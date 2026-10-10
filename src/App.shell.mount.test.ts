@@ -30,6 +30,8 @@ const compiled = compileMount(new URL('./App.svelte', import.meta.url), [
   new URL('./lib/terminal/Terminal.svelte', import.meta.url),
 ]);
 
+/** Records the target at MOUNT only: it does not follow a prop change, so a
+ * case that changes the pane afterwards reads the saved record instead. */
 const terminalStub = {
   default: (anchor: Comment, props: { target: string }) => {
     const el = anchor.ownerDocument.createElement('div');
@@ -286,26 +288,37 @@ const savedNav = (serverId: string, target: string, cells: readonly string[] = [
   })),
 });
 
-/** A transport that answers as whichever machine the address belongs to. */
-function twoServerTransport(calls: string[]) {
+/** Which machine answers on `url`, at the `n`th connect (1-based). */
+type MachineAt = (url: string, n: number) => string;
+const byAddress: MachineAt = (url) => (url.includes('//b') ? 'm-b' : 'm-a');
+
+/** A transport that answers as whichever machine the address belongs to, and
+ * that a case can DROP — which is how a failover begins. */
+function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress) {
   let connected = false;
   let machine = '';
+  let dials = 0;
+  let onDrop: (() => void) | null = null;
   const rpc = (name: string, result: unknown = []) => () => {
     calls.push(name);
     return connected ? Promise.resolve(result) : Promise.reject(new Error('not connected'));
   };
-  return {
+  const net = {
+    /** The socket closed under the app: the reconnect machine takes over. */
+    drop() { connected = false; onDrop?.(); },
+  };
+  const module = {
     connect: async (url: string) => {
       calls.push(`connect:${url}`);
-      machine = url.includes('//b') ? 'm-b' : 'm-a';
+      machine = machineAt(url, ++dials);
       connected = true;
       return machine;
     },
     disconnect: () => { connected = false; },
     isConnected: () => connected,
     getMachineId: () => (connected ? machine : ''),
-    getHostname: () => (connected ? `${machine}.host` : ''),
-    setOnDisconnect: () => {},
+    getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
+    setOnDisconnect: (fn: () => void) => { onDrop = fn; },
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
@@ -322,7 +335,12 @@ function twoServerTransport(calls: string[]) {
     listSessions: rpc('list_sessions', [{ name: 'work' }]),
     listPanes: rpc('list_panes', [{ session: 'work', window: 1, pane: 0 }]),
     // The desktop layout mounts the session sidebar, which asks for these.
-    listSessionsWithPanes: rpc('list_sessions_with_panes', { sessions: [{ name: 'work', panes: [] }] }),
+    // `other` is a session a case can OPEN from the sidebar, which is how a
+    // person changes the navigation the shell then has to save.
+    listSessionsWithPanes: rpc('list_sessions_with_panes', {
+      sessions: [{ name: 'work', windows: 1 }, { name: 'other', windows: 1 }],
+      panes: [{ session: 'work', window: 1, pane: 0 }, { session: 'other', window: 3, pane: 0 }],
+    }),
     projectList: rpc('project_list', { projects: [] }),
     backendsList: rpc('backends_list', { backends: [] }),
     setSocket: rpc('set_socket'),
@@ -331,15 +349,17 @@ function twoServerTransport(calls: string[]) {
     getPrefs: rpc('get_prefs', {}),
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
   };
+  return { module, net };
 }
 
 /** The app booted on a seeded storage, with the transport mocked: ONE harness,
  * and each case says what the client wakes up with. */
-async function bootApp(context: TestContext, seed: Record<string, string>) {
+async function bootApp(context: TestContext, seed: Record<string, string>, machineAt?: MachineAt) {
   const calls: string[] = [];
+  const transport = twoServerTransport(calls, machineAt);
   const app = await (await compiled).mount(context, {
     props: {},
-    modules: [asModule(twoServerTransport(calls)), terminalStub],
+    modules: [asModule(transport.module), terminalStub],
     setup(window) {
       window.localStorage.clear();
       window.localStorage.setItem('tmux_locale', 'en');
@@ -389,7 +409,44 @@ async function bootApp(context: TestContext, seed: Record<string, string>) {
     await settle();
     await settle();
   };
-  return { app, calls, settle, onScreen, record, restored, cellsOnScreen, switchTo };
+  /** Open the session `name` from the Terminal page's sidebar: a person
+   * changing the navigation. */
+  const openSession = async (name: string) => {
+    const tab = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+      .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+    assert.ok(tab, `the Terminal tab is on screen: ${
+      [...app.document.querySelectorAll('.rail-btn, .tabbar button')].map((b) => b.getAttribute('aria-label')).join(' | ')}`);
+    tab.click();
+    await settle();
+    const row = [...app.document.querySelectorAll<HTMLElement>('.session-row')]
+      .find((r) => r.querySelector('.name')?.textContent?.trim() === name);
+    assert.ok(row, `the sidebar lists ${name}: ${
+      [...app.document.querySelectorAll('.session-row .name')].map((n) => n.textContent).join(' | ')}`);
+    row.click();
+    await settle();
+  };
+  /** Disconnect through Settings, then connect again through the card. */
+  const reconnectThroughForm = async (address: string) => {
+    const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+    gear!.click();
+    await settle();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')]
+      .find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+    await settle();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')]
+      .find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await settle();
+    const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+    field.value = address;
+    field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await settle();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.card button')]
+      .find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+    await settle();
+    await settle();
+  };
+  return { app, calls, settle, onScreen, record, restored, cellsOnScreen, switchTo, openSession, reconnectThroughForm, net: transport.net };
 }
 
 /** Two named servers on two machines, the app current on A. */
@@ -583,4 +640,48 @@ test('a real merge moves only the merged ids: a third server s ref stays its own
   assert.deepEqual(cellsOnScreen(), ['1:work:1.0', '2:'], 'C s cell was not opened on the survivor');
   assert.deepEqual(record().splitCells.map((c: any) => c.pane?.serverId ?? null), ['canon', null],
     'and nothing of C was re-filed under the survivor');
+});
+
+/** The alias's machine answers WITHOUT an id on the first connect, so boot
+ * cannot merge; it reports itself on the next one, and THAT connect absorbs
+ * the alias. Which connect it is is the case's whole point. */
+const learnsItsMachineLater: MachineAt = (_url, n) => (n === 1 ? '' : 'm-a');
+
+test('a merge on the connect page s same-server return keeps saving', async (context) => {
+  // reviewer P1-b, 2026-10-10. `activateConnected` absorbs the alias and
+  // finds the survivor already CURRENT, so it reports `reload: false` and
+  // the app takes the same-server path: the handle is replaced, the refs are
+  // rebound — and the save gate, opened only by a restore, stayed shut on the
+  // replaced handle. The pane on screen was right, and nothing after it was
+  // ever saved.
+  const { app, restored, openSession, reconnectThroughForm } =
+    await bootApp(context, { ...aliasAndCanonical(legacyNav('work:1.0')), tmux_layout_mode: 'desktop' }, learnsItsMachineLater);
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'alias', 'boot could not merge');
+  assert.equal(restored(), 'alias:work:1.0');
+
+  await reconnectThroughForm('ws://a:9899');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the form s connect absorbed it');
+  assert.equal(restored(), 'canon:work:1.0', 'the navigation followed, and was saved as the survivor s');
+
+  await openSession('other');
+  assert.equal(restored(), 'canon:other:3.0', 'and what the person does next is saved too');
+});
+
+test('a merge on a failover keeps saving', async (context) => {
+  // The same contract on the reconnect machine's success path: the socket
+  // drops, the retry reaches the same machine and is the first connect to
+  // report its id, so `recordServer` absorbs the alias there.
+  const { app, onScreen, restored, openSession, settle, net } =
+    await bootApp(context, { ...aliasAndCanonical(legacyNav('work:1.0')), tmux_layout_mode: 'desktop' }, learnsItsMachineLater);
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'alias');
+
+  net.drop();
+  await settle();
+  await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the failover absorbed it');
+  assert.equal(onScreen(), 'work:1.0', 'the pane on screen is the same machine s');
+  assert.equal(restored(), 'canon:work:1.0', 'and it was saved as the survivor s');
+
+  await openSession('other');
+  assert.equal(restored(), 'canon:other:3.0', 'and so is what comes after it');
 });

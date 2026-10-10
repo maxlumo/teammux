@@ -544,6 +544,16 @@ test('the content tree is bound to one server, and only the swap binds it (board
   for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)',
     'reownSavedNav(localStorage, survivorOf);'])
     assert.ok(follow.includes(held), `the merge reaches what App holds and the record: ${held}`);
+  // Every CONFIRMED runtime opens the save gate: an arrival by restoring the
+  // record, a same-server return or a failover by keeping what is on screen
+  // (reviewer P1-b). Before, only a restore opened it, and a merge on the
+  // other two paths left it shut on the replaced handle for good.
+  assert.equal([...source.matchAll(/navRestored = target;/gu)].length, 2, 'the restore and the keep, nothing else');
+  assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*navRestored = target;/u);
+  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
+    'a failover keeps');
+  assert.match(source, /to keeps its handle and remounts nothing\.\s*swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
+    'and so does the connect page s same-server return');
   // The saved navigation names its server, and the restore is filtered to the
   // server it runs against (board #335 ②b-2).
   // One answer to which server a reference names — and it is the swap's

@@ -341,6 +341,14 @@ Reading is where the care goes, and three rules carry it:
   did exactly that). An id nothing explains keeps its server and is filtered
   out. This runs in `swapScope`, the one reader of CURRENT, so every path that
   records identity follows the same merges.
+- **Every confirmed runtime opens the save gate.** The saved-state effect
+  writes only for the runtime whose navigation is settled (`navRestored`). An
+  ARRIVAL settles it by restoring the record; the connect page's same-server
+  return and a failover settle it by KEEPING what is on screen (`keepNavFor`),
+  which on the same machine is newer than the record. Before, only a restore
+  opened the gate, so a merge on either of those paths replaced the handle and
+  left the gate shut on the old one: the pane was right and nothing after it
+  was ever saved (reviewer P1-b, 2026-10-10).
 - **The restore is filtered to the runtime it runs against**, and runs only
   after that runtime is bound — never during the tick in which a swap shows
   nothing, which silently dropped every pane of the server being brought up. A

@@ -826,6 +826,7 @@
     // app holds have to follow it (reviewer P1, 2026-10-10). A no-op whenever
     // the id did not move, which is the ordinary failover.
     swapScope();
+    void keepNavFor(scopeSwap.bound());
     resubscribeAll();
     serverReady();
     // Tell Terminal to reset stale resize state + re-fit against the new server.
@@ -881,6 +882,7 @@
     // (board #335 ②b-1). A plain reconnect to the server it is already bound
     // to keeps its handle and remounts nothing.
     swapScope();
+    void keepNavFor(scopeSwap.bound());
     // The device default (Chat), never a hard-coded Terminal (board #333); a
     // hubless server falls back to Terminal through the redirect above.
     page = defaultPage();
@@ -1446,6 +1448,28 @@
     swapScope();
     serverReady();
     void restoreNavFor(scopeSwap.bound());
+  }
+
+  /** The app's navigation is ALREADY this runtime's: open the saved-state
+   * effect for it without reading the record back (reviewer P1-b,
+   * 2026-10-10).
+   *
+   * The save gate opens per runtime, and before this only a restore opened
+   * it — so every path that confirms a runtime WITHOUT arriving at a server
+   * left it shut: the connect page's same-server return (and with it a
+   * client's first-ever connect, which has no record to restore), and a
+   * failover. When identity repair absorbed the entry the app was on, those
+   * paths replaced the handle and the gate stayed on the old one forever:
+   * the pane on screen was right, and nothing the person did after it was
+   * ever saved. Restoring there instead would be wrong in the other
+   * direction — what is on screen is the person's latest navigation on this
+   * same machine, newer than the record, and the merge has already rebound
+   * it. Same guard as the restore: after the bind, and only for the runtime
+   * still on screen. */
+  async function keepNavFor(target) {
+    await scopeSwap.settled();
+    if (!target || scopeSwap.shown() !== target) return;
+    navRestored = target;
   }
 
   /** The navigation the app comes up with, for ONE confirmed runtime.
