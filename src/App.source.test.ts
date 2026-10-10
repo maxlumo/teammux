@@ -715,6 +715,10 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // entry or, after identity repair, as another — comes up through bringUp.
   assert.match(source, /const dialled = runtime \? runtime\.dial\(\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);/u);
   assert.match(source, /if \(result\.ok \|\| result\.reason === 'elsewhere'\) bringUp\(addr, token\);/u);
+  // A SUPERSEDED dial reports nothing: whoever took the socket over owns the
+  // outcome, and sending the app to Settings would undo a connect that is
+  // succeeding. No mount can stage the race on the boot path, so it is pinned.
+  assert.match(source, /else if \(result\.reason !== 'superseded'\) page = 'settings';/u);
   const fn = (source.match(/dialled\.then\(\(result\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
   assert.match(fn, /recordServer\(localStorage, \{[\s\S]*?machineId: mid/u, 'boot stamps the identity');
   assert.ok(!fn.includes('activateConnected'), 'boot never activates — it IS the current server');
