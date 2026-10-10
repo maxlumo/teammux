@@ -710,8 +710,12 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // address of the SAME machine reads as a new server (live Chromium
   // finding). Record only — the entry booted as current.
   // The boot's half after connect is bringUp (board 315 shares it).
-  assert.match(source, /connect\(addr, token\)\.then\(\(\) => \{\s*clearTimeout\(timeout\);\s*bringUp\(addr, token\);/u);
-  const fn = (source.match(/connect\(addr, token\)\.then\(\(\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
+  // Since board #335 ②b-2-2 the BOUND runtime dials (the facade only for a
+  // client with no saved entry), and a dial that authenticated — as this
+  // entry or, after identity repair, as another — comes up through bringUp.
+  assert.match(source, /const dialled = runtime \? runtime\.dial\(\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);/u);
+  assert.match(source, /if \(result\.ok \|\| result\.reason === 'elsewhere'\) bringUp\(addr, token\);/u);
+  const fn = (source.match(/dialled\.then\(\(result\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
   assert.match(fn, /recordServer\(localStorage, \{[\s\S]*?machineId: mid/u, 'boot stamps the identity');
   assert.ok(!fn.includes('activateConnected'), 'boot never activates — it IS the current server');
 });
@@ -726,7 +730,7 @@ test('doConnect never writes the live tmux_machine_id — activateConnected owns
   assert.ok(!fn.includes("setItem('tmux_machine_id'"), 'no live machine-id pre-write in the form');
   assert.match(fn, /setItem\('tmux_machines'/u, 'the identity MAP update stays');
   // The boot path may write it: its server IS the current entry, no park to poison.
-  const boot = (source.match(/connect\(addr, token\)\.then\(\(\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
+  const boot = (source.match(/dialled\.then\(\(result\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
   assert.match(boot, /recordServer\(localStorage[\s\S]*?setItem\('tmux_machine_id', mid\)/u,
     'boot stamps the live key AFTER recording — it is the current server');
 });

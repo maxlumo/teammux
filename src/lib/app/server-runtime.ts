@@ -40,6 +40,7 @@ import type { WsApi } from '../core/ws-api.ts';
 import type { BackendInfo } from '../core/agents.ts';
 import type { ServerId } from './refs.ts';
 import { adoptHostname, loadServers, recordServer, saveServers, type ServerEntry } from './servers.ts';
+import { targetOf } from './server-target.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -337,9 +338,18 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // connection to a server the registry no longer lists.
     if (!target) return { ok: false, reason: 'gone' };
     known = target;
+    // WHERE to dial is the one reader's answer (board #335 ②b-2-2): for the
+    // server the app is on, the active mirror, which through ②b is written
+    // ahead of the registry (the connect form, the optimizer, the address
+    // pick, a failover) — dialling the entry's saved address there would go
+    // back to the address the user just left. For any other id it is the
+    // entry itself. b3-4 retires the mirror, and the two answers become one.
+    const route = targetOf(storage, id);
+    const address = route?.address || target.address;
+    const token = route ? route.token : target.token;
     let reported: string | null;
     try {
-      reported = await connection.connect(target.address, target.token, connectTimeoutMs);
+      reported = await connection.connect(address, token, connectTimeoutMs);
     } catch (error) {
       // A superseded attempt reports neither the failure nor the success it
       // might otherwise have: whoever took over owns the outcome now.
@@ -374,8 +384,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // leaves behind) without moving CURRENT — recording and activating are
     // different acts, and a runtime is never allowed to steal the focus.
     const { entry: canonical } = recordServer(storage, {
-      address: target.address,
-      token: target.token,
+      address,
+      token,
       ...(target.socket ? { socket: target.socket } : {}),
       ...(machine ? { machineId: machine } : {}),
     });

@@ -1589,9 +1589,22 @@
 
     const timeout = setTimeout(() => { page = 'settings'; }, 5000);
 
-    connect(addr, token).then(() => {
+    // The bound runtime dials (board #335 ②b-2-2): the same connection the
+    // facade would have used (the Single runtime borrows it), with the
+    // runtime's attempt identity and its identity recording. It dials the
+    // route the one reader names, which for the server the app is on is the
+    // active mirror — `addr` and `token` here. A client with no saved entry
+    // yet has nothing bound, and connects through the facade as before.
+    const runtime = scopeSwap.bound();
+    const dialled = runtime ? runtime.dial() : connect(addr, token).then(() => ({ ok: true }));
+    dialled.then((result) => {
       clearTimeout(timeout);
-      bringUp(addr, token);
+      // `elsewhere`: it authenticated, as another saved entry. Identity
+      // repair has already folded the registry; bringing the app up binds
+      // the tree to whichever entry is current now, as it did when the
+      // facade connected and bringUp recorded the machine itself.
+      if (result.ok || result.reason === 'elsewhere') bringUp(addr, token);
+      else if (result.reason !== 'superseded') page = 'settings';
     }).catch(() => {
       clearTimeout(timeout);
       page = 'settings';

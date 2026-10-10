@@ -658,7 +658,12 @@ wiping it to the fallback. The reconnect machine reads no connection keys: it
 asks `target()` at every attempt, which App answers with
 `server-target.targetOf(storage, CURRENT)` — the active mirror for the current
 server (written ahead of the registry on four paths through ②b), the entry and
-its machine's failover set for any other id.
+its machine's failover set for any other id. The boot connect is the bound runtime's `dial()`
+too: the same borrowed connection, dialled at the route that reader names,
+with the runtime's attempt identity (a superseded dial brings nothing up) and
+its identity recording (an address-only entry learns its machine and is
+folded by the dial itself). A client with no saved entry has nothing bound
+and connects through the facade as before.
 
 ## Multi-Server (board #55)
 

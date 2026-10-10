@@ -140,6 +140,19 @@ test('a fresh client sees the Connection card, and its own settings behind the g
   assert.deepEqual(app.calls, [], 'the whole walk touched no server');
 });
 
+/** The facade's ONE connection and the api bound to it, which the Single
+ * runtime borrows (single-runtime.ts): the same functions, so a call made
+ * through the runtime is a call on this transport. */
+function withSlot<M extends Record<string, any>>(module: M): M {
+  const m = module as Record<string, any>;
+  m.compatSlotApi = m;
+  m.connection = {
+    connect: (url: string, token: string) => m.connect(url, token), disconnect: m.disconnect,
+    isConnected: m.isConnected, getMachineId: m.getMachineId, getHostname: m.getHostname,
+  };
+  return module;
+}
+
 /** A transport that can actually connect, as one machine or another. */
 function liveTransport(calls: string[], machine: () => string) {
   let connected = false;
@@ -147,7 +160,7 @@ function liveTransport(calls: string[], machine: () => string) {
     calls.push(name);
     return connected ? Promise.resolve(result) : Promise.reject(new Error('not connected'));
   };
-  return {
+  return withSlot({
     connect: async (url: string) => { calls.push(`connect:${url}`); connected = true; return machine(); },
     disconnect: () => { connected = false; },
     isConnected: () => connected,
@@ -176,7 +189,7 @@ function liveTransport(calls: string[], machine: () => string) {
     fsList: rpc('fs_list', { entries: [] }),
     getPrefs: rpc('get_prefs', {}),
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
-  };
+  });
 }
 
 test('a reconnect to the SAME server through the form keeps the handle and the tree', async (context) => {
@@ -349,16 +362,8 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     getPrefs: rpc('get_prefs', {}),
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
     ...extra,
-  } as Record<string, any>;
-  // The facade's ONE connection and the api bound to it, which the Single
-  // runtime borrows (single-runtime.ts): the same functions, so a call made
-  // through the runtime is a call on this transport.
-  module.compatSlotApi = module;
-  module.connection = {
-    connect: (url: string) => module.connect(url), disconnect: module.disconnect,
-    isConnected: module.isConnected, getMachineId: module.getMachineId, getHostname: module.getHostname,
   };
-  return { module, net };
+  return { module: withSlot(module), net };
 }
 
 /** The app booted on a seeded storage, with the transport mocked: ONE harness,
@@ -813,4 +818,16 @@ test('a Hub probe that fails without an answer leaves the Hub page where it is',
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: legacyNav('work:2.0') }),
   }, undefined, { rpc: { hubRooms: () => Promise.reject(new Error('rpc timeout')) } });
   assert.equal(record()?.page, 'hub', 'still on the Hub: nothing said it is not there');
+});
+
+test('the boot dial is the bound runtime s, and records the machine it reached (board #335 ②b-2-2)', async (context) => {
+  // The runtime dials the route the reader names (the mirror, for the
+  // server the app is on) and records identity itself: the address-only
+  // alias learns its machine and is folded into the canonical entry by the
+  // dial, before bringUp runs.
+  const events: string[] = [];
+  const { app, onScreen } = await bootApp(context, aliasAndCanonical(legacyNav('work:1.0')), undefined, { calls: events });
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://a:9899'], 'one dial, to the mirror s address');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the dial folded the alias');
+  assert.equal(onScreen(), 'work:1.0', 'and the app came up on that machine s navigation');
 });
