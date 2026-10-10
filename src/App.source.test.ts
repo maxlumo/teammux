@@ -493,8 +493,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // serving its own server, and only with the ticket of the suspension in
   // force: a stale attempt's report must not lift a live one's protection.
   assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*const ticket = held\?\.suspend\(\) \?\? 0;/u);
-  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.resume\(ticket\);\s*else held\?\.dispose\(\);/u,
-    'an authenticated stranger (unresolved) and a different server both end the handle');
+  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.resume\(ticket\);\s*else if \(outcome === 'other-server'\) held\?\.dispose\(\);/u,
+    'only a conclusion that leaves the handle serving its own server resumes it');
+  assert.match(source, /\/\/ `unresolved`: nothing\. Not resumed, not released\./u,
+    'an authenticated stranger leaves the handle suspended: refusing, but still there for the attempt that works out it is ours');
   // The protection is never skipped because an address looked familiar: an
   // address is a route, and a route can come to reach another machine. What
   // decides is the identity the server reports, which is `activateConnected`'s

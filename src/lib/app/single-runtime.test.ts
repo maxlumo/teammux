@@ -225,6 +225,32 @@ test('only the CURRENT handover s ticket may resume', async (t) => {
     'and the right conclusion does');
 });
 
+test('an unidentified peer leaves the handle suspended, not released', async (t) => {
+  t.after(cleanup);
+  // The orchestrator's refinement (2026-10-10): a peer authenticated and the
+  // registry write failed, so nothing proves whose socket this is. Refusing
+  // is required; RELEASING would be safe and worse — the next attempt that
+  // does establish this is still our server would have to rebuild every page,
+  // when the handle it needs is right there. So the handle stays suspended
+  // and a later handover's own ticket can lift it.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+
+  const unresolved = rt.suspend();        // the attempt that could not identify the peer
+  void unresolved;                        // its conclusion resumes nothing
+  await assert.rejects(() => rt.api.listSessions(), /suspended/u);
+  assert.equal(rt.alive(), true, 'still the same handle, so no page is rebuilt');
+
+  // The retry establishes that this IS our server, and resumes what was there.
+  const retry = rt.suspend();
+  rt.resume(retry);
+  fire(rt.api.listSessions());
+  await settle();
+  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
+    'the handle came back without anything being remounted');
+});
+
 test('a handle released while suspended stays released', async (t) => {
   t.after(cleanup);
   // The other outcome of the same handover: the address was ANOTHER server,

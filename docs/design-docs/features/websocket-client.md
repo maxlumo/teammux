@@ -927,8 +927,9 @@ after the detach. The handle stands down BEFORE the socket is re-dialled
 elsewhere: the switch revokes (leaving is decided), the connect form suspends
 under a TICKET and resumes only on a confirmed conclusion — the same server,
 or no authenticated peer at all. A peer whose identity could not be recorded
-is terminal rather than a same-server success, and a superseded attempt
-concludes nothing, writes no registry and brings nothing up. Clearing landings
+leaves the handle suspended — refusing, but still there for the attempt that
+establishes it is ours — rather than resumed or released, and a superseded
+attempt concludes nothing, writes no registry and brings nothing up. Clearing landings
 after the DOM is gone is a second line, never the first.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)

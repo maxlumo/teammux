@@ -170,8 +170,13 @@
    *   - `unresolved`: a peer authenticated but its identity could not be
    *     established (the registry write failed). There IS an authenticated
    *     stranger on the socket and nothing proves it is ours, so the handle
-   *     must stay refusing. Resuming on "the function reached its finally"
-   *     is what would put A's pages on B's socket.
+   *     STAYS SUSPENDED — refusing every call, but not released. Resuming on
+   *     "the function reached its finally" is what would put A's pages on B's
+   *     socket; releasing instead would be safe too, and worse: the next
+   *     attempt that does establish this is still A would have to rebuild
+   *     every page, when the handle it needs is right there (orchestrator's
+   *     ruling, 2026-10-10). A later handover issues its own ticket, so the
+   *     conclusion that finally knows can lift this one.
    *
    * The ticket makes a stale conclusion harmless: an attempt that was
    * superseded, cancelled or unmounted cannot lift the protection of the one
@@ -181,7 +186,8 @@
     const ticket = held?.suspend() ?? 0;
     return (outcome) => {
       if (outcome === 'same-server' || outcome === 'no-peer') held?.resume(ticket);
-      else held?.dispose();
+      else if (outcome === 'other-server') held?.dispose();
+      // `unresolved`: nothing. Not resumed, not released.
     };
   }
   const shell = $derived(connected || !!switching);
