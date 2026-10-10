@@ -95,8 +95,18 @@
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
     settle: () => tick(),
-    // A Files/Board/Agents jump still aimed at the tree that is going away.
-    invalidate: () => clearLandings(),
+    invalidate: (gone) => {
+      // DETACH the handle the tree no longer shows (board #335 ②b-1, reviewer
+      // P1-a): two generations of handles can borrow one connection, so a
+      // replaced handle must stop being usable or its late continuations would
+      // record identity, and the api it handed out would send over a slot that
+      // now serves another server. On a borrowed slot this ends the handle and
+      // leaves the connection to the facade; b3-4 routes it through the
+      // fleet's drop, where it ends the connection too.
+      gone.dispose();
+      // And a Files/Board/Agents jump aimed at the tree that is going away.
+      clearLandings();
+    },
   });
   /** Bind the content tree to whichever server is current — the registry's
    * CURRENT is the one answer to "which server is the app on", so no caller

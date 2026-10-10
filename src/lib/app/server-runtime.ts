@@ -98,7 +98,11 @@ export interface ServerRuntime {
   hostname(): string;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
-   * and it touches no other runtime. */
+   * and it touches no other runtime.
+   *
+   * On a BORROWED slot (see `ServerRuntimeDeps.borrowed`) it DETACHES instead:
+   * the handle goes terminal and its api starts refusing, while the
+   * connection — somebody else's — is left alive. */
   dispose(): void;
 }
 
@@ -107,6 +111,35 @@ export interface ServerRuntimeDeps {
   storage: Store;
   /** From the connection registry, which owns this object's lifetime. */
   slot: ConnectionSlot;
+  /**
+   * The slot is BORROWED: its connection belongs to someone else — ②b's
+   * `ws.ts` facade, whose socket every un-migrated module is still using — so
+   * this runtime may end its own USE of the slot but never the object
+   * (reviewer P1-a, 2026-10-10; orchestrator's ruling the same day).
+   *
+   * Three paths inside this module end a runtime, and each of them would
+   * otherwise reach through to a connection it does not own:
+   *
+   *   - the entry removed while this dial was authenticating,
+   *   - this id absorbed into the canonical entry of the machine that
+   *     answered — the ORDINARY outcome for an old address-only history
+   *     entry, which would therefore close the legacy transport for good,
+   *   - the wrong machine answering, which disconnects the socket the app is
+   *     about to come up on.
+   *
+   * So for a borrowed slot those three DETACH instead: the handle goes
+   * terminal, the loss is reported through `onRegistryChanged` (the one edge
+   * ②a chose for it, rather than a second hook saying the same thing), and
+   * the connection is left alive for its owner. Detaching is also what makes
+   * two generations of handles over ONE slot safe: the handle App replaced
+   * is detached by the swap, so its late continuations record nothing and the
+   * api it handed out refuses rather than sending over a slot that now serves
+   * another server.
+   *
+   * The borrow — and this flag — end in b3-4, when the fleet owns connections
+   * and `dispose` becomes real everywhere.
+   */
+  borrowed?: boolean;
   /**
    * Called after every `recordServer`, whatever the outcome, because that call
    * is the one moment the saved entry SET can change: it stamps a machine onto
@@ -125,8 +158,8 @@ export interface ServerRuntimeDeps {
 }
 
 export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps): ServerRuntime {
-  const { storage, slot, onRegistryChanged, connectTimeoutMs } = deps;
-  const { connection, api } = slot;
+  const { storage, slot, borrowed = false, onRegistryChanged, connectTimeoutMs } = deps;
+  const { connection } = slot;
   const id = entry.id;
   let known: ServerEntry = entry;
   let caps: ServerCaps = { hub: null, backends: null };
@@ -138,6 +171,48 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
    * one's answer, or an old `method not found` can unmount a Hub a later
    * probe has confirmed (reviewer P2). */
   let probed = 0;
+
+  /**
+   * The api this runtime hands out.
+   *
+   * An OWNED slot needs no gate: ending the runtime disposes its connection,
+   * and the transport itself then refuses every call ("connection disposed").
+   * A BORROWED slot cannot be made to refuse — it is the live transport of
+   * every module that has not moved yet — so a detached handle's api is
+   * gated on the handle's own liveness instead. Without it, a page unmounted
+   * with the old subtree (or a closure in a settled promise) would still be
+   * holding an api object that now reaches a DIFFERENT server, which is the
+   * bug the whole phase exists to remove.
+   *
+   * It gates the object, not the functions: a caller that destructured a
+   * method before the detach keeps it, exactly as `ws.ts`'s own exports do.
+   * That is why ②a's rule for consumers is to hold the api and call through
+   * it, and why b3 retires the destructured module-level RPCs.
+   */
+  const api: WsApi = borrowed
+    ? new Proxy(slot.api as object, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== 'function' || !dead) return value;
+        return () => Promise.reject(new Error(`server runtime detached: ${id} no longer serves this subtree`));
+      },
+    }) as WsApi
+    : slot.api;
+
+  /** End this runtime's USE of the slot. A borrowed connection outlives every
+   * runtime that borrows it (see `borrowed`), so the handle goes terminal and
+   * the object is left to its owner. */
+  function releaseSlot() {
+    if (!borrowed) connection.dispose();
+  }
+
+  /** Close the socket — but only if it is ours to close. The app is coming up
+   * on the machine that just answered, and cutting that socket from inside a
+   * dial that is reporting `elsewhere` would take the connection away from
+   * the caller that has to recover. */
+  function endSocket() {
+    if (!borrowed) connection.disconnect();
+  }
 
   /** The saved entry for this id. A removed entry leaves the last known one,
    * so a caller still has a name to show while it tears the runtime down. */
@@ -232,7 +307,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       // Either this entry knew its machine and a different one answered, or it
       // knew none and the machine that answered already has an entry. Both are
       // the same fact: this is not the server this runtime is for.
-      connection.disconnect();
+      endSocket();
       adopt(machine, host);
       // Two unknown entries racing to the same machine is the ordinary way
       // this happens, in either auth order: whichever authenticates first
@@ -304,7 +379,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
 
   function dispose() {
     dead = true;
-    connection.dispose();
+    releaseSlot();
   }
 
   return {

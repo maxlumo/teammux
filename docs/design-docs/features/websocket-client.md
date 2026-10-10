@@ -515,11 +515,32 @@ the live one, with the un-migrated pages on the other socket. Sharing the slot
 is what makes every ②b commit behaviour-identical in Single mode instead of a
 flag day. It lives in its own file so `server-runtime.ts` stays facade-free
 (its own pin, for the reason that a runtime reaching the compatibility slot IS
-the "whichever server is current" bug), and RELEASING it closes the socket
-rather than ending the object: `Connection.dispose()` is terminal, that object
-is everyone's transport, and `dial`'s own terminal paths reach dispose from a
-call that must report a result and recover. b3-4 deletes the file, the slot and
-the provider-less fallback together.
+the "whichever server is current" bug).
+
+A BORROWED slot is declared as such (`borrowed: true`) rather than handled by
+convention, because "App never calls dispose" is not the dangerous path.
+`server-runtime.ts` ends a runtime from three places of its OWN: the entry
+removed while a dial authenticates, this id absorbed into the canonical entry
+of the machine that answered, and the wrong machine answering. The second of
+those is the ordinary fate of an old address-only history entry, so owning the
+connection's lifetime there would close the legacy transport for the rest of
+the session and every retry after it would answer "connection disposed". With
+`borrowed` those three DETACH instead: the handle goes terminal, the loss is
+reported through the one `onRegistryChanged` edge, and the connection is left
+alive for its owner.
+
+Detaching is also what makes two GENERATIONS of handles over one slot safe.
+A replaced handle keeps its own attempt counter, so without a detach its late
+continuation would still consider itself current and could record identity,
+and the api object it handed out would send over a slot that now serves
+another server. So the swap detaches the handle it unbinds, and a detached
+borrowed runtime's api refuses every call — a gate on the handle's liveness,
+which an owned runtime does not need because its connection is itself
+terminal. The gate is on the api OBJECT: a caller that destructured a method
+beforehand keeps it, exactly as `ws.ts`'s own exports do, which is why a
+consumer holds the api and calls through it and why b3 retires the
+module-level RPCs. b3-4 deletes the file, the slot, the borrow and the
+provider-less fallback together.
 
 ## Multi-Server (board #55)
 
@@ -851,8 +872,14 @@ machine's survivor moves the app with it, and a handle is replaced only when
 the server changes. Through ②b production holds ONE runtime, built on the
 facade's compatibility slot in `app/single-runtime.ts` so there is one socket
 while the consumers move — in its own file to keep `server-runtime.ts`
-facade-free, and releasing it closes the socket instead of ending the object
-every un-migrated module is still using.
+facade-free, and declared `borrowed`, because the dangerous paths are the
+three inside `server-runtime.ts` that end a runtime on their own: an entry
+removed mid-auth, an id absorbed into the machine's canonical entry (the
+ordinary fate of an old address-only entry, which would close the legacy
+transport for good), and the wrong machine answering. A borrowed runtime
+DETACHES on those — terminal handle, loss reported, connection left to its
+owner — and the swap detaches the handle it replaces, so a stale generation
+can neither record identity nor call through the api it handed out.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

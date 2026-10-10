@@ -472,7 +472,8 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'and after its declaration only createScopeSwap({ show }) assigns it');
   assert.match(source, /show: \(runtime\) => \{ scopeRuntime = runtime; \},/u);
   assert.match(source, /settle: \(\) => tick\(\),/u, 'the settle is where Svelte runs the teardown');
-  assert.match(source, /invalidate: \(\) => clearLandings\(\),/u);
+  assert.match(source, /invalidate: \(gone\) => \{[\s\S]*?gone\.dispose\(\);[\s\S]*?clearLandings\(\);/u,
+    'the replaced handle is DETACHED, not merely forgotten: two generations can borrow one connection');
   // WHICH server is read from the registry, never passed: identity repair can
   // absorb the entry we booted as into a machine's survivor and re-point
   // CURRENT at it, and from then on the app is on the survivor.

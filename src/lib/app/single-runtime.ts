@@ -22,17 +22,17 @@
 // edge belongs in one file that b3-4 deletes whole, not inside the module
 // that outlives it.
 //
-// RELEASING THIS RUNTIME CLOSES ITS SOCKET; IT DOES NOT END THE OBJECT.
-// `Connection.dispose()` is terminal by design (board #335 ①) and this object
-// is the transport of every module that has not moved yet, so the slot handed
-// to the runtime maps `dispose` onto `disconnect`. That is not a weakening of
-// the runtime contract: for a SHARED slot, "this server is released" and "the
-// socket is closed" are the same event, and the runtime's own terminal flag
-// still makes the handle dead — a disposed runtime cannot dial again, which
-// is what the contract is for. Without this, the two terminal paths inside
-// `dial` (the entry removed mid-auth, this id absorbed by a twin) would end
-// the app's only transport permanently, from a path that is supposed to
-// report a result and let the caller recover.
+// THE SLOT IS BORROWED, AND THAT IS DECLARED. `Connection.dispose()` is
+// terminal by design (board #335 ①) and this object is the transport of every
+// module that has not moved yet, so a runtime over it must never own its
+// lifetime — not even from its own inside. `server-runtime.ts` has three
+// paths that end a runtime, and the ordinary one is not exotic at all: an old
+// address-only history entry absorbed into the canonical entry of the machine
+// that answered. Owning the lifetime there would close the legacy transport
+// for the rest of the session, and every retry after it would answer
+// "connection disposed" (reviewer P1-a, 2026-10-10). `borrowed: true` is what
+// turns those three into a DETACH: the handle goes terminal, the loss is
+// reported, and the connection is left alive for its owner.
 //
 // b3-4 deletes this file together with `compatSlotApi` and the slot itself,
 // and the fleet mints the runtime from then on.
@@ -44,20 +44,16 @@ import type { ServerEntry } from './servers.ts';
  * A runtime for `entry` over the facade's one compatibility slot.
  *
  * Every other dependency is the caller's, exactly as for a fleet runtime, so
- * the only difference between this and what b3-4 replaces it with is WHERE
- * the connection comes from.
+ * the only differences between this and what b3-4 replaces it with are WHERE
+ * the connection comes from and who ends it.
  */
 export function createSingleRuntime(
   entry: ServerEntry,
-  deps: Omit<ServerRuntimeDeps, 'slot'>,
+  deps: Omit<ServerRuntimeDeps, 'slot' | 'borrowed'>,
 ): ServerRuntime {
   return createServerRuntime(entry, {
     ...deps,
-    slot: {
-      // A view, not a wrapper with behaviour: every member is the facade's own
-      // closure, and only `dispose` is remapped (see the note above).
-      connection: { ...connection, dispose: connection.disconnect },
-      api: compatSlotApi,
-    },
+    slot: { connection, api: compatSlotApi },
+    borrowed: true,
   });
 }

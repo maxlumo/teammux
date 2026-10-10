@@ -10,7 +10,7 @@ import {
 import { createConnectionRegistry, type ConnectionSlot } from '../core/connection-registry.ts';
 import { createServerFleet } from './server-fleet.ts';
 import { createServerRuntime, type ServerRuntime } from './server-runtime.ts';
-import { loadServers, type ServerEntry } from './servers.ts';
+import { loadServers, saveServers, type ServerEntry } from './servers.ts';
 
 installDoubles();
 
@@ -853,4 +853,109 @@ test('a frame sealed for one server resolves nothing on the other', async () => 
       fleet.dropAll();
     }
   });
+});
+
+// A BORROWED slot (board #335 ②b-1, reviewer P1-a 2026-10-10). Through ②b
+// production's one runtime sits on the `ws.ts` facade's connection, because
+// sixteen modules still import their RPCs from it and a second connection
+// would put them on the other socket. The runtime therefore must not own that
+// object's lifetime — not even from its own inside, which is where the danger
+// is: `dial` ends the runtime on three paths, and the ORDINARY one is an old
+// address-only entry being absorbed into the canonical entry of the machine
+// that answered. Owning the lifetime there would close the legacy transport
+// for the rest of the session.
+//
+// These cases drive those paths with a counting slot, because no node test
+// can make the real facade authenticate.
+function countingSlot(over: Record<string, unknown> = {}) {
+  const calls = { disconnect: 0, dispose: 0 };
+  const slot = {
+    connection: {
+      connect: async () => 'm-a',
+      disconnect: () => { calls.disconnect++; },
+      dispose: () => { calls.dispose++; },
+      getMachineId: () => 'm-a',
+      getHostname: () => 'alpha-host',
+      ...over,
+    },
+    api: { listSessions: async () => [{ name: 'live' }] },
+  } as unknown as ConnectionSlot;
+  return { slot, calls };
+}
+
+test('a borrowed runtime detaches when its entry is removed mid-auth; an owned one ends its connection', async () => {
+  const { storage, a } = twoServers();
+  let resolve: (v: string) => void = () => {};
+  const { slot, calls } = countingSlot({ connect: () => new Promise<string>((r) => { resolve = r; }) });
+  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
+
+  const dial = runtime.dial();
+  // Removed WHILE authenticating: a decision that recording the successful
+  // connection would undo.
+  saveServers(storage, loadServers(storage).filter((s) => s.id !== 'a'));
+  resolve('m-a');
+  assert.deepEqual(await dial, { ok: false, reason: 'gone' });
+  assert.deepEqual(calls, { disconnect: 0, dispose: 0 },
+    'the borrowed connection is left alive for its owner');
+  await assert.rejects(runtime.api.listSessions(), /detached/u, 'and the handle is terminal');
+
+  // The same path on an OWNED slot does end the connection — that contrast is
+  // the whole reason `borrowed` has to be declared rather than assumed.
+  const owned = twoServers();
+  let resolveOwned: (v: string) => void = () => {};
+  const second = countingSlot({ connect: () => new Promise<string>((r) => { resolveOwned = r; }) });
+  const ownedRuntime = createServerRuntime(owned.a, { storage: owned.storage, slot: second.slot });
+  const ownedDial = ownedRuntime.dial();
+  saveServers(owned.storage, loadServers(owned.storage).filter((s) => s.id !== 'a'));
+  resolveOwned('m-a');
+  assert.deepEqual(await ownedDial, { ok: false, reason: 'gone' });
+  assert.equal(second.calls.dispose, 1, 'an owned runtime releases its own connection');
+});
+
+test('a borrowed runtime absorbed into another entry keeps the socket the app came up on', async () => {
+  // The ordinary absorption: this id knows no machine, the machine that
+  // answered already has an entry, so `recordServer` folds this one away. The
+  // app is coming up on the machine that answered — cutting that socket from
+  // inside a dial that is REPORTING the canonical entry would take the
+  // connection away from the caller that has to recover.
+  const known = entry({ id: 'canon', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a' });
+  const history = entry({ id: 'history', name: 'ws://old:9899', address: 'ws://old:9899', token: 'tokA' });
+  const storage = mem({
+    tmux_servers: JSON.stringify([known, history]),
+    tmux_server_current: 'canon',
+  });
+  const { slot, calls } = countingSlot();
+  const runtime = createServerRuntime(history, { storage, slot, borrowed: true });
+
+  const result = await runtime.dial();
+  assert.equal(result.ok, false);
+  assert.equal(!result.ok && result.reason, 'elsewhere');
+  assert.equal(!result.ok && result.reason === 'elsewhere' && result.entry.id, 'canon',
+    'it reports the entry for the machine that answered');
+  assert.ok(!loadServers(storage).some((s) => s.id === 'history'), 'and this id is gone');
+  assert.deepEqual(calls, { disconnect: 0, dispose: 0 },
+    'the legacy transport is still open: every un-migrated module is on it');
+  await assert.rejects(runtime.api.listSessions(), /detached/u, 'the absorbed handle is inert');
+
+  // Owned, the same dial closes the socket, because a connection under an id
+  // that no longer exists is exactly what must not stay open.
+  const owned = mem({
+    tmux_servers: JSON.stringify([known, history]),
+    tmux_server_current: 'canon',
+  });
+  const second = countingSlot();
+  await createServerRuntime(history, { storage: owned, slot: second.slot }).dial();
+  assert.equal(second.calls.disconnect, 1, 'an owned runtime closes a socket it may not keep');
+});
+
+test('a borrowed handle keeps answering until it is detached', async () => {
+  // The gate is on the handle's own liveness, not on the connection: while the
+  // handle is the one the app shows, its api is the facade's api, so a bound
+  // page and an un-migrated module are provably on one socket.
+  const { storage, a } = twoServers();
+  const { slot } = countingSlot();
+  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
+  assert.deepEqual((await runtime.api.listSessions()).map((s: any) => s.name), ['live']);
+  runtime.dispose();
+  await assert.rejects(runtime.api.listSessions(), /detached/u);
 });
