@@ -41,8 +41,8 @@
      * reviewer P1-c): may the server-bound tree be thrown away for this
      * address? A connect to another server destroys every page of the one
      * the app is on, and an unsaved editor there has to be asked in its own
-     * dialog while it still exists. False stays: nothing is dialled. Which
-     * addresses can be the SAME server is the host's to know.
+     * dialog while it still exists. False stays: nothing is dialled. Asked
+     * with the address this attempt froze, which is the one it will dial.
      */
     confirmLeave?: ((address: string) => Promise<boolean>) | undefined;
     /**
@@ -174,9 +174,25 @@
     connecting = true;
     cancelled = false;
     const attempt = ++attempts;
+    // FROZEN at submit, before the first await, and used for everything
+    // after — the question, the dial, every write: the fields are live inputs
+    // a reader (or a late autofill) can change while the leave walk is open,
+    // and the target that was approved has to be the one dialled (reviewer
+    // P1-b on 48b40082; and an identity write that re-read them would record
+    // a server nobody dialled, orchestrator's ruling, 2026-10-10).
+    const url = normalizeAddress(address);
+    const tok = token;
+    const sock = socket.trim();
     // Before the handover, the dial and every write: a "stay" here must leave
-    // the app exactly as it was.
-    if (confirmLeave && !(await confirmLeave(normalizeAddress(address)))) {
+    // the app exactly as it was. A walk that FAILS is a stay too, and this
+    // attempt ends with it — never an unhandled rejection with the form left
+    // connecting. The host holds this form mounted while the walk shows other
+    // pages, so an accept comes back to the instance that asked.
+    let leave = true;
+    if (confirmLeave) {
+      try { leave = await confirmLeave(url); } catch { leave = false; }
+    }
+    if (!leave) {
       if (attempt === attempts) connecting = false;
       return;
     }
@@ -193,13 +209,6 @@
     // old server's pages off an unidentified peer.
     const handover = beforeConnect?.() as ConnectHandover | void;
     try {
-      // FROZEN at the start of the attempt, and used for everything after:
-      // the fields are live inputs a reader can keep typing into, and an
-      // identity write that re-read them would record a server nobody dialled
-      // (orchestrator's ruling, 2026-10-10).
-      const url = normalizeAddress(address);
-      const tok = token;
-      const sock = socket.trim();
       localStorage.setItem('tmux_address', url);
       localStorage.setItem('tmux_token', tok);
       if (sock) localStorage.setItem('tmux_socket', sock);

@@ -312,7 +312,7 @@ test('an attempt whose handover was taken over does nothing, and the loop yields
   // again, so a later start() is not a no-op forever.
   const { createHandovers } = await import('./handover.ts');
   for (const outcome of ['resolve', 'reject'] as const) {
-    const handovers = createHandovers();
+    const handovers = createHandovers({ end: () => {} });
     const timers = fakeTimers();
     const events: string[] = [];
     let finish: () => void = () => {};
@@ -344,7 +344,7 @@ test('a failed attempt resumes the handle it stood down; a success hands its han
   const log: string[] = [];
   let tickets = 0;
   const runtime = { suspend: () => ++tickets, settle: (t: number, v: string) => log.push(`${t}:${v}`) } as never;
-  const handovers = createHandovers();
+  const handovers = createHandovers({ end: () => {} });
   const timers = fakeTimers();
   let n = 0;
   let handed: unknown = null;
@@ -372,7 +372,7 @@ test('a failed attempt resumes the handle it stood down; a success hands its han
 // again, mark cooldown or give up.
 async function takeoverHarness(over: { addresses?: string[]; probe?: (a: string[]) => Promise<string | null>; fail?: boolean; watchdogMs?: number } = {}) {
   const { createHandovers } = await import('./handover.ts');
-  const handovers = createHandovers();
+  const handovers = createHandovers({ end: () => {} });
   const timers = fakeTimers();
   const events: string[] = [];
   const machine = createReconnectMachine({

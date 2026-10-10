@@ -39,6 +39,7 @@
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createHandovers } from './lib/app/handover.ts';
+  import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
@@ -110,6 +111,20 @@
    * the subtree with the runtime. A WeakMap because the bundle's life is the
    * handle's: a handle nobody holds takes its server's memory with it. */
   const serverStates = new WeakMap();
+  /** The ONE way a handle ends (app/handle-end.ts; board #335 ②b-2-3,
+   * reviewer P1-a on 48b40082), on every path — the swap, a switch's revoke,
+   * a connect attempt's "another server" verdict, an identity loss: it stops
+   * now, its server's state is released, and only then is it disposed. The
+   * state is NOT released when the handle replacing it adopted it (a
+   * same-machine merge); `bound()` names that replacement. */
+  const ends = createHandleEnds({
+    stateOf: (runtime) => serverStates.get(runtime),
+    adoptedElsewhere: (state, runtime) => {
+      const next = scopeSwap.bound();
+      return !!next && next !== runtime && serverStates.get(next) === state;
+    },
+    release: releaseServerState,
+  });
   /** The centre the shell's bell shows: the bound server's (②b-2-1), or —
    * with no server — an empty list over the window's one surface, so the bell
    * and its popover keep one owner whether or not a server is bound. */
@@ -122,23 +137,18 @@
     invalidate: async (gone) => {
       // And a Files/Board/Agents jump aimed at the tree that is going away.
       clearLandings();
-      // Its server's state is RELEASED first, and the handle ends only once
-      // that is over (board #335 ②b-2-3, reviewer P1-a): the work that state
-      // started — a download, its retries and re-signs — finishes or stops
-      // while the handle can still answer for it, and the swap shows no
-      // runtime until this resolves. Skipped when the handle replacing it
-      // ADOPTED that very state (a same-machine merge, the same server);
-      // `bound()` already names the replacement here.
-      const state = serverStates.get(gone);
-      if (state && serverStates.get(scopeSwap.bound()) !== state) await releaseServerState(state);
-      // DETACH the handle the tree no longer shows (board #335 ②b-1, reviewer
-      // P1-a): two generations of handles can borrow one connection, so a
-      // replaced handle must stop being usable or its late continuations would
-      // record identity, and the api it handed out would send over a slot that
-      // now serves another server. On a borrowed slot this ends the handle and
-      // leaves the connection to the facade; b3-4 routes it through the
-      // fleet's drop, where it ends the connection too.
-      gone.dispose();
+      // END the handle the tree no longer shows — the same end a revoke or a
+      // verdict may already have started, and then this waits on it. Its
+      // server's state is released first (board #335 ②b-2-3): the work that
+      // state started finishes or stops while the handle can still answer
+      // for it, and the swap shows no runtime until this resolves. Then it
+      // is DETACHED (board #335 ②b-1, reviewer P1-a): two generations of
+      // handles can borrow one connection, so a replaced handle must stop
+      // being usable, or its late continuations would record identity over a
+      // slot that now serves another server. On a borrowed slot that ends
+      // the handle and leaves the connection to the facade; b3-4 routes it
+      // through the fleet's drop, where it ends the connection too.
+      await ends.end(gone);
     },
   });
   /** Bind the content tree to whichever server is current — the registry's
@@ -162,7 +172,7 @@
     const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
     followMerges();
     const held = scopeSwap.bound();
-    if (held?.alive() && entry && held.id === entry.id) return;
+    if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id) return;
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
     handovers.endAll();
@@ -245,7 +255,10 @@
     // attempt that comes back afterwards must write no identity and bring
     // nothing up, whatever it found (reviewer P1, 2026-10-10).
     handovers.endAll();
-    scopeSwap.bound()?.dispose();
+    // STOPPED now — it refuses every call from here on — and ended once its
+    // server's state is released: the swap that follows waits on that end
+    // before it shows anything (reviewer P1-a on 48b40082).
+    void ends.end(scopeSwap.bound());
   }
   /** The connect form's handover (app/handover.ts, which holds the rules and
    * the tests): the handle stands down for the length of one attempt, and
@@ -253,24 +266,23 @@
    * the peer — never by the attempt merely finishing. A reconnect to the same
    * server therefore keeps its handle and remounts nothing, while an
    * authenticated stranger leaves it refusing. */
-  const handovers = createHandovers();
+  const handovers = createHandovers({ end: (runtime) => { void ends.end(runtime); } });
   function suspendScope() {
     return handovers.open(scopeSwap.bound());
   }
   /** The connect form is about to dial `address` (board #335 ②b-2-3,
    * reviewer P1-c on 0b8b9038). If that can be ANOTHER server, the tree bound
    * to this one will be destroyed, so its editors are asked first — the same
-   * walk the switcher runs, for the same handle. An address this machine is
-   * known to answer on (its entry's, the mirror's, its failover set) is the
-   * ordinary reconnect, which keeps the handle and destroys nothing. Any
-   * other address is asked about: an address is not an identity, so it MAY
-   * turn out to be this machine — and a clean editor asks nothing anyway. */
-  function confirmFormLeave(address) {
+   * walk the switcher runs, for the same handle. ANY address can be: an
+   * address is not an identity, and one this machine used to answer on can
+   * answer as another machine now (reviewer P1-b on 48b40082) — which machine
+   * is known only after the dial, too late to ask. So there is no address
+   * exemption; a clean editor asks nothing anyway. The walk HOLDS the form
+   * mounted (`holdPages`) while it reveals other pages, so an accept returns
+   * to the attempt that asked, with what it froze. */
+  function confirmFormLeave() {
     const held = scopeSwap.bound();
     if (!held?.alive()) return Promise.resolve(true);
-    const here = targetOf(localStorage, held.id);
-    const own = new Set([held.entry().address, here?.address, ...(here?.alternates ?? [])].filter(Boolean));
-    if (own.has(address)) return Promise.resolve(true);
     return confirmLeave({ leaving: held, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } });
   }
   const shell = $derived(connected || !!switching);
@@ -876,11 +888,11 @@
     reconnectError = '';
     loadServerRegistry(); // the entry's active address moved
     // Another known machine answered, and both entries stay: the socket is
-    // B's. The handle is released and the app ARRIVES at B the way the boot
-    // and the connect page do — never A's api resumed over B's socket.
+    // B's. The app ARRIVES at B the way the boot and the connect page do —
+    // after A's editors have been asked — and never resumes A's api over B's
+    // socket.
     if (held && currentServerId(localStorage) !== canonical.id && mergedInto(localStorage, held.id) !== canonical.id) {
-      handover?.settle('other-server');
-      arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '');
+      void arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '', handover);
       return;
     }
     connected = true;
@@ -888,14 +900,17 @@
     // Keep the registry entry's active address fresh (board #55): failover
     // just proved a different address of the SAME machine.
     if (useAddr !== primaryAddr) { localStorage.setItem('tmux_address', useAddr); activeAddress = useAddr; }
-    // The handle's own server (same id), or the entry it was folded into
-    // (identity repair moved CURRENT, and the swap below binds that).
-    handover?.settle(held && held.id === canonical.id ? 'same-server' : 'other-server');
-    // A failover can be the connect that first learns this machine's id, and
-    // then `recordServer` absorbs the entry we were on into the machine's
-    // survivor: CURRENT moved, so the tree's handle and every reference the
-    // app holds have to follow it (reviewer P1, 2026-10-10). A no-op whenever
-    // the id did not move, which is the ordinary failover.
+    // The handle's own server (same id) resumes. Otherwise this is the entry
+    // it was folded into: a failover can be the connect that first learns
+    // this machine's id, and then `recordServer` absorbs the entry we were on
+    // into the machine's survivor. CURRENT moved, so the tree's handle and
+    // every reference the app holds have to follow it (reviewer P1,
+    // 2026-10-10) — and the swap below does that WITHOUT a verdict: it ends
+    // every handover and ends the handle itself, after the replacement has
+    // ADOPTED its state. A verdict here would end it first, while nothing had
+    // adopted it, and release the state the survivor is about to take over.
+    // A no-op whenever the id did not move, which is the ordinary failover.
+    if (held && held.id === canonical.id) handover?.settle('same-server');
     swapScope();
     void keepNavFor(scopeSwap.bound());
     resubscribeAll();
@@ -934,9 +949,10 @@
     });
   }
 
-  /** The boot dial for the current entry authenticated as ANOTHER saved one
-   * (`elsewhere`, reviewer P1-a on cc5e517e). Two different facts arrive as
-   * that one verdict:
+  /** The socket now answers as ANOTHER saved entry: a boot dial's
+   * `elsewhere` (reviewer P1-a on cc5e517e), or an automatic reconnect whose
+   * address reached a different known machine (reviewer, 18:54 on
+   * 5ca0e79e). Two different facts arrive as that one verdict:
    *
    *   - the entry was an address-only alias of that machine, and identity
    *     repair ABSORBED it: CURRENT already names the canonical entry, so the
@@ -946,12 +962,32 @@
    *     up would rebuild A's runtime over B's socket. The socket is B's, so
    *     the app ARRIVES at B the way the connect page arrives at a different
    *     server — park A, point the live keys at B (`activateConnected`), and
-   *     come up on B through the swap (`onConnected(true)`). That path asks
-   *     no leave guard, and here there is nothing to ask: the socket already
-   *     answered as B, and "stay on A" is not a state that exists any more.
-   *     A's handle was detached by the dial itself; nothing is sent for A. */
-  function arrivedElsewhere(result, addr, token) {
+   *     come up on B through the swap (`onConnected(true)`).
+   *
+   * Arriving destroys A's tree, so A's editors are asked FIRST, through the
+   * one leave walk: losing the socket is not consent to discard local edits.
+   * On a fresh boot nothing is dirty and the walk asks nothing. A "stay"
+   * keeps A's tree with its handle still refusing (`hold`), closes B's
+   * socket, and says why on the connect page — nothing retries on its own;
+   * the person decides. `attempt` is the claim or handover the socket was
+   * taken under: if someone else took it while the walk was open, this
+   * arrival is not the app's any more. */
+  async function arrivedElsewhere(result, addr, token, attempt) {
     if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
+    let leave = false;
+    try {
+      leave = await confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } });
+    } catch { leave = false; }
+    if (!attempt.current()) return;
+    if (!leave) {
+      attempt.settle?.('unresolved');
+      disconnect();
+      connected = false;
+      reconnectError = t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
+      page = 'settings';
+      return;
+    }
+    attempt.settle?.('other-server');
     try {
       const act = activateConnected(localStorage, {
         address: addr, token,
@@ -1704,7 +1740,7 @@
       clearTimeout(timeout);
       if (!owner.current()) return;
       if (result.ok) { bringUp(addr, token); return; }
-      if (result.reason === 'elsewhere') { arrivedElsewhere(result, addr, token); return; }
+      if (result.reason === 'elsewhere') { void arrivedElsewhere(result, addr, token, owner); return; }
       if (result.reason !== 'superseded') page = 'settings';
     }).catch(() => {
       clearTimeout(timeout);
@@ -2412,8 +2448,13 @@
          either — so it lives OUTSIDE the server-bound subtree. That is also
          what lets the subtree render nothing at all while it has no runtime
          (board #335 ②b-1, reviewer P1-b). -->
-    {#if page === 'settings'}
+    <!-- Held, like Preferences below, while a leave walk shows another page:
+         the walk may have been started BY this form, and its accept has to
+         come back to the attempt that asked (reviewer P1-b on 48b40082). -->
+    {#if page === 'settings' || holdPages}
+    <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
       <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError} />
+    </div>
     {/if}
     <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,
          shortcuts, notification switches — so it must open with or without a

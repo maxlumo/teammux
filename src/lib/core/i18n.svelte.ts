@@ -578,6 +578,9 @@ const msgs: Record<string, Record<string, string>> = {
     // The peer authenticated but the client could not record WHICH server it
     // is, so it cannot be treated as the one you were on (#335 ②b).
     configIdentityFailed: 'Connected, but this server could not be identified. Try again.',
+    // The address now reaches another saved server, and the person chose to
+    // keep this one's unsaved edits rather than switch (#335 ②b).
+    serverAnsweredElsewhere: 'This address now reaches {name}. Nothing was switched, and your unsaved edits are kept. Connect to switch.',
     // ── Confirmations for destructive verbs. The title names what is about to
     // happen, the note says what is LOST and what survives — that second half
     // is the whole reason a confirmation is more than a speed bump.
@@ -1276,6 +1279,7 @@ const msgs: Record<string, Record<string, string>> = {
     configReset: '重置',
     configRetry: '重试',
     configIdentityFailed: '已连接，但无法确认这台服务器的身份，请重试。',
+    serverAnsweredElsewhere: '这个地址现在连到的是「{name}」。没有切换，未保存的修改都还在；要切换请重新连接。',
     projectArchiveConfirmTitle: '把「{name}」从项目列表移除？',
     projectArchiveConfirmNote: '停止跟踪项目；tmux 会话继续运行。',
     confirmDeleteAgentDefTitle: '删除 agent「{name}」？',

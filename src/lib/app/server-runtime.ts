@@ -126,8 +126,8 @@ export interface ServerRuntime {
    * every always-mounted page and throw away the state they are mounted for,
    * without asking a single leave guard. So the handle is suspended for the
    * length of the handover: calls are refused (the socket is mid-flight
-   * anyway), and then it either resumes as the same handle or is released for
-   * good by whoever finds out the server changed.
+   * anyway), and then it either resumes as the same handle or is ended for
+   * good by the host, once someone finds out the server changed.
    *
    * Returns a TICKET, and that is not bookkeeping — it is the whole
    * correctness of the thing. Handovers overlap: a form can be unmounted
@@ -142,17 +142,18 @@ export interface ServerRuntime {
    * End the handover `ticket` opened, with its verdict:
    *
    *   `resume`  — still serving its own server: use the slot again.
-   *   `release` — another server owns the slot now: terminal.
    *   `hold`    — nothing was established: keep refusing, stay available.
    *
+   * There is no terminal verdict here (board #335 ②b-2-3, reviewer P1-a on
+   * 48b40082): "another server owns the slot" ends the handle, and ending is
+   * the HOST's — its server's state released first, `dispose` after — so
+   * that conclusion goes to the host's end, never into a dispose here.
+   *
    * Honoured only for the suspension in force. A stale ticket (a superseded,
-   * cancelled or unmounted attempt reporting late) is a no-op in EVERY
-   * verdict, including the terminal one: a late `release` would end a handle
-   * that a live handover is protecting and may still resume (reviewer,
-   * 2026-10-10). So a caller can report its conclusion without first proving
-   * it still matters.
+   * cancelled or unmounted attempt reporting late) is a no-op, so a caller
+   * can report its conclusion without first proving it still matters.
    */
-  settle(ticket: number, verdict: 'resume' | 'release' | 'hold'): void;
+  settle(ticket: number, verdict: 'resume' | 'hold'): void;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime.
@@ -508,14 +509,13 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       }
       return ticket;
     },
-    settle: (ticket: number, verdict: 'resume' | 'release' | 'hold') => {
+    settle: (ticket: number, verdict: 'resume' | 'hold') => {
       // A stale attempt's conclusion says nothing about the handover that is
-      // actually in force — not even a terminal one. And a verdict is spent
-      // when it is given: `hold` is a conclusion, not a deferral.
+      // actually in force. And a verdict is spent when it is given: `hold` is
+      // a conclusion, not a deferral.
       if (dead || !ticket || ticket !== open) return;
       open = 0;
       if (verdict === 'resume') suspended = false;
-      else if (verdict === 'release') dispose();
       // `hold`: still suspended, still available to the attempt that works
       // out whose socket this is — but not to this one again.
     },

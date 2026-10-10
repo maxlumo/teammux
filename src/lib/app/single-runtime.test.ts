@@ -225,31 +225,23 @@ test('only the CURRENT handover s ticket may resume', async (t) => {
     'and the right conclusion does');
 });
 
-test('a stale ticket cannot END the handle either', async (t) => {
+test('no verdict ends the handle: ending is the host s, after its release', async (t) => {
   t.after(cleanup);
-  // The verdict that kills is the one a stale attempt must least be allowed
-  // to give (reviewer, 2026-10-10): "another server authenticated" from an
-  // attempt the app has moved on from would end the handle the LIVE handover
-  // is protecting — and that one may still resume.
+  // "Another server authenticated" used to be a verdict that disposed the
+  // handle on the spot (board #335 ②b-2-3, reviewer P1-a on 48b40082) —
+  // before anything had released the server's state. Ending now belongs to
+  // the host (app/handle-end.ts), so whatever an attempt concludes, the
+  // handle is still there for that end to release and then dispose. The
+  // stale-terminal rule went with it, to the handovers (handover.test.ts).
   const e = entry();
   const rt = createSingleRuntime(e, { storage: saved(e) });
   await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
-  const first = rt.suspend();
-  const second = rt.suspend();
-
-  rt.settle(first, 'release');
-  assert.equal(rt.alive(), true, 'the stale release did not end the handle');
-  rt.settle(second, 'resume');
-  fire(rt.api.listSessions());
-  await settle();
-  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
-    'and the live handover could still resume it');
-
-  // The current ticket's release is the one that counts.
-  const third = rt.suspend();
-  rt.settle(third, 'release');
+  const ticket = rt.suspend();
+  rt.settle(ticket, 'release' as never);
+  assert.equal(rt.alive(), true, 'a terminal-sounding verdict is not an end');
+  rt.dispose();
   assert.equal(rt.alive(), false);
-  await assert.rejects(() => rt.api.listSessions(), /detached/u);
+  await assert.rejects(() => rt.api.listSessions(), /detached/u, 'the dispose is');
 });
 
 test('a verdict is spent when it is given, hold included', async (t) => {

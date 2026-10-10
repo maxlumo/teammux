@@ -18,6 +18,12 @@
 //     no-op, `hold` included: an attempt that has already concluded cannot
 //     change its mind, and `hold` is a conclusion like the others rather
 //     than "nothing happened yet".
+//   - A TERMINAL VERDICT IS THE HOST'S TO CARRY OUT (board #335 ②b-2-3,
+//     reviewer P1-a on 48b40082). "Another server authenticated" ends the
+//     handle, and ending a handle is a release first — its server's state
+//     sealed, its downloads stopped and settled — and a dispose only after
+//     that. The runtime cannot do the first half, so the verdict is handed
+//     to the host's one way of ending a handle (`end`), never to a dispose.
 //   - THE HOST CAN END THEM ALL. When the app revokes the handle itself — a
 //     server switch, where leaving is already decided — every open handover
 //     stops being current, so an attempt that comes back afterwards writes no
@@ -57,7 +63,14 @@ export interface Handovers {
   endAll(): void;
 }
 
-/** The verdict a conclusion carries to the runtime. */
+export interface HandoversDeps {
+  /** End `runtime` the host's one way: stop it now, release its server's
+   * state, dispose it once that is over (app/handle-end.ts). */
+  end(runtime: ServerRuntime): void;
+}
+
+/** The verdict a conclusion carries: to the runtime (`resume`, `hold`), or to
+ * the host (`release`). */
 function verdictOf(outcome: HandoverOutcome): 'resume' | 'release' | 'hold' {
   // Only the two conclusions that leave the handle serving its own server
   // resume it. `unresolved` — a peer authenticated and the registry write
@@ -69,7 +82,7 @@ function verdictOf(outcome: HandoverOutcome): 'resume' | 'release' | 'hold' {
   return 'hold';
 }
 
-export function createHandovers(): Handovers {
+export function createHandovers({ end }: HandoversDeps): Handovers {
   let open = 0;
 
   return {
@@ -83,7 +96,10 @@ export function createHandovers(): Handovers {
         settle(outcome) {
           if (spent || !current()) return;
           spent = true;
-          runtime?.settle(ticket, verdictOf(outcome));
+          if (!runtime) return;
+          const verdict = verdictOf(outcome);
+          if (verdict === 'release') end(runtime);
+          else runtime.settle(ticket, verdict);
         },
       };
     },

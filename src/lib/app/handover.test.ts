@@ -21,9 +21,13 @@ function handle() {
   };
 }
 
+/** The host's end, recorded: a terminal verdict is handed to it (board #335
+ * ②b-2-3), never turned into a settle that disposes. */
+const ending = (h: { log: string[] }) => ({ end: () => { h.log.push('end'); } });
+
 test('an attempt stands the handle down and reports its verdict', () => {
   const h = handle();
-  const handovers = createHandovers();
+  const handovers = createHandovers(ending(h));
   const first = handovers.open(h.runtime);
   assert.equal(first.current(), true);
   first.settle('same-server');
@@ -34,12 +38,12 @@ test('each conclusion carries the verdict it means', () => {
   for (const [outcome, verdict] of [
     ['same-server', 'resume'],
     ['no-peer', 'resume'],
-    ['other-server', 'release'],
+    ['other-server', 'end'],
     ['unresolved', 'hold'],
   ] as const) {
     const h = handle();
-    createHandovers().open(h.runtime).settle(outcome);
-    assert.deepEqual(h.log, ['suspend:1', `settle:1:${verdict}`], outcome);
+    createHandovers(ending(h)).open(h.runtime).settle(outcome);
+    assert.deepEqual(h.log, ['suspend:1', verdict === 'end' ? 'end' : `settle:1:${verdict}`], outcome);
   }
 });
 
@@ -48,7 +52,7 @@ test('a newer handover makes the older one stale, for every verdict', () => {
   // end the handle the live handover is protecting, and that one may still
   // resume.
   const h = handle();
-  const handovers = createHandovers();
+  const handovers = createHandovers(ending(h));
   const first = handovers.open(h.runtime);
   const second = handovers.open(h.runtime);
   h.log.length = 0;
@@ -65,7 +69,7 @@ test('a verdict is consumed once, hold included', () => {
   // `hold` is a conclusion, not a deferral: an attempt that has had its say
   // cannot come back and resume what it left suspended.
   const h = handle();
-  const handovers = createHandovers();
+  const handovers = createHandovers(ending(h));
   const only = handovers.open(h.runtime);
   only.settle('unresolved');
   only.settle('same-server');
@@ -78,7 +82,7 @@ test('the host can end every open handover', () => {
   // comes back afterwards writes no identity and brings nothing up — which is
   // what `current()` tells its caller before it does either.
   const h = handle();
-  const handovers = createHandovers();
+  const handovers = createHandovers(ending(h));
   const inFlight = handovers.open(h.runtime);
   h.log.length = 0;
 
@@ -92,7 +96,7 @@ test('the host can end every open handover', () => {
 test('a handover with no server bound still answers', () => {
   // A fresh client has no runtime to stand down, and the caller should not
   // have to care: it opens a handover, asks, and concludes the same way.
-  const handovers = createHandovers();
+  const handovers = createHandovers({ end: () => assert.fail('there is no handle to end') });
   const first = handovers.open(null);
   assert.equal(first.current(), true);
   first.settle('same-server');          // no throw
@@ -106,7 +110,7 @@ test('a claim shares the owner counter: the later attempt owns the outcome (boar
   // the boot dial stale — including one whose connect had already resolved —
   // and a claim after a handover makes that handover stale in turn.
   const h = handle();
-  const handovers = createHandovers();
+  const handovers = createHandovers(ending(h));
   const boot = handovers.claim();
   assert.equal(boot.current(), true);
   assert.deepEqual(h.log, [], 'a claim stands nothing down');

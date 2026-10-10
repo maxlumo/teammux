@@ -200,7 +200,7 @@ test('an attempt the HOST has moved on from writes nothing and concludes nothing
   // is `handovers.endAll()` — not a boolean this test flips (reviewer,
   // 2026-10-10).
   const order: string[] = [];
-  const handovers = createHandovers();
+  const handovers = createHandovers({ end: () => {} });
   let release: ((machine: string) => void) | null = null;
   const app = await (await compiled).mount(context, {
     props: {
@@ -362,4 +362,75 @@ test('the credentials an attempt uses are the ones it started with', async (cont
   assert.deepEqual(order.filter((o) => o.startsWith('activate')),
     [`activate:wss://dialled.test/ws|${seen.token}`],
     'the identity write used the credentials the attempt dialled with');
+});
+
+/** The form with a host leave walk the case controls. */
+async function withWalk(context: TestContext, confirmLeave: (address: string) => Promise<boolean>) {
+  const order: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: {
+      onConnected() { order.push('connected'); },
+      beforeConnect() { order.push('stand-down'); return { current: () => true, settle: () => {} }; },
+      confirmLeave,
+    },
+    modules: [{
+      connect: async (url: string, token: string) => { order.push(`connect:${url}|${token}`); return 'm-b'; },
+      disconnect: () => {},
+      getMachineId: () => 'm-b',
+      setSocket: async () => {},
+    }],
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+  });
+  const field = (selector: string, value: string) => {
+    const input = app.document.querySelector<HTMLInputElement>(selector)!;
+    input.value = value;
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  };
+  const submit = () => [...app.document.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  return { app, order, field, submit };
+}
+
+test('the walk is asked about, and the dial uses, what was submitted — not what is typed while it is open (reviewer P1-b on 48b40082)', async (context) => {
+  // The credentials freeze at SUBMIT, before the walk's await: the walk can
+  // stay open for as long as a dialog takes, and the fields stay live inputs
+  // (a person, or a late autofill) the whole time. The target the person
+  // approved has to be the one dialled.
+  const asked: string[] = [];
+  let answer: (leave: boolean) => void = () => {};
+  const { app, order, field, submit } = await withWalk(context, (address) => {
+    asked.push(address);
+    return new Promise((resolve) => { answer = resolve; });
+  });
+  field('input[type="text"]', 'wss://approved.test/ws');
+  const tokenField = app.document.querySelector<HTMLInputElement>('input[type="password"], .token-wrap input');
+  assert.ok(tokenField, 'the card has a token field');
+  tokenField.value = 'approved-token';
+  tokenField.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await app.flush();
+  submit();
+  await app.flush();
+  assert.deepEqual(asked, ['wss://approved.test/ws'], 'the walk is asked about the submitted address');
+  assert.equal(order.length, 0, `and nothing is dialled while it is open: ${order.join(', ')}`);
+
+  field('input[type="text"]', 'wss://typed-later.test/ws');   // edited during the walk
+  tokenField.value = 'typed-later';
+  tokenField.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await app.flush();
+  answer(true);
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.deepEqual(order.filter((o) => o.startsWith('connect:')), ['connect:wss://approved.test/ws|approved-token'],
+    'exactly one dial, to what was approved');
+  assert.equal(app.window.localStorage.getItem('tmux_address'), 'wss://approved.test/ws', 'and that is what was saved');
+});
+
+test('a leave walk that fails is a stay: the form stops connecting, and nothing is left unhandled', async (context) => {
+  const { app, order, field, submit } = await withWalk(context, () => Promise.reject(new Error('the walk broke')));
+  field('input[type="text"]', 'wss://other.test/ws');
+  await app.flush();
+  submit();
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.deepEqual(order, [], 'nothing stood down and nothing was dialled');
+  assert.ok([...app.document.querySelectorAll<HTMLButtonElement>('button')].some((b) => /^connect$/iu.test((b.textContent ?? '').trim())),
+    'the form is back to Connect, not stuck connecting');
 });

@@ -103,7 +103,8 @@ test('a fresh client sees the Connection card, and its own settings behind the g
   assert.ok(app.document.querySelector('.card .fields input[type="text"]'),
     'the Connection card rendered');
   // And nothing server-bound: no runtime is bound, so the subtree is empty.
-  assert.equal(app.document.querySelector('.page-layer'), null, 'no resident page layer exists');
+  // (The Connection card's own layer is the person's, outside the subtree.)
+  assert.equal(app.document.querySelector('.page-layer:not(.connect-layer)'), null, 'no resident page layer exists');
   assert.equal(app.document.querySelector('.term-page'), null, 'no Terminal page');
   assert.deepEqual(app.calls, [], 'and nothing reached for the wire');
 
@@ -1151,4 +1152,220 @@ test('a reconnect whose identity cannot be recorded is not a same-server success
   const error = app.document.querySelector('.card .error');
   assert.match(error?.textContent ?? '', /could not be identified/iu, 'the person is told on the connect page');
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'nothing moved');
+});
+
+// ── Board #335 ②b-2-3, reviewer's G1/G2 on 48b40082 (and the 18:54 addition).
+
+/** A Files editor on A with unsaved text in it. */
+const editorRpc = {
+  fsList: async () => ({ path: '/home', entries: [{ name: 'notes.md', path: '/home/notes.md', type: 'file', size: 10 }] }),
+  fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 10, mime_hint: 'text/markdown' }),
+  fsRead: async () => ({ content: '# notes' }),
+  gitCmd: async () => ({ code: 1, stdout: '' }),
+  setPref: async () => ({}), saveBookmarks: async () => ({}),
+};
+async function dirtyEditor(app: Awaited<ReturnType<typeof bootApp>>['app'], settle: () => Promise<void>) {
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  files!.click(); await settle();
+  app.document.querySelector<HTMLButtonElement>('.file-main')!.click(); await settle();
+  app.document.querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click(); await settle();
+  const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+  area.value = '# notes\n\nunsaved'; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle();
+  return area;
+}
+const answerDialog = (app: Awaited<ReturnType<typeof bootApp>>['app'], name: RegExp) => {
+  const button = [...app.document.querySelectorAll<HTMLButtonElement>('[role=alertdialog] button')]
+    .find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  assert.ok(button, `the dialog offers ${name}: ${[...app.document.querySelectorAll('[role=alertdialog] button')].map((b) => b.textContent?.trim()).join(' | ')}`);
+  button.click();
+};
+/** Settings → Connection → Disconnect, and type `address` into the card. */
+async function toTheCard(app: Awaited<ReturnType<typeof bootApp>>['app'], settle: () => Promise<void>, address: string) {
+  const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = address;
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  return {
+    field,
+    submit: async () => {
+      [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+      await settle();
+    },
+  };
+}
+
+test('the card s connect to another server, accepted in the editor s dialog, dials exactly once — what was submitted (G2-a/c)', async (context) => {
+  // Accepting reveals Files, which used to UNMOUNT the connect form that was
+  // waiting on the walk: its attempt died at `!mounted`, and the approved
+  // connect never happened. The host now holds the form for the walk.
+  const events: string[] = [];
+  const { app, settle, onScreen, restored } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { calls: events, rpc: editorRpc });
+  await dirtyEditor(app, settle);
+  const { field, submit } = await toTheCard(app, settle, 'ws://b:9899');
+  const dials = () => events.filter((e) => e.startsWith('connect:')).slice(1);   // after the boot dial
+  await submit();
+  assert.ok(app.document.querySelector('[role=alertdialog]'), 'the editor asks, in its own dialog');
+  assert.deepEqual(dials(), [], 'nothing dialled yet');
+  // The person (or a late autofill) changes the field while the dialog is up.
+  field.value = 'ws://elsewhere:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  answerDialog(app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  assert.deepEqual(dials(), ['connect:ws://b:9899'], 'accept dials once, to the address that was approved');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'and the app is on B');
+  await app.advance(1000);
+  assert.equal(onScreen(), 'work:2.0', 'with B s navigation');
+  assert.equal(restored(), 'b:work:2.0');
+});
+
+test('A s own address is asked about too: it can answer as another machine now (G2-b)', async (context) => {
+  // An address is not an identity. The card dials A's saved address, the
+  // machine there is B now — the boot and the reconnect have both met this —
+  // and the old exemption for "an address this machine answers on" let it
+  // tear A's tree down with no question asked.
+  const events: string[] = [];
+  const { app, settle } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'), { calls: events, rpc: editorRpc });
+  const area = await dirtyEditor(app, settle);
+  const { submit } = await toTheCard(app, settle, 'ws://a:9899');
+  const dials = () => events.filter((e) => e.startsWith('connect:')).slice(1);
+  await submit();
+  assert.ok(app.document.querySelector('[role=alertdialog]'), 'the editor asks before A s own address is dialled');
+  assert.deepEqual(dials(), [], 'nothing dialled yet');
+  answerDialog(app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) await settle();
+  assert.deepEqual(dials(), [], 'keep editing: no dial');
+  assert.equal(area.isConnected && area.value, '# notes\n\nunsaved');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a');
+});
+
+test('a reconnect that reaches another known machine asks A s editor first; "keep editing" keeps A (G2, reviewer 18:54)', async (context) => {
+  // The socket dropped and the retry to A's address answered as known B.
+  // Losing the socket is not consent to discard A's unsaved text.
+  const events: string[] = [];
+  const { app, settle, net } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'), { calls: events, rpc: editorRpc });
+  const area = await dirtyEditor(app, settle);
+  net.drop();
+  for (let i = 0; i < 4; i++) await settle();
+  assert.ok(app.document.querySelector('[role=alertdialog]'), 'A s editor asks, in its own dialog');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'nothing moved while it asks');
+  answerDialog(app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'the app stays on A');
+  assert.equal(app.window.localStorage.getItem('tmux_state::a'), null, 'A was never parked');
+  assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'and A s text is still there');
+  assert.match(app.document.querySelector('.card .error')?.textContent ?? '', /now reaches beta/iu,
+    'the connect page says why, and nothing retries on its own');
+  const reconnects = events.filter((e) => e.startsWith('connect:')).length;
+  await app.advance(60_000);
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, reconnects, 'no retry behind the person s back');
+});
+
+test('a reconnect that reaches another known machine, accepted in A s dialog, arrives at B (G2, reviewer 18:54)', async (context) => {
+  const events: string[] = [];
+  const { app, settle, net, onScreen } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'), { calls: events, rpc: editorRpc });
+  await dirtyEditor(app, settle);
+  net.drop();
+  for (let i = 0; i < 4; i++) await settle();
+  answerDialog(app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'the app arrived at B');
+  await app.advance(1000);
+  assert.equal(onScreen(), 'work:2.0', 'with B s navigation');
+});
+
+/** A transfer that ignores its abort: it records it, and ends only when the
+ * case lets it — a download whose cleanup takes a while. */
+function slowTransfer(events: string[]) {
+  let finish: () => void = () => {};
+  return {
+    finish: () => finish(),
+    rpc: {
+      fsList: async () => ({ path: '/home', entries: [{ name: 'big.bin', path: '/home/big.bin', type: 'file', size: 9e9 }] }),
+      fsStat: async (path: string) => ({ path, is_text: false, writable: true, readable: true, size: 9e9 }),
+      fsDownloadHttp: async () => ({ url: 'https://a/dl?path=%2Fhome%2Fbig.bin&sig=s' }),
+      gitCmd: async () => ({ code: 1, stdout: '' }),
+    },
+    setup(window: any) {
+      window.fetch = (_url: string, init: { signal?: AbortSignal } = {}) => new window.Promise((_resolve: unknown, reject: (e: unknown) => void) => {
+        events.push('fetch');
+        init.signal?.addEventListener('abort', () => { events.push('aborted'); });
+        finish = () => { events.push('settled'); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); };
+      });
+    },
+  };
+}
+async function startDownload(app: Awaited<ReturnType<typeof bootApp>>['app'], settle: () => Promise<void>) {
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  files!.click(); await settle();
+  app.document.querySelector<HTMLButtonElement>('button[aria-label="Download: big.bin"]')!.click();
+  await settle();
+}
+
+for (const [path, start] of [
+  ['the card s connect to another server', async (h: Awaited<ReturnType<typeof bootApp>>) => {
+    const { submit } = await toTheCard(h.app, h.settle, 'ws://b:9899');
+    await submit();
+  }],
+  ['a reconnect that reaches another known machine', async (h: Awaited<ReturnType<typeof bootApp>>) => {
+    h.net.drop();
+  }],
+] as const) {
+  test(`${path} ends A only after A s download has settled (G1)`, async (context) => {
+    // The verdict ("another server") and the revoke used to DISPOSE A on the
+    // spot; the release came later, from the swap. Now each of them hands A
+    // to the one end: stopped at once (the transfer is aborted right there),
+    // and B comes up only once A's work has finished stopping.
+    const events: string[] = [];
+    const transfer = slowTransfer(events);
+    const h = await bootApp(context,
+      { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+      (url, n) => (url.includes('//b') || n > 1 ? 'm-b' : 'm-a'), { calls: events, rpc: transfer.rpc, setup: transfer.setup });
+    await startDownload(h.app, h.settle);
+    assert.deepEqual(events.filter((e) => ['fetch', 'aborted', 'settled'].includes(e)), ['fetch'], 'the transfer is running');
+    await start(h);
+    for (let i = 0; i < 6; i++) await h.settle();
+    assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'B authenticated');
+    assert.deepEqual(events.filter((e) => ['fetch', 'aborted', 'settled'].includes(e)), ['fetch', 'aborted'],
+      'A was stopped the moment it was given up');
+    await h.app.advance(1000);
+    assert.equal(h.onScreen(), 'none', 'and B waits: A s download has not finished stopping');
+    transfer.finish();
+    for (let i = 0; i < 6; i++) await h.settle();
+    await h.app.advance(1000);
+    assert.equal(h.onScreen(), 'work:2.0', 'once it has, B comes up');
+  });
+}
+
+test('a merge on a failover keeps a download in flight: no verdict releases what the survivor adopts', async (context) => {
+  // The reconnect is the first connect to learn the machine, and identity
+  // repair folds the alias into canonical. The swap hands the alias's state
+  // to the survivor; a verdict ending the alias first would have released it.
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  const { app, settle, net } = await bootApp(context,
+    { ...aliasAndCanonical(legacyNav('work:1.0')), tmux_layout_mode: 'desktop' }, learnsItsMachineLater,
+    { calls: events, rpc: transfer.rpc, setup: transfer.setup });
+  await startDownload(app, settle);
+  net.drop();
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the failover absorbed the alias');
+  assert.deepEqual(events.filter((e) => ['fetch', 'aborted', 'settled'].includes(e)), ['fetch'], 'and the download is still running');
 });

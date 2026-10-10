@@ -562,7 +562,7 @@ another server. Three rules follow, and each was a hole first:
   |---|---|---|
   | `same-server` | resume | authenticated, and the identity layer confirmed this entry |
   | `no-peer` | resume | the dial never got there, so there is no stranger to be confused with |
-  | `other-server` | release | a different server authenticated; the swap binds the new one |
+  | `other-server` | end (the host's) | a different server authenticated; the handle is ENDED — released, then disposed — and the swap binds the new one |
   | `unresolved` | hold | a peer authenticated and the registry write FAILED: refusing, but still there for the attempt that works out whose socket this is |
 
   An identity-activation failure is therefore an error the person sees, never
@@ -572,9 +572,13 @@ another server. Three rules follow, and each was a hole first:
   instance starting its own are two instances, and to the old one its dial is
   still its latest. So the form asks the handover whether it is still current
   before the identity write and before bringing the app up, and every
-  verdict — including the terminal one — is refused for a ticket that is no
-  longer the suspension in force: a late `release` would end the very handle
-  the live handover is protecting.
+  verdict — including the terminal one — is refused for an attempt that is
+  no longer current: a late "another server" would end the very handle the
+  live handover is protecting. The terminal verdict is not the runtime's to
+  carry out (②b-2-3, reviewer P1-a on 48b40082): it used to dispose the
+  handle inside `settle`, before anything had released its server's state.
+  The runtime's `settle` knows only `resume` and `hold`; "another server"
+  goes to the host's one end of a handle (below).
 
   Clearing the landings after the DOM is gone is the second line, never the
   first — it runs ticks later, by which time the socket would already have
@@ -649,17 +653,42 @@ and awaits them before the socket moves. Since ②b-2-3 this is one function, `r
 ruled: SEAL the record — a gate, so a download that tries to register
 afterwards is REFUSED and sends nothing (`suspend` only snapshots what is
 tracked when it is called) — suspend every running attempt keeping its part,
-and await their settle. The switch awaits it before the socket moves; every
-other end of a handle — an unbind, a replacement — awaits it in the swap
-BEFORE the handle is disposed, and the swap shows no runtime until every
-release in flight has finished. A handle replacing one whose state it
-adopted (a same-machine merge) skips the release, and a state already
-released is never adopted: its record is sealed for good, so a failed
-switch's Back that discovers a merge builds a fresh one. The connect form
-runs the same leave walk as the switcher, for the handle a connect to
-another server would destroy, before it dials anything; an address the
-current machine is known to answer on is the ordinary reconnect and asks
-nothing.
+and await their settle. The switch awaits it before the socket moves.
+
+A handle ENDS one way, `app/handle-end.ts` (②b-2-3, reviewer P1-a on
+48b40082), on every path that gives one up — the swap's invalidate, a
+switch's revoke, a connect attempt's "another server" verdict, an arrival
+elsewhere — and ending is two steps that are not the same step. It STOPS
+at once: the handle refuses every call and the host stops treating it as
+reusable, and its state's release starts in that same turn (the seal is the
+release's first step, so a merge found a moment later cannot adopt a state
+on its way out). It is DISPOSED only once that release has settled, and the
+swap shows no runtime until it has. Every path waits on the same end, so
+it is idempotent. A handle whose state the handle replacing it ADOPTED (a
+same-machine merge) ends without a release — which is why a merge is
+concluded by the swap, never by a verdict: a verdict ends the handle before
+anything adopts its state. A state already released is never adopted: its
+record is sealed for good, so a failed switch's Back that discovers a merge
+builds a fresh one. On a borrowed slot the runtime's own detach on an
+identity loss inside `dial` is the stop step only (the gate a suspend also
+closes; nothing is closed), and the host's end follows; the fleet's owned
+slots keep their self-dispose until b3-4, which moves server state into the
+fleet.
+
+Before anything destroys a server-bound tree, that tree's editors are asked,
+through the one leave walk. The connect form asks before it dials, about
+EVERY address: an address is not an identity — one this machine used to
+answer on can answer as another machine now — and which machine answers is
+known only after the dial (reviewer P1-b on 48b40082). It asks with the
+address, token and socket it froze at submit, and dials exactly those,
+however the fields change while the walk is open; a walk that fails is a
+stay. The walk may reveal another page, so the host HOLDS the connect form
+mounted for it, as it holds Preferences, and an accept returns to the
+attempt that asked. An automatic reconnect — or a boot dial — whose socket
+answers as another known machine ARRIVES there only after the same walk
+(reviewer, 18:54 on 5ca0e79e): losing the socket is not consent to discard
+local edits. A stay keeps A's tree with its handle held (refusing), closes
+B's socket and says why on the connect page; nothing retries on its own.
 
 **The runtime asks; the reconnect loop is told where** (②b-2-2). The
 capability handshake every connect path runs (`serverReady`) is the bound
