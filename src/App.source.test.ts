@@ -528,8 +528,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
     // A failover can be the connect that first learns the machine's id, and
-    // then identity repair can absorb the entry the app was on.
-    ['a failover', /function onReconnectSuccess\([\s\S]*?swapScope\(\);/u],
+    // then identity repair can absorb the entry the app was on. Read within
+    // the function's own body: an unbounded pattern is satisfied by any later
+    // `swapScope();` in the file (a negative control showed it).
+    ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
   // An ABSORBED entry is followed, in the one place that reads CURRENT: the
   // registry is the evidence (an id the app holds can stop being an entry
