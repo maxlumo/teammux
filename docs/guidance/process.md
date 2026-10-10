@@ -16,6 +16,9 @@
 3. **Test wiring with negative controls:** a passing helper does not prove
    its component is wired correctly. Break one thing and verify that exactly
    one corresponding test fails. Every regression fix starts with a failing test.
+   `scripts/negative-controls.mjs` runs a list of such breaks against the
+   committed tree and restores it from git, never from memory (an earlier
+   scratch version once left a mutated file to be committed; #335 ②a-4).
 4. **Documentation and code share a commit:** behavior changes update the
    design document's Rules and their reasons. Record decision, reason,
    date and triggering incident or measurement.
