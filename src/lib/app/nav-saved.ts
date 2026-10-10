@@ -17,10 +17,14 @@
 //     v1-shaped record inside B's slot is still B's. The slot reader itself
 //     arrives with the fold (②b-4); before that the live key is the only
 //     home, so this module reads only it.
-//   - the ONE unprefixed legacy record belongs to whoever owned the live keys
-//     when it was written: `layoutMark.into` once the fold has run (that
-//     marker records which server received those very inputs), else the
-//     CURRENT read before anything in this boot could move it.
+//   - the ONE unprefixed legacy record belongs to whoever last PUT IT THERE,
+//     and the caller is the only one who can know that: at boot it is the
+//     server the last session left current, and from then on it is whichever
+//     server the app arrived at, because arriving surfaces that server's
+//     parked slot into the live key (`pointTo`, which ②b-4 retires).
+//     Comparing bytes cannot answer this — two servers can hold byte-identical
+//     records, and `work:1.0` on A looks exactly like `work:1.0` on B
+//     (orchestrator, 2026-10-10).
 //   - when that cannot be established — a dangling CURRENT, no marker — the
 //     record is UNATTRIBUTED and nothing of it is restored. It is not handed
 //     to the next server that authenticates: being the next to connect is not
@@ -54,9 +58,11 @@ export const NAV_VERSION = 2;
  * server merely being the next to authenticate proves nothing. */
 export const QUARANTINE_KEY = 'tmux_state::unattributed';
 
-/** The most panes a split can be restored into. The exact choices are the
- * shell's (`SPLIT_CHOICES`), which re-gates on them anyway; what matters here
- * is refusing a number that is not a small whole count. */
+/** The most panes a split can be restored into. The shell offers a smaller
+ * set of its own (`SPLIT_CHOICES`), but on restore it gates only on being
+ * able to show a split at all and on the count being more than one — so what
+ * matters here is refusing a number that is not a small whole count
+ * (reviewer P2, 2026-10-10). */
 const MAX_SPLIT = 16;
 
 /** One cell of the desktop split. The id is the cell's own, so a restore can
@@ -102,15 +108,21 @@ function savedPane(value: unknown): PaneRef | null {
 
 /** Cells keep their order and their ids, and an id is used ONCE: two cells
  * sharing one would make the shell's keyed list and its `activeCellId`
- * disagree about which cell is which (reviewer P2). A duplicate or missing id
- * falls back to the position, which is unique by construction. */
+ * disagree about which cell is which (reviewer P2).
+ *
+ * A duplicate or missing id falls back to the LOWEST id nobody is using —
+ * the position is not a free slot: `[1, 1]` gave the second cell position 1,
+ * which the first cell had just claimed as its id (reviewer P2-b,
+ * 2026-10-10). Only the id changes; the cells keep their order. */
 function cellsOf(value: unknown, read: (v: unknown) => PaneRef | null): SavedCell[] {
   if (!Array.isArray(value)) return [];
   const used = new Set<number>();
-  return value.slice(0, MAX_SPLIT).map((c, i) => {
+  let free = 0;
+  const unused = () => { while (used.has(free)) free++; return free; };
+  return value.slice(0, MAX_SPLIT).map((c) => {
     const cell = (c ?? {}) as { id?: unknown; pane?: unknown; target?: unknown; session?: unknown };
     const given = typeof cell.id === 'number' && Number.isInteger(cell.id) && cell.id >= 0 ? cell.id : -1;
-    const id = given >= 0 && !used.has(given) ? given : i;
+    const id = given >= 0 && !used.has(given) ? given : unused();
     used.add(id);
     return { id, pane: read(cell) };
   });
@@ -207,29 +219,6 @@ export function navFor(nav: SavedNav, serverId: ServerId): SavedNav {
     splitLayout: nav.splitLayout,
     splitCells: nav.splitCells.map((c) => ({ id: c.id, pane: mine(c.pane) })),
   };
-}
-
-/**
- * Who the live record belongs to, given what was snapshotted at boot.
- *
- * The frozen boot owner explains the BYTES it was frozen with and nothing
- * else (reviewer P1-b). While `pointTo` is still in service — ②b-4 retires
- * it — arriving at a server SURFACES that server's parked record as the live
- * key, so the live key's content changes under us, and a record placed there
- * from a known slot belongs to that slot's server: the one being brought up.
- *
- *   - the bytes are the ones snapshotted at boot → the boot owner, which may
- *     be empty: an input nobody can be shown to own stays unattributed rather
- *     than falling to whoever is arriving.
- *   - the bytes are something else → the server being brought up, because
- *     that is who put them there.
- */
-export function legacyOwner(
-  live: string | null,
-  boot: { raw: string | null; owner: ServerId },
-  arriving: ServerId,
-): ServerId {
-  return live === boot.raw ? boot.owner : arriving;
 }
 
 /**

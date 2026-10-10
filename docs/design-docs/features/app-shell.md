@@ -308,14 +308,17 @@ the restore is about to read.
 
 Reading is where the care goes, and three rules carry it:
 
-- **Ownership is where the bytes came from.** A pre-#335 record has no
-  serverId, so App freezes the one unprefixed record TOGETHER WITH its owner
-  at boot, before anything can move CURRENT or replace the key, and validates
-  that CURRENT against the saved registry rather than trusting the string.
-  That frozen owner explains those bytes and nothing else: while `pointTo` is
-  still in service (②b-4 retires it), arriving at a server surfaces that
-  server's parked record as the live key, and a record put there from a known
-  slot belongs to that slot's server — the one being brought up.
+- **Ownership is WHO PUT IT THERE, and only the shell knows.** A pre-#335
+  record has no serverId, and it cannot be worked out from the content: two
+  servers can hold byte-identical records, and `work:1.0` on A reads exactly
+  like `work:1.0` on B (orchestrator, 2026-10-10 — an earlier version
+  compared the live bytes with a boot snapshot and filed B's record under A).
+  So App TRACKS the provenance instead: at boot the live record belongs to
+  whatever CURRENT names, validated against the saved registry rather than
+  trusted as a string, and from then on it belongs to whichever server the app
+  ARRIVED at — a deep link, a switch, a connect — because while `pointTo` is
+  still in service (②b-4 retires it) arriving is what surfaces that server's
+  parked record into the live key.
 - **An input nobody can be shown to own is quarantined, not guessed.** Its
   bytes are copied to `tmux_state::unattributed` with the machine id the
   legacy mirror named at that moment, before the shell can save over them;

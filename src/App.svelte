@@ -37,7 +37,7 @@
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createHandovers } from './lib/app/handover.ts';
-  import { legacyOwner, navFor, quarantineLegacyNav, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
+  import { navFor, quarantineLegacyNav, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
@@ -93,11 +93,16 @@
   // facade, the path they all took before this (board 315's serverEpoch
   // counter said "a different server" without saying WHICH, so nothing below
   // could be bound to one).
-  let scopeRuntime = $state(null);
+  // `$state.raw`, not `$state`: a runtime is an opaque HANDLE, and a deep
+  // proxy over it would both wrap its transport and break the one thing the
+  // handle is for — identity. `scopeRuntime === scopeSwap.shown()` has to
+  // mean something, and under a proxy it never can (found by the A→B→A
+  // restore test: the saved-state effect's guard could never pass).
+  let scopeRuntime = $state.raw(null);
   /** The runtime whose navigation has been restored. The saved-state effect
    * waits for it, so nothing writes an empty navigation over the record the
    * restore is about to read (board #335 ②b-2). */
-  let navRestored = $state(null);
+  let navRestored = $state.raw(null);
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -819,6 +824,7 @@
       resetServerMemory();
       hubPrefs.reloadServerState();
       centre.reload();
+      navLiveOwner = navProvenance();
       swapScope();
       localStorage.removeItem('tmux_disconnected');
       activeAddress = localStorage.getItem('tmux_address') || '';
@@ -1168,6 +1174,8 @@
     comeUp: (target) => {
       hubPrefs.reloadServerState();
       centre.reload();
+      // Arriving surfaced the target's parked slot into the live key.
+      navLiveOwner = navProvenance();
       swapScope();
       activeAddress = target.address;
       loadServerRegistry();
@@ -1298,29 +1306,33 @@
   // the registry would make migrateServers a no-op and drop the history).
   migrateServers(localStorage);
   loadServerRegistry();
-  /** The ONE unprefixed `tmux_state` as it stood at boot, with who can be
-   * shown to own it (board #335 ②b-2, reviewer P1-b/c).
+  /** WHO PUT the current unprefixed `tmux_state` there — the provenance the
+   * attribution of a pre-#335 record depends on.
    *
-   * Both halves are frozen here, before anything in this boot can move
-   * CURRENT or replace the key: the deep-link consumer below activates its
-   * own server, and `pointTo` SURFACES that server's parked record as the live
-   * key — so an owner frozen without its bytes would end up explaining
-   * somebody else's record. CURRENT is validated against the saved registry
-   * rather than trusted as a string: a dangling id names no server.
+   * It cannot be derived from the bytes: two servers can hold byte-identical
+   * records, and `work:1.0` on A looks exactly like `work:1.0` on B
+   * (orchestrator, 2026-10-10). It can only be KNOWN, and App is what knows
+   * it: at boot the record is whatever the last session left current, and
+   * from then on it is whichever server the app ARRIVED at, because arriving
+   * surfaces that server's parked slot into the live key (`pointTo`, which
+   * ②b-4 retires along with this whole question).
    *
-   * When nobody can be shown to own it, the bytes are copied to the
-   * quarantine key right here — before the shell can save its own navigation
-   * over them — and ②b-4 lets a server claim them by proving the machine the
-   * legacy mirror named is its own. */
-  const navBoot = {
-    raw: localStorage.getItem('tmux_state'),
-    owner: (() => {
-      const id = currentServerId(localStorage);
-      return id && loadServers(localStorage).some((srv) => srv.id === id) ? id : '';
-    })(),
-  };
-  if (!navBoot.owner) quarantineLegacyNav(localStorage);
+   * CURRENT is validated against the saved registry rather than trusted as a
+   * string: a dangling id names no server, and then nobody can be shown to
+   * own the record — so its bytes are copied to the quarantine key right
+   * here, before the shell can save its own navigation over them, with the
+   * machine id the legacy mirror names at this moment as the evidence ②b-4
+   * requires before any server may claim them. */
+  function navProvenance() {
+    const id = currentServerId(localStorage);
+    return id && loadServers(localStorage).some((srv) => srv.id === id) ? id : '';
+  }
+  let navLiveOwner = navProvenance();
+  if (!navLiveOwner) quarantineLegacyNav(localStorage);
   consumeConnectUrlParams();
+  // A deep link activates its own server, which surfaces THAT server's slot
+  // into the live key: the record there is now its, whatever it looks like.
+  navLiveOwner = navProvenance();
   // Bind the content tree before its first render (board #335 ②b-1): the
   // deep-link consumer above can make a different server current, and a bind
   // that arrived a tick later would mount every page unbound and then rebuild
@@ -1414,8 +1426,12 @@
       // runtime. A pane belonging to another server cannot be resolved over
       // this connection — at best the capture fails, at worst that server has
       // a pane by the same name and the reader lands on a stranger's terminal.
-      const live = localStorage.getItem('tmux_state');
-      const s = navFor(readLegacyNav(localStorage, legacyOwner(live, navBoot, target.id)), target.id);
+      // Two different questions: whose bytes these are (`navLiveOwner`, the
+      // provenance App has tracked) and who we are restoring FOR (this
+      // runtime). They usually agree, and when they do not — a dangling
+      // CURRENT at boot, a record left by another server — nothing is
+      // attributed and nothing is restored.
+      const s = navFor(readLegacyNav(localStorage, navLiveOwner), target.id);
       // A saved target names a session that may not exist any more — killed
       // while we were away, or RENAMED (a project rename renames its session).
       // Restoring it anyway lands the user on a pane that cannot be captured,

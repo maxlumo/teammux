@@ -82,9 +82,19 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
   let inFlight: Promise<void> | null = null;
 
   function swap(next: ServerRuntime | null): Promise<void> {
+    // A REPEAT of the swap in flight is that swap, not a new one that is
+    // already over (reviewer P2-a, 2026-10-10): `doSwap` would see its own
+    // target already bound and return at once, and the caller — who asked in
+    // order to wait for the bind — would be handed a resolved promise while
+    // nothing is shown. Settling is what it is waiting for.
+    if (inFlight && next === pending) return inFlight;
     const run = doSwap(next);
-    inFlight = run.finally(() => { if (inFlight === run) inFlight = null; });
-    return inFlight;
+    // Track the promise the caller gets, so the cleanup compares the same
+    // object it stored: `run.finally(...)` is a DIFFERENT promise, and an
+    // identity check against `run` can never match.
+    const tracked: Promise<void> = run.finally(() => { if (inFlight === tracked) inFlight = null; });
+    inFlight = tracked;
+    return tracked;
   }
 
   async function doSwap(next: ServerRuntime | null): Promise<void> {

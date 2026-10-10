@@ -8,16 +8,23 @@ import type { ServerRuntime } from './server-runtime.ts';
 /** A handle double: what the swap needs from a runtime is its identity. */
 const handle = (id: string) => ({ id } as ServerRuntime);
 
-function host() {
+function host({ hold = false } = {}) {
   const log: string[] = [];
-  /** Resolves on the next microtask, where Svelte's tick would resolve. */
+  /** Resolves on the next microtask, where Svelte's tick would resolve —
+   * unless the case holds it open, which is how "the host has not settled
+   * yet" becomes observable. */
   let settled = 0;
+  let open = () => {};
   const swap = createScopeSwap({
     show: (rt) => log.push(`show:${rt?.id ?? 'none'}`),
-    settle: async () => { settled++; log.push('settle'); },
+    settle: () => {
+      settled++;
+      log.push('settle');
+      return hold ? new Promise<void>((resolve) => { open = resolve; }) : Promise.resolve();
+    },
     invalidate: (rt) => log.push(`invalidate:${rt.id}`),
   });
-  return { log, swap, settles: () => settled };
+  return { log, swap, settles: () => settled, release: () => open() };
 }
 
 test('a first bind happens at once, with nothing to tear down', async () => {
@@ -130,4 +137,36 @@ test('an orphan is not invalidated twice by a later swap', async () => {
   await h.swap.swap(handle('c'));
   assert.deepEqual(h.log, ['show:none', 'settle', 'invalidate:b', 'show:c'],
     'only the handle this swap unbound');
+});
+
+test('settled() resolves on the bind, and a repeat of the swap in flight IS that swap', async () => {
+  // What `settled()` is for is waiting until the subtree is actually bound —
+  // the restore reads the record for the server on screen. Asking for the
+  // same server again used to hand the waiter a promise that was already
+  // over, because the repeat early-returns and the wrapper overwrote the one
+  // still in flight (reviewer P2-a, 2026-10-10): `await settled()` then
+  // returned with nothing shown, which is the very state the restore guards
+  // against.
+  const h = host({ hold: true });
+  const a = handle('a');
+  const b = handle('b');
+  await h.swap.swap(a);                       // first bind: immediate
+  const first = h.swap.swap(b);
+  assert.equal(h.swap.shown(), null, 'the subtree is unbound while the host settles');
+
+  let bound = false;
+  const waiting = h.swap.settled().then(() => { bound = true; });
+  assert.equal(h.swap.swap(b), first, 'the same target, asked again, is the request in flight');
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(bound, false, 'and nothing has resolved: the bind has not happened');
+  assert.equal(h.swap.shown(), null);
+
+  h.release();
+  await first;
+  await waiting;
+  assert.equal(bound, true);
+  assert.equal(h.swap.shown(), b, 'settled() resolved on the bind itself');
+  // Nothing in flight: a waiter does not block on a swap that is over.
+  await h.swap.settled();
+  assert.deepEqual(h.log, ['show:a', 'show:none', 'settle', 'invalidate:a', 'show:b']);
 });

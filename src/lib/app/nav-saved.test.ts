@@ -1,7 +1,7 @@
 // The saved nav state across the v1 → v2 change (board #335 ②b-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, legacyOwner, navFor, quarantineLegacyNav, readLegacyNav, saveNav, type SavedNav } from './nav-saved.ts';
+import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, navFor, quarantineLegacyNav, readLegacyNav, saveNav, type SavedNav } from './nav-saved.ts';
 import { paneRef } from './refs.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -111,23 +111,6 @@ test('storage is untrusted: junk is dropped, never repaired', () => {
   assert.deepEqual(readLegacyNav(cells, 'a').splitCells, [{ id: 0, pane: null }, { id: 7, pane: null }]);
 });
 
-test('the frozen owner explains the bytes it was frozen with, and nothing else', () => {
-  // While `pointTo` is still in service, arriving at a server SURFACES that
-  // server's parked record as the live key — so the live key's content changes
-  // under us (reviewer P1-b). An owner frozen at boot therefore explains only
-  // the record it was frozen with; anything else there was put there by the
-  // server being brought up, and belongs to it.
-  const boot = { raw: '{"page":"terminal","terminalTarget":"work:1.0"}', owner: 'a' };
-  assert.equal(legacyOwner(boot.raw, boot, 'b'), 'a', 'the boot bytes are still A s');
-  assert.equal(legacyOwner('{"page":"files","terminalTarget":"work:2.0"}', boot, 'b'), 'b',
-    'B s parked record, surfaced into the live key, is B s');
-  assert.equal(legacyOwner(null, boot, 'b'), 'b', 'and nothing there is nobody s to misattribute');
-  // An unattributable boot input stays unattributable: being the server that
-  // arrives is not evidence of having written it.
-  const orphan = { raw: '{"page":"terminal","terminalTarget":"work:1.0"}', owner: '' };
-  assert.equal(legacyOwner(orphan.raw, orphan, 'b'), '', 'not handed to whoever arrives');
-});
-
 test('an input nobody owns is copied aside, once, with its evidence', () => {
   // `readLegacyNav` returning no panes preserves nothing: the shell saves its
   // own navigation over the same key as soon as it comes up (reviewer P1-c).
@@ -179,6 +162,17 @@ test('a split restores as whole cells with distinct ids', () => {
   }) });
   const nav = readLegacyNav(storage, 'a');
   assert.equal(nav.splitLayout, 1, 'a fractional layout is not a layout');
-  assert.deepEqual(nav.splitCells.map((c) => c.id), [3, 1],
-    'a duplicate id falls back to the position, which is unique by construction');
+  assert.deepEqual(nav.splitCells.map((c) => c.id), [3, 0],
+    'a duplicate id falls back to an id nobody is using');
+  // The position is NOT a free slot (reviewer P2-b, 2026-10-10): `[1, 1]`
+  // used to give the second cell position 1 — the id the first cell had just
+  // claimed — and two cells with one id make the keyed list and
+  // `activeCellId` disagree about which cell is which.
+  const collide = mem({ [NAV_KEY]: JSON.stringify({
+    v: 2, splitLayout: 3,
+    splitCells: [{ id: 1, pane: null }, { id: 1, pane: null }, { id: 'x', pane: null }],
+  }) });
+  const ids = readLegacyNav(collide, 'a').splitCells.map((c) => c.id);
+  assert.equal(new Set(ids).size, ids.length, `every id is its own: ${ids.join(',')}`);
+  assert.deepEqual(ids, [1, 0, 2], 'the given id is kept, the rest take the lowest free one');
 });

@@ -469,7 +469,11 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // assignment would compile, look right, and mount the new server's pages
   // beside the old server's still-live ones, because `{#key}` creates the new
   // branch before destroying the old.
-  assert.match(source, /let scopeRuntime = \$state\(null\);/u, 'the handle is App state');
+  // `$state.raw`: a runtime is an opaque HANDLE, and a deep proxy over it
+  // breaks the one thing it is for — identity. The A→B→A restore test found
+  // this: the saved-state guard could never pass.
+  assert.match(source, /let scopeRuntime = \$state\.raw\(null\);/u, 'the handle is raw App state');
+  assert.match(source, /let navRestored = \$state\.raw\(null\);/u);
   assert.equal([...source.matchAll(/(?<!let )scopeRuntime = /gu)].length, 1,
     'and after its declaration only createScopeSwap({ show }) assigns it');
   assert.match(source, /show: \(runtime\) => \{ scopeRuntime = runtime; \},/u);
@@ -517,7 +521,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'one runtime, on the facade s slot, so Single mode keeps one socket');
   // Every path that can change which server the app is on binds the tree.
   for (const [name, pattern] of [
-    ['boot', /consumeConnectUrlParams\(\);[\s\S]{0,400}?swapScope\(\);/u],
+    // Boot's order is the pin: consume the deep link, re-read WHO owns the
+    // legacy record now that a link may have made another server current,
+    // then bind.
+    ['boot', /consumeConnectUrlParams\(\);[\s\S]{0,300}?navLiveOwner = navProvenance\(\);[\s\S]{0,400}?swapScope\(\);/u],
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
@@ -533,14 +540,19 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The restore belongs to ONE confirmed runtime, runs after the bind, and
   // does nothing for a runtime that is no longer on screen.
   assert.match(source, /async function restoreNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;/u);
-  assert.match(source, /legacyOwner\(live, navBoot, target\.id\)\), target\.id\);/u,
-    'attributed by where the bytes came from, then filtered to that runtime');
-  // The boot snapshot freezes the BYTES with their owner, and validates
-  // CURRENT against the registry rather than trusting the string.
-  assert.match(source, /const navBoot = \{\s*raw: localStorage\.getItem\('tmux_state'\),/u);
-  assert.match(source, /return id && loadServers\(localStorage\)\.some\(\(srv\) => srv\.id === id\) \? id : '';/u);
-  assert.match(source, /if \(!navBoot\.owner\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
+  assert.match(source, /readLegacyNav\(localStorage, navLiveOwner\), target\.id\);/u,
+    'attributed by the tracked provenance, then filtered to this runtime');
+  // Provenance is KNOWN, never derived from the bytes: two servers can hold
+  // byte-identical records.
+  assert.match(source, /function navProvenance\(\) \{\s*const id = currentServerId\(localStorage\);\s*return id && loadServers\(localStorage\)\.some\(\(srv\) => srv\.id === id\) \? id : '';/u,
+    'and it validates CURRENT against the registry rather than trusting the string');
+  assert.doesNotMatch(source, /navBoot|=== boot\.raw/u, 'no byte comparison decides ownership');
+  assert.match(source, /if \(!navLiveOwner\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
     'an input nobody owns is copied aside BEFORE anything can overwrite it');
+  // Every ARRIVAL re-reads it, because arriving is what surfaces a server's
+  // slot into the live key.
+  assert.equal([...source.matchAll(/(?<!let )navLiveOwner = navProvenance\(\);/gu)].length, 3,
+    'the deep link, the in-place switch and the connect page all surface a slot');
   // And nothing saves over that record until the restore for the bound
   // runtime has finished.
   assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
