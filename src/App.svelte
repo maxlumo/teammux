@@ -119,7 +119,18 @@
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
     settle: () => tick(),
-    invalidate: (gone) => {
+    invalidate: async (gone) => {
+      // And a Files/Board/Agents jump aimed at the tree that is going away.
+      clearLandings();
+      // Its server's state is RELEASED first, and the handle ends only once
+      // that is over (board #335 ②b-2-3, reviewer P1-a): the work that state
+      // started — a download, its retries and re-signs — finishes or stops
+      // while the handle can still answer for it, and the swap shows no
+      // runtime until this resolves. Skipped when the handle replacing it
+      // ADOPTED that very state (a same-machine merge, the same server);
+      // `bound()` already names the replacement here.
+      const state = serverStates.get(gone);
+      if (state && serverStates.get(scopeSwap.bound()) !== state) await releaseServerState(state);
       // DETACH the handle the tree no longer shows (board #335 ②b-1, reviewer
       // P1-a): two generations of handles can borrow one connection, so a
       // replaced handle must stop being usable or its late continuations would
@@ -128,13 +139,6 @@
       // leaves the connection to the facade; b3-4 routes it through the
       // fleet's drop, where it ends the connection too.
       gone.dispose();
-      // Its server's state is released with it — unless the handle that
-      // replaces it ADOPTED that very state (a same-machine merge, which is
-      // the same server). `bound()` already names the replacement here.
-      const state = serverStates.get(gone);
-      if (state && serverStates.get(scopeSwap.bound()) !== state) void releaseServerState(state);
-      // And a Files/Board/Agents jump aimed at the tree that is going away.
-      clearLandings();
     },
   });
   /** Bind the content tree to whichever server is current — the registry's
@@ -252,6 +256,22 @@
   const handovers = createHandovers();
   function suspendScope() {
     return handovers.open(scopeSwap.bound());
+  }
+  /** The connect form is about to dial `address` (board #335 ②b-2-3,
+   * reviewer P1-c on 0b8b9038). If that can be ANOTHER server, the tree bound
+   * to this one will be destroyed, so its editors are asked first — the same
+   * walk the switcher runs, for the same handle. An address this machine is
+   * known to answer on (its entry's, the mirror's, its failover set) is the
+   * ordinary reconnect, which keeps the handle and destroys nothing. Any
+   * other address is asked about: an address is not an identity, so it MAY
+   * turn out to be this machine — and a clean editor asks nothing anyway. */
+  function confirmFormLeave(address) {
+    const held = scopeSwap.bound();
+    if (!held?.alive()) return Promise.resolve(true);
+    const here = targetOf(localStorage, held.id);
+    const own = new Set([held.entry().address, here?.address, ...(here?.alternates ?? [])].filter(Boolean));
+    if (own.has(address)) return Promise.resolve(true);
+    return confirmLeave({ leaving: held, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } });
   }
   const shell = $derived(connected || !!switching);
   // WHAT the terminal is pointed at (board #335 ②b-2): a reference that names
@@ -2370,7 +2390,7 @@
          what lets the subtree render nothing at all while it has no runtime
          (board #335 ②b-1, reviewer P1-b). -->
     {#if page === 'settings'}
-      <Settings {onConnected} beforeConnect={suspendScope} />
+      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} />
     {/if}
     <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,
          shortcuts, notification switches — so it must open with or without a

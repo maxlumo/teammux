@@ -646,12 +646,20 @@ and its two halves travel together because the page and the Hub's drawer share
 one record and a download is not stopped by dropping a reference: the switch
 suspends the LEAVING server's attempts through `suspendFiles(thatServer.files)`
 and awaits them before the socket moves. Since ②b-2-3 this is one function, `releaseServerState`, in the order ②a
-ruled: SEAL the record so a download that registers afterwards is aborted the
-moment it does (`suspend` only snapshots what is tracked when it is called),
-suspend every running attempt keeping its part, and await their settle. The
-switch awaits it before the socket moves; every other end of a handle —
-an unbind, a replacement — releases the state it held, unless the handle
-replacing it adopted that very state (a same-machine merge).
+ruled: SEAL the record — a gate, so a download that tries to register
+afterwards is REFUSED and sends nothing (`suspend` only snapshots what is
+tracked when it is called) — suspend every running attempt keeping its part,
+and await their settle. The switch awaits it before the socket moves; every
+other end of a handle — an unbind, a replacement — awaits it in the swap
+BEFORE the handle is disposed, and the swap shows no runtime until every
+release in flight has finished. A handle replacing one whose state it
+adopted (a same-machine merge) skips the release, and a state already
+released is never adopted: its record is sealed for good, so a failed
+switch's Back that discovers a merge builds a fresh one. The connect form
+runs the same leave walk as the switcher, for the handle a connect to
+another server would destroy, before it dials anything; an address the
+current machine is known to answer on is the ordinary reconnect and asks
+nothing.
 
 **The runtime asks; the reconnect loop is told where** (②b-2-2). The
 capability handshake every connect path runs (`serverReady`) is the bound

@@ -41,8 +41,10 @@ export interface ScopeSwapDeps {
    * has run. */
   settle(): Promise<void>;
   /** This runtime will not be shown (again): release it, and drop what was
-   * aimed at the subtree it had. */
-  invalidate(runtime: ServerRuntime): void;
+   * aimed at the subtree it had. May return a promise — a release that has
+   * to WAIT for work it started (board #335 ②b-2-3, reviewer P1-a) — and no
+   * runtime is shown until every invalidation in flight has finished. */
+  invalidate(runtime: ServerRuntime): void | Promise<void>;
 }
 
 export interface ScopeSwap {
@@ -78,6 +80,11 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
   const orphans = new Set<ServerRuntime>();
 
   const bound = () => pending ?? shown;
+  /** Invalidations still finishing. A swap that would bind while one is
+   * running waits for it, whichever swap started it: the work a released
+   * runtime started must be over before ANY runtime is shown. */
+  const draining = new Set<Promise<void>>();
+  const drained = async () => { while (draining.size) await Promise.allSettled([...draining]); };
   /** The swap in flight, with the target it is heading for — `pending` cannot
    * answer that: it is null both when no swap is running and when a swap has
    * just bound its target, so comparing against it reads an unbind request
@@ -120,7 +127,7 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
     // bind happens AT ONCE. Deferring it would leave the tree with no
     // server-bound subtree for a tick and then build the whole thing — at
     // boot, every page.
-    if (!settled && orphans.size === 0) {
+    if (!settled && orphans.size === 0 && draining.size === 0) {
       shown = next;
       pending = null;
       show(next);
@@ -136,8 +143,17 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
     // releases the orphans this one left, because they are still ours to clear
     // and nobody else will find them.
     if (mine !== seq) return;
-    for (const gone of orphans) invalidate(gone);
+    const gone = [...orphans];
     orphans.clear();
+    for (const runtime of gone) {
+      const done = Promise.resolve(invalidate(runtime)).catch(() => {});
+      draining.add(done);
+      void done.then(() => draining.delete(done));
+    }
+    await drained();
+    // Superseded while the releases ran: the later swap shows its own target,
+    // and it waited on these too.
+    if (mine !== seq) return;
     shown = next;
     pending = null;
     show(next);

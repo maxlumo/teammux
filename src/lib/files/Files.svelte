@@ -1322,10 +1322,12 @@
     // The store's row is this attempt's ONE record (board #308): progress
     // writes it, and the feedback slot shows what it says.
     const rowId = id ?? memory.nextWebRowId();
-    const row = store.begin(rowId, name, path);
     const control = new AbortController();
     let settle;
-    memory.track(rowId, control, new Promise((resolve) => { settle = resolve; }));
+    // The gate (board #335 ②b-2-3, reviewer P1-a): a record being released
+    // refuses the attempt, which ends here — no row, no claim, no RPC.
+    if (!memory.track(rowId, control, new Promise((resolve) => { settle = resolve; }))) return;
+    const row = store.begin(rowId, name, path);
     const strings = () => ({ downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
     const show = () => { if (operation.current()) downloadLifetime.update(token, feedbackOf(row, strings())); };
     const progress = (fraction, received = 0, total = 0) => { store.progress(rowId, received, total); show(); };

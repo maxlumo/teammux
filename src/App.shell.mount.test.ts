@@ -403,7 +403,8 @@ async function bootApp(
         set: (target, prop, value) => { target[prop as string] = value; return true; },
       });
     },
-    pendingImports: ['@tauri-apps/'],
+    // The editor's highlighter loads lazily; this tier cannot paint it.
+    pendingImports: ['@tauri-apps/', 'highlight.js/'],
   });
   const settle = async () => { for (let i = 0; i < 10; i++) await app.flush(); };
   await settle();
@@ -1016,4 +1017,99 @@ test('a reconnect that takes over a suspended form leaves the handle working (re
   assert.ok(events.slice(since).includes('hub_rooms'), `the runtime s api reached the transport: ${events.slice(since).join(',')}`);
   await openSession('other');
   assert.equal(restored(), 'a:other:3.0');
+});
+
+test('a connect to another server through the card asks an unsaved editor first (reviewer P1-c on 0b8b9038)', async (context) => {
+  // A has a dirty Files editor; the person disconnects (the tree stays) and
+  // connects to B through the card. B would destroy A's tree, so A's editor
+  // asks in its own dialog BEFORE anything is dialled; "keep editing" means
+  // nothing happens at all.
+  const events: string[] = [];
+  const { app, settle } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, {
+      calls: events,
+      rpc: {
+        fsList: async () => ({ path: '/home', entries: [{ name: 'notes.md', path: '/home/notes.md', type: 'file', size: 10 }] }),
+        fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 10, mime_hint: 'text/markdown' }),
+        fsRead: async () => ({ content: '# notes' }),
+        gitCmd: async () => ({ code: 1, stdout: '' }),
+        setPref: async () => ({}), saveBookmarks: async () => ({}),
+      },
+    });
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  files!.click(); await settle();
+  app.document.querySelector<HTMLButtonElement>('.file-main')!.click(); await settle();
+  app.document.querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click(); await settle();
+  const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+  area.value = '# notes\n\nunsaved'; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle();
+
+  const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://b:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  const dials = events.filter((e) => e.startsWith('connect:')).length;
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  const dialog = app.document.querySelector('[role=alertdialog]');
+  assert.ok(dialog, 'the editor s own discard confirmation is asked');
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'and nothing was dialled yet');
+  [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /keep editing/iu.test(b.getAttribute('aria-label') ?? b.textContent ?? ''))!.click();
+  await settle(); await settle();
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'keep editing: no dial at all');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a');
+  assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'and the text is still there');
+});
+
+test('a failed switch s Back that discovers a merge can still start a download (reviewer P1-b on 0b8b9038)', async (context) => {
+  // The switch to C releases the alias's state (sealed for good) on the way
+  // out; C fails; Back reconnects the alias, and that authentication is the
+  // first to report its machine, so the alias is absorbed into canonical. A
+  // sealed state handed to the canonical runtime could never start a
+  // download again.
+  const events: string[] = [];
+  const machineAt: MachineAt = (url, n) => (url.includes('//c') ? '' : n === 1 ? '' : 'm-a');
+  const { app, settle, switchTo } = await bootApp(context, {
+    ...aliasAndCanonical(legacyNav('work:1.0')),
+    tmux_servers: JSON.stringify([
+      { id: 'alias', name: 'home', address: 'ws://a:9899', token: 'tok', named: true },
+      { id: 'canon', name: 'canonical', address: 'ws://b:9899', token: 'tok', machineId: 'm-a', named: true },
+      { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+    ]),
+  }, machineAt, {
+    calls: events,
+    gate: (url) => (url.includes('//c') ? Promise.reject(new Error('refused')) : null),
+    rpc: {
+      fsList: async () => { events.push('fs_list'); return { path: '/home', entries: [{ name: 'big.bin', path: '/home/big.bin', type: 'file', size: 9e9 }] }; },
+      fsCwd: async () => { events.push('fs_cwd'); return { path: '/home' }; },
+      fsStat: async (path: string) => ({ path, is_text: false, writable: true, readable: true, size: 9e9 }),
+      fsDownloadHttp: async () => { events.push('fs_download_http'); return { url: 'https://a/dl?path=x&sig=s' }; },
+      gitCmd: async () => ({ code: 1, stdout: '' }),
+    },
+    setup(window) { window.fetch = () => new window.Promise(() => {}); },
+  });
+  await switchTo('charlie');
+  const back = [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^back to/iu.test((b.textContent ?? '').trim()));
+  assert.ok(back, `the switch failed and offers Back: ${[...app.document.querySelectorAll('.switch-panel button')].map((b) => b.textContent?.trim()).join(' | ')}`);
+  back.click();
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'Back absorbed the alias');
+  // Files is one tab away; the page slide from the switch's return ends first.
+  await app.advance(1000);
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button')]
+    .find((b) => /^files$/iu.test((b.textContent ?? '').trim()));
+  assert.ok(files, 'the Files tab');
+  files.click(); await settle(); await settle();
+  const download = app.document.querySelector<HTMLButtonElement>('button[aria-label="Download: big.bin"]');
+  assert.ok(download, 'Files offers the download');
+  download.click(); await settle();
+  assert.ok(events.includes('fs_download_http'), 'and the download started: the canonical runtime s record is not sealed');
 });

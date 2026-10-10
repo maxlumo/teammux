@@ -59,8 +59,11 @@ export interface FilesMemory {
   writerOf(partId: string): PartWriter | undefined;
   claim(partId: string, writer: PartWriter): void;
   release(partId: string): void;
-  /** Track a running attempt: how to stop it, and when it has settled. */
-  track(rowId: string, control: AbortController, settled: Promise<void>): void;
+  /** Track a running attempt: how to stop it, and when it has settled.
+   * Returns false on a SEALED record and tracks nothing: the attempt must
+   * not start (board #335 ②b-2-3, reviewer P1-a — a gate, not a signal the
+   * caller may or may not read later). */
+  track(rowId: string, control: AbortController, settled: Promise<void>): boolean;
   untrack(rowId: string): void;
   /** The Downloads view's Cancel. */
   abort(rowId: string): void;
@@ -78,9 +81,8 @@ export interface FilesMemory {
   suspend(reason: unknown): Promise<void>;
   /** Forbid new attempts, for good (board #335 ②b-2-3): the first step of
    * releasing this server's record. `suspend` snapshots what is tracked when
-   * it is called and does not stop a LATER `track`, so without this an
-   * attempt started in the gap would outlive the release. A `track` after
-   * this aborts its attempt at once with `reason`. Idempotent. */
+   * it is called, so without this an attempt started in the gap would
+   * outlive the release; after it, `track` refuses. Idempotent. */
   seal(reason: unknown): void;
   /** Has the record been sealed? A new download must not start. */
   sealed(): boolean;
@@ -103,11 +105,11 @@ export function createFilesMemory(): FilesMemory {
     claim: (partId, writer) => { inFlight.set(partId, writer); },
     release: (partId) => { inFlight.delete(partId); },
     track(rowId, control, settled) {
-      // Released: this attempt never runs. Tracked anyway, so its settle is
-      // still awaited by a release that is already waiting.
-      if (sealedBy) control.abort(sealedBy.reason);
+      // Released: this attempt never runs, and nothing of it is kept.
+      if (sealedBy) return false;
       cancels.set(rowId, control);
       settles.set(rowId, settled);
+      return true;
     },
     untrack(rowId) {
       cancels.delete(rowId);

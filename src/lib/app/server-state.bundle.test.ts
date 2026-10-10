@@ -105,3 +105,17 @@ test('releasing a server s state forbids new attempts, then suspends and awaits 
   await releasing;
   assert.equal(done, true);
 });
+
+test('a state already released is never handed over, merge or not (reviewer P1-b)', async () => {
+  // A failed switch released the alias's state on the way out; the merge is
+  // discovered only on the way back. Adopting that sealed record would leave
+  // the canonical runtime unable to start a download.
+  const { stateForRuntime, releaseServerState } = await import('./server-state.ts');
+  live.clear();
+  const old = createServerState(localStorage);
+  await releaseServerState(old);
+  const merged = (id: string) => (id === 'alias' ? 'canon' : id);
+  const next = stateForRuntime({ id: 'alias', state: old }, 'canon', { survivorOf: merged, create: () => createServerState(localStorage) });
+  assert.notEqual(next, old, 'a fresh state instead');
+  assert.equal(next.files.memory.sealed(), false, 'which can start downloads');
+});

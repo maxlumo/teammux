@@ -430,7 +430,9 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,/u);
   // Every other way a handle ends releases its state too — unless the handle
   // replacing it ADOPTED that very state (a same-machine merge).
-  assert.match(source, /gone\.dispose\(\);[\s\S]{0,400}?const state = serverStates\.get\(gone\);\s*if \(state && serverStates\.get\(scopeSwap\.bound\(\)\) !== state\) void releaseServerState\(state\);/u);
+  // RELEASED before the handle is disposed, and awaited (reviewer P1-a on
+  // 0b8b9038): the swap shows nothing until it resolves.
+  assert.match(source, /invalidate: async \(gone\) => \{[\s\S]*?const state = serverStates\.get\(gone\);\s*if \(state && serverStates\.get\(scopeSwap\.bound\(\)\) !== state\) await releaseServerState\(state\);[\s\S]*?gone\.dispose\(\);\s*\},/u);
   assert.match(source, /comeUp: \(target\) => \{[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(target\.address, target\.token\);/u);
   assert.doesNotMatch(source, /location\.reload\(/u, 'no reload remains on any switch or connect path');
   assert.doesNotMatch(source, /applySwitch/u, 'the reload-era plan is gone');
@@ -505,7 +507,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 1, 'and one place hands it to a runtime');
   assert.match(source, /function swapScope\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, stateForRuntime\(/u,
     'inside swapScope — and a same-machine merge hands the replaced handle s state over (stateForRuntime)');
-  assert.match(source, /invalidate: \(gone\) => \{[\s\S]*?gone\.dispose\(\);[\s\S]*?clearLandings\(\);/u,
+  assert.match(source, /invalidate: async \(gone\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearLandings\(\);[\s\S]*?gone\.dispose\(\);/u,
     'the replaced handle is DETACHED, not merely forgotten: two generations can borrow one connection');
   // WHICH server is read from the registry, never passed: identity repair can
   // absorb the entry we booted as into a machine's survivor and re-point
@@ -530,11 +532,14 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // back itself.
   assert.match(source, /const handovers = createHandovers\(\);/u);
   assert.match(source, /function suspendScope\(\) \{\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
+  // And asks the leave walk of the handle a connect to ANOTHER server would
+  // destroy, before anything is dialled (reviewer P1-c on 0b8b9038).
+  assert.match(source, /function confirmFormLeave\(address\) \{[\s\S]*?return confirmLeave\(\{ leaving: held, current: page,/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
   assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(localStorage\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
+  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what

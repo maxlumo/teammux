@@ -167,29 +167,27 @@ test('browser row ids are unique within a record', () => {
   assert.equal(b.nextWebRowId(), ids[0], 'and each record counts for itself');
 });
 
-test('a sealed record aborts an attempt that registers after the seal (board #335 ②b-2-3)', async () => {
-  // `suspend` snapshots what is tracked when it is called, so an attempt
-  // started in the gap would outlive the release. Sealing is the separate
-  // first step that closes the gap.
+test('a sealed record refuses a new attempt, and the release awaits every one it had (board #335 ②b-2-3)', async () => {
+  // reviewer P1-a: a gate, not a signal. A `track` after the seal is
+  // REFUSED — nothing is kept, so the caller sends nothing — while an attempt
+  // tracked before it is suspended and awaited.
   const m = createFilesMemory();
   const early = new AbortController();
   let earlyDone = () => {};
-  m.track('early', early, new Promise<void>((r) => { earlyDone = r; }));
+  assert.equal(m.track('early', early, new Promise<void>((r) => { earlyDone = r; })), true);
   m.seal('suspend');
-  assert.equal(m.sealed(), true);
-  const late = new AbortController();
-  let lateDone = () => {};
-  m.track('late', late, new Promise<void>((r) => { lateDone = r; }));
-  assert.equal(late.signal.aborted, true, 'the late attempt is aborted the moment it registers');
-  assert.equal(late.signal.reason, 'suspend');
   let released = false;
   const releasing = m.suspend('suspend').then(() => { released = true; });
+  // A late attempt arrives WHILE the release is waiting.
+  const late = new AbortController();
+  assert.equal(m.track('late', late, new Promise<void>(() => {})), false, 'refused: it must not start');
+  assert.equal(late.signal.aborted, false, 'and nothing was started to abort');
   assert.equal(early.signal.aborted, true);
   await Promise.resolve();
-  assert.equal(released, false, 'and the release waits for both to settle');
-  earlyDone(); lateDone();
+  assert.equal(released, false, 'the release waits for the early attempt');
+  earlyDone();
   await releasing;
-  assert.equal(released, true);
+  assert.equal(released, true, 'and only for it: the late one was never kept');
   m.seal('other');
   assert.equal(m.sealed(), true, 'idempotent');
 });

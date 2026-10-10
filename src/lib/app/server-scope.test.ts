@@ -22,7 +22,7 @@ function host({ hold = false } = {}) {
       log.push('settle');
       return hold ? new Promise<void>((resolve) => { open = resolve; }) : Promise.resolve();
     },
-    invalidate: (rt) => log.push(`invalidate:${rt.id}`),
+    invalidate: (rt) => { log.push(`invalidate:${rt.id}`); },
   });
   return { log, swap, settles: () => settled, release: () => open() };
 }
@@ -185,4 +185,34 @@ test('settled() resolves on the bind, and a repeat of the swap in flight IS that
   // Nothing in flight: a waiter does not block on a swap that is over.
   await h.swap.settled();
   assert.deepEqual(h.log, ['show:a', 'show:none', 'settle', 'invalidate:a', 'show:b']);
+});
+
+test('nothing is shown until the replaced runtime s release has finished (board #335 ②b-2-3)', async () => {
+  // reviewer P1-a: the release of a runtime's state waits for work it
+  // started; binding the next runtime before that would let the old work's
+  // retries go out over a socket the new one already uses.
+  const log: string[] = [];
+  const finish = new Map<string, () => void>();
+  const swap = createScopeSwap({
+    show: (rt) => log.push(`show:${rt?.id ?? 'none'}`),
+    settle: async () => { log.push('settle'); },
+    invalidate: (rt) => new Promise<void>((resolve) => { log.push(`release:${rt.id}`); finish.set(rt.id, () => { log.push(`released:${rt.id}`); resolve(); }); }),
+  });
+  await swap.swap(handle('a'));
+  const going = swap.swap(handle('b'));
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(log, ['show:a', 'show:none', 'settle', 'release:a'], 'B is not shown while A is releasing');
+  // A swap that arrives meanwhile with nothing of its own to tear down
+  // waits too.
+  const third = swap.swap(handle('c'));
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.ok(!log.includes('show:c'), 'C waits too');
+  // C's own teardown releases B (never shown), and C waits for that AND A's.
+  finish.get('b')?.();
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.ok(!log.includes('show:c'), 'still waiting on A');
+  finish.get('a')!();
+  await going; await third;
+  assert.equal(log.at(-1), 'show:c', 'shown only after every release finished');
+  assert.ok(!log.includes('show:b'), 'and B, superseded, was never shown');
 });

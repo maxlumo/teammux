@@ -27,8 +27,18 @@
   let {
     onConnected,
     beforeConnect,
+    confirmLeave,
   }: {
     onConnected: (switched: boolean) => void;
+    /**
+     * Asked FIRST, before anything is dialled or written (board #335 ②b-2-3,
+     * reviewer P1-c): may the server-bound tree be thrown away for this
+     * address? A connect to another server destroys every page of the one
+     * the app is on, and an unsaved editor there has to be asked in its own
+     * dialog while it still exists. False stays: nothing is dialled. Which
+     * addresses can be the SAME server is the host's to know.
+     */
+    confirmLeave?: ((address: string) => Promise<boolean>) | undefined;
     /**
      * Called once, before this form re-dials the shared socket (board #335
      * ②b-1, reviewer P1-b).
@@ -158,6 +168,13 @@
     connecting = true;
     cancelled = false;
     const attempt = ++attempts;
+    // Before the handover, the dial and every write: a "stay" here must leave
+    // the app exactly as it was.
+    if (confirmLeave && !(await confirmLeave(normalizeAddress(address)))) {
+      if (attempt === attempts) connecting = false;
+      return;
+    }
+    if (!mounted || attempt !== attempts || cancelled) return;
     // Mine AND still the app's: the instance counter orders this form's own
     // attempts, the host's handover says whether the app is still waiting on
     // this one at all.

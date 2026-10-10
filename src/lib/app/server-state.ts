@@ -83,7 +83,14 @@ export function stateForRuntime(
   deps: { survivorOf: (id: string) => string; create: () => ServerState },
 ): ServerState {
   const merged = !!replaced && replaced.id !== id && deps.survivorOf(replaced.id) === id;
-  return (merged && replaced.state) || deps.create();
+  // A state already released (or being released) is never handed over: its
+  // Files record is sealed for good, and adopting it would leave the
+  // canonical runtime unable to start a download (reviewer P1-b,
+  // 2026-10-10). A failed switch's Back is the ordinary way here: the switch
+  // released the alias's state on the way out, and the merge is discovered
+  // only on the way back.
+  const live = merged && replaced.state && !replaced.state.files.memory.sealed() ? replaced.state : null;
+  return live ?? deps.create();
 }
 
 /**
