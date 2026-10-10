@@ -459,6 +459,40 @@ test('two servers can hold the SAME legacy bytes, and each one is still its own'
   assert.equal(restored(), 'a:work:1.0', 'and A s is A s again');
 });
 
+test('a split comes back whole, and every cell of it names its own server', async (context) => {
+  // The round trip has to cover the SPLIT, not just the top pane (reviewer
+  // P2-b, 2026-10-10): the cells are the second half of what a desktop client
+  // comes back to, and they are the references most easily filtered away,
+  // being one per cell. Desktop mode, because a split is restored only on a
+  // client that can show one.
+  const { onScreen, record, cellsOnScreen, switchTo, app } = await bootApp(context, {
+    ...twoServers({
+      live: legacyNav('work:1.0', ['work:1.0', 'work:2.0']),
+      parked: legacyNav('work:9.0'),
+    }),
+    tmux_layout_mode: 'desktop',
+  });
+
+  assert.equal(onScreen(), 'work:1.0');
+  assert.deepEqual(cellsOnScreen(), ['1:work:1.0', '2:work:2.0'], 'both cells came up with their panes');
+  assert.equal(record().splitLayout, 2, 'and the record keeps the layout');
+  assert.deepEqual(record().splitCells.map((c: any) => `${c.id}:${c.pane?.serverId}:${c.pane?.target}`),
+    ['1:a:work:1.0', '2:a:work:2.0'], 'every cell is A s, by its own reference');
+
+  await switchTo('beta');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(onScreen(), 'work:9.0', 'B has no split of its own');
+  assert.equal(record().splitLayout, 1);
+  const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
+  assert.equal(parkedA.splitLayout, 2, 'A s split was parked whole');
+
+  await switchTo('alpha');
+  assert.equal(onScreen(), 'work:1.0');
+  assert.deepEqual(cellsOnScreen(), ['1:work:1.0', '2:work:2.0'], 'and A s split came back whole');
+  assert.deepEqual(record().splitCells.map((c: any) => `${c.id}:${c.pane?.serverId}:${c.pane?.target}`),
+    ['1:a:work:1.0', '2:a:work:2.0'], 'still A s, with the same cell ids');
+});
+
 /** The shape identity repair merges: the entry the app is CURRENT on knows
  * only an address, and the machine it reaches is already saved under another
  * entry. `recordServer` folds the first into the second and deletes it. */
