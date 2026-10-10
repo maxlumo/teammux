@@ -822,8 +822,8 @@
   /** The person chose to stay on a server whose address now reaches another
    * one (`arrivedElsewhere`, reviewer P2 on 085b0e70). Nothing AUTOMATIC
    * dials until they connect themselves: not the disconnect callback, not a
-   * foreground resume. Every explicit owner of the socket — the connect
-   * form, a switch, an address row — clears it. */
+   * foreground resume, not a late optimizer probe. The person's own acts —
+   * the connect form, a switch, an address row — clear it. */
   let heldOffline = false;
   let reconnectAttempt = $state(0);   // 1-indexed when visible; 0 means not attempting
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
@@ -988,9 +988,11 @@
    * the app's any more and does nothing. */
   async function arrivedElsewhere(result, addr, token, attempt) {
     if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
+    if (!attempt.current()) return;
     let leave = false;
     try {
-      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
+      // Under the attempt's OWN ownership: claiming again would make it stale.
+      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }), attempt);
     } catch { leave = false; }
     if (!attempt.current()) return;
     if (!leave) {
@@ -1353,10 +1355,10 @@
     currentId: () => serverCurId,
     currentName: () => serverName,
     confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
-    // An address change takes the socket from every other owner (reviewer
-    // P1 on 085b0e70) — and it is the person's or the connected optimizer's
-    // choice, so it lifts a stay-offline too.
-    claim: () => { heldOffline = false; return handovers.claim(); },
+    // An address change and a leave walk take the socket from every other
+    // owner (reviewer P1s on 085b0e70 and 4fbce02e): the one owner counter.
+    claim: () => handovers.claim(),
+    reconnecting: () => reconnectMachine.isActive(),
     stopReconnect: () => reconnectMachine.cancel(),
     startReconnect: () => reconnectMachine.start(),
     addressUp: () => {
@@ -1448,7 +1450,10 @@
       // Nor may it move the socket while a leave walk asks about it — not
       // even the mirror: a probe that started before the dialog and answers
       // during it is the same takeover (reviewer P1 on 085b0e70).
-      if (!serverSwitch.owns(intent) || serverSwitch.guarding) return;
+      // And after a "stay" it is not the person's connect, so it does not
+      // lift the stay (reviewer P2 on 4fbce02e); a walk since the probe
+      // began has moved the intent anyway.
+      if (!serverSwitch.owns(intent) || serverSwitch.guarding || heldOffline) return;
       if (!best || best === current) return;
       // Only switch if the new address is higher priority (lower class number)
       if (classifyAddress(best) >= curClass) return;
@@ -2515,6 +2520,7 @@
         // The switch module owns the socket (board 315): a server switch that
         // starts meanwhile makes this attempt stale, and a stale one neither
         // publishes nor restarts the reconnect loop.
+        heldOffline = false;           // the person picked an address
         void serverSwitch.connectAddress(address, localStorage.getItem('tmux_token') || '')
           .finally(() => { if (pendingAddress === address) pendingAddress = ''; });
       }}

@@ -90,6 +90,7 @@ function app(storage = mem({
   const reconnects: string[] = [];
   const published: string[] = [];
   const handovers = createHandovers({ end: () => {} });
+  let looping = false;
   const sw = createServerSwitch({
     storage,
     connected: () => connected,
@@ -97,8 +98,9 @@ function app(storage = mem({
     currentName: () => loadServers(storage).find((s) => s.id === currentServerId(storage))?.name ?? '',
     confirmLeave: () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} }),
     claim: () => handovers.claim(),
-    stopReconnect: () => { reconnects.push('stop'); },
-    startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); },
+    stopReconnect: () => { reconnects.push('stop'); looping = false; },
+    reconnecting: () => looping,
+    startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); looping = true; },
     addressUp: (addr) => { published.push(addr); },
     onstate: (st) => { states.push(st); if (st) { connected = false; mounted = false; } },
     suspendDownloads: async () => { for (const s of suspenders) await s(); },
@@ -111,7 +113,7 @@ function app(storage = mem({
     comeUp: () => { connected = true; mounted = true; },
   });
   const suspenders: (() => Promise<void>)[] = [];
-  return { storage, w, a, b, sw, handovers, states, unmountWrites, resets, suspenders, reconnects, published,
+  return { storage, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, unmountWrites, resets, suspenders, reconnects, published,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -305,12 +307,84 @@ test('while a host leave walk asks, no address connect and no switch starts', as
   const t = app();
   let answer!: (v: boolean) => void;
   const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  await new Promise((r) => setTimeout(r, 0));
   assert.equal(t.sw.guarding, true);
   assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), false, 'the optimizer or an address row is refused');
   await t.sw.switchTo(t.b);
-  assert.equal(currentServerId(t.storage), t.a.id, 'and so is a switch: one walk at a time');
+  assert.equal(currentServerId(t.storage), t.a.id, 'and so is a switch');
   answer(true);
   assert.equal(await walk, true);
   assert.equal(t.sw.guarding, false);
   assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), true, 'after it, they work again');
+});
+
+test('one walk at a time: a second one is refused, and its callback never runs (reviewer P1 on 4fbce02e)', async () => {
+  const t = app();
+  let answer!: (v: boolean) => void;
+  const first = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  await new Promise((r) => setTimeout(r, 0));
+  let ran = false;
+  assert.equal(await t.sw.guard(async () => { ran = true; return true; }), false, 'refused: a stay');
+  assert.equal(await t.sw.guard(async () => { ran = true; return true; }, { current: () => true }), false, 'with an owner of its own too');
+  assert.equal(ran, false, 'the second walk never asked anything');
+  answer(false);
+  assert.equal(await first, false);
+});
+
+test('a walk takes the socket from everything already running (reviewer P1 on 4fbce02e)', async () => {
+  const t = app();
+  // The reconnect loop is running, and an attempt of the host's holds the
+  // owner — a reconnect continuation, a boot dial.
+  t.loop(true);
+  const earlier = t.handovers.claim();
+  const intent = t.sw.intent;
+  let answer!: (v: boolean) => void;
+  const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(t.reconnects, ['stop'], 'the loop is frozen');
+  assert.equal(earlier.current(), false, 'the earlier owner is stale');
+  assert.equal(t.sw.owns(intent), false, 'and an optimizer probe begun before it owns nothing when it answers');
+  answer(false);
+  assert.equal(await walk, false);
+  assert.deepEqual(t.reconnects, ['stop', 'start ws://a:1'], 'a stay starts the loop it froze again');
+
+  // An accept leaves it to whoever leaves.
+  t.reconnects.length = 0;
+  t.loop(true);
+  assert.equal(await t.sw.guard(async () => true), true);
+  assert.deepEqual(t.reconnects, ['stop']);
+});
+
+test('a walk freezes an address connect already dialling; a stay puts its outcome back, an accept does not (reviewer P1 on 4fbce02e)', async () => {
+  for (const stay of [true, false]) {
+    const t = app();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const real = t.w.connect.bind(t.w);
+    (t.w as { connect: (a: string) => Promise<void> }).connect = async (addr: string) => { await gate; return real(addr); };
+    const tap = t.sw.connectAddress('ws://a:1', 'ta');
+    await new Promise((r) => setTimeout(r, 0));
+    let answer!: (v: boolean) => void;
+    const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+    await new Promise((r) => setTimeout(r, 0));
+    release();                                     // it answers while the dialog is open
+    assert.equal(await tap, false, 'the frozen attempt is not the owner');
+    assert.deepEqual(t.published, [], 'and publishes nothing under the open dialog');
+    answer(!stay);
+    await walk;
+    assert.deepEqual(t.published, stay ? ['ws://a:1'] : [], stay ? 'a stay puts its outcome back' : 'an accept leaves the socket to whoever leaves');
+  }
+});
+
+test('a stay puts a FAILED frozen address connect back to the reconnect loop', async () => {
+  const t = app();
+  t.w.fail('ws://a:1', 1);
+  let answer!: (v: boolean) => void;
+  const tap = t.sw.connectAddress('ws://a:1', 'ta');
+  const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  assert.equal(await tap, false);
+  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), [], 'no loop under the open dialog');
+  answer(false);
+  await walk;
+  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), ['start ws://a:1']);
 });

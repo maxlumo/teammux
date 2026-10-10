@@ -1375,7 +1375,7 @@ test('a merge on a failover keeps a download in flight: no verdict releases what
 
 /** A on two addresses, the optimizer's probe for the faster one held until
  * the case lets it answer, and the reconnect after a drop reaching B. */
-async function arrivalWithAProbeOut(context: TestContext) {
+async function arrivalWithAProbeOut(context: TestContext, probeAnswers: 'during the dialog' | 'later' = 'during the dialog') {
   const events: string[] = [];
   let answerProbe: (best: string | null) => void = () => {};
   let probes = 0;
@@ -1407,9 +1407,11 @@ async function arrivalWithAProbeOut(context: TestContext) {
   for (let i = 0; i < 4; i++) await h.settle();
   assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'A s editor asks about arriving at B');
   // The probe answers while the dialog is open: a faster address of A.
-  answerProbe('ws://a-lan:9899');
-  for (let i = 0; i < 4; i++) await h.settle();
-  return { ...h, events, area, dials: () => events.filter((e) => e.startsWith('connect:')) };
+  if (probeAnswers === 'during the dialog') {
+    answerProbe('ws://a-lan:9899');
+    for (let i = 0; i < 4; i++) await h.settle();
+  }
+  return { ...h, events, area, answerProbe, dials: () => events.filter((e) => e.startsWith('connect:')) };
 }
 
 test('a probe that answers while A s leave dialog is open takes nothing; "keep editing" then keeps A and the socket alone (reviewer P1 on 085b0e70)', async (context) => {
@@ -1486,4 +1488,84 @@ test('after "keep editing", the person s own connect lifts the stay: a failed on
   app.document.dispatchEvent(new app.window.Event('visibilitychange'));
   for (let i = 0; i < 4; i++) await settle();
   assert.ok(events.filter((e) => e.startsWith('connect:')).length > dials, 'coming back to the app reconnects again: the stay was lifted');
+});
+
+test('a probe that answers only AFTER "keep editing" moves nothing and lifts no stay (reviewer P2 on 4fbce02e)', async (context) => {
+  const h = await arrivalWithAProbeOut(context, 'later');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) await h.settle();
+  const dials = h.dials().length;
+  h.answerProbe('ws://a-lan:9899');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.dials().length, dials, `the late probe dialled nothing: ${h.dials().join(',')}`);
+  assert.equal(h.app.window.localStorage.getItem('tmux_address'), 'ws://a:9899', 'and did not move the mirror');
+  // The stay still holds: coming back to the app dials nothing either.
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  for (let i = 0; i < 4; i++) await h.settle();
+  await h.app.advance(60_000);
+  assert.equal(h.dials().length, dials, 'the stay is still in force');
+  assert.equal(h.area.isConnected && h.area.value, '# notes\n\nunsaved');
+});
+
+/** A on screen with an unsaved editor; the socket drops and every reconnect
+ * fails until the loop gives up, which puts the connect card up over A's
+ * tree. `next` decides what the dials after that do. */
+async function gaveUpOnA(context: TestContext, next: (url: string, n: number) => Promise<void> | null) {
+  const events: string[] = [];
+  let failing = true;
+  const h = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (url, n) => (n === 1 ? 'm-a' : url.includes('//b') ? 'm-b' : 'm-b'),
+    { calls: events, rpc: editorRpc, gate: (url, n) => (n === 1 ? null : failing ? Promise.reject(new Error('refused')) : next(url, n)) });
+  const area = await dirtyEditor(h.app, h.settle);
+  h.net.drop();
+  for (let i = 0; i < 30; i++) { await h.app.advance(5_000); await h.settle(); }
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]');
+  assert.ok(field, `the loop gave up: the connect card is up (${events.filter((e) => e.startsWith('connect:')).length} dials)`);
+  failing = false;
+  const dials = () => events.filter((e) => e.startsWith('connect:'));
+  const dialogs = () => h.app.document.querySelectorAll('[role=alertdialog]').length;
+  return { ...h, events, area, field, dials, dialogs };
+}
+
+test('a form walk freezes a reconnect loop in its backoff: no dial while it asks, and a stay starts the loop again (reviewer P1 on 4fbce02e)', async (context) => {
+  const h = await gaveUpOnA(context, () => Promise.reject(new Error('refused')));
+  // Coming back to the app starts a loop; its first dial fails and it waits.
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  const out = h.dials().length;
+  h.field.value = 'ws://b:9899';
+  h.field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+  assert.equal(h.dialogs(), 1, 'A s editor asks');
+  for (let i = 0; i < 6; i++) { await h.app.advance(5_000); await h.settle(); }
+  assert.equal(h.dials().length, out, `nothing dialled while it asks: ${h.dials().slice(out).join(',')}`);
+  assert.equal(h.dialogs(), 1, 'and no second dialog opened');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.dials().length > out, 'the stay started the frozen loop again');
+  assert.ok(!h.dials().slice(out).includes('connect:ws://b:9899'), 'and never dialled what was declined');
+  assert.equal(h.area.isConnected && h.area.value, '# notes\n\nunsaved');
+});
+
+test('a reconnect dial out when a form walk opens cannot open a second walk when it answers as another machine (reviewer P1 on 4fbce02e)', async (context) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const h = await gaveUpOnA(context, (url) => (url.includes('//a') ? held : null));
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  assert.ok(h.dials().at(-1) === 'connect:ws://a:9899', 'R1 is out');
+  h.field.value = 'ws://b:9899';
+  h.field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+  assert.equal(h.dialogs(), 1, 'A s editor asks about the form s connect');
+  release();                                     // R1 answers — as B
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(h.dialogs(), 1, 'its late success opened no arrival walk of its own');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'and moved nothing');
+  assert.equal(h.app.window.localStorage.getItem('tmux_state::a'), null, 'A was not parked');
 });

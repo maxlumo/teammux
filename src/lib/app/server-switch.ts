@@ -52,6 +52,9 @@ export interface SwitchDeps {
    * socket change, and the answer to "is this still mine". */
   claim(): { current(): boolean };
   stopReconnect(): void;
+  /** Is the reconnect loop running? A walk freezes it, and a "stay" starts
+   * it again. */
+  reconnecting(): boolean;
   /** Start the reconnect loop for the CURRENT server (it reads the mirror). */
   startReconnect(): void;
   /** The switch state changed: non-null = the content tree must be unmounted. */
@@ -72,10 +75,13 @@ export interface SwitchDeps {
 
 export function createServerSwitch(d: SwitchDeps) {
   let seq = 0;
-  /** Leave walks open right now — this module's own and the host's (the
-   * connect form, an arrival elsewhere): while one is asking, nothing may
-   * take the socket or open a second walk. A count, because they nest. */
-  let guarding = 0;
+  /** A leave walk is open — this module's own or the host's (the connect
+   * form, an arrival elsewhere): while it asks, nothing may take the socket
+   * and no second walk opens. */
+  let guarding = false;
+  /** The address connect in flight, if any: a walk freezes it, and puts its
+   * outcome back on a stay. */
+  let addressing: { address: string; dialled: Promise<'up' | 'failed'> } | null = null;
   let state: SwitchState | null = null;
   const set = (next: SwitchState | null) => { state = next; d.onstate(next); };
 
@@ -85,6 +91,8 @@ export function createServerSwitch(d: SwitchDeps) {
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected) {
       if (!(await guard(() => d.confirmLeave()))) return;
+      // The walk froze the reconnect loop and took the socket's owner; the
+      // switch takes it from here.
     }
     const intent = ++seq;
     d.stopReconnect();
@@ -128,34 +136,83 @@ export function createServerSwitch(d: SwitchDeps) {
    * would dial the server the user just left, over the new server's socket.
    * Resolves true when the address answered and is now the connection.
    */
-  async function connectAddress(address: string, token: string): Promise<boolean> {
-    if (state || guarding) return false;
+  function connectAddress(address: string, token: string): Promise<boolean> {
+    if (state || guarding) return Promise.resolve(false);
     const intent = ++seq;
     // It changes the socket, so it takes it from the host's other owners
-    // too (reviewer P1 on 085b0e70): an attempt the host was waiting on —
-    // an arrival whose leave dialog is still open — wakes to find it is not
-    // the owner any more, and does nothing. And the reverse: an owner that
-    // takes the socket after this makes this attempt stale.
+    // too (reviewer P1 on 085b0e70): an attempt the host was waiting on
+    // wakes to find it is not the owner any more, and does nothing. And the
+    // reverse: an owner that takes the socket after this — a leave walk
+    // among them — makes this attempt stale.
     const owner = d.claim();
     const mine = () => intent === seq && !state && owner.current();
     d.stopReconnect();
     d.disconnect();
-    try {
-      await d.connect(address, token);
+    // What the dial DID, whoever owns it by then: a walk that froze this
+    // attempt and then stays puts its outcome back (`guard`).
+    const dialled = d.connect(address, token).then(() => 'up' as const, () => 'failed' as const);
+    const pending = { address, dialled };
+    addressing = pending;
+    return dialled.then((how) => {
+      if (addressing === pending) addressing = null;
       if (!mine()) return false;
-      d.addressUp(address);
-      return true;
-    } catch {
-      if (mine()) d.startReconnect();
+      if (how === 'up') { d.addressUp(address); return true; }
+      d.startReconnect();
       return false;
-    }
+    });
   }
 
-  /** Run a leave walk with the socket held: no address change, no switch
-   * and no second walk starts until it has answered. */
-  async function guard<T>(walk: () => Promise<T>): Promise<T> {
-    guarding++;
-    try { return await walk(); } finally { guarding--; }
+  /**
+   * Run a leave walk as the socket's OWNER (board #335 ②b-2-3, reviewer P1
+   * on 4fbce02e), so nothing — started before it or during it — acts on the
+   * socket while the dialog is open:
+   *
+   *   - ONE WALK AT A TIME. A second request while one asks is refused, and
+   *     a refusal is a stay: its callback never runs.
+   *   - EVERYTHING ALREADY RUNNING LOSES THE SOCKET. The reconnect loop is
+   *     stopped — its timers, its probe, the dial it has out — and the walk
+   *     claims the host's owner counter, so every attempt that checks it (a
+   *     reconnect continuation, a boot dial, an address connect, the connect
+   *     form's older attempt) wakes to find it is not the owner and does
+   *     nothing: it publishes nothing, starts no loop and opens no arrival.
+   *     This module's intent moves too, so an optimizer probe begun before
+   *     the walk does nothing when it answers, during the walk or after it.
+   *   - A STAY PUTS BACK WHAT IT FROZE, once the walk has answered and only
+   *     if nobody took the socket meanwhile: an address connect it froze has
+   *     its outcome applied (published, or handed to the reconnect loop), or
+   *     else a reconnect loop that was running starts again. An accept
+   *     leaves the socket to whoever is leaving.
+   *
+   * `own` is the owner the caller ALREADY holds: an arrival elsewhere runs
+   * its walk under the attempt that reached the other machine, and claiming
+   * again would make that very attempt stale. Everything older than it is
+   * stale already (one counter), and the reconnect loop that produced it is
+   * idle; a stay there is the caller's to carry out.
+   */
+  async function guard(walk: () => Promise<boolean>, own?: { current(): boolean }): Promise<boolean> {
+    if (guarding) return false;
+    guarding = true;
+    try {
+      seq++;
+      if (own) return await walk();
+      const frozen = addressing;
+      addressing = null;
+      const wasReconnecting = d.reconnecting();
+      d.stopReconnect();
+      const owner = d.claim();
+      const untouched = () => owner.current() && !state;
+      let leave = false;
+      try { leave = await walk(); }
+      finally {
+        if (!leave && untouched()) {
+          if (frozen) {
+            const how = await frozen.dialled;
+            if (untouched()) { if (how === 'up') d.addressUp(frozen.address); else d.startReconnect(); }
+          } else if (wasReconnecting) d.startReconnect();
+        }
+      }
+      return leave;
+    } finally { guarding = false; }
   }
 
   return {
@@ -164,7 +221,7 @@ export function createServerSwitch(d: SwitchDeps) {
     guard,
     /** Is a leave walk asking right now? Then nothing automatic may take the
      * socket: not a reconnect, not the address optimizer. */
-    get guarding() { return guarding > 0; },
+    get guarding() { return guarding; },
     get state() { return state; },
     /** The current intent: an async begun under it compares on resolve. */
     get intent() { return seq; },

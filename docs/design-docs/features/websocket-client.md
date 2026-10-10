@@ -690,19 +690,30 @@ answers as another known machine ARRIVES there only after the same walk
 local edits. A stay keeps A's tree with its handle held (refusing), closes
 B's socket and says why on the connect page.
 
-While a leave walk asks — the switcher's, the form's or an arrival's — the
-socket is HELD (`serverSwitch.guard`, reviewer P1 on 085b0e70): no address
-change (a row, the optimizer, a probe that started before the dialog and
-answers during it — not even the mirror key moves), no switch, no
-automatic reconnect and no second walk starts. And every socket change takes
-the one owner counter: `connectAddress` claims it like the boot dial, the
-form, the reconnect attempts and the switch do, so an owner that wakes after
-someone else took the socket does nothing — an arrival's accept does not
-activate B over A's new socket, and its stay does not close it. After a
-stay, nothing AUTOMATIC dials (`heldOffline`, reviewer P2): not the
-disconnect callback, not a foreground resume; the connect form, a switch or
-an address row — the person's own act — lifts it. (An address change still
-does not check which machine answered; that is unchanged from before #335.)
+A leave walk — the switcher's, the form's or an arrival's — runs as the
+socket's OWNER (`serverSwitch.guard`, reviewer P1s on 085b0e70 and
+4fbce02e). One walk at a time: a second request while one asks is refused,
+and a refusal is a stay. Everything already running loses the socket when
+the walk begins: the reconnect loop is stopped (timers, probe, the dial it
+has out), the walk claims the host's one owner counter — so a reconnect
+continuation, a boot dial, an address connect or an older form attempt wakes
+to find it is not the owner and does nothing, opening no arrival of its own —
+and the switch's intent moves, so an optimizer probe begun before the walk
+moves nothing when it answers, during the walk or after it (not even the
+mirror key). While it asks, nothing new starts either: no address change, no
+switch, no automatic reconnect. A stay puts back what the walk froze, once it
+has answered and only if nobody took the socket meanwhile: a frozen address
+connect has its outcome applied (published, or handed to the reconnect
+loop), or else a loop that was running starts again. An arrival runs its
+walk under the attempt that reached the other machine (claiming again would
+make that very attempt stale), and every socket change takes the same
+counter: `connectAddress` claims it like the boot dial, the form, the
+reconnect attempts and the switch. After an arrival's stay, nothing
+AUTOMATIC dials (`heldOffline`, reviewer P2s): not the disconnect callback,
+not a foreground resume, not a late optimizer probe; the person's own act —
+the connect form, a switch, an address row — lifts it. (An address change
+still does not check which machine answered; that is unchanged from before
+#335.)
 
 **The runtime asks; the reconnect loop is told where** (②b-2-2). The
 capability handshake every connect path runs (`serverReady`) is the bound

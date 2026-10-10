@@ -783,10 +783,11 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // While it asks, the socket is held: nothing automatic takes it and no
   // second walk opens (reviewer P1 on 085b0e70); a stay keeps everything
   // automatic from dialling again (P2).
-  assert.match(elsewhere, /leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
+  assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
   assert.match(source, /setOnDisconnect\(\(\) => \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline\) return;/u);
   assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline\) return;/u);
-  assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding\) return;/u, 'a probe that answers during a walk moves nothing, not even the mirror');
+  assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing, not even the mirror');
+  assert.match(source, /claim: \(\) => handovers\.claim\(\),\s*reconnecting: \(\) => reconnectMachine\.isActive\(\),/u, 'an automatic claim lifts no stay');
   assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf("settle?.('other-server')")
     && elsewhere.indexOf("settle?.('other-server')") < elsewhere.indexOf('activateConnected('), 'ask, then conclude, then write');
   assert.match(elsewhere, /activateConnected\(localStorage,[\s\S]*?if \(act\.reload\) \{ onConnected\(true\); return; \}/u,
@@ -915,7 +916,7 @@ test('a typed address ends the running reconnect loop before it connects (review
   // timeout' then marked a reachable address unreachable for two minutes.
   // Since board 315 the order lives in server-switch.ts connectAddress.
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
-  assert.match(mod, /async function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*d\.disconnect\(\);\s*try \{\s*await d\.connect\(address, token\);/u,
+  assert.match(mod, /function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*d\.disconnect\(\);[\s\S]*?const dialled = d\.connect\(address, token\)/u,
     'claim → cancel → disconnect → connect, in that order');
 });
 
