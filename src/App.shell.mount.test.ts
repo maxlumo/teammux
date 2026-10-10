@@ -310,7 +310,11 @@ const byAddress: MachineAt = (url) => (url.includes('//b') ? 'm-b' : 'm-a');
 /** Hold a dial before it answers: resolve the returned promise to let it. */
 type DialGate = (url: string, n: number) => Promise<void> | null;
 
-function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}, gate: DialGate = () => null) {
+function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}, gate: DialGate = () => null,
+  /** What a dial a later one REPLACED does when it is let go: answer anyway
+   * (a slow socket's late auth), or fail as `Connection` fails a superseded
+   * dial. */
+  stale: 'answer' | 'reject' = 'answer') {
   let connected = false;
   let machine = '';
   let dials = 0;
@@ -330,6 +334,7 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
       const mine = machineAt(url, n);
       const held = gate(url, n);
       if (held) await held;
+      if (stale === 'reject' && n !== dials) { calls.push(`superseded:${url}#${n}`); throw new Error('superseded by a newer connect'); }
       calls.push(`answered:${url}#${n}`);
       // A dial a later one replaced still answers, as a slow socket can — but
       // it is not the connection any more, so it changes nothing here.
@@ -379,10 +384,10 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
  * and each case says what the client wakes up with. */
 async function bootApp(
   context: TestContext, seed: Record<string, string>, machineAt?: MachineAt,
-  more: { rpc?: Record<string, unknown>; setup?: (window: any) => void; calls?: string[]; gate?: DialGate } = {},
+  more: { rpc?: Record<string, unknown>; setup?: (window: any) => void; calls?: string[]; gate?: DialGate; stale?: 'answer' | 'reject' } = {},
 ) {
   const calls: string[] = more.calls ?? [];
-  const transport = twoServerTransport(calls, machineAt, more.rpc, more.gate);
+  const transport = twoServerTransport(calls, machineAt, more.rpc, more.gate, more.stale);
   const app = await (await compiled).mount(context, {
     props: {},
     modules: [asModule(transport.module), terminalStub],
@@ -937,42 +942,43 @@ test('a late boot dial records nothing after a SAME-server reconnect through the
 });
 
 test('a reconnect attempt the connect form took over does nothing when it answers late (reviewer P1 on c5487bef)', async (context) => {
-  // R1 (the reconnect loop) is out when the person connects through the card
-  // (D2, to B). R1 then answers — as a machine nobody saved, so any identity
-  // write shows. Nothing may come of it, and no retry may take B's socket.
+  // The boot dial fails and the connect card is up. Coming back to the app
+  // (a visibility resume) starts the reconnect loop: R1 is out. The person
+  // then connects through the card (D2, to B) — the form does NOT cancel the
+  // loop; only the handover can tell R1 it has lost the socket. R1 answers
+  // while D2 is still authenticating, as a machine nobody saved, so any
+  // identity write shows; no retry may take D2's socket either.
   const events: string[] = [];
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
-  const { app, settle, onScreen, net } = await bootApp(context,
+  let releaseForm: () => void = () => {};
+  const formHeld = new Promise<void>((resolve) => { releaseForm = resolve; });
+  const { app, settle, onScreen } = await bootApp(context,
     twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
     (url, n) => (n === 2 ? 'm-x' : url.includes('//b') ? 'm-b' : 'm-a'),
-    { calls: events, gate: (_url, n) => (n === 2 ? held : null) });
-  net.drop();                                  // R1 starts, and hangs
+    { calls: events, gate: (_url, n) => (n === 1 ? Promise.reject(new Error('refused')) : n === 2 ? held : n === 3 ? formHeld : null), stale: 'reject' });
   await settle();
-  assert.ok(events.includes('connect:ws://a:9899') && events.filter((e) => e.startsWith('connect:')).length === 2, 'R1 is out');
-  // The person gives up waiting and connects to B through the card.
-  const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
-    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
-  gear!.click(); await settle();
-  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]');
+  assert.ok(field, 'the boot failed: the connect card is up');
+  app.document.dispatchEvent(new app.window.Event('visibilitychange'));
   await settle();
-  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
-  await settle();
-  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  assert.ok(events.includes('connect:ws://a:9899') && events.filter((e) => e.startsWith('connect:')).length === 2, `R1 is out: ${events.filter((e) => e.startsWith('connect:')).join(',')}`);
   field.value = 'ws://b:9899';
   field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
   await settle();
   [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
-  await settle(); await settle();
-  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'D2 arrived at B');
+  await settle();
+  assert.ok(events.includes('connect:ws://b:9899'), 'D2 is out');
   const before = app.window.localStorage.getItem('tmux_servers');
   const dials = events.filter((e) => e.startsWith('connect:')).length;
   release();
   await settle(); await app.advance(10_000); await settle();
-  assert.ok(events.includes('answered:ws://a:9899#2'), 'R1 did answer, late');
+  assert.ok(events.includes('superseded:ws://a:9899#2'), 'R1 came back — failed, as a dial a newer connect replaced does');
   assert.equal(app.window.localStorage.getItem('tmux_servers'), before, 'and recorded nothing');
-  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'and no retry took B s socket');
-  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'and no retry took D2 s socket');
+  releaseForm();
+  await settle(); await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'D2 arrived at B');
   assert.equal(onScreen(), 'work:2.0');
 });
 
@@ -1001,11 +1007,13 @@ test('a reconnect that takes over a suspended form leaves the handle working (re
   [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
   await settle();
   // Now the reconnect loop takes the socket (n = 3) and reaches A.
+  const since = events.length;
   net.drop();
   await settle(); await settle();
   release(); await settle(); await settle();
-  // The handle works: a navigation change is SAVED, which the save effect
-  // does only for a live, bound handle — and the sidebar's list call went out.
+  // The handle works: the success's capability probe goes out THROUGH the
+  // runtime's api, which a suspended handle refuses before the transport.
+  assert.ok(events.slice(since).includes('hub_rooms'), `the runtime s api reached the transport: ${events.slice(since).join(',')}`);
   await openSession('other');
-  assert.equal(restored(), 'a:other:3.0', 'the handle is working, not left suspended');
+  assert.equal(restored(), 'a:other:3.0');
 });
