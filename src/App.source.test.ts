@@ -489,7 +489,12 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'the switch revokes before its connect (resetMemory runs before connect in server-switch.ts)');
   // The connect form SUSPENDS instead, because its address may be the same
   // server: revoking there would rebuild every page on an ordinary reconnect.
-  assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*held\?\.suspend\(\);\s*return \(\) => held\?\.resume\(\);/u);
+  // The form's handover resumes only on a conclusion that leaves the handle
+  // serving its own server, and only with the ticket of the suspension in
+  // force: a stale attempt's report must not lift a live one's protection.
+  assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*const ticket = held\?\.suspend\(\) \?\? 0;/u);
+  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.resume\(ticket\);\s*else held\?\.dispose\(\);/u,
+    'an authenticated stranger (unresolved) and a different server both end the handle');
   // The protection is never skipped because an address looked familiar: an
   // address is a route, and a route can come to reach another machine. What
   // decides is the identity the server reports, which is `activateConnected`'s
@@ -543,10 +548,20 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
   const fn = settings.match(/async function doConnect\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   const iAct = fn.indexOf('activateConnected(localStorage');
-  const iSwitched = fn.indexOf('if (act.reload) { onConnected(true); return; }');
+  const iSwitched = fn.indexOf('onConnected(true)');
   const iDone = fn.indexOf('onConnected(false)');
   assert.ok(iAct >= 0 && iSwitched > iAct && iDone > iSwitched,
     'activate → a different server comes up as a switch → only then the same-server path');
+  // Since #335 ②b-1 each branch also reports what it ESTABLISHED, because the
+  // handle may only resume on a conclusion that leaves it serving its own
+  // server. An identity-activation failure is NOT a same-server success.
+  assert.match(fn, /conclude\?\.\('other-server'\);\s*onConnected\(true\);/u);
+  assert.match(fn, /conclude\?\.\('same-server'\);\s*onConnected\(false\);/u);
+  assert.match(fn, /\} catch \{[\s\S]*?conclude\?\.\('unresolved'\);[\s\S]*?\}\s*return;/u,
+    'a peer that authenticated but could not be identified is an error, not a success');
+  assert.match(fn, /conclude\?\.\('no-peer'\);/u, 'and a dial that never got there says so');
+  assert.match(fn, /const mine = \(\) => attempt === attempts && !cancelled;/u,
+    'a superseded attempt concludes nothing');
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';

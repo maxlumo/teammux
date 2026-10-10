@@ -189,16 +189,40 @@ test('a suspended handle refuses, and resumes as the SAME handle', async (t) => 
   await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
   const held = rt.api.listSessions;              // what a page is holding
 
-  rt.suspend();
+  const ticket = rt.suspend();
   assert.equal(rt.alive(), true, 'suspended is not released: it is the same handle');
   await assert.rejects(() => held(), /suspended/u, 'and it does not send during the handover');
   await assert.rejects(() => rt.api.capturePane('work:1.0'), /suspended/u);
 
-  rt.resume();
+  rt.resume(ticket);
   fire(held());
   await settle();
   assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
     'the very api a page was holding works again — nothing was rebuilt');
+});
+
+test('only the CURRENT handover s ticket may resume', async (t) => {
+  t.after(cleanup);
+  // Handovers overlap: a form unmounted mid-dial, a new instance starting its
+  // own, and the first one's completion arriving while the second is still
+  // authenticating. A boolean would let that stale completion lift the live
+  // attempt's protection — the same class of bug as a superseded dial
+  // recording its result (reviewer P1, 2026-10-10).
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+
+  const first = rt.suspend();
+  const second = rt.suspend();                   // a newer handover takes over
+  rt.resume(first);                              // the OLD attempt settles
+  await assert.rejects(() => rt.api.listSessions(), /suspended/u,
+    'the stale conclusion did not lift the live handover s protection');
+
+  rt.resume(second);                             // the attempt that owns it
+  fire(rt.api.listSessions());
+  await settle();
+  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
+    'and the right conclusion does');
 });
 
 test('a handle released while suspended stays released', async (t) => {
@@ -207,9 +231,9 @@ test('a handle released while suspended stays released', async (t) => {
   // the scope swap released this handle, and the form's resume then arrives.
   const e = entry();
   const rt = createSingleRuntime(e, { storage: saved(e) });
-  rt.suspend();
+  const ticket = rt.suspend();
   rt.dispose();
-  rt.resume();                                   // the form settles afterwards
+  rt.resume(ticket);                             // the form settles afterwards
   assert.equal(rt.alive(), false);
   await assert.rejects(() => rt.api.listSessions(), /detached/u,
     'resume cannot bring back a handle whose server is gone');

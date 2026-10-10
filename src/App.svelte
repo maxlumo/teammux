@@ -148,26 +148,41 @@
   function revokeScope() {
     scopeSwap.bound()?.dispose();
   }
-  /** The connect form's version: SUSPEND, and hand back the resume.
+  /** The connect form's version: SUSPEND, and hand back a way to report what
+   * the attempt CONCLUDED.
    *
    * That form re-dials the same socket at an address that may turn out to be
    * this very server — the ordinary reconnect — and nobody knows which until
    * it authenticates. Revoking outright would replace the handle on every
    * reconnect, remount every always-mounted page and throw away the state
    * they exist to keep, without asking a single leave guard (reviewer,
-   * 2026-10-10). Suspended, the handle refuses calls for the length of the
-   * handover — the socket is mid-flight anyway — and then:
+   * 2026-10-10). So the handle is suspended for the length of the handover
+   * and resumed only on a conclusion that says it is still serving its
+   * server:
    *
-   *   - the same server: `onConnected(false)`, the resume runs, the handle is
-   *     alive and `swapScope` keeps it. Nothing remounts.
-   *   - another server: `onConnected(true)` swaps the scope, which releases
-   *     this handle; the resume then finds it dead and does nothing.
-   *   - a failure: the resume puts the tree back on its own server, which is
-   *     still the server it was on. */
+   *   - `same-server`: authenticated, and the identity layer confirmed this
+   *     is the entry we were on. Resume; nothing remounts.
+   *   - `no-peer`: the dial never got there, so there is no new server to be
+   *     confused with. The socket is down either way and the reconnect
+   *     machine owns what happens next. Resume.
+   *   - `other-server`: a different server authenticated. Terminal: the
+   *     handle is released here, and the swap that follows binds the new one.
+   *   - `unresolved`: a peer authenticated but its identity could not be
+   *     established (the registry write failed). There IS an authenticated
+   *     stranger on the socket and nothing proves it is ours, so the handle
+   *     must stay refusing. Resuming on "the function reached its finally"
+   *     is what would put A's pages on B's socket.
+   *
+   * The ticket makes a stale conclusion harmless: an attempt that was
+   * superseded, cancelled or unmounted cannot lift the protection of the one
+   * that is actually in flight. */
   function suspendScope() {
     const held = scopeSwap.bound();
-    held?.suspend();
-    return () => held?.resume();
+    const ticket = held?.suspend() ?? 0;
+    return (outcome) => {
+      if (outcome === 'same-server' || outcome === 'no-peer') held?.resume(ticket);
+      else held?.dispose();
+    };
   }
   const shell = $derived(connected || !!switching);
   let terminalTarget = $state('');

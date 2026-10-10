@@ -575,6 +575,9 @@ const msgs: Record<string, Record<string, string>> = {
     configIncrease: 'Increase',
     configReset: 'Reset',
     configRetry: 'Retry',
+    // The peer authenticated but the client could not record WHICH server it
+    // is, so it cannot be treated as the one you were on (#335 ②b).
+    configIdentityFailed: 'Connected, but this server could not be identified. Try again.',
     // ── Confirmations for destructive verbs. The title names what is about to
     // happen, the note says what is LOST and what survives — that second half
     // is the whole reason a confirmation is more than a speed bump.
@@ -1272,6 +1275,7 @@ const msgs: Record<string, Record<string, string>> = {
     configIncrease: '增加',
     configReset: '重置',
     configRetry: '重试',
+    configIdentityFailed: '已连接，但无法确认这台服务器的身份，请重试。',
     projectArchiveConfirmTitle: '把「{name}」从项目列表移除？',
     projectArchiveConfirmNote: '停止跟踪项目；tmux 会话继续运行。',
     confirmDeleteAgentDefTitle: '删除 agent「{name}」？',

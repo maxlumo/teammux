@@ -25,14 +25,18 @@ const compiled = compileMount(new URL('./Settings.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
 ]);
 
-async function mount(context: TestContext, connect: () => Promise<unknown>) {
+async function mount(
+  context: TestContext,
+  connect: () => Promise<unknown>,
+  seed: (storage: Storage) => void = () => {},
+) {
   const order: string[] = [];
   const app = await (await compiled).mount(context, {
     props: {
       onConnected() { order.push('connected'); },
       beforeConnect() {
         order.push('stand-down');
-        return () => order.push('resume');
+        return (outcome: string) => order.push(`conclude:${outcome}`);
       },
     },
     modules: [{
@@ -41,7 +45,10 @@ async function mount(context: TestContext, connect: () => Promise<unknown>) {
       getMachineId: () => 'm-a',
       setSocket: async () => {},
     }],
-    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+    setup(window) {
+      window.localStorage.setItem('tmux_locale', 'en');
+      seed(window.localStorage);
+    },
   });
   return { ...app, order };
 }
@@ -66,21 +73,110 @@ test('the current server s handle stands down BEFORE the socket is re-dialled', 
     'first the handle stands down; after the re-dial the old tree would be talking to the new server');
 });
 
-test('and it is handed back when the attempt settles', async (context) => {
-  // The reconnect case: the address turns out to be the same server, so the
-  // host must be able to keep its handle. If the form never gave it back, a
-  // plain reconnect would replace the handle, rebuild every page and ask no
+test('a same-server reconnect reports that conclusion, after the dial', async (context) => {
+  // The reconnect case: the identity layer confirms this is the server we
+  // were on, so the host may keep its handle. Without a conclusion to report,
+  // a plain reconnect would replace the handle, rebuild every page and ask no
   // leave guard.
-  const app = await mount(context, async () => 'm-a');
+  // The client is already on this machine: a saved entry, current, with the
+  // mirror pointing at it. Only then is re-dialling it a RECONNECT rather
+  // than a first connect to an unknown server.
+  const app = await mount(context, async () => 'm-a', (storage) => {
+    storage.setItem('tmux_servers', JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'wss://same.test/ws', token: 'tok', machineId: 'm-a', named: true },
+    ]));
+    storage.setItem('tmux_server_current', 'a');
+    storage.setItem('tmux_address', 'wss://same.test/ws');
+    storage.setItem('tmux_token', 'tok');
+    storage.setItem('tmux_machine_id', 'm-a');
+  });
   await connectTo(app, 'wss://same.test/ws');
-  assert.ok(app.order.indexOf('resume') > app.order.indexOf('connect'),
-    `resumed after the dial: ${app.order.join(' → ')}`);
-  assert.equal(app.order.at(-1), 'resume', 'and last, once the outcome is known');
+  assert.ok(app.order.indexOf('conclude:same-server') > app.order.indexOf('connect'),
+    `concluded after the dial: ${app.order.join(' → ')}`);
+  assert.equal(app.order.at(-1), 'connected', 'and App is told last');
 });
 
-test('a failed attempt hands the handle back too', async (context) => {
-  // The tree is still on the server it was on; nothing changed hands.
+test('a dial that never reached a peer says so', async (context) => {
+  // No authenticated stranger on the socket, so there is nothing for the old
+  // handle to be confused with.
   const app = await mount(context, async () => { throw new Error('refused'); });
   await connectTo(app, 'wss://down.test/ws');
-  assert.deepEqual(app.order, ['stand-down', 'connect', 'resume']);
+  assert.deepEqual(app.order, ['stand-down', 'connect', 'conclude:no-peer']);
+});
+
+test('a superseded attempt concludes nothing', async (context) => {
+  // Handovers overlap in ordinary use: a dial is in flight and the person
+  // submits again (or leaves the form and comes back, which is a new
+  // instance). The older attempt must not report a conclusion — with a
+  // boolean suspension its late "I am done" would lift the live attempt's
+  // protection and put the old server's pages on a socket that is still
+  // authenticating (reviewer P1, 2026-10-10).
+  const pending: ((machine: string) => void)[] = [];
+  const app = await mount(context, () => new Promise((resolve) => { pending.push(resolve); }));
+  await connectTo(app, 'wss://same.test/ws');          // attempt 1, in flight
+  assert.deepEqual(app.order, ['stand-down', 'connect'], 'the first dial is pending');
+
+  // The form does not let one instance dial twice at once (the button is
+  // disabled while connecting), so the second attempt starts the way a person
+  // reaches it: cancel, then submit again.
+  const cancel = [...app.document.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => /cancel/iu.test(`${b.textContent ?? ''} ${b.getAttribute('aria-label') ?? ''}`));
+  assert.ok(cancel, 'the connecting state offers Cancel');
+  cancel.click();
+  await app.flush();
+  await connectTo(app, 'wss://same.test/ws');          // attempt 2 supersedes it
+  assert.deepEqual(app.order.filter((o) => o === 'connect').length, 2, 'two dials were started');
+
+  assert.equal(pending.length, 2, 'both dials are waiting');
+  pending[0]!('m-a');                                   // the OLD dial settles
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.deepEqual(app.order.filter((o) => o.startsWith('conclude')), [],
+    'the superseded attempt reported nothing at all');
+  assert.ok(!app.order.includes('connected'), 'and did not bring the app up either');
+});
+
+// The identity layer, mocked, so the one failure that matters can happen: a
+// peer authenticates and the client cannot record WHICH server it is.
+const withIdentity = compileMount(new URL('./Settings.svelte', import.meta.url), [
+  new URL('../core/ws.ts', import.meta.url),
+  new URL('./servers.ts', import.meta.url),
+]);
+
+test('a peer that authenticated but could not be identified is not a same-server success', async (context) => {
+  // The reviewer's second fixture: B authenticates, the registry write fails,
+  // CURRENT still names A. Reporting "the function finished" would resume A's
+  // handle onto B's socket. The conclusion must be `unresolved`, the form must
+  // say so, and the app must NOT be told it is connected.
+  const order: string[] = [];
+  const app = await (await withIdentity).mount(context, {
+    props: {
+      onConnected(switched: boolean) { order.push(`connected:${switched}`); },
+      beforeConnect() {
+        order.push('stand-down');
+        return (outcome: string) => order.push(`conclude:${outcome}`);
+      },
+    },
+    modules: [
+      {
+        connect: async () => { order.push('connect'); return 'm-b'; },
+        disconnect: () => { order.push('disconnect'); },
+        getMachineId: () => 'm-b',
+        setSocket: async () => {},
+      },
+      {
+        // Everything Settings asks of the identity layer, with the one write
+        // that fails.
+        activateConnected: () => { order.push('activate'); throw new Error('storage full'); },
+      },
+    ],
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+  });
+  await connectTo({ ...app, order }, 'wss://stranger.test/ws');
+
+  assert.deepEqual(order, ['stand-down', 'connect', 'activate', 'conclude:unresolved', 'disconnect'],
+    'the attempt concluded `unresolved` and dropped the socket it could not identify');
+  assert.ok(!order.some((o) => o.startsWith('connected')),
+    'and the app was never told this was its server');
+  assert.match(app.document.querySelector('.error')?.textContent ?? '',
+    /identif/iu, 'the person is told why');
 });

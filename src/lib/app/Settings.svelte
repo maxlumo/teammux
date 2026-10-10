@@ -13,6 +13,11 @@
 
   type HistoryEntry = { address: string; token: string };
 
+  /** What a connect attempt established about the peer on the other end
+   * (board #335 ②b-1): the host's handle may only resume on one of the two
+   * conclusions that leave it still serving its own server. */
+  type ConnectOutcome = 'same-server' | 'other-server' | 'no-peer' | 'unresolved';
+
   let {
     onConnected,
     beforeConnect,
@@ -29,14 +34,18 @@
      * a callback that settles before the new tree mounts — would be the old
      * server's work sent to the new one.
      *
-     * It may return a function to call when the attempt SETTLES, whatever the
-     * outcome: nobody knows until the server authenticates whether this
-     * address is the same server (the ordinary reconnect, where the host must
-     * keep its handle and remount nothing) or another one, and the host is
-     * the one that finds out. Optional, because Settings is a person-level
-     * surface that also renders with no server at all.
+     * It may return a function that takes what this attempt CONCLUDED, and
+     * the conclusion is the point: nobody knows until the peer authenticates
+     * whether this address is the same server (the ordinary reconnect, where
+     * the host keeps its handle and remounts nothing), another one, or a
+     * stranger whose identity could not be established. "The function reached
+     * its finally" is not a conclusion — reporting that would hand the old
+     * server's pages to a peer nobody has identified.
+     *
+     * Optional, because Settings is a person-level surface that also renders
+     * with no server at all.
      */
-    beforeConnect?: (() => (() => void) | void) | undefined;
+    beforeConnect?: ((() => (outcome: ConnectOutcome) => void) | (() => void)) | undefined;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
@@ -124,17 +133,25 @@
   }
 
   let cancelled = false;
+  /** Attempts started by THIS instance. Only the latest may conclude: a
+   * superseded one must not write the registry, call `onConnected` or report a
+   * handover conclusion, exactly as a superseded dial must not record its
+   * result (board #335 ②b-1, reviewer 2026-10-10). */
+  let attempts = 0;
 
   async function doConnect() {
     error = '';
     connecting = true;
     cancelled = false;
+    const attempt = ++attempts;
+    const mine = () => attempt === attempts && !cancelled;
     // The handover of the shared socket: the host puts its current server's
-    // handle aside before the dial and takes it back when this attempt
-    // settles, whichever way it goes. Suspending rather than revoking is what
+    // handle aside before the dial, and this attempt reports what it
+    // ESTABLISHED about the peer. Suspending rather than revoking is what
     // keeps an ordinary reconnect to the SAME server from remounting every
-    // page (board #335 ②b-1).
-    let handover: (() => void) | void = undefined;
+    // page; reporting a conclusion rather than completion is what keeps the
+    // old server's pages off an unidentified peer.
+    const conclude = beforeConnect?.() as ((outcome: ConnectOutcome) => void) | void;
     try {
       const url = normalizeAddress(address);
       localStorage.setItem('tmux_address', url);
@@ -142,11 +159,10 @@
       if (socket.trim()) localStorage.setItem('tmux_socket', socket.trim());
       else localStorage.removeItem('tmux_socket');
       saveHistory(url, token);
-      // The socket is about to point at whatever this address reaches, which
-      // may be another server: the current handle stands down first.
-      handover = beforeConnect?.();
       await connect(url, token);
-      if (cancelled) return;
+      // A superseded or cancelled attempt owns nothing from here on: not the
+      // registry, not `onConnected`, and not the handover.
+      if (!mine()) return;
       if (socket.trim()) {
         const { setSocket } = await import('../core/ws.ts');
         await setSocket(socket.trim()).catch(() => {});
@@ -181,16 +197,35 @@
           ...(socket.trim() ? { socket: socket.trim() } : {}),
           ...(mid ? { machineId: mid } : {}),
         });
-        if (act.reload) { onConnected(true); return; }
-      } catch {}
+        if (!mine()) return;
+        if (act.reload) {
+          // A different server authenticated: the old handle is terminal.
+          conclude?.('other-server');
+          onConnected(true);
+          return;
+        }
+      } catch {
+        // A peer DID authenticate and we could not establish which server it
+        // is (the registry write failed). Treating that as a same-server
+        // success is what would resume the old server's handle onto it, so it
+        // is an error and the handle keeps refusing.
+        if (mine()) {
+          conclude?.('unresolved');
+          error = t('configIdentityFailed');
+          disconnect();
+        }
+        return;
+      }
+      conclude?.('same-server');
       onConnected(false);
     } catch (e) {
-      if (!cancelled) error = (e as Error).message;
+      if (!mine()) return;
+      // The dial never reached an authenticated peer, so there is no stranger
+      // on the socket to be confused with this server.
+      conclude?.('no-peer');
+      error = (e as Error).message;
     } finally {
-      // Whatever happened — same server, another server, or no server at all —
-      // the host decides what its handle does next.
-      handover?.();
-      connecting = false;
+      if (mine()) connecting = false;
     }
   }
 

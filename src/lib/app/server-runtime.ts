@@ -117,11 +117,21 @@ export interface ServerRuntime {
    * length of the handover: calls are refused (the socket is mid-flight
    * anyway), and then it either resumes as the same handle or is released for
    * good by whoever finds out the server changed.
+   *
+   * Returns a TICKET, and that is not bookkeeping — it is the whole
+   * correctness of the thing. Handovers overlap: a form can be unmounted
+   * mid-dial and a new instance start its own, and the first one's completion
+   * then arrives while the second is still authenticating. A boolean would let
+   * that stale completion lift the live attempt's protection, which is the
+   * same class of bug as a superseded dial recording its result. Only the
+   * ticket of the CURRENT suspension may resume.
    */
-  suspend(): void;
-  /** Use the slot again. A no-op on a handle that has since been released,
-   * so a caller can resume unconditionally when its attempt settles. */
-  resume(): void;
+  suspend(): number;
+  /** Use the slot again — if `ticket` is the current suspension's. A stale
+   * ticket (a superseded, cancelled or unmounted attempt reporting late) and
+   * a handle that has since been released are both no-ops, so a caller can
+   * report its conclusion without first proving it still matters. */
+  resume(ticket: number): void;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime.
@@ -217,8 +227,12 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
   let known: ServerEntry = entry;
   let caps: ServerCaps = { hub: null, backends: null };
   let dead = false;
-  /** Waiting out a socket handover: the same handle, not using the slot. */
-  let suspended = false;
+  /** Waiting out a socket handover: the same handle, not using the slot.
+   * Zero means running; otherwise it is the ticket of the suspension in
+   * force, and only that ticket can lift it. */
+  let suspended = 0;
+  /** Tickets issued, so each handover has its own. */
+  let handovers = 0;
   /** How many dials this runtime has started. The counter IS the attempt
    * identity: only the latest may record, adopt, disconnect or report ok. */
   let dialled = 0;
@@ -451,8 +465,16 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
     alive: () => !dead,
-    suspend: () => { if (!dead) suspended = true; },
-    resume: () => { if (!dead) suspended = false; },
+    suspend: () => {
+      const ticket = ++handovers;
+      if (!dead) suspended = ticket;
+      return ticket;
+    },
+    resume: (ticket: number) => {
+      // A stale attempt's conclusion says nothing about the handover that is
+      // actually in force.
+      if (!dead && ticket === suspended) suspended = 0;
+    },
     dispose,
   };
 }
