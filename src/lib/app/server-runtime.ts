@@ -237,10 +237,13 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
   let known: ServerEntry = entry;
   let caps: ServerCaps = { hub: null, backends: null };
   let dead = false;
-  /** Waiting out a socket handover: the same handle, not using the slot.
-   * Zero means running; otherwise it is the ticket of the suspension in
-   * force, and only that ticket can lift it. */
-  let suspended = 0;
+  /** Waiting out a socket handover: the same handle, not using the slot. */
+  let suspended = false;
+  /** The ticket of the handover in force, or 0 when none is owed a verdict.
+   * Separate from `suspended` because a verdict is CONSUMED — after `hold`
+   * the handle is still suspended but that attempt has had its say, so the
+   * same ticket cannot come back and resume it. */
+  let open = 0;
   /** Tickets issued, so each handover has its own. */
   let handovers = 0;
   /** How many dials this runtime has started. The counter IS the attempt
@@ -477,17 +480,22 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     alive: () => !dead,
     suspend: () => {
       const ticket = ++handovers;
-      if (!dead) suspended = ticket;
+      if (!dead) {
+        suspended = true;
+        open = ticket;
+      }
       return ticket;
     },
     settle: (ticket: number, verdict: 'resume' | 'release' | 'hold') => {
       // A stale attempt's conclusion says nothing about the handover that is
-      // actually in force — not even a terminal one.
-      if (dead || ticket !== suspended) return;
-      if (verdict === 'resume') suspended = 0;
+      // actually in force — not even a terminal one. And a verdict is spent
+      // when it is given: `hold` is a conclusion, not a deferral.
+      if (dead || !ticket || ticket !== open) return;
+      open = 0;
+      if (verdict === 'resume') suspended = false;
       else if (verdict === 'release') dispose();
       // `hold`: still suspended, still available to the attempt that works
-      // out whose socket this is.
+      // out whose socket this is — but not to this one again.
     },
     dispose,
   };

@@ -67,6 +67,10 @@ test('the identity modules have exactly the production consumers this commit giv
     'server-runtime.ts': [],
     'single-runtime.ts': ['src/App.svelte'],
     'server-scope.ts': ['src/App.svelte'],
+    // The handover's rules, extracted from App so they can be tested; the
+    // connect form never imports it — it receives the handover the host
+    // opened.
+    'handover.ts': ['src/App.svelte'],
     'server-fleet.ts': [],
     'server-store.ts': [],
     'server-state-migration.ts': [],

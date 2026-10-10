@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from '../test/mount.ts';
+import { createHandovers } from './handover.ts';
 
 const compiled = compileMount(new URL('./Settings.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
@@ -194,17 +195,25 @@ test('an attempt the HOST has moved on from writes nothing and concludes nothing
   // host's handover is the authority, and it says the app is waiting on
   // someone else now. The late dial must then write no identity, bring
   // nothing up and settle nothing.
+  // The REAL handover bookkeeping, and the real way it goes stale: the host
+  // ends every open handover when it takes the handle back (a switch), which
+  // is `handovers.endAll()` — not a boolean this test flips (reviewer,
+  // 2026-10-10).
   const order: string[] = [];
-  let current = true;
+  const handovers = createHandovers();
   let release: ((machine: string) => void) | null = null;
   const app = await (await compiled).mount(context, {
     props: {
       onConnected(switched: boolean) { order.push(`connected:${switched}`); },
       beforeConnect() {
         order.push('stand-down');
+        const handover = handovers.open(null);
         return {
-          current: () => current,
-          settle: (outcome: string) => order.push(`conclude:${outcome}`),
+          current: () => handover.current(),
+          settle: (outcome: string) => {
+            handover.settle(outcome as 'same-server');
+            if (handover.current()) order.push(`conclude:${outcome}`);
+          },
         };
       },
     },
@@ -228,9 +237,8 @@ test('an attempt the HOST has moved on from writes nothing and concludes nothing
   await connectTo({ ...app, order }, 'wss://same.test/ws');
   assert.deepEqual(order, ['stand-down', 'connect:wss://same.test/ws'], 'the dial is in flight');
 
-  // The app moved on: another handover owns the handle now (a new Settings
-  // instance, the switcher, anything).
-  current = false;
+  // The app took the handle back — what `revokeScope` does on a switch.
+  handovers.endAll();
   const registryBefore = app.window.localStorage.getItem('tmux_servers');
   release!('m-a');
   for (let i = 0; i < 8; i++) await app.flush();

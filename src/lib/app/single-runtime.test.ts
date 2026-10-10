@@ -252,6 +252,29 @@ test('a stale ticket cannot END the handle either', async (t) => {
   await assert.rejects(() => rt.api.listSessions(), /detached/u);
 });
 
+test('a verdict is spent when it is given, hold included', async (t) => {
+  t.after(cleanup);
+  // `hold` leaves the handle suspended, and that is a CONCLUSION: the attempt
+  // that gave it cannot come back and resume what it left refusing (reviewer,
+  // 2026-10-10). Only a new handover — with its own ticket — can.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+
+  const ticket = rt.suspend();
+  rt.settle(ticket, 'hold');
+  rt.settle(ticket, 'resume');            // the same attempt, changing its mind
+  await assert.rejects(() => rt.api.listSessions(), /suspended/u,
+    'the spent ticket could not lift what it held');
+
+  const next = rt.suspend();
+  rt.settle(next, 'resume');
+  fire(rt.api.listSessions());
+  await settle();
+  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
+    'and the attempt that works out whose socket it is can');
+});
+
 test('an unidentified peer leaves the handle suspended, not released', async (t) => {
   t.after(cleanup);
   // The orchestrator's refinement (2026-10-10): a peer authenticated and the

@@ -36,6 +36,7 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
+  import { createHandovers } from './lib/app/handover.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
@@ -129,6 +130,9 @@
     const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
     const held = scopeSwap.bound();
     if (held?.alive() && entry && held.id === entry.id) return;
+    // The tree is changing servers: an attempt still in flight is no longer
+    // the one the app is waiting on.
+    handovers.endAll();
     void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
   }
   /** Give up the handle the tree is bound to, BEFORE the shared socket is
@@ -146,57 +150,21 @@
    * is unmounted, the leave guards have answered, and the target is by
    * definition another server. */
   function revokeScope() {
+    // Every open handover stops being current here: leaving is decided, so an
+    // attempt that comes back afterwards must write no identity and bring
+    // nothing up, whatever it found (reviewer P1, 2026-10-10).
+    handovers.endAll();
     scopeSwap.bound()?.dispose();
   }
-  /** The connect form's version: SUSPEND, and hand back the HANDOVER — a way
-   * to ask whether this attempt is still the one, and to report what it
-   * CONCLUDED.
-   *
-   * That form re-dials the same socket at an address that may turn out to be
-   * this very server — the ordinary reconnect — and nobody knows which until
-   * it authenticates. Revoking outright would replace the handle on every
-   * reconnect, remount every always-mounted page and throw away the state
-   * they exist to keep, without asking a single leave guard (reviewer,
-   * 2026-10-10). So the handle is suspended for the length of the handover
-   * and the verdict decides what happens to it:
-   *
-   *   - `same-server`: authenticated, and the identity layer confirmed this
-   *     is the entry we were on. Resume; nothing remounts.
-   *   - `no-peer`: the dial never got there, so there is no new server to be
-   *     confused with. The socket is down either way and the reconnect
-   *     machine owns what happens next. Resume.
-   *   - `other-server`: a different server authenticated. Terminal; the swap
-   *     that follows binds the new one.
-   *   - `unresolved`: a peer authenticated but its identity could not be
-   *     established (the registry write failed). There IS an authenticated
-   *     stranger on the socket and nothing proves it is ours, so the handle
-   *     HOLDS — refusing every call, but not released. Resuming on "the
-   *     function reached its finally" is what would put A's pages on B's
-   *     socket; releasing instead would be safe too, and worse: the next
-   *     attempt that does establish this is still A would have to rebuild
-   *     every page, when the handle it needs is right there.
-   *
-   * ONE ticket covers the whole chain, and `current()` is how the form asks
-   * before it writes identity or brings the app up. A generation inside the
-   * form only orders ITS OWN attempts: a form unmounted mid-dial and a new
-   * instance starting its own are two instances, and the first one's late
-   * completion would otherwise still write the registry, call `onConnected`
-   * and end a handle the live handover is protecting (reviewer, 2026-10-10). */
-  let handoverSeq = 0;
+  /** The connect form's handover (app/handover.ts, which holds the rules and
+   * the tests): the handle stands down for the length of one attempt, and
+   * what happens to it next is decided by what that attempt ESTABLISHED about
+   * the peer — never by the attempt merely finishing. A reconnect to the same
+   * server therefore keeps its handle and remounts nothing, while an
+   * authenticated stranger leaves it refusing. */
+  const handovers = createHandovers();
   function suspendScope() {
-    const mine = ++handoverSeq;
-    const held = scopeSwap.bound();
-    const ticket = held?.suspend() ?? 0;
-    return {
-      /** Is this still the handover the app is waiting on? */
-      current: () => mine === handoverSeq,
-      settle: (outcome) => {
-        if (mine !== handoverSeq) return;
-        if (outcome === 'same-server' || outcome === 'no-peer') held?.settle(ticket, 'resume');
-        else if (outcome === 'other-server') held?.settle(ticket, 'release');
-        else held?.settle(ticket, 'hold');
-      },
-    };
+    return handovers.open(scopeSwap.bound());
   }
   const shell = $derived(connected || !!switching);
   let terminalTarget = $state('');

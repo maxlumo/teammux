@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { connect, disconnect } from '../core/ws.ts';
+  import { connect, disconnect, getMachineId, setSocket } from '../core/ws.ts';
   import { defaultConnectionAddress, dropAutofilled, hostedByGateway, localAutofill, normalizeAddress as normalizeAddressFor, type Autofilled, type LocalConfig } from '../core/connection-address.ts';
   import { isAndroid, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { localServerLine, localServer } from './server-mode.svelte.ts';
@@ -186,17 +186,15 @@
       // A superseded, cancelled or unmounted attempt owns nothing from here
       // on: not the registry, not `onConnected`, and not the handover.
       if (!live()) return;
-      if (sock) {
-        const { setSocket } = await import('../core/ws.ts');
-        await setSocket(sock).catch(() => {});
-      }
-      // Checked again here, after the socket/import awaits above and BEFORE
-      // the first identity write: a newer handover may have taken over while
-      // they resolved (reviewer, 2026-10-10).
+      if (sock) await setSocket(sock).catch(() => {});
+      // Checked again here, after the awaits above and with NO await between
+      // this and the first identity write: a newer handover may have taken
+      // over while `connect` or `setSocket` resolved, and the transport is
+      // imported statically precisely so nothing can resolve in between
+      // (reviewer, 2026-10-10).
       if (!live()) return;
       // Save machine_id → address mapping
       try {
-        const { getMachineId } = await import('../core/ws.ts');
         const mid = getMachineId?.();
         if (mid) {
           const map = JSON.parse(localStorage.getItem('tmux_machines') || '{}');

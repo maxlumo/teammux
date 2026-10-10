@@ -484,7 +484,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'and it asks what the swap is already heading for, or one success path mints a handle nobody shows or releases');
   // The lease is given up BEFORE the shared socket can be re-dialled
   // elsewhere, on both paths that can reach another server.
-  assert.match(source, /function revokeScope\(\) \{\s*scopeSwap\.bound\(\)\?\.dispose\(\);/u);
+  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?scopeSwap\.bound\(\)\?\.dispose\(\);/u);
   assert.match(source, /function resetServerMemory\(\) \{[\s\S]{0,400}?revokeScope\(\);/u,
     'the switch revokes before its connect (resetMemory runs before connect in server-switch.ts)');
   // The connect form SUSPENDS instead, because its address may be the same
@@ -492,22 +492,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The form's handover resumes only on a conclusion that leaves the handle
   // serving its own server, and only with the ticket of the suspension in
   // force: a stale attempt's report must not lift a live one's protection.
-  assert.match(source, /function suspendScope\(\) \{\s*const mine = \+\+handoverSeq;\s*const held = scopeSwap\.bound\(\);\s*const ticket = held\?\.suspend\(\) \?\? 0;/u);
-  // ONE host ticket covers the whole chain: the form asks `current()` before
-  // it writes identity or brings the app up, and every verdict — including the
-  // terminal one — is refused for a stale handover.
-  assert.match(source, /current: \(\) => mine === handoverSeq,/u);
-  assert.match(source, /settle: \(outcome\) => \{\s*if \(mine !== handoverSeq\) return;/u,
-    'a superseded handover settles nothing at all, not even a release');
-  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.settle\(ticket, 'resume'\);\s*else if \(outcome === 'other-server'\) held\?\.settle\(ticket, 'release'\);\s*else held\?\.settle\(ticket, 'hold'\);/u,
-    'the four conclusions map onto resume / release / hold, and nothing else');
-  // The protection is never skipped because an address looked familiar: an
-  // address is a route, and a route can come to reach another machine. What
-  // decides is the identity the server reports, which is `activateConnected`'s
-  // answer — so neither handover function so much as mentions an address.
-  const handover = (source.match(/function suspendScope\(\)[\s\S]*?\n  \}/u)?.[0] ?? '')
-    + (source.match(/function revokeScope\(\)[\s\S]*?\n  \}/u)?.[0] ?? '');
-  assert.doesNotMatch(handover, /address|\burl\b/iu, 'the handover compares no addresses');
+  // The handover's rules live in app/handover.ts, where they are tested; App
+  // only opens one per attempt and ends them all when it takes the handle
+  // back itself.
+  assert.match(source, /const handovers = createHandovers\(\);/u);
+  assert.match(source, /function suspendScope\(\) \{\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
+  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
+    'the switch ends every open handover: an attempt that comes back after it writes nothing');
+  assert.match(source, /handovers\.endAll\(\);\s*void scopeSwap\.swap\(/u,
+    'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
@@ -584,6 +577,12 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // point, and a handover can take over while they resolve.
   assert.match(fn, /if \(!live\(\)\) return;\s*\/\/ Save machine_id → address mapping/u,
     'liveness is re-checked immediately before the first identity write');
+  // And nothing may AWAIT in that window: the transport is imported
+  // statically so no module load can resolve between the check and the write.
+  const guarded = fn.slice(fn.lastIndexOf('if (!live()) return;', fn.indexOf('activateConnected(localStorage')),
+    fn.indexOf('activateConnected(localStorage'));
+  assert.doesNotMatch(guarded, /\bawait\b|import\(/u,
+    'an await between the check and the identity write is a window for a newer handover');
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
