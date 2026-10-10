@@ -240,3 +240,118 @@ test('an attempt the HOST has moved on from writes nothing and concludes nothing
   assert.equal(app.window.localStorage.getItem('tmux_servers'), registryBefore,
     'and wrote no identity');
 });
+
+test('an attempt dies with the form: no identity, no onConnected, no disconnect', async (context) => {
+  // The host's ticket cannot cover this one (orchestrator's ruling,
+  // 2026-10-10): a re-dial that does NOT go through a handover — the
+  // Connection page's address rows, the periodic optimizer — leaves the
+  // host's handover current. So a dial started by a form the reader has since
+  // left would still look live, and could disconnect or write identity over
+  // the socket that re-dial now owns.
+  const order: string[] = [];
+  let release: ((machine: string) => void) | null = null;
+  const app = await (await compiled).mount(context, {
+    props: {
+      onConnected(switched: boolean) { order.push(`connected:${switched}`); },
+      beforeConnect() {
+        order.push('stand-down');
+        // Still "current": nothing else started a handover, which is exactly
+        // the case the component's own lifetime has to answer.
+        return { current: () => true, settle: (o: string) => order.push(`conclude:${o}`) };
+      },
+    },
+    modules: [{
+      connect: () => { order.push('connect'); return new Promise((resolve) => { release = resolve; }); },
+      disconnect: () => { order.push('disconnect'); },
+      getMachineId: () => 'm-b',
+      setSocket: async () => {},
+    }],
+    setup(window) {
+      window.localStorage.setItem('tmux_locale', 'en');
+      window.localStorage.setItem('tmux_servers', JSON.stringify([
+        { id: 'a', name: 'alpha', address: 'wss://a.test/ws', token: 'tok', machineId: 'm-a', named: true },
+      ]));
+      window.localStorage.setItem('tmux_server_current', 'a');
+    },
+  });
+  await connectTo({ ...app, order }, 'wss://b.test/ws');
+  assert.deepEqual(order, ['stand-down', 'connect'], 'the dial is in flight');
+  const registryBefore = app.window.localStorage.getItem('tmux_servers');
+
+  await app.unmount();                                   // the reader leaves the form
+  release!('m-b');                                        // and the dial comes back
+  for (let i = 0; i < 8; i++) await app.flush();
+
+  assert.deepEqual(order, ['stand-down', 'connect'],
+    'the dead attempt concluded nothing, brought nothing up and disconnected nothing');
+  assert.equal(app.window.localStorage.getItem('tmux_servers'), registryBefore,
+    'and wrote no identity');
+});
+
+test('the credentials an attempt uses are the ones it started with', async (context) => {
+  // The fields are live inputs a reader can keep typing into. An identity
+  // write that re-read them would record a server nobody dialled — a token
+  // that was never authenticated, filed against the address that was
+  // (orchestrator's ruling, 2026-10-10).
+  const seen: { url?: string; token?: string } = {};
+  const order: string[] = [];
+  let release: ((machine: string) => void) | null = null;
+  const app = await (await withIdentity).mount(context, {
+    props: {
+      onConnected() { order.push('connected'); },
+      beforeConnect() { return { current: () => true, settle: () => {} }; },
+    },
+    modules: [
+      {
+        connect: (url: string, token: string) => {
+          seen.url = url;
+          seen.token = token;
+          return new Promise((resolve) => { release = resolve; });
+        },
+        disconnect: () => {},
+        getMachineId: () => 'm-a',
+        setSocket: async () => {},
+      },
+      {
+        activateConnected: (_storage: unknown, entry: { address: string; token: string }) => {
+          order.push(`activate:${entry.address}|${entry.token}`);
+          return { reload: false };
+        },
+      },
+    ],
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+  });
+
+  // Type an address and a token, submit, then keep typing while it dials.
+  const field = (selector: string, value: string) => {
+    const input = app.document.querySelector<HTMLInputElement>(selector)!;
+    input.value = value;
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  };
+  field('input[type="text"]', 'wss://dialled.test/ws');
+  const tokenField = app.document.querySelector<HTMLInputElement>('input[type="password"], .token-wrap input');
+  if (tokenField) {
+    tokenField.value = 'dialled-token';
+    tokenField.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  }
+  await app.flush();
+  const submit = [...app.document.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => /^connect$/iu.test((b.textContent ?? '').trim()));
+  assert.ok(submit, `the card has a connect button: ${
+    [...app.document.querySelectorAll('button')].map((b) => b.textContent?.trim()).join(' | ')}`);
+  submit.click();
+  for (let i = 0; i < 4; i++) await app.flush();
+  assert.equal(seen.url, 'wss://dialled.test/ws', 'the dial used what was typed');
+
+  if (tokenField) {
+    tokenField.value = 'typed-after';                    // the reader keeps editing
+    tokenField.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.flush();
+  }
+  release!('m-a');
+  for (let i = 0; i < 8; i++) await app.flush();
+
+  assert.deepEqual(order.filter((o) => o.startsWith('activate')),
+    [`activate:wss://dialled.test/ws|${seen.token}`],
+    'the identity write used the credentials the attempt dialled with');
+});

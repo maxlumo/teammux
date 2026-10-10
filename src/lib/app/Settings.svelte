@@ -144,6 +144,14 @@
    * handover conclusion, exactly as a superseded dial must not record its
    * result (board #335 ②b-1, reviewer 2026-10-10). */
   let attempts = 0;
+  /** And an attempt dies with the component. The host's ticket cannot cover
+   * this one: a re-dial that does NOT go through a handover — the Connection
+   * page's address rows, the periodic optimizer — leaves the host's handover
+   * current, so a dial started by a form the reader has since left would
+   * still look live and could disconnect or write identity over the socket
+   * that re-dial now owns (orchestrator's ruling, 2026-10-10). */
+  let mounted = true;
+  onDestroy(() => { mounted = false; });
 
   async function doConnect() {
     error = '';
@@ -153,7 +161,7 @@
     // Mine AND still the app's: the instance counter orders this form's own
     // attempts, the host's handover says whether the app is still waiting on
     // this one at all.
-    const live = () => attempt === attempts && !cancelled && (handover?.current() ?? true);
+    const live = () => mounted && attempt === attempts && !cancelled && (handover?.current() ?? true);
     // The handover of the shared socket: the host puts its current server's
     // handle aside before the dial, and this attempt reports what it
     // ESTABLISHED about the peer. Suspending rather than revoking is what
@@ -162,19 +170,25 @@
     // old server's pages off an unidentified peer.
     const handover = beforeConnect?.() as ConnectHandover | void;
     try {
+      // FROZEN at the start of the attempt, and used for everything after:
+      // the fields are live inputs a reader can keep typing into, and an
+      // identity write that re-read them would record a server nobody dialled
+      // (orchestrator's ruling, 2026-10-10).
       const url = normalizeAddress(address);
+      const tok = token;
+      const sock = socket.trim();
       localStorage.setItem('tmux_address', url);
-      localStorage.setItem('tmux_token', token);
-      if (socket.trim()) localStorage.setItem('tmux_socket', socket.trim());
+      localStorage.setItem('tmux_token', tok);
+      if (sock) localStorage.setItem('tmux_socket', sock);
       else localStorage.removeItem('tmux_socket');
-      saveHistory(url, token);
-      await connect(url, token);
+      saveHistory(url, tok);
+      await connect(url, tok);
       // A superseded, cancelled or unmounted attempt owns nothing from here
       // on: not the registry, not `onConnected`, and not the handover.
       if (!live()) return;
-      if (socket.trim()) {
+      if (sock) {
         const { setSocket } = await import('../core/ws.ts');
-        await setSocket(socket.trim()).catch(() => {});
+        await setSocket(sock).catch(() => {});
       }
       // Checked again here, after the socket/import awaits above and BEFORE
       // the first identity write: a newer handover may have taken over while
@@ -206,8 +220,8 @@
         // per-server memory reset (board 315, no reload). The mirror keys
         // already point here — this form wrote them before dialing.
         const act = activateConnected(localStorage, {
-          address: url, token,
-          ...(socket.trim() ? { socket: socket.trim() } : {}),
+          address: url, token: tok,
+          ...(sock ? { socket: sock } : {}),
           ...(mid ? { machineId: mid } : {}),
         });
         if (!live()) return;

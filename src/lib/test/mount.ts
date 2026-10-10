@@ -85,7 +85,7 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
               globalThis.__mountClient = {
                 start(props) { instance = mount(Component, { target: document.body, props }); },
                 tick, flushSync,
-                async stop() { if (instance) await unmount(instance); }
+                async stop() { const held = instance; instance = undefined; if (held) await unmount(held); }
               };
             `;
             if (id.startsWith('\0mount-mock:')) return {
@@ -209,6 +209,10 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
       return {
         window: win, document: win.document, flush, close,
         async advance(ms: number) { context.mock.timers.tick(ms); await flush(); },
+        /** Destroy the component but keep the realm, so a test can observe
+         * what its teardown did — and what work it had in flight still does.
+         * `close` remains idempotent after it. */
+        async unmount() { await api?.stop(); await flush(); },
       };
     },
   };

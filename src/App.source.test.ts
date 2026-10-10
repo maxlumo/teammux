@@ -569,7 +569,16 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // The host's handover is part of the liveness question, so an attempt the
   // app is no longer waiting on writes no identity and brings nothing up —
   // including one from an instance that has been unmounted.
-  assert.match(fn, /const live = \(\) => attempt === attempts && !cancelled && \(handover\?\.current\(\) \?\? true\);/u);
+  // Three questions, and each covers a case the others cannot: the component
+  // is still there (a re-dial that bypasses the handover leaves the host's
+  // ticket current), this is still the instance's latest attempt, and the app
+  // is still waiting on this handover at all.
+  assert.match(fn, /const live = \(\) => mounted && attempt === attempts && !cancelled && \(handover\?\.current\(\) \?\? true\);/u);
+  // And the credentials are frozen before the first write, because the fields
+  // stay editable while the dial is in flight.
+  assert.match(fn, /const url = normalizeAddress\(address\);\s*const tok = token;\s*const sock = socket\.trim\(\);/u);
+  assert.doesNotMatch(fn.slice(fn.indexOf('await connect(')), /\btoken\b(?!:)|socket\.trim\(\)/u,
+    'nothing after the dial re-reads a live field');
   // Adjacent to the first identity write, not merely somewhere above it: the
   // socket and import awaits sit between the post-connect check and this
   // point, and a handover can take over while they resolve.
