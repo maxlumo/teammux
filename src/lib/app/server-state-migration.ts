@@ -54,8 +54,10 @@
 // matches its fingerprint (or never existed and still does not) takes the
 // live value, or is cleared — the fold's rule — while a slot that changed,
 // appeared or disappeared since was written by the owner on this build, and
-// is kept. An identity merge that MOVES a slot moves its fingerprint too
-// (servers.ts `moveSlots`): a relocation is not an edit. The record also
+// is kept. An identity merge that MOVES a slot first records the move on the
+// pending record (servers.ts `moveSlots`), and a slot of the destination
+// that matches the baseline of a server moved into it is not an edit either:
+// a relocation, even one that failed part-way, is not a write by the owner. The record also
 // fingerprints the INPUTS themselves (P2-a): only a
 // build from before #335 writes them, and if one has since, the evidence
 // they carry (the legacy mirror's machine) is read again before anybody
@@ -109,20 +111,33 @@ function slotPrints(storage: Store): Record<string, string> {
   return prints;
 }
 
+/** The servers whose slots may now sit in `id`'s: `id` itself, and every
+ * server the pending record says was moved into it — transitively. */
+function sourcesOf(id: ServerId, moved: readonly { from: string; to: string }[]): ServerId[] {
+  const out = [id];
+  for (let i = 0; i < out.length; i++) for (const m of moved) if (m.to === out[i] && !out.includes(m.from)) out.push(m.from);
+  return out;
+}
+
+/** What a claim compares a slot against: the baselines of the slots that
+ * existed when the inputs were set aside, and the moves recorded since. */
+interface Since { slots: Record<string, string>; moved: { from: string; to: string }[] }
+
 /** File every legacy live key under `id`'s slot; an absent live key clears
- * the slot (see the header). With `since` — a claim — a slot whose value is
- * not what `since` recorded (changed, appeared, or gone) was written by its
- * owner after the inputs were set aside, and is kept. */
-function fileLive(storage: Store, id: ServerId, since?: Record<string, string>): { folded: string[]; cleared: string[] } {
+ * the slot (see the header). With `since` — a claim — a slot that matches no
+ * baseline it could carry (its own, or one moved into it), present or absent,
+ * was written by its owner after the inputs were set aside, and is kept. */
+function fileLive(storage: Store, id: ServerId, since?: Since): { folded: string[]; cleared: string[] } {
   const folded: string[] = [];
   const cleared: string[] = [];
+  const sources = since ? sourcesOf(id, since.moved) : [];
   for (const key of RESIDENT_KEYS) {
     const live = storage.getItem(key);
     const slot = storage.getItem(residentKey(key, id));
     if (since) {
-      const then = since[residentKey(key, id)];
-      const writtenSince = slot == null ? then !== undefined : then === undefined || fingerprint(slot) !== then;
-      if (writtenSince) continue;
+      const baselines = sources.map((src) => since.slots[residentKey(key, src)]);
+      const untouched = slot == null ? baselines.includes(undefined) : baselines.includes(fingerprint(slot));
+      if (!untouched) continue;
     }
     if (live != null) { folded.push(key); storage.setItem(residentKey(key, id), live); }
     else if (slot != null) { cleared.push(key); storage.removeItem(residentKey(key, id)); }
@@ -157,6 +172,9 @@ export type LayoutMark =
     inputs?: string;
     /** Every slot that existed then, fingerprinted (see `fileLive`). */
     slots?: Record<string, string>;
+    /** Identity merges that moved one server's slots into another's since
+     * (servers.ts `moveSlots`). */
+    moved?: { from: string; to: string }[];
   };
 
 /** The marker, or null when nothing has been decided. Anything unparseable
@@ -175,6 +193,7 @@ export function layoutMark(storage: Pick<Storage, 'getItem'>): LayoutMark | null
           v, state: 'pending', machineId: String(parsed.machineId ?? storage.getItem('tmux_machine_id') ?? ''),
           ...(typeof parsed.inputs === 'string' ? { inputs: parsed.inputs } : {}),
           ...(parsed.slots && typeof parsed.slots === 'object' ? { slots: parsed.slots } : {}),
+          ...(Array.isArray(parsed.moved) ? { moved: parsed.moved.filter((m: any) => m && typeof m.from === 'string' && typeof m.to === 'string') } : {}),
         };
       }
       return { v, state: 'folded', into: String(parsed.into ?? '') };
@@ -264,10 +283,10 @@ export function claimPending(storage: Store, id: ServerId): MigrationReport {
   }
   const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
   if (!own || !evidence.machineId || own !== evidence.machineId) return none('pending');
-  return foldInto(storage, id, evidence.slots ?? {});
+  return foldInto(storage, id, { slots: evidence.slots ?? {}, moved: evidence.moved ?? [] });
 }
 
-function foldInto(storage: Store, id: ServerId, since?: Record<string, string>): MigrationReport {
+function foldInto(storage: Store, id: ServerId, since?: Since): MigrationReport {
   let moved: { folded: string[]; cleared: string[] };
   try { moved = fileLive(storage, id, since); } catch { return { ran: true, reason: 'unrecorded', serverId: id, folded: [], cleared: [] }; }
   // Marked AFTER the move, so a failure part-way leaves the inputs readable

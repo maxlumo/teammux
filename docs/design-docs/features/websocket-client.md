@@ -475,11 +475,16 @@ its owner wrote since (reviewer P1-1 on 08fdb6ba). A non-empty slot is not
 evidence of that: it may be the owner's pre-#335 park, older than the inputs.
 So the pending record fingerprints every slot that existed when the inputs
 were set aside, and only a slot that changed, appeared or disappeared since is
-kept. A slot the identity layer MOVED is not one its owner wrote: when a
+kept. A slot the identity layer MOVED is not one its owner wrote: before a
 merge hands the current alias's slots to its canonical entry, `moveSlots`
-moves their baselines with them (reviewer P1 on cde052f7), so a claim into
-the canonical entry still folds the inputs over the alias's old park, while
-an edit the alias really made after the inputs went pending stays. It fingerprints the inputs too (P2-a): if a build from before #335 has
+records the move on the pending record, in one write that is never undone
+(reviewer P1s on cde052f7 and 4ef4dd07). A claim then treats a slot as
+untouched if it matches the baseline of ANY server recorded as moved into it,
+or its own, so a claim into the canonical entry folds the inputs over the
+alias's old park — including after a move that failed part-way and was never
+retried — while an edit the alias really made after the inputs went pending
+matches no baseline and stays. If even the record cannot be written, nothing
+moves. It fingerprints the inputs too (P2-a): if a build from before #335 has
 rewritten them since, the machine they belong to is read again from its
 mirror before anybody claims them. Any other server runs on its own slots
 while the input stays pending, however many come first. A

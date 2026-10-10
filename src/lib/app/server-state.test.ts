@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
 import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, layoutMark, migrateServerState } from './server-state-migration.ts';
-import { RESIDENT_KEYS, activateSwitched, recordServer, residentKey } from './servers.ts';
+import { RESIDENT_KEYS, activateConnected, activateSwitched, recordServer, residentKey } from './servers.ts';
 
 /** What a switch on a pre-#335 build did to storage: file the leaving
  * server's live keys under its id, surface the target's. The upgrade
@@ -512,8 +512,9 @@ test('inputs an old build changed after they were set aside are re-attributed be
 /** Reviewer's fixture on cde052f7: an address-only alias `a` and the known
  * canonical `c` (m-a), different addresses so boot repair does not merge
  * them, each with an old park; CURRENT dangles; the inputs are m-a's. */
-function aliasPending() {
+function aliasPending(more: Record<string, string> = {}) {
   const storage = mem({
+    ...more,
     tmux_servers: JSON.stringify([
       { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 't' },
       { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 't', machineId: 'm-a' },
@@ -547,4 +548,57 @@ test('what the alias really edited after the inputs went pending survives the me
   assert.equal(claimPending(storage, 'c').reason, 'folded');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'typed on the alias' }, 'a real edit is kept');
   assert.equal(storage.getItem('tmux_hub_drawer::c'), null, 'and the untouched rest still folds');
+});
+
+/** `storage` refusing writes to `key` while `on()` says so. */
+function refuse(storage: ReturnType<typeof mem>, key: string) {
+  const set = storage.setItem;
+  let failing = true;
+  storage.setItem = (k: string, v: string) => { if (failing && k === key) throw new Error('QuotaExceededError'); set(k, v); };
+  return () => { failing = false; };
+}
+
+test('a merge whose slot move fails part-way, then a connect straight to canonical: the claim still lands LATEST (reviewer P1 on 4ef4dd07)', () => {
+  // A key that moves BEFORE the failing one (RESIDENT_KEYS order), so the
+  // canonical slots end up half alias, half canonical.
+  const storage = aliasPending({
+    tmux_hub_project: 'LATEST-PROJECT',
+    'tmux_hub_project::a': 'OLD-ALIAS-PROJECT',
+    'tmux_hub_project::c': 'OLD-CANON-PROJECT',
+  });
+  const restore = refuse(storage, 'tmux_hub_drafts::c');           // a slot write AFTER the record
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.equal(storage.getItem('tmux_server_current'), 'a', 'the merge never committed');
+  assert.equal(storage.getItem('tmux_hub_drafts::c'), JSON.stringify({ work: 'OLD-CANON' }), 'c s draft was not moved');
+  assert.equal(storage.getItem('tmux_hub_project::c'), 'OLD-ALIAS-PROJECT', 'but its project was');
+  // The canonical address, which does not re-run the alias merge.
+  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.equal(storage.getItem('tmux_server_current'), 'c');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'LATEST' }, 'LATEST, not an old park read as an edit');
+  assert.equal(storage.getItem('tmux_hub_project::c'), 'LATEST-PROJECT', 'and the moved half is not read as an edit either');
+  assert.equal(storage.getItem('tmux_hub_drawer::c'), null, 'and nothing the legacy set cleared');
+});
+
+test('a merge that fails part-way and is then retried keeps what the alias really edited', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'typed on the alias' }));
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });   // the retry completes it
+  assert.equal(storage.getItem('tmux_server_current'), 'c');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'typed on the alias' }, 'the real edit survives');
+  assert.equal(storage.getItem('tmux_hub_drawer::c'), null);
+});
+
+test('if even the move s record cannot be written, nothing moves', () => {
+  const storage = aliasPending();
+  const before = storage.dump();
+  const restore = refuse(storage, LAYOUT_KEY);
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.deepEqual(storage.dump(), before);
 });
