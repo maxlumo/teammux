@@ -179,9 +179,8 @@ test('a split restores as whole cells with distinct ids', () => {
 
 test('a record written by an absorbed entry names the survivor', () => {
   // Identity repair folded alias A into canonical B and deleted A, so A's
-  // v2 record names an id no entry claims any more — and `navFor(..., 'b')`
-  // would drop the navigation of the machine the app is connected to
-  // (reviewer P1, 2026-10-10).
+  // v2 record names the absorbed id — and `navFor(..., 'b')` would drop the
+  // navigation of the machine the app is connected to (reviewer P1).
   const storage = mem();
   saveNav(storage, {
     page: 'terminal',
@@ -189,7 +188,7 @@ test('a record written by an absorbed entry names the survivor', () => {
     splitLayout: 2,
     splitCells: [{ id: 0, pane: paneRef('a', 'work', 'work:1.0') }, { id: 1, pane: paneRef('a', 'work', 'work:2.0') }],
   });
-  assert.equal(reownSavedNav(storage, new Set(['b']), 'b'), true);
+  assert.equal(reownSavedNav(storage, (id) => (id === 'a' || id === 'b' ? 'b' : '')), true);
   const nav = readLegacyNav(storage, '');
   assert.deepEqual(nav.pane, paneRef('b', 'work', 'work:1.0'));
   assert.deepEqual(nav.splitCells.map((c) => c.pane?.serverId), ['b', 'b'], 'the cells came too');
@@ -197,16 +196,31 @@ test('a record written by an absorbed entry names the survivor', () => {
     'and the restore for B keeps every pane');
 });
 
-test('a record whose server is still saved is left exactly as it is', () => {
-  // Being another server's record is not being absorbed, and a v1 record owns
-  // nothing to rewrite: its provenance is the caller's.
+test('only a ref the identity layer shows to be merged moves', () => {
+  // reviewer P1-a, 2026-10-10: an id ABSENT from the registry is not a merge.
+  // A record naming one keeps it, and the restore filters it out — rather
+  // than pointing it at whoever is current and opening their same-named pane.
+  const survivorOf = (id: string) => (id === 'a' ? 'b' : id === 'b' ? 'b' : '');
+  const mixed = mem();
+  saveNav(mixed, {
+    page: 'terminal', pane: paneRef('c', 'work', 'work:1.0'), splitLayout: 2,
+    splitCells: [{ id: 0, pane: paneRef('a', 'work', 'work:1.0') }, { id: 1, pane: paneRef('c', 'work', 'work:2.0') }],
+  });
+  assert.equal(reownSavedNav(mixed, survivorOf), true);
+  const nav = readLegacyNav(mixed, '');
+  assert.equal(nav.pane?.serverId, 'c', 'the unexplained top pane keeps its server');
+  assert.deepEqual(nav.splitCells.map((c) => c.pane?.serverId), ['b', 'c'], 'only the merged cell moved');
+  assert.equal(navFor(nav, 'b').pane, null, 'and the restore for B drops the stranger');
+
   const live = mem();
   saveNav(live, { page: 'terminal', pane: paneRef('b', 'work', 'work:1.0'), splitLayout: 1, splitCells: [] });
   const before = live.getItem(NAV_KEY);
-  assert.equal(reownSavedNav(live, new Set(['a', 'b']), 'a'), false, 'B is saved, so B keeps its record');
+  assert.equal(reownSavedNav(live, survivorOf), false, 'a saved server keeps its record');
   assert.equal(live.getItem(NAV_KEY), before, 'and the bytes are untouched');
+  const unknown = mem();
+  saveNav(unknown, { page: 'terminal', pane: paneRef('c', 'work', 'work:1.0'), splitLayout: 1, splitCells: [] });
+  assert.equal(reownSavedNav(unknown, survivorOf), false, 'nothing explains c: nothing moves');
   const legacy = mem({ [NAV_KEY]: '{"page":"terminal","terminalTarget":"work:1.0"}' });
-  assert.equal(reownSavedNav(legacy, new Set(['b']), 'b'), false, 'a v1 record names no server');
-  assert.equal(legacy.getItem(NAV_KEY), '{"page":"terminal","terminalTarget":"work:1.0"}');
-  assert.equal(reownSavedNav(mem({ [NAV_KEY]: 'not json' }), new Set(['b']), 'b'), false);
+  assert.equal(reownSavedNav(legacy, survivorOf), false, 'a v1 record names no server');
+  assert.equal(reownSavedNav(mem({ [NAV_KEY]: 'not json' }), survivorOf), false);
 });

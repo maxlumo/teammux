@@ -541,3 +541,46 @@ test('a v2 record written by the absorbed entry is rebound, not dropped', async 
   assert.deepEqual(record().splitCells.map((c: any) => c.pane?.serverId), ['canon', 'canon'],
     'every cell followed the merge');
 });
+
+test('an id nothing shows to be merged is not handed to the current server', async (context) => {
+  // reviewer P1-a, 2026-10-10. No merge happens here at all: the registry
+  // holds only B, and the record names A — forgotten, or a server this client
+  // never saved. Treating "absent" as "absorbed into whoever is current"
+  // rewrote it to B and opened B's same-named `work:1.0`: a stranger's pane.
+  // It is another server's record, and the restore filters it out.
+  const { onScreen, restored, app } = await bootApp(context, {
+    tmux_servers: JSON.stringify([
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'b',
+    tmux_address: 'ws://b:9899',
+    tmux_token: 'tokB',
+    tmux_machine_id: 'm-b',
+    tmux_state: savedNav('a', 'work:1.0'),
+  });
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(onScreen(), 'none', 'B did not open A s pane by its name');
+  assert.notEqual(restored(), 'b:work:1.0', 'and the record was not re-filed under B');
+});
+
+test('a real merge moves only the merged ids: a third server s ref stays its own', async (context) => {
+  // The other half of P1-a: the alias IS absorbed into the canonical entry,
+  // and the record also holds a cell naming C, which nobody merged. The
+  // alias's refs follow the merge; C's must not ride along with it.
+  const { record, cellsOnScreen, onScreen } = await bootApp(context, {
+    ...aliasAndCanonical(JSON.stringify({
+      v: 2, page: 'terminal',
+      pane: { kind: 'pane', serverId: 'alias', session: 'work', target: 'work:1.0' },
+      splitLayout: 2,
+      splitCells: [
+        { id: 1, pane: { kind: 'pane', serverId: 'alias', session: 'work', target: 'work:1.0' } },
+        { id: 2, pane: { kind: 'pane', serverId: 'c', session: 'work', target: 'work:2.0' } },
+      ],
+    })),
+    tmux_layout_mode: 'desktop',
+  });
+  assert.equal(onScreen(), 'work:1.0', 'the alias s pane followed the merge');
+  assert.deepEqual(cellsOnScreen(), ['1:work:1.0', '2:'], 'C s cell was not opened on the survivor');
+  assert.deepEqual(record().splitCells.map((c: any) => c.pane?.serverId ?? null), ['canon', null],
+    'and nothing of C was re-filed under the survivor');
+});

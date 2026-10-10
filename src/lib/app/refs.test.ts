@@ -135,24 +135,25 @@ test('nothing to do returns the very same object', () => {
 
 test('a ref whose server was absorbed names the survivor', () => {
   // Identity repair folds a machine's twin entries into one and DELETES the
-  // absorbed entry, moving CURRENT to the survivor. A ref left naming the
-  // deleted entry is filtered out of its own server's restore — the
-  // navigation of the very machine the app is connected to (reviewer P1,
-  // 2026-10-10).
-  const known = new Set([B]);
-  assert.deepEqual(reownRef(paneRef(A, 'work', 'work:1.0'), known, B), paneRef(B, 'work', 'work:1.0'),
-    'only the server moves: the object is the same pane on the same machine');
-  assert.deepEqual(reownRef(sessionRef(A, 'work'), known, B), sessionRef(B, 'work'));
-  assert.deepEqual(reownRef(issueRef(A, 'work', 3), known, B), issueRef(B, 'work', 3));
-  assert.deepEqual(reownRef(roomRef(A, 'proj:work'), known, B), roomRef(B, 'proj:work'));
-  assert.deepEqual(reownRef(projectRef(A, 'p1'), known, B), projectRef(B, 'p1'));
+  // absorbed entry. A ref left naming the deleted entry is filtered out of its
+  // own server's restore — the navigation of the very machine the app is
+  // connected to (reviewer P1, 2026-10-10). Only the server moves: the object
+  // is the same pane on the same machine.
+  const survivorOf = (id: string) => (id === A ? B : id === B ? B : '');
+  assert.deepEqual(reownRef(paneRef(A, 'work', 'work:1.0'), survivorOf), paneRef(B, 'work', 'work:1.0'));
+  assert.deepEqual(reownRef(sessionRef(A, 'work'), survivorOf), sessionRef(B, 'work'));
+  assert.deepEqual(reownRef(issueRef(A, 'work', 3), survivorOf), issueRef(B, 'work', 3));
+  assert.deepEqual(reownRef(roomRef(A, 'proj:work'), survivorOf), roomRef(B, 'proj:work'));
+  assert.deepEqual(reownRef(projectRef(A, 'p1'), survivorOf), projectRef(B, 'p1'));
 });
 
-test('a ref whose server is still saved is the very same object', () => {
-  // Being on another server is not being absorbed: both are known, so B's
-  // refs stay B's while the app is bound to A.
-  const known = new Set([A, B]);
-  for (const ref of [paneRef(A, 'work', 'work:1.0'), sessionRef(B, 'work'), projectRef(B, 'p1')] as const) {
-    assert.equal(reownRef(ref, known, A), ref, refKey(ref));
+test('a ref nothing shows to be merged is the very same object', () => {
+  // A saved server is itself, and an id the identity layer cannot explain —
+  // forgotten, or never saved — is NOT re-pointed at anyone (reviewer P1-a,
+  // 2026-10-10): absence is not evidence of a merge, and moving it to the
+  // current server would open that server's same-named pane.
+  const survivorOf = (id: string) => (id === B ? B : '');
+  for (const ref of [paneRef(B, 'work', 'work:1.0'), paneRef('srv-c', 'work', 'work:1.0'), projectRef(A, 'p1')] as const) {
+    assert.equal(reownRef(ref, survivorOf), ref, refKey(ref));
   }
 });

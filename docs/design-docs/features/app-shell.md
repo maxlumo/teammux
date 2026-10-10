@@ -324,17 +324,23 @@ Reading is where the care goes, and three rules carry it:
   legacy mirror named at that moment, before the shell can save over them;
   ②b-4 lets a server claim them by PROVING that machine is its own. Being the
   next server to authenticate is not evidence of having written them.
-- **An absorbed entry takes its navigation with it.** `recordServer` folds a
-  machine's twin entries into one — an address-only entry that just learned it
-  is the machine already saved — deletes the absorbed entry and moves CURRENT
-  to the survivor. Everything that named the deleted id follows: the tracked
-  provenance, every ref App holds, and the refs inside the record itself
-  (`reownRef`, `reownSavedNav`). Without that the restore filtered out the
-  navigation of the very machine the app had just connected to, and then saved
-  the emptiness over it (reviewer P1, 2026-10-10). It is DERIVED in the one
-  place that reads CURRENT rather than reported by each connect path:
-  `removeServer` refuses to delete CURRENT, so an id the app holds can stop
-  being a saved entry only by being absorbed.
+- **An absorbed entry takes its navigation with it, and only an absorbed
+  one.** `recordServer` folds a machine's twin entries into one — an
+  address-only entry that just learned it is the machine already saved —
+  deletes the absorbed entry and moves CURRENT to the survivor. Everything
+  that named the deleted id follows: the tracked provenance, every ref App
+  holds, and the refs inside the record itself (`reownRef`, `reownSavedNav`).
+  Without that the restore filtered out the navigation of the very machine the
+  app had just connected to, and then saved the emptiness over it (reviewer
+  P1, 2026-10-10). WHICH ids moved is the identity layer's own record of the
+  merges it made — `tmux_server_merges`, written where the absorption happens,
+  read through `servers.mergedInto` — never an inference from an id being
+  absent from the registry. A forgotten entry or a record from a server this
+  client never saved is absent too, and handing it to the current server
+  would open that server's same-named pane (reviewer P1-a; a first version
+  did exactly that). An id nothing explains keeps its server and is filtered
+  out. This runs in `swapScope`, the one reader of CURRENT, so every path that
+  records identity follows the same merges.
 - **The restore is filtered to the runtime it runs against**, and runs only
   after that runtime is bound — never during the tick in which a swap shows
   nothing, which silently dropped every pane of the server being brought up. A

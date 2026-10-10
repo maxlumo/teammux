@@ -533,17 +533,17 @@ test('the content tree is bound to one server, and only the swap binds it (board
     // `swapScope();` in the file (a negative control showed it).
     ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
-  // An ABSORBED entry is followed, in the one place that reads CURRENT: the
-  // registry is the evidence (an id the app holds can stop being an entry
-  // only by being absorbed, since removeServer refuses to delete CURRENT), so
-  // no connect path has to report the merge.
-  assert.match(source, /if \(entry\) rebindAbsorbed\(entry\.id\);\s*const held = scopeSwap\.bound\(\);/u);
-  assert.match(source, /function rebindAbsorbed\(into\) \{\s*const known = new Set\(loadServers\(localStorage\)\.map\(\(s\) => s\.id\)\);\s*const absorbed = \(serverId\) => !!serverId && !known\.has\(serverId\);\s*if \(absorbed\(navLiveOwner\)\) navLiveOwner = into;/u,
-    'the provenance of the legacy record follows the merge');
-  for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)'])
-    assert.ok(source.includes(held), `and so does what App holds: ${held}`);
-  assert.match(source, /reownSavedNav\(localStorage, known, into\);/u,
-    'and the record on disk, which names its server from v2 on');
+  // An ABSORBED entry is followed, in the one place that reads CURRENT — and
+  // which ids moved is the identity layer's RECORD of the merges it made,
+  // never an inference from an id being absent (reviewer P1-a, 2026-10-10).
+  assert.match(source, /const entry = id \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u);
+  assert.match(source, /function followMerges\(\) \{\s*const survivorOf = \(serverId\) => mergedInto\(localStorage, serverId\);/u,
+    'the survivor comes from servers.mergedInto');
+  const follow = source.match(/function followMerges\(\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  assert.doesNotMatch(follow, /known|\.has\(/u, 'and nothing reads absence as a merge');
+  for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)',
+    'reownSavedNav(localStorage, survivorOf);'])
+    assert.ok(follow.includes(held), `the merge reaches what App holds and the record: ${held}`);
   // The saved navigation names its server, and the restore is filtered to the
   // server it runs against (board #335 ②b-2).
   // One answer to which server a reference names — and it is the swap's

@@ -54,6 +54,16 @@ export const STATE_PREFIX = 'tmux_state::';
 /** Per-server parked machine id, same shape. */
 export const MACHINE_PREFIX = 'tmux_machine_id::';
 export const MAX_SERVERS = 16;
+/** Which entry each ABSORBED entry was folded into, `{ [absorbed]: survivor }`
+ * (board #335 ②b-2, reviewer P1-a, 2026-10-10). Written only where an
+ * absorption happens (`forgetDropped`), so it is the identity layer's own
+ * record of the merges it actually made — the one thing that lets a holder of
+ * an old id follow it to the survivor. An id that is merely ABSENT from the
+ * registry proves nothing: it may have been forgotten, or never saved. */
+export const MERGES_KEY = 'tmux_server_merges';
+/** Merges kept. Ids are never reused, so an old row cannot misdirect anything;
+ * the cap only bounds the key. */
+const MAX_MERGES = 32;
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -306,6 +316,46 @@ function forgetDropped(storage: Store, dropped: string[], survivorId: string): v
   if (!dropped.length) return;
   if (dropped.includes(currentServerId(storage))) storage.setItem(CURRENT_KEY, survivorId);
   for (const id of dropped) for (const key of PARKED_KEYS) storage.removeItem(`${key}::${id}`);
+  noteMerges(storage, dropped, survivorId);
+}
+
+function loadMerges(storage: Store): Record<string, string> {
+  try {
+    const raw: unknown = JSON.parse(storage.getItem(MERGES_KEY) || '{}');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return Object.fromEntries(Object.entries(raw).filter(([from, to]) => from && typeof to === 'string' && to));
+  } catch { return {}; }
+}
+
+function noteMerges(storage: Store, dropped: string[], survivorId: string): void {
+  const merges = loadMerges(storage);
+  for (const id of dropped) { delete merges[id]; merges[id] = survivorId; }
+  const kept = Object.entries(merges).slice(-MAX_MERGES);
+  storage.setItem(MERGES_KEY, JSON.stringify(Object.fromEntries(kept)));
+}
+
+/**
+ * The saved entry `id` now IS, by the merges identity repair actually made:
+ * `id` itself while it is saved, the survivor it was folded into (following a
+ * chain of later merges), or '' when nothing shows it to be any saved entry.
+ *
+ * The '' case is the point (reviewer P1-a, 2026-10-10): an id absent from the
+ * registry may have been forgotten, or belong to a record written by a server
+ * this client never saved, and re-pointing it at whichever server is current
+ * would open that server's same-named pane — a stranger's terminal.
+ */
+export function mergedInto(storage: Store, id: string): string {
+  if (!id) return '';
+  const saved = new Set(loadServers(storage).map((s) => s.id));
+  const merges = loadMerges(storage);
+  let at = id;
+  for (let hops = 0; hops <= MAX_MERGES; hops++) {
+    if (saved.has(at)) return at;
+    const next = merges[at];
+    if (!next) return '';
+    at = next;
+  }
+  return '';
 }
 
 /**

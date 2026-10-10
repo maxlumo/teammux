@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CURRENT_KEY, MACHINE_PREFIX, MAX_SERVERS, SERVERS_KEY, STATE_PREFIX,
+  CURRENT_KEY, MACHINE_PREFIX, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, STATE_PREFIX, mergedInto,
   activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, parkFrom, pointTo, PARKED_KEYS, hostLabel, loadServers,
   migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses,
 } from './servers.ts';
@@ -598,3 +598,37 @@ test('currentServerName: the current server reads as its saved row, renamed or n
 function saveServersAdopted(s: ReturnType<typeof mem>, id: string, host: string) {
   s.setItem(SERVERS_KEY, JSON.stringify(adoptHostname(loadServers(s), id, host)));
 }
+
+test('the identity layer records the merges it made, and only those', () => {
+  // reviewer P1-a (#335, 2026-10-10): a holder of an old id has to follow it
+  // to the survivor, and the evidence must be the absorption itself — an id
+  // that is merely absent may have been forgotten or never saved, and
+  // re-pointing it at the current server would open a stranger's pane.
+  const storage = mem({
+    [SERVERS_KEY]: JSON.stringify([
+      { id: 'alias', name: 'home', address: 'ws://a:9899', token: 't', named: true },
+      { id: 'canon', name: 'canonical', address: 'ws://b:9899', token: 't', machineId: 'm', named: true },
+      { id: 'other', name: 'other', address: 'ws://c:9899', token: 't', machineId: 'm-c', named: true },
+    ]),
+    [CURRENT_KEY]: 'alias',
+  });
+  assert.equal(mergedInto(storage, 'alias'), 'alias', 'a saved entry is itself');
+  recordServer(storage, { address: 'ws://a:9899', token: 't', machineId: 'm' });
+  assert.deepEqual(loadServers(storage).map((s) => s.id), ['canon', 'other'], 'the alias was absorbed');
+  assert.equal(mergedInto(storage, 'alias'), 'canon', 'and it is followed to its survivor');
+  assert.equal(mergedInto(storage, 'never-saved'), '', 'an id nothing explains is nobody');
+  removeServer(storage, 'other');
+  assert.equal(mergedInto(storage, 'other'), '', 'a FORGOTTEN entry was not merged into anyone');
+  assert.equal(mergedInto(storage, ''), '');
+});
+
+test('a merge chain is followed, and a chain into a forgotten entry ends nowhere', () => {
+  const storage = mem({
+    [SERVERS_KEY]: JSON.stringify([{ id: 'c', name: 'c', address: 'ws://c', token: 't' }]),
+    [MERGES_KEY]: JSON.stringify({ a: 'b', b: 'c', x: 'gone', loop1: 'loop2', loop2: 'loop1' }),
+  });
+  assert.equal(mergedInto(storage, 'a'), 'c', 'a was folded into b, and b later into c');
+  assert.equal(mergedInto(storage, 'x'), '', 'its survivor was forgotten since');
+  assert.equal(mergedInto(storage, 'loop1'), '', 'a corrupt cycle terminates');
+  assert.equal(mergedInto(mem({ [MERGES_KEY]: 'not json' }), 'a'), '');
+});

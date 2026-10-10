@@ -114,25 +114,25 @@ export function refKey(ref: Ref): string {
 }
 
 /**
- * Follow an identity MERGE: a ref whose server is no longer a saved entry was
- * absorbed into `into`, and names it now (board #335 ②b-2, reviewer P1,
- * 2026-10-10).
+ * Follow an identity MERGE: a ref whose server was absorbed into another
+ * entry names the survivor (board #335 ②b-2, reviewer P1, 2026-10-10).
  *
  * `recordServer` folds a machine's twin entries into one — an address-only
  * entry learns it is the machine we already know — and the absorbed entry is
- * deleted from the registry, with CURRENT moved to the survivor. Nothing
- * about the OBJECT changed: it is the same session on the same machine, and
- * only the entry that names its connection was merged. So the serverId moves
- * and nothing else does; a ref left naming the deleted entry would be
- * filtered out of its own server's restore.
+ * deleted from the registry. Nothing about the OBJECT changed: it is the same
+ * session on the same machine, and only the entry that names its connection
+ * was merged. So the serverId moves and nothing else does.
  *
- * `known` is the registry's id set, which is what makes this derivable rather
- * than announced: `removeServer` refuses to delete CURRENT, so an id the app
- * holds can only stop being a saved entry by being absorbed. Returns the ref
- * unchanged — the same object — when its server is still there.
+ * `survivorOf` is the identity layer's answer (`servers.mergedInto`): the id
+ * itself while saved, the survivor of a merge that actually happened, or ''.
+ * Only the middle case moves a ref. An id that is merely ABSENT from the
+ * registry is not evidence of anything (reviewer P1-a): re-pointing it at the
+ * current server would open that server's same-named pane. Returns the same
+ * object whenever nothing moved.
  */
-export function reownRef<R extends Ref>(ref: R, known: ReadonlySet<ServerId>, into: ServerId): R {
-  return known.has(ref.serverId) ? ref : { ...ref, serverId: into };
+export function reownRef<R extends Ref>(ref: R, survivorOf: (id: ServerId) => ServerId): R {
+  const into = survivorOf(ref.serverId);
+  return into && into !== ref.serverId ? { ...ref, serverId: into } : ref;
 }
 
 /** A session rename that happened on ONE server. The serverId travels with
