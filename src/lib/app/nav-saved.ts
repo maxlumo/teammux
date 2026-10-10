@@ -40,7 +40,7 @@
 // from a newer build, a cell list of nulls. Anything that does not parse into
 // the shape below is dropped rather than repaired, because a half-understood
 // pane target lands the reader on a pane that cannot be captured.
-import { paneRef, type PaneRef, type ServerId } from './refs.ts';
+import { paneRef, reownRef, type PaneRef, type ServerId } from './refs.ts';
 
 /** Where the nav state lives. One spelling, shared with `servers.ts`'s
  * resident-key list, which treats the value as opaque. */
@@ -245,5 +245,35 @@ export function quarantineLegacyNav(storage: Pick<Storage, 'getItem' | 'setItem'
     // recorded as missing rather than guessed.
     machineId: storage.getItem('tmux_machine_id') || '',
   }));
+  return true;
+}
+
+/**
+ * Follow an identity MERGE in the record itself (reviewer P1, 2026-10-10).
+ *
+ * A v2 record names its server, so a record written before `recordServer`
+ * absorbed that entry still names an id no entry claims — and the restore
+ * filters it out, losing the navigation of the very machine the app has just
+ * reconnected to. Every ref naming an unknown id is re-owned to `into`, the
+ * survivor the registry moved CURRENT to.
+ *
+ * A v1 record needs nothing: it names no server at all, and who owns it is
+ * the caller's tracked provenance (App's `navLiveOwner`), which follows the
+ * same merge. Returns whether anything was rewritten.
+ */
+export function reownSavedNav(storage: Store, known: ReadonlySet<ServerId>, into: ServerId): boolean {
+  let raw: unknown;
+  try { raw = JSON.parse(storage.getItem(NAV_KEY) || '{}'); } catch { return false; }
+  if (!raw || typeof raw !== 'object' || (raw as Record<string, unknown>).v !== NAV_VERSION) return false;
+  const nav = readAt(storage, NAV_KEY, into);
+  const absorbed = (pane: PaneRef | null) => !!pane && !known.has(pane.serverId);
+  if (!absorbed(nav.pane) && !nav.splitCells.some((c) => absorbed(c.pane))) return false;
+  const move = (pane: PaneRef | null) => (pane ? reownRef(pane, known, into) : pane);
+  saveNav(storage, {
+    page: nav.page,
+    pane: move(nav.pane),
+    splitLayout: nav.splitLayout,
+    splitCells: nav.splitCells.map((c) => ({ id: c.id, pane: move(c.pane) })),
+  });
   return true;
 }

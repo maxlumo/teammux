@@ -5,6 +5,7 @@ import {
   paneRef,
   projectRef,
   refKey,
+  reownRef,
   retargetRef,
   roomRef,
   sessionRef,
@@ -129,5 +130,29 @@ test('nothing to do returns the very same object', () => {
   ];
   for (const rename of noops) {
     assert.equal(retargetRef(ref, rename), ref, JSON.stringify(rename));
+  }
+});
+
+test('a ref whose server was absorbed names the survivor', () => {
+  // Identity repair folds a machine's twin entries into one and DELETES the
+  // absorbed entry, moving CURRENT to the survivor. A ref left naming the
+  // deleted entry is filtered out of its own server's restore — the
+  // navigation of the very machine the app is connected to (reviewer P1,
+  // 2026-10-10).
+  const known = new Set([B]);
+  assert.deepEqual(reownRef(paneRef(A, 'work', 'work:1.0'), known, B), paneRef(B, 'work', 'work:1.0'),
+    'only the server moves: the object is the same pane on the same machine');
+  assert.deepEqual(reownRef(sessionRef(A, 'work'), known, B), sessionRef(B, 'work'));
+  assert.deepEqual(reownRef(issueRef(A, 'work', 3), known, B), issueRef(B, 'work', 3));
+  assert.deepEqual(reownRef(roomRef(A, 'proj:work'), known, B), roomRef(B, 'proj:work'));
+  assert.deepEqual(reownRef(projectRef(A, 'p1'), known, B), projectRef(B, 'p1'));
+});
+
+test('a ref whose server is still saved is the very same object', () => {
+  // Being on another server is not being absorbed: both are known, so B's
+  // refs stay B's while the app is bound to A.
+  const known = new Set([A, B]);
+  for (const ref of [paneRef(A, 'work', 'work:1.0'), sessionRef(B, 'work'), projectRef(B, 'p1')] as const) {
+    assert.equal(reownRef(ref, known, A), ref, refKey(ref));
   }
 });

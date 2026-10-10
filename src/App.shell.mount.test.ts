@@ -165,6 +165,9 @@ function liveTransport(calls: string[], machine: () => string) {
     systemStatus: rpc('system_status', {}),
     listSessions: rpc('list_sessions', [{ name: 'work' }]),
     listPanes: rpc('list_panes', [{ session: 'work', window: 1, pane: 0 }]),
+    // The desktop layout mounts the session sidebar, which asks for these.
+    listSessionsWithPanes: rpc('list_sessions_with_panes', { sessions: [{ name: 'work', panes: [] }] }),
+    projectList: rpc('project_list', { projects: [] }),
     backendsList: rpc('backends_list', { backends: [] }),
     setSocket: rpc('set_socket'),
     fsCwd: rpc('fs_cwd', { path: '/home' }),
@@ -258,13 +261,29 @@ test('a reconnect to the SAME server through the form keeps the handle and the t
     'and neither was any other resident layer');
 });
 
-/** A PRE-#335 record: a bare target, with no server of its own. This is the
+/** A PRE-#335 record: bare targets, with no server of its own. This is the
  * shape the attribution rules are about — a v2 record names its server, so it
- * cannot tell whether the rules work. */
-const legacyNav = (target: string) => JSON.stringify({
+ * cannot tell whether the rules work. `cells` seeds the desktop split, whose
+ * cells are the same two bare strings again. */
+const legacyNav = (target: string, cells: readonly string[] = []) => JSON.stringify({
   page: 'terminal',
   terminalTarget: target,
   terminalSession: target.split(':')[0],
+  ...(cells.length ? {
+    splitLayout: cells.length,
+    splitCells: cells.map((t, i) => ({ id: i + 1, target: t, session: t.split(':')[0] })),
+  } : {}),
+});
+
+/** A #335 record, which NAMES its server in every reference it holds. */
+const savedNav = (serverId: string, target: string, cells: readonly string[] = []) => JSON.stringify({
+  v: 2,
+  page: 'terminal',
+  pane: { kind: 'pane', serverId, session: target.split(':')[0], target },
+  splitLayout: cells.length || 1,
+  splitCells: cells.map((t, i) => ({
+    id: i + 1, pane: { kind: 'pane', serverId, session: t.split(':')[0], target: t },
+  })),
 });
 
 /** A transport that answers as whichever machine the address belongs to. */
@@ -302,6 +321,9 @@ function twoServerTransport(calls: string[]) {
     // whole point: a name alone cannot tell them apart.
     listSessions: rpc('list_sessions', [{ name: 'work' }]),
     listPanes: rpc('list_panes', [{ session: 'work', window: 1, pane: 0 }]),
+    // The desktop layout mounts the session sidebar, which asks for these.
+    listSessionsWithPanes: rpc('list_sessions_with_panes', { sessions: [{ name: 'work', panes: [] }] }),
+    projectList: rpc('project_list', { projects: [] }),
     backendsList: rpc('backends_list', { backends: [] }),
     setSocket: rpc('set_socket'),
     fsCwd: rpc('fs_cwd', { path: '/home' }),
@@ -311,10 +333,9 @@ function twoServerTransport(calls: string[]) {
   };
 }
 
-/** Two named servers, each holding a PRE-#335 record, driven through the real
- * switcher. `live` is the unprefixed key the app boots on (A's, by CURRENT);
- * `parked` is B's own slot, which arriving at B surfaces into that key. */
-async function twoServerApp(context: TestContext, nav: { live: string; parked: string }) {
+/** The app booted on a seeded storage, with the transport mocked: ONE harness,
+ * and each case says what the client wakes up with. */
+async function bootApp(context: TestContext, seed: Record<string, string>) {
   const calls: string[] = [];
   const app = await (await compiled).mount(context, {
     props: {},
@@ -322,16 +343,7 @@ async function twoServerApp(context: TestContext, nav: { live: string; parked: s
     setup(window) {
       window.localStorage.clear();
       window.localStorage.setItem('tmux_locale', 'en');
-      window.localStorage.setItem('tmux_servers', JSON.stringify([
-        { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
-        { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
-      ]));
-      window.localStorage.setItem('tmux_server_current', 'a');
-      window.localStorage.setItem('tmux_address', 'ws://a:9899');
-      window.localStorage.setItem('tmux_token', 'tokA');
-      window.localStorage.setItem('tmux_machine_id', 'm-a');
-      window.localStorage.setItem('tmux_state', legacyNav(nav.live));
-      window.localStorage.setItem('tmux_state::b', legacyNav(nav.parked));
+      for (const [key, value] of Object.entries(seed)) window.localStorage.setItem(key, value);
       (window as any).HTMLCanvasElement.prototype.getContext = () => new Proxy({
         font: '', measureText: () => ({ width: 0 }),
       } as Record<string, unknown>, {
@@ -348,16 +360,22 @@ async function twoServerApp(context: TestContext, nav: { live: string; parked: s
    * actually handed, and the record the shell saves back. */
   const onScreen = () =>
     app.document.querySelector<HTMLElement>('.term-main .xterm-wrap')?.dataset.target ?? 'none';
+  const record = () => JSON.parse(app.window.localStorage.getItem('tmux_state') || 'null');
   const restored = () => {
-    const raw = app.window.localStorage.getItem('tmux_state');
-    const pane = raw ? JSON.parse(raw).pane : null;
+    const pane = record()?.pane ?? null;
     return pane ? `${pane.serverId}:${pane.target}` : 'none';
   };
+  /** The split as it stands on screen: the cell's own id, and the target the
+   * Terminal in it was handed. */
+  const cellsOnScreen = () => [...app.document.querySelectorAll<HTMLElement>('.split-grid .cell')]
+    .map((c) => `${c.dataset.cellId}:${c.querySelector<HTMLElement>('.xterm-wrap')?.dataset.target ?? ''}`);
   /** Switch through the real switcher: Settings → Connection → the row. */
   const switchTo = async (name: string) => {
-    const entry = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn')]
+    const entry = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
       .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
-    entry!.click();
+    assert.ok(entry, `an entry into Settings exists: ${
+      [...app.document.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') || b.textContent?.trim()).join(' | ')}`);
+    entry.click();
     await settle();
     const connection = [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')]
       .find((b) => /connection/iu.test(b.textContent ?? ''));
@@ -371,8 +389,25 @@ async function twoServerApp(context: TestContext, nav: { live: string; parked: s
     await settle();
     await settle();
   };
-  return { app, calls, settle, onScreen, restored, switchTo };
+  return { app, calls, settle, onScreen, record, restored, cellsOnScreen, switchTo };
 }
+
+/** Two named servers on two machines, the app current on A. */
+const twoServers = (nav: { live: string; parked: string }) => ({
+  tmux_servers: JSON.stringify([
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ]),
+  tmux_server_current: 'a',
+  tmux_address: 'ws://a:9899',
+  tmux_token: 'tokA',
+  tmux_machine_id: 'm-a',
+  tmux_state: nav.live,
+  'tmux_state::b': nav.parked,
+});
+
+const twoServerApp = (context: TestContext, nav: { live: string; parked: string }) =>
+  bootApp(context, twoServers({ live: legacyNav(nav.live), parked: legacyNav(nav.parked) }));
 
 test('A→B→A through the switcher restores each server s own navigation', async (context) => {
   // The regression that would have caught P1-a (reviewer, 2026-10-10): the
@@ -422,4 +457,53 @@ test('two servers can hold the SAME legacy bytes, and each one is still its own'
 
   await switchTo('alpha');
   assert.equal(restored(), 'a:work:1.0', 'and A s is A s again');
+});
+
+/** The shape identity repair merges: the entry the app is CURRENT on knows
+ * only an address, and the machine it reaches is already saved under another
+ * entry. `recordServer` folds the first into the second and deletes it. */
+const aliasAndCanonical = (nav: string) => ({
+  tmux_servers: JSON.stringify([
+    { id: 'alias', name: 'home', address: 'ws://a:9899', token: 'tok', named: true },
+    { id: 'canon', name: 'canonical', address: 'ws://b:9899', token: 'tok', machineId: 'm-a', named: true },
+  ]),
+  tmux_server_current: 'alias',
+  tmux_address: 'ws://a:9899',
+  tmux_token: 'tok',
+  tmux_state: nav,
+});
+
+test('the entry the app was on is absorbed, and its navigation comes with it', async (context) => {
+  // reviewer P1, 2026-10-10. Dialling the alias authenticates as m-a, which
+  // the canonical entry already claims, so `recordServer` updates that entry
+  // and ABSORBS the alias: the alias is deleted and CURRENT moves to the
+  // canonical id. The provenance of the legacy record was still the alias, so
+  // the restore filtered out every pane of the machine we had just connected
+  // to — and then saved that emptiness over it. Before #335 the same record
+  // had no server in it and was simply restored, which is what makes this a
+  // Single-mode regression.
+  const { onScreen, restored, app, calls } =
+    await bootApp(context, aliasAndCanonical(legacyNav('work:1.0', ['work:1.0', 'work:2.0'])));
+
+  const ids = JSON.parse(app.window.localStorage.getItem('tmux_servers')!).map((s: any) => s.id);
+  assert.deepEqual(ids, ['canon'], `the alias was absorbed: ${JSON.stringify(ids)}`);
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'and CURRENT moved');
+  assert.equal(onScreen(), 'work:1.0', `the navigation came with it: ${calls.join(',')}`);
+  assert.equal(restored(), 'canon:work:1.0', 'and it is the survivor s now');
+});
+
+test('a v2 record written by the absorbed entry is rebound, not dropped', async (context) => {
+  // The same merge, one boot later: the record is already v2 and NAMES the
+  // alias, an id no entry claims any more. Attribution cannot save it — a v2
+  // record carries its own server — so the references themselves are rebound
+  // to the survivor.
+  const { onScreen, record, restored } = await bootApp(context, {
+    ...aliasAndCanonical(savedNav('alias', 'work:1.0', ['work:1.0', 'work:2.0'])),
+    tmux_layout_mode: 'desktop',
+  });
+
+  assert.equal(onScreen(), 'work:1.0');
+  assert.equal(restored(), 'canon:work:1.0');
+  assert.deepEqual(record().splitCells.map((c: any) => c.pane?.serverId), ['canon', 'canon'],
+    'every cell followed the merge');
 });

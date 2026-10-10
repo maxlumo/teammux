@@ -113,6 +113,28 @@ export function refKey(ref: Ref): string {
   }
 }
 
+/**
+ * Follow an identity MERGE: a ref whose server is no longer a saved entry was
+ * absorbed into `into`, and names it now (board #335 ②b-2, reviewer P1,
+ * 2026-10-10).
+ *
+ * `recordServer` folds a machine's twin entries into one — an address-only
+ * entry learns it is the machine we already know — and the absorbed entry is
+ * deleted from the registry, with CURRENT moved to the survivor. Nothing
+ * about the OBJECT changed: it is the same session on the same machine, and
+ * only the entry that names its connection was merged. So the serverId moves
+ * and nothing else does; a ref left naming the deleted entry would be
+ * filtered out of its own server's restore.
+ *
+ * `known` is the registry's id set, which is what makes this derivable rather
+ * than announced: `removeServer` refuses to delete CURRENT, so an id the app
+ * holds can only stop being a saved entry by being absorbed. Returns the ref
+ * unchanged — the same object — when its server is still there.
+ */
+export function reownRef<R extends Ref>(ref: R, known: ReadonlySet<ServerId>, into: ServerId): R {
+  return known.has(ref.serverId) ? ref : { ...ref, serverId: into };
+}
+
 /** A session rename that happened on ONE server. The serverId travels with
  * `from`/`to` so a call site cannot apply server A's rename to server B's
  * identically named session — the bug this type exists to make unwritable. */

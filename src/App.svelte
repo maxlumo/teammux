@@ -37,8 +37,8 @@
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createHandovers } from './lib/app/handover.ts';
-  import { navFor, quarantineLegacyNav, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
-  import { paneRef, retargetRef, sessionRef } from './lib/app/refs.ts';
+  import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
+  import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
@@ -139,12 +139,46 @@
   function swapScope() {
     const id = currentServerId(localStorage);
     const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
+    if (entry) rebindAbsorbed(entry.id);
     const held = scopeSwap.bound();
     if (held?.alive() && entry && held.id === entry.id) return;
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
     handovers.endAll();
     void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
+  }
+  /** Identity repair MERGED the entry the app's navigation names into `into`:
+   * everything that named the absorbed entry names the survivor now (reviewer
+   * P1, 2026-10-10).
+   *
+   * `recordServer` folds a machine's twins into one entry — an address-only
+   * entry that just learned it is the machine we already know — DELETES the
+   * absorbed one and moves CURRENT to the survivor. Nothing else noticed: the
+   * provenance of the legacy record, every ref the app holds, and the refs
+   * inside the saved record itself still named an id no entry claims, so the
+   * restore filtered them out and a same-machine connect came up with no
+   * panes at all and then saved that emptiness. Before #335 the same record
+   * had no server in it and was simply restored, which makes this a Single
+   * regression rather than an aggregate-only concern.
+   *
+   * It is DERIVED from the registry rather than reported by each connect
+   * path: `removeServer` refuses to delete CURRENT, so an id the app holds
+   * can stop being a saved entry only by being absorbed. This runs in the one
+   * place that reads CURRENT, so every path that records identity — boot,
+   * bringUp, the connect page's same-server return, a failover that first
+   * learns the machine — gets the same rule. */
+  function rebindAbsorbed(into) {
+    const known = new Set(loadServers(localStorage).map((s) => s.id));
+    const absorbed = (serverId) => !!serverId && !known.has(serverId);
+    if (absorbed(navLiveOwner)) navLiveOwner = into;
+    const rebind = (ref) => (ref && absorbed(ref.serverId) ? reownRef(ref, known, into) : ref);
+    termPane = rebind(termPane);
+    filesRef = rebind(filesRef);
+    if (splitCells.some((c) => absorbed(c.pane?.serverId))) {
+      splitCells = splitCells.map((c) => ({ ...c, pane: rebind(c.pane) }));
+    }
+    // And the record on disk, which names its server from v2 on.
+    reownSavedNav(localStorage, known, into);
   }
   /** The server every navigation reference names: the one the content tree is
    * bound to (board #335 ②b-2). Empty when nothing is bound — and then
@@ -786,6 +820,12 @@
       });
     } catch {}
     loadServerRegistry(); // the entry's active address moved
+    // A failover can be the connect that first learns this machine's id, and
+    // then `recordServer` absorbs the entry we were on into the machine's
+    // survivor: CURRENT moved, so the tree's handle and every reference the
+    // app holds have to follow it (reviewer P1, 2026-10-10). A no-op whenever
+    // the id did not move, which is the ordinary failover.
+    swapScope();
     resubscribeAll();
     serverReady();
     // Tell Terminal to reset stale resize state + re-fit against the new server.

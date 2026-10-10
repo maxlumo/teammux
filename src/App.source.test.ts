@@ -527,7 +527,21 @@ test('the content tree is bound to one server, and only the swap binds it (board
     ['boot', /consumeConnectUrlParams\(\);[\s\S]{0,300}?navLiveOwner = navProvenance\(\);[\s\S]{0,400}?swapScope\(\);/u],
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
+    // A failover can be the connect that first learns the machine's id, and
+    // then identity repair can absorb the entry the app was on.
+    ['a failover', /function onReconnectSuccess\([\s\S]*?swapScope\(\);/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
+  // An ABSORBED entry is followed, in the one place that reads CURRENT: the
+  // registry is the evidence (an id the app holds can stop being an entry
+  // only by being absorbed, since removeServer refuses to delete CURRENT), so
+  // no connect path has to report the merge.
+  assert.match(source, /if \(entry\) rebindAbsorbed\(entry\.id\);\s*const held = scopeSwap\.bound\(\);/u);
+  assert.match(source, /function rebindAbsorbed\(into\) \{\s*const known = new Set\(loadServers\(localStorage\)\.map\(\(s\) => s\.id\)\);\s*const absorbed = \(serverId\) => !!serverId && !known\.has\(serverId\);\s*if \(absorbed\(navLiveOwner\)\) navLiveOwner = into;/u,
+    'the provenance of the legacy record follows the merge');
+  for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)'])
+    assert.ok(source.includes(held), `and so does what App holds: ${held}`);
+  assert.match(source, /reownSavedNav\(localStorage, known, into\);/u,
+    'and the record on disk, which names its server from v2 on');
   // The saved navigation names its server, and the restore is filtered to the
   // server it runs against (board #335 ②b-2).
   // One answer to which server a reference names — and it is the swap's
@@ -565,7 +579,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // which is what makes "the identity has one home" checkable.
   assert.match(source, /let termPane = \$state\(null\);/u);
   for (const write of [...source.matchAll(/^\s*termPane = (.+)$/gmu)].slice(1)) {
-    assert.match(write[1]!, /paneRef\(navServerId\(\)|^pane;$|^null;$|^move\(termPane\);$|^s\.pane;$/u,
+    assert.match(write[1]!, /paneRef\(navServerId\(\)|^pane;$|^null;$|^move\(termPane\);$|^rebind\(termPane\);$|^s\.pane;$/u,
       `termPane = ${write[1]} — a pane is a reference, not a target string`);
   }
   // The strings consumers and the wire take are DERIVED: a serverId cannot

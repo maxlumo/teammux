@@ -1,7 +1,7 @@
 // The saved nav state across the v1 → v2 change (board #335 ②b-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, navFor, quarantineLegacyNav, readLegacyNav, saveNav, type SavedNav } from './nav-saved.ts';
+import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav, type SavedNav } from './nav-saved.ts';
 import { paneRef } from './refs.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -175,4 +175,38 @@ test('a split restores as whole cells with distinct ids', () => {
   const ids = readLegacyNav(collide, 'a').splitCells.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length, `every id is its own: ${ids.join(',')}`);
   assert.deepEqual(ids, [1, 0, 2], 'the given id is kept, the rest take the lowest free one');
+});
+
+test('a record written by an absorbed entry names the survivor', () => {
+  // Identity repair folded alias A into canonical B and deleted A, so A's
+  // v2 record names an id no entry claims any more — and `navFor(..., 'b')`
+  // would drop the navigation of the machine the app is connected to
+  // (reviewer P1, 2026-10-10).
+  const storage = mem();
+  saveNav(storage, {
+    page: 'terminal',
+    pane: paneRef('a', 'work', 'work:1.0'),
+    splitLayout: 2,
+    splitCells: [{ id: 0, pane: paneRef('a', 'work', 'work:1.0') }, { id: 1, pane: paneRef('a', 'work', 'work:2.0') }],
+  });
+  assert.equal(reownSavedNav(storage, new Set(['b']), 'b'), true);
+  const nav = readLegacyNav(storage, '');
+  assert.deepEqual(nav.pane, paneRef('b', 'work', 'work:1.0'));
+  assert.deepEqual(nav.splitCells.map((c) => c.pane?.serverId), ['b', 'b'], 'the cells came too');
+  assert.deepEqual(navFor(nav, 'b').splitCells.map((c) => c.pane?.target), ['work:1.0', 'work:2.0'],
+    'and the restore for B keeps every pane');
+});
+
+test('a record whose server is still saved is left exactly as it is', () => {
+  // Being another server's record is not being absorbed, and a v1 record owns
+  // nothing to rewrite: its provenance is the caller's.
+  const live = mem();
+  saveNav(live, { page: 'terminal', pane: paneRef('b', 'work', 'work:1.0'), splitLayout: 1, splitCells: [] });
+  const before = live.getItem(NAV_KEY);
+  assert.equal(reownSavedNav(live, new Set(['a', 'b']), 'a'), false, 'B is saved, so B keeps its record');
+  assert.equal(live.getItem(NAV_KEY), before, 'and the bytes are untouched');
+  const legacy = mem({ [NAV_KEY]: '{"page":"terminal","terminalTarget":"work:1.0"}' });
+  assert.equal(reownSavedNav(legacy, new Set(['b']), 'b'), false, 'a v1 record names no server');
+  assert.equal(legacy.getItem(NAV_KEY), '{"page":"terminal","terminalTarget":"work:1.0"}');
+  assert.equal(reownSavedNav(mem({ [NAV_KEY]: 'not json' }), new Set(['b']), 'b'), false);
 });
