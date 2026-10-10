@@ -9,9 +9,11 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { agentHue, localWhen } from './hub.ts';
-  import { centre, type Alert } from './notify-centre.svelte.ts';
+  import type { Alert, Centre } from './notify-centre.svelte.ts';
 
-  let { onpick = (_a: Alert) => {} }: { onpick?: (a: Alert) => void } = $props();
+  // The shell renders this popover, outside any server's subtree, so it is
+  // handed the bound server's centre rather than reading a scope (②b-2-1).
+  let { centre, onpick = (_a: Alert) => {} }: { centre: Centre; onpick?: (a: Alert) => void } = $props();
   let view = $state<'all' | 'me'>('all');
   const shown = $derived(view === 'me' ? centre.items.filter((a) => a.toHuman) : centre.items);
   const when = (ms: number) => localWhen(Math.floor(ms / 1000));

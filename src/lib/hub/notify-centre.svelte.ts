@@ -19,7 +19,7 @@
 //
 // Per server: the list lives in `tmux_hub_alerts`, one of servers.ts
 // PARKED_KEYS, so a switch parks it with the rest of the server's Hub state
-// and `reload()` reads the target's. Entries also carry the server id, and a
+// and the target's runtime builds its own log over the surfaced key. Entries also carry the server id, and a
 // jump request carries it too, so a late jump cannot act on another server.
 import type { FeedMsg, NewsKind } from './notifications.ts';
 
@@ -94,8 +94,9 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 // same split hub-prefs needed):
 //
 //   the LIST is per SERVER. It lives in `tmux_hub_alerts`, one of servers.ts
-//     PARKED_KEYS, every entry already carries its `server`, and `reload()`
-//     existed only because a switch re-pointed the live key.
+//     PARKED_KEYS, and every entry already carries its `server`. It belongs to
+//     a runtime (②b-2-1); the `reload()` that existed because a switch
+//     re-pointed the live key is gone with the module instance.
 //   the SURFACE is per WINDOW. There is one bell, one popover and one jump
 //     request in flight, however many servers are on screen — a second
 //     anchor would mean two popovers fighting over the same corner, and a
@@ -105,9 +106,10 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 // The union — one bell counting both servers — is a projection over the logs,
 // which is ②a-5's business, not a second list here.
 //
-// NOT YET WIRED PER RUNTIME, which is not the same as uncalled: production
-// reads `centre` below, which is one log plus the one surface, exactly as it
-// read the module state before.
+// Wired per runtime since ②b-2-1: each runtime's `ServerState` holds a
+// `createCentre(createAlertLog(storage))`, and there is no module instance of
+// a log. Through b2-4 that storage is the bare localStorage, so the bundle is
+// built only once its server is current.
 
 /** One SERVER's alert list. */
 export interface AlertLog {
@@ -118,8 +120,6 @@ export interface AlertLog {
   viewed(key: string): void;
   failed(key: string, reason: string): void;
   clear(): void;
-  /** Re-read this server's stored list. */
-  reload(): void;
 }
 
 export function createAlertLog(storage: Store | null): AlertLog {
@@ -139,7 +139,6 @@ export function createAlertLog(storage: Store | null): AlertLog {
     viewed(key) { save(state.items.map((a) => (a.key === key ? { ...a, viewed: true, failed: undefined } : a))); },
     failed(key, reason) { save(state.items.map((a) => (a.key === key ? { ...a, failed: reason } : a))); },
     clear() { save([]); },
-    reload() { state.items = read(storage); },
   };
 }
 
@@ -158,8 +157,8 @@ export interface CentreSurface {
   /** The request `n` is done (landed, failed, or invalidated): it is never
    * replayed. A newer request is left alone. */
   consume(n: number): void;
-  /** A switch (and, in ②b, dropping a runtime) invalidates anything aimed at
-   * the server being left. */
+  /** A switch invalidates anything aimed at the server being left: the
+   * popover closes and a jump in flight is dropped. */
   reset(): void;
 }
 
@@ -178,32 +177,31 @@ export function createCentreSurface(): CentreSurface {
   };
 }
 
-const storage = (): Store | null => (typeof localStorage === 'undefined' ? null : localStorage);
-
-/** This window's one surface. ②b passes THIS to every runtime's centre. */
+/** This window's one surface: every server's centre shares it. */
 export const centreSurface = createCentreSurface();
-/** The app's one alert log, for as long as it looks at one server. */
-export const alertLog = createAlertLog(storage());
 
-/** What every consumer still imports: one server's log plus this window's
- * surface, behind the shape the module always had. ②b gives each runtime its
- * own log and keeps sharing the surface. */
-export const centre = {
-  get items(): readonly Alert[] { return alertLog.items; },
-  get unviewed(): number { return alertLog.unviewed; },
-  record(alert: Alert) { alertLog.record(alert); },
-  markRoomRead(session: string, seq: number) { alertLog.markRoomRead(session, seq); },
-  viewed(key: string) { alertLog.viewed(key); },
-  failed(key: string, reason: string) { alertLog.failed(key, reason); },
-  clear() { alertLog.clear(); },
-  /** After a server switch pointed the live key at another server's list: the
-   * list is re-read and anything aimed at the server being left is dropped. */
-  reload() { alertLog.reload(); centreSurface.reset(); },
-  get anchor() { return centreSurface.anchor; },
-  toggle(trigger: HTMLElement) { centreSurface.toggle(trigger); },
-  close() { centreSurface.close(); },
-  get jump(): JumpRequest | null { return centreSurface.jump; },
-  requestJump(alert: Alert) { centreSurface.requestJump(alert); },
-  isCurrent(n: number) { return centreSurface.isCurrent(n); },
-  consume(n: number) { centreSurface.consume(n); },
-};
+/**
+ * One server's centre: ITS alert log, behind the shape every consumer always
+ * read, plus this window's ONE surface (board #335 ②b-2-1). Each runtime's
+ * `ServerState` holds one; the log goes away with the runtime, and the
+ * surface — the bell, the popover, the jump in flight — stays the window's.
+ */
+export function createCentre(log: AlertLog, surface: CentreSurface = centreSurface) {
+  return {
+    get items(): readonly Alert[] { return log.items; },
+    get unviewed(): number { return log.unviewed; },
+    record(alert: Alert) { log.record(alert); },
+    markRoomRead(session: string, seq: number) { log.markRoomRead(session, seq); },
+    viewed(key: string) { log.viewed(key); },
+    failed(key: string, reason: string) { log.failed(key, reason); },
+    clear() { log.clear(); },
+    get anchor() { return surface.anchor; },
+    toggle(trigger: HTMLElement) { surface.toggle(trigger); },
+    close() { surface.close(); },
+    get jump(): JumpRequest | null { return surface.jump; },
+    requestJump(alert: Alert) { surface.requestJump(alert); },
+    isCurrent(n: number) { return surface.isCurrent(n); },
+    consume(n: number) { surface.consume(n); },
+  };
+}
+export type Centre = ReturnType<typeof createCentre>;

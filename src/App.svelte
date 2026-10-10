@@ -20,7 +20,7 @@
   import ServerList from './lib/app/ServerList.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
-  import { centre } from './lib/hub/notify-centre.svelte.ts';
+  import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
@@ -110,6 +110,11 @@
    * the subtree with the runtime. A WeakMap because the bundle's life is the
    * handle's: a handle nobody holds takes its server's memory with it. */
   const serverStates = new WeakMap();
+  /** The centre the shell's bell shows: the bound server's (②b-2-1), or —
+   * with no server — an empty list over the window's one surface, so the bell
+   * and its popover keep one owner whether or not a server is bound. */
+  const noServerCentre = createCentre(createAlertLog(null));
+  const centre = $derived(serverStates.get(scopeRuntime)?.centre ?? noServerCentre);
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -874,7 +879,7 @@
       reconnectMachine.cancel();
       serverSwitch.supersede();
       resetServerMemory();
-      centre.reload();
+      centreSurface.reset();          // the bell and a jump aimed at the server left
       navLiveOwner = navProvenance();
       swapScope();
       localStorage.removeItem('tmux_disconnected');
@@ -1224,7 +1229,7 @@
     setSocket,
     machineId: () => getMachineId() || '',
     comeUp: (target) => {
-      centre.reload();
+      centreSurface.reset();          // the bell and a jump aimed at the server left
       // Arriving surfaced the target's parked slot into the live key.
       navLiveOwner = navProvenance();
       swapScope();
@@ -2238,7 +2243,7 @@
       style:--pop-maxw="{centrePos.maxW}px" style:--pop-maxh="{centrePos.maxH}px"
       style:--pop-origin={centrePlace?.origin}
       bind:this={centreEl} bind:offsetWidth={centreW} bind:offsetHeight={centreH}>
-      <NotifyCentre onpick={(a) => { centre.close(); centre.requestJump(a); if (page !== 'hub') switchTab('hub'); }} />
+      <NotifyCentre {centre} onpick={(a) => { centre.close(); centre.requestJump(a); if (page !== 'hub') switchTab('hub'); }} />
     </div>
   {/if}
 

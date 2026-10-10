@@ -689,7 +689,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centre\.reload\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
+  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
     'the same reset + rebind + bring-up as an in-place switch — and swapScope builds the new server s state');
 });
 

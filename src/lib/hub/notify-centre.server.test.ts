@@ -80,20 +80,6 @@ test('a failure message belongs to the list that holds the entry', () => {
   assert.equal(b.items[0]?.failed, undefined, 'the same key on B is a different entry');
 });
 
-test('a reload re-reads one server s slot only', () => {
-  const disk = mem();
-  const a = createAlertLog(scoped(disk, 'a'));
-  const b = createAlertLog(scoped(disk, 'b'));
-  a.record(alert('a', 'app', 'm1'));
-  b.record(alert('b', 'app', 'm1'));
-  // Something outside wrote A's slot (another tab, the migration).
-  disk.setItem(`${ALERTS_KEY}::a`, JSON.stringify([alert('a', 'app', 'm2')]));
-
-  a.reload();
-  assert.deepEqual(a.items.map((x) => x.id), ['m2']);
-  assert.deepEqual(b.items.map((x) => x.id), ['m1'], 'B did not re-read anything');
-});
-
 test('one window has ONE bell, popover and jump request', () => {
   // A second anchor would be two popovers in one corner; a per-server jump
   // counter would let two requests both believe they are current.
@@ -144,6 +130,5 @@ test('a log with no storage still works', () => {
   const a = createAlertLog(null);
   a.record(alert('a', 'app', 'm1'));
   assert.equal(a.unviewed, 1);
-  a.reload();
-  assert.deepEqual(a.items, [], 'with nowhere to read from, a reload empties it');
+  assert.deepEqual(createAlertLog(null).items, [], 'and a new one has nothing to read');
 });

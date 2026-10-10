@@ -37,7 +37,7 @@
     addTeamMessageListener, removeTeamMessageListener,
   } from '../core/ws.ts';
   import { sortRows } from '../projects/projects.ts';
-  import { centre, alertOf } from './notify-centre.svelte.ts';
+  import { alertOf } from './notify-centre.svelte.ts';
   import { currentServerId } from '../app/servers.ts';
   import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch } from './hub.ts';
   import { resolvePathRef } from '../core/path-links.ts';
@@ -57,11 +57,11 @@
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { activeModal } from '../ui/modal.ts';
 
-  // This server's memory — per-project lead, read mark, draft, drawer, roster
-  // and the open project — from the scope the subtree is bound to (board #335
-  // ②b-2-1), read once at init. The person's own preferences come through it
+  // This server's memory — per-project lead, read mark, draft, drawer, roster,
+  // the open project, and its notification centre — from the scope the
+  // subtree is bound to (board #335 ②b-2-1), read once at init. The person's own preferences come through it
   // from `appPrefs`, their one owner.
-  const hubPrefs = useServerScope().state.prefs;
+  const { prefs: hubPrefs, centre } = useServerScope().state;
 
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null } = $props();
   const drawerId = $props.id();

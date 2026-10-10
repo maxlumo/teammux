@@ -26,6 +26,7 @@
 //     first sight of an entry (reviewer, b2-1 plan). b2-4 hands each bundle a
 //     store scoped to its server, and then the timing stops mattering.
 import { createHubPrefs, type HubPrefs } from '../hub/hub-prefs.svelte.ts';
+import { createAlertLog, createCentre, type Centre } from '../hub/notify-centre.svelte.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -35,6 +36,9 @@ export interface ServerState {
    * (feed level, tool-row cap, sidebar) are NOT here: they live in `appPrefs`,
    * one owner however many servers are on screen. */
   prefs: HubPrefs;
+  /** This server's notification centre: ITS alert list, and the window's one
+   * bell, popover and jump request, which every server's centre shares. */
+  centre: Centre;
 }
 
 /** One server's state, over `storage`. Call it only once that server is
@@ -42,5 +46,6 @@ export interface ServerState {
 export function createServerState(storage: Store): ServerState {
   return {
     prefs: createHubPrefs(storage),
+    centre: createCentre(createAlertLog(storage)),
   };
 }

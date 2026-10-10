@@ -12,7 +12,10 @@ const store = new Map<string, string>();
   removeItem: (k: string) => { store.delete(k); },
 };
 (globalThis as any).$state = (v: unknown) => v;
-const { withAlert, readThrough, alertOf, centre, CENTRE_CAP, ALERTS_KEY } = await import('./notify-centre.svelte.ts');
+const { withAlert, readThrough, alertOf, createAlertLog, createCentre, centreSurface, CENTRE_CAP, ALERTS_KEY } = await import('./notify-centre.svelte.ts');
+/** One server's centre over the live key, as its runtime's bundle builds it
+ * once that server is current (board #335 ②b-2-1). */
+const centreNow = () => createCentre(createAlertLog(localStorage));
 
 const ctx = { server: 's1', room: 'proj:p', session: 'p', project: 'P', kind: 'reply' as const, viewed: false, excerpt: 'x' };
 const a = (id: number, ts = id, over: Partial<Alert> = {}): Alert => ({ ...alertOf({ id, seq: id, ts, from: 'dev', to: ['human'] }, ctx), ...over });
@@ -45,9 +48,9 @@ test('alertOf names the source and flags a reply to the human (#289)', () => {
   assert.equal(alertOf({ id: 'm2', seq: 8, ts: 5, from: 'lead', to: ['dev'] }, ctx).toHuman, false);
 });
 
-test('the store persists per live key, clears records only, and reloads a switched server\'s list', () => {
+test('the store persists per live key, clears records only, and a switched server s centre reads its own list', () => {
   store.clear();
-  centre.reload();
+  const centre = centreNow();
   centre.record(a(1));
   centre.record(a(2));
   assert.equal(centre.unviewed, 2);
@@ -58,13 +61,16 @@ test('the store persists per live key, clears records only, and reloads a switch
   const n = centre.jump!.n;
   centre.requestJump(centre.items[0]!);
   assert.equal(centre.isCurrent(n), false, 'a newer jump supersedes');
-  // A server switch points the live key at the other server's list.
+  // A server switch points the live key at the other server's list, resets
+  // the window's surface, and the target's runtime builds its own centre.
   store.set(ALERTS_KEY, JSON.stringify([a(9)]));
-  centre.reload();
-  assert.deepEqual(centre.items.map((x) => x.id), ['9']);
-  assert.equal(centre.jump, null, 'a pending jump does not cross servers');
-  centre.clear();
-  assert.equal(centre.items.length, 0);
+  centreSurface.reset();
+  const next = centreNow();
+  assert.deepEqual(next.items.map((x) => x.id), ['9']);
+  assert.equal(next.jump, null, 'a pending jump does not cross servers');
+  assert.deepEqual(centre.items.map((x) => x.id), ['2', '1'], 'and the server left keeps what it had');
+  next.clear();
+  assert.equal(next.items.length, 0);
 });
 
 test('a pre-#334 list loses its non-bell entries on load; read marks are not the centre\'s (#334)', () => {
@@ -74,7 +80,7 @@ test('a pre-#334 list loses its non-bell entries on load; read marks are not the
   const mine = a(7);                                             // a reply to the human
   store.set(ALERTS_KEY, JSON.stringify([mine, done, note, plain]));
   store.set('tmux_hub_seen', JSON.stringify({ p: { seq: 1, ts: 1 } }));
-  centre.reload();
+  const centre = centreNow();
   assert.deepEqual(centre.items.map((x) => x.id), ['7', '6']);
   assert.equal(store.get('tmux_hub_seen'), JSON.stringify({ p: { seq: 1, ts: 1 } }), 'no room read mark moved');
 });

@@ -45,3 +45,23 @@ test('the person s preferences are not in a server s bundle', () => {
   assert.equal(appPrefs.sidebarCollapsed, true, 'a write through any bundle is the one owner s');
   assert.equal(a.prefs.sidebarCollapsed, true);
 });
+
+test('each server s centre holds its own alerts, and every centre shares the one bell', async () => {
+  // The list is per server (`tmux_hub_alerts`, parked per server); the bell,
+  // the popover and the jump in flight are the window's.
+  const { centreSurface } = await import('../hub/notify-centre.svelte.ts');
+  live.clear();
+  live.set('tmux_hub_alerts', JSON.stringify([]));
+  const a = createServerState(localStorage);
+  a.centre.record({ key: 'proj:app|1', server: 'a', room: 'proj:app', session: 'app', project: 'app',
+    seq: 1, id: '1', ts: 1, from: 'dev', toHuman: true, kind: 'reply', excerpt: 'x', viewed: false });
+  // The switch surfaces B's (empty) list into the live key.
+  live.set('tmux_hub_alerts', JSON.stringify([]));
+  const b = createServerState(localStorage);
+  assert.equal(a.centre.unviewed, 1);
+  assert.equal(b.centre.unviewed, 0, 'B does not show A s alert');
+  a.centre.requestJump(a.centre.items[0]!);
+  assert.equal(b.centre.jump?.alert.key, 'proj:app|1', 'one jump request for the window');
+  centreSurface.reset();
+  assert.equal(a.centre.jump, null);
+});
