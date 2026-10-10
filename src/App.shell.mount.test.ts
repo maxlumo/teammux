@@ -1906,6 +1906,45 @@ test('blocked mid-session (a claim that cannot be recorded): the optimizer and t
   retry.click();
   for (let i = 0; i < 6; i++) await h.settle();
   assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'm-a claimed its inputs');
+  // Storage is not the socket (reviewer P1-2 on 08fdb6ba): the drop while
+  // blocked is reconnected now, and A comes up on it.
+  await h.app.advance(5000);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const after = events.filter((e) => e.startsWith('answered:')).slice(-1)[0] ?? '';
+  assert.ok(dials() > n, `Retry reconnected: ${events.filter((e) => e.startsWith('connect:')).slice(-3).join(',')}`);
+  assert.match(after, /ws:\/\/a(-lan)?:9899/u, 'to alpha');
+  assert.equal(h.app.document.querySelector('.reconnect-cancel'), null, 'and the reconnect is over');
+  assert.equal(h.onScreen(), 'work:1.0', 'with m-a s navigation');
+});
+
+test('Retry after a mid-session block with the socket still up: A comes up on it, nothing is dialled again', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_server_current: 'gone',
+    tmux_layout_mode: 'desktop',
+  }, undefined, { calls: events, setup: store.setup });
+  const ls = h.app.window.localStorage;
+  await connectCard(h.app, h.settle, 'ws://b:9899');
+  store.state.failing = true;
+  await h.app.advance(1000);
+  await h.switchTo('alpha');
+  await h.app.advance(1000);
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'blocked');
+  const dials = () => events.filter((e) => e.startsWith('connect:')).length;
+  const n = dials();
+  store.state.failing = false;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))?.click();
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, 'a');
+  assert.equal(dials(), n, 'no new dial: the socket was up');
+  assert.equal(h.onScreen(), 'work:1.0', 'and m-a s navigation came up on it');
 });
 
 test('the boot dials the CURRENT entry s address, not a mirror an unanswered form left behind (board #335 ②b-4)', async (context) => {
@@ -2037,4 +2076,61 @@ test('a saved entry boots even when an unanswered form left the mirror empty (re
   await app.advance(1000);
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://a:9899'], 'the entry s address and token');
   assert.equal(onScreen(), 'work:1.0');
+});
+
+test('a merge rewrite of the navigation that cannot be written blocks with Retry, keeps the record, and Retry restores the layout (reviewer P1-3 on 08fdb6ba)', async (context) => {
+  // canon is current; its slot's v2 record still names the absorbed alias,
+  // and the merge record says alias → canon. Rewriting the slot fails.
+  const store = refusing(['tmux_state::canon']);
+  const record = savedNav('alias', 'work:1.0');
+  const h = await bootApp(context, {
+    tmux_servers: JSON.stringify([{ id: 'canon', name: 'canonical', address: 'ws://a:9899', token: 'tok', machineId: 'm-a', named: true }]),
+    tmux_server_current: 'canon',
+    tmux_server_merges: JSON.stringify({ alias: 'canon' }),
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'canon' }),
+    'tmux_state::canon': record,
+    tmux_address: 'ws://a:9899', tmux_token: 'tok',
+    tmux_layout_mode: 'desktop',
+  }, undefined, { setup: store.setup });
+  await h.app.advance(6000);
+  const ls = h.app.window.localStorage;
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server page');
+  assert.ok(cardButton(h.app, /retry/iu), 'the card offers Retry');
+  assert.equal(ls.getItem('tmux_state::canon'), record, 'the record is as it was');
+  store.state.failing = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(JSON.parse(ls.getItem('tmux_state::canon')!).pane.serverId, 'canon', 'Retry rewrote it');
+  assert.equal(h.onScreen(), 'work:1.0', 'and the layout came back');
+});
+
+test('while blocked the registry is frozen: an unnamed entry adopts no hostname until Retry (reviewer P2-b)', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = JSON.parse(twoServers({ live: '', parked: '' }).tmux_servers);
+  delete servers[0].named;
+  servers[0].name = 'a';
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers),
+    tmux_server_current: 'gone',
+    tmux_address: '', tmux_token: '',                // no boot dial: alpha has not answered yet
+    tmux_layout_mode: 'desktop',
+  }, undefined, { setup: store.setup });
+  const ls = h.app.window.localStorage;
+  await connectCard(h.app, h.settle, 'ws://b:9899');
+  store.state.failing = true;
+  await h.app.advance(1000);
+  await h.switchTo('a');                           // its auth reports m-a.host; the claim fails
+  await h.app.advance(1000);
+  const alpha = JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'a');
+  assert.notEqual(alpha.name, 'm-a.host', 'the unnamed entry did not adopt the hostname while blocked');
+  store.state.failing = false;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))?.click();
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'a').name, 'm-a.host', 'and adopts it once unblocked');
 });

@@ -466,7 +466,7 @@ test('every App socket owner goes through the switch module and loses ownership 
   assert.doesNotMatch(source, /\bhubRooms\(|\bbackendsList\(/u, 'App asks no capability question over the facade');
   // The only remaining direct starts are the reconnect machine's own owners.
   const starts = [...source.matchAll(/reconnectMachine\.start\(\)/gu)].length;
-  assert.equal(starts, 3, 'setOnDisconnect, the visibility resume and startReconnect — each guarded by the switch state');
+  assert.equal(starts, 4, 'setOnDisconnect, the visibility resume, startReconnect and the migration Retry — each guarded');
 });
 
 test('the leave walk holds Settings mounted while guards are asked (board 315 review P1)', () => {
@@ -580,7 +580,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
   // never an inference from an id being absent (reviewer P1-a, 2026-10-10).
-  assert.match(source, /const fold = id \? foldFor\(id\) : 'ok';\s*const entry = fold !== 'blocked' \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) \?\? null : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u,
+  assert.match(source, /let fold = id \? foldFor\(id\) : 'ok';[\s\S]{0,300}?if \(fold !== 'blocked' && !followMerges\(\)\) \{ migrationBlocked = true; fold = 'blocked'; \}\s*const entry = fold !== 'blocked' \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) \?\? null : null;\s*const held = scopeSwap\.bound\(\);/u,
     'no server s state is built before the fold has run for it, and none at all while it cannot be recorded');
   assert.match(source, /function followMerges\(\) \{\s*const survivorOf = \(serverId\) => mergedInto\(localStorage, serverId\);/u,
     'the survivor comes from servers.mergedInto');
@@ -803,6 +803,16 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /frozen=\{migrationBlocked \? t\('migrationBlockedNote'\) : ''\} onRetry=\{retryMigration\}/u, 'and the form offers only Retry');
   const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
   assert.match(settings, /async function doConnect\(\) \{\s*if \(frozen\) return;/u, 'not only its button');
+  // And every other registry writer (reviewer P2-b on 08fdb6ba).
+  assert.match(source, /if \(!hostname \|\| migrationBlocked\) return;/u, 'the hostname adoption');
+  assert.match(source, /function serverRename\(id, name\) \{ if \(!migrationBlocked\)/u);
+  assert.match(source, /function serverRemove\(id\) \{ if \(migrationBlocked\) return;/u);
+  assert.match(source, /onAddressesChange=\{\(next\) => \{\s*if \(migrationBlocked\) return;/u);
+  assert.match(source, /if \(mid && !migrationBlocked\) \{\s*recordServer\(/u, 'bringUp records nothing while frozen');
+  // The merge rewrite is inside the gate (P1-3), and Retry resumes the
+  // connection by its real state (P1-2).
+  assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ migrationBlocked = true; fold = 'blocked'; \}/u);
+  assert.match(source, /if \(isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline && !reconnectMachine\.isActive\(\)\) reconnectMachine\.start\(\);/u);
   // Every per-server read and write goes through the server's store.
   assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\),/u);
   assert.match(source, /readNav\(createServerStore\(localStorage, target\.id\)\)/u);
@@ -840,7 +850,7 @@ test('removing a saved server goes through the shared ConfirmDialog (board #55)'
   assert.match(fn, /onremove\(v\.id\)/u, 'and removes by that id alone');
   assert.match(list, /<ConfirmDialog open=\{!!victim\}[\s\S]*?onconfirm=\{confirmRemove\} oncancel=\{\(\) => \(victim = null\)\}/u,
     'the shared dialog, cancel drops the capture');
-  assert.match(source, /function serverRemove\(id\) \{ serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed');
+  assert.match(source, /function serverRemove\(id\) \{ if \(migrationBlocked\) return; serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed');
 });
 
 test('one system-vitals strip serves desktop sidebar and an open phone drawer (board #85)', () => {

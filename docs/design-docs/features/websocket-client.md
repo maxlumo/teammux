@@ -469,9 +469,16 @@ P1-c on cf7e7957).
 
 **A pending input is claimed only by its machine** (reviewer P1-c on the ②
 plan; P1-b on cf7e7957). Every bind meets a pending input (`claimPending`):
-a server whose machine IS the legacy mirror's claims it — keeping whatever
-it wrote to its slot since, which is newer — and any other server runs on
-its own slots while the input stays pending, however many come first. A
+a server whose machine IS the legacy mirror's claims it, by the fold's rule —
+the live value replaces a slot, an absent one clears it — except for a slot
+its owner wrote since (reviewer P1-1 on 08fdb6ba). A non-empty slot is not
+evidence of that: it may be the owner's pre-#335 park, older than the inputs.
+So the pending record fingerprints every slot that existed when the inputs
+were set aside, and only a slot that changed, appeared or disappeared since is
+kept. It fingerprints the inputs too (P2-a): if a build from before #335 has
+rewritten them since, the machine they belong to is read again from its
+mirror before anybody claims them. Any other server runs on its own slots
+while the input stays pending, however many come first. A
 server that has not reported its machine yet claims it after its
 authentication. There is no terminal "consumed, nobody's" state: only a fold
 ends pending.
@@ -507,10 +514,16 @@ lost to it. In that commit:
   identity runs — the boot dial, a deep link's activation (the link is parsed
   and stripped from the URL at once and applied after the migration is
   recorded), a switch, an address row, the optimizer, the reconnect loop or a
-  late reconnect success, an arrival. The connect card shows the reason and
-  offers only Retry; connected, the content area's panel does. Retry re-runs
-  every step that had not completed; every later bind tries again too. The
-  shell and Preferences stay;
+  late reconnect success, an arrival — nor any other registry write (a
+  hostname adoption, a rename or remove, an address list edit; reviewer P2-b).
+  The navigation's merge rewrite (`followMerges`) is a pre-bind write too, and
+  its failure blocks (P1-3). The connect card shows the reason and offers only
+  Retry; connected, the content area's panel does. Retry re-runs every step
+  that had not completed, then resumes the CONNECTION by its real state
+  (P1-2): never connected, the boot dial runs; the socket still up, the server
+  comes up on it with no new dial; the socket dropped while blocked, the
+  navigation is restored and the reconnect loop brings the socket back. Every
+  later bind tries again too. The shell and Preferences stay;
 - where to reach a server is its ENTRY, for every id (`server-target.ts`), and
   every path that moves the active address records it there once it answers —
   the form and the deep link (`activateConnected`), a failover

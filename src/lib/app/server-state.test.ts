@@ -253,8 +253,12 @@ const PENDING_DANGLING = (storage: ReturnType<typeof mem>) => {
   assert.deepEqual(report, { ran: false, reason: 'pending', serverId: '', folded: [], cleared: [] });
   const { [LAYOUT_KEY]: marker, 'tmux_state::unattributed': copy, ...rest } = storage.dump();
   assert.deepEqual(rest, before, 'nothing filed into any slot');
-  assert.deepEqual(JSON.parse(marker!), { v: LAYOUT_VERSION, state: 'pending', machineId: 'm-a' },
+  const record = JSON.parse(marker!);
+  assert.deepEqual({ v: record.v, state: record.state, machineId: record.machineId }, { v: LAYOUT_VERSION, state: 'pending', machineId: 'm-a' },
     'the attribution state is RECORDED, with the legacy mirror s machine as its evidence');
+  assert.equal(typeof record.inputs, 'string', 'and the inputs it is evidence for, fingerprinted');
+  assert.deepEqual(Object.keys(record.slots).sort(), Object.keys(before).filter((k) => /::(a|b)$/u.test(k)).sort(),
+    'and every slot that existed then');
   assert.equal(JSON.parse(copy!).raw, before.tmux_state, 'and the navigation is copied aside');
 };
 
@@ -466,4 +470,41 @@ test('a key the server never had leaves no slot behind', () => {
   assert.equal(storage.getItem('tmux_hub_lead::a'), null);
   assert.ok(!report.folded.includes('tmux_hub_lead'));
   assert.ok(!report.cleared.includes('tmux_hub_lead'), 'nothing to clear either');
+});
+
+test('a claim by the SAME id folds by the fold s rule: its old park is replaced, a cleared value stays cleared (reviewer P1-1 on 08fdb6ba)', () => {
+  // `tmux_hub_drafts::a` is A's pre-#335 park — older than the live draft by
+  // construction — not something the owner wrote since.
+  const storage = preMigration();
+  storage.setItem('tmux_hub_drawer::a', JSON.stringify({ work: 'old drawer' }));   // a park the live set has cleared
+  storage.removeItem('tmux_hub_drawer');
+  storage.setItem('tmux_server_current', 'ghost');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  assert.equal(claimPending(storage, 'a').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'half a line on A' }, 'the live draft replaced the old park');
+  assert.equal(storage.getItem('tmux_hub_drawer::a'), null, 'and the cleared drawer did not come back');
+});
+
+test('a claim keeps what the owner changed or cleared after the inputs were set aside', () => {
+  const storage = preMigration();
+  storage.setItem('tmux_hub_seen::a', JSON.stringify({ work: { seq: 1, ts: 1 } }));   // an old park
+  storage.setItem('tmux_server_current', 'ghost');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  // The owner was bound before it could prove itself, and the person used it.
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'typed on the new build' }));
+  storage.removeItem('tmux_hub_seen::a');
+  assert.equal(claimPending(storage, 'a').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'typed on the new build' }, 'a changed slot is kept');
+  assert.equal(storage.getItem('tmux_hub_seen::a'), null, 'a slot cleared since stays cleared');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_lead::a')!), { work: 'builder' }, 'an untouched one takes the live value');
+});
+
+test('inputs an old build changed after they were set aside are re-attributed before anyone claims them (reviewer P2-a)', () => {
+  const storage = pending([{ id: 'a2', machineId: 'm-a' }, { id: 'b2', machineId: 'm-b' }]);
+  // A pre-#335 page on the same origin switched to B: B's live keys now.
+  storage.setItem('tmux_hub_drafts', JSON.stringify({ work: 'B s bytes' }));
+  storage.setItem('tmux_machine_id', 'm-b');
+  assert.equal(claimPending(storage, 'a2').reason, 'pending', 'm-a may not claim B s bytes');
+  assert.equal(claimPending(storage, 'b2').reason, 'folded', 'the machine they now belong to may');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::b2')!), { work: 'B s bytes' });
 });

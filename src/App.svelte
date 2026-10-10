@@ -176,9 +176,11 @@
     // asked for it (board #335 ②b-4): a fresh client's first server folds
     // here, a pending input meets the server that can claim it, and a
     // migration that cannot be recorded binds nothing at all.
-    const fold = id ? foldFor(id) : 'ok';
+    let fold = id ? foldFor(id) : 'ok';
+    // The navigation's merge rewrite is a pre-bind write too (reviewer P1-3
+    // on 08fdb6ba): not attempted while blocked, and a failure blocks.
+    if (fold !== 'blocked' && !followMerges()) { migrationBlocked = true; fold = 'blocked'; }
     const entry = fold !== 'blocked' ? loadServers(localStorage).find((s) => s.id === id) ?? null : null;
-    followMerges();
     const held = scopeSwap.bound();
     // A claim just filed the inputs into THIS server's slots: its state,
     // read before the claim, is rebuilt from them.
@@ -223,15 +225,18 @@
    * machine — follows the same merges. */
   function followMerges() {
     const survivorOf = (serverId) => mergedInto(localStorage, serverId);
+    // The record on disk FIRST, which names its server from v2 on — in the
+    // survivor's slot, where the merge moved it. A write that fails returns
+    // false and moves nothing in memory either: the caller blocks, and
+    // Retry runs this again.
+    const id = currentServerId(localStorage);
+    try { if (id) reownSavedNav(createServerStore(localStorage, id), survivorOf); } catch { return false; }
     const rebind = (ref) => (ref ? reownRef(ref, survivorOf) : ref);
     termPane = rebind(termPane);
     filesRef = rebind(filesRef);
     const cells = splitCells.map((c) => ({ ...c, pane: rebind(c.pane) }));
     if (cells.some((c, i) => c.pane !== splitCells[i].pane)) splitCells = cells;
-    // And the record on disk, which names its server from v2 on — in the
-    // survivor's slot, where the merge moved it.
-    const id = currentServerId(localStorage);
-    if (id) reownSavedNav(createServerStore(localStorage, id), survivorOf);
+    return true;
   }
   /** The server every navigation reference names: the one the content tree is
    * bound to (board #335 ②b-2). Empty when nothing is bound — and then
@@ -1153,7 +1158,9 @@
   // connect paths' recordServer, so a fresh entry is already there.
   $effect(() => {
     const { hostname, machineId } = serverInfo;
-    if (!hostname) return;
+    // The registry is frozen while the migration is blocked; this runs
+    // again once it is not.
+    if (!hostname || migrationBlocked) return;
     const servers = loadServers(localStorage);
     const entry = (machineId && servers.find((s) => s.machineId === machineId))
       || servers.find((s) => s.id === currentServerId(localStorage));
@@ -1287,8 +1294,9 @@
     };
   });
 
-  function serverRename(id, name) { serverList = renameServer(localStorage, id, name); }
-  function serverRemove(id) { serverList = removeServer(localStorage, id); serverCurId = currentServerId(localStorage); }
+  // Frozen with the rest of the registry while the migration is blocked.
+  function serverRename(id, name) { if (!migrationBlocked) serverList = renameServer(localStorage, id, name); }
+  function serverRemove(id) { if (migrationBlocked) return; serverList = removeServer(localStorage, id); serverCurId = currentServerId(localStorage); }
   /** A row of the server list was picked. */
   function doServerSwitch(id) {
     const target = loadServers(localStorage).find((s) => s.id === id);
@@ -1607,13 +1615,25 @@
    * is recorded — applying it makes its server current, and the inputs must
    * be attributed first (reviewer P1-a on cf7e7957). */
   let deferredLink = null;
+  /** Retry: finish what the migration could not record, then resume the
+   * bind — and the CONNECTION, by its actual state (reviewer P1-2 on
+   * 08fdb6ba): storage that worked again is not a socket that did. Never
+   * connected (blocked at boot): the boot dial runs now that nothing blocks
+   * it. Connected and the socket alive: the server comes up on it, no new
+   * dial. Connected but the socket dropped while blocked (its reconnect was
+   * frozen): the navigation is restored, and the reconnect loop brings the
+   * socket back, through the same handover as any other drop. */
   function retryMigration() {
     prepareStorage();
     if (migrationBlocked) return;
     if (deferredLink) { const link = deferredLink; deferredLink = null; applyConnectLink(link); loadServerRegistry(); }
     swapScope();
+    if (migrationBlocked) return;
     const bound = scopeSwap.bound();
-    if (bound && connected) { serverReady(); void restoreNavFor(bound); }
+    if (!bound || !connected) return;
+    void restoreNavFor(bound);
+    if (isConnected()) serverReady();
+    else if (!heldOffline && !reconnectMachine.isActive()) reconnectMachine.start();
   }
   /** The boot (board #335 ②b-4): the registry and the inputs' attribution
    * FIRST, then the deep link — a link to B makes B current, and attributing
@@ -1677,7 +1697,9 @@
     // server. Record only: the entry booted as current, nothing activates.
     try {
       const mid = getMachineId?.();
-      if (mid) {
+      // Not while the registry is frozen (a switch that arrived and then
+      // found the migration blocked): the switch has recorded it already.
+      if (mid && !migrationBlocked) {
         recordServer(localStorage, {
           address: addr, token,
           ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
@@ -2608,6 +2630,7 @@
       }}
       onDisconnect={() => { page = 'settings'; doDisconnect(); }}
       onAddressesChange={(next) => {
+        if (migrationBlocked) return;
         saveMachineAddresses(localStorage, serverInfo.machineId, next);
         addrSetVersion++;
       }}

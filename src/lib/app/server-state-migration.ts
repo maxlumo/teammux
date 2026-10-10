@@ -43,9 +43,21 @@
 // says by then: a server a connect made current in the meantime is NOT the
 // owner. Only a server whose machine IS that machine claims the inputs
 // (`claimPending`), whenever it shows up; any other runs on its own empty
-// slots and the inputs stay pending. A claim keeps what the owner wrote
-// since — its slot is newer than the inputs. There is no terminal "consumed,
+// slots and the inputs stay pending. There is no terminal "consumed,
 // nobody's" state: only a fold ends pending.
+//
+// A CLAIM FOLDS BY THE FOLD'S RULE, except where the owner has written since
+// (reviewer P1-1 on 08fdb6ba). A non-empty slot is not evidence of a newer
+// value: it may be the owner's pre-#335 park, older than the live inputs by
+// construction. So the pending record keeps a FINGERPRINT of every slot that
+// existed when the inputs were set aside, and at the claim a slot that still
+// matches its fingerprint (or never existed and still does not) takes the
+// live value, or is cleared — the fold's rule — while a slot that changed,
+// appeared or disappeared since was written by the owner on this build, and
+// is kept. The record also fingerprints the INPUTS themselves (P2-a): only a
+// build from before #335 writes them, and if one has since, the evidence
+// they carry (the legacy mirror's machine) is read again before anybody
+// claims them.
 //
 // With no inputs at all there is nothing to attribute: the marker records a
 // fold into CURRENT once one exists.
@@ -68,17 +80,48 @@ import type { ServerId } from './refs.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
+/** A value's fingerprint: FNV-1a over its UTF-16 units, with its length.
+ * Synchronous, because the fold runs before the first render. It decides
+ * only "is this still the value that was there", never who owns anything. */
+export function fingerprint(value: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) { h ^= value.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return `${h.toString(16)}:${value.length}`;
+}
+
+/** The pre-#335 inputs, fingerprinted as one: an absent key counts. */
+function inputsPrint(storage: Pick<Storage, 'getItem'>): string {
+  return fingerprint(JSON.stringify(RESIDENT_KEYS.map((key) => storage.getItem(key))));
+}
+
+/** Every slot of every saved server that exists now, fingerprinted: what a
+ * later claim compares against to tell an old park from a newer write. */
+function slotPrints(storage: Store): Record<string, string> {
+  const prints: Record<string, string> = {};
+  for (const server of loadServers(storage)) {
+    for (const key of RESIDENT_KEYS) {
+      const value = storage.getItem(residentKey(key, server.id));
+      if (value != null) prints[residentKey(key, server.id)] = fingerprint(value);
+    }
+  }
+  return prints;
+}
+
 /** File every legacy live key under `id`'s slot; an absent live key clears
- * the slot (see the header). `keepNewer`: a slot that already holds a value
- * keeps it — a CLAIM, where the owner has been writing its slot since the
- * inputs were set aside. */
-function fileLive(storage: Store, id: ServerId, keepNewer = false): { folded: string[]; cleared: string[] } {
+ * the slot (see the header). With `since` — a claim — a slot whose value is
+ * not what `since` recorded (changed, appeared, or gone) was written by its
+ * owner after the inputs were set aside, and is kept. */
+function fileLive(storage: Store, id: ServerId, since?: Record<string, string>): { folded: string[]; cleared: string[] } {
   const folded: string[] = [];
   const cleared: string[] = [];
   for (const key of RESIDENT_KEYS) {
     const live = storage.getItem(key);
     const slot = storage.getItem(residentKey(key, id));
-    if (keepNewer && slot != null) continue;
+    if (since) {
+      const then = since[residentKey(key, id)];
+      const writtenSince = slot == null ? then !== undefined : then === undefined || fingerprint(slot) !== then;
+      if (writtenSince) continue;
+    }
     if (live != null) { folded.push(key); storage.setItem(residentKey(key, id), live); }
     else if (slot != null) { cleared.push(key); storage.removeItem(residentKey(key, id)); }
   }
@@ -105,7 +148,13 @@ export const LAYOUT_VERSION = '335';
  * machine. */
 export type LayoutMark =
   | { v: string; state: 'folded'; into: ServerId }
-  | { v: string; state: 'pending'; machineId: string };
+  | {
+    v: string; state: 'pending'; machineId: string;
+    /** The inputs' fingerprint when that machine was read. */
+    inputs?: string;
+    /** Every slot that existed then, fingerprinted (see `fileLive`). */
+    slots?: Record<string, string>;
+  };
 
 /** The marker, or null when nothing has been decided. Anything unparseable
  * still counts as consumed: the one thing worse than not knowing which fold
@@ -119,7 +168,11 @@ export function layoutMark(storage: Pick<Storage, 'getItem'>): LayoutMark | null
     if (parsed && typeof parsed === 'object') {
       const v = String(parsed.v ?? '');
       if (parsed.state === 'pending' || (parsed.state === undefined && !parsed.into)) {
-        return { v, state: 'pending', machineId: String(parsed.machineId ?? storage.getItem('tmux_machine_id') ?? '') };
+        return {
+          v, state: 'pending', machineId: String(parsed.machineId ?? storage.getItem('tmux_machine_id') ?? ''),
+          ...(typeof parsed.inputs === 'string' ? { inputs: parsed.inputs } : {}),
+          ...(parsed.slots && typeof parsed.slots === 'object' ? { slots: parsed.slots } : {}),
+        };
       }
       return { v, state: 'folded', into: String(parsed.into ?? '') };
     }
@@ -178,31 +231,42 @@ export function migrateServerState(storage: Store): MigrationReport {
       quarantineLegacyNav(storage);
       storage.setItem(LAYOUT_KEY, JSON.stringify({
         v: LAYOUT_VERSION, state: 'pending', machineId: storage.getItem('tmux_machine_id') || '',
+        inputs: inputsPrint(storage), slots: slotPrints(storage),
       } satisfies LayoutMark));
     } catch { return none('unrecorded'); }
     return none('pending');
   }
-  return foldInto(storage, id, false);
+  return foldInto(storage, id);
 }
 
 /**
  * A pending input meets server `id`: fold it in only if `id`'s machine is the
- * one the legacy mirror named, keeping whatever `id` wrote since. Anything
- * else changes nothing — `pending` again — however often it is asked.
+ * one the legacy mirror named, by the fold's rule — keeping only what `id`
+ * wrote since. Anything else changes nothing — `pending` again — however
+ * often it is asked.
  */
 export function claimPending(storage: Store, id: ServerId): MigrationReport {
   const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
     ({ ran: false, reason, serverId, folded: [], cleared: [] });
   const done = layoutMark(storage);
   if (done?.state !== 'pending') return done ? none('already-done', done.into) : none('no-current');
+  let evidence = done;
+  const now = inputsPrint(storage);
+  if (evidence.inputs !== undefined && evidence.inputs !== now) {
+    // The inputs changed since they were set aside — only a build from
+    // before #335 writes them — so the machine they belong to is read again
+    // from the mirror that build keeps, before anybody claims them.
+    evidence = { ...evidence, machineId: storage.getItem('tmux_machine_id') || '', inputs: now };
+    try { storage.setItem(LAYOUT_KEY, JSON.stringify(evidence)); } catch { return none('unrecorded', id); }
+  }
   const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
-  if (!own || !done.machineId || own !== done.machineId) return none('pending');
-  return foldInto(storage, id, true);
+  if (!own || !evidence.machineId || own !== evidence.machineId) return none('pending');
+  return foldInto(storage, id, evidence.slots ?? {});
 }
 
-function foldInto(storage: Store, id: ServerId, keepNewer: boolean): MigrationReport {
+function foldInto(storage: Store, id: ServerId, since?: Record<string, string>): MigrationReport {
   let moved: { folded: string[]; cleared: string[] };
-  try { moved = fileLive(storage, id, keepNewer); } catch { return { ran: true, reason: 'unrecorded', serverId: id, folded: [], cleared: [] }; }
+  try { moved = fileLive(storage, id, since); } catch { return { ran: true, reason: 'unrecorded', serverId: id, folded: [], cleared: [] }; }
   // Marked AFTER the move, so a failure part-way leaves the inputs readable
   // and the next run redoes the whole fold rather than half of it. Two
   // writes cannot be made atomic in `localStorage`; what is possible is one
