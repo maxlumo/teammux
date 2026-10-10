@@ -39,7 +39,7 @@ test('a guarded break bites, an unguarded one does not, and the file is restored
   assert.match(lines[0]!, /^BITES  add subtracts\n {7}not ok 1 - adds/u);
   assert.equal(lines[1], '*** NO BITE *** name changes', 'an unguarded break is the finding');
   assert.equal(lines[2], 'SKIP (anchor missing) anchor gone');
-  assert.equal(lines.at(-1), 'tree restored, matches HEAD');
+  assert.equal(lines.at(-1), 'tree restored: the whole worktree is as it was before the run');
   assert.equal(await readFile(join(dir, 'lib.mjs'), 'utf8'), original);
 });
 
@@ -68,5 +68,52 @@ test('it refuses to start on a dirty file, and leaves it alone', async (t) => {
     assert.match(lines[0]!, /^refusing to run/u);
     assert.equal(process.exitCode, 1);
     assert.equal(await readFile(join(dir, 'lib.mjs'), 'utf8'), 'export const add = () => 0;\n', 'the work in progress is untouched');
+  } finally { process.exitCode = before; }
+});
+
+test('a break that stops a file loading is BROKE BUILD, never BITES', async (t) => {
+  // validator P2, 2026-10-10: a syntax error fails every test in the file,
+  // which looks exactly like a guard noticing — and proves nothing.
+  const { dir } = await repo(t);
+  const lines = await negativeControls({
+    cwd: dir, log: () => {},
+    files: ['lib.mjs'], tests: ['lib.test.mjs'],
+    cases: [['lib.mjs', 'syntax error', 'a + b', 'a +* b']],
+  });
+  assert.match(lines[0]!, /^\*\*\* BROKE BUILD \*\*\* syntax error: a test file did not load/u);
+});
+
+test('a run that fails or finds no tests is ERROR, never NO BITE', async (t) => {
+  // reviewer P2, 2026-10-10: "nothing failed" is a finding only if something RAN.
+  const { dir, git } = await repo(t);
+  await writeFile(join(dir, 'empty.test.mjs'), '// no tests here\n');
+  await writeFile(join(dir, 'slow.test.mjs'), "import test from 'node:test';\ntest('waits', () => new Promise((r) => setTimeout(r, 60_000)));\n");
+  git('add', '.'); git('commit', '-q', '-m', 'more');
+  const none = await negativeControls({
+    cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['empty.test.mjs'],
+    cases: [['lib.mjs', 'nothing tested', '"lib"', '"x"']],
+  });
+  assert.match(none[0]!, /^\*\*\* ERROR \*\*\* nothing tested: no tests ran in a test file/u);
+  const slow = await negativeControls({
+    cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['slow.test.mjs'], timeoutMs: 1500,
+    cases: [['lib.mjs', 'timed out', '"lib"', '"x"']],
+  });
+  assert.match(slow[0]!, /^\*\*\* ERROR \*\*\* timed out: the run itself failed — killed/u);
+});
+
+test('a test that writes into the tree fails the whole-tree check', async (t) => {
+  // reviewer P2: "restored" used to mean only the named files.
+  const { dir, git } = await repo(t);
+  await writeFile(join(dir, 'litter.test.mjs'),
+    "import test from 'node:test';\nimport { writeFileSync } from 'node:fs';\ntest('litters', () => writeFileSync('stray.txt', 'x'));\n");
+  git('add', '.'); git('commit', '-q', '-m', 'litter');
+  const before = process.exitCode;
+  try {
+    const lines = await negativeControls({
+      cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['litter.test.mjs'],
+      cases: [['lib.mjs', 'anything', '"lib"', '"x"']],
+    });
+    assert.match(lines.at(-1)!, /^\*\*\* TREE CHANGED during the run \*\*\*[\s\S]*stray\.txt/u);
+    assert.equal(process.exitCode, 1);
   } finally { process.exitCode = before; }
 });

@@ -9,6 +9,18 @@
 // A spec is a small `.mjs` that calls `negativeControls(...)` from the
 // worktree root; keep it in gitignored `temp/` beside the review it serves.
 //
+// Five verdicts, because only one of them is evidence (validator and
+// reviewer P2s, 2026-10-10):
+//   BITES        a test failed, and every test file still LOADED;
+//   NO BITE      the tests ran and none failed — the finding;
+//   BROKE BUILD  the replacement stopped a test FILE from loading (a parse or
+//                import error), or failed every test there is: that is the
+//                break failing to compile, not a test noticing it;
+//   ERROR        the run itself failed — a timeout, a crash, no TAP, or no
+//                tests at all — so nothing can be concluded;
+//   SKIP         the anchor was not found.
+// Only BITES says a guard is held.
+//
 // It is committed rather than kept as scratch because it once DAMAGED a
 // commit (#335 ②a-4): an earlier version restored files from a copy in
 // memory, its output was piped through `head`, node took SIGPIPE before the
@@ -36,6 +48,7 @@ const run = promisify(execFile);
  *   cwd?: string,
  *   report?: string,
  *   log?: (line: string) => void,
+ *   timeoutMs?: number,
  * }} spec
  * `prelude` adds a declaration one case's broken version needs, as
  * `{ [file]: [[caseName, anchor, replacement], ...] }`, applied after the
@@ -43,7 +56,7 @@ const run = promisify(execFile);
  * Resolves to the result lines; sets a non-zero exit code when the tree could
  * not be restored or the run refused to start.
  */
-export async function negativeControls({ files, tests, cases, prelude = {}, cwd = process.cwd(), report, log = console.log }) {
+export async function negativeControls({ files, tests, cases, prelude = {}, cwd = process.cwd(), report, log = console.log, timeoutMs = 600_000 }) {
   if (!process.stdout.listenerCount('error')) process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
   const git = (...args) => run('git', args, { cwd }).then((r) => r.stdout);
   const dirty = async () => (await git('status', '--porcelain', '--', ...files)).trim();
@@ -51,6 +64,11 @@ export async function negativeControls({ files, tests, cases, prelude = {}, cwd 
   const say = (text) => { lines.push(text); log(text); };
 
   const before = await dirty();
+  // The WHOLE worktree as it stands now — untracked specs and all — so the end
+  // check can say "nothing changed anywhere", not only "the named files are
+  // back": a test that writes into the tree is a leftover too.
+  const tree = async () => (await git('status', '--porcelain', '--untracked-files=all')).trim();
+  const treeBefore = before ? '' : await tree();
   if (before) {
     say(`refusing to run: these files already differ from HEAD\n${before}\ncommit or restore them first — otherwise the baseline is unknown.`);
     process.exitCode = 1;
@@ -75,16 +93,22 @@ export async function negativeControls({ files, tests, cases, prelude = {}, cwd 
       if (skip) continue;
       await writeFile(join(cwd, file), body);
       let out = '';
+      let crash = '';
       try {
         // A fresh test run, not a child of whatever runs THIS: an inherited
         // NODE_TEST_CONTEXT makes node skip every file and report nothing.
         const env = { ...process.env };
         delete env.NODE_TEST_CONTEXT;
-        out = (await run('node', ['--test', '--test-reporter=tap', ...tests], { cwd, env, timeout: 600_000, maxBuffer: 64 << 20 })).stdout;
-      } catch (e) { out = (e.stdout ?? '') + (e.stderr ?? ''); }
+        out = (await run('node', ['--test', '--test-reporter=tap', ...tests], { cwd, env, timeout: timeoutMs, maxBuffer: 64 << 20 })).stdout;
+      } catch (e) {
+        out = e.stdout ?? '';
+        // node --test exits 1 when a test failed; anything else is the run
+        // itself going wrong.
+        if (e.killed || e.signal) crash = `killed (${e.signal ?? 'timeout'})`;
+        else if (e.code !== 1) crash = `exit ${e.code}: ${String(e.stderr ?? e.message).trim().split('\n')[0]}`;
+      }
       await git('checkout', '--', file);
-      const failed = out.split('\n').filter((l) => l.startsWith('not ok')).map((l) => l.trim());
-      say(failed.length ? `BITES  ${name}\n       ${failed.join('\n       ')}` : `*** NO BITE *** ${name}`);
+      say(verdict(name, out, crash, tests));
     }
   } finally {
     await git('checkout', '--', ...files);
@@ -92,8 +116,30 @@ export async function negativeControls({ files, tests, cases, prelude = {}, cwd 
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGPIPE']) process.off(sig, onSignal);
   }
   const after = await dirty();
-  say(after ? `*** TREE NOT RESTORED ***\n${after}` : 'tree restored, matches HEAD');
-  if (after) process.exitCode = 1;
+  const treeAfter = await tree();
+  if (after) say(`*** TREE NOT RESTORED ***\n${after}`);
+  else if (treeAfter !== treeBefore) say(`*** TREE CHANGED during the run ***\nbefore:\n${treeBefore || '(clean)'}\nafter:\n${treeAfter || '(clean)'}`);
+  else say('tree restored: the whole worktree is as it was before the run');
+  if (after || treeAfter !== treeBefore) process.exitCode = 1;
   if (report) await writeFile(join(cwd, report), lines.join('\n') + '\n');
   return lines;
+}
+
+/** One case's verdict from its TAP output; see the module header. */
+function verdict(name, out, crash, tests) {
+  const failed = out.split('\n').filter((l) => l.startsWith('not ok')).map((l) => l.trim());
+  const count = (key) => Number(/^# (\w+) (\d+)$/mu.exec(out.split('\n').filter((l) => l.startsWith(`# ${key} `)).at(-1) ?? '')?.[2] ?? NaN);
+  const total = count('tests');
+  const list = failed.length ? `\n       ${failed.join('\n       ')}` : '';
+  if (crash) return `*** ERROR *** ${name}: the run itself failed — ${crash}${list}`;
+  if (!Number.isFinite(total) || total === 0) return `*** ERROR *** ${name}: no tests ran${list}`;
+  // node reports a test FILE as an entry of its own only when nothing inside
+  // it did: `not ok - <file>` is a file that did not load, `ok - <file>` one
+  // that loaded and declared no tests.
+  const files = tests.map((t) => t.replace(/^\.\//u, ''));
+  const isFile = (l) => { const title = l.replace(/^(?:not )?ok \d+ - /u, ''); return files.some((f) => title === f || title.endsWith(`/${f}`)); };
+  if (failed.some(isFile)) return `*** BROKE BUILD *** ${name}: a test file did not load${list}`;
+  if (out.split('\n').some((l) => /^ok \d+ - /u.test(l) && isFile(l))) return `*** ERROR *** ${name}: no tests ran in a test file${list}`;
+  if (total > 1 && failed.length >= total) return `*** BROKE BUILD *** ${name}: every test failed (${total}), which a break that compiles does not do${list}`;
+  return failed.length ? `BITES  ${name}${list}` : `*** NO BITE *** ${name}`;
 }
