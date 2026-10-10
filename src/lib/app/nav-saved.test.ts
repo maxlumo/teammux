@@ -1,7 +1,7 @@
 // The saved nav state across the v1 → v2 change (board #335 ②b-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_NAV, NAV_KEY, navFor, readLegacyNav, saveNav, type SavedNav } from './nav-saved.ts';
+import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, legacyOwner, navFor, quarantineLegacyNav, readLegacyNav, saveNav, type SavedNav } from './nav-saved.ts';
 import { paneRef } from './refs.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -109,4 +109,76 @@ test('storage is untrusted: junk is dropped, never repaired', () => {
   // Cells that are not objects still hold their place by index.
   const cells = mem({ [NAV_KEY]: JSON.stringify({ v: 2, splitLayout: 2, splitCells: [null, { id: 7, pane: null }] }) });
   assert.deepEqual(readLegacyNav(cells, 'a').splitCells, [{ id: 0, pane: null }, { id: 7, pane: null }]);
+});
+
+test('the frozen owner explains the bytes it was frozen with, and nothing else', () => {
+  // While `pointTo` is still in service, arriving at a server SURFACES that
+  // server's parked record as the live key — so the live key's content changes
+  // under us (reviewer P1-b). An owner frozen at boot therefore explains only
+  // the record it was frozen with; anything else there was put there by the
+  // server being brought up, and belongs to it.
+  const boot = { raw: '{"page":"terminal","terminalTarget":"work:1.0"}', owner: 'a' };
+  assert.equal(legacyOwner(boot.raw, boot, 'b'), 'a', 'the boot bytes are still A s');
+  assert.equal(legacyOwner('{"page":"files","terminalTarget":"work:2.0"}', boot, 'b'), 'b',
+    'B s parked record, surfaced into the live key, is B s');
+  assert.equal(legacyOwner(null, boot, 'b'), 'b', 'and nothing there is nobody s to misattribute');
+  // An unattributable boot input stays unattributable: being the server that
+  // arrives is not evidence of having written it.
+  const orphan = { raw: '{"page":"terminal","terminalTarget":"work:1.0"}', owner: '' };
+  assert.equal(legacyOwner(orphan.raw, orphan, 'b'), '', 'not handed to whoever arrives');
+});
+
+test('an input nobody owns is copied aside, once, with its evidence', () => {
+  // `readLegacyNav` returning no panes preserves nothing: the shell saves its
+  // own navigation over the same key as soon as it comes up (reviewer P1-c).
+  const storage = mem({
+    [NAV_KEY]: '{"page":"terminal","terminalTarget":"work:1.0"}',
+    tmux_machine_id: 'm-old',
+  });
+  assert.equal(quarantineLegacyNav(storage), true);
+  const kept = JSON.parse(storage.getItem(QUARANTINE_KEY)!);
+  assert.equal(kept.raw, '{"page":"terminal","terminalTarget":"work:1.0"}');
+  assert.equal(kept.machineId, 'm-old', 'the evidence ②b-4 needs to let a server claim it');
+  assert.ok(typeof kept.at === 'number');
+  // The live key stays writable: what is preserved is the copy.
+  assert.ok(storage.getItem(NAV_KEY));
+
+  // The FIRST one wins — a later boot must not overwrite the original with
+  // whatever the shell has written since.
+  storage.setItem(NAV_KEY, '{"v":2,"page":"hub","pane":null,"splitLayout":1,"splitCells":[]}');
+  assert.equal(quarantineLegacyNav(storage), false);
+  assert.equal(JSON.parse(storage.getItem(QUARANTINE_KEY)!).raw,
+    '{"page":"terminal","terminalTarget":"work:1.0"}');
+
+  // Nothing to keep is not a failure.
+  assert.equal(quarantineLegacyNav(mem()), false);
+});
+
+test('a record this build does not understand is junk, not a v1 record', () => {
+  // Guessing at a newer layout is how it gets misread (reviewer P2).
+  const future = mem({ [NAV_KEY]: JSON.stringify({ v: 3, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'w', target: 'w:1.0' } }) });
+  assert.deepEqual(readLegacyNav(future, 'a'), EMPTY_NAV);
+});
+
+test('a record that disagrees with itself is refused, not repaired', () => {
+  // The target is what tmux resolves; a `session` that is not its prefix means
+  // the two were written by different things.
+  const mismatch = mem({ [NAV_KEY]: JSON.stringify({ page: 'terminal', terminalTarget: 'work:1.0', terminalSession: 'other' }) });
+  assert.equal(readLegacyNav(mismatch, 'a').pane, null);
+  // An empty serverId is not an attribution.
+  const unowned = mem({ [NAV_KEY]: JSON.stringify({ v: 2, pane: { kind: 'pane', serverId: '', session: 'w', target: 'w:1.0' } }) });
+  assert.equal(readLegacyNav(unowned, 'a').pane, null);
+});
+
+test('a split restores as whole cells with distinct ids', () => {
+  const storage = mem({ [NAV_KEY]: JSON.stringify({
+    page: 'terminal',
+    terminalTarget: 'work:1.0',
+    splitLayout: 2.5,                       // not a whole count
+    splitCells: [{ id: 3, target: 'work:1.0' }, { id: 3, target: 'work:2.0' }],
+  }) });
+  const nav = readLegacyNav(storage, 'a');
+  assert.equal(nav.splitLayout, 1, 'a fractional layout is not a layout');
+  assert.deepEqual(nav.splitCells.map((c) => c.id), [3, 1],
+    'a duplicate id falls back to the position, which is unique by construction');
 });

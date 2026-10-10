@@ -296,7 +296,36 @@ hidden partitions retain the original visibility gates.
 
 ### Where you left off is persisted, and the tab is part of it
 
-`tmux_state` carries `{ page, terminalTarget, terminalSession, splitLayout, splitCells }` and is written whenever `connected` — it used to be gated on `terminalTarget`, so reading the chat and refreshing dropped you on the device default (owner, 2026-08-19: "每次切换或者刷新都会变"). Restore is `restorePage` (`src/lib/app/nav-state.ts`, pure + tested): an unknown/stale name (a retired tab, an older build) falls back to `defaultPage` — Chat (the Hub) on every form factor since #333 (owner, 2026-10-09: "整个应用一打开的时候 默认已打开的窗口应该是第一个 chat 页面 而不是 terminal 页面"; it used to be terminal on touch) — never to a page that no longer renders. A connect from the Settings connect card also lands on `defaultPage` instead of a hard-coded Terminal; on a server without the Hub, the one hubless redirect (`hubState.probed && !hubState.available`) turns Chat into Terminal. The Hub's open project is `tmux_hub_project` via `hubPrefs.setProject`, verified against the current list on load (a project can be deleted between two visits) and only then falling back to the top row. Files is the deliberate exception: its cwd FOLLOWS the tmux session's cwd — but the SESSION it follows is whichever the user touched LAST (a terminal pane or the chat's selected project; it used to be terminal-only, so browsing a project in chat never moved Files — owner, 2026-08-22), and switching projects PARKS the in-Files browse position per session (in-memory, not a preference) and restores it on return, with the follow rule still outranking the parked position when that project's real cwd moved meanwhile. That parked map is MODULE-scoped in Files.svelte (owner, 2026-08-28: "每个 project 自己记录自己的 current路径"): every Files instance shares it and it outlives any one instance — which is what lets the Hub's drawer mount a fresh Files per open and still wake up where that project left off (a new instance restores its session's parked cwd at mount and parks on unmount).
+`tmux_state` carries `{ v: 2, page, pane, splitLayout, splitCells }`, where a
+pane is a `PaneRef` that NAMES ITS SERVER (board #335 ②b-2,
+`src/lib/app/nav-saved.ts`): `work:1.0` on its own does not say whose `work`
+it is, and a restore runs against exactly one runtime. The record is written
+whenever `connected` — it used to be gated on `terminalTarget`, so reading the
+chat and refreshing dropped you on the device default (owner, 2026-08-19:
+"每次切换或者刷新都会变") — and, since ②b-2, not until the restore for the
+bound runtime has finished, because the record this effect writes is the one
+the restore is about to read.
+
+Reading is where the care goes, and three rules carry it:
+
+- **Ownership is where the bytes came from.** A pre-#335 record has no
+  serverId, so App freezes the one unprefixed record TOGETHER WITH its owner
+  at boot, before anything can move CURRENT or replace the key, and validates
+  that CURRENT against the saved registry rather than trusting the string.
+  That frozen owner explains those bytes and nothing else: while `pointTo` is
+  still in service (②b-4 retires it), arriving at a server surfaces that
+  server's parked record as the live key, and a record put there from a known
+  slot belongs to that slot's server — the one being brought up.
+- **An input nobody can be shown to own is quarantined, not guessed.** Its
+  bytes are copied to `tmux_state::unattributed` with the machine id the
+  legacy mirror named at that moment, before the shell can save over them;
+  ②b-4 lets a server claim them by PROVING that machine is its own. Being the
+  next server to authenticate is not evidence of having written them.
+- **The restore is filtered to the runtime it runs against**, and runs only
+  after that runtime is bound — never during the tick in which a swap shows
+  nothing, which silently dropped every pane of the server being brought up. A
+  foreign cell empties and keeps its place, so the split keeps its shape; a
+  restore for a runtime that is no longer on screen does nothing. Restore is `restorePage` (`src/lib/app/nav-state.ts`, pure + tested): an unknown/stale name (a retired tab, an older build) falls back to `defaultPage` — Chat (the Hub) on every form factor since #333 (owner, 2026-10-09: "整个应用一打开的时候 默认已打开的窗口应该是第一个 chat 页面 而不是 terminal 页面"; it used to be terminal on touch) — never to a page that no longer renders. A connect from the Settings connect card also lands on `defaultPage` instead of a hard-coded Terminal; on a server without the Hub, the one hubless redirect (`hubState.probed && !hubState.available`) turns Chat into Terminal. The Hub's open project is `tmux_hub_project` via `hubPrefs.setProject`, verified against the current list on load (a project can be deleted between two visits) and only then falling back to the top row. Files is the deliberate exception: its cwd FOLLOWS the tmux session's cwd — but the SESSION it follows is whichever the user touched LAST (a terminal pane or the chat's selected project; it used to be terminal-only, so browsing a project in chat never moved Files — owner, 2026-08-22), and switching projects PARKS the in-Files browse position per session (in-memory, not a preference) and restores it on return, with the follow rule still outranking the parked position when that project's real cwd moved meanwhile. That parked map is MODULE-scoped in Files.svelte (owner, 2026-08-28: "每个 project 自己记录自己的 current路径"): every Files instance shares it and it outlives any one instance — which is what lets the Hub's drawer mount a fresh Files per open and still wake up where that project left off (a new instance restores its session's parked cwd at mount and parks on unmount).
 
 ### Shell motion follows the one vocabulary (2026-09-03)
 

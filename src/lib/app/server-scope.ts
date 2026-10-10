@@ -62,6 +62,10 @@ export interface ScopeSwap {
   bound(): ServerRuntime | null;
   /** Bind the subtree to `next`, in the order above. */
   swap(next: ServerRuntime | null): Promise<void>;
+  /** Resolves once the swap in flight has finished — immediately when none
+   * is. What a caller awaits before doing anything that must see the subtree
+   * actually bound, like restoring that server's navigation. */
+  settled(): Promise<void>;
 }
 
 export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): ScopeSwap {
@@ -74,8 +78,16 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
   const orphans = new Set<ServerRuntime>();
 
   const bound = () => pending ?? shown;
+  /** The swap in flight, for callers that must wait for the bind. */
+  let inFlight: Promise<void> | null = null;
 
-  async function swap(next: ServerRuntime | null): Promise<void> {
+  function swap(next: ServerRuntime | null): Promise<void> {
+    const run = doSwap(next);
+    inFlight = run.finally(() => { if (inFlight === run) inFlight = null; });
+    return inFlight;
+  }
+
+  async function doSwap(next: ServerRuntime | null): Promise<void> {
     // Already there, with nothing owed — or already on its way, in which case
     // the swap in flight is the current one (a superseded swap's target has
     // been replaced by whoever superseded it) and it will pay every debt.
@@ -114,5 +126,10 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
     show(next);
   }
 
-  return { shown: () => shown, bound, swap };
+  return {
+    shown: () => shown,
+    bound,
+    swap,
+    settled: () => inFlight ?? Promise.resolve(),
+  };
 }

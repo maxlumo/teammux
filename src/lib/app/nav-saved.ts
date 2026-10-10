@@ -43,8 +43,21 @@ import { paneRef, type PaneRef, type ServerId } from './refs.ts';
 export const NAV_KEY = 'tmux_state';
 
 /** The layout this module writes. v1 is "no `v` at all": the pre-#335 record
- * with `terminalTarget`/`terminalSession` strings. */
+ * with `terminalTarget`/`terminalSession` strings. Any OTHER value is junk —
+ * a record from a build this one does not understand is not a v1 record, and
+ * guessing at it is how a newer layout gets misread (reviewer P2). */
 export const NAV_VERSION = 2;
+
+/** Where an input nobody can be shown to own is kept (reviewer P1-c): the raw
+ * bytes, when they were found, and the machine the legacy mirror named at that
+ * moment. ②b-4 lets a server claim it by PROVING that machine is its own; a
+ * server merely being the next to authenticate proves nothing. */
+export const QUARANTINE_KEY = 'tmux_state::unattributed';
+
+/** The most panes a split can be restored into. The exact choices are the
+ * shell's (`SPLIT_CHOICES`), which re-gates on them anyway; what matters here
+ * is refusing a number that is not a small whole count. */
+const MAX_SPLIT = 16;
 
 /** One cell of the desktop split. The id is the cell's own, so a restore can
  * keep `activeCellId` and the next id generator consistent. */
@@ -66,11 +79,16 @@ export const EMPTY_NAV: SavedNav = { page: undefined, pane: null, splitLayout: 1
 type Store = Pick<Storage, 'getItem' | 'setItem'>;
 
 /** A pane target names its session, so a record that disagrees with itself is
- * not repaired: the target is what tmux resolves. */
+ * REFUSED rather than repaired: the target is what tmux resolves, and a
+ * `session` that is not its prefix means the two were written by different
+ * things (reviewer P2). An empty serverId is refused too — an unattributed
+ * pane is not a pane. */
 function paneOf(serverId: ServerId, target: unknown, session: unknown): PaneRef | null {
-  if (typeof target !== 'string' || !target) return null;
-  const named = typeof session === 'string' && session ? session : target.split(':')[0]!;
-  return paneRef(serverId, named, target);
+  if (!serverId || typeof target !== 'string' || !target) return null;
+  const prefix = target.split(':')[0]!;
+  if (!prefix) return null;
+  if (typeof session === 'string' && session && session !== prefix) return null;
+  return paneRef(serverId, prefix, target);
 }
 
 /** A ref as it comes back out of JSON: validated, and re-stamped with nothing —
@@ -82,14 +100,26 @@ function savedPane(value: unknown): PaneRef | null {
   return paneOf(r.serverId, r.target, r.session);
 }
 
+/** Cells keep their order and their ids, and an id is used ONCE: two cells
+ * sharing one would make the shell's keyed list and its `activeCellId`
+ * disagree about which cell is which (reviewer P2). A duplicate or missing id
+ * falls back to the position, which is unique by construction. */
 function cellsOf(value: unknown, read: (v: unknown) => PaneRef | null): SavedCell[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((c, i) => {
-      const cell = (c ?? {}) as { id?: unknown; pane?: unknown; target?: unknown; session?: unknown };
-      const id = typeof cell.id === 'number' && Number.isFinite(cell.id) ? cell.id : i;
-      return { id, pane: read(cell) };
-    });
+  const used = new Set<number>();
+  return value.slice(0, MAX_SPLIT).map((c, i) => {
+    const cell = (c ?? {}) as { id?: unknown; pane?: unknown; target?: unknown; session?: unknown };
+    const given = typeof cell.id === 'number' && Number.isInteger(cell.id) && cell.id >= 0 ? cell.id : -1;
+    const id = given >= 0 && !used.has(given) ? given : i;
+    used.add(id);
+    return { id, pane: read(cell) };
+  });
+}
+
+/** A whole small count, or single-pane. The shell re-gates on its own choices
+ * and on whether this client can show a split at all. */
+function layoutOf(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 1 && value <= MAX_SPLIT ? value : 1;
 }
 
 /**
@@ -106,7 +136,10 @@ function readAt(storage: Pick<Storage, 'getItem'>, key: string, owner: ServerId)
   try { raw = JSON.parse(storage.getItem(key) || '{}'); } catch { return EMPTY_NAV; }
   if (!raw || typeof raw !== 'object') return EMPTY_NAV;
   const r = raw as Record<string, unknown>;
-  const layout = typeof r.splitLayout === 'number' && r.splitLayout > 1 ? r.splitLayout : 1;
+  // A version this build does not know is not a v1 record: only the absence
+  // of `v` is.
+  if (r.v !== undefined && r.v !== NAV_VERSION) return EMPTY_NAV;
+  const layout = layoutOf(r.splitLayout);
   if (r.v === NAV_VERSION) {
     return {
       page: r.page,
@@ -174,4 +207,54 @@ export function navFor(nav: SavedNav, serverId: ServerId): SavedNav {
     splitLayout: nav.splitLayout,
     splitCells: nav.splitCells.map((c) => ({ id: c.id, pane: mine(c.pane) })),
   };
+}
+
+/**
+ * Who the live record belongs to, given what was snapshotted at boot.
+ *
+ * The frozen boot owner explains the BYTES it was frozen with and nothing
+ * else (reviewer P1-b). While `pointTo` is still in service — ②b-4 retires
+ * it — arriving at a server SURFACES that server's parked record as the live
+ * key, so the live key's content changes under us, and a record placed there
+ * from a known slot belongs to that slot's server: the one being brought up.
+ *
+ *   - the bytes are the ones snapshotted at boot → the boot owner, which may
+ *     be empty: an input nobody can be shown to own stays unattributed rather
+ *     than falling to whoever is arriving.
+ *   - the bytes are something else → the server being brought up, because
+ *     that is who put them there.
+ */
+export function legacyOwner(
+  live: string | null,
+  boot: { raw: string | null; owner: ServerId },
+  arriving: ServerId,
+): ServerId {
+  return live === boot.raw ? boot.owner : arriving;
+}
+
+/**
+ * Keep an input nobody can be shown to own, before anything can overwrite it.
+ *
+ * `readLegacyNav` returning no panes does not preserve anything: the shell
+ * saves its own navigation over the same key as soon as it comes up
+ * (reviewer P1-c). So the bytes are copied aside, together with the machine
+ * the legacy mirror named at that moment — the evidence ②b-4 requires before
+ * any server may claim them. The live key is left writable: what is preserved
+ * is this copy.
+ *
+ * The FIRST quarantine wins. A second boot must not overwrite the original
+ * with whatever the shell has written since.
+ */
+export function quarantineLegacyNav(storage: Pick<Storage, 'getItem' | 'setItem'>): boolean {
+  const raw = storage.getItem(NAV_KEY);
+  if (raw == null || storage.getItem(QUARANTINE_KEY) != null) return false;
+  storage.setItem(QUARANTINE_KEY, JSON.stringify({
+    raw,
+    at: Date.now(),
+    // The live mirror's machine id, read before any authentication can
+    // rewrite it. Without it nothing can ever be proven, so a missing one is
+    // recorded as missing rather than guessed.
+    machineId: storage.getItem('tmux_machine_id') || '',
+  }));
+  return true;
 }

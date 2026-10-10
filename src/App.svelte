@@ -37,7 +37,7 @@
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createHandovers } from './lib/app/handover.ts';
-  import { navFor, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
+  import { legacyOwner, navFor, quarantineLegacyNav, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
@@ -94,6 +94,10 @@
   // counter said "a different server" without saying WHICH, so nothing below
   // could be bound to one).
   let scopeRuntime = $state(null);
+  /** The runtime whose navigation has been restored. The saved-state effect
+   * waits for it, so nothing writes an empty navigation over the record the
+   * restore is about to read (board #335 ②b-2). */
+  let navRestored = $state(null);
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -143,7 +147,12 @@
    * restored. A reference is minted only here and in the saved-state effect,
    * both from this one answer. */
   function navServerId() {
-    return scopeRuntime?.id ?? '';
+    // `bound()`, not the shown handle: during a swap nothing is shown for a
+    // tick, and a reference minted — or a restore filtered — against that
+    // emptiness would drop every pane of the server being bound (reviewer
+    // P1-a). `bound()` is the confirmed target of the swap in flight, and the
+    // shown handle once it has settled.
+    return scopeSwap.bound()?.id ?? '';
   }
   /** Give up the handle the tree is bound to, BEFORE the shared socket is
    * re-dialled at another server (reviewer P1-b, 2026-10-10).
@@ -708,7 +717,11 @@
   // against ONE runtime. The ids come from the server the tree is bound to,
   // which is the only server anything in this state can be about.
   $effect(() => {
-    if (!connected) return;
+    // Not before the restore for THIS runtime has finished: the record this
+    // effect would write over is the one the restore is about to read, and an
+    // input nobody owns must survive until ②b-4 can give it to a server that
+    // proves it (reviewer P1-c).
+    if (!connected || !scopeRuntime || navRestored !== scopeRuntime) return;
     saveNav(localStorage, { page, pane: termPane, splitLayout, splitCells });
   });
 
@@ -1285,13 +1298,28 @@
   // the registry would make migrateServers a no-op and drop the history).
   migrateServers(localStorage);
   loadServerRegistry();
-  /** Who the ONE unprefixed `tmux_state` belongs to, read BEFORE anything in
-   * this boot can move CURRENT (board #335 ②b-2, reviewer P1-c): the deep
-   * link below activates its own server, and attributing the old record to
-   * that one would hand it another server's panes. Empty when CURRENT does
-   * not resolve — then nothing of it is restored and the record stays for a
-   * server that can prove it owns it (②b-4). */
-  const navLegacyOwner = currentServerId(localStorage);
+  /** The ONE unprefixed `tmux_state` as it stood at boot, with who can be
+   * shown to own it (board #335 ②b-2, reviewer P1-b/c).
+   *
+   * Both halves are frozen here, before anything in this boot can move
+   * CURRENT or replace the key: the deep-link consumer below activates its
+   * own server, and `pointTo` SURFACES that server's parked record as the live
+   * key — so an owner frozen without its bytes would end up explaining
+   * somebody else's record. CURRENT is validated against the saved registry
+   * rather than trusted as a string: a dangling id names no server.
+   *
+   * When nobody can be shown to own it, the bytes are copied to the
+   * quarantine key right here — before the shell can save its own navigation
+   * over them — and ②b-4 lets a server claim them by proving the machine the
+   * legacy mirror named is its own. */
+  const navBoot = {
+    raw: localStorage.getItem('tmux_state'),
+    owner: (() => {
+      const id = currentServerId(localStorage);
+      return id && loadServers(localStorage).some((srv) => srv.id === id) ? id : '';
+    })(),
+  };
+  if (!navBoot.owner) quarantineLegacyNav(localStorage);
   consumeConnectUrlParams();
   // Bind the content tree before its first render (board #335 ②b-1): the
   // deep-link consumer above can make a different server current, and a bind
@@ -1365,13 +1393,29 @@
     // no-op whenever the id did not move (board #335 ②b-1).
     swapScope();
     serverReady();
+    void restoreNavFor(scopeSwap.bound());
+  }
+
+  /** The navigation the app comes up with, for ONE confirmed runtime.
+   *
+   * It runs after that runtime is actually bound (reviewer P1-a): the swap
+   * shows nothing for a tick, and filtering against that emptiness dropped
+   * every pane of the server being brought up — an ordinary A→B→A lost both
+   * sides' terminal and split. A restore for a runtime that is no longer the
+   * one on screen does nothing, so a stale swap cannot restore over a later
+   * one's work, and the saved-state effect waits until the restore for the
+   * bound runtime has finished (`navRestored`) rather than writing an empty
+   * navigation over the record it was about to read. */
+  async function restoreNavFor(target) {
+    await scopeSwap.settled();
+    if (!target || scopeSwap.shown() !== target) return;
     try {
-      // The saved state, attributed and then FILTERED to the server this
-      // restore is running against (board #335 ②b-2). A pane belonging to
-      // another server cannot be resolved over this connection — at best the
-      // capture fails, at worst that server has a pane by the same name and
-      // the reader lands on a stranger's terminal.
-      const s = navFor(readLegacyNav(localStorage, navLegacyOwner), navServerId());
+      // Attributed by WHERE the bytes came from, then filtered to this
+      // runtime. A pane belonging to another server cannot be resolved over
+      // this connection — at best the capture fails, at worst that server has
+      // a pane by the same name and the reader lands on a stranger's terminal.
+      const live = localStorage.getItem('tmux_state');
+      const s = navFor(readLegacyNav(localStorage, legacyOwner(live, navBoot, target.id)), target.id);
       // A saved target names a session that may not exist any more — killed
       // while we were away, or RENAMED (a project rename renames its session).
       // Restoring it anyway lands the user on a pane that cannot be captured,
@@ -1409,6 +1453,7 @@
       page = nav.page;
       if (nav.settingsTab) prefsOpenReq = { tab: nav.settingsTab, n: ++prefsOpenSeq };
     } catch { page = defaultPage(); }
+    navRestored = target;
   }
 
   // Auto-reconnect and restore state on page load

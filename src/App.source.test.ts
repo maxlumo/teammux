@@ -523,8 +523,27 @@ test('the content tree is bound to one server, and only the swap binds it (board
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
   // The saved navigation names its server, and the restore is filtered to the
   // server it runs against (board #335 ②b-2).
-  assert.match(source, /function navServerId\(\) \{\s*return scopeRuntime\?\.id \?\? '';\s*\}/u,
-    'one answer to which server a reference names');
+  // One answer to which server a reference names — and it is the swap's
+  // CONFIRMED target, never the tick in which nothing is shown: filtering a
+  // restore against that emptiness dropped every pane of the server being
+  // brought up.
+  assert.match(source, /function navServerId\(\) \{[\s\S]{0,600}?return scopeSwap\.bound\(\)\?\.id \?\? '';/u);
+  assert.doesNotMatch(source, /navServerId\(\) \{[\s\S]{0,600}?scopeRuntime\?\.id/u,
+    'the shown handle is not the answer: it is null for a tick on every swap');
+  // The restore belongs to ONE confirmed runtime, runs after the bind, and
+  // does nothing for a runtime that is no longer on screen.
+  assert.match(source, /async function restoreNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;/u);
+  assert.match(source, /legacyOwner\(live, navBoot, target\.id\)\), target\.id\);/u,
+    'attributed by where the bytes came from, then filtered to that runtime');
+  // The boot snapshot freezes the BYTES with their owner, and validates
+  // CURRENT against the registry rather than trusting the string.
+  assert.match(source, /const navBoot = \{\s*raw: localStorage\.getItem\('tmux_state'\),/u);
+  assert.match(source, /return id && loadServers\(localStorage\)\.some\(\(srv\) => srv\.id === id\) \? id : '';/u);
+  assert.match(source, /if \(!navBoot\.owner\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
+    'an input nobody owns is copied aside BEFORE anything can overwrite it');
+  // And nothing saves over that record until the restore for the bound
+  // runtime has finished.
+  assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
   assert.match(source, /saveNav\(localStorage, \{ page, pane: termPane, splitLayout, splitCells \}\);/u,
     'the saved state writes the refs App already holds, rather than rebuilding them');
   // Every reference is minted in ONE place per kind, from the bound server.
@@ -555,10 +574,6 @@ test('the content tree is bound to one server, and only the swap binds it (board
   for (const req of ['filesNavReq', 'boardIssueReq']) {
     assert.match(source, new RegExp(`${req} = \\{ serverId: navServerId\\(\\),`, 'u'), `${req} names its tree`);
   }
-  assert.match(source, /const s = navFor\(readLegacyNav\(localStorage, navLegacyOwner\), navServerId\(\)\);/u,
-    'attributed, then filtered to this runtime');
-  assert.match(source, /const navLegacyOwner = currentServerId\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
-    'the legacy owner is frozen BEFORE the deep link can activate another server');
   assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem\('tmux_state'\)/u,
     'nothing parses the saved state by hand any more');
   // One definition of what a landing is: the swap and the reset share it.
