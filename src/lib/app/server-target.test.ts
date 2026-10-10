@@ -11,16 +11,16 @@ const registry = JSON.stringify([
 ]);
 const machines = JSON.stringify({ 'm-a': ['ws://a-lan:9899', 'ws://a-ts:9899'], 'm-b': ['ws://b-wan:9899', 'ws://b:9899'] });
 
-test('the current server is where the ACTIVE MIRROR says, even ahead of the registry', () => {
-  // The connect form, the optimizer, the address pick and a failover all
-  // write the mirror before the registry learns: reading the registry here
-  // would reconnect to the address the user just left.
+test('the current server is where its ENTRY says, whatever the mirror holds (board #335 ②b-4)', () => {
+  // Every path that moves the active address records it on the entry once
+  // it answers; an address in the mirror that never answered is not where
+  // the server is.
   const s = store({
     tmux_servers: registry, tmux_server_current: 'a', tmux_machines: machines,
-    tmux_address: 'ws://a-ts:9899', tmux_token: 'tA2', tmux_machine_id: 'm-a',
+    tmux_address: 'ws://typed-but-never-answered:9899', tmux_token: 'tX', tmux_machine_id: 'm-old',
   });
   assert.deepEqual(targetOf(s, 'a'), {
-    address: 'ws://a-ts:9899', token: 'tA2', machineId: 'm-a', alternates: ['ws://a-lan:9899'],
+    address: 'ws://a-lan:9899', token: 'tA', machineId: 'm-a', alternates: ['ws://a-ts:9899'],
   });
 });
 
@@ -36,10 +36,7 @@ test('any other server is where its own entry says, with its own failover set', 
   assert.equal(targetOf(s, 'gone'), null, 'nothing saved: nowhere to go');
 });
 
-test('a client with no registry yet reconnects the mirror, as before', () => {
-  // CURRENT is '' and so is the id App asks for: the mirror is the server.
-  assert.deepEqual(targetOf(store({ tmux_address: 'ws://x:9899', tmux_token: 't' }), ''), {
-    address: 'ws://x:9899', token: 't', machineId: '', alternates: [],
-  });
-  assert.equal(targetOf(store({}), ''), null, 'and with no address there is nothing to reconnect');
+test('with no saved server there is nowhere to go', () => {
+  assert.equal(targetOf(store({ tmux_address: 'ws://x:9899', tmux_token: 't' }), ''), null,
+    'the mirror alone is not a server: the boot migrates it into an entry first');
 });

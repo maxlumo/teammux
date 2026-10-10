@@ -234,20 +234,18 @@
           if (!addrs.includes(url)) addrs.push(url);
           map[mid] = addrs.slice(-8);
           localStorage.setItem('tmux_machines', JSON.stringify(map));
-          // The LIVE tmux_machine_id is deliberately NOT written here:
-          // activateConnected owns that key. A pre-write would poison the
-          // park on the different-server path — parkAndPoint would file the
-          // NEW machine's id under the OLD server's parking slot (lead
-          // blocker #2, board #55). The map above is safe: it is keyed by
-          // machineId and never read through the live key.
+          // The unprefixed tmux_machine_id is NOT written here, or anywhere:
+          // since board #335 ②b-4 it is the frozen LEGACY mirror, the
+          // evidence a server must match to claim pre-#335 inputs. The
+          // machine is the entry's (activateConnected records it).
         }
         // The multi-server registry (board #55): a successful connect RECORDS
         // by machine identity and then asks whether this was a different
         // server. Same machine (a LAN/Tailscale alternate) — nothing to
         // activate, the socket swap was the whole event. A DIFFERENT server —
-        // the old one's live state is parked under its id and App brings the
-        // app up on this one with the content tree remounted and every
-        // per-server memory reset (board 315, no reload). The mirror keys
+        // CURRENT moves to it and App brings the app up on it with the
+        // content tree remounted (board 315, no reload); each server's state
+        // is in its own slots already. The mirror keys
         // already point here — this form wrote them before dialing.
         const act = activateConnected(localStorage, {
           address: url, token: tok,

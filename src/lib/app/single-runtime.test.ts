@@ -315,27 +315,27 @@ test('the entry is read fresh, so a rename shows through', () => {
   assert.equal(rt.entry().name, 'renamed');
 });
 
-test('the runtime dials where the one reader says: the mirror, for the server the app is on (board #335 ②b-2-2)', async (t) => {
+test('the runtime dials where the one reader says: its entry, whatever the mirror holds (board #335 ②b-4)', async (t) => {
   t.after(cleanup);
-  // The connect form, the optimizer, the address pick and a failover write
-  // the active mirror ahead of the registry. A dial at the entry's saved
-  // address would go back to the address the user just left.
-  const e = entry({ address: 'ws://a-lan:9899', token: 'old', machineId: 'm-a' });
+  // Every path that moves the active address records it on the entry once it
+  // answers, so the entry is the one source; a mirror address that never
+  // answered is not where the server is.
+  const e = entry({ address: 'ws://a-lan:9899', token: 'tokA', machineId: 'm-a' });
   const storage = saved(e);
   storage.setItem('tmux_server_current', 'a');
-  storage.setItem('tmux_address', 'ws://a-ts:9899');
-  storage.setItem('tmux_token', 'tokA');
+  storage.setItem('tmux_address', 'ws://typed-never-answered:9899');
+  storage.setItem('tmux_token', 'other');
   const rt = createSingleRuntime(e, { storage });
   const dialling = rt.dial();
   await settle(2);
   const socket = MockWebSocket.instances.at(-1)!;
-  assert.equal(socket.url, 'ws://a-ts:9899', 'the mirror s address, not the saved one');
+  assert.equal(socket.url, 'ws://a-lan:9899', 'the entry s address');
   socket.readyState = MockWebSocket.OPEN;
   socket.message({ server_nonce: '00'.repeat(16) });
   socket.message({ result: { authenticated: true, machine_id: 'm-a', hostname: 'a.host' } });
   const result = await dialling;
   assert.equal(result.ok, true);
   const after = JSON.parse(storage.getItem(SERVERS_KEY)!)[0];
-  assert.equal(after.address, 'ws://a-ts:9899', 'and the address that worked is the one recorded');
+  assert.equal(after.address, 'ws://a-lan:9899');
   assert.equal(after.token, 'tokA');
 });

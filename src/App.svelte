@@ -38,9 +38,11 @@
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
+  import { createServerStore } from './lib/app/server-store.ts';
+  import { migrateServerState } from './lib/app/server-state-migration.ts';
   import { createHandovers } from './lib/app/handover.ts';
   import { createHandleEnds } from './lib/app/handle-end.ts';
-  import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
+  import { navFor, quarantineLegacyNav, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
@@ -116,12 +118,13 @@
    * a connect attempt's "another server" verdict, an identity loss: it stops
    * now, its server's state is released, and only then is it disposed. The
    * state is NOT released when the handle replacing it adopted it (a
-   * same-machine merge); `bound()` names that replacement. */
+   * same-machine merge, which hands over its Files record); `bound()` names
+   * that replacement. */
   const ends = createHandleEnds({
     stateOf: (runtime) => serverStates.get(runtime),
     adoptedElsewhere: (state, runtime) => {
       const next = scopeSwap.bound();
-      return !!next && next !== runtime && serverStates.get(next) === state;
+      return !!next && next !== runtime && serverStates.get(next)?.files === state.files;
     },
     release: releaseServerState,
   });
@@ -169,7 +172,11 @@
    * mint a handle nobody ever shows or releases. */
   function swapScope() {
     const id = currentServerId(localStorage);
-    const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
+    // No server's state is built before the fold has run for it (board #335
+    // ②b-4): a server that became current only after the boot — a fresh
+    // client's first connect — folds here, and a fold that cannot be
+    // recorded binds nothing at all (`migrationBlocked`).
+    const entry = id && foldFor() ? loadServers(localStorage).find((s) => s.id === id) : null;
     followMerges();
     const held = scopeSwap.bound();
     if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id) return;
@@ -185,7 +192,7 @@
       const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
       serverStates.set(next, stateForRuntime(replaced, entry.id, {
         survivorOf: (id) => mergedInto(localStorage, id),
-        create: () => createServerState(localStorage),
+        create: () => createServerState(createServerStore(localStorage, entry.id)),
       }));
     }
     void scopeSwap.swap(next);
@@ -195,9 +202,9 @@
    *
    * `recordServer` folds a machine's twins into one entry — an address-only
    * entry that just learned it is the machine we already know — DELETES the
-   * absorbed one and moves CURRENT to the survivor. Nothing else noticed: the
-   * provenance of the legacy record, every ref the app holds, and the refs
-   * inside the saved record still named the deleted id, so the restore
+   * absorbed one and moves CURRENT (and its slots) to the survivor. Nothing
+   * else noticed: every ref the app holds, and the refs inside the saved
+   * record, still named the deleted id, so the restore
    * filtered them out and a same-machine connect came up with no panes at
    * all. Before #335 the same record had no server in it and was simply
    * restored, which makes this a Single regression.
@@ -213,15 +220,15 @@
    * machine — follows the same merges. */
   function followMerges() {
     const survivorOf = (serverId) => mergedInto(localStorage, serverId);
-    const owner = survivorOf(navLiveOwner);
-    if (owner && owner !== navLiveOwner) navLiveOwner = owner;
     const rebind = (ref) => (ref ? reownRef(ref, survivorOf) : ref);
     termPane = rebind(termPane);
     filesRef = rebind(filesRef);
     const cells = splitCells.map((c) => ({ ...c, pane: rebind(c.pane) }));
     if (cells.some((c, i) => c.pane !== splitCells[i].pane)) splitCells = cells;
-    // And the record on disk, which names its server from v2 on.
-    reownSavedNav(localStorage, survivorOf);
+    // And the record on disk, which names its server from v2 on — in the
+    // survivor's slot, where the merge moved it.
+    const id = currentServerId(localStorage);
+    if (id) reownSavedNav(createServerStore(localStorage, id), survivorOf);
   }
   /** The server every navigation reference names: the one the content tree is
    * bound to (board #335 ②b-2). Empty when nothing is bound — and then
@@ -805,11 +812,10 @@
   // which is the only server anything in this state can be about.
   $effect(() => {
     // Not before the restore for THIS runtime has finished: the record this
-    // effect would write over is the one the restore is about to read, and an
-    // input nobody owns must survive until ②b-4 can give it to a server that
-    // proves it (reviewer P1-c).
+    // effect would write over is the one the restore is about to read. It
+    // writes the bound server's own slot (board #335 ②b-4).
     if (!connected || !scopeRuntime || navRestored !== scopeRuntime) return;
-    saveNav(localStorage, { page, pane: termPane, splitLayout, splitCells });
+    saveNav(createServerStore(localStorage, scopeRuntime.id), { page, pane: termPane, splitLayout, splitCells });
   });
 
   // Reconnect UI state, mirrored from the reconnect machine
@@ -973,8 +979,8 @@
    *     to reach A reaches B now. CURRENT still names A, and bringing the app
    *     up would rebuild A's runtime over B's socket. The socket is B's, so
    *     the app ARRIVES at B the way the connect page arrives at a different
-   *     server — park A, point the live keys at B (`activateConnected`), and
-   *     come up on B through the swap (`onConnected(true)`).
+   *     server — CURRENT moves to B (`activateConnected`), and the app comes
+   *     up on B through the swap (`onConnected(true)`).
    *
    * Arriving destroys A's tree, so A's editors are asked FIRST, through the
    * one leave walk: losing the socket is not consent to discard local edits.
@@ -1017,17 +1023,16 @@
   }
 
   /** The disconnected connect page reached a server. `switched`: it is a
-   * DIFFERENT server than the current entry (activateConnected parked the
-   * old one and pointed the live keys here), so the app comes up on it the
-   * way an in-place switch does — memory reset, tree remounted, the
-   * target's parked state restored — instead of reloading (board 315). */
+   * DIFFERENT server than the current entry (activateConnected moved CURRENT
+   * here), so the app comes up on it the way an in-place switch does — memory
+   * reset, tree remounted, the target's own state restored — instead of
+   * reloading (board 315). */
   function onConnected(switched = false) {
     if (switched) {
       reconnectMachine.cancel();
       serverSwitch.supersede();
       resetServerMemory();
       centreSurface.reset();          // the bell and a jump aimed at the server left
-      navLiveOwner = navProvenance();
       swapScope();
       localStorage.removeItem('tmux_disconnected');
       activeAddress = localStorage.getItem('tmux_address') || '';
@@ -1103,7 +1108,8 @@
     disconnect();
     connected = false;
     page = 'settings';
-    localStorage.removeItem('tmux_state');
+    const id = currentServerId(localStorage);
+    if (id) createServerStore(localStorage, id).removeItem('tmux_state');
     localStorage.setItem('tmux_disconnected', '1');
   }
 
@@ -1319,7 +1325,8 @@
 
   /** Everything in memory that belongs to the server being left (board 315),
    * reset AFTER the content tree is gone and the socket closed. The rest of
-   * the per-server state is in storage, parked by parkFrom; components and
+   * the per-server state is in that server's slots and its runtime's state
+   * bundle; components and
    * their ws.ts listeners/subscriptions went with the unmount. A source test
    * pins this list against the module-level stores. */
   function resetServerMemory() {
@@ -1361,8 +1368,22 @@
     reconnecting: () => reconnectMachine.isActive(),
     stopReconnect: () => reconnectMachine.cancel(),
     startReconnect: () => reconnectMachine.start(),
-    addressUp: () => {
+    addressUp: (address) => {
       serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
+      // The address that just answered is the server's active one, on its
+      // ENTRY — the one place a reconnect or a reload reads it (board #335
+      // ②b-4 retired the mirror that used to stand in for it).
+      const mid = getMachineId() || '';
+      if (mid) {
+        try {
+          recordServer(localStorage, {
+            address, token: localStorage.getItem('tmux_token') || '',
+            ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
+            machineId: mid,
+          });
+          loadServerRegistry();
+        } catch { /* the entry keeps the address it had */ }
+      }
       resubscribeAll();
       window.dispatchEvent(new Event('ws-reconnected'));
     },
@@ -1383,8 +1404,6 @@
     machineId: () => getMachineId() || '',
     comeUp: (target) => {
       centreSurface.reset();          // the bell and a jump aimed at the server left
-      // Arriving surfaced the target's parked slot into the live key.
-      navLiveOwner = navProvenance();
       swapScope();
       activeAddress = target.address;
       loadServerRegistry();
@@ -1393,7 +1412,9 @@
       resubscribeAll();
     },
   });
-  const switchTo = (target) => serverSwitch.switchTo(target);
+  // No switch while the fold is unrecorded: there is no server state to
+  // arrive with.
+  const switchTo = (target) => (migrationBlocked ? Promise.resolve() : serverSwitch.switchTo(target));
   function switchRetry() { void serverSwitch.retry(); }
   function switchBack() { void serverSwitch.back(loadServers(localStorage)); }
 
@@ -1422,7 +1443,10 @@
   let optimizing = $state(false);
 
   function getAllAddresses() {
-    const mid = localStorage.getItem('tmux_machine_id');
+    // The CURRENT entry's machine (board #335 ②b-4): the unprefixed
+    // tmux_machine_id is the frozen legacy mirror now, not the live machine.
+    const id = currentServerId(localStorage);
+    const mid = loadServers(localStorage).find((s) => s.id === id)?.machineId || '';
     if (!mid) return [];
     try { return JSON.parse(localStorage.getItem('tmux_machines') || '{}')[mid] || []; }
     catch { return []; }
@@ -1502,10 +1526,11 @@
       if (socket) localStorage.setItem('tmux_socket', socket);
       localStorage.removeItem('tmux_disconnected'); // explicit intent to connect
       // A deep-linked server joins the registry like a hand-typed one (board
-      // #55) — and ACTIVATES like one: a different server parks the leaving
-      // server's live state under its id BEFORE the boot restore reads
-      // tmux_state (this runs pre-boot, so no reload is needed on top), while
-      // an alternate address of the current machine folds into its entry.
+      // #55) — and ACTIVATES like one: a different server becomes CURRENT
+      // (this runs pre-boot, so no reload is needed on top), while an
+      // alternate address of the current machine folds into its entry. The
+      // leaving server's live state was folded into ITS slot just before
+      // (`bootFold`), so nothing of it can land in the linked server's.
       if (addrRaw) {
         let a2 = addrRaw.trim();
         if (!/^wss?:\/\//.test(a2)) a2 = (location.protocol === 'https:' ? 'wss://' : 'ws://') + a2;
@@ -1521,33 +1546,45 @@
   // the registry would make migrateServers a no-op and drop the history).
   migrateServers(localStorage);
   loadServerRegistry();
-  /** WHO PUT the current unprefixed `tmux_state` there — the provenance the
-   * attribution of a pre-#335 record depends on.
-   *
-   * It cannot be derived from the bytes: two servers can hold byte-identical
-   * records, and `work:1.0` on A looks exactly like `work:1.0` on B
-   * (orchestrator, 2026-10-10). It can only be KNOWN, and App is what knows
-   * it: at boot the record is whatever the last session left current, and
-   * from then on it is whichever server the app ARRIVED at, because arriving
-   * surfaces that server's parked slot into the live key (`pointTo`, which
-   * ②b-4 retires along with this whole question).
-   *
-   * CURRENT is validated against the saved registry rather than trusted as a
-   * string: a dangling id names no server, and then nobody can be shown to
-   * own the record — so its bytes are copied to the quarantine key right
-   * here, before the shell can save its own navigation over them, with the
-   * machine id the legacy mirror names at this moment as the evidence ②b-4
-   * requires before any server may claim them. */
-  function navProvenance() {
-    const id = currentServerId(localStorage);
-    return id && loadServers(localStorage).some((srv) => srv.id === id) ? id : '';
+  /** The fold could not be RECORDED (or threw): storage is failing, and the
+   * inputs still read as unconsumed (board #335 ②b-4, reviewer 2026-10-09).
+   * Then no server's state is built and no server page mounts — a writable
+   * page plus an unconsumed input set is the half-migrated client, whose
+   * next fold would overwrite the page's newer writes — and no switch
+   * starts. The shell, Settings and Preferences stay; the panel offers
+   * Retry. */
+  let migrationBlocked = $state(false);
+  function runFold(requireProof) {
+    let reason;
+    try { reason = migrateServerState(localStorage, { requireProof }).reason; } catch { reason = 'unrecorded'; }
+    migrationBlocked = reason === 'unrecorded';
+    return reason;
   }
-  let navLiveOwner = navProvenance();
-  if (!navLiveOwner) quarantineLegacyNav(localStorage);
+  /** Before any server's state is built: has the fold run, for that server
+   * if it had not yet? An unrecorded one is simply tried again, so storage
+   * that has recovered unblocks the next bind (and Retry is that bind). */
+  function foldFor() {
+    return runFold(foldNeedsProof) !== 'unrecorded';
+  }
+  function retryMigration() {
+    swapScope();
+    const bound = scopeSwap.bound();
+    if (bound && connected) { serverReady(); void restoreNavFor(bound); }
+  }
+  /** The one-time fold of the pre-#335 live keys into a server's slot (board
+   * #335 ②b-4, `server-state-migration.ts`), BEFORE the deep link: a link to
+   * B makes B current, and folding after it would file A's live state —
+   * drafts, read marks, the navigation — into B's slot.
+   *
+   * It may find no server to fold into: a fresh client (nothing to fold), or
+   * a CURRENT that names no saved entry. Then it runs again for the first
+   * server a connect makes current (`foldFor`, from `swapScope`) — and in the
+   * second case that server must PROVE the inputs are its own, so the
+   * navigation's bytes are copied aside here, before anything else runs. */
+  const bootFold = runFold(false);
+  const foldNeedsProof = bootFold === 'no-current' || bootFold === 'unknown-current';
+  if (foldNeedsProof) quarantineLegacyNav(localStorage);
   consumeConnectUrlParams();
-  // A deep link activates its own server, which surfaces THAT server's slot
-  // into the live key: the record there is now its, whatever it looks like.
-  navLiveOwner = navProvenance();
   // Bind the content tree before its first render (board #335 ②b-1): the
   // deep-link consumer above can make a different server current, and a bind
   // that arrived a tick later would mount every page unbound and then rebuild
@@ -1590,7 +1627,7 @@
    * the boot path's half after `connect` resolves (board 315 shares it with
    * the in-place switch, so "how the app comes up on a server" is written
    * once). Records the machine identity onto the current entry, asks the
-   * server what it hosts, and restores the parked tmux_state. */
+   * server what it hosts, and restores that server's navigation. */
   function bringUp(addr, token) {
     connected = true;
     serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
@@ -1607,10 +1644,6 @@
           ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
           machineId: mid,
         });
-        // Boot's server IS the current entry — refreshing the live key
-        // here has no park to poison, and the reconnect machine needs it
-        // for the failover set (Settings no longer writes it).
-        localStorage.setItem('tmux_machine_id', mid);
       }
     } catch {}
     // Identity repair may have moved CURRENT: `recordServer` absorbs the
@@ -1619,6 +1652,9 @@
     // step of recording identity, not a step of connecting — and it is a
     // no-op whenever the id did not move (board #335 ②b-1).
     swapScope();
+    // Nothing to restore while the fold is unrecorded: the app shows the
+    // reason, on a page that is not the connect card (board #335 ②b-4).
+    if (migrationBlocked) { page = defaultPage(); return; }
     serverReady();
     void restoreNavFor(scopeSwap.bound());
   }
@@ -1659,16 +1695,12 @@
     await scopeSwap.settled();
     if (!target || scopeSwap.shown() !== target) return;
     try {
-      // Attributed by WHERE the bytes came from, then filtered to this
-      // runtime. A pane belonging to another server cannot be resolved over
-      // this connection — at best the capture fails, at worst that server has
-      // a pane by the same name and the reader lands on a stranger's terminal.
-      // Two different questions: whose bytes these are (`navLiveOwner`, the
-      // provenance App has tracked) and who we are restoring FOR (this
-      // runtime). They usually agree, and when they do not — a dangling
-      // CURRENT at boot, a record left by another server — nothing is
-      // attributed and nothing is restored.
-      const s = navFor(readLegacyNav(localStorage, navLiveOwner), target.id);
+      // Read from THIS server's slot, which is what makes it this server's
+      // (board #335 ②b-4), then filtered to this runtime: a v2 pane that
+      // names another server cannot be resolved over this connection — at
+      // best the capture fails, at worst that server has a pane by the same
+      // name and the reader lands on a stranger's terminal.
+      const s = navFor(readNav(createServerStore(localStorage, target.id)), target.id);
       // A saved target names a session that may not exist any more — killed
       // while we were away, or RENAMED (a project rename renames its session).
       // Restoring it anyway lands the user on a pane that cannot be captured,
@@ -1768,8 +1800,11 @@
     dialled.then((result) => {
       clearTimeout(timeout);
       if (!owner.current()) return;
-      if (result.ok) { bringUp(addr, token); return; }
-      if (result.reason === 'elsewhere') { void arrivedElsewhere(result, addr, token, owner); return; }
+      // Where the runtime actually dialled is its ENTRY's address (board
+      // #335 ②b-4), which the mirror read above need not be: the app comes
+      // up on what answered, and records that.
+      if (result.ok) { bringUp(result.entry?.address ?? addr, result.entry?.token ?? token); return; }
+      if (result.reason === 'elsewhere') { void arrivedElsewhere(result, result.entry.address, result.entry.token, owner); return; }
       if (result.reason !== 'superseded') page = 'settings';
     }).catch(() => {
       clearTimeout(timeout);
@@ -2541,6 +2576,18 @@
          without one; the order (teardown, release, mount) is
          server-scope.ts's, because `{#key}` creates the new branch before
          destroying the old one. -->
+    {#if migrationBlocked && page !== 'settings' && page !== 'prefs'}
+      <!-- The fold could not be recorded (board #335 ②b-4): no server page,
+           the switch panel's own form, and Retry. -->
+      <div class="switch-panel appear" role="alert">
+        <Icon name="info" size={22} />
+        <strong class="switch-name">{t('migrationBlocked')}</strong>
+        <p class="config-error">{t('migrationBlockedNote')}</p>
+        <div class="switch-actions">
+          <CommandButton label={t('configRetry')} icon="refresh" variant="primary" onclick={retryMigration} />
+        </div>
+      </div>
+    {/if}
     {#key scopeRuntime}
     <ServerScope runtime={scopeRuntime} state={serverStates.get(scopeRuntime)}>
     {#if hubEligible}

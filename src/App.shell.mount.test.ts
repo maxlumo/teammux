@@ -414,7 +414,13 @@ async function bootApp(
    * actually handed, and the record the shell saves back. */
   const onScreen = () =>
     app.document.querySelector<HTMLElement>('.term-main .xterm-wrap')?.dataset.target ?? 'none';
-  const record = () => JSON.parse(app.window.localStorage.getItem('tmux_state') || 'null');
+  // The CURRENT server's own slot: where its navigation lives since board
+  // #335 ②b-4. (The seeds are pre-#335 fixtures — a live record and parked
+  // slots — which the boot's fold turns into exactly this.)
+  const record = () => {
+    const id = app.window.localStorage.getItem('tmux_server_current');
+    return JSON.parse((id && app.window.localStorage.getItem(`tmux_state::${id}`)) || 'null');
+  };
   const restored = () => {
     const pane = record()?.pane ?? null;
     return pane ? `${pane.serverId}:${pane.target}` : 'none';
@@ -575,7 +581,7 @@ test('a split comes back whole, and every cell of it names its own server', asyn
   assert.equal(onScreen(), 'work:9.0', 'B has no split of its own');
   assert.equal(record().splitLayout, 1);
   const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
-  assert.equal(parkedA.splitLayout, 2, 'A s split was parked whole');
+  assert.equal(parkedA.splitLayout, 2, 'A s split is in its own slot, whole');
 
   await switchTo('alpha');
   assert.equal(onScreen(), 'work:1.0');
@@ -862,7 +868,7 @@ test('a boot dial that reaches ANOTHER known machine arrives there; it never bin
   assert.equal(onScreen(), 'work:2.0', 'with B s own navigation');
   assert.equal(restored(), 'b:work:2.0');
   const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
-  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s was parked, not lost');
+  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s is in its own slot, not lost');
 });
 
 test('a boot dial that answers after the connect form took the socket records nothing and brings nothing up', async (context) => {
@@ -1132,7 +1138,7 @@ test('a reconnect that reaches ANOTHER known machine arrives there; A s api neve
   assert.equal(onScreen(), 'work:2.0', 'with B s navigation');
   assert.equal(restored(), 'b:work:2.0');
   const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
-  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s was parked');
+  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s is in its own slot');
 });
 
 test('a reconnect whose identity cannot be recorded is not a same-server success', async (context) => {
@@ -1263,10 +1269,11 @@ test('a reconnect that reaches another known machine asks A s editor first; "kee
   for (let i = 0; i < 4; i++) await settle();
   assert.ok(app.document.querySelector('[role=alertdialog]'), 'A s editor asks, in its own dialog');
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'nothing moved while it asks');
+  const slotA = app.window.localStorage.getItem('tmux_state::a');
   answerDialog(app, /keep editing/iu);
   for (let i = 0; i < 6; i++) await settle();
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'the app stays on A');
-  assert.equal(app.window.localStorage.getItem('tmux_state::a'), null, 'A was never parked');
+  assert.equal(app.window.localStorage.getItem('tmux_state::a'), slotA, 'A s navigation untouched');
   assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'and A s text is still there');
   assert.match(app.document.querySelector('.card .error')?.textContent ?? '', /now reaches beta/iu,
     'the connect page says why, and nothing retries on its own');
@@ -1563,11 +1570,12 @@ test('a reconnect dial out when a form walk opens cannot open a second walk when
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
   await h.settle();
   assert.equal(h.dialogs(), 1, 'A s editor asks about the form s connect');
+  const slotA = h.app.window.localStorage.getItem('tmux_state::a');
   release();                                     // R1 answers — as B
   for (let i = 0; i < 6; i++) await h.settle();
   assert.equal(h.dialogs(), 1, 'its late success opened no arrival walk of its own');
   assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'and moved nothing');
-  assert.equal(h.app.window.localStorage.getItem('tmux_state::a'), null, 'A was not parked');
+  assert.equal(h.app.window.localStorage.getItem('tmux_state::a'), slotA, 'A s navigation untouched');
 });
 
 // ── The last ②b case before the flip (orchestrator, 08:29): a real switch
@@ -1611,4 +1619,229 @@ test('a switch while a reconnect dial hangs: A s download settles before B is di
   assert.equal(h.app.window.localStorage.getItem('tmux_servers'), servers, 'no identity was recorded');
   assert.equal(h.onScreen(), 'work:2.0', 'and B s tree is the one on screen');
   assert.equal(h.app.document.querySelector('.reconnect-cancel'), null, 'no reconnect banner');
+});
+
+// ── b2-4, the flip (board #335 ②b-4): every server's state lives in its own
+// slot, the boot folds the pre-#335 live keys into one once, and nothing
+// parks or points again.
+
+/** Every key, as a plain object: what a reload boots from. */
+const dumpStorage = (app: { window: any }) => {
+  const out: Record<string, string> = {};
+  const st = app.window.localStorage;
+  for (let i = 0; i < st.length; i++) { const k = st.key(i)!; out[k] = st.getItem(k)!; }
+  return out;
+};
+const LEGACY_KEYS = ['tmux_state', 'tmux_machine_id', 'tmux_hub_project', 'tmux_hub_drafts', 'tmux_hub_seen',
+  'tmux_hub_lead', 'tmux_hub_drawer', 'tmux_hub_roster_expanded', 'tmux_hub_alerts'];
+
+test('acceptance: a pre-#335 client migrates, is edited, goes A→B→A, and a reload finds every server s own state', async (context) => {
+  // The fixture is what a pre-#335 build leaves: A live (unprefixed), B
+  // parked under its id, a Hub draft for the same project name on each.
+  const seed = {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft on A' }),
+    'tmux_hub_drafts::b': JSON.stringify({ work: 'draft on B' }),
+  };
+  // `other` exists on both servers, so a restore keeps it (the shell drops a
+  // restored pane whose session is gone).
+  const rpc = { listSessions: async () => [{ name: 'work' }, { name: 'other' }] };
+  const first = await bootApp(context, seed, undefined, { rpc });
+  const ls = first.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, 'a', 'the boot folded the live keys into A');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft on A' }), 'A s draft is in A s slot');
+  assert.equal(first.onScreen(), 'work:1.0', 'and A s navigation came up');
+  const legacy = Object.fromEntries(LEGACY_KEYS.map((k) => [k, ls.getItem(k)]));
+
+  await first.openSession('other');                     // an edit on A
+  assert.equal(first.restored(), 'a:other:3.0', 'written into A s slot');
+  await first.switchTo('beta');
+  await first.app.advance(1000);
+  assert.equal(first.onScreen(), 'work:2.0', 'B s own navigation');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft on B' }), 'B s draft untouched');
+  await first.switchTo('alpha');
+  await first.app.advance(1000);
+  assert.equal(first.onScreen(), 'other:3.0', 'A as it was left');
+  assert.deepEqual(Object.fromEntries(LEGACY_KEYS.map((k) => [k, ls.getItem(k)])), legacy,
+    'nothing wrote a legacy key, through an edit and two switches');
+  const after = dumpStorage(first.app);
+  await first.app.close();
+
+  // Reload.
+  const second = await bootApp(context, after, undefined, { rpc });
+  assert.equal(second.onScreen(), 'other:3.0', 'the reload restores A s latest navigation');
+  assert.equal(second.app.window.localStorage.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft on A' }),
+    'and the fold did not run again over A s slot');
+  const b = JSON.parse(second.app.window.localStorage.getItem('tmux_state::b')!);
+  assert.equal(b.pane?.target ?? b.terminalTarget, 'work:2.0', 'and B s slot still holds B s');
+  assert.equal(second.app.window.localStorage.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft on B' }));
+});
+
+test('a deep link to B on a client that is on A: A s live state goes to A s slot, B s is untouched', async (context) => {
+  // Fold before the link: the link makes B current, and a fold after it
+  // would have filed A's live state into B's slot.
+  const { app, onScreen } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft on A' }),
+  }, undefined, { setup(window) { window.history.replaceState(null, '', '/?addr=ws://b:9899&token=tokB'); } });
+  const ls = app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the link made B current');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, 'a');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft on A' }));
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), null, 'B never got A s draft');
+  const b = JSON.parse(ls.getItem('tmux_state::b')!);
+  assert.equal(b.pane?.target ?? b.terminalTarget, 'work:2.0', 'B s navigation is B s');
+  await app.advance(1000);
+  assert.equal(onScreen(), 'work:2.0');
+  assert.equal(app.window.location.search, '', 'and the token left the address bar');
+});
+
+test('a fresh client opens the connect card, and a first connect folds and brings the server up', async (context) => {
+  const events: string[] = [];
+  const { app, settle, onScreen } = await bootApp(context, { tmux_layout_mode: 'desktop' }, undefined, { calls: events });
+  assert.ok(app.document.querySelector('.card .fields input[type="text"]'), 'the connect card');
+  assert.equal(app.window.localStorage.getItem('tmux_state_layout'), null, 'nothing to fold into yet');
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://a:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 4; i++) await settle();
+  const id = app.window.localStorage.getItem('tmux_server_current')!;
+  assert.ok(id, 'the connect made a server current');
+  assert.equal(JSON.parse(app.window.localStorage.getItem('tmux_state_layout')!).into, id, 'and folded for it');
+  assert.ok(app.document.querySelector('.term-page'), 'the server pages mounted');
+  void onScreen;
+});
+
+test('a deep link on a fresh client: the linked server is current, folded, and up', async (context) => {
+  const { app } = await bootApp(context, { tmux_layout_mode: 'desktop' }, undefined,
+    { setup(window) { window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); } });
+  const ls = app.window.localStorage;
+  const id = ls.getItem('tmux_server_current')!;
+  assert.ok(id);
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, id);
+  assert.ok(app.document.querySelector('.term-page'), 'the server pages mounted');
+});
+
+test('pre-#335 inputs left under a dangling CURRENT go only to the machine that proves them (reviewer P1-c)', async (context) => {
+  for (const [answers, claimed] of [['m-a', true], ['m-x', false]] as const) {
+    const { app, onScreen } = await bootApp(context, {
+      tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', named: true }]),
+      tmux_server_current: 'gone',
+      tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_machine_id: 'm-a',
+      tmux_state: legacyNav('work:1.0'),
+      tmux_hub_drafts: JSON.stringify({ work: 'draft of m-a' }),
+      tmux_layout_mode: 'desktop',
+    }, () => answers);
+    const ls = app.window.localStorage;
+    assert.ok(ls.getItem('tmux_state::unattributed'), 'the legacy navigation was copied aside at boot');
+    // The form connects; the server becomes current and must prove itself.
+    const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+    field.value = 'ws://a:9899';
+    field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    for (let i = 0; i < 2; i++) await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+    for (let i = 0; i < 20; i++) await app.flush();
+    const id = ls.getItem('tmux_server_current')!;
+    assert.equal(ls.getItem(`tmux_hub_drafts::${id}`), claimed ? JSON.stringify({ work: 'draft of m-a' }) : null,
+      claimed ? 'm-a proved it: the draft is its' : 'm-x could not: nothing of m-a s is its');
+    await app.advance(1000);
+    if (claimed) assert.equal(onScreen(), 'work:1.0', 'and its navigation came up');
+    else assert.equal(onScreen(), 'none', 'and no pane of m-a s opened on m-x');
+    await app.close();
+  }
+});
+
+test('an unrecorded fold opens no server page and starts no switch; Retry brings it up (board #335 ②b-4)', async (context) => {
+  let failing = true;
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, {
+    calls: events,
+    setup(window) {
+      const set = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (failing && k === 'tmux_state_layout') throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+    },
+  });
+  await h.app.advance(1000);
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server page mounted');
+  assert.match(h.app.document.querySelector('.switch-panel')?.textContent ?? '', /could not be updated/iu, 'the reason, on the switch panel s form');
+  assert.equal(h.app.window.localStorage.getItem('tmux_state_layout'), null);
+  // A switch does nothing while it is blocked.
+  const current = h.app.window.localStorage.getItem('tmux_server_current');
+  const dials = events.filter((e) => e.startsWith('connect:')).length;
+  await h.switchTo('beta');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), current, 'no switch');
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'nothing dialled');
+  // Storage works again; Retry.
+  failing = false;
+  // Back from Preferences (where the switcher lives) to the content area.
+  const toTab = [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  assert.ok(toTab, 'the Terminal tab');
+  toTab.click();
+  await h.settle();
+  const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry, 'the panel offers Retry');
+  retry.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(JSON.parse(h.app.window.localStorage.getItem('tmux_state_layout')!).into, 'a', 'the fold is recorded');
+  assert.equal(h.onScreen(), 'work:1.0', 'and A came up with its navigation');
+});
+
+test('the boot dials the CURRENT entry s address, not a mirror an unanswered form left behind (board #335 ②b-4)', async (context) => {
+  // A connect form that never got an answer wrote its address into the
+  // mirror; the entry still names where the server is.
+  const events: string[] = [];
+  const { app } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_address: 'ws://typed-never-answered:9899',
+  }, undefined, { calls: events });
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://a:9899'], 'the entry s address');
+  const a = JSON.parse(app.window.localStorage.getItem('tmux_servers')!).find((e: any) => e.id === 'a');
+  assert.equal(a.address, 'ws://a:9899', 'and that is what is recorded');
+});
+
+test('an address the optimizer moved to is recorded on the entry, where a reconnect reads it (board #335 ②b-4)', async (context) => {
+  const events: string[] = [];
+  const { app, settle } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+  }, (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
+    calls: events,
+    rpc: { classifyAddress: (a: string) => (a.includes('lan') ? 0 : 2), findBestAddress: async () => 'ws://a-lan:9899' },
+  });
+  app.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  for (let i = 0; i < 4; i++) await settle();
+  assert.ok(events.includes('connect:ws://a-lan:9899'), `the optimizer moved the socket: ${events.filter((e) => e.startsWith('connect:')).join(',')}`);
+  const a = JSON.parse(app.window.localStorage.getItem('tmux_servers')!).find((e: any) => e.id === 'a');
+  assert.equal(a.address, 'ws://a-lan:9899', 'and the entry knows it');
+});
+
+test('each server s stored Hub state is read from its own slot: the bell counts only that server s alerts (board #335 ②b-4)', async (context) => {
+  // The alert list is one of the resident keys, built into the runtime's
+  // state over its server's store: a bundle over the bare storage would read
+  // A's legacy list on B too.
+  const alert = (id: string) => ({ key: `proj:work|${id}`, room: 'proj:work', server: '', session: 'work', seq: 1, id, ts: 1, from: 'lead', toHuman: true, kind: 'reply', excerpt: 'x' });
+  const hub = { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) };
+  const { app, switchTo } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_hub_alerts: JSON.stringify([alert('a1'), alert('a2')]),           // A's, live
+    'tmux_hub_alerts::b': JSON.stringify([alert('b1')]),                   // B's, parked
+  }, undefined, { rpc: hub, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  const bell = () => app.document.querySelector('.rail-bell')?.getAttribute('aria-label') ?? '';
+  assert.match(bell(), /· 2\b/u, `A s two alerts: ${bell()}`);
+  await switchTo('beta');
+  await app.advance(1000);
+  assert.match(bell(), /· 1\b/u, `B s one alert, not A s: ${bell()}`);
 });

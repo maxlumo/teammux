@@ -18,13 +18,12 @@
 //     would each hold their own copy and the later write would win — the
 //     drafts lost on the first switch after an upgrade that ②a's review
 //     caught in the plan.
-//   - BUILT AFTER THE SERVER IS CURRENT. Through ②b the storage is still the
-//     bare `localStorage`, whose unprefixed keys `pointTo` re-points at
-//     whichever server is current. A bundle built before CURRENT moved would
-//     read the server being LEFT. So App builds it in `swapScope` — the one
-//     reader of CURRENT, and the step that binds the runtime — and never on
-//     first sight of an entry (reviewer, b2-1 plan). b2-4 hands each bundle a
-//     store scoped to its server, and then the timing stops mattering.
+//   - BUILT OVER ITS SERVER'S OWN STORE (board #335 ②b-4). Its storage is
+//     `createServerStore(localStorage, id)`, the view that reads and writes
+//     that server's slots, so when it is built no longer matters: a bundle
+//     reads its own server whichever one is current. (Until ②b-4 it was the
+//     bare `localStorage`, whose unprefixed keys a switch re-pointed, and a
+//     bundle built before CURRENT moved read the server being left.)
 import { createHubPrefs, type HubPrefs } from '../hub/hub-prefs.svelte.ts';
 import { createAlertLog, createCentre, type Centre } from '../hub/notify-centre.svelte.ts';
 import { createFilesMemory, type FilesMemory } from '../files/files-memory.ts';
@@ -49,8 +48,7 @@ export interface ServerState {
   files: { memory: FilesMemory; downloads: DownloadStore };
 }
 
-/** One server's state, over `storage`. Call it only once that server is
- * CURRENT — see the module header. */
+/** One server's state, over `storage` — that server's own store. */
 export function createServerState(storage: Store): ServerState {
   return {
     prefs: createHubPrefs(storage),
@@ -82,6 +80,10 @@ export function stateForRuntime(
   id: string,
   deps: { survivorOf: (id: string) => string; create: () => ServerState },
 ): ServerState {
+  // What transfers is the work in memory — Files' record and its rows. What
+  // is STORED comes from the survivor's own slots, which the merge has just
+  // handed the absorbed entry's (servers.ts `forgetDropped`); the old prefs
+  // would go on writing the absorbed id's slots, which no longer exist.
   const merged = !!replaced && replaced.id !== id && deps.survivorOf(replaced.id) === id;
   // A state already released (or being released) is never handed over: its
   // Files record is sealed for good, and adopting it would leave the
@@ -90,7 +92,8 @@ export function stateForRuntime(
   // released the alias's state on the way out, and the merge is discovered
   // only on the way back.
   const live = merged && replaced.state && !replaced.state.files.memory.sealed() ? replaced.state : null;
-  return live ?? deps.create();
+  const fresh = deps.create();
+  return live ? { ...fresh, files: live.files } : fresh;
 }
 
 /**

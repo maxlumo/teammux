@@ -403,7 +403,6 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
     "set({ intent, from, target, phase: 'connecting'",
     'await d.suspendDownloads()',
     'await d.afterUnmount()',
-    'parkFrom(d.storage, from.id)',
     'd.disconnect()',
     'd.resetMemory()',
     'await d.connect(target.address, target.token)',
@@ -411,8 +410,9 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
     'd.comeUp(target, entry)',
   ].map(at);
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'the switch steps run in the documented order');
-  assert.match(fn, /if \(fromConnected && from\) \{\s*await d\.suspendDownloads\(\);\s*await d\.afterUnmount\(\);\s*parkFrom\(d\.storage, from\.id\);/u,
-    'only a switch that LEFT a connected server parks — retry/back never re-park');
+  assert.match(fn, /if \(fromConnected && from\) \{\s*await d\.suspendDownloads\(\);\s*await d\.afterUnmount\(\);\s*\}/u,
+    'only a switch that LEFT a connected server stops its downloads; nothing is parked (board #335 ②b-4)');
+  assert.doesNotMatch(mod, /parkFrom|pointTo/u, 'the switch moves CURRENT and nothing else');
   assert.ok((fn.match(/intent !== seq/gu) ?? []).length >= 3, 'every await re-checks that this intent still owns the switch');
   // App wires the effects into that one module and calls nothing else.
   assert.match(source, /const serverSwitch = createServerSwitch\(\{/u);
@@ -433,7 +433,7 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // unless the handle replacing it ADOPTED that very state (a same-machine
   // merge) — and disposed only after that. The swap awaits it, so it shows
   // nothing until the end is over.
-  assert.match(source, /const ends = createHandleEnds\(\{\s*stateOf: \(runtime\) => serverStates\.get\(runtime\),\s*adoptedElsewhere: \(state, runtime\) => \{\s*const next = scopeSwap\.bound\(\);\s*return !!next && next !== runtime && serverStates\.get\(next\) === state;\s*\},\s*release: releaseServerState,\s*\}\);/u);
+  assert.match(source, /const ends = createHandleEnds\(\{\s*stateOf: \(runtime\) => serverStates\.get\(runtime\),\s*adoptedElsewhere: \(state, runtime\) => \{\s*const next = scopeSwap\.bound\(\);\s*return !!next && next !== runtime && serverStates\.get\(next\)\?\.files === state\.files;\s*\},\s*release: releaseServerState,\s*\}\);/u);
   assert.match(source, /invalidate: async \(gone\) => \{[\s\S]*?await ends\.end\(gone\);\s*\},/u);
   // And NOTHING else in App disposes a runtime or releases a state: the
   // revoke, the handover's terminal verdict and the swap all hand the handle
@@ -551,7 +551,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
-  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(localStorage\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
+  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
@@ -567,10 +567,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'one runtime, on the facade s slot, so Single mode keeps one socket');
   // Every path that can change which server the app is on binds the tree.
   for (const [name, pattern] of [
-    // Boot's order is the pin: consume the deep link, re-read WHO owns the
-    // legacy record now that a link may have made another server current,
-    // then bind.
-    ['boot', /consumeConnectUrlParams\(\);[\s\S]{0,300}?navLiveOwner = navProvenance\(\);[\s\S]{0,400}?swapScope\(\);/u],
+    // Boot's order is the pin (board #335 ②b-4, orchestrator's ruling on the
+    // ② plan): migrate the registry, load it, FOLD, then the deep link, then
+    // bind. A fold after the link would file A's live state into B's slot.
+    ['boot', /migrateServers\(localStorage\);\s*loadServerRegistry\(\);[\s\S]{0,2400}?const bootFold = runFold\(false\);[\s\S]{0,300}?consumeConnectUrlParams\(\);[\s\S]{0,600}?swapScope\(\);/u],
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
     // A failover can be the connect that first learns the machine's id, and
@@ -582,13 +582,14 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
   // never an inference from an id being absent (reviewer P1-a, 2026-10-10).
-  assert.match(source, /const entry = id \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u);
+  assert.match(source, /const entry = id && foldFor\(\) \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u,
+    'no server s state is built before the fold has run for it, and none at all while it cannot be recorded');
   assert.match(source, /function followMerges\(\) \{\s*const survivorOf = \(serverId\) => mergedInto\(localStorage, serverId\);/u,
     'the survivor comes from servers.mergedInto');
   const follow = source.match(/function followMerges\(\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(follow, /known|\.has\(/u, 'and nothing reads absence as a merge');
   for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)',
-    'reownSavedNav(localStorage, survivorOf);'])
+    'reownSavedNav(createServerStore(localStorage, id), survivorOf);'])
     assert.ok(follow.includes(held), `the merge reaches what App holds and the record: ${held}`);
   // Every CONFIRMED runtime opens the save gate: an arrival by restoring the
   // record, a same-server return or a failover by keeping what is on screen
@@ -612,23 +613,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The restore belongs to ONE confirmed runtime, runs after the bind, and
   // does nothing for a runtime that is no longer on screen.
   assert.match(source, /async function restoreNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;/u);
-  assert.match(source, /readLegacyNav\(localStorage, navLiveOwner\), target\.id\);/u,
-    'attributed by the tracked provenance, then filtered to this runtime');
-  // Provenance is KNOWN, never derived from the bytes: two servers can hold
-  // byte-identical records.
-  assert.match(source, /function navProvenance\(\) \{\s*const id = currentServerId\(localStorage\);\s*return id && loadServers\(localStorage\)\.some\(\(srv\) => srv\.id === id\) \? id : '';/u,
-    'and it validates CURRENT against the registry rather than trusting the string');
-  assert.doesNotMatch(source, /navBoot|=== boot\.raw/u, 'no byte comparison decides ownership');
-  assert.match(source, /if \(!navLiveOwner\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
-    'an input nobody owns is copied aside BEFORE anything can overwrite it');
-  // Every ARRIVAL re-reads it, because arriving is what surfaces a server's
-  // slot into the live key.
-  assert.equal([...source.matchAll(/(?<!let )navLiveOwner = navProvenance\(\);/gu)].length, 3,
-    'the deep link, the in-place switch and the connect page all surface a slot');
+  assert.match(source, /navFor\(readNav\(createServerStore\(localStorage, target\.id\)\), target\.id\);/u,
+    'read from THIS server s slot, then filtered to this runtime (board #335 ②b-4)');
+  // Ownership is WHERE a record is read (board #335 ②b-4): there is no live
+  // record left to track the provenance of, and nothing compares bytes.
+  assert.doesNotMatch(source, /navProvenance|navLiveOwner|navBoot|=== boot\.raw/u, 'no tracked provenance and no byte comparison');
   // And nothing saves over that record until the restore for the bound
   // runtime has finished.
   assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
-  assert.match(source, /saveNav\(localStorage, \{ page, pane: termPane, splitLayout, splitCells \}\);/u,
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\), \{ page, pane: termPane, splitLayout, splitCells \}\);/u,
     'the saved state writes the refs App already holds, rather than rebuilding them');
   // Every reference is minted in ONE place per kind, from the bound server.
   assert.match(source, /function showPane\(session, target\) \{\s*termPane = target \? paneRef\(navServerId\(\),/u);
@@ -745,7 +738,8 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // records anything, and the outcome is acted on only while it still holds.
   assert.match(source, /const owner = handovers\.claim\(\);\s*const runtime = scopeSwap\.bound\(\);\s*const dialled = runtime \? runtime\.dial\(owner\.current\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
   assert.match(source, /\.catch\(\(\) => \{\s*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) page = 'settings';/u);
-  assert.match(source, /if \(result\.ok\) \{ bringUp\(addr, token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result, addr, token, owner\); return; \}/u);
+  assert.match(source, /if \(result\.ok\) \{ bringUp\(result\.entry\?\.address \?\? addr, result\.entry\?\.token \?\? token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result, result\.entry\.address, result\.entry\.token, owner\); return; \}/u,
+    'the app comes up on, and records, the address the runtime dialled — its entry s');
   // And every reconnect attempt takes the socket through a handover of its
   // own, concluded like the form's (reviewer P1 on c5487bef).
   assert.match(source, /attempt: \(\) => handovers\.open\(scopeSwap\.bound\(\)\),/u);
@@ -794,7 +788,22 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
     'both kept: arrive at B through the connect page s different-server path');
 });
 
-test('doConnect never writes the live tmux_machine_id — activateConnected owns it (board #55)', async () => {
+test('the fold gate: an unrecorded fold binds no server and starts no switch (board #335 ②b-4)', () => {
+  assert.match(source, /function runFold\(requireProof\) \{\s*let reason;\s*try \{ reason = migrateServerState\(localStorage, \{ requireProof \}\)\.reason; \} catch \{ reason = 'unrecorded'; \}\s*migrationBlocked = reason === 'unrecorded';/u,
+    'a thrown fold is unrecorded too');
+  assert.match(source, /function foldFor\(\) \{\s*return runFold\(foldNeedsProof\) !== 'unrecorded';\s*\}/u,
+    'a server that became current after a boot that could not name one must PROVE the inputs are its own');
+  assert.match(source, /const switchTo = \(target\) => \(migrationBlocked \? Promise\.resolve\(\) : serverSwitch\.switchTo\(target\)\);/u);
+  assert.match(source, /if \(foldNeedsProof\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
+    'the legacy navigation is copied aside before anything else runs');
+  // Every per-server read and write goes through the server's store.
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\),/u);
+  assert.match(source, /readNav\(createServerStore\(localStorage, target\.id\)\)/u);
+  assert.doesNotMatch(source, /localStorage\.(?:getItem|setItem|removeItem)\('tmux_(?:state|hub_project|hub_drafts|hub_seen|hub_lead|hub_drawer|hub_roster_expanded|hub_alerts|machine_id)'/u,
+    'App reads and writes no legacy per-server key');
+});
+
+test('nothing writes the unprefixed tmux_machine_id (board #55, #335 ②b-4)', async () => {
   // Lead blocker #2: the form pre-wrote the NEW machine's id into the live
   // key before activating, so parkAndPoint filed it under the OLD server's
   // parking slot. The map (tmux_machines, keyed by machineId) stays the
@@ -803,10 +812,12 @@ test('doConnect never writes the live tmux_machine_id — activateConnected owns
   const fn = settings.match(/async function doConnect\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.ok(!fn.includes("setItem('tmux_machine_id'"), 'no live machine-id pre-write in the form');
   assert.match(fn, /setItem\('tmux_machines'/u, 'the identity MAP update stays');
-  // The boot path may write it: its server IS the current entry, no park to poison.
-  const boot = (source.match(/dialled\.then\(\(result\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
-  assert.match(boot, /recordServer\(localStorage[\s\S]*?setItem\('tmux_machine_id', mid\)/u,
-    'boot stamps the live key AFTER recording — it is the current server');
+  // Nothing writes it since board #335 ②b-4: it is the frozen legacy mirror,
+  // the evidence a server must match to claim pre-#335 inputs.
+  assert.doesNotMatch(source, /setItem\('tmux_machine_id'/u, 'App writes no unprefixed machine id');
+  for (const mod of ['./lib/app/servers.ts', './lib/app/server-switch.ts', './lib/app/server-runtime.ts']) {
+    assert.doesNotMatch(await readFile(new URL(mod, import.meta.url), 'utf8'), /setItem\('tmux_machine_id'/u, `${mod} writes none either`);
+  }
 });
 
 test('removing a saved server goes through the shared ConfirmDialog (board #55)', async () => {

@@ -76,13 +76,17 @@ test('a same-machine merge hands the replaced runtime s state over; anything els
   const old = createServerState(localStorage);
   const create = () => createServerState(localStorage);
   const merged = (id: string) => (id === 'alias' ? 'canon' : id);
-  assert.equal(stateForRuntime({ id: 'alias', state: old }, 'canon', { survivorOf: merged, create }), old,
-    'the canonical runtime adopts the SAME bundle — the attempt table included');
-  assert.notEqual(stateForRuntime({ id: 'other', state: old }, 'canon', { survivorOf: merged, create }), old,
+  const adopted = stateForRuntime({ id: 'alias', state: old }, 'canon', { survivorOf: merged, create });
+  assert.equal(adopted.files, old.files, 'the canonical runtime adopts the SAME Files record — the attempt table included');
+  // What is STORED comes from the survivor's own slots, which the merge has
+  // handed the alias's (board #335 ②b-4): the old prefs would go on writing
+  // the absorbed id's slots.
+  assert.notEqual(adopted.prefs, old.prefs, 'and stored state is read afresh, over the survivor s store');
+  assert.notEqual(stateForRuntime({ id: 'other', state: old }, 'canon', { survivorOf: merged, create }).files, old.files,
     'a different server is a different state');
-  assert.notEqual(stateForRuntime({ id: 'gone', state: old }, 'canon', { survivorOf: () => '', create }), old,
+  assert.notEqual(stateForRuntime({ id: 'gone', state: old }, 'canon', { survivorOf: () => '', create }).files, old.files,
     'an id nothing shows to be merged hands nothing over');
-  assert.notEqual(stateForRuntime(null, 'canon', { survivorOf: merged, create }), old, 'a first bind is fresh');
+  assert.notEqual(stateForRuntime(null, 'canon', { survivorOf: merged, create }).files, old.files, 'a first bind is fresh');
   assert.notEqual(stateForRuntime({ id: 'alias', state: undefined }, 'canon', { survivorOf: merged, create }), undefined,
     'and there is always a state');
 });
@@ -116,6 +120,6 @@ test('a state already released is never handed over, merge or not (reviewer P1-b
   await releaseServerState(old);
   const merged = (id: string) => (id === 'alias' ? 'canon' : id);
   const next = stateForRuntime({ id: 'alias', state: old }, 'canon', { survivorOf: merged, create: () => createServerState(localStorage) });
-  assert.notEqual(next, old, 'a fresh state instead');
+  assert.notEqual(next.files, old.files, 'a fresh state instead');
   assert.equal(next.files.memory.sealed(), false, 'which can start downloads');
 });

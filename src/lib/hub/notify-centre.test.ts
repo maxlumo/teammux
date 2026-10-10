@@ -85,7 +85,7 @@ test('a pre-#334 list loses its non-bell entries on load; read marks are not the
   assert.equal(store.get('tmux_hub_seen'), JSON.stringify({ p: { seq: 1, ts: 1 } }), 'no room read mark moved');
 });
 
-test('tmux_hub_alerts is parked per server (#315)', async () => {
-  const { PARKED_KEYS } = await import('../app/servers.ts');
-  assert.ok((PARKED_KEYS as readonly string[]).includes(ALERTS_KEY));
+test('tmux_hub_alerts is resident per server (#315, #335 ②b-4)', async () => {
+  const { RESIDENT_KEYS } = await import('../app/servers.ts');
+  assert.ok((RESIDENT_KEYS as readonly string[]).includes(ALERTS_KEY));
 });

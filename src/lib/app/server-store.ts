@@ -1,8 +1,8 @@
 // A server's own corner of storage (board #335 ②a-3).
 //
-// The per-server keys stop having two homes — a live unprefixed one for
-// whichever server is current, and `<key>::<id>` where the switch files the
-// one you left — and become resident at `<key>::<id>`. With two servers on
+// The per-server keys stopped having two homes — a live unprefixed one for
+// whichever server was current, and `<key>::<id>` where the switch filed the
+// one you left — and are resident at `<key>::<id>`. With two servers on
 // screen there is no "the" live value, so a store that answers "which server
 // are you asking about" is the whole mechanism.
 //
@@ -15,10 +15,9 @@
 //
 // Two rules decide what is scoped:
 //
-//   - a RESIDENT key is rewritten. `RESIDENT_KEYS` is `servers.ts`'s own
-//     `PARKED_KEYS`: "parked per server" and "resident per server" are the
-//     same set seen from two sides, so there is one list and a key cannot be
-//     added to one and forgotten in the other.
+//   - a RESIDENT key is rewritten, to `servers.ts`'s `residentKey`. The list
+//     is `servers.ts`'s `RESIDENT_KEYS`: one list, which the identity layer
+//     also uses when it removes or merges an entry.
 //   - everything else PASSES THROUGH, unchanged. The user's preferences —
 //     theme, fonts, zoom, language, shortcuts, notification switches, the feed
 //     level, the sidebar collapse — are properties of the PERSON and the
@@ -28,17 +27,15 @@
 //     active mirror (`tmux_address`, `tmux_token`, `tmux_socket`) pass through
 //     too, because their home is the `ServerEntry`.
 //
-// Passing them through is a COMPATIBILITY decision, not a claim that those
-// credentials are now scoped by server. They are not: `tmux_address`,
-// `tmux_token` and `tmux_machine_id`'s live spelling still describe whichever
-// server is current. So handing this view to the existing reconnect machine
-// would not scope it — ②b must give reconnect (and anything else reading the
-// connection config) a reader that resolves the ENTRY by id.
+// Passing the mirror through is not a claim that those credentials are
+// scoped by server: they describe whichever server is current, for the
+// connect form and the boot gate. Where to reach a server is read from its
+// ENTRY, by id (`server-target.ts`).
 //
-// Not wired into production yet: ②a ships this and its tests; the ②b commit
-// that switches every live read and write over is what adopts it.
+// In production since board #335 ②b-4: every server's state is built over
+// its own view.
 import type { ServerId } from './refs.ts';
-import { RESIDENT_KEYS, residentKey } from './server-state-migration.ts';
+import { RESIDENT_KEYS, residentKey } from './servers.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 

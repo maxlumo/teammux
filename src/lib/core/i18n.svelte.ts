@@ -153,6 +153,10 @@ const msgs: Record<string, Record<string, string>> = {
     serverCurrent: 'Current',
     serverSwitching: 'Connecting to {name}…',
     serverSwitchFailed: 'Could not connect to {name}',
+    // Board #335 ②b-4: the one-time move of this device's saved state into
+    // per-server storage could not be recorded, so no server page opens.
+    migrationBlocked: 'Saved state could not be updated',
+    migrationBlockedNote: 'This device could not write its storage, so server pages stay closed to keep your drafts and views safe. Free some space or allow storage, then retry.',
     serverSwitchBack: 'Back to {name}',
     serverSwitchEdit: 'Edit connection',
     serverSwitchOther: 'Other server',
@@ -858,6 +862,8 @@ const msgs: Record<string, Record<string, string>> = {
     serverCurrent: '当前',
     serverSwitching: '正在连接 {name}…',
     serverSwitchFailed: '无法连接 {name}',
+    migrationBlocked: '无法更新已保存的状态',
+    migrationBlockedNote: '这台设备写不进存储，为保护你的草稿和界面，服务器页面暂不打开。请腾出空间或允许存储后重试。',
     serverSwitchBack: '回到 {name}',
     serverSwitchEdit: '编辑连接',
     serverSwitchOther: '其他服务端',

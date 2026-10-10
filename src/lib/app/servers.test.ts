@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CURRENT_KEY, MACHINE_PREFIX, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, STATE_PREFIX, mergedInto,
-  activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, parkFrom, pointTo, PARKED_KEYS, hostLabel, loadServers,
+  CURRENT_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, residentKey,
+  activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, RESIDENT_KEYS, hostLabel, loadServers,
   migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses,
 } from './servers.ts';
 
@@ -186,179 +186,117 @@ test('activateConnected: the SAME server (machine alternate) needs no reboot', (
   assert.equal(loadServers(s).length, 1, 'still one entry');
 });
 
-test('activateConnected: a DIFFERENT server parks the old live state and demands a reboot', () => {
-  // The lead blocker: a Settings connect to a new machine bypassed
-  // applySwitch — old tmux_state was never parked under the old id and the
-  // in-memory caches (Hub rooms, terminals, Files cwds) stayed old-server.
-  // activateConnected does the applySwitch bookkeeping and returns
-  // reload:true so the caller reboots through the one boot path.
+test('activateConnected: a DIFFERENT server becomes CURRENT, and nothing is filed or surfaced (board #335 ②b-4)', () => {
+  // Each server's state is in its own slots already, so arriving is only
+  // moving CURRENT. The legacy live keys are inputs for the fold: nothing
+  // writes them, the machine id included (it is the frozen legacy mirror).
   const s = mem({
     tmux_address: 'ws://a:1', tmux_token: 'ta', tmux_machine_id: 'm-a',
     tmux_state: '{"page":"board"}',
   });
   migrateServers(s);
   const aId = currentServerId(s);
+  s.setItem(residentKey('tmux_state', aId), '{"page":"files"}');
   s.setItem('tmux_address', 'ws://b:2');       // the connect form wrote the mirror keys pre-dial
   s.setItem('tmux_token', 'tb');
   s.setItem('tmux_disconnected', '1');
   const act = activateConnected(s, { address: 'ws://b:2', token: 'tb', machineId: 'm-b' });
-  assert.equal(act.reload, true, 'different machine — the caller must location.reload()');
-  assert.equal(s.getItem(STATE_PREFIX + aId), '{"page":"board"}', 'A’s live state parked under A');
-  assert.equal(s.getItem(MACHINE_PREFIX + aId), 'm-a', 'A’s machine id parked too');
-  assert.equal(s.getItem('tmux_state'), null, 'B starts fresh — never on A’s restore targets');
-  assert.equal(s.getItem('tmux_machine_id'), 'm-b', 'B’s identity is live');
+  assert.equal(act.reload, true, 'different machine — the caller brings the app up as a switch');
   const bEntry = loadServers(s).find((x) => x.address === 'ws://b:2')!;
   assert.equal(currentServerId(s), bEntry.id, 'B is current');
+  assert.equal(s.getItem(residentKey('tmux_state', aId)), '{"page":"files"}', 'A s slot untouched');
+  assert.equal(s.getItem(residentKey('tmux_state', bEntry.id)), null, 'B s slot untouched: B starts fresh');
+  assert.equal(s.getItem('tmux_state'), '{"page":"board"}', 'the legacy live key is not touched');
+  assert.equal(s.getItem('tmux_machine_id'), 'm-a', 'nor the legacy machine id');
   assert.equal(s.getItem('tmux_disconnected'), null, 'connecting IS the intent');
-  // And a later switch back restores A intact.
-  parkFrom(s, currentServerId(s));
-  pointTo(s, loadServers(s).find((x) => x.id === aId)!);
-  assert.equal(s.getItem('tmux_state'), '{"page":"board"}');
-  assert.equal(s.getItem('tmux_machine_id'), 'm-a');
 });
 
-test('removeServer refuses the current entry and clears parked state for others', () => {
+test('removeServer refuses the current entry and clears the others  slots', () => {
   const s = mem({ tmux_address: 'ws://a:1', tmux_token: '' });
   migrateServers(s);
   const a = loadServers(s)[0]!;
   const { entry: b } = recordServer(s, { address: 'ws://b:2', token: '' });
-  s.setItem(STATE_PREFIX + b.id, '{"page":"hub"}');
-  s.setItem(MACHINE_PREFIX + b.id, 'mid-b');
+  for (const key of RESIDENT_KEYS) s.setItem(residentKey(key, b.id), `${key} of b`);
   assert.equal(removeServer(s, a.id).length, 2, 'current is not removable');
   const left = removeServer(s, b.id);
   assert.equal(left.length, 1);
-  assert.equal(s.getItem(STATE_PREFIX + b.id), null, 'parked state goes with the entry');
-  assert.equal(s.getItem(MACHINE_PREFIX + b.id), null);
+  for (const key of RESIDENT_KEYS) assert.equal(s.getItem(residentKey(key, b.id)), null, `${key} goes with the entry`);
 });
 
-// --- The in-place switch's storage half (board 315) -------------------------
-
-const HUB = (project: string, draft: string) => ({
-  tmux_hub_project: project,
-  tmux_hub_drafts: JSON.stringify({ [project]: draft }),
-  tmux_hub_seen: JSON.stringify({ [project]: 1 }),
-  tmux_hub_lead: JSON.stringify({ [project]: 'lead' }),
-});
-
-test('parkFrom files every per-server key under the source id; pointTo surfaces the target’s', () => {
-  const s = mem({
-    tmux_address: 'ws://a:1', tmux_token: 'ta',
-    tmux_state: '{"page":"terminal","terminalTarget":"app:1.1"}', tmux_machine_id: 'mid-a',
-    ...HUB('app', 'half-typed on A'),
-  });
-  migrateServers(s);
-  const a = loadServers(s)[0]!;
-  const { entry: b } = recordServer(s, { address: 'ws://b:2', token: 'tb' });
-  s.setItem(STATE_PREFIX + b.id, '{"page":"board"}');
-  s.setItem(MACHINE_PREFIX + b.id, 'mid-b');
-  s.setItem(`tmux_hub_drafts::${b.id}`, JSON.stringify({ app: 'B draft' }));
-
-  parkFrom(s, a.id);
-  assert.equal(s.getItem(STATE_PREFIX + a.id), '{"page":"terminal","terminalTarget":"app:1.1"}');
-  assert.equal(s.getItem(MACHINE_PREFIX + a.id), 'mid-a');
-  assert.equal(s.getItem(`tmux_hub_drafts::${a.id}`), JSON.stringify({ app: 'half-typed on A' }));
-  assert.equal(s.getItem(`tmux_hub_project::${a.id}`), 'app');
-  assert.equal(s.getItem('tmux_address'), 'ws://a:1', 'parking never touches the mirror');
-  assert.equal(currentServerId(s), a.id, 'nor CURRENT');
-
-  pointTo(s, b);
-  assert.equal(s.getItem('tmux_state'), '{"page":"board"}');
-  assert.equal(s.getItem('tmux_machine_id'), 'mid-b');
-  assert.equal(s.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'B draft' }), 'same project name, B’s own draft');
-  assert.equal(s.getItem('tmux_hub_project'), null, 'nothing parked for B: cleared, never A’s');
-  assert.equal(s.getItem('tmux_hub_seen'), null);
-  assert.equal(currentServerId(s), b.id);
-
-  // And back: A exactly as it was.
-  parkFrom(s, b.id);
-  pointTo(s, a);
-  assert.equal(s.getItem('tmux_state'), '{"page":"terminal","terminalTarget":"app:1.1"}');
-  assert.equal(s.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'half-typed on A' }));
-  assert.equal(s.getItem('tmux_hub_project'), 'app');
-  assert.equal(s.getItem('tmux_machine_id'), 'mid-a');
-});
-
-test('pointTo prefers the entry’s own machineId for the failover set', () => {
-  const s = mem({ tmux_address: 'ws://a:1', tmux_token: 'ta', tmux_machine_id: 'm-a' });
-  migrateServers(s);
-  const a = loadServers(s)[0]!;
-  const { entry: b } = recordServer(s, { address: 'ws://b:2', token: 'tb', machineId: 'm-b' });
-  parkFrom(s, a.id);
-  pointTo(s, b);
-  assert.equal(s.getItem('tmux_machine_id'), 'm-b', 'B’s identity, even with no parked key');
-  parkFrom(s, b.id);
-  pointTo(s, loadServers(s).find((x) => x.id === a.id)!);
-  assert.equal(s.getItem('tmux_machine_id'), 'm-a', 'and back — never crossed');
-});
+// --- The in-place switch's storage half (board 315; since #335 ②b-4 it is
+// only moving CURRENT — the layer proof is server-state.test.ts) ----------
 
 test('activateSwitched: a candidate becomes current only by the identity it reported', () => {
   const s = mem({
-    tmux_address: 'ws://a:1', tmux_token: 'ta', tmux_machine_id: 'm-a', tmux_state: '{"page":"hub"}',
+    tmux_address: 'ws://a:1', tmux_token: 'ta', tmux_machine_id: 'm-a',
     tmux_machines: JSON.stringify({ 'm-a': ['ws://a:1'] }), tmux_disconnected: '1',
   });
   migrateServers(s);
   const aId = currentServerId(s);
-  parkFrom(s, aId);
+  s.setItem(residentKey('tmux_state', aId), '{"page":"hub"}');
   // A NEW address that turns out to be machine A (its Tailscale name): it
-  // folds into A's entry and restores A's parked state, never a second server.
+  // folds into A's entry, never a second server.
   const same = activateSwitched(s, { address: 'ws://a-ts:9', token: 'ta', machineId: 'm-a' });
   assert.equal(same.id, aId);
   assert.equal(loadServers(s).length, 1);
-  assert.equal(s.getItem('tmux_state'), '{"page":"hub"}');
+  assert.equal(currentServerId(s), aId);
   assert.deepEqual(JSON.parse(s.getItem('tmux_machines')!)['m-a'], ['ws://a:1', 'ws://a-ts:9'], 'the address joins the failover set');
   assert.equal(s.getItem('tmux_address'), 'ws://a-ts:9', 'the mirror follows only after auth');
   assert.equal(s.getItem('tmux_disconnected'), null);
-  // A genuinely new machine gets its own entry and starts fresh.
-  parkFrom(s, aId);
+  // A genuinely new machine gets its own entry, and CURRENT moves to it.
   const b = activateSwitched(s, { address: 'ws://b:2', token: 'tb', socket: '/sb', machineId: 'm-b' });
   assert.notEqual(b.id, aId);
   assert.equal(currentServerId(s), b.id);
-  assert.equal(s.getItem('tmux_state'), null);
-  assert.equal(s.getItem('tmux_machine_id'), 'm-b');
   assert.equal(s.getItem('tmux_socket'), '/sb');
-  assert.equal(s.getItem(STATE_PREFIX + aId), '{"page":"hub"}', 'A’s park untouched by B’s activation');
+  assert.equal(s.getItem(residentKey('tmux_state', aId)), '{"page":"hub"}', 'A s slot untouched by B s activation');
+  assert.equal(s.getItem(residentKey('tmux_state', b.id)), null, 'and B s is its own');
+  assert.equal(s.getItem('tmux_machine_id'), 'm-a', 'the legacy machine id is written by nothing');
 });
 
-test('PARKED_KEYS names exactly the Hub prefs that are per project (per server)', async () => {
+test('RESIDENT_KEYS names exactly the Hub prefs that are per project (per server)', async () => {
   const { readFile } = await import('node:fs/promises');
   const src = await readFile(new URL('../hub/hub-prefs.svelte.ts', import.meta.url), 'utf8');
   const keyOf = (name: string) => new RegExp(`const ${name} = '([^']+)'`, 'u').exec(src)?.[1];
   const list = /HUB_SERVER_KEYS = \[([^\]]+)\]/u.exec(src)?.[1]?.split(',').map((x) => keyOf(x.trim())) ?? [];
   assert.ok(list.length >= 4, 'hub-prefs names its per-server keys');
-  for (const key of list) assert.ok((PARKED_KEYS as readonly string[]).includes(key!), `${key} is parked per server`);
+  for (const key of list) assert.ok((RESIDENT_KEYS as readonly string[]).includes(key!), `${key} is resident per server`);
 });
 
-test('activateConnected owns the live machine id — same machine refreshes it (lead blocker #2)', () => {
+test('a merge hands the CURRENT twin s slots to the survivor (board #335 ②b-4)', () => {
+  // The current twin's slots are what the person was just using on that
+  // machine; before ②b-4 they were the live keys and simply stayed live.
   const s = mem({
-    tmux_address: 'ws://a-lan:1', tmux_token: 'ta',
-    tmux_machines: JSON.stringify({ 'm-a': ['ws://a-lan:1', 'ws://a-alt:2'] }),
-    // live key stale/absent — Settings no longer pre-writes it
+    [SERVERS_KEY]: JSON.stringify([
+      { id: 'alias', name: 'home', address: 'ws://a:1', token: 't' },
+      { id: 'canon', name: 'canonical', address: 'ws://a-ts:2', token: 't', machineId: 'm-a' },
+    ]),
+    [CURRENT_KEY]: 'alias',
+    [residentKey('tmux_state', 'alias')]: 'alias nav',
+    [residentKey('tmux_hub_drafts', 'alias')]: 'alias drafts',
+    [residentKey('tmux_state', 'canon')]: 'older canon nav',
+    [residentKey('tmux_hub_seen', 'canon')]: 'older canon seen',
   });
-  migrateServers(s);
-  const act = activateConnected(s, { address: 'ws://a-alt:2', token: 'ta', machineId: 'm-a' });
-  assert.equal(act.reload, false);
-  assert.equal(s.getItem('tmux_machine_id'), 'm-a', 'the same-machine branch refreshes the live key');
+  recordServer(s, { address: 'ws://a:1', token: 't', machineId: 'm-a' });
+  assert.equal(currentServerId(s), 'canon', 'CURRENT followed the merge');
+  assert.equal(s.getItem(residentKey('tmux_state', 'canon')), 'alias nav', 'the current twin s state is the survivor s now');
+  assert.equal(s.getItem(residentKey('tmux_hub_drafts', 'canon')), 'alias drafts');
+  assert.equal(s.getItem(residentKey('tmux_hub_seen', 'canon')), null, 'whole: what the twin did not have is gone too');
+  for (const key of RESIDENT_KEYS) assert.equal(s.getItem(residentKey(key, 'alias')), null, `the alias s ${key} went with it`);
 });
 
-test('the REAL caller sequence cannot poison the old server’s parked machine id', () => {
-  // Regression for the exact bug: Settings used to write the NEW machine's
-  // id into the live key BEFORE activating, so parkAndPoint filed m-b under
-  // A's slot. The contract is now: the caller never pre-writes the live key,
-  // activateConnected parks whatever the OLD server left there.
+test('a merge of a twin that was NOT current keeps the survivor s slots', () => {
   const s = mem({
-    tmux_address: 'ws://a:1', tmux_token: 'ta', tmux_machine_id: 'm-a',
-    tmux_state: '{"page":"hub"}',
+    [SERVERS_KEY]: JSON.stringify([
+      { id: 'canon', name: 'canonical', address: 'ws://a-ts:2', token: 't', machineId: 'm-a' },
+      { id: 'alias', name: 'home', address: 'ws://a:1', token: 't' },
+    ]),
+    [CURRENT_KEY]: 'canon',
+    [residentKey('tmux_state', 'alias')]: 'alias nav',
+    [residentKey('tmux_state', 'canon')]: 'canon nav',
   });
-  migrateServers(s);
-  const aId = currentServerId(s);
-  // The real caller: mirror keys pre-written, map updated, live key UNTOUCHED.
-  s.setItem('tmux_address', 'ws://b:2');
-  s.setItem('tmux_token', 'tb');
-  s.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://a:1'], 'm-b': ['ws://b:2'] }));
-  const act = activateConnected(s, { address: 'ws://b:2', token: 'tb', machineId: 'm-b' });
-  assert.equal(act.reload, true);
-  assert.equal(s.getItem(MACHINE_PREFIX + aId), 'm-a', 'A’s slot holds A’s id — never B’s');
-  assert.equal(s.getItem('tmux_machine_id'), 'm-b', 'the live key is B’s, written by parkAndPoint');
+  recordServer(s, { address: 'ws://a:1', token: 't', machineId: 'm-a' });
+  assert.equal(s.getItem(residentKey('tmux_state', 'canon')), 'canon nav');
+  assert.equal(s.getItem(residentKey('tmux_state', 'alias')), null);
 });
 
 test('removeServer with a vanished id is a harmless no-op (stale confirm, board #55)', () => {

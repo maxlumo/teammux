@@ -308,22 +308,24 @@ the restore is about to read.
 
 Reading is where the care goes, and three rules carry it:
 
-- **Ownership is WHO PUT IT THERE, and only the shell knows.** A pre-#335
-  record has no serverId, and it cannot be worked out from the content: two
-  servers can hold byte-identical records, and `work:1.0` on A reads exactly
-  like `work:1.0` on B (orchestrator, 2026-10-10 — an earlier version
-  compared the live bytes with a boot snapshot and filed B's record under A).
-  So App TRACKS the provenance instead: at boot the live record belongs to
-  whatever CURRENT names, validated against the saved registry rather than
-  trusted as a string, and from then on it belongs to whichever server the app
-  ARRIVED at — a deep link, a switch, a connect — because while `pointTo` is
-  still in service (②b-4 retires it) arriving is what surfaces that server's
-  parked record into the live key.
+- **Ownership is WHERE IT IS READ.** Since #335 ②b-4 a server's record lives
+  in its own slot, `tmux_state::<id>`, and the shell saves and reads it only
+  through that server's store, so a v1-shaped record in B's slot is B's. A
+  pre-#335 record has no serverId, and it cannot be worked out from the
+  content: two servers can hold byte-identical records, and `work:1.0` on A
+  reads exactly like `work:1.0` on B (orchestrator, 2026-10-10 — an earlier
+  version compared the live bytes with a boot snapshot and filed B's record
+  under A). So the ONE unprefixed legacy record is the boot fold's to file,
+  into whatever CURRENT names, validated against the saved registry — before
+  the deep link, which can make another server current. (Until ②b-4 the shell
+  tracked that provenance itself, because arriving at a server surfaced its
+  parked record into the live key.)
 - **An input nobody can be shown to own is quarantined, not guessed.** Its
   bytes are copied to `tmux_state::unattributed` with the machine id the
-  legacy mirror named at that moment, before the shell can save over them;
-  ②b-4 lets a server claim them by PROVING that machine is its own. Being the
-  next server to authenticate is not evidence of having written them.
+  legacy mirror named at that moment, before anything else runs, and the
+  inputs go only to a server that PROVES that machine is its own (the fold's
+  `requireProof`). Being the next server to authenticate is not evidence of
+  having written them.
 - **An absorbed entry takes its navigation with it, and only an absorbed
   one.** `recordServer` folds a machine's twin entries into one — an
   address-only entry that just learned it is the machine already saved —

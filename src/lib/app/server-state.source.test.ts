@@ -23,17 +23,18 @@ const code = (text: string) => text
   .join('\n');
 
 test('one function spells the per-server key layout', async () => {
-  const layout = code(await read('server-state-migration.ts'));
-  // residentKey is that function. It is the only template literal in the
-  // module that joins a key to a server id.
-  assert.match(layout, /export function residentKey/u);
-  const store = code(await read('server-store.ts'));
-  assert.match(store, /residentKey\(/u, 'the store asks for the layout rather than rebuilding it');
-  assert.doesNotMatch(store, /`\$\{[^}]*\}::/u, 'and never spells `::` itself');
-  // servers.ts keeps its own `parked()` until ②b retires park/point; what must
-  // not happen is a THIRD speller appearing in the new modules.
-  for (const name of ['server-store.ts', 'server-runtime.ts', 'server-fleet.ts', 'refs.ts']) {
-    assert.doesNotMatch(code(await read(name)), /::\$\{/u, `${name} builds a parked key by hand`);
+  // residentKey, in the identity layer (board #335 ②b-4 retired `parked()`,
+  // its second speller). Everything else asks it.
+  const servers = code(await read('servers.ts'));
+  assert.match(servers, /export function residentKey/u);
+  assert.equal((servers.match(/`\$\{[^}]*\}::\$\{/gu) ?? []).length, 1, 'servers.ts spells it once');
+  for (const name of ['server-store.ts', 'server-state-migration.ts']) {
+    const src = code(await read(name));
+    assert.match(src, /residentKey\(/u, `${name} asks for the layout rather than rebuilding it`);
+    assert.doesNotMatch(src, /`\$\{[^}]*\}::/u, `and never spells \`::\` itself`);
+  }
+  for (const name of ['server-store.ts', 'server-runtime.ts', 'server-fleet.ts', 'refs.ts', 'server-state-migration.ts']) {
+    assert.doesNotMatch(code(await read(name)), /::\$\{/u, `${name} builds a resident key by hand`);
   }
 });
 
@@ -62,6 +63,7 @@ test('the identity modules have exactly the production consumers this commit giv
   //   ②b-1  App (the constructor) and ServerScope (the provider)
   //   ②b-2  App's nav keeps refs; the resident stores reach server-store
   //   ②b-3  every bound page reaches server-context
+  //   ②b-4  App reaches server-store and the fold
   // Since ②b-1-3 the test after this one says who may CONSTRUCT a runtime or
   // a scope (App alone), and the one after it that a union list acts through
   // its rows rather than through one context.
@@ -78,8 +80,10 @@ test('the identity modules have exactly the production consumers this commit giv
     // opened.
     'handover.ts': ['src/App.svelte'],
     'server-fleet.ts': [],
-    'server-store.ts': [],
-    'server-state-migration.ts': [],
+    // ②b-4: App builds each server's state over its own store, saves and
+    // reads the navigation through it, and runs the fold.
+    'server-store.ts': ['src/App.svelte'],
+    'server-state-migration.ts': ['src/App.svelte'],
     // ②b-2-1: a page that holds this server's state reads it from its scope.
     // ②b-2-3: every page with a leave guard names its owner, the runtime of
     // its scope, so a leave asks only what it destroys.

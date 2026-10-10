@@ -1,11 +1,12 @@
 // Moving the per-server keys from "live plus parked" to "one slot per server"
 // (board #335 ②a-3, reviewer r1 §C).
 //
-// Until now a per-server key had TWO homes: the unprefixed one, which holds
-// whichever server is current, and `<key>::<id>`, where the switch files the
-// server you are leaving (`servers.ts` parkFrom/pointTo). That works for one
-// server at a time and cannot work for two: with A and B both on screen there
-// is no "the" live value, and the first write from B would overwrite A's.
+// Until board #335 ②b-4 a per-server key had TWO homes: the unprefixed one,
+// which held whichever server was current, and `<key>::<id>`, where the
+// switch filed the server you were leaving (park) and from which it surfaced
+// the one you arrived at (point). That works for one server at a time and
+// cannot work for two: with A and B both on screen there is no "the" live
+// value, and the first write from B would overwrite A's.
 //
 // So the `::<id>` slot becomes the ONLY home, and the unprefixed key stops
 // being a location. This function is the one-time fold that gets there, and
@@ -23,14 +24,13 @@
 //
 // THE LIVE SET IS AUTHORITATIVE IN FULL, not just its present keys. An absent
 // live key means the value was CLEARED, and for the current server that is a
-// definite conclusion rather than a guess: arriving at a server surfaces its
-// park as the live key (`pointTo`), so from that moment live and slot agree,
-// and any later divergence is a live-side change. Copying only the present
-// keys made a cleared draft or a reset read-mark come back from the old park
-// the moment the slot became the live home. The fold therefore IS
-// `parkFrom` — the switch's own "file this server's live keys under its id,
-// an absent one clears the slot" — rather than a second loop that has to be
-// taught the same rule.
+// definite conclusion rather than a guess: arriving at a server surfaced its
+// park as the live key, so from that moment live and slot agreed, and any
+// later divergence was a live-side change. Copying only the present keys made
+// a cleared draft or a reset read-mark come back from the old park the moment
+// the slot became the live home. So the fold files the WHOLE set — the old
+// switch's park, kept here as the one place that still reads the live keys
+// (`fileLive`).
 //
 // CURRENT MUST RESOLVE. An empty CURRENT has no slot to fold into; a CURRENT
 // naming an id that is not in the saved registry (an entry removed, a value
@@ -38,28 +38,38 @@
 // reported no-op with no writes and no marker, so a later run still folds once
 // a connect has resolved which server this is.
 //
-// What it still does NOT do: clear the unprefixed keys. A client rolled back to
-// a build from before #335 finds exactly the state it left. Deleting them
-// belongs to the ②b commit that stops writing them.
+// AND THEN THE SERVER MUST PROVE IT (reviewer P1-c on the ② plan). When the
+// boot could not name a server, the inputs were left by one nobody can
+// identify, and the next server to become current is not evidence of having
+// written them. Such a later run (`requireProof`) folds only into a server
+// whose machine is the one the legacy mirror named — `tmux_machine_id`,
+// which nothing writes after ②b-4, so it is the value the old build left. A
+// server that cannot prove it gets nothing: the inputs are marked consumed
+// with no owner (`unclaimed`) and stay where they are, and nothing is folded
+// over that server's slot later. With no inputs at all there is nothing to
+// prove, and it is an ordinary fold.
 //
-// Not wired into production yet: ②a ships the function and its tests, and the
-// ②b commit that switches every live read/write and the park/point/reset
-// entry points over calls it once, before any page mounts.
-import { PARKED_KEYS, currentServerId, loadServers, parkFrom } from './servers.ts';
+// What it does NOT do: clear the unprefixed keys. Nothing writes them any
+// more, and a client rolled back to a build from before #335 finds exactly
+// the state it left.
+//
+// App runs it at boot, before the deep link and before any page mounts, and
+// again before it builds any server's state (`swapScope`): only then can a
+// fresh client, or one whose CURRENT dangled, fold for the server a connect
+// has since made current.
+import { RESIDENT_KEYS, currentServerId, loadServers, residentKey } from './servers.ts';
 import type { ServerId } from './refs.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-/** The keys this fold owns. `servers.ts` already names them: they are exactly
- * the ones the switch parks, because "parked per server" and "resident per
- * server" are the same set seen from two sides. Keeping one list means a key
- * added to one and forgotten in the other cannot exist. */
-export const RESIDENT_KEYS = PARKED_KEYS;
-
-/** Where a per-server key lives after the fold. The ONE place that spells the
- * layout, so nothing reconstructs `${key}::${id}` by hand. */
-export function residentKey(key: string, serverId: ServerId): string {
-  return `${key}::${serverId}`;
+/** File every legacy live key under `id`'s slot; an absent live key clears
+ * the slot (see the header). */
+function fileLive(storage: Store, id: ServerId): void {
+  for (const key of RESIDENT_KEYS) {
+    const live = storage.getItem(key);
+    if (live != null) storage.setItem(residentKey(key, id), live);
+    else storage.removeItem(residentKey(key, id));
+  }
 }
 
 /** The completion marker. Unprefixed and single: its subject is the INPUTS,
@@ -112,10 +122,13 @@ export interface MigrationReport {
    *   up read-only.
    * `no-current` / `unknown-current`: nothing to fold into. No writes, no
    *   marker; ask again once a connect has resolved the server.
+   * `unclaimed`: asked with `requireProof`, there were inputs, and this
+   *   server could not prove they are its own. Marked consumed with no
+   *   owner; nothing moved.
    * `already-done`: the inputs were consumed by an earlier run, and reading
    *   them again would overwrite newer resident values.
    */
-  reason: 'folded' | 'unrecorded' | 'no-current' | 'unknown-current' | 'already-done';
+  reason: 'folded' | 'unrecorded' | 'no-current' | 'unknown-current' | 'already-done' | 'unclaimed';
   /** The server the live values were filed under — or, for `already-done`,
    * the one an earlier run filed them under. */
   serverId: ServerId;
@@ -134,7 +147,7 @@ export interface MigrationReport {
  * Returns what it did, which is what the ②b caller logs and what the tests
  * assert on.
  */
-export function migrateServerState(storage: Store): MigrationReport {
+export function migrateServerState(storage: Store, { requireProof = false }: { requireProof?: boolean } = {}): MigrationReport {
   const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
     ({ ran: false, reason, serverId, folded: [], cleared: [] });
 
@@ -147,22 +160,31 @@ export function migrateServerState(storage: Store): MigrationReport {
   const done = layoutMark(storage);
   if (done) return none('already-done', done.into);
 
+  const mark = (into: ServerId): boolean => {
+    try {
+      storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, into } satisfies LayoutMark));
+      return true;
+    } catch { return false; }
+  };
+  if (requireProof && RESIDENT_KEYS.some((key) => storage.getItem(key) != null)) {
+    const legacy = storage.getItem('tmux_machine_id') || '';
+    const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
+    if (!legacy || legacy !== own) {
+      return mark('') ? none('unclaimed') : none('unrecorded', id);
+    }
+  }
+
   const folded: string[] = [];
   const cleared: string[] = [];
   for (const key of RESIDENT_KEYS) {
     if (storage.getItem(key) != null) folded.push(key);
     else if (storage.getItem(residentKey(key, id)) != null) cleared.push(key);
   }
-  // The switch's own rule, not a second copy of it.
-  parkFrom(storage, id);
+  fileLive(storage, id);
   // Marked AFTER the move, so a failure part-way leaves the inputs readable
-  // and the next run redoes the whole fold rather than half of it.
-  try {
-    storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, into: id } satisfies LayoutMark));
-  } catch {
-    // Two writes cannot be made atomic in `localStorage`. What is possible is
-    // one write, and saying so when even that fails.
-    return { ran: true, reason: 'unrecorded', serverId: id, folded, cleared };
-  }
+  // and the next run redoes the whole fold rather than half of it. Two
+  // writes cannot be made atomic in `localStorage`; what is possible is one
+  // write, and saying so when even that fails.
+  if (!mark(id)) return { ran: true, reason: 'unrecorded', serverId: id, folded, cleared };
   return { ran: true, reason: 'folded', serverId: id, folded, cleared };
 }

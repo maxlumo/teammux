@@ -10,15 +10,18 @@
 // client sees exactly the single-server world it expects.
 //
 // Switching servers happens in place (board 315; it was a reload until then):
-// App's switchTo owns the order, and this module owns its storage half —
-// `parkFrom` files the leaving server's per-server keys (PARKED_KEYS) under
-// its id, `pointTo` surfaces the target's, `activateSwitched` does it after
-// auth. What you were looking at on server A is still there when you come
-// back from server B (the "恢复目标不能串" half), and `tmux_machine_id` is
-// parked the same way so A's failover set is never consulted while
-// connected to B. The in-memory half (component trees, module caches) is
-// App's resetServerMemory + the keyed content remount. `tmux_machines` itself stays GLOBAL — it is
-// keyed by machineId, so entries cannot contaminate each other by design.
+// App's switchTo owns the order, and this module owns its storage half,
+// which since board #335 ②b-4 is only MOVING CURRENT. Every per-server key
+// (RESIDENT_KEYS) lives in its server's own slot, `<key>::<id>`, all the
+// time — the server-store view reads and writes there — so a switch has
+// nothing to file away and nothing to surface: what you were looking at on
+// server A is in A's slot when you come back from server B (the "恢复目标
+// 不能串" half). Until ②b-4 a switch PARKED the leaving server's live keys
+// and POINTED the target's slot into them; the one-time fold
+// (server-state-migration.ts) is what remains of that. The in-memory half
+// (component trees, module caches) is the runtime's server state and the
+// keyed content remount. `tmux_machines` itself stays GLOBAL — it is keyed by
+// machineId, so entries cannot contaminate each other by design.
 //
 // Framework-free and storage-injected so migration, upsert and the switch
 // plan are unit-testable without a browser.
@@ -48,11 +51,6 @@ export interface ServerEntry {
 
 export const SERVERS_KEY = 'tmux_servers';
 export const CURRENT_KEY = 'tmux_server_current';
-/** Per-server parked nav state: `tmux_state::<id>` (the LIVE one stays in
- *  `tmux_state`, unprefixed — older code reads it there). */
-export const STATE_PREFIX = 'tmux_state::';
-/** Per-server parked machine id, same shape. */
-export const MACHINE_PREFIX = 'tmux_machine_id::';
 export const MAX_SERVERS = 16;
 /** Which entry each ABSORBED entry was folded into, `{ [absorbed]: survivor }`
  * (board #335 ②b-2, reviewer P1-a, 2026-10-10). Written only where an
@@ -278,9 +276,10 @@ const defaultName = (e: ServerEntry) => !e.named && (e.name === hostLabel(e.addr
  * folded into the survivor and dropped; two entries whose known machine ids
  * differ both stay, whatever their addresses. The survivor keeps its identity
  * (id, machine, address, token); it takes the twin's name only when its own
- * is still a default and the twin's was typed. The twin's parked per-server
- * keys go with it, and if the twin was CURRENT, CURRENT moves to the survivor
- * (its live keys are that server's, so nothing is lost). Before board 318 a
+ * is still a default and the twin's was typed. The twin's per-server slots
+ * go with it — unless the twin was CURRENT: then CURRENT moves to the
+ * survivor and so do the twin's slots, which hold the state the person was
+ * just using on that machine, so nothing is lost. Before board 318 a
  * machine-id-less entry (migrated from the address history, or recorded
  * before the id was learned) holding the same address as the authenticated
  * entry could never merge: recordServer matched the machine id first and
@@ -316,8 +315,14 @@ function absorbTwins(servers: ServerEntry[], survivor: ServerEntry): string[] {
 
 function forgetDropped(storage: Store, dropped: string[], survivorId: string): void {
   if (!dropped.length) return;
-  if (dropped.includes(currentServerId(storage))) storage.setItem(CURRENT_KEY, survivorId);
-  for (const id of dropped) for (const key of PARKED_KEYS) storage.removeItem(`${key}::${id}`);
+  const current = currentServerId(storage);
+  // The CURRENT twin's slots are the newest state of this machine — the one
+  // the person was just using — so they BECOME the survivor's, whole: an
+  // absent key clears the survivor's too (board #335 ②b-4; before it the
+  // live keys simply stayed live). Any other twin's slots go with it.
+  if (dropped.includes(current)) moveSlots(storage, current, survivorId);
+  for (const id of dropped) for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
+  if (dropped.includes(current)) storage.setItem(CURRENT_KEY, survivorId);
   noteMerges(storage, dropped, survivorId);
 }
 
@@ -386,7 +391,7 @@ export function repairServers(storage: Store): ServerEntry[] {
 /**
  * RECORD a connection in the registry — and nothing else (lead review #2:
  * recording and ACTIVATING are different acts; the first must never move
- * CURRENT, or a Settings connect skips the park/restore contract).
+ * CURRENT, or a Settings connect would arrive somewhere without the arrival).
  *
  * Identity is the machine when known: an explicit `machineId` (or, absent
  * that, the failover map's attribution of the address) matches that entry —
@@ -422,90 +427,60 @@ export function recordServer(
   return { servers, entry };
 }
 
-/** Everything that is "where I was on THIS server", parked per server id as
- * `<key>::<id>` while another server is current. The live key stays
- * unprefixed (older code reads it there). `tmux_state` is the nav state
- * (tab, terminal target, split), `tmux_machine_id` picks the failover set,
- * and the Hub keys are per-PROJECT maps keyed by tmux session name — a
- * project called `app` on server A is not `app` on server B, so its draft,
- * read marker, chosen lead, drawer and roster disclosure must not follow the
- * user across (board 315; before it they were global and a switch carried
- * A's open project and its half-typed line into B). Keys must match
- * hub-prefs.svelte.ts; a test pins it. */
-export const PARKED_KEYS = [
+/** Everything that is "where I was on THIS server", resident per server id
+ * as `<key>::<id>` (board #335 ②b-4; until then it was parked there while
+ * another server was current, and live unprefixed while its own was).
+ * `tmux_state` is the nav state (tab, terminal target, split),
+ * `tmux_machine_id` the machine, and the Hub keys are per-PROJECT maps keyed
+ * by tmux session name — a project called `app` on server A is not `app` on
+ * server B, so its draft, read marker, chosen lead, drawer and roster
+ * disclosure must not follow the user across (board 315). Keys must match
+ * hub-prefs.svelte.ts; a test pins it. The unprefixed spellings are the
+ * pre-#335 LEGACY inputs: read once by the fold, written by nothing. */
+export const RESIDENT_KEYS = [
   'tmux_state', 'tmux_machine_id',
   'tmux_hub_project', 'tmux_hub_drafts', 'tmux_hub_seen', 'tmux_hub_lead',
   'tmux_hub_drawer', 'tmux_hub_roster_expanded', 'tmux_hub_alerts',
 ] as const;
-const parked = (key: string, id: string) => `${key}::${id}`;
 
-/** Park the leaving server's live keys under ITS id (an absent live key
- * clears the slot). Only a server the user was actually connected to is
- * parked — a failed or pending switch has nothing of its own to file. */
-export function parkFrom(storage: Store, fromId: string): void {
-  if (!fromId) return;
-  for (const key of PARKED_KEYS) {
-    const live = storage.getItem(key);
-    if (live != null) storage.setItem(parked(key, fromId), live);
-    else storage.removeItem(parked(key, fromId));
-  }
+/** Where a per-server key lives. The ONE place that spells the layout, so
+ * nothing reconstructs `${key}::${id}` by hand. */
+export function residentKey(key: string, serverId: string): string {
+  return `${key}::${serverId}`;
 }
 
-/** Surface the target's parked keys as the live ones (or clear them — a
- * first visit inherits nothing) and mark it current. The machine id prefers
- * the entry's own stamp. The mirror keys are the caller's business. */
-export function pointTo(storage: Store, target: ServerEntry): void {
-  for (const key of PARKED_KEYS) {
-    const value = key === 'tmux_machine_id'
-      ? target.machineId || storage.getItem(parked(key, target.id))
-      : storage.getItem(parked(key, target.id));
-    if (value != null && value !== '') storage.setItem(key, value);
-    else storage.removeItem(key);
+/** Hand every slot of `fromId` to `toId`, replacing what `toId` had. */
+function moveSlots(storage: Store, fromId: string, toId: string): void {
+  if (!fromId || fromId === toId) return;
+  for (const key of RESIDENT_KEYS) {
+    const value = storage.getItem(residentKey(key, fromId));
+    if (value != null) storage.setItem(residentKey(key, toId), value);
+    else storage.removeItem(residentKey(key, toId));
   }
-  storage.setItem(CURRENT_KEY, target.id);
-}
-
-/** The park/restore core of the reload paths (a deep link pre-boot, the
- * disconnected connect page): park, then point. */
-function parkAndPoint(storage: Store, fromId: string, target: ServerEntry): void {
-  parkFrom(storage, fromId);
-  pointTo(storage, target);
 }
 
 /**
  * A connect just succeeded (the Settings form, a deep link) — record it and
- * decide whether the app must come up as a DIFFERENT server.
+ * say whether the app must come up as a DIFFERENT server.
  *
  * Same server as current (same entry — machine alternates fold into one by
  * recordServer): nothing to activate; the socket swap was the whole event
  * and the failover semantics own it. Returns `{ reload: false }`.
  *
- * A DIFFERENT server: this connect bypassed switchTo, but the contract
- * is the same — the old server's live `tmux_state`/`tmux_machine_id` are
- * parked under the OLD current id BEFORE anything overwrites them (the
- * caller runs this before flipping `connected`, so the state effect has not
- * yet written the new world), the target's parked pair is surfaced, CURRENT
- * moves, and the caller must bring the app up as a switch (App's
- * onConnected(true): memory reset, content remount — board 315; a deep link
- * runs pre-boot, so the boot itself is that). The mirror keys already point
- * at the new server — the connect path wrote them before dialing.
+ * A DIFFERENT server: CURRENT moves to it, and the caller brings the app up
+ * as a switch (App's onConnected(true): content remount — board 315; a deep
+ * link runs pre-boot, so the boot itself is that). Nothing is filed or
+ * surfaced: each server's state is in its own slot already (②b-4). The
+ * mirror keys already point at the new server — the connect path wrote them
+ * before dialing.
  */
 export function activateConnected(
   storage: Store,
   conn: { address: string; token: string; socket?: string; machineId?: string },
 ): { reload: boolean } {
   const { entry } = recordServer(storage, conn);
-  const fromId = currentServerId(storage);
-  if (entry.id === fromId) {
-    // Same server: the socket swap was the whole event — but the LIVE
-    // machine id is THIS function's to keep fresh. The caller must never
-    // pre-write it (lead blocker #2): on the different-server path below,
-    // parkAndPoint parks the live value under the OLD id, and a pre-written
-    // new mid would be filed in the old server's slot.
-    if (entry.machineId) storage.setItem('tmux_machine_id', entry.machineId);
-    return { reload: false };
-  }
-  parkAndPoint(storage, fromId, entry);
+  if (entry.id === currentServerId(storage)) return { reload: false };
+  storage.setItem(CURRENT_KEY, entry.id);
   storage.removeItem('tmux_disconnected');
   return { reload: true };
 }
@@ -519,9 +494,8 @@ export function activateConnected(
  * address of a known machine folds into that machine's entry; a new machine
  * gets a new entry — an address alone never guesses a machine when the
  * server told us which it is), adds the address to that machine's failover
- * set, points every parked key at the canonical entry, and writes the
- * active-mirror keys. The leaving server was parked BEFORE the socket
- * closed (parkFrom); nothing here touches its slots. Returns the entry.
+ * set, moves CURRENT to the canonical entry, and writes the active-mirror
+ * keys. Returns the entry.
  */
 export function activateSwitched(
   storage: Store,
@@ -535,7 +509,7 @@ export function activateSwitched(
     map[conn.machineId] = addrs.slice(-8);
     storage.setItem('tmux_machines', JSON.stringify(map));
   }
-  pointTo(storage, entry);
+  storage.setItem(CURRENT_KEY, entry.id);
   storage.setItem('tmux_address', conn.address);
   storage.setItem('tmux_token', conn.token);
   if (conn.socket) storage.setItem('tmux_socket', conn.socket);
@@ -552,13 +526,13 @@ export function renameServer(storage: Store, id: string, name: string): ServerEn
   return servers;
 }
 
-/** Remove an entry and its parked per-server state. The CURRENT entry is not
+/** Remove an entry and its per-server state. The CURRENT entry is not
  *  removable — the switcher offers removal only on the others, and refusing
  *  here keeps a stale UI honest. */
 export function removeServer(storage: Store, id: string): ServerEntry[] {
   if (id === currentServerId(storage)) return loadServers(storage);
   const servers = loadServers(storage).filter((s) => s.id !== id);
   saveServers(storage, servers);
-  for (const key of PARKED_KEYS) storage.removeItem(parked(key, id));
+  for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
   return servers;
 }

@@ -28,8 +28,15 @@ function fakeTimers() {
   };
 }
 
+/** The CURRENT server's entry, from the fields these fixtures name the old
+ * way: where to reach a server is its ENTRY since board #335 ②b-4. */
 function makeStorage(entries: Record<string, string>) {
-  const map = new Map(Object.entries(entries));
+  const { tmux_address: address, tmux_token: token = '', tmux_machine_id: machineId, ...rest } = entries;
+  const map = new Map(Object.entries(address ? {
+    ...rest,
+    tmux_servers: JSON.stringify([{ id: 'cur', name: 'current', address, token, ...(machineId ? { machineId } : {}) }]),
+    tmux_server_current: 'cur',
+  } : rest));
   return { getItem: (k: string) => (map.has(k) ? map.get(k)! : null) };
 }
 
@@ -52,8 +59,7 @@ function harness({ storage, connectImpl, findBest = async (a: string[]) => a[0] 
     noteAddressUnreachable: (u) => unreachable.push(u),
     classifyAddress: (url) => (url.includes('192.168.') ? 0 : url.includes('100.') ? 1 : 2),
     addressLabels: ['LAN', 'Tailscale', 'WAN'],
-    // What App passes: the CURRENT server's target. These fixtures seed only
-    // the mirror keys, so CURRENT is '' and the mirror answers.
+    // What App passes: the CURRENT server's target.
     target: () => targetOf(storage, currentServerId(storage)),
     onStateChange: (s) => events.push({ ...s }),
     onSuccess: (use, primary) => events.push({ success: [use, primary] }),

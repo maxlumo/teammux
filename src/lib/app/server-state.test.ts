@@ -1,11 +1,26 @@
 // One slot per server, and the one-time fold that gets there (board #335
-// ②a-3). Neither is wired into production: ②b switches the live reads and
-// writes over and calls the migration once, before any page mounts.
+// ②a-3; in production since ②b-4, where App runs the fold at boot, before
+// the deep link, and again before it builds any server's state).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
-import { LAYOUT_KEY, LAYOUT_VERSION, RESIDENT_KEYS, layoutMark, migrateServerState, residentKey } from './server-state-migration.ts';
-import { PARKED_KEYS, parkFrom, pointTo } from './servers.ts';
+import { LAYOUT_KEY, LAYOUT_VERSION, layoutMark, migrateServerState } from './server-state-migration.ts';
+import { RESIDENT_KEYS, activateSwitched, residentKey } from './servers.ts';
+
+/** What a switch on a pre-#335 build did to storage: file the leaving
+ * server's live keys under its id, surface the target's. The upgrade
+ * fixtures need it; the app no longer does it (②b-4). */
+function legacySwitch(storage: ReturnType<typeof mem>, fromId: string, to: { id: string; machineId?: string }) {
+  for (const key of RESIDENT_KEYS) {
+    const live = storage.getItem(key);
+    if (live != null) storage.setItem(residentKey(key, fromId), live); else storage.removeItem(residentKey(key, fromId));
+  }
+  for (const key of RESIDENT_KEYS) {
+    const v = key === 'tmux_machine_id' ? to.machineId || storage.getItem(residentKey(key, to.id)) : storage.getItem(residentKey(key, to.id));
+    if (v != null && v !== '') storage.setItem(key, v); else storage.removeItem(key);
+  }
+  storage.setItem('tmux_server_current', to.id);
+}
 
 function mem(init: Record<string, string> = {}) {
   const m = new Map(Object.entries(init));
@@ -51,14 +66,11 @@ function preMigration() {
   });
 }
 
-test('the resident set is exactly the parked set, in both directions', () => {
-  // Two lists would let a key be added to one and forgotten in the other, and
-  // the symptom is a draft or a read mark that vanishes on a switch.
-  // `servers.test.ts` already pins PARKED_KEYS against hub-prefs'
+test('the store scopes exactly the resident set', () => {
+  // One list (`servers.ts`), used by the store, the fold and the identity
+  // layer's remove and merge. `servers.test.ts` pins it against hub-prefs'
   // HUB_SERVER_KEYS by reading the source, because hub-prefs touches
-  // localStorage at module load; this chains onto that pin rather than
-  // repeating it.
-  assert.deepEqual([...RESIDENT_KEYS], [...PARKED_KEYS]);
+  // localStorage at module load; this chains onto that pin.
   for (const key of [
     'tmux_state', 'tmux_machine_id', 'tmux_hub_project', 'tmux_hub_drafts', 'tmux_hub_seen',
     'tmux_hub_lead', 'tmux_hub_drawer', 'tmux_hub_roster_expanded', 'tmux_hub_alerts',
@@ -327,13 +339,12 @@ test('a fresh client has nothing to fold', () => {
 });
 
 test('the fold survives a pre-#335 switch having happened in between', () => {
-  // The realistic upgrade path: the user switches A→B→A on the OLD build, so
+  // The realistic upgrade path: the user switches A→B on the OLD build, so
   // park/point has already shuffled the live keys, and only then does the new
   // build run the fold. Whatever is live belongs to whatever CURRENT says.
   const storage = preMigration();
   const servers = JSON.parse(storage.getItem('tmux_servers')!);
-  parkFrom(storage, 'a');
-  pointTo(storage, servers[1]);
+  legacySwitch(storage, 'a', servers[1]);
   assert.equal(storage.getItem('tmux_server_current'), 'b');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts')!), { work: 'half a line on B' },
     'the old switch surfaced B s park as the live value');
@@ -349,28 +360,61 @@ test('the fold survives a pre-#335 switch having happened in between', () => {
   assert.deepEqual(JSON.parse(createServerStore(storage, 'b').getItem('tmux_hub_drafts')!), { work: 'half a line on B' });
 });
 
-test('the legacy switch still owns the live keys, which is why the fold stays off', () => {
-  // The reviewer's P1 on the ② plan, as an executable fact: `parkFrom` writes
-  // `<key>::<id>` — the very string a resident slot uses — from the LIVE key.
-  // So while any module still writes the live key, a switch overwrites the
-  // resident slot with that module's value, and while any module already
-  // reads the resident slot, a write through the live key is lost to it.
-  // Enabling the fold before the readers and writers move is therefore not a
-  // partial improvement, it is a way to lose a draft; ②b flips the fold, the
-  // stores, park/point and the reset entry points in ONE commit.
+test('after the fold nothing writes the legacy keys: a store write and a switch leave them as they were (board #335 ②b-4)', () => {
+  // Before ②b-4 a switch filed the live keys over the resident slots, which
+  // is why the fold, the stores and park/point had to flip in ONE commit.
   const storage = preMigration();
   migrateServerState(storage);
+  const legacy = Object.fromEntries(RESIDENT_KEYS.map((key) => [key, storage.getItem(key)]));
   const a = createServerStore(storage, 'a');
+  a.setItem('tmux_hub_drafts', JSON.stringify({ work: 'written after the flip' }));
+  activateSwitched(storage, { address: 'ws://b:9899', token: 'tokB', machineId: 'm-b' });
+  assert.equal(storage.getItem('tmux_server_current'), 'b', 'the switch only moved CURRENT');
+  assert.deepEqual(JSON.parse(a.getItem('tmux_hub_drafts')!), { work: 'written after the flip' }, 'A s slot kept A s write');
+  assert.deepEqual(Object.fromEntries(RESIDENT_KEYS.map((key) => [key, storage.getItem(key)])), legacy, 'no legacy key was written');
+  assert.equal(migrateServerState(storage).reason, 'already-done', 'and they are never read again');
+  assert.deepEqual(JSON.parse(a.getItem('tmux_hub_drafts')!), { work: 'written after the flip' });
+});
 
-  // A module that has already moved writes through the store.
-  a.setItem('tmux_hub_drafts', JSON.stringify({ work: 'written the ②b way' }));
-  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts')!), { work: 'half a line on A' },
-    'the live key never sees it — the two are independent homes');
+test('a fold that must PROVE its server gives the inputs only to the machine the legacy mirror named (reviewer P1-c)', () => {
+  // The boot could not name a server (CURRENT dangled), so the next server a
+  // connect makes current must show the inputs are its own.
+  for (const [machineId, expected] of [['m-a', 'folded'], ['m-x', 'unclaimed'], ['', 'unclaimed']] as const) {
+    const storage = preMigration();
+    storage.setItem('tmux_servers', JSON.stringify([
+      { id: 'n', name: 'new', address: 'ws://n:9899', token: 't', ...(machineId ? { machineId } : {}) },
+    ]));
+    storage.setItem('tmux_server_current', 'n');
+    const before = storage.dump();
+    const report = migrateServerState(storage, { requireProof: true });
+    assert.equal(report.reason, expected, `a server on ${machineId || 'an unknown machine'}`);
+    if (expected === 'folded') {
+      assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::n')!), { work: 'half a line on A' }, 'proven: it is that machine s state');
+    } else {
+      const { [LAYOUT_KEY]: marker, ...rest } = storage.dump();
+      assert.deepEqual(rest, before, 'unproven: nothing moved');
+      assert.deepEqual(JSON.parse(marker!), { v: LAYOUT_VERSION, into: '' }, 'and the inputs are consumed with no owner');
+      assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'already-done', 'so no later server folds them either');
+    }
+  }
+});
 
-  // Then today's switch runs, and files the live (older) value over it.
-  parkFrom(storage, 'a');
-  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'half a line on A' },
-    'parkFrom overwrote the resident slot: one commit must move both sides');
+test('with nothing to fold there is nothing to prove', () => {
+  const storage = mem({
+    tmux_servers: JSON.stringify([{ id: 'n', name: 'new', address: 'ws://n:9899', token: 't', machineId: 'm-n' }]),
+    tmux_server_current: 'n',
+  });
+  assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'folded');
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, into: 'n' });
+});
+
+test('an unproven fold that cannot be recorded says so', () => {
+  const storage = preMigration();
+  storage.setItem('tmux_servers', JSON.stringify([{ id: 'n', name: 'new', address: 'ws://n:9899', token: 't', machineId: 'm-x' }]));
+  storage.setItem('tmux_server_current', 'n');
+  const set = storage.setItem;
+  storage.setItem = (k: string, v: string) => { if (k === LAYOUT_KEY) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'unrecorded');
 });
 
 test('a key the server never had leaves no slot behind', () => {

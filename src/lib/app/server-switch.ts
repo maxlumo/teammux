@@ -10,19 +10,19 @@
 //      delete in flight finishes first) — a cancel changes nothing at all;
 //   2. one intent: the reconnect loop stops, the content tree unmounts
 //      (onstate), every older async loses ownership (`owns(intent)`);
-//   3. running downloads are suspended (part kept) and awaited, the tree's
-//      unmount persistence runs (afterUnmount), THEN the leaving server is
-//      parked — only a server we were really connected to, and only once;
+//   3. running downloads are suspended (part kept) and awaited, and the tree's
+//      unmount persistence runs (afterUnmount) — into the leaving server's own
+//      slots, where its state lives (board #335 ②b-4: nothing is parked);
 //   4. the socket closes, the in-memory per-server state resets;
 //   5. connect to the target WITHOUT touching the mirror keys or CURRENT
 //      (a reload mid-switch boots the server we left — honest);
 //   6. only after auth: record by the identity the server reported, point
-//      every parked key at that canonical entry, write the mirror, come up.
-// A failure keeps `from` (identity + its park) frozen: Retry and Back reuse
-// it and never park again, so the source's state cannot be overwritten by a
-// half-switched world.
+//      CURRENT at that canonical entry, write the mirror, come up.
+// A failure keeps `from` (its identity) frozen: Retry and Back reuse it, and
+// the source's state, in its own slots, is never touched by a half-switched
+// world.
 
-import { activateSwitched, parkFrom, type ServerEntry } from './servers.ts';
+import { activateSwitched, type ServerEntry } from './servers.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -101,7 +101,6 @@ export function createServerSwitch(d: SwitchDeps) {
     if (fromConnected && from) {
       await d.suspendDownloads();
       await d.afterUnmount();
-      parkFrom(d.storage, from.id);
     }
     if (intent !== seq) return;
     d.disconnect();

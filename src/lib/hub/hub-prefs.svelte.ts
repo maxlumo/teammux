@@ -27,9 +27,8 @@
 // path here.
 //
 // Wired per runtime since ②b-2-1: there is no module instance of the
-// per-server half any more. Until b2-4 each runtime's store is still the bare
-// `localStorage`, which is why the bundle is built only after its server is
-// current.
+// per-server half any more, and each runtime's store is its server's own
+// (②b-4).
 import { draftUpdate, STEPS_ROWS, clampStepsRows, type SeenMark } from './hub.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;

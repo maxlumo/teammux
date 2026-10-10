@@ -1,7 +1,8 @@
 // The saved nav state across the v1 → v2 change (board #335 ②b-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav, type SavedNav } from './nav-saved.ts';
+import { EMPTY_NAV, NAV_KEY, QUARANTINE_KEY, navFor, quarantineLegacyNav, readNav, reownSavedNav, saveNav, type SavedNav } from './nav-saved.ts';
+import { createServerStore } from './server-store.ts';
 import { paneRef } from './refs.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -14,19 +15,25 @@ function mem(init: Record<string, string> = {}) {
   };
 }
 
+/** `storage` read as server `id`'s slot — what `createServerStore` hands
+ * `readNav`, with the slot's key spelled unprefixed so a case can seed it
+ * plainly. */
+const slot = (storage: { getItem(k: string): string | null }, serverId: string) =>
+  ({ getItem: (k: string) => storage.getItem(k), serverId });
+
 const v1 = (over: Record<string, unknown> = {}) => mem({
   [NAV_KEY]: JSON.stringify({
     page: 'terminal', terminalTarget: 'work:1.0', terminalSession: 'work', ...over,
   }),
 });
 
-test('a v1 record belongs to the server that owned the live keys', () => {
-  const nav = readLegacyNav(v1(), 'a');
+test('a v1 record belongs to the server whose slot it is read from', () => {
+  const nav = readNav(slot(v1(), 'a'));
   assert.deepEqual(nav.pane, paneRef('a', 'work', 'work:1.0'));
   assert.equal(nav.page, 'terminal');
 });
 
-test('a legacy record is only ever attributed to the owner it is GIVEN', () => {
+test('a v1 record is only ever attributed to the slot it is read from', () => {
   // The rule is about where the record was read and what the caller could
   // establish, never about who happens to be current now: a deep link
   // activates B before anything restores, so filing A's panes under B is the
@@ -34,13 +41,13 @@ test('a legacy record is only ever attributed to the owner it is GIVEN', () => {
   // record is unattributed and nothing of it is restored — it stays for a
   // server that can prove it later (②b-4), rather than going to whoever
   // authenticates next.
-  const a = readLegacyNav(v1(), 'a');
-  const b = readLegacyNav(v1(), 'b');
+  const a = readNav(slot(v1(), 'a'));
+  const b = readNav(slot(v1(), 'b'));
   assert.equal(a.pane?.serverId, 'a');
   assert.equal(b.pane?.serverId, 'b', 'the function attributes what it is told');
   // And the proof that it decides nothing by itself: with no owner the panes
   // are dropped rather than filed under whoever asks.
-  const none = readLegacyNav(v1(), '');
+  const none = readNav(slot(v1(), ''));
   assert.equal(none.pane, null, 'nothing to attribute means nothing restored');
   assert.equal(none.page, 'terminal', 'the tab is not a server s, so it survives');
   assert.deepEqual(none.splitCells, []);
@@ -52,7 +59,7 @@ test('a v1 split restores its cells under the same owner', () => {
     splitLayout: 2,
     splitCells: [{ id: 3, target: 'work:1.0', session: 'work' }, { id: 4, target: '', session: '' }],
   });
-  const nav = readLegacyNav(storage, 'a');
+  const nav = readNav(slot(storage, 'a'));
   assert.equal(nav.splitLayout, 2);
   assert.deepEqual(nav.splitCells, [
     { id: 3, pane: paneRef('a', 'work', 'work:1.0') },
@@ -71,7 +78,7 @@ test('a v2 record carries its own server, and survives a round trip', () => {
   saveNav(storage, nav);
   // The owner argument is ignored: a v2 record knows whose it is, whatever the
   // caller believes.
-  assert.deepEqual(readLegacyNav(storage, 'a'), nav);
+  assert.deepEqual(readNav(slot(storage, 'a')), nav);
   assert.match(storage.raw()!, /"v":2/u);
 });
 
@@ -96,23 +103,23 @@ test('the restore keeps only the server it is running against', () => {
 });
 
 test('storage is untrusted: junk is dropped, never repaired', () => {
-  assert.deepEqual(readLegacyNav(mem({ [NAV_KEY]: 'not json' }), 'a'), EMPTY_NAV);
-  assert.deepEqual(readLegacyNav(mem(), 'a'), EMPTY_NAV);
-  assert.deepEqual(readLegacyNav(mem({ [NAV_KEY]: '"a string"' }), 'a'), EMPTY_NAV);
+  assert.deepEqual(readNav(slot(mem({ [NAV_KEY]: 'not json' }), 'a')), EMPTY_NAV);
+  assert.deepEqual(readNav(slot(mem(), 'a')), EMPTY_NAV);
+  assert.deepEqual(readNav(slot(mem({ [NAV_KEY]: '"a string"' }), 'a')), EMPTY_NAV);
   // A v2 record whose pane is not a pane ref at all.
   const bad = mem({ [NAV_KEY]: JSON.stringify({ v: 2, page: 'files', pane: { kind: 'session', serverId: 'a', session: 'work' } }) });
-  assert.equal(readLegacyNav(bad, 'a').pane, null);
+  assert.equal(readNav(slot(bad, 'a')).pane, null);
   // A target with no session field falls back to the session the TARGET
   // names, because the target is what tmux resolves.
   const noSession = mem({ [NAV_KEY]: JSON.stringify({ page: 'terminal', terminalTarget: 'work:1.0' }) });
-  assert.deepEqual(readLegacyNav(noSession, 'a').pane, paneRef('a', 'work', 'work:1.0'));
+  assert.deepEqual(readNav(slot(noSession, 'a')).pane, paneRef('a', 'work', 'work:1.0'));
   // Cells that are not objects still hold their place by index.
   const cells = mem({ [NAV_KEY]: JSON.stringify({ v: 2, splitLayout: 2, splitCells: [null, { id: 7, pane: null }] }) });
-  assert.deepEqual(readLegacyNav(cells, 'a').splitCells, [{ id: 0, pane: null }, { id: 7, pane: null }]);
+  assert.deepEqual(readNav(slot(cells, 'a')).splitCells, [{ id: 0, pane: null }, { id: 7, pane: null }]);
 });
 
 test('an input nobody owns is copied aside, once, with its evidence', () => {
-  // `readLegacyNav` returning no panes preserves nothing: the shell saves its
+  // Reading it attributes nothing to anybody without a slot: the shell saves its
   // own navigation over the same key as soon as it comes up (reviewer P1-c).
   const storage = mem({
     [NAV_KEY]: '{"page":"terminal","terminalTarget":"work:1.0"}',
@@ -140,17 +147,17 @@ test('an input nobody owns is copied aside, once, with its evidence', () => {
 test('a record this build does not understand is junk, not a v1 record', () => {
   // Guessing at a newer layout is how it gets misread (reviewer P2).
   const future = mem({ [NAV_KEY]: JSON.stringify({ v: 3, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'w', target: 'w:1.0' } }) });
-  assert.deepEqual(readLegacyNav(future, 'a'), EMPTY_NAV);
+  assert.deepEqual(readNav(slot(future, 'a')), EMPTY_NAV);
 });
 
 test('a record that disagrees with itself is refused, not repaired', () => {
   // The target is what tmux resolves; a `session` that is not its prefix means
   // the two were written by different things.
   const mismatch = mem({ [NAV_KEY]: JSON.stringify({ page: 'terminal', terminalTarget: 'work:1.0', terminalSession: 'other' }) });
-  assert.equal(readLegacyNav(mismatch, 'a').pane, null);
+  assert.equal(readNav(slot(mismatch, 'a')).pane, null);
   // An empty serverId is not an attribution.
   const unowned = mem({ [NAV_KEY]: JSON.stringify({ v: 2, pane: { kind: 'pane', serverId: '', session: 'w', target: 'w:1.0' } }) });
-  assert.equal(readLegacyNav(unowned, 'a').pane, null);
+  assert.equal(readNav(slot(unowned, 'a')).pane, null);
 });
 
 test('a split restores as whole cells with distinct ids', () => {
@@ -160,7 +167,7 @@ test('a split restores as whole cells with distinct ids', () => {
     splitLayout: 2.5,                       // not a whole count
     splitCells: [{ id: 3, target: 'work:1.0' }, { id: 3, target: 'work:2.0' }],
   }) });
-  const nav = readLegacyNav(storage, 'a');
+  const nav = readNav(slot(storage, 'a'));
   assert.equal(nav.splitLayout, 1, 'a fractional layout is not a layout');
   assert.deepEqual(nav.splitCells.map((c) => c.id), [3, 0],
     'a duplicate id falls back to an id nobody is using');
@@ -172,7 +179,7 @@ test('a split restores as whole cells with distinct ids', () => {
     v: 2, splitLayout: 3,
     splitCells: [{ id: 1, pane: null }, { id: 1, pane: null }, { id: 'x', pane: null }],
   }) });
-  const ids = readLegacyNav(collide, 'a').splitCells.map((c) => c.id);
+  const ids = readNav(slot(collide, 'a')).splitCells.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length, `every id is its own: ${ids.join(',')}`);
   assert.deepEqual(ids, [1, 0, 2], 'the given id is kept, the rest take the lowest free one');
 });
@@ -189,7 +196,7 @@ test('a record written by an absorbed entry names the survivor', () => {
     splitCells: [{ id: 0, pane: paneRef('a', 'work', 'work:1.0') }, { id: 1, pane: paneRef('a', 'work', 'work:2.0') }],
   });
   assert.equal(reownSavedNav(storage, (id) => (id === 'a' || id === 'b' ? 'b' : '')), true);
-  const nav = readLegacyNav(storage, '');
+  const nav = readNav(slot(storage, ''));
   assert.deepEqual(nav.pane, paneRef('b', 'work', 'work:1.0'));
   assert.deepEqual(nav.splitCells.map((c) => c.pane?.serverId), ['b', 'b'], 'the cells came too');
   assert.deepEqual(navFor(nav, 'b').splitCells.map((c) => c.pane?.target), ['work:1.0', 'work:2.0'],
@@ -207,7 +214,7 @@ test('only a ref the identity layer shows to be merged moves', () => {
     splitCells: [{ id: 0, pane: paneRef('a', 'work', 'work:1.0') }, { id: 1, pane: paneRef('c', 'work', 'work:2.0') }],
   });
   assert.equal(reownSavedNav(mixed, survivorOf), true);
-  const nav = readLegacyNav(mixed, '');
+  const nav = readNav(slot(mixed, ''));
   assert.equal(nav.pane?.serverId, 'c', 'the unexplained top pane keeps its server');
   assert.deepEqual(nav.splitCells.map((c) => c.pane?.serverId), ['b', 'c'], 'only the merged cell moved');
   assert.equal(navFor(nav, 'b').pane, null, 'and the restore for B drops the stranger');
@@ -223,4 +230,14 @@ test('only a ref the identity layer shows to be merged moves', () => {
   const legacy = mem({ [NAV_KEY]: '{"page":"terminal","terminalTarget":"work:1.0"}' });
   assert.equal(reownSavedNav(legacy, survivorOf), false, 'a v1 record names no server');
   assert.equal(reownSavedNav(mem({ [NAV_KEY]: 'not json' }), survivorOf), false);
+});
+
+test('a server s store reads and writes that server s slot, and the legacy key is not touched (board #335 ②b-4)', () => {
+  const storage = mem({ [NAV_KEY]: JSON.stringify({ page: 'hub', terminalTarget: 'old:1.0', terminalSession: 'old' }) });
+  const a = createServerStore(storage, 'a');
+  const nav: SavedNav = { page: 'files', pane: paneRef('a', 'work', 'work:1.0'), splitLayout: 1, splitCells: [] };
+  saveNav(a, nav);
+  assert.deepEqual(readNav(a), nav);
+  assert.deepEqual(readNav(createServerStore(storage, 'b')), EMPTY_NAV, 'B s slot is B s');
+  assert.equal(JSON.parse(storage.getItem(NAV_KEY)!).terminalTarget, 'old:1.0', 'the legacy record is as it was');
 });

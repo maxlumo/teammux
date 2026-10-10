@@ -409,9 +409,9 @@ touching their logic. A second copy of those rules here would be the "one
 mechanism per job" regression, and a source test fails if one appears.
 
 What is scoped and what is not is the load-bearing half. A RESIDENT key is
-rewritten, and `RESIDENT_KEYS` IS `servers.ts`'s `PARKED_KEYS` — "parked per
-server" and "resident per server" are the same set seen from two sides, so
-there is one list and a key cannot be added to one and forgotten in the other.
+rewritten, by `servers.ts`'s `residentKey` over its `RESIDENT_KEYS` — one
+list, which the identity layer also uses when it removes or merges an entry,
+so a key cannot be added to one and forgotten in the other.
 Everything else passes through: theme, fonts, zoom, language, shortcuts,
 notification switches, the feed level and the sidebar collapse are properties
 of the PERSON and the WINDOW, and scoping them would give the same human a
@@ -453,28 +453,59 @@ conclusion rather than a guess: arriving at a server surfaces its park as the
 live key, so from that moment live and slot agree and any later divergence is a
 live-side change. Copying only the present keys made a cleared draft and a
 reset read-mark come back out of the old park the moment the slot became the
-live home. The fold therefore IS `parkFrom` — the switch's own "file this
-server's live keys under its id; an absent one clears the slot" — rather than a
-second loop that has to be taught the same rule. Every other server's park is
-untouched, because the live set speaks only for the current server.
+live home. The fold therefore files the WHOLE set — the old switch's park, kept
+in the fold as the one place that still reads the live keys. Every other
+server's park is untouched, because the live set speaks only for the current
+server.
 
 **CURRENT must resolve.** An empty CURRENT has no slot to fold into, and a
 CURRENT naming an id no saved server has is a slot nothing will ever read.
 Both are a reported no-op with no writes and no marker, so a later run still
 folds once a connect has resolved which server this is.
 
-It does not clear the unprefixed keys, so a client rolled back to a build from
-before #335 finds the state it left; deleting them belongs to the ②b commit
-that stops writing them.
+**And then the server must prove it** (reviewer P1-c on the ② plan). When the
+boot could not name a server, the inputs were left by one nobody can identify,
+and the next server a connect makes current is not evidence of having written
+them. That later run (`requireProof`) folds only into a server whose machine is
+the one the legacy mirror named — `tmux_machine_id`, which nothing writes after
+②b-4, so it is the value the old build left. A server that cannot prove it gets
+nothing: the inputs are marked consumed with no owner (`unclaimed`) and left
+where they are. With no inputs there is nothing to prove.
 
-The fold is NOT enabled in ②a, and that sequencing is a rule rather than
-caution: `parkFrom` writes `<key>::<id>` — the very string a resident slot
-uses — from the LIVE key, so while any module still writes the live key a
-switch overwrites the resident slot, and while any module already reads the
-resident slot a live write is lost to it. Enabling the fold before the readers
-and writers move is not a partial improvement, it is a way to lose a draft.
-②b flips the fold, the stores, park/point and the reset entry points in ONE
-commit; `server-state.test.ts` carries that coupling as an executable fact.
+It does not clear the unprefixed keys: nothing writes them after ②b-4, and a
+client rolled back to a build from before #335 finds the state it left.
+
+**The flip (②b-4) moved everything in ONE commit**, because the two halves
+cannot be apart: `parkFrom` wrote `<key>::<id>` — the very string a resident
+slot uses — from the LIVE key, so while anything wrote the live key a switch
+overwrote the resident slot, and while anything read the slot a live write was
+lost to it. In that commit:
+- every server's state is built over its own store (`createServerState(
+  createServerStore(localStorage, id))`), and the navigation is saved and read
+  through it (`saveNav`, `readNav`); App reads and writes no unprefixed
+  per-server key, and nothing writes `tmux_machine_id`;
+- `parkFrom`/`pointTo` and the park in the switch are gone: arriving at a
+  server is moving CURRENT (`activateConnected`, `activateSwitched`). An
+  identity merge hands the CURRENT twin's slots to the survivor whole — they
+  are what the person was just using on that machine — and drops any other
+  twin's;
+- the boot order is migrateServers → loadServerRegistry → the fold →
+  the deep link → bind. The fold runs before the link, because a link to B
+  makes B current and a later fold would file A's live state into B's slot.
+  With no server to fold into at boot, it runs again before the first
+  server's state is built (`swapScope`), and if CURRENT had dangled, that
+  server must prove itself;
+- an `unrecorded` fold (or one that throws) binds no server: no server page
+  mounts, no switch starts, and the content area shows the reason with Retry
+  on the switch panel's own form. Every later bind tries the fold again, so
+  storage that recovers unblocks it; Retry is such a bind. The shell, the
+  connect card and Preferences stay;
+- where to reach a server is its ENTRY, for every id (`server-target.ts`), and
+  every path that moves the active address records it there once it answers —
+  the form and the deep link (`activateConnected`), a failover
+  (`recordServer`), an address row and the optimizer (`addressUp`); the boot
+  comes up on, and records, the address the runtime dialled. The mirror keys
+  are still written for the connect card and the share link.
 
 ### A subtree is bound to one server, in that order (board #335 ②b-1)
 
@@ -755,10 +786,10 @@ doc already describes. Design decisions, in the order they bit:
   1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
   2. **One intent**: the reconnect machine stops, `switching` unmounts the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing.
   3. **Downloads suspended**: every running attempt aborts with `SUSPEND` and is awaited, so no retry, re-sign or WS fallback of the old server's chain can go out on the next connection (`download.ts` re-checks the signal after its retry sleep, before `freshUrl`). Its part is KEPT (see file-handling.md). Then `tick()` lets the unmounted tree's persistence run (the composer's last keystroke) — under the old server.
-  4. **Park the source, once**: `parkFrom` files every key in `PARKED_KEYS` under the leaving id. Only a switch that began CONNECTED parks; Retry and Back reuse the frozen `from` and never park again, so a half-switched world can never overwrite the source's slot.
+  4. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
   5. Socket closed (`disconnect()` rejects every pending RPC), `resetServerMemory()`.
   6. **Connect without touching the mirror or CURRENT**: a reload mid-switch boots the server you left.
-  7. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, `pointTo` the canonical entry, write the mirror. Then `comeUp`: `centreSurface.reset()`, `swapScope()` — which builds the target's runtime and its server state (§ One server's state is one value) — and `bringUp` (the boot path's own half after connect).
+  7. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, move CURRENT to the canonical entry, write the mirror. Then `comeUp`: `centreSurface.reset()`, `swapScope()` — which builds the target's runtime and its server state (§ One server's state is one value) — and `bringUp` (the boot path's own half after connect).
 
   **One socket owner.** Moving the socket to another address of the SAME server (the Connection page's address rows, the periodic optimizer) goes through `connectAddress` in the same module, under the same intent counter: a switch that starts while it dials makes it stale, and a stale attempt neither publishes its result nor restarts the reconnect loop (review P1: it used to call `reconnectMachine.start()` in its catch, and that loop reads the mirror, i.e. the server just left, over the new server's socket). `probeHub` and `loadBackends` drop an answer that arrives after a switch began. The reconnect machine's own starts (`setOnDisconnect`, the visibility resume) are skipped while `switching` is set.
 
@@ -767,7 +798,7 @@ doc already describes. Design decisions, in the order they bit:
   | state | where it lives | on a switch |
   |---|---|---|
   | theme, fonts, zoom, locale, layout, shortcuts, rail order, widths, notifications, `tmux_servers`, `tmux_server_merges`, `tmux_machines` (keyed by machine id) | localStorage | global, untouched |
-  | `tmux_state` (tab, terminal target, split), `tmux_machine_id`, `tmux_hub_project` / `_drafts` / `_seen` / `_lead` / `_drawer` / `_roster_expanded` (per-project maps keyed by tmux session NAME: `app` on A is not `app` on B) | localStorage, `PARKED_KEYS` | parked as `<key>::<id>`, the target's surfaced |
+  | `tmux_state` (tab, terminal target, split), `tmux_machine_id`, `tmux_hub_project` / `_drafts` / `_seen` / `_lead` / `_drawer` / `_roster_expanded` / `tmux_hub_alerts` (per-project maps keyed by tmux session NAME: `app` on A is not `app` on B) | localStorage, `RESIDENT_KEYS`, at `<key>::<id>` (since #335 ②b-4) | untouched: each server reads its own slot |
   | every mounted component, its ws.ts listeners and subscriptions | memory | unmounted with the tree |
   | Files' parked cwds (`browsed`), download rows, served backends, the hover card, App's hub probe / serverInfo / terminal and Files targets | module/App memory | `resetServerMemory()` |
   | download parts on disk | the shell | kept; `partId` hashes the machine id, Resumable lists only this server's |
@@ -1021,31 +1052,26 @@ it exists to preserve.
 ### A server's state is resident in its own slot (#335 ②)
 
 A per-server key lives at `<key>::<serverId>` and nowhere else;
-`residentKey()` is the only function that spells that layout, and
-`RESIDENT_KEYS` is `servers.ts`'s `PARKED_KEYS` rather than a second list,
-because a key added to one and forgotten in the other loses a draft on a
-switch. `createServerStore(storage, serverId)` is a `Storage` view, never a
+`residentKey()` (in `servers.ts`) is the only function that spells that
+layout, over its `RESIDENT_KEYS` — one list, so a key cannot be scoped in one
+place and forgotten in another. `createServerStore(storage, serverId)` is a `Storage` view, never a
 second copy of the per-project semantics — those stay in `hub-prefs` and
-`notify-centre`, whose storage ②b repoints at this view. Only one server's
+`notify-centre`, whose storage is this view since ②b-4. Only one server's
 STATE is scoped: the person's and the window's preferences (theme, fonts,
 zoom, language, shortcuts, notification switches, feed level, sidebar) pass
 through, and so do the registry keys and the active mirror, whose home is the
-`ServerEntry` — which is a compatibility decision about a storage view, not a
-claim that those credentials are scoped by server, so ②b still owes reconnect
-and the connection config an entry-scoped reader. An empty serverId throws
+`ServerEntry`; where to reach a server is read from the entry by id
+(`server-target.ts`). An empty serverId throws
 rather than falling back to the unprefixed keys. `migrateServerState` records
 its completion in ONE marker write carrying the layout and the server the
 inputs went to: inferring it from values stops being idempotent the moment the
 slot is the live home, and two markers leave a window in which one server skips
-while the next folds the same inputs. The fold IS `parkFrom`, so an absent live
+while the next folds the same inputs. The fold files the whole live set, so an absent live
 key CLEARS the slot — a cleared draft must not come back out of the old park —
 and a CURRENT that is empty or names no saved server writes nothing at all. A
-marker write that fails is reported as `unrecorded`, not as a completed fold.
-It must be enabled in
-the SAME commit that moves every live read and write: `parkFrom` writes the
-very string a resident slot uses, so a half-migrated client either overwrites
-a resident slot on the next switch or loses a live write to a reader that has
-already moved.
+marker write that fails is reported as `unrecorded`, not as a completed fold,
+and then no server page mounts. It was enabled in the SAME commit that moved
+every live read and write (②b-4, above).
 
 ### A subtree is bound to one server, and the binding is ordered (#335 ②b)
 
@@ -1112,7 +1138,7 @@ not claimed as a full-App or native-clipboard test.
 
 ### Servers are a named registry; the machine is the identity
 
-(board #55): `src/lib/app/servers.ts` keeps `tmux_servers` (+`tmux_server_current`) while the old `tmux_address`/`tmux_token`/`tmux_socket` stay the ACTIVE MIRROR every existing reader keeps reading. One machine = one entry however many LAN/Tailscale/WAN addresses it answers on — `recordServer` merges by `machineId` (learned at connect) without moving CURRENT, migration attributes `tmux_address_history` through `tmux_machines`, and the same-machine failover semantics are untouched. A different-machine successful connect goes through `activateConnected` (or, for the in-place switch, `activateSwitched` after auth — board 315): park the old live state before surfacing the target; a same-machine alternate records in place. Switching is in place since board 315 (`server-switch.ts`, the order and the state-ownership table are in the Multi-Server section above): the per-server keys (`PARKED_KEYS`) park/restore under `::<id>` so restore targets and Hub drafts never cross servers, the content tree remounts and `resetServerMemory` clears the module caches, so nothing in memory leaks across. The desktop rail's switcher rides the RAIL_GAP branch above the configure group — a control (no drag slot), popover in the one menu recipe; Add server is a dialog over the connected shell (cancel changes nothing) and activates only after authentication. Forgetting a non-current server captures its row identity and asks through the shared `ConfirmDialog` before removing config + parked state.
+(board #55): `src/lib/app/servers.ts` keeps `tmux_servers` (+`tmux_server_current`) while the old `tmux_address`/`tmux_token`/`tmux_socket` stay the ACTIVE MIRROR every existing reader keeps reading. One machine = one entry however many LAN/Tailscale/WAN addresses it answers on — `recordServer` merges by `machineId` (learned at connect) without moving CURRENT, migration attributes `tmux_address_history` through `tmux_machines`, and the same-machine failover semantics are untouched. A different-machine successful connect goes through `activateConnected` (or, for the in-place switch, `activateSwitched` after auth — board 315): CURRENT moves to it; a same-machine alternate records in place. Switching is in place since board 315 (`server-switch.ts`, the order and the state-ownership table are in the Multi-Server section above): the per-server keys (`RESIDENT_KEYS`) live in each server's own slot, `<key>::<id>`, since #335 ②b-4 (until then they were parked and restored there), so restore targets and Hub drafts never cross servers, the content tree remounts and `resetServerMemory` clears the module caches, so nothing in memory leaks across. The desktop rail's switcher rides the RAIL_GAP branch above the configure group — a control (no drag slot), popover in the one menu recipe; Add server is a dialog over the connected shell (cancel changes nothing) and activates only after authentication. Forgetting a non-current server captures its row identity and asks through the shared `ConfirmDialog` before removing config + that server's slots.
 
 ### The failover set's order is the priority, edited through one writer
 

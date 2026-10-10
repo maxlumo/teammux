@@ -7,7 +7,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerSwitch, type SwitchState, type SwitchTarget } from './server-switch.ts';
-import { currentServerId, loadServers, migrateServers, PARKED_KEYS, recordServer, STATE_PREFIX } from './servers.ts';
+import { currentServerId, loadServers, migrateServers, RESIDENT_KEYS, recordServer, residentKey } from './servers.ts';
+import { migrateServerState } from './server-state-migration.ts';
+import { createServerStore } from './server-store.ts';
 import { clearLeaveGuardsForTests, confirmLeave, registerLeaveGuard } from './leave-guards.ts';
 import { createHandovers } from './handover.ts';
 import { download, SUSPEND, type DownloadSink } from '../files/download.ts';
@@ -78,6 +80,8 @@ function app(storage = mem({
   tmux_hub_project: 'app', tmux_hub_drafts: JSON.stringify({ app: 'draft on A' }),
 })) {
   migrateServers(storage);
+  // The boot's fold: A's pre-#335 live keys are A's slots from here on.
+  migrateServerState(storage);
   const w = world();
   w.connect('ws://a:1');
   const a = loadServers(storage)[0]!;
@@ -113,7 +117,11 @@ function app(storage = mem({
     comeUp: () => { connected = true; mounted = true; },
   });
   const suspenders: (() => Promise<void>)[] = [];
-  return { storage, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, unmountWrites, resets, suspenders, reconnects, published,
+  /** What a page writes and reads: the server it is bound to, its slots. */
+  const slot = (id: string) => createServerStore(storage, id);
+  /** Every key of every slot, and the legacy keys: what nothing may touch. */
+  const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
+  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, unmountWrites, resets, suspenders, reconnects, published,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -121,46 +129,44 @@ test.beforeEach(() => clearLeaveGuardsForTests());
 
 test('A→B→A with a same-named project keeps each server’s state (board 315)', async () => {
   const t = app();
-  // The Hub writes its draft on unmount — under A, before A is parked.
-  t.unmountWrites.push(() => t.storage.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on A, last keystroke' })));
+  const [a, b] = [t.slot(t.a.id), t.slot(t.b.id)];
+  // The Hub writes its draft on unmount — into A's slot, the server it is
+  // bound to; nothing is parked (board #335 ②b-4).
+  t.unmountWrites.push(() => a.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on A, last keystroke' })));
   await t.sw.switchTo(t.b);
   assert.equal(t.w.at, 'ws://b:2');
   assert.equal(currentServerId(t.storage), t.b.id);
-  assert.equal(t.storage.getItem('tmux_hub_drafts'), null, 'B’s project `app` does not inherit A’s draft');
-  assert.equal(t.storage.getItem('tmux_hub_project'), null);
-  assert.equal(t.storage.getItem('tmux_state'), null, 'B starts on no target of A’s');
+  assert.equal(b.getItem('tmux_hub_drafts'), null, 'B’s project `app` does not inherit A’s draft');
+  assert.equal(b.getItem('tmux_hub_project'), null);
+  assert.equal(b.getItem('tmux_state'), null, 'B starts on no target of A’s');
   assert.ok(t.connected && t.mounted, 'B is up, tree remounted');
   // On B the user opens `app` and types.
-  t.storage.setItem('tmux_hub_project', 'app');
-  t.storage.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on B' }));
-  t.storage.setItem('tmux_state', '{"page":"hub"}');
+  b.setItem('tmux_hub_project', 'app');
+  b.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on B' }));
+  b.setItem('tmux_state', '{"page":"hub"}');
   await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.a.id)!);
   assert.equal(t.w.at, 'ws://a:1');
-  assert.equal(t.storage.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A, last keystroke' }));
-  assert.equal(t.storage.getItem('tmux_state'), '{"page":"terminal","terminalTarget":"app:1.1","terminalSession":"app"}');
-  assert.equal(t.storage.getItem(`tmux_hub_drafts::${t.b.id}`), JSON.stringify({ app: 'draft on B' }), 'B’s parked for later');
+  assert.equal(a.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A, last keystroke' }));
+  assert.equal(a.getItem('tmux_state'), '{"page":"terminal","terminalTarget":"app:1.1","terminalSession":"app"}');
+  assert.equal(b.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on B' }), 'B’s kept for later');
 });
 
 test('acceptance: B fails twice → Back to A, A’s page, drafts and terminal target unchanged', async () => {
   const t = app();
-  const before = Object.fromEntries(PARKED_KEYS.map((k) => [k, t.storage.getItem(k)]));
+  const before = t.everything();
   t.w.fail('ws://b:2', 2);
   await t.sw.switchTo(t.b);
   assert.equal(t.sw.state?.phase, 'failed');
   assert.equal(t.sw.state?.from?.id, t.a.id, 'the source is frozen');
   assert.equal(currentServerId(t.storage), t.a.id, 'CURRENT never moved to a server that did not answer');
   assert.equal(t.storage.getItem('tmux_address'), 'ws://a:1', 'nor did the mirror');
-  // A stray write in the failed world (nothing is mounted to make one, but
-  // the rule must not depend on that): it must not become A's park.
-  t.storage.setItem('tmux_state', '{"page":"settings"}');
   await t.sw.retry();
   assert.equal(t.sw.state?.phase, 'failed', 'second failure');
-  const parked = t.storage.getItem(STATE_PREFIX + t.a.id);
   await t.sw.back(loadServers(t.storage));
   assert.equal(t.sw.state, null);
   assert.equal(t.w.at, 'ws://a:1');
-  assert.equal(t.storage.getItem(STATE_PREFIX + t.a.id), parked, 'retry/back never re-parked A');
-  for (const k of PARKED_KEYS) assert.equal(t.storage.getItem(k), before[k], `${k} is A’s, as before`);
+  assert.equal(t.everything(), before, 'every slot of A and B, and every legacy key, as before');
+  assert.equal(t.slot(t.a.id).getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A' }));
 });
 
 test('a delayed read started on A never lands in B’s world', async () => {
@@ -207,7 +213,7 @@ test('a running download is suspended, keeps its part, and never re-signs after 
 
 test('a dirty editor’s cancel leaves A connected and every key untouched', async () => {
   const t = app();
-  const snapshot = JSON.stringify(PARKED_KEYS.map((k) => t.storage.getItem(k)));
+  const snapshot = t.everything();
   let asked = 0;
   const off = registerLeaveGuard({ runtime: null, page: 'files', dirty: () => true, ask: async () => { asked++; return false; } });
   await t.sw.switchTo(t.b);
@@ -217,8 +223,7 @@ test('a dirty editor’s cancel leaves A connected and every key untouched', asy
   assert.equal(t.w.at, 'ws://a:1');
   assert.ok(t.connected && t.mounted);
   assert.equal(t.resets.length, 0, 'nothing was reset');
-  assert.equal(JSON.stringify(PARKED_KEYS.map((k) => t.storage.getItem(k))), snapshot);
-  assert.equal(t.storage.getItem(STATE_PREFIX + t.a.id), null, 'not even parked');
+  assert.equal(t.everything(), snapshot, 'no slot and no legacy key moved');
 });
 
 test('a second address of the SAME machine folds into its entry and restores its state', async () => {
@@ -229,7 +234,7 @@ test('a second address of the SAME machine folds into its entry and restores its
   await t.sw.switchTo(candidate);
   assert.equal(loadServers(t.storage).length, 2, 'no third "server"');
   assert.equal(currentServerId(t.storage), t.a.id, 'the identity the server reported decides');
-  assert.equal(t.storage.getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A' }), 'A’s state, not a fresh start');
+  assert.equal(t.slot(currentServerId(t.storage)).getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A' }), 'A’s state, not a fresh start');
   assert.equal(t.storage.getItem('tmux_address'), 'ws://a-ts:9');
 });
 

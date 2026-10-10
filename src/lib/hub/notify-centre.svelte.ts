@@ -18,8 +18,8 @@
 //   the app is closed (notifications.md, the running-client limit).
 //
 // Per server: the list lives in `tmux_hub_alerts`, one of servers.ts
-// PARKED_KEYS, so a switch parks it with the rest of the server's Hub state
-// and the target's runtime builds its own log over the surfaced key. Entries also carry the server id, and a
+// RESIDENT_KEYS, in each server's own slot, and each runtime builds its own
+// log over its server's store. Entries also carry the server id, and a
 // jump request carries it too, so a late jump cannot act on another server.
 import type { FeedMsg, NewsKind } from './notifications.ts';
 
@@ -94,7 +94,7 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 // same split hub-prefs needed):
 //
 //   the LIST is per SERVER. It lives in `tmux_hub_alerts`, one of servers.ts
-//     PARKED_KEYS, and every entry already carries its `server`. It belongs to
+//     RESIDENT_KEYS, and every entry already carries its `server`. It belongs to
 //     a runtime (②b-2-1); the `reload()` that existed because a switch
 //     re-pointed the live key is gone with the module instance.
 //   the SURFACE is per WINDOW. There is one bell, one popover and one jump
@@ -108,8 +108,7 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 //
 // Wired per runtime since ②b-2-1: each runtime's `ServerState` holds a
 // `createCentre(createAlertLog(storage))`, and there is no module instance of
-// a log. Through b2-4 that storage is the bare localStorage, so the bundle is
-// built only once its server is current.
+// a log. That storage is the server's own store (②b-4).
 
 /** One SERVER's alert list. */
 export interface AlertLog {

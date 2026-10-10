@@ -25,12 +25,9 @@
 //
 // What a runtime deliberately does NOT own yet:
 //
-//   - RECONNECT. `app/reconnect.ts` reads `tmux_address`, `tmux_token`,
-//     `tmux_machine_id` and `tmux_machines` off the live unprefixed keys, i.e.
-//     off whichever server is current, so a second runtime would reconnect to
-//     the wrong machine. It needs one scoped target reader, which is ②b's
-//     commit; faking it here with a key-remapping storage proxy would be a
-//     second mechanism to delete two commits later.
+//   - RECONNECT. `app/reconnect.ts` is told where by `server-target.ts`,
+//     which reads the entry by id; App still runs the one machine, for
+//     CURRENT.
 //   - FOCUS. There is no "current" here, exactly as in the connection
 //     registry. Which runtime a page looks at is the context provider's (②a-3)
 //     and App's (②b-1).
@@ -349,13 +346,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // connection to a server the registry no longer lists.
     if (!target) return { ok: false, reason: 'gone' };
     known = target;
-    // WHERE to dial is the one reader's answer (board #335 ②b-2-2): for the
-    // server the app is on, the active mirror, which through ②b is written
-    // ahead of the registry (the connect form, the optimizer, the address
-    // pick, a failover) — dialling the entry's saved address there would go
-    // back to the address the user just left. For any other id it is the
-    // entry itself. b2-4 retires the mirror compatibility, and the two answers
-    // become one.
+    // WHERE to dial is the one reader's answer, the entry (server-target.ts;
+    // board #335 ②b-4 retired the mirror it read for the current server).
     const route = targetOf(storage, id);
     const address = route?.address || target.address;
     const token = route ? route.token : target.token;

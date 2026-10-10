@@ -9,32 +9,22 @@
 // side is where the care goes.
 //
 // READING A v1 RECORD IS THE INTERESTING HALF (reviewer + orchestrator,
-// 2026-10-10), and the rule is about WHERE the record was read, not about a
-// global marker:
+// 2026-10-10), and the rule is about WHERE the record was read: a record read
+// from a server's own SLOT (`tmux_state::<id>`) belongs to that id. Nothing is
+// inferred, because the slot names it, and a v1-shaped record inside B's slot
+// is still B's. Since board #335 ②b-4 the slot is the only place this module
+// reads — every read and write goes through the server's store
+// (`server-store.ts`), which maps `tmux_state` to the slot.
 //
-//   - a record read from a server's own SLOT (`tmux_state::<id>`) belongs to
-//     that id. Nothing is inferred, because the slot names it, and a
-//     v1-shaped record inside B's slot is still B's. The slot reader itself
-//     arrives with the fold (②b-4); before that the live key is the only
-//     home, so this module reads only it.
-//   - the ONE unprefixed legacy record belongs to whoever last PUT IT THERE,
-//     and the caller is the only one who can know that: at boot it is the
-//     server the last session left current, and from then on it is whichever
-//     server the app arrived at, because arriving surfaces that server's
-//     parked slot into the live key (`pointTo`, which ②b-4 retires).
-//     Comparing bytes cannot answer this — two servers can hold byte-identical
-//     records, and `work:1.0` on A looks exactly like `work:1.0` on B
-//     (orchestrator, 2026-10-10).
-//   - when that cannot be established — a dangling CURRENT, no marker — the
-//     record is UNATTRIBUTED and nothing of it is restored. It is not handed
-//     to the next server that authenticates: being the next to connect is not
-//     evidence of having written it. The data stays where it is, and ②b-4
-//     only lets a server claim it on PROOF (its machineId matching the frozen
-//     legacy mirror).
-//
-// A deep link activates its server before the boot restore runs, so
-// attributing the legacy record to the new CURRENT would hand server B the
-// panes of server A — which is the bug this shape exists to make unwritable.
+// The ONE unprefixed legacy record is the fold's to file
+// (`server-state-migration.ts`), into the server that can be shown to have
+// written it. Comparing bytes cannot answer that — two servers can hold
+// byte-identical records, and `work:1.0` on A looks exactly like `work:1.0`
+// on B (orchestrator, 2026-10-10). When the boot cannot name a server, the
+// record is UNATTRIBUTED: its bytes are copied aside here
+// (`quarantineLegacyNav`), and a server claims the inputs only on PROOF (its
+// machineId matching the frozen legacy mirror). Being the next to connect is
+// not evidence of having written it.
 //
 // Everything here treats storage as UNTRUSTED: a hand-edited value, a record
 // from a newer build, a cell list of nulls. Anything that does not parse into
@@ -42,8 +32,9 @@
 // pane target lands the reader on a pane that cannot be captured.
 import { paneRef, reownRef, type PaneRef, type ServerId } from './refs.ts';
 
-/** Where the nav state lives. One spelling, shared with `servers.ts`'s
- * resident-key list, which treats the value as opaque. */
+/** The nav state's key. One spelling, shared with `servers.ts`'s resident-key
+ * list, which treats the value as opaque; a server's store maps it to that
+ * server's slot. */
 export const NAV_KEY = 'tmux_state';
 
 /** The layout this module writes. v1 is "no `v` at all": the pre-#335 record
@@ -54,8 +45,8 @@ export const NAV_VERSION = 2;
 
 /** Where an input nobody can be shown to own is kept (reviewer P1-c): the raw
  * bytes, when they were found, and the machine the legacy mirror named at that
- * moment. ②b-4 lets a server claim it by PROVING that machine is its own; a
- * server merely being the next to authenticate proves nothing. */
+ * moment. A server claims the inputs only by PROVING that machine is its own
+ * (the fold's `requireProof`); being the next to authenticate proves nothing. */
 export const QUARANTINE_KEY = 'tmux_state::unattributed';
 
 /** The most panes a split can be restored into. The shell offers a smaller
@@ -83,6 +74,8 @@ export interface SavedNav {
 export const EMPTY_NAV: SavedNav = { page: undefined, pane: null, splitLayout: 1, splitCells: [] };
 
 type Store = Pick<Storage, 'getItem' | 'setItem'>;
+/** One server's view of storage (`server-store.ts`'s `ServerStore`). */
+type SlotReader = Pick<Storage, 'getItem'> & { readonly serverId: ServerId };
 
 /** A pane target names its session, so a record that disagrees with itself is
  * REFUSED rather than repaired: the target is what tmux resolves, and a
@@ -178,20 +171,15 @@ function readAt(storage: Pick<Storage, 'getItem'>, key: string, owner: ServerId)
 }
 
 /**
- * The ONE unprefixed legacy record, attributed to the server that can be shown
- * to have written it — and to nobody otherwise.
- *
- * `owner` is the caller's conclusion, and the caller has exactly two sources
- * for it: the fold's marker (`layoutMark.into`, which records the server those
- * inputs went to) once the fold has run, and the CURRENT read before anything
- * in this boot could move it. With neither, it passes '' and nothing is
- * restored: the record stays untouched for a server that can prove it later.
+ * The record in ONE server's slot, read through that server's store. A
+ * v1-shaped record there is that server's: the slot says so.
  */
-export function readLegacyNav(storage: Pick<Storage, 'getItem'>, owner: ServerId): SavedNav {
-  return readAt(storage, NAV_KEY, owner);
+export function readNav(store: SlotReader): SavedNav {
+  return readAt(store, NAV_KEY, store.serverId);
 }
 
-/** Write the record. One definition of the shape, shared with `readNav`. */
+/** Write the record, through a server's store. One definition of the shape,
+ * shared with `readNav`. */
 export function saveNav(storage: Store, nav: SavedNav): void {
   storage.setItem(NAV_KEY, JSON.stringify({
     v: NAV_VERSION,
@@ -224,12 +212,11 @@ export function navFor(nav: SavedNav, serverId: ServerId): SavedNav {
 /**
  * Keep an input nobody can be shown to own, before anything can overwrite it.
  *
- * `readLegacyNav` returning no panes does not preserve anything: the shell
- * saves its own navigation over the same key as soon as it comes up
- * (reviewer P1-c). So the bytes are copied aside, together with the machine
- * the legacy mirror named at that moment — the evidence ②b-4 requires before
- * any server may claim them. The live key is left writable: what is preserved
- * is this copy.
+ * The bytes are copied aside, together with the machine the legacy mirror
+ * named at that moment — the evidence a server must match before it may
+ * claim the inputs (reviewer P1-c). Nothing writes the unprefixed key after
+ * board #335 ②b-4, so the copy is for the one reader that still looks at it
+ * — a person, or a build that comes after this one.
  *
  * The FIRST quarantine wins. A second boot must not overwrite the original
  * with whatever the shell has written since.
@@ -261,9 +248,9 @@ export function quarantineLegacyNav(storage: Pick<Storage, 'getItem' | 'setItem'
  * keeps it, and the restore then filters it out as another server's, which
  * is the safe answer for a record this client cannot attribute.
  *
- * A v1 record needs nothing: it names no server at all, and who owns it is
- * the caller's tracked provenance (App's `navLiveOwner`), which follows the
- * same merges. Returns whether anything was rewritten.
+ * A v1 record needs nothing: it names no server at all, and the slot it sits
+ * in is the survivor's (the merge moved it there). Returns whether anything
+ * was rewritten.
  */
 export function reownSavedNav(storage: Store, survivorOf: (id: ServerId) => ServerId): boolean {
   let raw: unknown;
