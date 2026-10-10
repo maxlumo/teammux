@@ -8,5 +8,10 @@ import { scopeContext } from '../app/server-context.ts';
 import { createServerState } from '../app/server-state.ts';
 import type { ServerRuntime } from '../app/server-runtime.ts';
 
-export const testScopeContext = () =>
-  scopeContext({ runtime: { id: 'test' } as ServerRuntime, state: createServerState(localStorage) });
+export const testScopeContext = () => {
+  const state = createServerState(localStorage);
+  // Reachable from a test, so it can act on the server's state the way App
+  // does — release it, say — without a second way to build one.
+  (globalThis as { __serverState?: unknown }).__serverState = state;
+  return scopeContext({ runtime: { id: 'test' } as ServerRuntime, state });
+};

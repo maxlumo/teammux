@@ -1112,3 +1112,21 @@ test('a server switch asks an unsaved editor through its own discard dialog (boa
     assert.equal(await answer, true);
   } finally { await app.close(); }
 });
+
+test('a download on a released server s record sends nothing (board #335 ②b-2-3, reviewer P1-a)', async context => {
+  // The record is sealed while the page is still on screen — a release is
+  // under way. A click on Download must not reach the server at all.
+  const asked: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc({ fsDownloadHttp: async () => { asked.push('fs_download_http'); return { base64: 'eA==' }; },
+      fsDownload: async () => { asked.push('fs_download'); return { data: 'eA==' }; } })],
+  });
+  try {
+    await settle(app);
+    (app.window as any).__serverState.files.memory.seal('released');
+    button(app, 'Download: AGENTS.md').click(); await settle(app);
+    assert.deepEqual(asked, [], 'no RPC from a sealed record');
+    assert.equal((app.window as any).__serverState.files.downloads.rows.length, 0, 'and no row');
+  } finally { await app.close(); }
+});
