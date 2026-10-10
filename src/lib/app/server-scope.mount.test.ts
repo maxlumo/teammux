@@ -127,3 +127,18 @@ test('a swap already heading for a server is not repeated', async (t) => {
   assert.deepEqual(trace(app), ['mount:a', 'destroy:a', 'release:a', 'mount:b']);
   assert.equal(app.window.__scope.shown(), b);
 });
+
+test('a subtree gets the state its host built for THAT runtime, with the runtime', async (t) => {
+  // ②b-2-1: the provider binds the runtime and its server's state as ONE
+  // scope. A provider that dropped the state, or kept the previous one, would
+  // give B's pages A's memory beside B's api.
+  const app = await mount(t);
+  await swap(app, runtime('a'));
+  await flush(app);
+  await swap(app, runtime('b'));
+  await flush(app);
+  const seen = Array.from((app.window.__ctxSeen ?? []) as unknown[])
+    .filter((e: any) => typeof e !== 'string' && e.mounted)
+    .map((e: any) => `${e.label}:${e.stateOf}`);
+  assert.deepEqual(seen, ['a:a', 'b:b'], 'each subtree saw its own runtime s state');
+});

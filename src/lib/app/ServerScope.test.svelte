@@ -31,7 +31,7 @@
 </script>
 
 {#key shown}
-  <ServerScope runtime={shown}>
+  <ServerScope runtime={shown} state={shown ? { of: shown.id } : undefined}>
     <Consumer label={shown?.id ?? 'unbound'} />
   </ServerScope>
 {/key}
