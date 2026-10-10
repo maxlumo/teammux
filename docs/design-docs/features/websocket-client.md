@@ -688,7 +688,21 @@ attempt that asked. An automatic reconnect — or a boot dial — whose socket
 answers as another known machine ARRIVES there only after the same walk
 (reviewer, 18:54 on 5ca0e79e): losing the socket is not consent to discard
 local edits. A stay keeps A's tree with its handle held (refusing), closes
-B's socket and says why on the connect page; nothing retries on its own.
+B's socket and says why on the connect page.
+
+While a leave walk asks — the switcher's, the form's or an arrival's — the
+socket is HELD (`serverSwitch.guard`, reviewer P1 on 085b0e70): no address
+change (a row, the optimizer, a probe that started before the dialog and
+answers during it — not even the mirror key moves), no switch, no
+automatic reconnect and no second walk starts. And every socket change takes
+the one owner counter: `connectAddress` claims it like the boot dial, the
+form, the reconnect attempts and the switch do, so an owner that wakes after
+someone else took the socket does nothing — an arrival's accept does not
+activate B over A's new socket, and its stay does not close it. After a
+stay, nothing AUTOMATIC dials (`heldOffline`, reviewer P2): not the
+disconnect callback, not a foreground resume; the connect form, a switch or
+an address row — the person's own act — lifts it. (An address change still
+does not check which machine answered; that is unchanged from before #335.)
 
 **The runtime asks; the reconnect loop is told where** (②b-2-2). The
 capability handshake every connect path runs (`serverReady`) is the bound

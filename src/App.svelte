@@ -255,6 +255,7 @@
     // attempt that comes back afterwards must write no identity and bring
     // nothing up, whatever it found (reviewer P1, 2026-10-10).
     handovers.endAll();
+    heldOffline = false;               // the person chose another server
     // STOPPED now — it refuses every call from here on — and ended once its
     // server's state is released: the swap that follows waits on that end
     // before it shows anything (reviewer P1-a on 48b40082).
@@ -268,6 +269,7 @@
    * authenticated stranger leaves it refusing. */
   const handovers = createHandovers({ end: (runtime) => { void ends.end(runtime); } });
   function suspendScope() {
+    heldOffline = false;               // the person is connecting
     return handovers.open(scopeSwap.bound());
   }
   /** The connect form is about to dial `address` (board #335 ②b-2-3,
@@ -279,11 +281,12 @@
    * is known only after the dial, too late to ask. So there is no address
    * exemption; a clean editor asks nothing anyway. The walk HOLDS the form
    * mounted (`holdPages`) while it reveals other pages, so an accept returns
-   * to the attempt that asked, with what it froze. */
+   * to the attempt that asked, with what it froze. While it asks, the
+   * socket is held: nothing automatic takes it (`serverSwitch.guard`). */
   function confirmFormLeave() {
     const held = scopeSwap.bound();
     if (!held?.alive()) return Promise.resolve(true);
-    return confirmLeave({ leaving: held, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } });
+    return serverSwitch.guard(() => confirmLeave({ leaving: held, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
   }
   const shell = $derived(connected || !!switching);
   // WHAT the terminal is pointed at (board #335 ②b-2): a reference that names
@@ -816,6 +819,12 @@
   /** Why the last automatic reconnect could not bring the app back, shown on
    * the connect page ('' when nothing went wrong). */
   let reconnectError = $state('');
+  /** The person chose to stay on a server whose address now reaches another
+   * one (`arrivedElsewhere`, reviewer P2 on 085b0e70). Nothing AUTOMATIC
+   * dials until they connect themselves: not the disconnect callback, not a
+   * foreground resume. Every explicit owner of the socket — the connect
+   * form, a switch, an address row — clears it. */
+  let heldOffline = false;
   let reconnectAttempt = $state(0);   // 1-indexed when visible; 0 means not attempting
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
 
@@ -848,6 +857,9 @@
 
   setOnDisconnect(() => {
     if (switching) return; // the switch owns the socket now
+    // A leave walk is asking about this socket, or the person chose to stay
+    // offline: an automatic reconnect would take the socket under them.
+    if (serverSwitch.guarding || heldOffline) return;
     // Keep connected=true during reconnect to avoid UI flicker
     reconnectMachine.start();
   });
@@ -968,21 +980,24 @@
    * one leave walk: losing the socket is not consent to discard local edits.
    * On a fresh boot nothing is dirty and the walk asks nothing. A "stay"
    * keeps A's tree with its handle still refusing (`hold`), closes B's
-   * socket, and says why on the connect page — nothing retries on its own;
-   * the person decides. `attempt` is the claim or handover the socket was
-   * taken under: if someone else took it while the walk was open, this
-   * arrival is not the app's any more. */
+   * socket, and says why on the connect page — and nothing automatic dials
+   * again (`heldOffline`) until the person connects. While the walk asks,
+   * the socket is held: no reconnect, address change or second walk starts
+   * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
+   * was taken under: if someone else took it anyway, this arrival is not
+   * the app's any more and does nothing. */
   async function arrivedElsewhere(result, addr, token, attempt) {
     if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
     let leave = false;
     try {
-      leave = await confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } });
+      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
     } catch { leave = false; }
     if (!attempt.current()) return;
     if (!leave) {
       attempt.settle?.('unresolved');
       disconnect();
       connected = false;
+      heldOffline = true;
       reconnectError = t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
       page = 'settings';
       return;
@@ -1338,6 +1353,10 @@
     currentId: () => serverCurId,
     currentName: () => serverName,
     confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
+    // An address change takes the socket from every other owner (reviewer
+    // P1 on 085b0e70) — and it is the person's or the connected optimizer's
+    // choice, so it lifts a stay-offline too.
+    claim: () => { heldOffline = false; return handovers.claim(); },
     stopReconnect: () => reconnectMachine.cancel(),
     startReconnect: () => reconnectMachine.start(),
     addressUp: () => {
@@ -1426,7 +1445,10 @@
     try {
       const best = await findBestAddress(candidates);
       // A server switch began while probing: this server is not current now.
-      if (!serverSwitch.owns(intent)) return;
+      // Nor may it move the socket while a leave walk asks about it — not
+      // even the mirror: a probe that started before the dialog and answers
+      // during it is the same takeover (reviewer P1 on 085b0e70).
+      if (!serverSwitch.owns(intent) || serverSwitch.guarding) return;
       if (!best || best === current) return;
       // Only switch if the new address is higher priority (lower class number)
       if (classifyAddress(best) >= curClass) return;
@@ -1688,7 +1710,9 @@
   // Detect app resume (Android background → foreground) + periodic optimize
   $effect(() => {
     const handler = () => {
-      if (document.visibilityState !== 'visible' || switching) return;
+      // Not while a leave walk asks about the socket, and not after the
+      // person chose to stay offline (reviewer P2 on 085b0e70).
+      if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline) return;
       if (!isConnected() && !reconnectMachine.isActive()) {
         reconnectMachine.start();
       } else if (isConnected()) {
@@ -1703,7 +1727,7 @@
     document.addEventListener('visibilitychange', handler);
     // Periodic check while connected
     const interval = setInterval(() => {
-      if (!switching && isConnected() && Date.now() - lastProbeTime > OPTIMIZE_INTERVAL_MS) {
+      if (!switching && !serverSwitch.guarding && isConnected() && Date.now() - lastProbeTime > OPTIMIZE_INTERVAL_MS) {
         optimizeConnection();
       }
     }, OPTIMIZE_INTERVAL_MS);

@@ -1369,3 +1369,121 @@ test('a merge on a failover keeps a download in flight: no verdict releases what
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the failover absorbed the alias');
   assert.deepEqual(events.filter((e) => ['fetch', 'aborted', 'settled'].includes(e)), ['fetch'], 'and the download is still running');
 });
+
+// ── Reviewer on 085b0e70: while A's leave dialog asks, nothing else takes
+// the socket, and a "stay" means nothing dials until the person does.
+
+/** A on two addresses, the optimizer's probe for the faster one held until
+ * the case lets it answer, and the reconnect after a drop reaching B. */
+async function arrivalWithAProbeOut(context: TestContext) {
+  const events: string[] = [];
+  let answerProbe: (best: string | null) => void = () => {};
+  let probes = 0;
+  const h = await bootApp(context,
+    {
+      ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }),
+      tmux_layout_mode: 'desktop',
+      tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+    },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'),
+    {
+      calls: events,
+      rpc: {
+        ...editorRpc,
+        classifyAddress: (a: string) => (a.includes('lan') ? 0 : 2),
+        // The optimizer's probe is the first; the reconnect loop's own
+        // address probes answer at once, with nothing better.
+        findBestAddress: () => (++probes === 1
+          ? new Promise<string | null>((resolve) => { answerProbe = resolve; })
+          : Promise.resolve(null)),
+      },
+    });
+  const area = await dirtyEditor(h.app, h.settle);
+  // Coming back to the app starts the optimizer: its probe is out.
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  assert.equal(probes, 1, 'the optimizer s probe is out');
+  h.net.drop();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'A s editor asks about arriving at B');
+  // The probe answers while the dialog is open: a faster address of A.
+  answerProbe('ws://a-lan:9899');
+  for (let i = 0; i < 4; i++) await h.settle();
+  return { ...h, events, area, dials: () => events.filter((e) => e.startsWith('connect:')) };
+}
+
+test('a probe that answers while A s leave dialog is open takes nothing; "keep editing" then keeps A and the socket alone (reviewer P1 on 085b0e70)', async (context) => {
+  const h = await arrivalWithAProbeOut(context);
+  assert.ok(!h.dials().includes('connect:ws://a-lan:9899'), `the optimizer did not move the socket: ${h.dials().join(',')}`);
+  assert.equal(h.app.window.localStorage.getItem('tmux_address'), 'ws://a:9899', 'nor the address the app dials');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'the app stays on A');
+  assert.equal(h.area.isConnected && h.area.value, '# notes\n\nunsaved');
+});
+
+test('a probe that answers while A s leave dialog is open takes nothing; "discard" then arrives at B (reviewer P1 on 085b0e70)', async (context) => {
+  const h = await arrivalWithAProbeOut(context);
+  assert.ok(!h.dials().includes('connect:ws://a-lan:9899'), `the optimizer did not move the socket: ${h.dials().join(',')}`);
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'the arrival is still the app s, and it arrives at B');
+  await h.app.advance(1000);
+  assert.equal(h.onScreen(), 'work:2.0');
+});
+
+test('after "keep editing", coming back to the app dials nothing until the person connects (reviewer P2 on 085b0e70)', async (context) => {
+  const events: string[] = [];
+  const { app, settle, net } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'), { calls: events, rpc: editorRpc });
+  await dirtyEditor(app, settle);
+  net.drop();
+  for (let i = 0; i < 4; i++) await settle();
+  answerDialog(app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  const dials = () => events.filter((e) => e.startsWith('connect:')).length;
+  const before = dials();
+  app.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  for (let i = 0; i < 4; i++) await settle();
+  await app.advance(60_000);
+  assert.equal(dials(), before, 'a foreground resume does not dial B again behind the person s back');
+  assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'and asks nothing again');
+  // The person connects: that is theirs to do, and it works.
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://a:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  assert.ok(app.document.querySelector('[role=alertdialog]'), 'the explicit connect asks A s editor, as a connect to another server does');
+  assert.equal(dials(), before, 'and dials only once the person answers');
+});
+
+test('after "keep editing", the person s own connect lifts the stay: a failed one hands back to the automatic reconnect', async (context) => {
+  const events: string[] = [];
+  const { app, settle, net } = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (_url, n) => (n === 1 ? 'm-a' : 'm-b'),
+    { calls: events, rpc: editorRpc, gate: (url) => (url.includes('//dead') ? Promise.reject(new Error('refused')) : null) });
+  await dirtyEditor(app, settle);
+  net.drop();
+  for (let i = 0; i < 4; i++) await settle();
+  answerDialog(app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  // The person connects somewhere that does not answer; the editor asks,
+  // and they let it go.
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://dead:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  answerDialog(app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) await settle();
+  assert.ok(events.includes('connect:ws://dead:9899'), 'the person s connect went out');
+  const dials = events.filter((e) => e.startsWith('connect:')).length;
+  app.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  for (let i = 0; i < 4; i++) await settle();
+  assert.ok(events.filter((e) => e.startsWith('connect:')).length > dials, 'coming back to the app reconnects again: the stay was lifted');
+});

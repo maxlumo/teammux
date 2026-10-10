@@ -397,7 +397,7 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   const fn = mod.match(/async function switchTo\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   const at = (needle: string) => { const i = fn.indexOf(needle); assert.ok(i >= 0, `switchTo has ${needle}`); return i; };
   const order = [
-    'await d.confirmLeave()',
+    'await guard(() => d.confirmLeave())',
     'const intent = ++seq',
     'd.stopReconnect()',
     "set({ intent, from, target, phase: 'connecting'",
@@ -543,12 +543,12 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The handover's rules live in app/handover.ts, where they are tested; App
   // only opens one per attempt and ends them all when it takes the handle
   // back itself.
-  assert.match(source, /function suspendScope\(\) \{\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
+  assert.match(source, /function suspendScope\(\) \{\s*heldOffline = false;[^\n]*\n\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
   // And asks the leave walk of the handle a connect to ANOTHER server would
   // destroy, before anything is dialled (reviewer P1-c on 0b8b9038).
   // With NO address exemption (reviewer P1-b on 48b40082): an address is not
   // an identity, and which machine answers is known only after the dial.
-  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return confirmLeave\(\{ leaving: held, current: page,/u);
+  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
   assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(localStorage\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
@@ -780,7 +780,13 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // Arriving destroys A's tree: A's editors are asked first (reviewer, 18:54
   // on 5ca0e79e), and nothing — no verdict, no park — happens before they
   // answer. A stay holds the handle and closes B's socket.
-  assert.match(elsewhere, /leave = await confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);/u);
+  // While it asks, the socket is held: nothing automatic takes it and no
+  // second walk opens (reviewer P1 on 085b0e70); a stay keeps everything
+  // automatic from dialling again (P2).
+  assert.match(elsewhere, /leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
+  assert.match(source, /setOnDisconnect\(\(\) => \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline\) return;/u);
+  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline\) return;/u);
+  assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding\) return;/u, 'a probe that answers during a walk moves nothing, not even the mirror');
   assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf("settle?.('other-server')")
     && elsewhere.indexOf("settle?.('other-server')") < elsewhere.indexOf('activateConnected('), 'ask, then conclude, then write');
   assert.match(elsewhere, /activateConnected\(localStorage,[\s\S]*?if \(act\.reload\) \{ onConnected\(true\); return; \}/u,
@@ -909,8 +915,8 @@ test('a typed address ends the running reconnect loop before it connects (review
   // timeout' then marked a reachable address unreachable for two minutes.
   // Since board 315 the order lives in server-switch.ts connectAddress.
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
-  assert.match(mod, /async function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;\s*d\.stopReconnect\(\);\s*d\.disconnect\(\);\s*try \{\s*await d\.connect\(address, token\);/u,
-    'cancel → disconnect → connect, in that order');
+  assert.match(mod, /async function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*d\.disconnect\(\);\s*try \{\s*await d\.connect\(address, token\);/u,
+    'claim → cancel → disconnect → connect, in that order');
 });
 
 test('the back-gesture history dance is the phone’s; a desktop browser keeps its Back (2026-09-03)', () => {

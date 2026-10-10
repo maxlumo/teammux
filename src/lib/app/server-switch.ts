@@ -46,6 +46,11 @@ export interface SwitchDeps {
   currentName(): string;
   /** Ask every leave guard; false = stay. */
   confirmLeave(): Promise<boolean>;
+  /** Take the socket from every other owner the host knows — the connect
+   * form, a reconnect attempt, an arrival waiting on its leave walk (board
+   * #335 ②b-2-3, reviewer P1 on 085b0e70): ONE owner counter for every
+   * socket change, and the answer to "is this still mine". */
+  claim(): { current(): boolean };
   stopReconnect(): void;
   /** Start the reconnect loop for the CURRENT server (it reads the mirror). */
   startReconnect(): void;
@@ -67,7 +72,10 @@ export interface SwitchDeps {
 
 export function createServerSwitch(d: SwitchDeps) {
   let seq = 0;
-  let guarding = false;
+  /** Leave walks open right now — this module's own and the host's (the
+   * connect form, an arrival elsewhere): while one is asking, nothing may
+   * take the socket or open a second walk. A count, because they nest. */
+  let guarding = 0;
   let state: SwitchState | null = null;
   const set = (next: SwitchState | null) => { state = next; d.onstate(next); };
 
@@ -76,10 +84,7 @@ export function createServerSwitch(d: SwitchDeps) {
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected) {
-      guarding = true;
-      let ok = false;
-      try { ok = await d.confirmLeave(); } finally { guarding = false; }
-      if (!ok) return;
+      if (!(await guard(() => d.confirmLeave()))) return;
     }
     const intent = ++seq;
     d.stopReconnect();
@@ -126,22 +131,40 @@ export function createServerSwitch(d: SwitchDeps) {
   async function connectAddress(address: string, token: string): Promise<boolean> {
     if (state || guarding) return false;
     const intent = ++seq;
+    // It changes the socket, so it takes it from the host's other owners
+    // too (reviewer P1 on 085b0e70): an attempt the host was waiting on —
+    // an arrival whose leave dialog is still open — wakes to find it is not
+    // the owner any more, and does nothing. And the reverse: an owner that
+    // takes the socket after this makes this attempt stale.
+    const owner = d.claim();
+    const mine = () => intent === seq && !state && owner.current();
     d.stopReconnect();
     d.disconnect();
     try {
       await d.connect(address, token);
-      if (intent !== seq || state) return false;
+      if (!mine()) return false;
       d.addressUp(address);
       return true;
     } catch {
-      if (intent === seq && !state) d.startReconnect();
+      if (mine()) d.startReconnect();
       return false;
     }
+  }
+
+  /** Run a leave walk with the socket held: no address change, no switch
+   * and no second walk starts until it has answered. */
+  async function guard<T>(walk: () => Promise<T>): Promise<T> {
+    guarding++;
+    try { return await walk(); } finally { guarding--; }
   }
 
   return {
     switchTo,
     connectAddress,
+    guard,
+    /** Is a leave walk asking right now? Then nothing automatic may take the
+     * socket: not a reconnect, not the address optimizer. */
+    get guarding() { return guarding > 0; },
     get state() { return state; },
     /** The current intent: an async begun under it compares on resolve. */
     get intent() { return seq; },
