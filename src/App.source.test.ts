@@ -440,8 +440,12 @@ test('every App socket owner goes through the switch module and loses ownership 
   assert.match(opt, /await serverSwitch\.connectAddress\(best,/u);
   assert.doesNotMatch(opt, /reconnectMachine\.start|await connect\(/u);
   // Server answers land only for the server that was asked.
-  assert.match(source, /async function probeHub\(\) \{\s*const intent = serverSwitch\.intent;[\s\S]*?if \(!serverSwitch\.owns\(intent\)\) return;/u);
-  assert.match(source, /function loadBackends\(\) \{\s*const intent = serverSwitch\.intent;[\s\S]*?serverSwitch\.owns\(intent\)/u);
+  // Asked through the bound runtime (board #335 ②b-2-2), and kept only if
+  // the switch still owns the intent AND that runtime is still bound.
+  assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*void runtime\.probeCaps\(\)\.then\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u);
+  assert.match(source, /if \(caps\.hub !== null\) hubState = \{ available: caps\.hub, probed: true \};/u,
+    'the Hub flag moves only on a definitive answer');
+  assert.doesNotMatch(source, /\bhubRooms\(|\bbackendsList\(/u, 'App asks no capability question over the facade');
   // The only remaining direct starts are the reconnect machine's own owners.
   const starts = [...source.matchAll(/reconnectMachine\.start\(\)/gu)].length;
   assert.equal(starts, 3, 'setOnDisconnect, the visibility resume and startReconnect — each guarded by the switch state');
@@ -1030,8 +1034,8 @@ test('every connect path runs the one server handshake, which loads backends_lis
   // connected must reach serverReady(), and nothing may probe or load
   // backends on its own beside it.
   const ready = source.match(/function serverReady\(\) \{([\s\S]*?)\n  \}/u)?.[1] ?? '';
-  assert.match(ready, /probeHub\(\);/u);
-  assert.match(ready, /loadBackends\(\);/u);
+  assert.match(ready, /runtime\.probeCaps\(\)/u, 'one probe, both questions');
+  assert.match(ready, /setServedBackends\(caps\.backends\);/u);
   const sites = [...source.matchAll(/connected = true;/gu)].map((m) => m.index!);
   assert.equal(sites.length, 3, 'boot, reconnect success, manual connect');
   for (const at of sites) {
@@ -1041,7 +1045,7 @@ test('every connect path runs the one server handshake, which loads backends_lis
     assert.match(body, /serverReady\(\);/u, `the connect path at offset ${at} runs the handshake`);
   }
   const outside = source.replace(/function serverReady\(\) \{[\s\S]*?\n  \}/u, '');
-  assert.doesNotMatch(outside, /^\s*(?:probeHub|loadBackends)\(\);/mu, 'no path does half the handshake');
+  assert.doesNotMatch(outside, /probeCaps\(\)/u, 'no path does half the handshake');
 });
 
 test('a connect lands on the default page, Chat — never a hard-coded Terminal (#333)', () => {

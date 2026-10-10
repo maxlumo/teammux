@@ -647,6 +647,19 @@ one record and a download is not stopped by dropping a reference: the switch
 suspends the LEAVING server's attempts through `suspendFiles(thatServer.files)`
 and awaits them before the socket moves.
 
+**The runtime asks; the reconnect loop is told where** (②b-2-2). The
+capability handshake every connect path runs (`serverReady`) is the bound
+runtime's `probeCaps()`: asked over its own api, kept as its caps under a round
+number of its own, and mirrored into the shell only while the switch still
+owns the intent AND that runtime is still bound — a late answer from a server
+already left never lands. The Hub flag moves only on a definitive answer, and
+a failed backends probe keeps the list the runtime already had rather than
+wiping it to the fallback. The reconnect machine reads no connection keys: it
+asks `target()` at every attempt, which App answers with
+`server-target.targetOf(storage, CURRENT)` — the active mirror for the current
+server (written ahead of the registry on four paths through ②b), the entry and
+its machine's failover set for any other id.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

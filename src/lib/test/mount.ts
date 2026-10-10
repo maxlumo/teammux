@@ -11,7 +11,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 // Mocked module exports cross the test/window boundary; production types stay
 // with the fixture that supplies them, not this small runtime adapter.
-type MockExport = (...args: any[]) => unknown;
+type MockExport = ((...args: any[]) => unknown) | Record<string, unknown> | readonly unknown[];
 interface MountOptions {
   props?: Record<string, unknown>;
   modules: Record<string, MockExport>[];
@@ -152,8 +152,14 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
       win.__mountModules = paths.map((path, index) => new Proxy({}, {
         get(_target, key) {
           if (typeof key !== 'string') return undefined;
+          // An OBJECT export (a constant, or an api object such as ws.ts's
+          // `compatSlotApi` and `connection`) is handed over as it is: a
+          // call wrapper around it would turn every property read into
+          // undefined (board #335 ②b-2-2 — the runtime's api is one).
+          const value = options.modules[index]?.[key] as unknown;
+          if (value !== undefined && typeof value !== 'function') return value;
           return (...args: unknown[]) => {
-            const fn = options.modules[index]?.[key];
+            const fn = options.modules[index]?.[key] as ((...args: unknown[]) => unknown) | undefined;
             if (!fn) return fail(`Unexpected mocked export: ${path}:${key}`);
             const result = fn(...args);
             // RPCs are JSON on the wire; clone replies into the client realm

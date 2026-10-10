@@ -349,6 +349,14 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     getPrefs: rpc('get_prefs', {}),
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
     ...extra,
+  } as Record<string, any>;
+  // The facade's ONE connection and the api bound to it, which the Single
+  // runtime borrows (single-runtime.ts): the same functions, so a call made
+  // through the runtime is a call on this transport.
+  module.compatSlotApi = module;
+  module.connection = {
+    connect: (url: string) => module.connect(url), disconnect: module.disconnect,
+    isConnected: module.isConnected, getMachineId: module.getMachineId, getHostname: module.getHostname,
   };
   return { module, net };
 }
@@ -753,4 +761,42 @@ test('a same-machine merge keeps a download in flight, and the next switch abort
   // SETTLED before the dial is `memory.suspend`'s own await chain (its unit
   // tests), not something this stub can show: it rejects the moment it is
   // aborted (reviewer P2, 2026-10-10).
+});
+
+test('a capability answer lands only for the runtime still bound (board #335 ②b-2-2)', async (context) => {
+  // The handshake is the runtime's now. A's Hub probe is still in flight when
+  // the switch takes the app to B, which has no Hub; A's late "yes" must not
+  // put a Hub bell on B's shell.
+  const events: string[] = [];
+  const answer: { a: (() => void) | null } = { a: null };
+  const { app, switchTo } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, {
+    calls: events,
+    rpc: {
+      hubRooms: () => {
+        const on = events.filter((e) => e.startsWith('connect:')).at(-1) ?? '';
+        if (on.includes('//a')) return new Promise((resolve) => { answer.a = () => resolve({ rooms: {} }); });
+        return Promise.reject(Object.assign(new Error('no hub'), { code: -32601 }));
+      },
+    },
+  });
+  const bell = () => !!app.document.querySelector('.rail-bell');
+  assert.equal(bell(), false, 'A has not answered yet');
+  await switchTo('beta');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(bell(), false, 'B answered: no Hub');
+  assert.ok(answer.a, 'A was asked');
+  answer.a();
+  for (let i = 0; i < 10; i++) await app.flush();
+  assert.equal(bell(), false, 'and A s late answer did not land on B');
+});
+
+test('the handshake reaches the shell: a Hub server gets its bell', async (context) => {
+  const { app } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, { rpc: { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) } });
+  assert.equal(!!app.document.querySelector('.rail-bell'), true);
 });

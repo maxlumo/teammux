@@ -15,7 +15,7 @@
   import Preferences from './lib/app/Preferences.svelte';
   import { copyText } from './lib/core/clipboard.ts';
   import { createFeedbackLifetime } from './lib/ui/feedback-lifetime.ts';
-  import { hubRooms, systemStatus } from './lib/core/ws.ts';
+  import { systemStatus } from './lib/core/ws.ts';
   import SystemStatus from './lib/system/SystemStatus.svelte';
   import ServerList from './lib/app/ServerList.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
@@ -24,7 +24,7 @@
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
-  import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, backendsList, setSocket } from './lib/core/ws.ts';
+  import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, setSocket } from './lib/core/ws.ts';
   import { setServedBackends } from './lib/core/agents.ts';
   import { t } from './lib/core/i18n.svelte.ts';
   import { layout } from './lib/app/layout.svelte.ts';
@@ -286,22 +286,6 @@
   // tabs should appear.
   let hubState = $state({ available: false, probed: false });
   let hubAvailable = $derived(hubState.available);
-  async function probeHub() {
-    const intent = serverSwitch.intent;
-    try {
-      await hubRooms();
-      if (!serverSwitch.owns(intent)) return; // asked of a server we have left
-      hubState.available = true; hubState.probed = true;
-    }
-    catch (e) {
-      if (!serverSwitch.owns(intent)) return;
-      // Only a definitive server answer (method-not-found: no hub) may flip
-      // the flag off. Transient failures (RPC timeout, reconnect blip) keep
-      // the current value — flipping to false unmounts the always-mounted Hub
-      // and destroys the state it exists to preserve.
-      if (e?.code === -32601) { hubState.available = false; hubState.probed = true; }
-    }
-  }
   // The Hub page-layers only mount when hubAvailable, so page === 'hub'
   // without it would render an empty main area (the state restore sets `page`
   // before the probe resolves, and a reconnect can land on a hubless server).
@@ -859,24 +843,32 @@
     window.dispatchEvent(new Event('ws-reconnected'));
   }
 
-  // The server's backend list, once per connection (board #130). Fail-soft:
-  // an older server without the method, or a timeout, leaves the client on
-  // its frozen fallback list rather than on an empty one.
-  function loadBackends() {
-    const intent = serverSwitch.intent;
-    backendsList()
-      .then((r) => { if (serverSwitch.owns(intent)) setServedBackends(r?.backends ?? null); })
-      .catch(() => { if (serverSwitch.owns(intent)) setServedBackends(null); });
-  }
-
   /** What EVERY connect path asks a server it has just reached: does it host
    * the Hub, and which backends can it spawn. ONE call per path (board #253):
    * the boot path called probeHub alone, so a page load with a saved token
    * never fetched backends_list and the Agents editor hid the queue/steer
-   * field (and fell back to the frozen backend list). */
+   * field (and fell back to the frozen backend list).
+   *
+   * The questions are the RUNTIME's since board #335 ②b-2-2: it is asked
+   * through its own api, keeps the answers as its caps, and a round number
+   * of its own means an older answer never overwrites a newer one. App adds
+   * the two checks only it can make — the switch still owns this intent, and
+   * the runtime asked is still the one the tree is bound to — and mirrors the
+   * caps into the shell. Two rules stay as they were: a Hub flag changes only
+   * on a definitive answer (`hub` stays null on a blip, because false
+   * unmounts the always-mounted Hub), and an empty backend list counts as
+   * unknown. One rule is the runtime's and differs: a FAILED backends probe
+   * keeps the list this runtime already had instead of wiping it to the
+   * fallback, as ②a ruled (a list that vanished on a blip was the bug). */
   function serverReady() {
-    probeHub();
-    loadBackends();
+    const runtime = scopeSwap.bound();
+    if (!runtime) return;
+    const intent = serverSwitch.intent;
+    void runtime.probeCaps().then((caps) => {
+      if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
+      if (caps.hub !== null) hubState = { available: caps.hub, probed: true };
+      setServedBackends(caps.backends);
+    });
   }
 
   /** The disconnected connect page reached a server. `switched`: it is a
