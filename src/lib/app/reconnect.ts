@@ -81,6 +81,14 @@ export function createReconnectMachine(deps: ReconnectDeps) {
   // "cancelled and restarted", so a superseded chain's late timeout used to
   // continue the NEW loop's counter and mark a reachable address unreachable.
   let gen = 0;
+  /** The handover this CHAIN took the socket with last (reviewer P1-a on
+   * 372cb4af). The chain owns the socket only while that is still the host's
+   * latest: every phase — the address probe, the dial, the backoff, the next
+   * attempt, the watchdog — asks it, and a chain that lost it yields. A new
+   * attempt opens its own handover only while the previous one still holds,
+   * so a retry can never take back what the form took in the gap. */
+  let held: { current(): boolean; settle(outcome: 'no-peer'): void } | null = null;
+  const chainOwns = () => !held || held.current();
 
   function emit() {
     onStateChange({ reconnecting, attempt, label });
@@ -103,6 +111,8 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     const myGen = gen;
     watchdog = setTimeoutFn(() => {
       if (!reconnecting || gen !== myGen) return;
+      // Superseded: somebody else is connecting. That is not a give-up.
+      if (!chainOwns()) { reconnecting = false; clearTimers(); emit(); return; }
       reconnecting = false;
       if (retryTimer) clearTimeoutFn(retryTimer);
       retryTimer = null;
@@ -114,6 +124,16 @@ export function createReconnectMachine(deps: ReconnectDeps) {
   async function tryAttempt(n: number, myGen: number): Promise<void> {
     const live = () => reconnecting && gen === myGen;
     if (!live()) return;
+    /** The loop stops quietly — no give-up, no cooldown — because nothing
+     * failed: somebody else took the socket. */
+    const yieldLoop = () => {
+      if (!live()) return;
+      reconnecting = false;
+      clearTimers();
+      emit();
+    };
+    // A retry continues THIS chain only while it still owns the socket.
+    if (!chainOwns()) { yieldLoop(); return; }
     const where = target();
     const primary = where?.address ?? '';
     const token = where?.token ?? '';
@@ -131,12 +151,21 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     // First attempt with multiple candidates: parallel probe → pick first
     // reachable. Avoids burning 3s × N timeouts cycling through dead
     // addresses serially.
+    // The attempt takes the socket NOW, before the address probe: a probe is
+    // part of the attempt, and one still out when the form takes over must
+    // not go on to dial (reviewer P1-a on 372cb4af).
+    const handover = takeSocket?.() ?? null;
+    if (handover) held = handover;
+    const owned = () => live() && (handover?.current() ?? true);
+
     if (n === 0 && allAddrs.length > 1) {
       try {
         const best = await findBestAddress(allAddrs);
         if (!live()) return; // cancelled (or restarted) mid-probe
+        if (!owned()) { yieldLoop(); return; }
         useAddr = best || allAddrs[0]!;
       } catch {
+        if (!owned()) { yieldLoop(); return; }
         useAddr = allAddrs[0]!;
       }
     } else {
@@ -160,20 +189,9 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     const cls = classifyAddress(useAddr);
     const attemptTimeout = cls === 0 ? 2000 : cls === 1 ? 3000 : 5000;
 
-    // This attempt takes the socket from whoever had it, and keeps it only
-    // until somebody takes it back. When that happens the LOOP is over, not
-    // just this attempt: a retry would take the socket from the owner that
-    // superseded it. It stops quietly — no give-up, no cooldown — because
-    // nothing failed; somebody else is connecting.
-    const handover = takeSocket?.();
-    const owned = () => live() && (handover?.current() ?? true);
-    const yieldLoop = () => {
-      if (!live()) return;
-      reconnecting = false;
-      clearTimers();
-      emit();
-    };
-
+    // The attempt keeps the socket only until somebody takes it back. When
+    // that happens the LOOP is over, not just this attempt: a retry would
+    // take the socket from the owner that superseded it.
     connect(useAddr, token, attemptTimeout).then(() => {
       if (!owned()) { yieldLoop(); return; }
       reconnecting = false;
@@ -217,6 +235,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
         return false;
       }
       gen++;
+      held = null;      // an explicit start is a new chain, owning nothing yet
       reconnecting = true;
       emit();
       armWatchdog();

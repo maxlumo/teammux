@@ -801,6 +801,9 @@
   // (src/lib/app/reconnect.ts — framework-free, unit-tested; owns every
   // timer, the retry/backoff/probe strategy, and the stuck-watchdog).
   let reconnecting = $state(false);
+  /** Why the last automatic reconnect could not bring the app back, shown on
+   * the connect page ('' when nothing went wrong). */
+  let reconnectError = $state('');
   let reconnectAttempt = $state(0);   // 1-indexed when visible; 0 means not attempting
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
 
@@ -845,29 +848,49 @@
   }
 
   function onReconnectSuccess(useAddr, primaryAddr, handover) {
-    connected = true;
-    serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
-    if (useAddr !== primaryAddr) { localStorage.setItem('tmux_address', useAddr); activeAddress = useAddr; }
-    // Keep the registry entry's active address fresh (board #55): failover
-    // just proved a different address of the SAME machine — RECORD by
-    // machineId (no second "server", and CURRENT does not move: recording
-    // and activating are different acts).
+    // WHO answered decides what this success means, and the identity layer
+    // is the one that knows (reviewer P1-b on 372cb4af): the entry
+    // `recordServer` returns for the machine that answered. "CURRENT did not
+    // move" is not that answer — a known A whose address now reaches known B
+    // keeps both entries and CURRENT on A.
+    const held = scopeSwap.bound();
+    const mid = getMachineId?.() || '';
+    let canonical;
     try {
-      const mid = getMachineId?.();
-      recordServer(localStorage, {
+      ({ entry: canonical } = recordServer(localStorage, {
         address: useAddr, token: localStorage.getItem('tmux_token') || '',
         ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
         ...(mid ? { machineId: mid } : {}),
-      });
-    } catch {}
+      }));
+    } catch {
+      // A peer authenticated and we could not establish which server it is.
+      // That is never "the same server": the handle keeps refusing (hold),
+      // and the person is told, exactly as the connect form does.
+      handover?.settle('unresolved');
+      reconnectError = t('configIdentityFailed');
+      disconnect();
+      connected = false;
+      page = 'settings';
+      return;
+    }
+    reconnectError = '';
     loadServerRegistry(); // the entry's active address moved
-    // Conclude this attempt's handover the way the form does: still the
-    // handle's own server → it resumes; identity repair moved CURRENT to
-    // another entry → that handle is done, and the swap below binds the one
-    // now current. A handle left suspended here would refuse every call for
-    // the rest of the session (reviewer P1, 2026-10-10).
-    const held = scopeSwap.bound();
-    handover?.settle(held && held.id === currentServerId(localStorage) ? 'same-server' : 'other-server');
+    // Another known machine answered, and both entries stay: the socket is
+    // B's. The handle is released and the app ARRIVES at B the way the boot
+    // and the connect page do — never A's api resumed over B's socket.
+    if (held && currentServerId(localStorage) !== canonical.id && mergedInto(localStorage, held.id) !== canonical.id) {
+      handover?.settle('other-server');
+      arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '');
+      return;
+    }
+    connected = true;
+    serverInfo = { hostname: getHostname() || '', machineId: mid };
+    // Keep the registry entry's active address fresh (board #55): failover
+    // just proved a different address of the SAME machine.
+    if (useAddr !== primaryAddr) { localStorage.setItem('tmux_address', useAddr); activeAddress = useAddr; }
+    // The handle's own server (same id), or the entry it was folded into
+    // (identity repair moved CURRENT, and the swap below binds that).
+    handover?.settle(held && held.id === canonical.id ? 'same-server' : 'other-server');
     // A failover can be the connect that first learns this machine's id, and
     // then `recordServer` absorbs the entry we were on into the machine's
     // survivor: CURRENT moved, so the tree's handle and every reference the
@@ -2390,7 +2413,7 @@
          what lets the subtree render nothing at all while it has no runtime
          (board #335 ②b-1, reviewer P1-b). -->
     {#if page === 'settings'}
-      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} />
+      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError} />
     {/if}
     <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,
          shortcuts, notification switches — so it must open with or without a

@@ -1113,3 +1113,42 @@ test('a failed switch s Back that discovers a merge can still start a download (
   download.click(); await settle();
   assert.ok(events.includes('fs_download_http'), 'and the download started: the canonical runtime s record is not sealed');
 });
+
+test('a reconnect that reaches ANOTHER known machine arrives there; A s api never resumes over B s socket (reviewer P1-b on 372cb4af)', async (context) => {
+  // A was connected; the socket drops and the retry to A's address answers
+  // as known B. Both entries stay, CURRENT still names A — and "CURRENT did
+  // not move" used to read as "the same server", resuming A's handle on B.
+  const events: string[] = [];
+  const { app, settle, net, onScreen, restored } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url, n) => (n === 1 ? 'm-a' : 'm-b'), { calls: events });
+  assert.equal(onScreen(), 'work:1.0');
+  net.drop();
+  await settle(); await settle(); await settle();
+  const servers = JSON.parse(app.window.localStorage.getItem('tmux_servers')!);
+  assert.deepEqual(servers.map((e: any) => `${e.id}:${e.machineId}`), ['a:m-a', 'b:m-b'], 'both stay, A s identity untouched');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'the app is on B');
+  assert.equal(onScreen(), 'work:2.0', 'with B s navigation');
+  assert.equal(restored(), 'b:work:2.0');
+  const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
+  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s was parked');
+});
+
+test('a reconnect whose identity cannot be recorded is not a same-server success', async (context) => {
+  // The peer authenticated, and writing the registry failed: nobody knows
+  // which server this is, so the handle keeps refusing and the person is
+  // told — the connect form's rule.
+  const { app, settle, net } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }));
+  const setItem = app.window.Storage.prototype.setItem;
+  app.window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+    if (k === 'tmux_servers') throw new Error('QuotaExceededError');
+    return setItem.call(this, k, v);
+  };
+  net.drop();
+  await settle(); await settle(); await settle();
+  app.window.Storage.prototype.setItem = setItem;
+  const error = app.document.querySelector('.card .error');
+  assert.match(error?.textContent ?? '', /could not be identified/iu, 'the person is told on the connect page');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'nothing moved');
+});

@@ -539,7 +539,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
   assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(localStorage\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} \/>/u,
+  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what
@@ -735,7 +735,15 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // And every reconnect attempt takes the socket through a handover of its
   // own, concluded like the form's (reviewer P1 on c5487bef).
   assert.match(source, /attempt: \(\) => handovers\.open\(scopeSwap\.bound\(\)\),/u);
-  assert.match(source, /handover\?\.settle\(held && held\.id === currentServerId\(localStorage\) \? 'same-server' : 'other-server'\);/u);
+  // ...decided by WHO answered, the entry recordServer returns (reviewer P1-b
+  // on 372cb4af), never by CURRENT not having moved; a recording failure is
+  // `unresolved`, shown, and never a resume.
+  const rs = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(rs, /\(\{ entry: canonical \} = recordServer\(localStorage,/u);
+  assert.match(rs, /\} catch \{[\s\S]*?handover\?\.settle\('unresolved'\);\s*reconnectError = t\('configIdentityFailed'\);/u);
+  assert.match(rs, /handover\?\.settle\('other-server'\);\s*arrivedElsewhere\(/u, 'another known machine: arrive there');
+  assert.match(rs, /handover\?\.settle\(held && held\.id === canonical\.id \? 'same-server' : 'other-server'\);/u);
+  assert.doesNotMatch(rs, /held\.id === currentServerId/u, 'CURRENT not moving is not an identity');
   // A SUPERSEDED dial reports nothing: whoever took the socket over owns the
   // outcome, and sending the app to Settings would undo a connect that is
   // succeeding. No mount can stage the race on the boot path, so it is pinned.

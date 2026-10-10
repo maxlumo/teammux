@@ -28,7 +28,13 @@
     onConnected,
     beforeConnect,
     confirmLeave,
+    notice = '',
   }: {
+    /** Why the app came back to this page, from outside the form — an
+     * automatic reconnect that reached a peer nobody could identify (board
+     * #335 ②b-2-2). Shown in the form's one error slot until it says
+     * something of its own. */
+    notice?: string;
     onConnected: (switched: boolean) => void;
     /**
      * Asked FIRST, before anything is dialled or written (board #335 ②b-2-3,
@@ -314,8 +320,8 @@
 
     <ConnectFields bind:address bind:token bind:socket bind:history onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
 
-    {#if error}
-      <div class="error appear">{error}</div>
+    {#if error || notice}
+      <div class="error appear">{error || notice}</div>
     {/if}
     {#if localTrouble}
       <div class="config-note" role="status">{localTrouble.label}: {localTrouble.value}</div>
