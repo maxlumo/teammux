@@ -948,6 +948,35 @@ test('a borrowed runtime absorbed into another entry keeps the socket the app ca
   assert.equal(second.calls.disconnect, 1, 'an owned runtime closes a socket it may not keep');
 });
 
+test('a borrowed runtime that reaches a DIFFERENT known server detaches; an owned one stays A s handle', async () => {
+  // known-A → known-B (reviewer P1-a2): both entries survive, so the
+  // absorption rule above never fires. The dial was A's and the socket it got
+  // reaches B — and the socket is not ours to close — so a BORROWED handle is
+  // provably no longer serving A, and anything still holding its api would be
+  // sending A's work to B. An OWNED handle closed its own socket instead, so
+  // it is still A's handle and may dial A again.
+  const { storage, a } = twoServers();
+  const { slot, calls } = countingSlot({ connect: async () => 'm-b' });
+  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
+
+  const result = await runtime.dial();
+  assert.equal(!result.ok && result.reason, 'elsewhere');
+  assert.equal(!result.ok && result.reason === 'elsewhere' && result.entry.id, 'b');
+  assert.deepEqual(loadServers(storage).map((s) => s.id), ['a', 'b'], 'both entries are kept');
+  assert.deepEqual(calls, { disconnect: 0, dispose: 0 }, 'the owner s socket is untouched');
+  assert.equal(runtime.alive(), false, 'but the handle has let go');
+  await assert.rejects(runtime.api.listSessions(), /detached/u);
+
+  const owned = twoServers();
+  const second = countingSlot({ connect: async () => 'm-b' });
+  const ownedRuntime = createServerRuntime(owned.a, { storage: owned.storage, slot: second.slot });
+  const ownedResult = await ownedRuntime.dial();
+  assert.equal(!ownedResult.ok && ownedResult.reason, 'elsewhere');
+  assert.equal(second.calls.disconnect, 1, 'it closes the socket that reached the wrong server');
+  assert.equal(second.calls.dispose, 0);
+  assert.equal(ownedRuntime.alive(), true, 'and remains A s handle, free to dial A again');
+});
+
 test('a borrowed handle keeps answering until it is detached', async () => {
   // The gate is on the handle's own liveness, not on the connection: while the
   // handle is the one the app shows, its api is the facade's api, so a bound

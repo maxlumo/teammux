@@ -113,17 +113,36 @@
    * has to pass an entry and none can pass a different one.
    *
    * A handle is replaced when the SERVER changes, not when a connect happens:
-   * a reconnect through the connect page, and a failed switch's Back to the
-   * server it left, keep the handle they had. Identity repair is the reason
-   * this is read rather than passed — `recordServer` can absorb the current
-   * entry into a machine's survivor and re-point CURRENT at it, and after
-   * that the app IS on the survivor. */
+   * a reconnect through the connect page keeps the handle it had. Identity
+   * repair is the reason this is read rather than passed — `recordServer` can
+   * absorb the current entry into a machine's survivor and re-point CURRENT
+   * at it, and after that the app IS on the survivor.
+   *
+   * Two things it must ask rather than assume (reviewer P2, 2026-10-10):
+   * whether the handle is still ALIVE, because a failed switch's Back finds
+   * the same entry id while the handle whose lease was revoked on the way out
+   * cannot serve it again; and what the swap is already heading for, because
+   * one success path calls this twice and comparing against the gap would
+   * mint a handle nobody ever shows or releases. */
   function swapScope() {
     const id = currentServerId(localStorage);
     const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
-    const held = scopeSwap.shown();
-    if (held && entry && held.id === entry.id) return;
+    const held = scopeSwap.bound();
+    if (held?.alive() && entry && held.id === entry.id) return;
     void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
+  }
+  /** Give up the handle the tree is bound to, BEFORE the shared socket is
+   * re-dialled at another server (reviewer P1-b, 2026-10-10).
+   *
+   * Every page in the tree holds that handle's api, and through ②b the api is
+   * the facade's one slot: the moment the socket points at B, a call still in
+   * flight from A's tree — or a settled callback that runs in the window
+   * before the new tree mounts — would be A's work sent to B. Detaching first
+   * makes those refuse instead. Clearing the landings after the DOM is gone
+   * (the swap's `invalidate`) is the second line, never the first: it runs
+   * ticks later, and by then the socket has already changed hands. */
+  function revokeScope() {
+    scopeSwap.bound()?.dispose();
   }
   const shell = $derived(connected || !!switching);
   let terminalTarget = $state('');
@@ -1010,6 +1029,10 @@
    * their ws.ts listeners/subscriptions went with the unmount. A source test
    * pins this list against the module-level stores. */
   function resetServerMemory() {
+    // FIRST, and before the shared socket can be re-dialled at the target:
+    // the handle this tree is bound to gives up its lease, so a call in
+    // flight or a settled callback cannot become A's work sent to B.
+    revokeScope();
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
     resetFilesMemory();                 // browse positions keyed by session name
     forgetDownloadRows();               // this session's rows; parts on disk carry their server
@@ -2049,19 +2072,25 @@
         {/if}
       </div>
     {:else}
+    <!-- The person-level surface. The Connection card needs no server — a
+         fresh client has none to give it, and a dangling CURRENT leaves none
+         either — so it lives OUTSIDE the server-bound subtree. That is also
+         what lets the subtree render nothing at all while it has no runtime
+         (board #335 ②b-1, reviewer P1-b). -->
+    {#if page === 'settings'}
+      <Settings {onConnected} beforeConnect={revokeScope} />
+    {/if}
     <!-- Keyed by the server's RUNTIME HANDLE (board #335 ②b-1, board 315): a
          different server is a different handle, so every server-bound
          component is rebuilt from scratch — no component state, listener or
          subscription of the old server survives into the new tree — while a
          reconnect inside one runtime keeps the handle and remounts nothing.
-         `ServerScope` binds the subtree to that handle, and the order
-         (teardown, invalidate, mount) is server-scope.ts's, because `{#key}`
-         creates the new branch before destroying the old one. -->
+         `ServerScope` binds the subtree to that handle and renders NOTHING
+         without one; the order (teardown, release, mount) is
+         server-scope.ts's, because `{#key}` creates the new branch before
+         destroying the old one. -->
     {#key scopeRuntime}
     <ServerScope runtime={scopeRuntime}>
-    {#if page === 'settings'}
-      <Settings {onConnected} />
-    {/if}
     {#if hubEligible}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
            Files/Terminal below) and merely hidden when inactive, so the

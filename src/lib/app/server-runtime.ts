@@ -96,6 +96,11 @@ export interface ServerRuntime {
   machineId(): string;
   /** The hostname the live socket reported, else the entry's adopted one. */
   hostname(): string;
+  /** Is this handle still the one serving its server? False once it has been
+   * released or detached, which a caller must check before REUSING a handle
+   * it is holding: a failed switch's Back finds the same entry id, but the
+   * handle whose lease was revoked on the way out cannot serve it again. */
+  alive(): boolean;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime.
@@ -157,6 +162,28 @@ export interface ServerRuntimeDeps {
   connectTimeoutMs?: number;
 }
 
+/**
+ * Wrap every method of a BORROWED slot's api so the call is refused once the
+ * handle that handed it out is detached.
+ *
+ * One wrapper per method, built once: the object keeps the shape and the
+ * identity callers expect, and the liveness question is asked when the call
+ * is MADE. A gate on the property read instead would miss both ways a page
+ * actually calls — holding `api` for its whole life, and reading a method
+ * before an `await` that finishes after the handover.
+ */
+function gateApi(api: WsApi, alive: () => boolean, id: ServerId): WsApi {
+  const gated: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(api as unknown as Record<string, unknown>)) {
+    gated[name] = typeof value === 'function'
+      ? (...args: unknown[]) => (alive()
+        ? (value as (...a: unknown[]) => unknown).apply(api, args)
+        : Promise.reject(new Error(`server runtime detached: ${id} no longer serves this subtree`)))
+      : value;
+  }
+  return gated as unknown as WsApi;
+}
+
 export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps): ServerRuntime {
   const { storage, slot, borrowed = false, onRegistryChanged, connectTimeoutMs } = deps;
   const { connection } = slot;
@@ -178,26 +205,18 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
    * An OWNED slot needs no gate: ending the runtime disposes its connection,
    * and the transport itself then refuses every call ("connection disposed").
    * A BORROWED slot cannot be made to refuse — it is the live transport of
-   * every module that has not moved yet — so a detached handle's api is
-   * gated on the handle's own liveness instead. Without it, a page unmounted
-   * with the old subtree (or a closure in a settled promise) would still be
-   * holding an api object that now reaches a DIFFERENT server, which is the
-   * bug the whole phase exists to remove.
+   * every module that has not moved yet — so each method is wrapped once and
+   * checks the handle's liveness AT CALL TIME.
    *
-   * It gates the object, not the functions: a caller that destructured a
-   * method before the detach keeps it, exactly as `ws.ts`'s own exports do.
-   * That is why ②a's rule for consumers is to hold the api and call through
-   * it, and why b3 retires the destructured module-level RPCs.
+   * Call time, not property-read time, and that is the whole point (reviewer
+   * P1-a1): a page holds `api` and calls `api.listSessions()` long after init,
+   * and a call like `api.fsWrite(path, await body)` reads the method BEFORE
+   * the await and sends AFTER it. A gate that fired on the property read
+   * would pass both of those straight through to a slot that by then serves
+   * another server. The wrappers are built once and are stable, so a caller
+   * that captured a method still holds the gate rather than the raw call.
    */
-  const api: WsApi = borrowed
-    ? new Proxy(slot.api as object, {
-      get(target, prop, receiver) {
-        const value = Reflect.get(target, prop, receiver);
-        if (typeof value !== 'function' || !dead) return value;
-        return () => Promise.reject(new Error(`server runtime detached: ${id} no longer serves this subtree`));
-      },
-    }) as WsApi
-    : slot.api;
+  const api: WsApi = borrowed ? gateApi(slot.api, () => !dead, id) : slot.api;
 
   /** End this runtime's USE of the slot. A borrowed connection outlives every
    * runtime that borrows it (see `borrowed`), so the handle goes terminal and
@@ -316,7 +335,16 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       // again, so the handle must be terminal rather than merely
       // disconnected — a disconnected one can dial back, keeps its liveness
       // clock, and anything holding the dead id goes on addressing it.
-      if (!loadServers(storage).some((s) => s.id === id)) dispose();
+      //
+      // A BORROWED handle detaches whether or not its entry survived
+      // (reviewer P1-a2). Both entries staying is the ordinary known-A →
+      // known-B case: the dial was A's, the socket it got now reaches B, and
+      // the socket is not ours to close — so this handle is provably no
+      // longer serving A, and anything still holding its api would be sending
+      // A's work to B. An OWNED handle keeps the narrower rule, because it
+      // closed its own socket and its slot is idle: it is still A's handle,
+      // and it can dial A again.
+      if (borrowed || !loadServers(storage).some((s) => s.id === id)) dispose();
       // Whatever happened to this runtime, the entry SET may have changed:
       // the membership layer reconciles, which is how a runtime absorbed
       // while idle or mid-auth is released too.
@@ -392,6 +420,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     caps: () => caps,
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
+    alive: () => !dead,
     dispose,
   };
 }

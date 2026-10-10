@@ -81,26 +81,45 @@ test('unbinding to nothing invalidates too', async () => {
   assert.equal(h.swap.shown(), null);
 });
 
-test('a superseded swap shows nothing, and its orphan is still invalidated', async () => {
+test('a superseded swap shows nothing, and every handle it touched is released', async () => {
   // Two swaps overlapping: the later one decides what is shown. The earlier
-  // one must not mount its own target over it — and the handle it unbound is
-  // still owed an invalidate, which only the finisher can give it, because a
-  // swap that starts while nothing is shown has no orphan of its own to find.
+  // one must not mount its own target over it — and BOTH handles it touched
+  // are owed a release: the one it unbound, and its own target, which the
+  // later swap replaced before it was ever shown. On a borrowed slot an
+  // unreleased handle is a live lease nobody will revoke.
   const h = host();
   const a = handle('a');
   await h.swap.swap(a);
   h.log.length = 0;
-  const first = h.swap.swap(handle('b'));
+  const b = handle('b');
+  const first = h.swap.swap(b);
   const second = h.swap.swap(handle('c'));
   await Promise.all([first, second]);
   assert.deepEqual(h.log, [
-    'show:none', 'settle',        // the first swap unbinds A
-    'show:none', 'settle',        // the second takes over
-    'invalidate:a', 'show:c',     // and finishes, paying A's debt
+    'show:none', 'settle',                    // the first swap unbinds A
+    'settle',                                 // the second takes over
+    'invalidate:a', 'invalidate:b', 'show:c', // and pays both debts
   ]);
   assert.equal(h.swap.shown()?.id, 'c', 'B was never shown');
   assert.ok(!h.log.includes('show:b'));
-  assert.equal(h.log.filter((l) => l === 'invalidate:a').length, 1, 'and only once');
+  assert.equal(h.log.filter((l) => l === 'invalidate:a').length, 1, 'and A only once');
+});
+
+test('a swap already heading for a server is not repeated', async () => {
+  // One success path asks twice — the switch's comeUp and then bringUp — and
+  // in between nothing is shown. Comparing against `shown` would start a
+  // second swap and mint a second handle, which is never shown and therefore
+  // never released.
+  const h = host();
+  await h.swap.swap(handle('a'));
+  h.log.length = 0;
+  const b = handle('b');
+  const first = h.swap.swap(b);
+  assert.equal(h.swap.bound(), b, 'the swap in flight says where it is going');
+  await h.swap.swap(b);                       // the same target, asked again
+  await first;
+  assert.deepEqual(h.log, ['show:none', 'settle', 'invalidate:a', 'show:b']);
+  assert.equal(h.swap.shown(), b);
 });
 
 test('an orphan is not invalidated twice by a later swap', async () => {

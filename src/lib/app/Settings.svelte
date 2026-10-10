@@ -13,7 +13,25 @@
 
   type HistoryEntry = { address: string; token: string };
 
-  let { onConnected }: { onConnected: (switched: boolean) => void } = $props();
+  let {
+    onConnected,
+    beforeConnect,
+  }: {
+    onConnected: (switched: boolean) => void;
+    /**
+     * Called once, before this form re-dials the shared socket (board #335
+     * ②b-1, reviewer P1-b).
+     *
+     * This form can reach a DIFFERENT server than the one the app is on, and
+     * through ②b every page is talking over the same connection object. So
+     * the host gets to revoke the current server's handle FIRST: after the
+     * socket points elsewhere, a call still in flight from the old tree — or
+     * a callback that settles before the new tree mounts — would be the old
+     * server's work sent to the new one. Optional, because Settings is a
+     * person-level surface that also renders with no server at all.
+     */
+    beforeConnect?: (() => void) | undefined;
+  } = $props();
 
   // The fields as the page opens: the state starts from them, and the
   // desktop autofill compares against them to tell a person's edit.
@@ -112,6 +130,9 @@
       if (socket.trim()) localStorage.setItem('tmux_socket', socket.trim());
       else localStorage.removeItem('tmux_socket');
       saveHistory(url, token);
+      // The socket is about to point at whatever this address reaches, which
+      // may be another server: the current handle gives up its lease first.
+      beforeConnect?.();
       await connect(url, token);
       if (cancelled) return;
       if (socket.trim()) {

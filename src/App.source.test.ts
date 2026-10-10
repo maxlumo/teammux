@@ -478,8 +478,23 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // absorb the entry we booted as into a machine's survivor and re-point
   // CURRENT at it, and from then on the app is on the survivor.
   assert.match(source, /function swapScope\(\) \{\s*const id = currentServerId\(localStorage\);/u);
-  assert.match(source, /if \(held && entry && held\.id === entry\.id\) return;/u,
-    'a reconnect keeps its handle: only a different SERVER is a different handle');
+  assert.match(source, /if \(held\?\.alive\(\) && entry && held\.id === entry\.id\) return;/u,
+    'a reconnect keeps its handle — but only a handle that is still alive: a revoked lease cannot serve the same id again');
+  assert.match(source, /const held = scopeSwap\.bound\(\);/u,
+    'and it asks what the swap is already heading for, or one success path mints a handle nobody shows or releases');
+  // The lease is given up BEFORE the shared socket can be re-dialled
+  // elsewhere, on both paths that can reach another server.
+  assert.match(source, /function revokeScope\(\) \{\s*scopeSwap\.bound\(\)\?\.dispose\(\);/u);
+  assert.match(source, /function resetServerMemory\(\) \{[\s\S]{0,400}?revokeScope\(\);/u,
+    'the switch revokes before its connect (resetMemory runs before connect in server-switch.ts)');
+  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{revokeScope\} \/>/u,
+    'and the connect form revokes before it re-dials the socket itself');
+  // The person-level surface is OUTSIDE the server-bound subtree, which is
+  // what lets that subtree render nothing while it has no runtime.
+  const beforeKey = source.slice(0, source.indexOf('{#key scopeRuntime}'));
+  assert.ok(beforeKey.includes('<Settings {onConnected}'), 'Settings renders outside the scope');
+  const keyed = source.slice(source.indexOf('{#key scopeRuntime}'), source.indexOf('</ServerScope>'));
+  assert.ok(!keyed.includes('<Settings'), 'and not inside it');
   assert.match(source, /createSingleRuntime\(entry, \{ storage: localStorage \}\)/u,
     'one runtime, on the facade s slot, so Single mode keeps one socket');
   // Every path that can change which server the app is on binds the tree.

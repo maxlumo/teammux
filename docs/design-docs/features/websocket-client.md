@@ -533,14 +533,38 @@ Detaching is also what makes two GENERATIONS of handles over one slot safe.
 A replaced handle keeps its own attempt counter, so without a detach its late
 continuation would still consider itself current and could record identity,
 and the api object it handed out would send over a slot that now serves
-another server. So the swap detaches the handle it unbinds, and a detached
-borrowed runtime's api refuses every call — a gate on the handle's liveness,
-which an owned runtime does not need because its connection is itself
-terminal. The gate is on the api OBJECT: a caller that destructured a method
-beforehand keeps it, exactly as `ws.ts`'s own exports do, which is why a
-consumer holds the api and calls through it and why b3 retires the
-module-level RPCs. b3-4 deletes the file, the slot, the borrow and the
-provider-less fallback together.
+another server. Three rules follow, and each was a hole first:
+
+- **A borrowed handle detaches on `elsewhere`, whether or not its entry
+  survived.** Both entries staying is the ordinary known-A → known-B case: the
+  dial was A's, the socket it got reaches B, and the socket is not ours to
+  close, so the handle is provably not serving A any more. An owned handle
+  keeps the narrower rule — it closed its own socket, so it is still A's
+  handle and may dial A again.
+- **The api gate is asked when the call is MADE.** A page holds `api` for its
+  whole life, and a call like `fsWrite(path, await body)` reads the method
+  before the await and sends after it; a gate on the property read would let
+  both through. So each method is wrapped once, the wrappers are stable, and a
+  caller that captured one still holds the gate.
+- **The lease is revoked BEFORE the shared socket is re-dialled**, on both
+  paths that can reach another server: the switch (whose `resetMemory` step
+  runs before its connect) and the connect form (which re-dials the socket
+  itself, so it is handed a `beforeConnect` hook). Clearing the landings after
+  the DOM is gone is the second line, never the first — it runs ticks later,
+  by which time the socket would already have changed hands.
+
+The provider renders NOTHING without a runtime. Rendering the children
+anyway — merely without a context — built a whole provider-less
+Files/Terminal/Hub tree during the gap in a swap, falling back to the facade,
+and `{#key}` mounts the new branch before destroying the old, so that unbound
+tree came up while the old server's was still alive. What a person can do
+before there is a server (the Connection surface) therefore lives OUTSIDE the
+subtree, which is also why suppressing the children cannot strand a fresh
+client. A caller asking whether a swap is needed asks what the swap is already
+HEADING for, not what is shown: during the gap nothing is shown, and one
+success path asks twice, so comparing against the gap would mint a handle
+nobody ever shows or releases. b3-4 deletes the file, the slot, the borrow and
+the provider-less fallback together.
 
 ## Multi-Server (board #55)
 
@@ -860,26 +884,36 @@ already moved.
 
 The server-bound tree is keyed on the runtime HANDLE: a reconnect keeps the
 handle, so the always-mounted pages keep their state, and a different server is
-a different handle, so nothing of the old one survives into the new tree.
-`{#key}` gives that swap and not its ORDER — Svelte creates the new branch
-before destroying the old — so `app/server-scope.ts` sequences it: unbind,
-settle (where the teardown runs), invalidate the landings aimed at the old
-tree, then bind. A first bind is immediate, because deferring it would mount
-every page unbound and rebuild them; a superseded swap shows nothing but its
-orphans are still invalidated by whoever finishes. The bound server is READ
-from CURRENT, never passed, so identity repair re-pointing CURRENT at a
-machine's survivor moves the app with it, and a handle is replaced only when
-the server changes. Through ②b production holds ONE runtime, built on the
-facade's compatibility slot in `app/single-runtime.ts` so there is one socket
-while the consumers move — in its own file to keep `server-runtime.ts`
-facade-free, and declared `borrowed`, because the dangerous paths are the
-three inside `server-runtime.ts` that end a runtime on their own: an entry
-removed mid-auth, an id absorbed into the machine's canonical entry (the
-ordinary fate of an old address-only entry, which would close the legacy
-transport for good), and the wrong machine answering. A borrowed runtime
-DETACHES on those — terminal handle, loss reported, connection left to its
-owner — and the swap detaches the handle it replaces, so a stale generation
-can neither record identity nor call through the api it handed out.
+a different handle, so nothing of the old one survives into the new tree. The
+provider renders NOTHING without a runtime — a server-bound page with no
+server is a page on the facade — so the person-level Connection surface lives
+outside the subtree. `{#key}` gives the swap and not its ORDER, since Svelte
+creates the new branch before destroying the old, so `app/server-scope.ts`
+sequences it: unbind, settle (where the teardown runs), release the handle and
+the landings aimed at the old tree, then bind. A first bind is immediate; a
+superseded swap shows nothing, and every handle it touched — the one it
+unbound and its own replaced target — is still released by whoever finishes.
+A caller asks what the swap is HEADING for, not what is shown, or one success
+path mints a handle nobody shows or releases. The bound server is READ from
+CURRENT, never passed, so identity repair re-pointing CURRENT at a machine's
+survivor moves the app with it; a handle is replaced when the server changes,
+and a handle whose lease was revoked is never reused for the same id.
+
+Through ②b production holds ONE runtime, built on the facade's compatibility
+slot in `app/single-runtime.ts` so there is one socket while the consumers
+move — in its own file to keep `server-runtime.ts` facade-free, and declared
+`borrowed`, because the dangerous paths are the three inside
+`server-runtime.ts` that end a runtime on their own: an entry removed
+mid-auth, an id absorbed into the machine's canonical entry (the ordinary fate
+of an old address-only entry, which would close the legacy transport for
+good), and the wrong machine answering. A borrowed runtime DETACHES on those —
+terminal handle, loss reported, connection left to its owner — and on
+`elsewhere` it detaches even when its entry survived, because the socket it
+holds now reaches someone else. Its api is gated at CALL time, not at property
+read, so a captured method and a call that awaits mid-way are both refused
+after the detach. The lease is revoked BEFORE the socket is re-dialled
+elsewhere, by the switch and by the connect form alike; clearing landings after
+the DOM is gone is a second line, never the first.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

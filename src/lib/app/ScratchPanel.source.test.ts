@@ -31,7 +31,9 @@ test('App: desktop only, inside the server scope, closed when a switch starts; t
   const keyed = app.slice(app.indexOf('{#key scopeRuntime}'), app.indexOf('</ServerScope>'));
   assert.match(keyed, /\{#if !layout\.isTouchDevice && connected\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
   assert.match(app, /\$effect\(\(\) => \{ if \(switching\) scratchOpen = false; \}\);/u);
-  assert.match(app, /function resetServerMemory\(\) \{\s*scratchOpen = false;/u);
+  // The reset's own ORDER is not this pin's subject (since #335 ②b-1 it gives
+  // up the server handle's lease first); that the panel closes there is.
+  assert.match(app, /function resetServerMemory\(\) \{[\s\S]{0,400}?scratchOpen = false;/u);
   assert.match(app, /toggleScratch\(\) \{ scratchOpen = !scratchOpen; \},/u);
   const shortcuts = await readFile(new URL('./shortcuts.ts', import.meta.url), 'utf8');
   assert.match(shortcuts, /\{ id: 'toggleScratch', label: 'shortcutToggleScratch', group: 'panels', default: 'Mod2\+Backquote'/u);

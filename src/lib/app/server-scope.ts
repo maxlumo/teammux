@@ -40,50 +40,79 @@ export interface ScopeSwapDeps {
   /** Resolves once `show` has been applied and the unbound subtree's teardown
    * has run. */
   settle(): Promise<void>;
-  /** The subtree bound to `runtime` is gone: drop what was aimed at it. */
+  /** This runtime will not be shown (again): release it, and drop what was
+   * aimed at the subtree it had. */
   invalidate(runtime: ServerRuntime): void;
 }
 
 export interface ScopeSwap {
   /** The runtime the subtree is bound to right now, or null mid-swap. */
   shown(): ServerRuntime | null;
+  /**
+   * What the subtree is bound to, or is already on its way to being bound to.
+   *
+   * A caller deciding whether a swap is NEEDED must ask this rather than
+   * `shown` (reviewer P2, 2026-10-10): during the gap `shown` is null, so
+   * comparing against it mints a second handle for a server a swap is already
+   * heading for — and that handle, never shown, would be a lease on the
+   * borrowed slot that nobody releases. One success path comes through here
+   * twice (the switch's `comeUp`, then `bringUp`), so this is the ordinary
+   * case rather than a race.
+   */
+  bound(): ServerRuntime | null;
   /** Bind the subtree to `next`, in the order above. */
   swap(next: ServerRuntime | null): Promise<void>;
 }
 
 export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): ScopeSwap {
   let shown: ServerRuntime | null = null;
+  /** The target of a swap that has not finished. */
+  let pending: ServerRuntime | null = null;
   /** Which swap owns the outcome. */
   let seq = 0;
-  /** Unbound and not yet invalidated. */
+  /** Handles that will not be shown (again) and are owed a release. */
   const orphans = new Set<ServerRuntime>();
 
+  const bound = () => pending ?? shown;
+
   async function swap(next: ServerRuntime | null): Promise<void> {
-    // Already there, with nothing owed: a reconnect, not a server.
-    if (next === shown && orphans.size === 0) return;
+    // Already there, with nothing owed — or already on its way, in which case
+    // the swap in flight is the current one (a superseded swap's target has
+    // been replaced by whoever superseded it) and it will pay every debt.
+    if (next === bound() && (pending === next || orphans.size === 0)) return;
     const mine = ++seq;
-    if (shown) orphans.add(shown);
-    // Nothing is bound and nothing is owed: there is no teardown to order, so
-    // the bind happens AT ONCE. Deferring it would leave the tree unbound for
-    // a tick, and at boot that mounts every page without a server and then
-    // rebuilds them — the remount this mechanism exists to avoid.
-    if (!shown && orphans.size === 0) {
+    // A target this swap replaces before it was ever shown is still a handle
+    // somebody has to release: the superseded swap cannot do it, because the
+    // later one owns the outcome.
+    if (pending && pending !== next) orphans.add(pending);
+    pending = next;
+    const settled = shown;
+    // Nothing bound and nothing owed: there is no teardown to order, so the
+    // bind happens AT ONCE. Deferring it would leave the tree with no
+    // server-bound subtree for a tick and then build the whole thing — at
+    // boot, every page.
+    if (!settled && orphans.size === 0) {
       shown = next;
+      pending = null;
       show(next);
       return;
     }
-    shown = null;
-    show(null);
+    if (settled) {
+      orphans.add(settled);
+      shown = null;
+      show(null);
+    }
     await settle();
     // A later swap is showing something else by now; its own completion
-    // invalidates the orphans this one left, because they are still ours to
-    // clear and nobody else will find them.
+    // releases the orphans this one left, because they are still ours to clear
+    // and nobody else will find them.
     if (mine !== seq) return;
     for (const gone of orphans) invalidate(gone);
     orphans.clear();
     shown = next;
+    pending = null;
     show(next);
   }
 
-  return { shown: () => shown, swap };
+  return { shown: () => shown, bound, swap };
 }
