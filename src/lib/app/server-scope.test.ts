@@ -139,6 +139,22 @@ test('an orphan is not invalidated twice by a later swap', async () => {
     'only the handle this swap unbound');
 });
 
+test('an unbind right after the first bind is not read as a repeat of it', async () => {
+  // `pending` is null in two different situations — no swap is running, and a
+  // swap has just bound its target — so `next === pending` read `swap(null)`
+  // as a repeat of the bind still finishing its `finally` and dropped the
+  // unbind entirely (reviewer P2-a, 2026-10-10). The public contract of
+  // `swap(null)` is that A is released.
+  const h = host();
+  const a = handle('a');
+  void h.swap.swap(a);                        // first bind: synchronous, pending cleared
+  await h.swap.swap(null);                    // in the same turn, before the finally ran
+  assert.deepEqual(h.log, ['show:a', 'show:none', 'settle', 'invalidate:a', 'show:none'],
+    'the unbind happened, and A was released');
+  assert.equal(h.swap.shown(), null);
+  assert.equal(h.swap.bound(), null);
+});
+
 test('settled() resolves on the bind, and a repeat of the swap in flight IS that swap', async () => {
   // What `settled()` is for is waiting until the subtree is actually bound —
   // the restore reads the record for the server on screen. Asking for the

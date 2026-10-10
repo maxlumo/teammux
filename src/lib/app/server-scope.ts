@@ -78,8 +78,12 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
   const orphans = new Set<ServerRuntime>();
 
   const bound = () => pending ?? shown;
-  /** The swap in flight, for callers that must wait for the bind. */
+  /** The swap in flight, with the target it is heading for — `pending` cannot
+   * answer that: it is null both when no swap is running and when a swap has
+   * just bound its target, so comparing against it reads an unbind request
+   * (`swap(null)`) as a repeat of whatever is in flight. */
   let inFlight: Promise<void> | null = null;
+  let flying: ServerRuntime | null = null;
 
   function swap(next: ServerRuntime | null): Promise<void> {
     // A REPEAT of the swap in flight is that swap, not a new one that is
@@ -87,13 +91,16 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
     // target already bound and return at once, and the caller — who asked in
     // order to wait for the bind — would be handed a resolved promise while
     // nothing is shown. Settling is what it is waiting for.
-    if (inFlight && next === pending) return inFlight;
+    if (inFlight && next === flying) return inFlight;
     const run = doSwap(next);
     // Track the promise the caller gets, so the cleanup compares the same
     // object it stored: `run.finally(...)` is a DIFFERENT promise, and an
     // identity check against `run` can never match.
-    const tracked: Promise<void> = run.finally(() => { if (inFlight === tracked) inFlight = null; });
+    const tracked: Promise<void> = run.finally(() => {
+      if (inFlight === tracked) { inFlight = null; flying = null; }
+    });
     inFlight = tracked;
+    flying = next;
     return tracked;
   }
 
