@@ -24,7 +24,20 @@ const asModule = (mock: Record<string, unknown>) => mock as Record<string, (...a
 
 const compiled = compileMount(new URL('./App.svelte', import.meta.url), [
   new URL('./lib/core/ws.ts', import.meta.url),
+  // The real Terminal needs xterm, which this tier does not paint; the stub
+  // records the target it was handed, which is exactly what a restore test
+  // wants to see (the same strategy as ScratchPanel.mount.test.ts).
+  new URL('./lib/terminal/Terminal.svelte', import.meta.url),
 ]);
+
+const terminalStub = {
+  default: (anchor: Comment, props: { target: string }) => {
+    const el = anchor.ownerDocument.createElement('div');
+    el.className = 'xterm-wrap';
+    el.dataset.target = props.target;
+    anchor.before(el);
+  },
+};
 
 function transport(calls: string[]) {
   const rpc = (name: string) => () => {
@@ -60,7 +73,7 @@ async function mount(context: TestContext) {
   const calls: string[] = [];
   const app = await (await compiled).mount(context, {
     props: {},
-    modules: [asModule(transport(calls))],
+    modules: [asModule(transport(calls)), terminalStub],
     setup(window) {
       // A fresh client: no saved server, no token, nothing parked.
       window.localStorage.clear();
@@ -170,7 +183,7 @@ test('a reconnect to the SAME server through the form keeps the handle and the t
   const calls: string[] = [];
   const app = await (await compiled).mount(context, {
     props: {},
-    modules: [asModule(liveTransport(calls, () => 'm-a'))],
+    modules: [asModule(liveTransport(calls, () => 'm-a')), terminalStub],
     setup(window) {
       window.localStorage.clear();
       window.localStorage.setItem('tmux_locale', 'en');
@@ -243,4 +256,170 @@ test('a reconnect to the SAME server through the form keeps the handle and the t
     `the Terminal page was not rebuilt (calls since: ${calls.slice(before).join(',')})`);
   assert.deepEqual([...app.document.querySelectorAll('.page-layer')], layers,
     'and neither was any other resident layer');
+});
+
+/** A PRE-#335 record: a bare target, with no server of its own. This is the
+ * shape the attribution rules are about — a v2 record names its server, so it
+ * cannot tell whether the rules work. */
+const legacyNav = (target: string) => JSON.stringify({
+  page: 'terminal',
+  terminalTarget: target,
+  terminalSession: target.split(':')[0],
+});
+
+/** A transport that answers as whichever machine the address belongs to. */
+function twoServerTransport(calls: string[]) {
+  let connected = false;
+  let machine = '';
+  const rpc = (name: string, result: unknown = []) => () => {
+    calls.push(name);
+    return connected ? Promise.resolve(result) : Promise.reject(new Error('not connected'));
+  };
+  return {
+    connect: async (url: string) => {
+      calls.push(`connect:${url}`);
+      machine = url.includes('//b') ? 'm-b' : 'm-a';
+      connected = true;
+      return machine;
+    },
+    disconnect: () => { connected = false; },
+    isConnected: () => connected,
+    getMachineId: () => (connected ? machine : ''),
+    getHostname: () => (connected ? `${machine}.host` : ''),
+    setOnDisconnect: () => {},
+    subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
+    addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
+    addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    findBestAddress: async () => null,
+    classifyAddress: () => 0,
+    isAddressViable: () => true,
+    noteAddressUnreachable: () => {},
+    ADDRESS_LABELS: ['LAN', 'Tailscale', 'WAN'],
+    hubRooms: () => { calls.push('hub_rooms'); return Promise.reject(Object.assign(new Error('no hub'), { code: -32601 })); },
+    systemStatus: rpc('system_status', {}),
+    // The session the saved panes name exists on both servers, which is the
+    // whole point: a name alone cannot tell them apart.
+    listSessions: rpc('list_sessions', [{ name: 'work' }]),
+    listPanes: rpc('list_panes', [{ session: 'work', window: 1, pane: 0 }]),
+    backendsList: rpc('backends_list', { backends: [] }),
+    setSocket: rpc('set_socket'),
+    fsCwd: rpc('fs_cwd', { path: '/home' }),
+    fsList: rpc('fs_list', { entries: [] }),
+    getPrefs: rpc('get_prefs', {}),
+    getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
+  };
+}
+
+/** Two named servers, each holding a PRE-#335 record, driven through the real
+ * switcher. `live` is the unprefixed key the app boots on (A's, by CURRENT);
+ * `parked` is B's own slot, which arriving at B surfaces into that key. */
+async function twoServerApp(context: TestContext, nav: { live: string; parked: string }) {
+  const calls: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: {},
+    modules: [asModule(twoServerTransport(calls)), terminalStub],
+    setup(window) {
+      window.localStorage.clear();
+      window.localStorage.setItem('tmux_locale', 'en');
+      window.localStorage.setItem('tmux_servers', JSON.stringify([
+        { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+        { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      ]));
+      window.localStorage.setItem('tmux_server_current', 'a');
+      window.localStorage.setItem('tmux_address', 'ws://a:9899');
+      window.localStorage.setItem('tmux_token', 'tokA');
+      window.localStorage.setItem('tmux_machine_id', 'm-a');
+      window.localStorage.setItem('tmux_state', legacyNav(nav.live));
+      window.localStorage.setItem('tmux_state::b', legacyNav(nav.parked));
+      (window as any).HTMLCanvasElement.prototype.getContext = () => new Proxy({
+        font: '', measureText: () => ({ width: 0 }),
+      } as Record<string, unknown>, {
+        get: (target, prop) => (prop in target ? target[prop as string] : () => undefined),
+        set: (target, prop, value) => { target[prop as string] = value; return true; },
+      });
+    },
+    pendingImports: ['@tauri-apps/'],
+  });
+  const settle = async () => { for (let i = 0; i < 10; i++) await app.flush(); };
+  await settle();
+
+  /** What the shell restored, seen twice over: the target the Terminal was
+   * actually handed, and the record the shell saves back. */
+  const onScreen = () =>
+    app.document.querySelector<HTMLElement>('.term-main .xterm-wrap')?.dataset.target ?? 'none';
+  const restored = () => {
+    const raw = app.window.localStorage.getItem('tmux_state');
+    const pane = raw ? JSON.parse(raw).pane : null;
+    return pane ? `${pane.serverId}:${pane.target}` : 'none';
+  };
+  /** Switch through the real switcher: Settings → Connection → the row. */
+  const switchTo = async (name: string) => {
+    const entry = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+    entry!.click();
+    await settle();
+    const connection = [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')]
+      .find((b) => /connection/iu.test(b.textContent ?? ''));
+    connection!.click();
+    await settle();
+    const row = [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')]
+      .find((b) => new RegExp(`^${name}\\b`, 'iu').test((b.textContent ?? '').trim()));
+    assert.ok(row, `the switcher offers ${name}: ${
+      [...app.document.querySelectorAll('.preferences button')].map((b) => b.textContent?.trim()).join(' | ')}`);
+    row.click();
+    await settle();
+    await settle();
+  };
+  return { app, calls, settle, onScreen, restored, switchTo };
+}
+
+test('A→B→A through the switcher restores each server s own navigation', async (context) => {
+  // The regression that would have caught P1-a (reviewer, 2026-10-10): the
+  // restore used to run in the swap's gap, where nothing is shown, so every
+  // saved pane was filtered out as belonging to "no server" — and an ordinary
+  // round trip lost both sides' layout. Two servers, each with a saved pane on
+  // a session of the SAME name. Both records are v1, so each one's owner has
+  // to be WORKED OUT: A's from what CURRENT said at boot, B's from the fact
+  // that arriving at B is what put its bytes in the live key.
+  const { calls, onScreen, restored, switchTo, app } =
+    await twoServerApp(context, { live: 'work:1.0', parked: 'work:2.0' });
+
+  assert.equal(onScreen(), 'work:1.0', `boot put A s pane on screen: ${calls.join(',')}`);
+  assert.equal(restored(), 'a:work:1.0', 'and saved it as A s');
+
+  await switchTo('beta');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'the switch arrived');
+  assert.equal(onScreen(), 'work:2.0', 'B came up on B s own pane, not on nothing');
+  assert.equal(restored(), 'b:work:2.0', 'and saved it as B s');
+  const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
+  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0',
+    'and A s record was parked, not lost');
+
+  await switchTo('alpha');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a');
+  assert.equal(onScreen(), 'work:1.0', 'and coming back puts A s pane up again');
+  assert.equal(restored(), 'a:work:1.0', 'saved as A s, not as B s');
+});
+
+test('two servers can hold the SAME legacy bytes, and each one is still its own', async (context) => {
+  // The orchestrator's P1 (2026-10-10): provenance cannot be derived by
+  // comparing the live record with the one read at boot, because `work:1.0`
+  // on A is byte-identical to `work:1.0` on B. Under that rule B's record
+  // "looked like" A's, so arriving at B was read as still showing A's
+  // navigation — B's pane was filtered out of its own restore and the record
+  // A came back to was B's write. Here the two records are the same bytes
+  // from the start; only WHERE each was read can tell them apart.
+  const { onScreen, restored, switchTo, app } =
+    await twoServerApp(context, { live: 'work:1.0', parked: 'work:1.0' });
+
+  assert.equal(restored(), 'a:work:1.0', 'at boot the record is the one CURRENT names');
+
+  await switchTo('beta');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(onScreen(), 'work:1.0', 'B restores its own identical record');
+  assert.equal(restored(), 'b:work:1.0', 'and it is B s, by where it was read — not by its bytes');
+
+  await switchTo('alpha');
+  assert.equal(restored(), 'a:work:1.0', 'and A s is A s again');
 });
