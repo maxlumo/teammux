@@ -1569,3 +1569,46 @@ test('a reconnect dial out when a form walk opens cannot open a second walk when
   assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'and moved nothing');
   assert.equal(h.app.window.localStorage.getItem('tmux_state::a'), null, 'A was not parked');
 });
+
+// ── The last ②b case before the flip (orchestrator, 08:29): a real switch
+// through the switcher while another dial is still out.
+
+test('a switch while a reconnect dial hangs: A s download settles before B is dialled, and the late dial changes nothing', async (context) => {
+  // A is on screen with a download running. The socket drops and the
+  // reconnect's dial to A hangs. The person picks beta in the switcher. The
+  // switch must take the socket from that dial, stop A's download and wait
+  // for it, and only then dial B. When the hung dial finally answers, it is
+  // nobody's: no identity, no reconnect, no tree.
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  let releaseR1: () => void = () => {};
+  const r1 = new Promise<void>((resolve) => { releaseR1 = resolve; });
+  const h = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (url) => (url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, rpc: transfer.rpc, setup: transfer.setup, gate: (_url, n) => (n === 2 ? r1 : null) });
+  await startDownload(h.app, h.settle);
+  const trace = () => events.filter((e) => ['fetch', 'aborted', 'settled'].includes(e) || e.startsWith('connect:') || e.startsWith('answered:'));
+  h.net.drop();
+  await h.settle();
+  assert.deepEqual(trace(), ['connect:ws://a:9899', 'answered:ws://a:9899#1', 'fetch', 'connect:ws://a:9899'], 'the reconnect s dial to A is out, and hangs');
+
+  await h.switchTo('beta');
+  assert.deepEqual(trace().slice(4), ['aborted'], 'the switch stopped A s download — and dials nothing until it has settled');
+  transfer.finish();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.deepEqual(trace().slice(4), ['aborted', 'settled', 'connect:ws://b:9899', 'answered:ws://b:9899#3'], 'then B');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'the app is on B');
+  await h.app.advance(1000);
+  assert.equal(h.onScreen(), 'work:2.0', 'with B s navigation');
+  const servers = h.app.window.localStorage.getItem('tmux_servers');
+
+  releaseR1();                                   // the hung dial answers, late
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(10_000);
+  assert.deepEqual(trace().slice(8), ['answered:ws://a:9899#2'], 'it answered — and nothing dialled after it');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'CURRENT stayed on B');
+  assert.equal(h.app.window.localStorage.getItem('tmux_servers'), servers, 'no identity was recorded');
+  assert.equal(h.onScreen(), 'work:2.0', 'and B s tree is the one on screen');
+  assert.equal(h.app.document.querySelector('.reconnect-cancel'), null, 'no reconnect banner');
+});
