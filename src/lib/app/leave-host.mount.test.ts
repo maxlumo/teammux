@@ -7,7 +7,7 @@ import { compileMount } from '../test/mount.ts';
 import type { DOMWindow } from 'jsdom';
 import type { TestContext } from 'node:test';
 
-const compiled = compileMount(new URL('./LeaveHost.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+const compiled = compileMount(new URL('./LeaveHost.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 const alpha = { name: 'alpha', backend: 'codex', model: '', effort: '', system: 'Original', skills: '[]', mcp: '[]' };
 function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
   return {

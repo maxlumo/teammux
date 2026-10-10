@@ -1,31 +1,24 @@
 <script module>
-  // Everything the Files pages remember about ONE server now lives in
-  // `files-memory.ts` as a factory (board #335 ②a-4): browse positions keyed
-  // by session name, the one-writer claim per part, and each running
-  // attempt's abort handle and settle. Both instances — this page and the
-  // Hub's drawer — share this record and outlive any one of them, which is
-  // why it is here and not in the instance.
+  // What the Files pages remember about ONE server — browse positions keyed
+  // by session name, the one-writer claim per part, each running attempt's
+  // abort handle and settle, and the download rows — belongs to that server's
+  // RUNTIME since board #335 ②b-2-1 (`app/server-state.ts`, `files`). Both
+  // instances, this page and the Hub's drawer, sit in one server's subtree and
+  // so share that record, and it outlives either of them. The rows and the
+  // memory travel TOGETHER, as ②a ruled: removing a runtime has to forbid new
+  // attempts, then suspend and AWAIT, then release — dropping the reference
+  // is not stopping a download.
   //
-  // ONE instance for as long as the app looks at one server, and production
-  // goes through it today — the extraction changed where this state lives, not
-  // who reads it. ②b gives each runtime its own, and must hold it together
-  // with that server's download rows: the page and the drawer share one
-  // record, and removing a runtime forbids new attempts, then suspends and
-  // AWAITS, then releases. Dropping the reference is not stopping a download.
-  import { createFilesMemory } from './files-memory.ts';
-  const memory = createFilesMemory();
   // A fresh page has no writer yet: drop claims a previous page (a webview
   // reload in a live process) left in Rust, or its parts could never be
   // resumed. Once per realm, before any download can start — a property of
   // the PROCESS, not of any server, so it stays here.
   if (isTauri) invokeNative('download_release_all').catch(() => {});
 
-  /** A server switch (board 315) stops every running download and KEEPS its
-   * part; it resolves once every attempt has settled. App's switch calls it. */
-  export async function suspendDownloads() { await memory.suspend(SUSPEND); }
-  /** Per-server memory a switch drops: browse positions are keyed by session
-   * NAME, and `app` on one server is not `app` on another. */
-  export function resetFilesMemory() { memory.reset(); }
+  /** A server switch (board 315) stops every running download of the server
+   * being left and KEEPS its part; it resolves once every attempt has
+   * settled. App's switch calls it with that server's record. */
+  export async function suspendFiles(files) { await files?.memory.suspend(SUSPEND); }
 </script>
 
 <script>
@@ -34,7 +27,8 @@
   import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
   import { download, bytesToB64, memorySink, nativeSink, partId, PIECE_BYTES, SUSPEND } from './download.ts';
-  import * as store from './downloads.svelte.ts';
+  import { speed as bytesPerSecond, feedbackOf } from './downloads.svelte.ts';
+  import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import Segmented from '../ui/Segmented.svelte';
@@ -101,6 +95,12 @@
   // agent in a worktree). Empty = no declaration (a direct/adopted session):
   // follow the pane cwd, the pre-#181 rule. The Session-directory tool
   // (goSessionDir) keeps offering the pane cwd explicitly either way.
+  // This server's Files record — memory and download rows together — from
+  // the scope this subtree is bound to (board #335 ②b-2-1), read once at init.
+  const { files } = useServerScope().state;
+  const memory = files.memory;
+  const store = files.downloads;
+
   let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable('') } = $props();
   const panelId = $props.id();
   const LIST_WIDTH = { min: 320, max: 520, default: 400 };
@@ -231,7 +231,7 @@
       navPush();
     } catch (e) { error = e.message; }
   }
-  const sessionRows = $derived(store.downloads.rows);
+  const sessionRows = $derived(store.rows);
   const activeRows = $derived(sessionRows.filter((r) => r.state === 'downloading' || r.state === 'saving'));
   const failedRows = $derived(sessionRows.filter((r) => r.state === 'failed'));
   // Resumable: a part on disk with no attempt. The store knows this
@@ -251,7 +251,7 @@
   // A download changes what is on disk: refresh the lists when one ends.
   let lastActive = 0;
   $effect(() => {
-    const n = store.downloads.active;
+    const n = store.active;
     if (n < lastActive && view === 'local') readDownloads().catch(() => {});
     lastActive = n;
   });
@@ -267,11 +267,11 @@
     } catch (e) { error = t('openFailed') + (e.message || e); }
   }
   const rowSpeed = (row) => {
-    const bps = store.speed(row);
+    const bps = bytesPerSecond(row);
     return bps ? `${formatSize(Math.round(bps))}/s` : '';
   };
   const rowFeedback = (row) => {
-    const value = store.feedbackOf(row, { downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
+    const value = feedbackOf(row, { downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
     const speedText = rowSpeed(row);
     return { ...value, detail: speedText ? `${row.name} · ${speedText}` : row.name };
   };
@@ -1329,7 +1329,7 @@
     let settle;
     memory.track(rowId, control, new Promise((resolve) => { settle = resolve; }));
     const strings = () => ({ downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
-    const show = () => { if (operation.current()) downloadLifetime.update(token, store.feedbackOf(row, strings())); };
+    const show = () => { if (operation.current()) downloadLifetime.update(token, feedbackOf(row, strings())); };
     const progress = (fraction, received = 0, total = 0) => { store.progress(rowId, received, total); show(); };
     if (id) memory.claim(id, { owner: instance, adopt() {
       token = downloadLifetime.begin();

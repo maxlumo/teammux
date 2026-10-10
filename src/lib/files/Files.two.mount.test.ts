@@ -6,8 +6,10 @@ import { compileMount } from '../test/mount.ts';
 // span Files instances. Start a download in the page's Files, then the same file in the
 // drawer's Files, in ONE realm against ONE fake part store (downloads.rs
 // semantics: one append-only part per id).
+// One server's scope around both instances: the page and the drawer share that
+// server's Files record, which is what this file is about (②b-2-1).
 const two = compileMount(new URL('./Files.two.test.svelte', import.meta.url),
-  [new URL('../core/ws.ts', import.meta.url), new URL('../core/native.ts', import.meta.url)]);
+  [new URL('../core/ws.ts', import.meta.url), new URL('../core/native.ts', import.meta.url)], { serverScope: true });
 const entries = [{ name: 'AGENTS.md', path: '/fixture/AGENTS.md', type: 'file', size: 1200 }];
 
 test('two Files instances downloading one file write one part once', async context => {

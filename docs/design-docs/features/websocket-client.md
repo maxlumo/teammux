@@ -616,8 +616,9 @@ ships here is the one mechanism and the pins every such list will be held to.
 
 **One server's state is one value** (②b-2-1, `app/server-state.ts`). What the
 app remembers about a server — so far the Hub's per-project maps (lead, read
-mark, draft, drawer, roster, open project) and its notification centre's
-list — is a `ServerState` that belongs
+mark, draft, drawer, roster, open project), its notification centre's list,
+and Files' memory together with the download rows — is a `ServerState` that
+belongs
 to a RUNTIME. App builds it in `swapScope`, beside the runtime and after
 CURRENT moved, and the provider hands both to the subtree as one scope
 (`useServerScope()`, one context key, read once at init). A different server
@@ -631,7 +632,12 @@ sight of an entry — only once its server is current; b2-4 gives each bundle a
 store scoped to its server, and then the timing stops mattering. The person's
 own preferences (feed level, tool-row cap, sidebar) are not in it: they are
 `appPrefs`, one owner however many servers are on screen, read directly by
-App and Preferences.
+App and Preferences. Files' record is memory only (parked
+cwds, the one-writer claim per part, each attempt's abort handle, the rows),
+and its two halves travel together because the page and the Hub's drawer share
+one record and a download is not stopped by dropping a reference: the switch
+suspends the LEAVING server's attempts through `suspendFiles(thatServer.files)`
+and awaits them before the socket moves.
 
 ## Multi-Server (board #55)
 

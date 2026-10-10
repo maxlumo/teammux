@@ -59,7 +59,9 @@ export const RENDER_TIMEOUT_MS = 20_000;
 export interface RenderHarness {
   /** `ssrLoadModule` on the one warm server. */
   load<T = any>(id: string): Promise<T>;
-  /** Svelte's server `render`, from the same runtime instance the components use. */
+  /** Svelte's server `render`, from the same runtime instance the components
+   * use — inside ONE server's scope, as App's provider renders every
+   * server-bound page (board #335 ②b-2-1). */
   render: (component: any, options?: { props?: Record<string, unknown> }) => { body: string; head: string };
   /** Parse emitted markup for querySelector assertions. */
   fragment(html: string): DocumentFragment;
@@ -102,7 +104,10 @@ async function build(): Promise<RenderHarness> {
   });
   // Warm the runtime every component shares, so a suite's timer only sees
   // its own files.
-  const { render } = await vite.ssrLoadModule('svelte/server');
+  const { render: renderBare } = await vite.ssrLoadModule('svelte/server');
+  const { testScopeContext } = await vite.ssrLoadModule('/src/lib/test/server-scope-host.ts');
+  const render = (component: any, options: { props?: Record<string, unknown> } = {}) =>
+    renderBare(component, { ...options, context: testScopeContext() });
   after(async () => { await vite.close(); dom.window.close(); });
   return {
     load: <T = any>(id: string) => vite.ssrLoadModule(id) as Promise<T>,

@@ -8,16 +8,10 @@
 // on one server, so two servers need two records: a row's `path` means nothing
 // without the machine it is on, and `forgetAll` exists precisely because a
 // switch invalidates the whole list. `createDownloads()` is that record as an
-// object; the exports below are ONE instance of it, shared by both Files
-// instances (the page and the Hub drawer) and every attempt, exactly as the
-// module-level store was.
-//
-// NOT YET WIRED PER RUNTIME — which is not the same as uncalled. Production
-// runs through `downloadStore` today, exactly as it ran through the module
-// state before: the conversion changed where the rows live, not who reads
-// them. ②b gives each runtime its own instance and retires the module-level
-// one, at which point "reset the store on a switch" becomes "drop the
-// server's instance" and `forgetAll` loses its reason to exist.
+// object, and since #335 ②b-2-1 each runtime's `ServerState.files` holds one,
+// shared by both Files instances (the page and the Hub drawer) and every
+// attempt; there is no module-level record. "Reset the store on a switch"
+// became "the next server's runtime has its own".
 //
 // ②b's contract, because dropping an instance is NOT stopping a download
 // (reviewer, 2026-10-09): a runtime's rows and its FilesMemory must be held
@@ -159,25 +153,3 @@ export function feedbackOf(row: DownloadRow, s: FeedbackStrings): FeedbackValue 
     progress: row.state === 'saving' || !row.total ? null : (row.received / row.total) * 100,
   };
 }
-
-/** The app's one record, for as long as the app looks at one server. The
- * named exports below are its methods, so every existing caller and every
- * existing test is unchanged — and the function identities are stable,
- * because these ARE the instance's closures rather than wrappers around them
- * (the same reason `ws.ts` destructures its facade). */
-export const downloadStore = createDownloads();
-
-export const downloads = {
-  get rows(): readonly DownloadRow[] { return downloadStore.rows; },
-  get active(): number { return downloadStore.active; },
-};
-
-export const {
-  rowOf, begin, progress, restarted, saving, done, paused, failed, forget,
-} = downloadStore;
-
-/** A server switch (board 315): this session's rows name paths on the
- * leaving server. Parts on disk carry their server and stay listed. */
-export const forgetAll = downloadStore.forgetAll;
-/** Test seam: the store is module state until ②b makes it per runtime. */
-export function resetForTests() { forgetAll(); }

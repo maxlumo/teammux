@@ -3,7 +3,21 @@ import assert from 'node:assert/strict';
 // The store is a runes module; outside the compiler $state is the value
 // itself (the i18n.test.ts convention).
 (globalThis as any).$state = (value: unknown) => value;
-const { downloads, begin, progress, restarted, saving, done, paused, failed, forget, speed, feedbackOf, resetForTests, rowOf } = await import('./downloads.svelte.ts');
+const { createDownloads, speed, feedbackOf } = await import('./downloads.svelte.ts');
+// ONE server's record, the way a runtime's bundle holds it (board #335 ②b-2-1).
+// Rebuilt per case, which is what the old `resetForTests` did to the module one.
+let record = createDownloads();
+const resetForTests = () => { record = createDownloads(); };
+const downloads = { get rows() { return record.rows; }, get active() { return record.active; } };
+const begin = (...a: Parameters<typeof record.begin>) => record.begin(...a);
+const progress = (...a: Parameters<typeof record.progress>) => record.progress(...a);
+const restarted = (...a: Parameters<typeof record.restarted>) => record.restarted(...a);
+const saving = (...a: Parameters<typeof record.saving>) => record.saving(...a);
+const done = (...a: Parameters<typeof record.done>) => record.done(...a);
+const paused = (...a: Parameters<typeof record.paused>) => record.paused(...a);
+const failed = (...a: Parameters<typeof record.failed>) => record.failed(...a);
+const forget = (...a: Parameters<typeof record.forget>) => record.forget(...a);
+const rowOf = (...a: Parameters<typeof record.rowOf>) => record.rowOf(...a);
 
 const S = { downloading: 'Downloading', changed: 'File changed', saving: 'Saving' };
 

@@ -313,8 +313,10 @@ test('a download that lost its slot reports once, outside the live slot (board #
 });
 
 test('the download feedback slot shows the store row; it keeps no copy of its own (board #308)', () => {
-  assert.match(source, /import \* as store from '\.\/downloads\.svelte\.ts';/u);
-  assert.match(source, /const show = \(\) => \{ if \(operation\.current\(\)\) downloadLifetime\.update\(token, store\.feedbackOf\(row, strings\(\)\)\); \};/u);
+  // The rows are this server's record, from the scope (board #335 ②b-2-1);
+  // what to show is the module's pure `feedbackOf` over the row.
+  assert.match(source, /const store = files\.downloads;/u);
+  assert.match(source, /const show = \(\) => \{ if \(operation\.current\(\)\) downloadLifetime\.update\(token, feedbackOf\(row, strings\(\)\)\); \};/u);
   assert.match(source, /const progress = \(fraction, received = 0, total = 0\) => \{ store\.progress\(rowId, received, total\); show\(\); \};/u);
   assert.doesNotMatch(source, /shown = \{ kind: 'progress'/u, 'the old private progress copy is gone');
   assert.match(source, /store\.done\(rowId, savedPath\);/u);

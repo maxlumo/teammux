@@ -5,15 +5,15 @@
 // Files.svelte. It is a record per SERVER, not per app:
 //
 //   - browse positions are keyed by session NAME, and `app` on one server is
-//     not `app` on another (that is what `resetFilesMemory` existed for).
+//     not `app` on another (a switch used to `resetFilesMemory` for that).
 //   - a part id, a running attempt and its abort handle all belong to a
 //     transfer from one machine. A switch stops them and KEEPS the part,
 //     because the bytes are the leaving server's file.
 //
-// Extracted into a factory so ②b can hold two of them. NOT YET WIRED PER
-// RUNTIME, which is not the same as uncalled: Files.svelte keeps ONE instance
-// and production goes through it today, every rule below is the one it had,
-// and `suspendDownloads`/`resetFilesMemory` still exist for App's switch.
+// A factory so each runtime holds its own: since #335 ②b-2-1 a runtime's
+// `ServerState.files` holds this record together with its download rows, and
+// App's switch suspends the leaving server's through `suspendFiles`. Every
+// rule below is the one it had.
 //
 // Two things ②b owes this record (reviewer, 2026-10-09):
 //

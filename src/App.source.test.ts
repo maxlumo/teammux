@@ -417,6 +417,10 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // App wires the effects into that one module and calls nothing else.
   assert.match(source, /const serverSwitch = createServerSwitch\(\{/u);
   assert.match(source, /onstate: \(st\) => \{\s*switching = st;/u);
+  // The downloads the switch suspends are the LEAVING server's, from that
+  // runtime's own record (board #335 ②b-2-1): `bound()` still names it here,
+  // because the switch suspends before `resetMemory` revokes the handle.
+  assert.match(source, /suspendDownloads: \(\) => suspendFiles\(serverStates\.get\(scopeSwap\.bound\(\)\)\?\.files\),/u);
   assert.match(source, /comeUp: \(target\) => \{[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(target\.address, target\.token\);/u);
   assert.doesNotMatch(source, /location\.reload\(/u, 'no reload remains on any switch or connect path');
   assert.doesNotMatch(source, /applySwitch/u, 'the reload-era plan is gone');

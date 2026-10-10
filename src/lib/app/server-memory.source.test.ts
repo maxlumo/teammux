@@ -19,16 +19,6 @@ const reset = app.match(/function resetServerMemory\(\) \{[\s\S]*?\n  \}/u)?.[0]
 
 /** file → store name → how a switch handles it. */
 const PER_SERVER: Record<string, Record<string, RegExp>> = {
-  // Since #335 ②a-4 all of it — parked cwds keyed by session name, the
-  // one-writer claim per part, each attempt's abort handle and settle, and the
-  // browser row counter — is an INSTANCE of createFilesMemory(). Same
-  // obligation: the switch resets the positions and awaits the attempts.
-  'files/Files.svelte': { memory: /resetFilesMemory\(\)/u },
-  // Since #335 ②a-4 the rows are an INSTANCE of createDownloads(), so what
-  // the scan sees at module level is the instance. Same obligation while the
-  // app holds one of them: ②b replaces "reset it on a switch" with "drop that
-  // server's instance".
-  'files/downloads.svelte.ts': { downloadStore: /forgetDownloadRows\(\)/u },
   // Since #335 ②a-4 the list and its listeners are an INSTANCE of
   // createBackendCatalog(); the frozen fallback lists stayed module-level
   // because they describe what this BUILD ships, not what a server serves.
@@ -44,6 +34,10 @@ const IN_RUNTIME: Record<string, { file: string; built: string; instance: string
   // are this WINDOW's, `centreSurface` below. A log over NO storage owns no
   // key, so only a stored one counts.
   centre: { file: 'hub/notify-centre.svelte.ts', built: 'createCentre\\(createAlertLog\\(storage', instance: 'createAlertLog\\((?!null\\))' },
+  // Files' memory and the download rows, TOGETHER (②a's ruling): parked cwds
+  // keyed by session name, the one-writer claim per part, each attempt's
+  // abort handle and settle, and the rows. Memory only, so no storage.
+  files: { file: 'files/files-memory.ts', built: '\\{ memory: createFilesMemory\\(\\), downloads: createDownloads\\(\\) \\}', instance: '(?:createFilesMemory|createDownloads)\\(' },
 };
 const GLOBAL: Record<string, Record<string, string>> = {
   'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself' },
@@ -110,8 +104,7 @@ test('every module-level store is reset on a switch or named global (board 315)'
     }
   }
   for (const instance of [
-    'files/downloads.svelte.ts:downloadStore', 'core/agents.ts:backendCatalog',
-    'files/Files.svelte:memory',
+    'core/agents.ts:backendCatalog',
     'hub/notify-centre.svelte.ts:centreSurface',
   ]) {
     assert.ok(found.includes(instance), `the scan sees the factory instance ${instance}`);

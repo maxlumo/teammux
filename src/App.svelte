@@ -5,7 +5,7 @@
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
   import SplitView from './lib/sessions/SplitView.svelte';
-  import Files, { resetFilesMemory, suspendDownloads } from './lib/files/Files.svelte';
+  import Files, { suspendFiles } from './lib/files/Files.svelte';
   import Hub from './lib/hub/Hub.svelte';
   import AgentsPage from './lib/hub/AgentsPage.svelte';
   import Board from './lib/hub/Board.svelte';
@@ -45,7 +45,6 @@
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
-  import { forgetAll as forgetDownloadRows } from './lib/files/downloads.svelte.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
   import HoverCard from './lib/ui/HoverCard.svelte';
@@ -1181,8 +1180,6 @@
     // flight or a settled callback cannot become A's work sent to B.
     revokeScope();
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
-    resetFilesMemory();                 // browse positions keyed by session name
-    forgetDownloadRows();               // this session's rows; parts on disk carry their server
     setServedBackends(null);            // the backend list is the server's answer
     hoverCard.hide();                   // a card may describe the old server's row
     hubState = { available: false, probed: false };
@@ -1221,7 +1218,8 @@
       switching = st;
       if (st) { serverMenuOpen = false; connected = false; }
     },
-    suspendDownloads,
+    // The leaving server's attempts, from ITS record (board #335 ②b-2-1).
+    suspendDownloads: () => suspendFiles(serverStates.get(scopeSwap.bound())?.files),
     afterUnmount: () => tick(),
     disconnect,
     resetMemory: resetServerMemory,

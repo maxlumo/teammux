@@ -81,7 +81,7 @@ test('the identity modules have exactly the production consumers this commit giv
     'server-store.ts': [],
     'server-state-migration.ts': [],
     // ②b-2-1: a page that holds this server's state reads it from its scope.
-    'server-context.ts': ['src/lib/app/ServerScope.svelte', 'src/lib/hub/Hub.svelte'],
+    'server-context.ts': ['src/lib/app/ServerScope.svelte', 'src/lib/hub/Hub.svelte', 'src/lib/files/Files.svelte'],
     // ②b-2-1: App builds each runtime's state bundle; pages never do.
     'server-state.ts': ['src/App.svelte'],
     'server-union.ts': [],

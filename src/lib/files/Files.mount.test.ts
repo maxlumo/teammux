@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
-const compiled = compileMount(new URL('./Files.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+const compiled = compileMount(new URL('./Files.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 const entries = [
   { name: 'AGENTS.md', path: '/fixture/AGENTS.md', type: 'file', size: 1200 },
   { name: 'next.md', path: '/fixture/next.md', type: 'file', size: 100 },
@@ -882,7 +882,7 @@ test('an earlier download\u2019s failure is reported, closable, without touching
 // download_* commands while they arrive. The whole buffer never crosses the
 // bridge (the JSON-per-byte encoding behind the owner's "invalid array length").
 const shell = compileMount(new URL('./Files.test.svelte', import.meta.url),
-  [new URL('../core/ws.ts', import.meta.url), new URL('../core/native.ts', import.meta.url)]);
+  [new URL('../core/ws.ts', import.meta.url), new URL('../core/native.ts', import.meta.url)], { serverScope: true });
 test('Android saves a download through download_chunk pieces, never one buffer (#305)', async context => {
   const size = 7 * 1024 * 1024 + 123;           // three pieces: 3 MiB, 3 MiB, the rest
   const file = new Uint8Array(size).map((_, i) => i & 0xff);
@@ -1082,7 +1082,7 @@ test('the Downloads view: two running rows, Cancel aborts its part, a part on di
   } finally { for (const f of feeds.values()) { try { f.close(); } catch {} } await app.close(); }
 });
 
-const guarded = compileMount(new URL('./Files.guard.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+const guarded = compileMount(new URL('./Files.guard.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 
 test('a server switch asks an unsaved editor through its own discard dialog (board 315)', async context => {
   let api!: { confirmLeave: () => Promise<boolean> };

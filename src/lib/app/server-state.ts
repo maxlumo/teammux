@@ -27,6 +27,8 @@
 //     store scoped to its server, and then the timing stops mattering.
 import { createHubPrefs, type HubPrefs } from '../hub/hub-prefs.svelte.ts';
 import { createAlertLog, createCentre, type Centre } from '../hub/notify-centre.svelte.ts';
+import { createFilesMemory, type FilesMemory } from '../files/files-memory.ts';
+import { createDownloads, type DownloadStore } from '../files/downloads.svelte.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -39,6 +41,11 @@ export interface ServerState {
   /** This server's notification centre: ITS alert list, and the window's one
    * bell, popover and jump request, which every server's centre shares. */
   centre: Centre;
+  /** What the Files pages remember about this server, and its download rows,
+   * TOGETHER: the page and the Hub's drawer share one record, and removing
+   * the runtime has to forbid new attempts, suspend and await, then release
+   * (②a's ruling). Memory only — nothing of it is stored. */
+  files: { memory: FilesMemory; downloads: DownloadStore };
 }
 
 /** One server's state, over `storage`. Call it only once that server is
@@ -47,5 +54,6 @@ export function createServerState(storage: Store): ServerState {
   return {
     prefs: createHubPrefs(storage),
     centre: createCentre(createAlertLog(storage)),
+    files: { memory: createFilesMemory(), downloads: createDownloads() },
   };
 }
