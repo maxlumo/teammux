@@ -2514,7 +2514,7 @@
       <ServerList bind:this={serverListEl} servers={serverList} currentId={serverCurId} link={serverLink} container={serverMenuEl}
         onpick={(id) => { serverMenuOpen = false; doServerSwitch(id); }}
         onrename={serverRename} onremove={serverRemove}
-        onadd={serverAddRow} onclose={() => (serverMenuOpen = false)} />
+        onadd={serverAddRow} onclose={() => (serverMenuOpen = false)} frozen={migrationBlocked ? t('migrationBlockedNote') : ''} />
     </div>
   {/if}
 
@@ -2532,7 +2532,7 @@
   {#snippet savedServers()}
     <!-- Settings › Connection: the same ServerList as the popover (board 315). -->
     <ServerList variant="page" servers={serverList} currentId={serverCurId} link={serverLink}
-      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} />
+      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} frozen={migrationBlocked ? t('migrationBlockedNote') : ''} />
   {/snippet}
 
   {#if addServer}

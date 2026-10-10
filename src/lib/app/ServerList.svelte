@@ -34,10 +34,15 @@
     onclose?: () => void;
     /** The element focus returns to after a rename/remove (the popover or page). */
     container?: HTMLElement | null;
+    /** Why the saved servers cannot be edited right now (board #335 ②b-4:
+     * the boot migration is blocked and the registry frozen). Non-empty: it
+     * is shown, and rename and remove are disabled — a refusal with its
+     * reason, never a silent no-op. */
+    frozen?: string;
   }
   let {
     servers, currentId, link = { connected: true }, variant = 'menu',
-    onpick, onrename, onremove, onadd, onclose = () => {}, container = null,
+    onpick, onrename, onremove, onadd, onclose = () => {}, container = null, frozen = '',
   }: Props = $props();
 
   /** The one status-dot language (stateDotColor / .live-dot): the server
@@ -163,6 +168,7 @@
 </script>
 
 <div class="server-list" class:page={variant === 'page'}>
+  {#if frozen}<small class="config-error appear" role="alert">{frozen}</small>{/if}
   {#each servers as s (s.id)}
     {@const cur = s.id === currentId}
     <div class="sm-row" class:cur>
@@ -185,11 +191,11 @@
         </button>
       {/if}
       <CommandButton variant="icon" icon="edit" label={`${t('serverRename')} ${s.name}`}
-        disabled={renaming === s.id} onclick={(e: MouseEvent) => { e.stopPropagation(); start(s, e.currentTarget as HTMLElement); }} />
+        disabled={renaming === s.id || !!frozen} onclick={(e: MouseEvent) => { e.stopPropagation(); start(s, e.currentTarget as HTMLElement); }} />
       {#if cur}
         <span class="sm-check" title={t('serverCurrent')}><Icon name="check" size={13} /></span>
       {:else}
-        <CommandButton variant="danger" iconOnly icon="x" label={`${t('serverRemove')} ${s.name}`}
+        <CommandButton variant="danger" iconOnly icon="x" label={`${t('serverRemove')} ${s.name}`} disabled={!!frozen}
           onclick={(e: MouseEvent) => { e.stopPropagation(); victim = { id: s.id, name: s.name }; }} />
       {/if}
     </div>

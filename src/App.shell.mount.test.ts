@@ -2134,3 +2134,46 @@ test('while blocked the registry is frozen: an unnamed entry adopts no hostname 
   for (let i = 0; i < 6; i++) await h.settle();
   assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'a').name, 'm-a.host', 'and adopts it once unblocked');
 });
+
+test('pending → a link to the address-only alias → it answers as m-a and merges into canonical → the claim lands the latest legacy draft (reviewer P1 on cde052f7)', async (context) => {
+  const { app } = await bootApp(context, {
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+      { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+    ]),
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::a': JSON.stringify({ work: 'OLD-ALIAS' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  }, () => 'm-a', { setup(window) { window.history.replaceState(null, '', '/?addr=ws://alias:9899&token=tok'); } });
+  await app.advance(1000);
+  for (let i = 0; i < 4; i++) await app.flush();
+  const ls = app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'the alias was absorbed into canonical');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' }, 'and canonical claimed');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'LATEST' }, 'the latest legacy draft, not a moved park');
+});
+
+test('while blocked, rename and remove are refused with the reason, not ignored (reviewer P2 on cde052f7)', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, { setup: store.setup });
+  await h.app.advance(6000);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+  const list = h.app.document.querySelector('.preferences .server-list');
+  assert.ok(list, 'the server list');
+  assert.match(list.querySelector('[role=alert]')?.textContent ?? '', /could not write its storage/iu, 'the reason, on the list');
+  const rename = list.querySelector<HTMLButtonElement>('button[aria-label^="Rename"]');
+  const remove = list.querySelector<HTMLButtonElement>('button[aria-label^="Remove"]');
+  assert.ok(rename?.disabled, 'rename is disabled');
+  assert.ok(remove?.disabled, 'and remove');
+});

@@ -449,14 +449,38 @@ export function residentKey(key: string, serverId: string): string {
   return `${key}::${serverId}`;
 }
 
-/** Hand every slot of `fromId` to `toId`, replacing what `toId` had. */
+/** The migration's one marker (server-state-migration.ts owns its meaning).
+ * Spelled here because moving a slot has to move its bookkeeping too. */
+export const LAYOUT_KEY = 'tmux_state_layout';
+
+/** Hand every slot of `fromId` to `toId`, replacing what `toId` had — and,
+ * while pre-#335 inputs are PENDING, the fingerprints the claim compares
+ * those slots against (reviewer P1 on cde052f7): a slot the identity layer
+ * moved is not a slot its owner wrote, so its baseline moves with it, and a
+ * claim into `toId` still folds the inputs over the moved park. The
+ * baseline moves FIRST: if a later write fails, the claim at worst keeps an
+ * old park, never mistakes one for an edit it then protects. */
 function moveSlots(storage: Store, fromId: string, toId: string): void {
   if (!fromId || fromId === toId) return;
+  moveBaseline(storage, fromId, toId);
   for (const key of RESIDENT_KEYS) {
     const value = storage.getItem(residentKey(key, fromId));
     if (value != null) storage.setItem(residentKey(key, toId), value);
     else storage.removeItem(residentKey(key, toId));
   }
+}
+
+function moveBaseline(storage: Store, fromId: string, toId: string): void {
+  let mark: { state?: unknown; slots?: Record<string, string> } | null = null;
+  try { mark = JSON.parse(storage.getItem(LAYOUT_KEY) || 'null'); } catch { return; }
+  if (!mark || mark.state !== 'pending' || !mark.slots || typeof mark.slots !== 'object') return;
+  const slots = { ...mark.slots };
+  for (const key of RESIDENT_KEYS) {
+    const from = residentKey(key, fromId);
+    const to = residentKey(key, toId);
+    if (from in slots) slots[to] = slots[from]!; else delete slots[to];
+  }
+  storage.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, slots }));
 }
 
 /**

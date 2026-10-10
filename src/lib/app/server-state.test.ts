@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
 import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, layoutMark, migrateServerState } from './server-state-migration.ts';
-import { RESIDENT_KEYS, activateSwitched, residentKey } from './servers.ts';
+import { RESIDENT_KEYS, activateSwitched, recordServer, residentKey } from './servers.ts';
 
 /** What a switch on a pre-#335 build did to storage: file the leaving
  * server's live keys under its id, surface the target's. The upgrade
@@ -507,4 +507,44 @@ test('inputs an old build changed after they were set aside are re-attributed be
   assert.equal(claimPending(storage, 'a2').reason, 'pending', 'm-a may not claim B s bytes');
   assert.equal(claimPending(storage, 'b2').reason, 'folded', 'the machine they now belong to may');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::b2')!), { work: 'B s bytes' });
+});
+
+/** Reviewer's fixture on cde052f7: an address-only alias `a` and the known
+ * canonical `c` (m-a), different addresses so boot repair does not merge
+ * them, each with an old park; CURRENT dangles; the inputs are m-a's. */
+function aliasPending() {
+  const storage = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 't' },
+      { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 't', machineId: 'm-a' },
+    ]),
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::a': JSON.stringify({ work: 'OLD-ALIAS' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    'tmux_hub_drawer::a': JSON.stringify({ work: 'old alias drawer' }),     // the live set has none
+  });
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  storage.setItem('tmux_server_current', 'a');          // a link activates the alias before any auth
+  return storage;
+}
+
+test('a merge that MOVES the alias s old park into canonical is not an edit: the claim still folds the inputs over it (reviewer P1 on cde052f7)', () => {
+  const storage = aliasPending();
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });   // it answers as m-a
+  assert.equal(storage.getItem('tmux_server_current'), 'c', 'absorbed into canonical');
+  assert.equal(storage.getItem('tmux_hub_drafts::c'), JSON.stringify({ work: 'OLD-ALIAS' }), 'the merge moved the alias s park');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'LATEST' }, 'the latest legacy draft, not the moved park');
+  assert.equal(storage.getItem('tmux_hub_drawer::c'), null, 'and a value the legacy set cleared does not come back with it');
+});
+
+test('what the alias really edited after the inputs went pending survives the merge and the claim', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'typed on the alias' }));
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'typed on the alias' }, 'a real edit is kept');
+  assert.equal(storage.getItem('tmux_hub_drawer::c'), null, 'and the untouched rest still folds');
 });

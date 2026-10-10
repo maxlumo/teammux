@@ -13,7 +13,7 @@ test('server switching is immediate and rename has its own sibling command (#165
   assert.match(list, /onclick=\{\(\) => onpick\(s\.id\)\}/u);
   assert.match(picker, /onpick=\{\(id\) => \{ serverMenuOpen = false; doServerSwitch\(id\); \}\}/u);
   assert.match(list, /<CommandButton variant="icon" icon="edit"/u);
-  assert.match(list, /disabled=\{renaming === s\.id\} onclick=\{\(e: MouseEvent\) => \{ e\.stopPropagation\(\); start\(s, e\.currentTarget as HTMLElement\); \}\}/u,
+  assert.match(list, /disabled=\{renaming === s\.id \|\| !!frozen\} onclick=\{\(e: MouseEvent\) => \{ e\.stopPropagation\(\); start\(s, e\.currentTarget as HTMLElement\); \}\}/u,
     'the pencil captures its own row, cannot restart an in-progress edit, and never bubbles into a switch');
   assert.match(source, /function doServerSwitch\(id\) \{[\s\S]*?void switchTo\(target\);/u,
     'a picked row goes through the one switch path');

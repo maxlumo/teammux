@@ -475,7 +475,11 @@ its owner wrote since (reviewer P1-1 on 08fdb6ba). A non-empty slot is not
 evidence of that: it may be the owner's pre-#335 park, older than the inputs.
 So the pending record fingerprints every slot that existed when the inputs
 were set aside, and only a slot that changed, appeared or disappeared since is
-kept. It fingerprints the inputs too (P2-a): if a build from before #335 has
+kept. A slot the identity layer MOVED is not one its owner wrote: when a
+merge hands the current alias's slots to its canonical entry, `moveSlots`
+moves their baselines with them (reviewer P1 on cde052f7), so a claim into
+the canonical entry still folds the inputs over the alias's old park, while
+an edit the alias really made after the inputs went pending stays. It fingerprints the inputs too (P2-a): if a build from before #335 has
 rewritten them since, the machine they belong to is read again from its
 mirror before anybody claims them. Any other server runs on its own slots
 while the input stays pending, however many come first. A
@@ -516,6 +520,8 @@ lost to it. In that commit:
   recorded), a switch, an address row, the optimizer, the reconnect loop or a
   late reconnect success, an arrival — nor any other registry write (a
   hostname adoption, a rename or remove, an address list edit; reviewer P2-b).
+  The server lists show the reason and disable rename and remove, so a person
+  is refused with a reason rather than ignored.
   The navigation's merge rewrite (`followMerges`) is a pre-bind write too, and
   its failure blocks (P1-3). The connect card shows the reason and offers only
   Retry; connected, the content area's panel does. Retry re-runs every step

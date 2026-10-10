@@ -54,7 +54,9 @@
 // matches its fingerprint (or never existed and still does not) takes the
 // live value, or is cleared — the fold's rule — while a slot that changed,
 // appeared or disappeared since was written by the owner on this build, and
-// is kept. The record also fingerprints the INPUTS themselves (P2-a): only a
+// is kept. An identity merge that MOVES a slot moves its fingerprint too
+// (servers.ts `moveSlots`): a relocation is not an edit. The record also
+// fingerprints the INPUTS themselves (P2-a): only a
 // build from before #335 writes them, and if one has since, the evidence
 // they carry (the legacy mirror's machine) is read again before anybody
 // claims them.
@@ -74,7 +76,7 @@
 // again before it builds any server's state (`swapScope`) — which is where a
 // fresh client folds for its first server and a pending input meets the
 // server that can claim it.
-import { RESIDENT_KEYS, currentServerId, loadServers, residentKey } from './servers.ts';
+import { LAYOUT_KEY, RESIDENT_KEYS, currentServerId, loadServers, residentKey } from './servers.ts';
 import { quarantineLegacyNav } from './nav-saved.ts';
 import type { ServerId } from './refs.ts';
 
@@ -135,8 +137,9 @@ function hasInputs(storage: Store): boolean {
 
 /** The completion marker. Unprefixed and single: its subject is the INPUTS,
  * which there is only one set of, and a second marker would mean a second
- * write and a window between them. */
-export const LAYOUT_KEY = 'tmux_state_layout';
+ * write and a window between them. Spelled in servers.ts, whose identity
+ * merges move a pending record's slot baselines with the slots. */
+export { LAYOUT_KEY };
 /** The layout this fold produces. A version rather than a boolean so a later
  * layout change can tell "folded by #335" from "folded by whatever comes
  * next" instead of seeing an opaque true. */
