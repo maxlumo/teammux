@@ -99,3 +99,22 @@ test('a handover with no server bound still answers', () => {
   handovers.endAll();
   assert.equal(first.current(), false);
 });
+
+test('a claim shares the owner counter: the later attempt owns the outcome (board #335 ②b-2-2)', () => {
+  // The boot dial and a reconnect attempt take the socket WITHOUT standing
+  // the handle down. The connect form opening a handover afterwards must make
+  // the boot dial stale — including one whose connect had already resolved —
+  // and a claim after a handover makes that handover stale in turn.
+  const h = handle();
+  const handovers = createHandovers();
+  const boot = handovers.claim();
+  assert.equal(boot.current(), true);
+  assert.deepEqual(h.log, [], 'a claim stands nothing down');
+  const form = handovers.open(h.runtime);
+  assert.equal(boot.current(), false, 'the form took the socket after the boot dial');
+  const retry = handovers.claim();
+  assert.equal(form.current(), false, 'and a later claim takes it from the form');
+  assert.equal(retry.current(), true);
+  handovers.endAll();
+  assert.equal(retry.current(), false, 'endAll ends claims too');
+});

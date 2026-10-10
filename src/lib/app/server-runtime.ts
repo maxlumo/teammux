@@ -88,10 +88,20 @@ export interface ServerRuntime {
   /** The saved entry, read fresh so a rename or a new active address shows
    * through. Falls back to the last known one if it has been removed. */
   entry(): ServerEntry;
-  /** Connect and authenticate, then canonicalize the identity. */
-  dial(): Promise<DialResult>;
-  /** Ask the server what it can do. Safe to call repeatedly. */
-  probeCaps(): Promise<ServerCaps>;
+  /** Connect and authenticate, then canonicalize the identity.
+   *
+   * `owns` is the HOST's answer to "is the app still waiting on this dial?"
+   * (board #335 ②b-2-2, reviewer P1-b). The runtime knows only its own dials;
+   * the shared socket has other owners — the connect form, the reconnect
+   * loop — that replace it without dialling through this runtime. A dial whose
+   * host has moved on records nothing and reports `superseded`, even when its
+   * own connect had already resolved. */
+  dial(owns?: () => boolean): Promise<DialResult>;
+  /** Ask the server what it can do. Safe to call repeatedly. `each` is called
+   * with the caps as EACH answer lands (the newest round only), so a quick
+   * Hub answer is not held behind a slow backends one (reviewer P2,
+   * 2026-10-10). Resolves once both have. */
+  probeCaps(each?: (caps: ServerCaps) => void): Promise<ServerCaps>;
   caps(): ServerCaps;
   /** The machine the live socket reported, else the entry's saved stamp. */
   machineId(): string;
@@ -317,7 +327,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     if (target.id === id) known = next.find((s) => s.id === id) ?? known;
   }
 
-  async function dial(): Promise<DialResult> {
+  async function dial(owns: () => boolean = () => true): Promise<DialResult> {
     if (dead) return { ok: false, reason: 'gone' };
     // This attempt's identity, captured before the first await. A runtime may
     // dial more than once, and `Connection` can only reject a dial that has
@@ -331,7 +341,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // attempt is current.
     const attempt = ++dialled;
     /** Is this still the attempt that owns the runtime? */
-    const mine = () => !dead && attempt === dialled;
+    const mine = () => !dead && attempt === dialled && owns();
     const target = loadServers(storage).find((s) => s.id === id);
     // Nothing saved under this id: the entry was removed (or merged away)
     // while the runtime was idle. Dialling the last known address would mint a
@@ -343,7 +353,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // ahead of the registry (the connect form, the optimizer, the address
     // pick, a failover) — dialling the entry's saved address there would go
     // back to the address the user just left. For any other id it is the
-    // entry itself. b3-4 retires the mirror, and the two answers become one.
+    // entry itself. b2-4 retires the mirror compatibility, and the two answers
+    // become one.
     const route = targetOf(storage, id);
     const address = route?.address || target.address;
     const token = route ? route.token : target.token;
@@ -466,9 +477,10 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     }
   }
 
-  async function probeCaps(): Promise<ServerCaps> {
+  async function probeCaps(each?: (caps: ServerCaps) => void): Promise<ServerCaps> {
     const round = ++probed;
-    await Promise.all([probeHub(round), probeBackends(round)]);
+    const publish = () => { if (!dead && round === probed) each?.(caps); };
+    await Promise.all([probeHub(round).then(publish), probeBackends(round).then(publish)]);
     return caps;
   }
 

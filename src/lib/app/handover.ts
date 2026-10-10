@@ -46,6 +46,12 @@ export interface Handovers {
    * A null runtime (no server bound) still gets a handover, so the caller has
    * one shape to deal with. */
   open(runtime: ServerRuntime | null): Handover;
+  /** Take the socket for an attempt that does NOT stand the handle down —
+   * the boot dial, a reconnect attempt (board #335 ②b-2-2, reviewer P1-b).
+   * It shares the one ownership counter with `open`, so whichever attempt
+   * starts later owns the outcome: a boot dial is no longer current once the
+   * connect form opens its handover, and the reverse. */
+  claim(): { current(): boolean };
   /** End every open handover: none of them is current any more. What the host
    * calls when it revokes the handle itself. */
   endAll(): void;
@@ -80,6 +86,10 @@ export function createHandovers(): Handovers {
           runtime?.settle(ticket, verdictOf(outcome));
         },
       };
+    },
+    claim() {
+      const mine = ++open;
+      return { current: () => mine === open };
     },
     endAll() {
       open++;

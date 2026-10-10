@@ -13,7 +13,7 @@
 // re-dials, the Connection page's address pick, and a failover that moved to
 // an alternate. A registry read there would reconnect to the address the user
 // just left. For any OTHER id the registry is the only record there is: the
-// entry's address and token, and its machine's failover set. b3-4 retires the
+// entry's address and token, and its machine's failover set. b2-4 retires the
 // mirror, and then there is one source for every id.
 import { currentServerId, loadServers, machinesMap } from './servers.ts';
 

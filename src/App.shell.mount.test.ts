@@ -307,7 +307,10 @@ const byAddress: MachineAt = (url) => (url.includes('//b') ? 'm-b' : 'm-a');
 
 /** A transport that answers as whichever machine the address belongs to, and
  * that a case can DROP — which is how a failover begins. */
-function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}) {
+/** Hold a dial before it answers: resolve the returned promise to let it. */
+type DialGate = (url: string, n: number) => Promise<void> | null;
+
+function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}, gate: DialGate = () => null) {
   let connected = false;
   let machine = '';
   let dials = 0;
@@ -323,9 +326,15 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
   const module = {
     connect: async (url: string) => {
       calls.push(`connect:${url}`);
-      machine = machineAt(url, ++dials);
-      connected = true;
-      return machine;
+      const n = ++dials;
+      const mine = machineAt(url, n);
+      const held = gate(url, n);
+      if (held) await held;
+      calls.push(`answered:${url}#${n}`);
+      // A dial a later one replaced still answers, as a slow socket can — but
+      // it is not the connection any more, so it changes nothing here.
+      if (n === dials) { machine = mine; connected = true; }
+      return mine;
     },
     disconnect: () => { connected = false; },
     isConnected: () => connected,
@@ -370,10 +379,10 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
  * and each case says what the client wakes up with. */
 async function bootApp(
   context: TestContext, seed: Record<string, string>, machineAt?: MachineAt,
-  more: { rpc?: Record<string, unknown>; setup?: (window: any) => void; calls?: string[] } = {},
+  more: { rpc?: Record<string, unknown>; setup?: (window: any) => void; calls?: string[]; gate?: DialGate } = {},
 ) {
   const calls: string[] = more.calls ?? [];
-  const transport = twoServerTransport(calls, machineAt, more.rpc);
+  const transport = twoServerTransport(calls, machineAt, more.rpc, more.gate);
   const app = await (await compiled).mount(context, {
     props: {},
     modules: [asModule(transport.module), terminalStub],
@@ -830,4 +839,71 @@ test('the boot dial is the bound runtime s, and records the machine it reached (
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://a:9899'], 'one dial, to the mirror s address');
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the dial folded the alias');
   assert.equal(onScreen(), 'work:1.0', 'and the app came up on that machine s navigation');
+});
+
+test('a boot dial that reaches ANOTHER known machine arrives there; it never binds A over B s socket', async (context) => {
+  // reviewer P1-a on cc5e517e. A and B are both known machines, and the
+  // address saved for A answers as B. recordServer keeps both entries, so
+  // CURRENT still names A — and bringing the app up there rebuilt A's runtime
+  // over B's socket. The socket is B's: the app arrives at B.
+  const { app, onScreen, restored } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url) => (url.includes('//a') ? 'm-b' : 'm-b'));
+  const servers = JSON.parse(app.window.localStorage.getItem('tmux_servers')!);
+  assert.deepEqual(servers.map((e: any) => `${e.id}:${e.machineId}`), ['a:m-a', 'b:m-b'], 'both entries stay, A s identity untouched');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'the app is on B');
+  assert.equal(onScreen(), 'work:2.0', 'with B s own navigation');
+  assert.equal(restored(), 'b:work:2.0');
+  const parkedA = JSON.parse(app.window.localStorage.getItem('tmux_state::a')!);
+  assert.equal(parkedA.pane?.target ?? parkedA.terminalTarget, 'work:1.0', 'and A s was parked, not lost');
+});
+
+test('a boot dial that answers after the connect form took the socket records nothing and brings nothing up', async (context) => {
+  // reviewer P1-b on cc5e517e. The boot dial D1 is still out when the person
+  // connects through the card (D2). D1 then answers — as a machine nobody
+  // saved, so ANY identity write would show as a new entry, and any bringUp
+  // as the app moving off D2's server.
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { app, settle, onScreen } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url, n) => (n === 1 ? 'm-x' : url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, gate: (_url, n) => (n === 1 ? held : null) });
+  // The boot gives a slow dial five seconds, then shows the connect page —
+  // which is where a person types a different address.
+  await app.advance(5000); await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]');
+  assert.ok(field, 'the connect card is up while the boot dial is still out');
+  field.value = 'ws://b:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle(); await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'D2 arrived at B');
+  const before = app.window.localStorage.getItem('tmux_servers');
+
+  release();
+  await settle(); await settle();
+  assert.ok(events.includes('answered:ws://a:9899#1'), 'D1 did answer, late');
+  assert.equal(app.window.localStorage.getItem('tmux_servers'), before, 'and recorded nothing — no entry for m-x, no address moved');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'nothing brought A back up');
+  assert.equal(onScreen(), 'work:2.0', 'the app is still on B s navigation');
+});
+
+test('the Hub shows when its own probe answers, not after a slow backends list', async (context) => {
+  // reviewer P2 on cc5e517e: Promise.all held the Hub behind backends_list.
+  let release: () => void = () => {};
+  const slow = new Promise<{ backends: never[] }>((resolve) => { release = () => resolve({ backends: [] }); });
+  const { app, settle } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, { rpc: {
+    hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }),
+    hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }),
+    hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }),
+    backendsList: () => slow,
+  } });
+  assert.equal(!!app.document.querySelector('.rail-bell'), true, 'the Hub is up while backends_list is still out');
+  release(); await settle();
 });

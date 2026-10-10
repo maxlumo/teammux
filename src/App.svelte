@@ -780,7 +780,9 @@
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
 
   const reconnectMachine = createReconnectMachine({
-    connect,
+    // Each attempt takes the socket: a boot dial still waiting is no longer
+    // the app's (reviewer P1-b, 2026-10-10).
+    connect: (url, token, ms) => { handovers.claim(); return connect(url, token, ms); },
     findBestAddress,
     isAddressViable,
     noteAddressUnreachable,
@@ -864,11 +866,42 @@
     const runtime = scopeSwap.bound();
     if (!runtime) return;
     const intent = serverSwitch.intent;
-    void runtime.probeCaps().then((caps) => {
+    // Published as EACH answer lands (reviewer P2): the Hub shows when its own
+    // probe answers, not after a slow backends list.
+    void runtime.probeCaps((caps) => {
       if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
       if (caps.hub !== null) hubState = { available: caps.hub, probed: true };
       setServedBackends(caps.backends);
     });
+  }
+
+  /** The boot dial for the current entry authenticated as ANOTHER saved one
+   * (`elsewhere`, reviewer P1-a on cc5e517e). Two different facts arrive as
+   * that one verdict:
+   *
+   *   - the entry was an address-only alias of that machine, and identity
+   *     repair ABSORBED it: CURRENT already names the canonical entry, so the
+   *     app simply comes up on it;
+   *   - both entries are known machines and BOTH stay: the address that used
+   *     to reach A reaches B now. CURRENT still names A, and bringing the app
+   *     up would rebuild A's runtime over B's socket. The socket is B's, so
+   *     the app ARRIVES at B the way the connect page arrives at a different
+   *     server — park A, point the live keys at B (`activateConnected`), and
+   *     come up on B through the swap (`onConnected(true)`). That path asks
+   *     no leave guard, and here there is nothing to ask: the socket already
+   *     answered as B, and "stay on A" is not a state that exists any more.
+   *     A's handle was detached by the dial itself; nothing is sent for A. */
+  function arrivedElsewhere(result, addr, token) {
+    if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
+    try {
+      const act = activateConnected(localStorage, {
+        address: addr, token,
+        ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
+        ...(result.machineId ? { machineId: result.machineId } : {}),
+      });
+      if (act.reload) { onConnected(true); return; }
+      bringUp(addr, token);
+    } catch { page = 'settings'; }
   }
 
   /** The disconnected connect page reached a server. `switched`: it is a
@@ -1595,19 +1628,25 @@
     // route the one reader names, which for the server the app is on is the
     // active mirror — `addr` and `token` here. A client with no saved entry
     // yet has nothing bound, and connects through the facade as before.
+    //
+    // The dial OWNS the socket only until another attempt takes it — the
+    // connect form, a reconnect attempt, a switch (reviewer P1-b,
+    // 2026-10-10). It claims the host's one owner counter, the runtime asks
+    // that claim before it records anything, and the outcome below is acted
+    // on only while the claim is still current: a result that had already
+    // resolved when the form took over says nothing about the app now.
+    const owner = handovers.claim();
     const runtime = scopeSwap.bound();
-    const dialled = runtime ? runtime.dial() : connect(addr, token).then(() => ({ ok: true }));
+    const dialled = runtime ? runtime.dial(owner.current) : connect(addr, token).then(() => ({ ok: true }));
     dialled.then((result) => {
       clearTimeout(timeout);
-      // `elsewhere`: it authenticated, as another saved entry. Identity
-      // repair has already folded the registry; bringing the app up binds
-      // the tree to whichever entry is current now, as it did when the
-      // facade connected and bringUp recorded the machine itself.
-      if (result.ok || result.reason === 'elsewhere') bringUp(addr, token);
-      else if (result.reason !== 'superseded') page = 'settings';
+      if (!owner.current()) return;
+      if (result.ok) { bringUp(addr, token); return; }
+      if (result.reason === 'elsewhere') { arrivedElsewhere(result, addr, token); return; }
+      if (result.reason !== 'superseded') page = 'settings';
     }).catch(() => {
       clearTimeout(timeout);
-      page = 'settings';
+      if (owner.current()) page = 'settings';
     });
   });
   // Android back gesture via history API

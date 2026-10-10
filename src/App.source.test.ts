@@ -442,7 +442,8 @@ test('every App socket owner goes through the switch module and loses ownership 
   // Server answers land only for the server that was asked.
   // Asked through the bound runtime (board #335 ②b-2-2), and kept only if
   // the switch still owns the intent AND that runtime is still bound.
-  assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*void runtime\.probeCaps\(\)\.then\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u);
+  assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*(?:\s*\/\/[^\n]*\n)*\s*void runtime\.probeCaps\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u,
+    'published as EACH answer lands, so a quick Hub answer is not held behind backends');
   assert.match(source, /if \(caps\.hub !== null\) hubState = \{ available: caps\.hub, probed: true \};/u,
     'the Hub flag moves only on a definitive answer');
   assert.doesNotMatch(source, /\bhubRooms\(|\bbackendsList\(/u, 'App asks no capability question over the facade');
@@ -713,15 +714,30 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // Since board #335 ②b-2-2 the BOUND runtime dials (the facade only for a
   // client with no saved entry), and a dial that authenticated — as this
   // entry or, after identity repair, as another — comes up through bringUp.
-  assert.match(source, /const dialled = runtime \? runtime\.dial\(\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);/u);
-  assert.match(source, /if \(result\.ok \|\| result\.reason === 'elsewhere'\) bringUp\(addr, token\);/u);
+  // The dial owns the socket only while its claim on the host's owner counter
+  // is current (reviewer P1-b on cc5e517e): the runtime asks it before it
+  // records anything, and the outcome is acted on only while it still holds.
+  assert.match(source, /const owner = handovers\.claim\(\);\s*const runtime = scopeSwap\.bound\(\);\s*const dialled = runtime \? runtime\.dial\(owner\.current\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
+  assert.match(source, /\.catch\(\(\) => \{\s*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) page = 'settings';/u);
+  assert.match(source, /if \(result\.ok\) \{ bringUp\(addr, token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ arrivedElsewhere\(result, addr, token\); return; \}/u);
+  // And every reconnect attempt takes the socket too.
+  assert.match(source, /connect: \(url, token, ms\) => \{ handovers\.claim\(\); return connect\(url, token, ms\); \},/u);
   // A SUPERSEDED dial reports nothing: whoever took the socket over owns the
   // outcome, and sending the app to Settings would undo a connect that is
   // succeeding. No mount can stage the race on the boot path, so it is pinned.
-  assert.match(source, /else if \(result\.reason !== 'superseded'\) page = 'settings';/u);
+  assert.match(source, /if \(result\.reason !== 'superseded'\) page = 'settings';/u);
   const fn = (source.match(/dialled\.then\(\(result\) => \{[\s\S]*?\n    \}\)/u)?.[0] ?? '') + (source.match(/function bringUp\(addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '');
   assert.match(fn, /recordServer\(localStorage, \{[\s\S]*?machineId: mid/u, 'boot stamps the identity');
   assert.ok(!fn.includes('activateConnected'), 'boot never activates — it IS the current server');
+  // ONE exception, kept out of that path on purpose (reviewer P1-a on
+  // cc5e517e): the address answered as ANOTHER known machine and both entries
+  // stay, so the socket is B's and the app arrives at B like the connect page
+  // does. Only when CURRENT did not already move.
+  const elsewhere = source.match(/function arrivedElsewhere\(result, addr, token\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(elsewhere, /^function arrivedElsewhere\(result, addr, token\) \{\s*if \(currentServerId\(localStorage\) === result\.entry\.id\) \{ bringUp\(addr, token\); return; \}/u,
+    'an absorbed alias already moved CURRENT: just come up');
+  assert.match(elsewhere, /activateConnected\(localStorage,[\s\S]*?if \(act\.reload\) \{ onConnected\(true\); return; \}/u,
+    'both kept: arrive at B through the connect page s different-server path');
 });
 
 test('doConnect never writes the live tmux_machine_id — activateConnected owns it (board #55)', async () => {
@@ -1042,7 +1058,7 @@ test('every connect path runs the one server handshake, which loads backends_lis
   // connected must reach serverReady(), and nothing may probe or load
   // backends on its own beside it.
   const ready = source.match(/function serverReady\(\) \{([\s\S]*?)\n  \}/u)?.[1] ?? '';
-  assert.match(ready, /runtime\.probeCaps\(\)/u, 'one probe, both questions');
+  assert.match(ready, /runtime\.probeCaps\(/u, 'one probe, both questions');
   assert.match(ready, /setServedBackends\(caps\.backends\);/u);
   const sites = [...source.matchAll(/connected = true;/gu)].map((m) => m.index!);
   assert.equal(sites.length, 3, 'boot, reconnect success, manual connect');
@@ -1053,7 +1069,7 @@ test('every connect path runs the one server handshake, which loads backends_lis
     assert.match(body, /serverReady\(\);/u, `the connect path at offset ${at} runs the handshake`);
   }
   const outside = source.replace(/function serverReady\(\) \{[\s\S]*?\n  \}/u, '');
-  assert.doesNotMatch(outside, /probeCaps\(\)/u, 'no path does half the handshake');
+  assert.doesNotMatch(outside, /probeCaps\(/u, 'no path does half the handshake');
 });
 
 test('a connect lands on the default page, Chat — never a hard-coded Terminal (#333)', () => {
