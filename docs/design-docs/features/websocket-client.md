@@ -550,16 +550,35 @@ another server. Three rules follow, and each was a hole first:
   paths that can reach another server. The switch REVOKES, because leaving is
   already decided there: the tree is unmounted, the guards have answered, and
   the target is by definition another server (its `resetMemory` step runs
-  before its connect). The connect form SUSPENDS and is handed the resume,
-  because its address may turn out to be this very server — revoking there
-  would replace the handle on every ordinary reconnect, rebuild every
-  always-mounted page and throw away the state they exist to keep, without
-  asking a single leave guard. A suspended handle refuses calls (the socket is
-  mid-flight anyway) and then resumes as the SAME handle, is released by the
-  swap if the server turned out to be different, or resumes after a failure
-  onto the server it never left. Clearing the landings after the DOM is gone is
-  the second line, never the first — it runs ticks later, by which time the
-  socket would already have changed hands.
+  before its connect). The connect form SUSPENDS, because its address may turn
+  out to be this very server — revoking there would replace the handle on
+  every ordinary reconnect, rebuild every always-mounted page and throw away
+  the state they exist to keep, without asking a single leave guard. A
+  suspended handle refuses calls (the socket is mid-flight anyway) and what
+  happens to it next is decided by the VERDICT of the attempt, never by the
+  attempt merely finishing:
+
+  | conclusion | verdict | why |
+  |---|---|---|
+  | `same-server` | resume | authenticated, and the identity layer confirmed this entry |
+  | `no-peer` | resume | the dial never got there, so there is no stranger to be confused with |
+  | `other-server` | release | a different server authenticated; the swap binds the new one |
+  | `unresolved` | hold | a peer authenticated and the registry write FAILED: refusing, but still there for the attempt that works out whose socket this is |
+
+  An identity-activation failure is therefore an error the person sees, never
+  a same-server success — swallowing it and reporting completion would resume
+  the old server's pages onto an unidentified peer. ONE host ticket covers the
+  whole chain, because handovers overlap: a form unmounted mid-dial and a new
+  instance starting its own are two instances, and to the old one its dial is
+  still its latest. So the form asks the handover whether it is still current
+  before the identity write and before bringing the app up, and every
+  verdict — including the terminal one — is refused for a ticket that is no
+  longer the suspension in force: a late `release` would end the very handle
+  the live handover is protecting.
+
+  Clearing the landings after the DOM is gone is the second line, never the
+  first — it runs ticks later, by which time the socket would already have
+  changed hands.
 
 The provider renders NOTHING without a runtime. Rendering the children
 anyway — merely without a context — built a whole provider-less

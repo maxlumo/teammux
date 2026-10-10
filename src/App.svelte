@@ -148,8 +148,9 @@
   function revokeScope() {
     scopeSwap.bound()?.dispose();
   }
-  /** The connect form's version: SUSPEND, and hand back a way to report what
-   * the attempt CONCLUDED.
+  /** The connect form's version: SUSPEND, and hand back the HANDOVER — a way
+   * to ask whether this attempt is still the one, and to report what it
+   * CONCLUDED.
    *
    * That form re-dials the same socket at an address that may turn out to be
    * this very server — the ordinary reconnect — and nobody knows which until
@@ -157,37 +158,44 @@
    * reconnect, remount every always-mounted page and throw away the state
    * they exist to keep, without asking a single leave guard (reviewer,
    * 2026-10-10). So the handle is suspended for the length of the handover
-   * and resumed only on a conclusion that says it is still serving its
-   * server:
+   * and the verdict decides what happens to it:
    *
    *   - `same-server`: authenticated, and the identity layer confirmed this
    *     is the entry we were on. Resume; nothing remounts.
    *   - `no-peer`: the dial never got there, so there is no new server to be
    *     confused with. The socket is down either way and the reconnect
    *     machine owns what happens next. Resume.
-   *   - `other-server`: a different server authenticated. Terminal: the
-   *     handle is released here, and the swap that follows binds the new one.
+   *   - `other-server`: a different server authenticated. Terminal; the swap
+   *     that follows binds the new one.
    *   - `unresolved`: a peer authenticated but its identity could not be
    *     established (the registry write failed). There IS an authenticated
    *     stranger on the socket and nothing proves it is ours, so the handle
-   *     STAYS SUSPENDED — refusing every call, but not released. Resuming on
-   *     "the function reached its finally" is what would put A's pages on B's
+   *     HOLDS — refusing every call, but not released. Resuming on "the
+   *     function reached its finally" is what would put A's pages on B's
    *     socket; releasing instead would be safe too, and worse: the next
    *     attempt that does establish this is still A would have to rebuild
-   *     every page, when the handle it needs is right there (orchestrator's
-   *     ruling, 2026-10-10). A later handover issues its own ticket, so the
-   *     conclusion that finally knows can lift this one.
+   *     every page, when the handle it needs is right there.
    *
-   * The ticket makes a stale conclusion harmless: an attempt that was
-   * superseded, cancelled or unmounted cannot lift the protection of the one
-   * that is actually in flight. */
+   * ONE ticket covers the whole chain, and `current()` is how the form asks
+   * before it writes identity or brings the app up. A generation inside the
+   * form only orders ITS OWN attempts: a form unmounted mid-dial and a new
+   * instance starting its own are two instances, and the first one's late
+   * completion would otherwise still write the registry, call `onConnected`
+   * and end a handle the live handover is protecting (reviewer, 2026-10-10). */
+  let handoverSeq = 0;
   function suspendScope() {
+    const mine = ++handoverSeq;
     const held = scopeSwap.bound();
     const ticket = held?.suspend() ?? 0;
-    return (outcome) => {
-      if (outcome === 'same-server' || outcome === 'no-peer') held?.resume(ticket);
-      else if (outcome === 'other-server') held?.dispose();
-      // `unresolved`: nothing. Not resumed, not released.
+    return {
+      /** Is this still the handover the app is waiting on? */
+      current: () => mine === handoverSeq,
+      settle: (outcome) => {
+        if (mine !== handoverSeq) return;
+        if (outcome === 'same-server' || outcome === 'no-peer') held?.settle(ticket, 'resume');
+        else if (outcome === 'other-server') held?.settle(ticket, 'release');
+        else held?.settle(ticket, 'hold');
+      },
     };
   }
   const shell = $derived(connected || !!switching);

@@ -36,7 +36,10 @@ async function mount(
       onConnected() { order.push('connected'); },
       beforeConnect() {
         order.push('stand-down');
-        return (outcome: string) => order.push(`conclude:${outcome}`);
+        return {
+          current: () => true,
+          settle: (outcome: string) => order.push(`conclude:${outcome}`),
+        };
       },
     },
     modules: [{
@@ -153,7 +156,10 @@ test('a peer that authenticated but could not be identified is not a same-server
       onConnected(switched: boolean) { order.push(`connected:${switched}`); },
       beforeConnect() {
         order.push('stand-down');
-        return (outcome: string) => order.push(`conclude:${outcome}`);
+        return {
+          current: () => true,
+          settle: (outcome: string) => order.push(`conclude:${outcome}`),
+        };
       },
     },
     modules: [
@@ -179,4 +185,58 @@ test('a peer that authenticated but could not be identified is not a same-server
     'and the app was never told this was its server');
   assert.match(app.document.querySelector('.error')?.textContent ?? '',
     /identif/iu, 'the person is told why');
+});
+
+test('an attempt the HOST has moved on from writes nothing and concludes nothing', async (context) => {
+  // Across instances (reviewer, 2026-10-10): this form can be unmounted
+  // mid-dial and a new one started, so the form's own counter cannot be the
+  // whole answer — to the old instance its attempt is still its latest. The
+  // host's handover is the authority, and it says the app is waiting on
+  // someone else now. The late dial must then write no identity, bring
+  // nothing up and settle nothing.
+  const order: string[] = [];
+  let current = true;
+  let release: ((machine: string) => void) | null = null;
+  const app = await (await compiled).mount(context, {
+    props: {
+      onConnected(switched: boolean) { order.push(`connected:${switched}`); },
+      beforeConnect() {
+        order.push('stand-down');
+        return {
+          current: () => current,
+          settle: (outcome: string) => order.push(`conclude:${outcome}`),
+        };
+      },
+    },
+    modules: [{
+      connect: (url: string) => {
+        order.push(`connect:${url}`);
+        return new Promise((resolve) => { release = resolve; });
+      },
+      disconnect: () => {},
+      getMachineId: () => 'm-a',
+      setSocket: async () => {},
+    }],
+    setup(window) {
+      window.localStorage.setItem('tmux_locale', 'en');
+      window.localStorage.setItem('tmux_servers', JSON.stringify([
+        { id: 'a', name: 'alpha', address: 'wss://same.test/ws', token: 'tok', machineId: 'm-a', named: true },
+      ]));
+      window.localStorage.setItem('tmux_server_current', 'a');
+    },
+  });
+  await connectTo({ ...app, order }, 'wss://same.test/ws');
+  assert.deepEqual(order, ['stand-down', 'connect:wss://same.test/ws'], 'the dial is in flight');
+
+  // The app moved on: another handover owns the handle now (a new Settings
+  // instance, the switcher, anything).
+  current = false;
+  const registryBefore = app.window.localStorage.getItem('tmux_servers');
+  release!('m-a');
+  for (let i = 0; i < 8; i++) await app.flush();
+
+  assert.deepEqual(order.filter((o) => o.startsWith('conclude') || o.startsWith('connected')), [],
+    'the stale attempt settled nothing and brought nothing up');
+  assert.equal(app.window.localStorage.getItem('tmux_servers'), registryBefore,
+    'and wrote no identity');
 });

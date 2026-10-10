@@ -194,7 +194,7 @@ test('a suspended handle refuses, and resumes as the SAME handle', async (t) => 
   await assert.rejects(() => held(), /suspended/u, 'and it does not send during the handover');
   await assert.rejects(() => rt.api.capturePane('work:1.0'), /suspended/u);
 
-  rt.resume(ticket);
+  rt.settle(ticket, 'resume');
   fire(held());
   await settle();
   assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
@@ -214,11 +214,11 @@ test('only the CURRENT handover s ticket may resume', async (t) => {
 
   const first = rt.suspend();
   const second = rt.suspend();                   // a newer handover takes over
-  rt.resume(first);                              // the OLD attempt settles
+  rt.settle(first, 'resume');                              // the OLD attempt settles
   await assert.rejects(() => rt.api.listSessions(), /suspended/u,
     'the stale conclusion did not lift the live handover s protection');
 
-  rt.resume(second);                             // the attempt that owns it
+  rt.settle(second, 'resume');                             // the attempt that owns it
   fire(rt.api.listSessions());
   await settle();
   assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
@@ -244,7 +244,7 @@ test('an unidentified peer leaves the handle suspended, not released', async (t)
 
   // The retry establishes that this IS our server, and resumes what was there.
   const retry = rt.suspend();
-  rt.resume(retry);
+  rt.settle(retry, 'resume');
   fire(rt.api.listSessions());
   await settle();
   assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
@@ -259,7 +259,7 @@ test('a handle released while suspended stays released', async (t) => {
   const rt = createSingleRuntime(e, { storage: saved(e) });
   const ticket = rt.suspend();
   rt.dispose();
-  rt.resume(ticket);                             // the form settles afterwards
+  rt.settle(ticket, 'resume');                             // the form settles afterwards
   assert.equal(rt.alive(), false);
   await assert.rejects(() => rt.api.listSessions(), /detached/u,
     'resume cannot bring back a handle whose server is gone');

@@ -18,6 +18,12 @@
    * conclusions that leave it still serving its own server. */
   type ConnectOutcome = 'same-server' | 'other-server' | 'no-peer' | 'unresolved';
 
+  /** The host's handover for ONE attempt. `current()` is what makes a late
+   * attempt harmless across instances — this form can be unmounted mid-dial
+   * and a new one started, and the old dial must then write no identity, bring
+   * nothing up and conclude nothing. */
+  type ConnectHandover = { current(): boolean; settle(outcome: ConnectOutcome): void };
+
   let {
     onConnected,
     beforeConnect,
@@ -45,7 +51,7 @@
      * Optional, because Settings is a person-level surface that also renders
      * with no server at all.
      */
-    beforeConnect?: ((() => (outcome: ConnectOutcome) => void) | (() => void)) | undefined;
+    beforeConnect?: (() => ConnectHandover | void) | undefined;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
@@ -144,14 +150,17 @@
     connecting = true;
     cancelled = false;
     const attempt = ++attempts;
-    const mine = () => attempt === attempts && !cancelled;
+    // Mine AND still the app's: the instance counter orders this form's own
+    // attempts, the host's handover says whether the app is still waiting on
+    // this one at all.
+    const live = () => attempt === attempts && !cancelled && (handover?.current() ?? true);
     // The handover of the shared socket: the host puts its current server's
     // handle aside before the dial, and this attempt reports what it
     // ESTABLISHED about the peer. Suspending rather than revoking is what
     // keeps an ordinary reconnect to the SAME server from remounting every
     // page; reporting a conclusion rather than completion is what keeps the
     // old server's pages off an unidentified peer.
-    const conclude = beforeConnect?.() as ((outcome: ConnectOutcome) => void) | void;
+    const handover = beforeConnect?.() as ConnectHandover | void;
     try {
       const url = normalizeAddress(address);
       localStorage.setItem('tmux_address', url);
@@ -160,13 +169,17 @@
       else localStorage.removeItem('tmux_socket');
       saveHistory(url, token);
       await connect(url, token);
-      // A superseded or cancelled attempt owns nothing from here on: not the
-      // registry, not `onConnected`, and not the handover.
-      if (!mine()) return;
+      // A superseded, cancelled or unmounted attempt owns nothing from here
+      // on: not the registry, not `onConnected`, and not the handover.
+      if (!live()) return;
       if (socket.trim()) {
         const { setSocket } = await import('../core/ws.ts');
         await setSocket(socket.trim()).catch(() => {});
       }
+      // Checked again here, after the socket/import awaits above and BEFORE
+      // the first identity write: a newer handover may have taken over while
+      // they resolved (reviewer, 2026-10-10).
+      if (!live()) return;
       // Save machine_id → address mapping
       try {
         const { getMachineId } = await import('../core/ws.ts');
@@ -197,10 +210,10 @@
           ...(socket.trim() ? { socket: socket.trim() } : {}),
           ...(mid ? { machineId: mid } : {}),
         });
-        if (!mine()) return;
+        if (!live()) return;
         if (act.reload) {
           // A different server authenticated: the old handle is terminal.
-          conclude?.('other-server');
+          handover?.settle('other-server');
           onConnected(true);
           return;
         }
@@ -209,23 +222,23 @@
         // is (the registry write failed). Treating that as a same-server
         // success is what would resume the old server's handle onto it, so it
         // is an error and the handle keeps refusing.
-        if (mine()) {
-          conclude?.('unresolved');
+        if (live()) {
+          handover?.settle('unresolved');
           error = t('configIdentityFailed');
           disconnect();
         }
         return;
       }
-      conclude?.('same-server');
+      handover?.settle('same-server');
       onConnected(false);
     } catch (e) {
-      if (!mine()) return;
+      if (!live()) return;
       // The dial never reached an authenticated peer, so there is no stranger
       // on the socket to be confused with this server.
-      conclude?.('no-peer');
+      handover?.settle('no-peer');
       error = (e as Error).message;
     } finally {
-      if (mine()) connecting = false;
+      if (live()) connecting = false;
     }
   }
 
@@ -241,7 +254,13 @@
   const shareLifetime = createFeedbackLifetime(value => { shareFeedback = value; });
   const shareContext = $derived({ address, token, socket });
   $effect(() => { void shareContext; shareLifetime.clear(); });
-  onDestroy(() => shareLifetime.dispose());
+  onDestroy(() => {
+    shareLifetime.dispose();
+    // An instance that goes away mid-dial takes its attempts with it: the
+    // dial it started must not come back and write identity, bring the app up
+    // or conclude a handover the next instance now owns (board #335 ②b-1).
+    attempts++;
+  });
   function buildShareUrl() {
     const url = normalizeAddress(address);
     const params = new URLSearchParams();

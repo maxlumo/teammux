@@ -127,11 +127,21 @@ export interface ServerRuntime {
    * ticket of the CURRENT suspension may resume.
    */
   suspend(): number;
-  /** Use the slot again — if `ticket` is the current suspension's. A stale
-   * ticket (a superseded, cancelled or unmounted attempt reporting late) and
-   * a handle that has since been released are both no-ops, so a caller can
-   * report its conclusion without first proving it still matters. */
-  resume(ticket: number): void;
+  /**
+   * End the handover `ticket` opened, with its verdict:
+   *
+   *   `resume`  — still serving its own server: use the slot again.
+   *   `release` — another server owns the slot now: terminal.
+   *   `hold`    — nothing was established: keep refusing, stay available.
+   *
+   * Honoured only for the suspension in force. A stale ticket (a superseded,
+   * cancelled or unmounted attempt reporting late) is a no-op in EVERY
+   * verdict, including the terminal one: a late `release` would end a handle
+   * that a live handover is protecting and may still resume (reviewer,
+   * 2026-10-10). So a caller can report its conclusion without first proving
+   * it still matters.
+   */
+  settle(ticket: number, verdict: 'resume' | 'release' | 'hold'): void;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime.
@@ -470,10 +480,14 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       if (!dead) suspended = ticket;
       return ticket;
     },
-    resume: (ticket: number) => {
+    settle: (ticket: number, verdict: 'resume' | 'release' | 'hold') => {
       // A stale attempt's conclusion says nothing about the handover that is
-      // actually in force.
-      if (!dead && ticket === suspended) suspended = 0;
+      // actually in force — not even a terminal one.
+      if (dead || ticket !== suspended) return;
+      if (verdict === 'resume') suspended = 0;
+      else if (verdict === 'release') dispose();
+      // `hold`: still suspended, still available to the attempt that works
+      // out whose socket this is.
     },
     dispose,
   };

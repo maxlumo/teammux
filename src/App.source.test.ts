@@ -492,11 +492,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The form's handover resumes only on a conclusion that leaves the handle
   // serving its own server, and only with the ticket of the suspension in
   // force: a stale attempt's report must not lift a live one's protection.
-  assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*const ticket = held\?\.suspend\(\) \?\? 0;/u);
-  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.resume\(ticket\);\s*else if \(outcome === 'other-server'\) held\?\.dispose\(\);/u,
-    'only a conclusion that leaves the handle serving its own server resumes it');
-  assert.match(source, /\/\/ `unresolved`: nothing\. Not resumed, not released\./u,
-    'an authenticated stranger leaves the handle suspended: refusing, but still there for the attempt that works out it is ours');
+  assert.match(source, /function suspendScope\(\) \{\s*const mine = \+\+handoverSeq;\s*const held = scopeSwap\.bound\(\);\s*const ticket = held\?\.suspend\(\) \?\? 0;/u);
+  // ONE host ticket covers the whole chain: the form asks `current()` before
+  // it writes identity or brings the app up, and every verdict — including the
+  // terminal one — is refused for a stale handover.
+  assert.match(source, /current: \(\) => mine === handoverSeq,/u);
+  assert.match(source, /settle: \(outcome\) => \{\s*if \(mine !== handoverSeq\) return;/u,
+    'a superseded handover settles nothing at all, not even a release');
+  assert.match(source, /if \(outcome === 'same-server' \|\| outcome === 'no-peer'\) held\?\.settle\(ticket, 'resume'\);\s*else if \(outcome === 'other-server'\) held\?\.settle\(ticket, 'release'\);\s*else held\?\.settle\(ticket, 'hold'\);/u,
+    'the four conclusions map onto resume / release / hold, and nothing else');
   // The protection is never skipped because an address looked familiar: an
   // address is a route, and a route can come to reach another machine. What
   // decides is the identity the server reports, which is `activateConnected`'s
@@ -557,13 +561,19 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // Since #335 ②b-1 each branch also reports what it ESTABLISHED, because the
   // handle may only resume on a conclusion that leaves it serving its own
   // server. An identity-activation failure is NOT a same-server success.
-  assert.match(fn, /conclude\?\.\('other-server'\);\s*onConnected\(true\);/u);
-  assert.match(fn, /conclude\?\.\('same-server'\);\s*onConnected\(false\);/u);
-  assert.match(fn, /\} catch \{[\s\S]*?conclude\?\.\('unresolved'\);[\s\S]*?\}\s*return;/u,
+  assert.match(fn, /handover\?\.settle\('other-server'\);\s*onConnected\(true\);/u);
+  assert.match(fn, /handover\?\.settle\('same-server'\);\s*onConnected\(false\);/u);
+  assert.match(fn, /\} catch \{[\s\S]*?handover\?\.settle\('unresolved'\);[\s\S]*?\}\s*return;/u,
     'a peer that authenticated but could not be identified is an error, not a success');
-  assert.match(fn, /conclude\?\.\('no-peer'\);/u, 'and a dial that never got there says so');
-  assert.match(fn, /const mine = \(\) => attempt === attempts && !cancelled;/u,
-    'a superseded attempt concludes nothing');
+  assert.match(fn, /handover\?\.settle\('no-peer'\);/u, 'and a dial that never got there says so');
+  // The host's handover is part of the liveness question, so an attempt the
+  // app is no longer waiting on writes no identity and brings nothing up —
+  // including one from an instance that has been unmounted.
+  assert.match(fn, /const live = \(\) => attempt === attempts && !cancelled && \(handover\?\.current\(\) \?\? true\);/u);
+  const iIdentity = fn.indexOf('activateConnected(localStorage');
+  const iGuard = fn.lastIndexOf('if (!live()) return;', iIdentity);
+  assert.ok(iGuard > fn.indexOf('await connect(url, token)'),
+    'liveness is re-checked after the socket awaits and BEFORE the first identity write');
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
