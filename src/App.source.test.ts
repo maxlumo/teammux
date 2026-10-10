@@ -309,7 +309,9 @@ test('a saved `agents` page never strands a phone on an unreachable layer', () =
 test('Settings only offers the category when there is a bus and no Agents page', () => {
   // hubEligible is the desktop-server gate; agentsLivesInSettings is the device.
   assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
-  assert.match(source, /agentsEditRequest=\{agentsEditReq\}/u, 'the Hub’s jump reaches the embedded editor');
+  // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
+  // jump travels through that one guard rather than straight from the state.
+  assert.match(source, /agentsEditRequest=\{landingFor\(agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
   assert.match(source, /openRequest=\{prefsOpenReq\}/u);
 });
 
@@ -523,7 +525,31 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // server it runs against (board #335 ②b-2).
   assert.match(source, /function navServerId\(\) \{\s*return scopeRuntime\?\.id \?\? '';\s*\}/u,
     'one answer to which server a reference names');
-  assert.match(source, /saveNav\(localStorage, \{[\s\S]{0,300}?pane: pane\(terminalSession, terminalTarget\),/u);
+  assert.match(source, /saveNav\(localStorage, \{ page, pane: termPane, splitLayout, splitCells \}\);/u,
+    'the saved state writes the refs App already holds, rather than rebuilding them');
+  // Every reference is minted in ONE place per kind, from the bound server.
+  assert.match(source, /function showPane\(session, target\) \{\s*termPane = target \? paneRef\(navServerId\(\),/u);
+  assert.match(source, /function showSession\(session\) \{\s*filesRef = session \? sessionRef\(navServerId\(\), session\) : null;/u);
+  // Every write to the pane assigns a REF or null — never a bare target —
+  // which is what makes "the identity has one home" checkable.
+  assert.match(source, /let termPane = \$state\(null\);/u);
+  for (const write of [...source.matchAll(/^\s*termPane = (.+)$/gmu)].slice(1)) {
+    assert.match(write[1]!, /paneRef\(navServerId\(\)|^pane;$|^null;$|^move\(termPane\);$|^s\.pane;$/u,
+      `termPane = ${write[1]} — a pane is a reference, not a target string`);
+  }
+  // The strings consumers and the wire take are DERIVED: a serverId cannot
+  // reach a `target` or `session` argument.
+  assert.match(source, /const terminalTarget = \$derived\(termPane\?\.target \?\? ''\);/u);
+  assert.match(source, /const terminalSession = \$derived\(termPane\?\.session \?\? ''\);/u);
+  assert.match(source, /const filesSession = \$derived\(filesRef\?\.session \?\? ''\);/u);
+  assert.match(source, /<SplitView cells=\{splitViewCells\}/u, 'and the split hands over strings too');
+  // A rename belongs to ONE server.
+  assert.match(source, /const rename = \{ serverId: navServerId\(\), from, to \};\s*const move = \(ref\) => \(ref \? retargetRef\(ref, rename\) : ref\);/u);
+  // A landing names its tree, and is delivered only to that tree.
+  assert.match(source, /function landingFor\(request\) \{\s*return request && request\.serverId === navServerId\(\) \? request : null;/u);
+  for (const req of ['filesNavReq', 'boardIssueReq']) {
+    assert.match(source, new RegExp(`${req} = \\{ serverId: navServerId\\(\\),`, 'u'), `${req} names its tree`);
+  }
   assert.match(source, /const s = navFor\(readLegacyNav\(localStorage, navLegacyOwner\), navServerId\(\)\);/u,
     'attributed, then filtered to this runtime');
   assert.match(source, /const navLegacyOwner = currentServerId\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
