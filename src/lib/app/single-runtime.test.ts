@@ -138,6 +138,46 @@ test('releasing the handle leaves the connection to its owner', async (t) => {
   assert.equal(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'), true);
 });
 
+test('a successful answer whose continuation runs after the handover sends nothing', async (t) => {
+  t.after(cleanup);
+  // The shape the earlier version of this test did NOT create (reviewer's
+  // evidence note, 2026-10-10): the call SUCCEEDED, the answer is in, and the
+  // page's continuation — the `.then` that does the next thing — runs after
+  // the lease was revoked and the socket changed hands. That continuation is
+  // ordinary code holding an ordinary api object.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  const socketA = await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+  const answered = rt.api.listSessions();
+  await settle();
+  const sent = socketA.texts().find((m: any) => m.method === 'list_sessions');
+  assert.ok(sent, 'the call went out');
+  // The server answers it successfully, and the connection processes it: from
+  // here the call has SUCCEEDED and only the page's continuation is still owed.
+  socketA.message({ id: (sent as any).id, result: [{ name: 'work' }] });
+  await settle();
+
+  let late: Promise<unknown> | null = null;
+  // Attached now, so it is queued as a microtask and runs AFTER the
+  // synchronous handover below — which is the shape a page produces: the
+  // answer arrived, and what it does next happens a turn later.
+  const continuation = answered.then((sessions: any) => {
+    late = rt.api.capturePane('work:1.0');
+    return sessions;
+  });
+  rt.dispose();
+  const socketB = await handshakePlain(connection, 'ws://b:9899', 'tokB', 'm-b');
+  const beforeB = socketB.sent.length;
+
+  assert.deepEqual((await continuation).map((s: any) => s.name), ['work'],
+    'the call that already succeeded still resolves with ITS server s answer');
+  await assert.rejects(() => late!, /detached/u, 'but what the continuation does next is refused');
+  // And again after B is fully up, which is where the new tree would mount.
+  await assert.rejects(() => rt.api.listSessions(), /detached/u);
+  await settle();
+  assert.equal(socketB.sent.length, beforeB, 'B s socket carried nothing of A s');
+});
+
 test('a suspended handle refuses, and resumes as the SAME handle', async (t) => {
   t.after(cleanup);
   // The connect form's handover: the socket is about to be re-dialled at an

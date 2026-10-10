@@ -490,6 +490,13 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The connect form SUSPENDS instead, because its address may be the same
   // server: revoking there would rebuild every page on an ordinary reconnect.
   assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*held\?\.suspend\(\);\s*return \(\) => held\?\.resume\(\);/u);
+  // The protection is never skipped because an address looked familiar: an
+  // address is a route, and a route can come to reach another machine. What
+  // decides is the identity the server reports, which is `activateConnected`'s
+  // answer — so neither handover function so much as mentions an address.
+  const handover = (source.match(/function suspendScope\(\)[\s\S]*?\n  \}/u)?.[0] ?? '')
+    + (source.match(/function revokeScope\(\)[\s\S]*?\n  \}/u)?.[0] ?? '');
+  assert.doesNotMatch(handover, /address|\burl\b/iu, 'the handover compares no addresses');
   assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
