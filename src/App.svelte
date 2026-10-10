@@ -33,6 +33,7 @@
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_DRAG_THRESHOLD, RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
+  import { targetOf } from './lib/app/server-target.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
@@ -801,7 +802,9 @@
     noteAddressUnreachable,
     classifyAddress,
     addressLabels: ADDRESS_LABELS,
-    storage: localStorage,
+    // The ONE machine reconnects the CURRENT server (board #335 ②b-2-2); a
+    // machine per runtime would pass its own id here.
+    target: () => targetOf(localStorage, currentServerId(localStorage)),
     maxAttempts: RECONNECT_MAX_ATTEMPTS,
     watchdogMs: RECONNECT_WATCHDOG_MS,
     onStateChange: (st) => {

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createReconnectMachine, type ReconnectDeps, type ReconnectState } from './reconnect.ts';
+import { targetOf } from './server-target.ts';
+import { currentServerId } from './servers.ts';
 
 // Deterministic fake timers: run() executes due callbacks in schedule order.
 function fakeTimers() {
@@ -50,7 +52,9 @@ function harness({ storage, connectImpl, findBest = async (a: string[]) => a[0] 
     noteAddressUnreachable: (u) => unreachable.push(u),
     classifyAddress: (url) => (url.includes('192.168.') ? 0 : url.includes('100.') ? 1 : 2),
     addressLabels: ['LAN', 'Tailscale', 'WAN'],
-    storage,
+    // What App passes: the CURRENT server's target. These fixtures seed only
+    // the mirror keys, so CURRENT is '' and the mirror answers.
+    target: () => targetOf(storage, currentServerId(storage)),
     onStateChange: (s) => events.push({ ...s }),
     onSuccess: (use, primary) => events.push({ success: [use, primary] }),
     onGiveUp: () => events.push({ gaveUp: true }),
@@ -240,4 +244,62 @@ test('a superseded chain cannot continue a restarted loop or poison the cooldown
   pending[1]!(new Error('connection timeout')); // B's own failure counts
   await new Promise(r => setTimeout(r, 0));
   assert.deepEqual(h.unreachable, ['ws://192.168.1.2:9899']);
+});
+
+test('the machine reconnects the server its target names, read at every attempt (board #335 ②b-2-2)', async () => {
+  // The loop no longer reads connection keys: WHERE is the host's answer, and
+  // it is asked again on each attempt — a target that moved between two
+  // attempts is followed rather than retried at the old address.
+  let where = { address: 'ws://192.168.1.2:9899', token: 'old', machineId: '', alternates: [] as string[] };
+  const dialled: string[] = [];
+  const timers = fakeTimers();
+  const events: string[] = [];
+  const machine = createReconnectMachine({
+    connect: async (url, token) => { dialled.push(`${url}#${token}`); if (dialled.length === 1) throw new Error('timeout'); },
+    findBestAddress: async (a) => a[0] ?? null,
+    isAddressViable: () => true,
+    noteAddressUnreachable: () => {},
+    classifyAddress: () => 0,
+    addressLabels: ['LAN'],
+    target: () => where,
+    onStateChange: () => {},
+    onSuccess: (use) => events.push(`ok:${use}`),
+    onGiveUp: () => events.push('gave up'),
+    maxAttempts: 3,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+  });
+  machine.start();
+  await timers.advance(1);
+  where = { address: 'ws://192.168.1.9:9899', token: 'new', machineId: '', alternates: [] };
+  await timers.advance(5000);
+  assert.deepEqual(dialled, ['ws://192.168.1.2:9899#old', 'ws://192.168.1.9:9899#new']);
+  assert.deepEqual(events, ['ok:ws://192.168.1.9:9899']);
+});
+
+test('no target gives up at once, and dials nothing', async () => {
+  const dialled: string[] = [];
+  const events: string[] = [];
+  const timers = fakeTimers();
+  const machine = createReconnectMachine({
+    connect: async (url) => { dialled.push(url); },
+    findBestAddress: async () => null, isAddressViable: () => true, noteAddressUnreachable: () => {},
+    classifyAddress: () => 0, addressLabels: ['LAN'],
+    target: () => null,
+    onStateChange: () => {}, onSuccess: () => events.push('ok'), onGiveUp: () => events.push('gave up'),
+    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+  });
+  machine.start();
+  await timers.advance(1);
+  assert.deepEqual(dialled, []);
+  assert.deepEqual(events, ['gave up']);
+});
+
+test('the machine reads no connection keys of its own (board #335 ②b-2-2)', async () => {
+  // "Whoever is current is who I reconnect", spelled inside the loop, is the
+  // thing one-machine-per-runtime cannot have; WHERE is the host's target().
+  const { readFile } = await import('node:fs/promises');
+  const src = (await readFile(new URL('./reconnect.ts', import.meta.url), 'utf8'))
+    .split('\n').filter((l) => !/^\s*(\/\/|\*)/u.test(l)).join('\n');
+  assert.doesNotMatch(src, /tmux_|localStorage|getItem\(/u);
 });

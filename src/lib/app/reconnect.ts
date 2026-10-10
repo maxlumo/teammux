@@ -9,6 +9,13 @@
 // onStateChange, runs post-success work in onSuccess, and decides what
 // "give up" looks like (drop to settings). The machine owns every timer
 // and never touches the DOM.
+//
+// It does not know what a server is, either (board #335 ②b-2-2): WHERE to
+// reconnect is the host's `target()` — `app/server-target.ts`, asked for one
+// entry — read afresh at every attempt, because an address can change while
+// the loop runs (a failover just proved another one).
+
+import type { ServerTarget } from './server-target.ts';
 
 export interface ReconnectState {
   reconnecting: boolean;
@@ -25,8 +32,9 @@ export interface ReconnectDeps {
   noteAddressUnreachable: (url: string) => void;
   classifyAddress: (url: string) => number;
   addressLabels: readonly string[];
-  /** Reads tmux_address / tmux_token / tmux_machine_id / tmux_machines. */
-  storage: Pick<Storage, 'getItem'>;
+  /** Where to reach the server this machine reconnects, or null when nothing
+   * is saved for it (which gives up). */
+  target: () => ServerTarget | null;
   onStateChange: (state: ReconnectState) => void;
   /** An attempt authenticated. The machine is already idle when this runs. */
   onSuccess: (useAddr: string, primaryAddr: string) => void;
@@ -45,7 +53,7 @@ const DEFAULT_WATCHDOG_MS = 180000;
 export function createReconnectMachine(deps: ReconnectDeps) {
   const {
     connect, findBestAddress, isAddressViable, noteAddressUnreachable,
-    classifyAddress, addressLabels, storage, onStateChange, onSuccess, onGiveUp,
+    classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     watchdogMs = DEFAULT_WATCHDOG_MS,
     setTimeoutFn = setTimeout,
@@ -94,21 +102,12 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     }, watchdogMs);
   }
 
-  function altAddresses(): string[] {
-    const mid = storage.getItem('tmux_machine_id');
-    const primary = storage.getItem('tmux_address');
-    if (!mid) return [];
-    try {
-      const map = JSON.parse(storage.getItem('tmux_machines') || '{}');
-      return (map[mid] || []).filter((a: string) => a !== primary);
-    } catch { return []; }
-  }
-
   async function tryAttempt(n: number, myGen: number): Promise<void> {
     const live = () => reconnecting && gen === myGen;
     if (!live()) return;
-    const primary = storage.getItem('tmux_address');
-    const token = storage.getItem('tmux_token') || '';
+    const where = target();
+    const primary = where?.address ?? '';
+    const token = where?.token ?? '';
     if (!primary) {
       reconnecting = false;
       clearTimers();
@@ -117,7 +116,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       return;
     }
 
-    const allAddrs = [primary, ...altAddresses()];
+    const allAddrs = [primary, ...(where?.alternates ?? [])];
     let useAddr: string;
 
     // First attempt with multiple candidates: parallel probe → pick first

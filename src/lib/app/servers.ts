@@ -66,6 +66,8 @@ export const MERGES_KEY = 'tmux_server_merges';
 const MAX_MERGES = 32;
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+/** What a function that only READS the registry needs. */
+type Reader = Pick<Storage, 'getItem'>;
 
 export function serverId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -141,7 +143,7 @@ export function adoptHostname(servers: ServerEntry[], id: string, hostname: stri
   return next;
 }
 
-export function loadServers(storage: Store): ServerEntry[] {
+export function loadServers(storage: Reader): ServerEntry[] {
   try { return sanitize(JSON.parse(storage.getItem(SERVERS_KEY) || '[]')); }
   catch { return []; }
 }
@@ -150,7 +152,7 @@ export function saveServers(storage: Store, servers: ServerEntry[]): void {
   storage.setItem(SERVERS_KEY, JSON.stringify(servers.slice(0, MAX_SERVERS)));
 }
 
-export function currentServerId(storage: Store): string {
+export function currentServerId(storage: Reader): string {
   return storage.getItem(CURRENT_KEY) || '';
 }
 
@@ -226,7 +228,7 @@ export function migrateServers(storage: Store): ServerEntry[] {
 }
 
 /** machineId → addresses, read off the failover map (identity authority). */
-function machinesMap(storage: Store): Record<string, string[]> {
+export function machinesMap(storage: Reader): Record<string, string[]> {
   try {
     const raw = JSON.parse(storage.getItem('tmux_machines') || '{}');
     if (raw && typeof raw === 'object') return raw;
