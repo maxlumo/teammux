@@ -313,17 +313,36 @@ function absorbTwins(servers: ServerEntry[], survivor: ServerEntry): string[] {
   return dropped;
 }
 
-function forgetDropped(storage: Store, dropped: string[], survivorId: string): void {
-  if (!dropped.length) return;
+/**
+ * Absorb `dropped` into `survivorId`, and `commit()` the registry without
+ * them — in the ONE order that a failure at any step leaves recoverable
+ * (board #335 ②b-4; reviewer P1s on 4807242f and 6a2ba341, orchestrator
+ * 23:19):
+ *
+ *   1. the CURRENT twin's slots are COPIED to the survivor (they are the
+ *      newest state of this machine, the one the person was just using, so
+ *      they become the survivor's whole; an absent key clears it) — under an
+ *      open intent while pre-#335 inputs are pending (`beginMove`);
+ *   2. CURRENT moves to the survivor, which is still in the registry;
+ *   3. the registry is committed without the twins, and the merges noted;
+ *   4. only then are the twins' slots removed;
+ *   5. last, the intent is closed (`completeMove`).
+ *
+ * Sources are removed only once the registry no longer lists them, so a
+ * failure before that leaves both slot sets intact and a resume re-copies
+ * the same values; a failure after it leaves a committed merge whose
+ * cleanup `resumeSlotMove` finishes without copying anything.
+ */
+function forgetDropped(storage: Store, dropped: string[], survivorId: string, commit: () => void): void {
+  if (!dropped.length) { commit(); return; }
   const current = currentServerId(storage);
-  // The CURRENT twin's slots are the newest state of this machine — the one
-  // the person was just using — so they BECOME the survivor's, whole: an
-  // absent key clears the survivor's too (board #335 ②b-4; before it the
-  // live keys simply stayed live). Any other twin's slots go with it.
-  if (dropped.includes(current)) moveSlots(storage, current, survivorId);
-  for (const id of dropped) for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
-  if (dropped.includes(current)) storage.setItem(CURRENT_KEY, survivorId);
+  const moving = dropped.includes(current);
+  if (moving) beginMove(storage, current, survivorId);
+  if (moving) storage.setItem(CURRENT_KEY, survivorId);
+  commit();
   noteMerges(storage, dropped, survivorId);
+  for (const id of dropped) for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
+  if (moving) completeMove(storage, current, survivorId);
 }
 
 function loadMerges(storage: Store): Record<string, string> {
@@ -376,15 +395,12 @@ export function repairServers(storage: Store): ServerEntry[] {
   const servers = loadServers(storage);
   const cur = currentServerId(storage);
   const rank = (e: ServerEntry) => (e.id === cur ? 2 : e.machineId ? 1 : 0);
-  let changed = false;
   for (const e of [...servers].sort((a, b) => rank(b) - rank(a))) {
     if (!servers.includes(e)) continue;          // already absorbed into a better survivor
     const dropped = absorbTwins(servers, e);
     if (!dropped.length) continue;
-    forgetDropped(storage, dropped, e.id);
-    changed = true;
+    forgetDropped(storage, dropped, e.id, () => saveServers(storage, servers));
   }
-  if (changed) saveServers(storage, servers);
   return servers;
 }
 
@@ -422,8 +438,7 @@ export function recordServer(
     };
     servers.push(entry);
   }
-  forgetDropped(storage, absorbTwins(servers, entry), entry.id);
-  saveServers(storage, servers);
+  forgetDropped(storage, absorbTwins(servers, entry), entry.id, () => saveServers(storage, servers));
   return { servers, entry };
 }
 
@@ -453,41 +468,47 @@ export function residentKey(key: string, serverId: string): string {
  * Spelled here because moving a slot has to move its bookkeeping too. */
 export const LAYOUT_KEY = 'tmux_state_layout';
 
-/** Hand every slot of `fromId` to `toId`, replacing what `toId` had.
+/** Copy every slot of `fromId` to `toId`, replacing what `toId` had — step 1
+ * of an absorption (`forgetDropped`, which owns the order).
  *
- * While pre-#335 inputs are PENDING it is a RECOVERABLE unit (reviewer P1s on
- * cde052f7, 4ef4dd07 and 4807242f; orchestrator 22:52): the claim compares
- * each slot of `toId` with a baseline, and a moved slot must be compared with
- * the baseline of the slot it came FROM. So:
- *
- *   1. the intent `{from, to}` is written on the pending record first — if
- *      that fails, nothing has moved;
- *   2. every slot is copied (the source is not touched);
- *   3. completion is ONE write: `toId`'s baselines become `fromId`'s, and the
- *      intent is cleared.
- *
- * A failure in 2 or 3 leaves the intent open. `resumeSlotMove` finishes it —
- * the migration runs it at boot and before every claim, and a claim refuses
- * while one is open — so a half-done move is never read against the wrong
- * baselines. The source slots outlive the intent: the merge removes them only
- * after this returns. */
-function moveSlots(storage: Store, fromId: string, toId: string): void {
+ * While pre-#335 inputs are PENDING the claim compares each slot of `toId`
+ * with a baseline, and a moved slot must be compared with the baseline of
+ * the slot it came FROM (reviewer P1s on cde052f7, 4ef4dd07, 4807242f). So
+ * the intent `{from, to}` is written on the pending record first — if that
+ * fails, nothing has moved — and it stays open until the whole absorption is
+ * done; `completeMove` then hands the baselines over and clears it in one
+ * write. */
+function beginMove(storage: Store, fromId: string, toId: string): void {
   if (!fromId || fromId === toId) return;
   const mark = pendingMark(storage);
   if (mark) storage.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moving: { from: fromId, to: toId } }));
   copySlots(storage, fromId, toId);
-  if (mark) completeMove(storage, fromId, toId);
 }
 
-/** Finish a slot move a failure left open (see `moveSlots`). Idempotent; a
- * write that fails throws, and the intent stays open. Returns whether one
- * was open. */
+/** Finish an absorption a failure left open (see `forgetDropped`).
+ * Idempotent; a write that fails throws and the intent stays open. Which
+ * half it is in is the REGISTRY's to say, never a guess from slot contents:
+ *
+ *   - `from` still saved: the registry was never committed, so its slots
+ *     are intact — re-copy them (the same values the first copy wrote);
+ *   - `from` gone: the merge is committed and the copy was done before it —
+ *     copy NOTHING (the source may already be empty, and copying an empty
+ *     source would delete the survivor's slots); finish what follows:
+ *     CURRENT off the absorbed id, the merge note, the source cleanup.
+ *
+ * Then the intent is closed. Returns whether one was open. */
 export function resumeSlotMove(storage: Store): boolean {
   const mark = pendingMark(storage);
   const moving = mark?.moving as { from?: unknown; to?: unknown } | undefined;
   if (!moving || typeof moving.from !== 'string' || typeof moving.to !== 'string') return false;
-  copySlots(storage, moving.from, moving.to);
-  completeMove(storage, moving.from, moving.to);
+  const { from, to } = moving as { from: string; to: string };
+  if (loadServers(storage).some((s) => s.id === from)) copySlots(storage, from, to);
+  else {
+    if (currentServerId(storage) === from) storage.setItem(CURRENT_KEY, to);
+    if (mergedInto(storage, from) !== to) noteMerges(storage, [from], to);
+    for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, from));
+  }
+  completeMove(storage, from, to);
   return true;
 }
 

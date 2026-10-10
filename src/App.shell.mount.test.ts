@@ -2184,7 +2184,7 @@ test('while blocked, rename and remove are refused with the reason, not ignored 
  * fixture on 4807242f): m-a's inputs pending, the alias edited after that,
  * and the drafts slot write failing mid-move. Built with the real identity
  * and migration functions, then handed to a fresh App — a reload. */
-function afterFailedMove(): Record<string, string> {
+function afterFailedMove(failKey = 'tmux_hub_drafts::c'): Record<string, string> {
   const m = new Map<string, string>(Object.entries({
     tmux_servers: JSON.stringify([
       { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
@@ -2201,7 +2201,7 @@ function afterFailedMove(): Record<string, string> {
   let failing = false;
   const store = {
     getItem: (k: string) => m.get(k) ?? null,
-    setItem: (k: string, v: string) => { if (failing && k === 'tmux_hub_drafts::c') throw new Error('QuotaExceededError'); m.set(k, v); },
+    setItem: (k: string, v: string) => { if (failing && k === failKey) throw new Error('QuotaExceededError'); m.set(k, v); },
     removeItem: (k: string) => { m.delete(k); },
   };
   assert.equal(migrateServerState(store).reason, 'pending');
@@ -2209,7 +2209,7 @@ function afterFailedMove(): Record<string, string> {
   m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
   failing = true;
   assert.throws(() => recordServer(store, { address: 'ws://alias:9899', token: 'tok', machineId: 'm-a' }), /Quota/u);
-  m.set('tmux_server_current', 'ghost');
+  if (failKey === 'tmux_hub_drafts::c') m.set('tmux_server_current', 'ghost');
   m.set('tmux_address', ''); m.set('tmux_token', '');
   return Object.fromEntries(m);
 }
@@ -2238,5 +2238,18 @@ test('a reload after a failed slot move that still cannot finish it is blocked, 
   for (let i = 0; i < 4; i++) await settle();
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry finished it');
   await connectCard(app, settle, 'ws://canonical:9899');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
+});
+
+test('a reload after an absorption whose registry commit failed: CURRENT is canonical, the boot dials it, and TYPED is what it claims (reviewer P1 on 6a2ba341)', async (context) => {
+  const seed = afterFailedMove('tmux_servers');
+  assert.equal(seed.tmux_server_current, 'c', 'CURRENT moved before the commit');
+  assert.ok(JSON.parse(seed.tmux_servers!).some((e: any) => e.id === 'a'), 'the registry still lists the alias');
+  const events: string[] = [];
+  const { app } = await bootApp(context, seed, undefined, { calls: events });
+  await app.advance(1000);
+  const ls = app.window.localStorage;
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://canonical:9899'], 'the boot dials canonical, not a ghost');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });

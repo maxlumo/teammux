@@ -657,3 +657,51 @@ test('a claim refuses when the move cannot be finished, even where the fold itse
   assert.equal(storage.getItem('tmux_hub_drafts::c'), JSON.stringify({ work: 'OLD-CANON' }), 'no slot written');
   restore();
 });
+
+/** `storage` failing the `n`th write to `key` (1-based), once. */
+function failNth(storage: ReturnType<typeof mem>, key: string, n: number) {
+  const set = storage.setItem;
+  let seen = 0;
+  storage.setItem = (k: string, v: string) => { if (k === key && ++seen === n) throw new Error('QuotaExceededError'); set(k, v); };
+  return () => { storage.setItem = set; };
+}
+
+for (const [where, key, n] of [
+  ['the registry commit', 'tmux_servers', 1],
+  ['the merge note', 'tmux_server_merges', 1],
+  ['the closing write', LAYOUT_KEY, 2],
+] as const) {
+  test(`an absorption that fails at ${where} recovers on reload: canonical keeps TYPED, CURRENT is canonical (reviewer P1 on 6a2ba341)`, () => {
+    const storage = aliasPending();
+    storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+    const restore = failNth(storage, key, n);
+    assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+    restore();
+    assert.ok(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, 'the intent is still open');
+    assert.equal(storage.getItem('tmux_server_current'), 'c', 'CURRENT moved before the commit, to an entry that exists');
+    // Reload: the boot finishes the absorption.
+    assert.equal(migrateServerState(storage).reason, 'pending');
+    assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'closed');
+    assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED intact');
+    // The alias's address dials again (the registry may still list it): the
+    // merge runs again and still never copies an empty source over TYPED.
+    recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+    assert.equal(storage.getItem('tmux_server_current'), 'c');
+    assert.equal(JSON.parse(storage.getItem('tmux_servers')!).some((e: any) => e.id === 'a'), false, 'the alias is gone');
+    for (const k of RESIDENT_KEYS) assert.equal(storage.getItem(residentKey(k, 'a')), null, `and its ${k} slot with it`);
+    assert.equal(claimPending(storage, 'c').reason, 'folded');
+    assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'and the claim keeps it');
+  });
+}
+
+test('an open intent whose merge is committed and whose source is already empty copies nothing over the survivor', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  // The absorption ran up to the source cleanup; only the closing write failed.
+  const restore = failNth(storage, LAYOUT_KEY, 2);
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.equal(storage.getItem('tmux_hub_drafts::a'), null, 'the source is empty');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the empty source did not delete TYPED');
+});

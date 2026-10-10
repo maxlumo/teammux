@@ -477,15 +477,22 @@ So the pending record fingerprints every slot that existed when the inputs
 were set aside, and only a slot that changed, appeared or disappeared since is
 kept. A slot the identity layer MOVED is not one its owner wrote, and a
 merge that hands the current alias's slots to its canonical entry hands their
-baselines over too, as ONE recoverable unit (`moveSlots`; reviewer P1s on
-cde052f7, 4ef4dd07 and 4807242f): the intent `{from, to}` is written on the
-pending record first, the slots are copied, and one write then moves the
-baselines and clears the intent. A failure leaves the intent open, and it is
-finished (`resumeSlotMove`) at boot and before every claim; a claim that
-cannot finish it does not fold (`unrecorded`, the blocked shell, Retry). Each
-slot is then compared only with its own baseline, so an edit or a clear the
-alias made after the inputs went pending stays, and a moved old park takes
-the inputs. If even the intent cannot be written, nothing moves. It fingerprints the inputs too (P2-a): if a build from before #335 has
+baselines over too, as ONE recoverable unit (`forgetDropped`; reviewer P1s on
+cde052f7, 4ef4dd07, 4807242f and 6a2ba341). The order is fixed: the intent
+`{from, to}` is written on the pending record, the slots are copied, CURRENT
+moves to the survivor, the registry is committed without the alias, the merge
+is noted, and only then are the alias's slots removed; one last write hands
+the baselines over and closes the intent. A failure anywhere leaves the
+intent open, and it is finished (`resumeSlotMove`) at boot and before every
+claim. Which half it stopped in is the REGISTRY's to say: the alias still
+saved means nothing was committed and its slots are intact, so they are
+copied again; the alias gone means the copy was already done, so nothing is
+copied (an emptied source must never overwrite the survivor) and the cleanup
+is finished. A claim that cannot finish it does not fold (`unrecorded`, the
+blocked shell, Retry). Each slot is then compared only with its own baseline,
+so an edit or a clear the alias made after the inputs went pending stays,
+and a moved old park takes the inputs. If even the intent cannot be written,
+nothing moves. It fingerprints the inputs too (P2-a): if a build from before #335 has
 rewritten them since, the machine they belong to is read again from its
 mirror before anybody claims them. Any other server runs on its own slots
 while the input stays pending, however many come first. A

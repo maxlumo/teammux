@@ -55,7 +55,7 @@
 // live value, or is cleared — the fold's rule — while a slot that changed,
 // appeared or disappeared since was written by the owner on this build, and
 // is kept. An identity merge that MOVES a slot hands its baseline over with
-// it, as one recoverable unit (servers.ts `moveSlots`): a relocation is not a
+// it, as one recoverable unit (servers.ts `forgetDropped`): a relocation is not a
 // write by the owner. A move a failure left open is finished at boot and
 // before every claim (`resumeSlotMove`), and a claim that cannot finish it
 // does not fold. The record also
@@ -161,7 +161,7 @@ export type LayoutMark =
     /** Every slot that existed then, fingerprinted (see `fileLive`). */
     slots?: Record<string, string>;
     /** A slot move an identity merge began and a failure left open
-     * (servers.ts `moveSlots`); finished before anything reads a baseline. */
+     * (servers.ts `forgetDropped`); finished before anything reads a baseline. */
     moving?: { from: string; to: string };
   };
 
