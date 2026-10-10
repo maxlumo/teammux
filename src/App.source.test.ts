@@ -735,7 +735,18 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // is current (reviewer P1-b on cc5e517e): the runtime asks it before it
   // records anything, and the outcome is acted on only while it still holds.
   assert.match(source, /const owner = handovers\.claim\(\);\s*const runtime = scopeSwap\.bound\(\);\s*const dialled = runtime \? runtime\.dial\(owner\.current\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
-  assert.match(source, /\.catch\(\(\) => \{\s*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) page = 'settings';/u);
+  assert.match(source, /\.catch\(\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) \{ page = 'settings'; storageFailed\(\); \}/u,
+    'a write that fails inside the dial goes to the host gate (reviewer P1 on 23879812)');
+  // Every identity-write failure path reports to the ONE gate.
+  for (const [where, pattern] of [
+    ['the form', /onIdentityFailed=\{storageFailed\}/u],
+    ['a reconnect', /reconnectError = t\('configIdentityFailed'\);\s*disconnect\(\);\s*storageFailed\(\);/u],
+    ['an arrival', /\} catch \{ page = 'settings'; storageFailed\(\); \}/u],
+    ['a switch', /identityFailed: storageFailed,/u],
+    ['an address change', /\} catch \{ storageFailed\(\); \}\s*\/\/ the entry keeps the address it had/u],
+    ['a deep link', /\} catch \{ storageFailed\(\); \}\s*\/\/ the saved connection stays as it was/u],
+    ['bringUp', /\} catch \{ storageFailed\(\); if \(migrationBlocked\) return; \}/u],
+  ] as const) assert.match(source, pattern, `${where} reports through the gate`);
   assert.match(source, /if \(result\.ok\) \{ bringUp\(result\.entry\?\.address \?\? addr, result\.entry\?\.token \?\? token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result, result\.entry\.address, result\.entry\.token, owner\); return; \}/u,
     'the app comes up on, and records, the address the runtime dialled — its entry s');
   // And every reconnect attempt takes the socket through a handover of its

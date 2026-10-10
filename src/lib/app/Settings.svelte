@@ -31,6 +31,7 @@
     notice = '',
     frozen = '',
     onRetry,
+    onIdentityFailed,
   }: {
     /** Why this form may not connect right now — the boot migration is
      * blocked, and nothing may move CURRENT until it is recorded (board #335
@@ -39,6 +40,9 @@
      * out, not a connect. */
     frozen?: string;
     onRetry?: () => void;
+    /** The identity write after an authenticated connect failed: the host's
+     * gate decides whether storage is blocked (board #335 ②b-4). */
+    onIdentityFailed?: () => void;
     /** Why the app came back to this page, from outside the form — an
      * automatic reconnect that reached a peer nobody could identify (board
      * #335 ②b-2-2). Shown in the form's one error slot until it says
@@ -278,6 +282,10 @@
           handover?.settle('unresolved');
           error = t('configIdentityFailed');
           disconnect();
+          // Done before the host's gate, which may end this attempt's
+          // handover (a blocked migration unbinds the server tree).
+          connecting = false;
+          onIdentityFailed?.();
         }
         return;
       }

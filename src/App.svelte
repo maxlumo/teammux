@@ -910,6 +910,7 @@
       handover?.settle('unresolved');
       reconnectError = t('configIdentityFailed');
       disconnect();
+      storageFailed();
       connected = false;
       page = 'settings';
       return;
@@ -1031,7 +1032,7 @@
       });
       if (act.reload) { onConnected(true); return; }
       bringUp(addr, token);
-    } catch { page = 'settings'; }
+    } catch { page = 'settings'; storageFailed(); }
   }
 
   /** The disconnected connect page reached a server. `switched`: it is a
@@ -1386,6 +1387,7 @@
     // While the migration is blocked nothing moves CURRENT (orchestrator,
     // 21:45): no switch, no address connect.
     frozen: () => migrationBlocked,
+    identityFailed: storageFailed,
     addressUp: (address) => {
       serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
       // The address that just answered is the server's active one, on its
@@ -1400,7 +1402,7 @@
             machineId: mid,
           });
           loadServerRegistry();
-        } catch { /* the entry keeps the address it had */ }
+        } catch { storageFailed(); }      // the entry keeps the address it had
       }
       resubscribeAll();
       window.dispatchEvent(new Event('ws-reconnected'));
@@ -1564,7 +1566,7 @@
       // inputs were attributed just before, so nothing of the server being
       // left can land in the linked server's slots.
       if (address) activateConnected(localStorage, { address, token: token || '', ...(socket ? { socket } : {}) });
-    } catch { /* storage refused: the saved connection stays as it was */ }
+    } catch { storageFailed(); }  // the saved connection stays as it was
   }
   // Multi-server registry (board #55): migrate the single-server keys into
   // named entries BEFORE the deep-link consumer runs, so a link on a
@@ -1582,6 +1584,8 @@
    * the connect card (disabled, with the reason) and Preferences stay; the
    * panel's Retry is the way out. */
   let migrationBlocked = $state(false);
+  /** The boot dial has been tried; the migration gate re-arms it. */
+  let autoConnectAttempted = false;
   /** Everything the boot needs written before a server may be bound, in its
    * order: the registry, then the inputs' attribution. Safe to run again —
    * each step is idempotent — which is what Retry does. */
@@ -1591,6 +1595,24 @@
       migrationBlocked = migrateServerState(localStorage).reason === 'unrecorded';
     } catch { migrationBlocked = true; }
     loadServerRegistry();
+  }
+  /** An identity or registry write failed somewhere — a form connect, the
+   * boot dial, a reconnect, an arrival, a switch, an address change (reviewer
+   * P1 on 23879812; orchestrator 23:44). The ONE host gate decides what it
+   * means, by the migration state rather than the error: it runs the same
+   * preparation the boot and Retry run, and if that cannot be recorded — an
+   * open handoff that still cannot be finished, a registry that cannot be
+   * written — the app is blocked HERE, in this turn: the server tree unbinds,
+   * CURRENT and the registry freeze, and Retry is offered. Otherwise it was
+   * an ordinary failure and the caller's own error stands. When it blocks,
+   * the boot dial is re-armed, so Retry brings the connection back. */
+  function storageFailed() {
+    if (migrationBlocked) return;
+    prepareStorage();
+    if (!migrationBlocked) return;
+    reconnectMachine.cancel();
+    autoConnectAttempted = false;
+    swapScope();
   }
   /** Before server `id`'s state is built: `claimed` when a pending input
    * was just filed into its slots, `blocked` when the migration cannot be
@@ -1706,7 +1728,7 @@
           machineId: mid,
         });
       }
-    } catch {}
+    } catch { storageFailed(); if (migrationBlocked) return; }
     // Identity repair may have moved CURRENT: `recordServer` absorbs the
     // machine's twins, and when the entry we booted as is one of the absorbed
     // the app is now on the survivor. Binding the tree is therefore the last
@@ -1802,8 +1824,8 @@
     navRestored = target;
   }
 
-  // Auto-reconnect and restore state on page load
-  let autoConnectAttempted = false;
+  // Auto-reconnect and restore state on page load (`autoConnectAttempted`,
+  // declared beside the migration gate, which re-arms it).
 
   // Detect app resume (Android background → foreground) + periodic optimize
   $effect(() => {
@@ -1874,8 +1896,10 @@
       if (result.reason === 'elsewhere') { void arrivedElsewhere(result, result.entry.address, result.entry.token, owner); return; }
       if (result.reason !== 'superseded') page = 'settings';
     }).catch(() => {
+      // The dial resolves every connect failure; what rejects is a write
+      // inside it — the identity record. The host gate classifies it.
       clearTimeout(timeout);
-      if (owner.current()) page = 'settings';
+      if (owner.current()) { page = 'settings'; storageFailed(); }
     });
   });
   // Android back gesture via history API
@@ -2585,7 +2609,7 @@
     {#if page === 'settings' || holdPages}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
       <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError}
-        frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} />
+        frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}
     <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,

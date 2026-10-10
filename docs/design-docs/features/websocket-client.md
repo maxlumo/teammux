@@ -487,8 +487,15 @@ intent open, and it is finished (`resumeSlotMove`) at boot, before every
 claim, and before every identity write (`recordServer`, `repairServers`;
 reviewer P1 on b5adcb3b): a new absorption of the same source must not
 replace the open intent and then delete the only copy it still owes. If it
-cannot be finished, the identity write is refused and writes nothing, and the
-migration reports itself blocked; one handoff is open at a time. Which half it stopped in is the REGISTRY's to say: the alias still
+cannot be finished, the identity write is refused and writes nothing; one
+handoff is open at a time. Every caller of an identity write — the connect
+form, the boot dial, a reconnect, an arrival, a switch, an address change, a
+deep link — reports its failure to the ONE host gate (`storageFailed`), which
+classifies it by the migration state, not by the error: it reruns the boot's
+preparation, and if that cannot be recorded the app is blocked in that same
+turn (the server tree unbinds, CURRENT and the registry freeze, Retry is
+offered, and the boot dial is re-armed so Retry brings the connection back).
+An ordinary failure keeps the caller's own error (reviewer P1 on 23879812). Which half it stopped in is the REGISTRY's to say: the alias still
 saved means nothing was committed and its slots are intact, so they are
 copied again; the alias gone means the copy was already done, so nothing is
 copied (an emptied source must never overwrite the survivor) and the cleanup

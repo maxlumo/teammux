@@ -55,6 +55,10 @@ export interface SwitchDeps {
    * migration is blocked, board #335 ②b-4)? Then no switch and no address
    * connect starts. */
   frozen(): boolean;
+  /** A connect or identity write failed: the host's one gate decides
+   * whether it was storage (board #335 ②b-4). Optional for a host with no
+   * migration. */
+  identityFailed?(): void;
   stopReconnect(): void;
   /** Is the reconnect loop running? A walk freezes it, and a "stay" starts
    * it again. */
@@ -125,6 +129,7 @@ export function createServerSwitch(d: SwitchDeps) {
     } catch (e) {
       if (intent !== seq) return;
       d.disconnect();
+      d.identityFailed?.();
       set({ intent, from, target, phase: 'failed', error: String((e as Error)?.message || e) });
     }
   }

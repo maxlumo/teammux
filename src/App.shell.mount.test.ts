@@ -2268,3 +2268,100 @@ test('a reload after an absorption whose CURRENT write failed: CURRENT is the al
   assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });
+
+// ── The gate in production (reviewer P1 on 23879812): a write that fails
+// inside a real connect blocks the app in that turn — no reload, nothing
+// called by hand.
+
+const aliasRegistry = JSON.stringify([
+  { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+  { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+]);
+const blockedNow = (app: any) => {
+  const ls = app.window.localStorage;
+  return { current: ls.getItem('tmux_server_current'), servers: ls.getItem('tmux_servers') };
+};
+
+test('the boot dial s identity write fails mid-handoff: blocked at once, frozen, and Retry finishes it and reconnects (reviewer P1 on 23879812)', async (context) => {
+  // Pending first, then TYPED written to the alias: an edit, not an old park.
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry,
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::a': JSON.stringify({ work: 'OLD-ALIAS' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const store = refusing(['tmux_hub_drafts::c']);
+  const events: string[] = [];
+  const h = await bootApp(context, Object.fromEntries(m), () => 'm-a', { calls: events, setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://alias:9899&token=tok'); } });
+  await h.app.advance(1000);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://alias:9899'], 'the boot dialled the alias');
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'its merge left the handoff open');
+  assert.ok(cardButton(h.app, /retry/iu), 'blocked in this turn: the card offers only Retry');
+  assert.equal(cardButton(h.app, /^connect$/iu), undefined);
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server tree');
+  const frozen = blockedNow(h.app);
+  const n = events.filter((e) => e.startsWith('connect:')).length;
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.app.advance(30_000);
+  assert.deepEqual(blockedNow(h.app), frozen, 'CURRENT and the registry frozen');
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, n, 'and nothing dials');
+  // Storage works again: Retry finishes the handoff and the boot dial runs again.
+  store.state.failing = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(6000);
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(events.filter((e) => e.startsWith('connect:')).length > n, 'Retry reconnected');
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'the alias merged into canonical');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED kept');
+  assert.ok(h.app.document.querySelector('.term-page'), 'and the server is up');
+});
+
+test('the connect form s identity write fails mid-handoff: blocked at once, the form offers only Retry, and after it the form connects (reviewer P1 on 23879812)', async (context) => {
+  // Pending with the alias current and the person disconnected: the form is
+  // what connects.
+  const seed: Record<string, string> = {
+    tmux_servers: aliasRegistry,
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  };
+  const m = new Map(Object.entries(seed));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  m.set('tmux_disconnected', '1');
+  const store = refusing(['tmux_hub_drafts::c']);
+  store.state.failing = false;
+  const events: string[] = [];
+  const h = await bootApp(context, Object.fromEntries(m), () => 'm-a', { calls: events, setup: store.setup });
+  await h.app.advance(1000);
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'disconnected: no boot dial');
+  store.state.failing = true;
+  await connectCard(h.app, h.settle, 'ws://alias:9899');
+  const ls = h.app.window.localStorage;
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the form s merge left the handoff open');
+  assert.ok(cardButton(h.app, /retry/iu), 'blocked in this turn: the form offers only Retry');
+  assert.equal(cardButton(h.app, /^connect$/iu), undefined, 'no Connect');
+  assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not write its storage/iu, 'and says why');
+  store.state.failing = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry finished the handoff');
+  await connectCard(h.app, h.settle, 'ws://alias:9899');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED kept');
+});
