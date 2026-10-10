@@ -791,6 +791,10 @@ test('a capability answer lands only for the runtime still bound (board #335 ②
   answer.a();
   for (let i = 0; i < 10; i++) await app.flush();
   assert.equal(bell(), false, 'and A s late answer did not land on B');
+  // Which guard holds this: the runtime's own. A's handle was detached by
+  // the switch, and a detached runtime drops its answers; App's two checks
+  // (the intent, the bound runtime) are the second line, held by source pins
+  // — a negative control removing them both leaves this case green.
 });
 
 test('the handshake reaches the shell: a Hub server gets its bell', async (context) => {
@@ -799,4 +803,14 @@ test('the handshake reaches the shell: a Hub server gets its bell', async (conte
     tmux_layout_mode: 'desktop',
   }, undefined, { rpc: { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) } });
   assert.equal(!!app.document.querySelector('.rail-bell'), true);
+});
+
+test('a Hub probe that fails without an answer leaves the Hub page where it is', async (context) => {
+  // Only a definitive "no Hub" (method not found) may flip the flag: false
+  // redirects the Hub page to Terminal and unmounts the always-mounted Hub, so
+  // a timeout must not be read as one.
+  const { record } = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: legacyNav('work:2.0') }),
+  }, undefined, { rpc: { hubRooms: () => Promise.reject(new Error('rpc timeout')) } });
+  assert.equal(record()?.page, 'hub', 'still on the Hub: nothing said it is not there');
 });
