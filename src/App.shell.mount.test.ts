@@ -1755,47 +1755,157 @@ test('pre-#335 inputs left under a dangling CURRENT go only to the machine that 
   }
 });
 
-test('an unrecorded fold opens no server page and starts no switch; Retry brings it up (board #335 ②b-4)', async (context) => {
-  let failing = true;
+/** Storage that refuses writes to `keys` until the case says otherwise. */
+const refusing = (keys: string[]) => {
+  const state = { failing: true };
+  return {
+    state,
+    setup(window: any) {
+      const set = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (state.failing && keys.includes(k)) throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+    },
+  };
+};
+const cardButton = (app: any, name: RegExp) => [...app.document.querySelectorAll('.card button')]
+  .find((b: any) => name.test((b.textContent ?? '').trim())) as HTMLButtonElement | undefined;
+
+test('a blocked migration freezes CURRENT: no boot dial, no switch, the card offers only Retry, and Retry brings A up (board #335 ②b-4)', async (context) => {
+  const store = refusing(['tmux_state_layout']);
   const events: string[] = [];
   const h = await bootApp(context, {
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
     tmux_layout_mode: 'desktop',
-  }, undefined, {
-    calls: events,
-    setup(window) {
-      const set = window.Storage.prototype.setItem;
-      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
-        if (failing && k === 'tmux_state_layout') throw new Error('QuotaExceededError');
-        return set.call(this, k, v);
-      };
-    },
-  });
-  await h.app.advance(1000);
+  }, undefined, { calls: events, setup: store.setup });
+  await h.app.advance(6000);
+  const ls = h.app.window.localStorage;
+  const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers')];
+  const before = frozen();
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'the boot did not dial');
   assert.equal(h.app.document.querySelector('.term-page'), null, 'no server page mounted');
-  assert.match(h.app.document.querySelector('.switch-panel')?.textContent ?? '', /could not be updated/iu, 'the reason, on the switch panel s form');
-  assert.equal(h.app.window.localStorage.getItem('tmux_state_layout'), null);
+  assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not write its storage/iu, 'the card says why');
+  assert.equal(cardButton(h.app, /^connect$/iu), undefined, 'and has no Connect');
   // A switch does nothing while it is blocked.
-  const current = h.app.window.localStorage.getItem('tmux_server_current');
-  const dials = events.filter((e) => e.startsWith('connect:')).length;
   await h.switchTo('beta');
-  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), current, 'no switch');
-  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'nothing dialled');
-  // Storage works again; Retry.
-  failing = false;
-  // Back from Preferences (where the switcher lives) to the content area.
-  const toTab = [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
-    .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
-  assert.ok(toTab, 'the Terminal tab');
-  toTab.click();
+  assert.deepEqual(frozen(), before, 'no switch: CURRENT and the registry as they were');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'nothing dialled');
+  // Storage works again; Retry, from the card.
+  store.state.failing = false;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))?.click();
+  await h.settle();
+  const retry = cardButton(h.app, /retry/iu);
+  assert.ok(retry, `the card offers Retry: ${[...h.app.document.querySelectorAll('.card button')].map((b) => b.textContent?.trim()).join(' | ')}`);
+  retry.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, 'a', 'the fold is recorded');
+  assert.equal(h.onScreen(), 'work:1.0', 'and A came up with its navigation');
+});
+
+test('a deep link that arrives while the migration is blocked is applied only after Retry records A s fold (reviewer P1-a on cf7e7957)', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft on A' }),
+    'tmux_hub_drafts::b': JSON.stringify({ work: 'draft on B' }),
+  }, undefined, { calls: events, setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://b:9899&token=tokB'); } });
+  await h.app.advance(6000);
+  const ls = h.app.window.localStorage;
+  assert.equal(h.app.window.location.search, '', 'the token left the address bar at once');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'but the link was not applied');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft on B' }), 'B s slot untouched');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'nothing dialled');
+  store.state.failing = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'A s fold first');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft on A' }));
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'then the link');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft on B' }), 'and B is B s');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://b:9899'], 'and B is dialled');
+});
+
+for (const [what, key] of [['the registry', 'tmux_servers'], ['the quarantine copy', 'tmux_state::unattributed']] as const) {
+  test(`a failure writing ${what} before the fold is the same blocked state, not a crash (reviewer P1-d on cf7e7957)`, async (context) => {
+    const store = refusing([key]);
+    const seed: Record<string, string> = key === 'tmux_servers'
+      // A pre-registry client: the registry has to be written first.
+      ? { tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_machine_id: 'm-a', tmux_state: legacyNav('work:1.0'), tmux_layout_mode: 'desktop' }
+      // A dangling CURRENT: the navigation has to be set aside first.
+      : { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_server_current: 'gone', tmux_layout_mode: 'desktop' };
+    const events: string[] = [];
+    const h = await bootApp(context, seed, undefined, { calls: events, setup: store.setup });
+    await h.app.advance(6000);
+    assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'nothing dialled');
+    assert.ok(cardButton(h.app, /retry/iu), 'the card offers Retry');
+    store.state.failing = false;
+    cardButton(h.app, /retry/iu)!.click();
+    for (let i = 0; i < 6; i++) await h.settle();
+    const mark = JSON.parse(h.app.window.localStorage.getItem('tmux_state_layout')!);
+    assert.equal(mark.state, key === 'tmux_servers' ? 'folded' : 'pending', 'Retry finished what had failed');
+    assert.ok(cardButton(h.app, /^connect$/iu) || h.app.document.querySelector('.term-page'), 'and the app is usable again');
+  });
+}
+
+test('blocked mid-session (a claim that cannot be recorded): the optimizer and the reconnect loop move nothing, and Retry lands the claim (orchestrator, 21:45)', async (context) => {
+  // m-a's inputs are pending (CURRENT dangled at boot). The person is on B,
+  // switches to alpha — m-a, the owner — and the claim's marker write fails.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_server_current: 'gone',
+    tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+  }, undefined, {
+    calls: events, setup: store.setup,
+    rpc: { classifyAddress: (a: string) => (a.includes('lan') ? 0 : 2), findBestAddress: async () => 'ws://a-lan:9899' },
+  });
+  const ls = h.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://b:9899';
+  field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  cardButton(h.app, /^connect$/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'on B');
+  store.state.failing = true;
+  await h.app.advance(1000);
+  await h.switchTo('alpha');
+  await h.app.advance(1000);
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'the claim could not be recorded: no server page');
+  const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers'), ls.getItem('tmux_address')];
+  const before = frozen();
+  const dials = () => events.filter((e) => e.startsWith('connect:')).length;
+  const n = dials();
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));   // the optimizer s entry
+  for (let i = 0; i < 4; i++) await h.settle();
+  await h.app.advance(400_000);                                               // and its timer
+  assert.equal(dials(), n, 'the optimizer dialled nothing');
+  h.net.drop();                                                               // the reconnect loop s entry
+  for (let i = 0; i < 4; i++) await h.settle();
+  await h.app.advance(30_000);
+  assert.equal(dials(), n, 'nor did a reconnect');
+  assert.deepEqual(frozen(), before, 'CURRENT, the registry and the mirror as they were');
+  // Retry, once storage works: the claim lands and A comes up.
+  store.state.failing = false;
+  // Connected, so the reason and Retry are on the content area's panel.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))?.click();
   await h.settle();
   const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''));
-  assert.ok(retry, 'the panel offers Retry');
+  assert.ok(retry, 'Retry is offered');
   retry.click();
-  for (let i = 0; i < 4; i++) await h.settle();
-  await h.app.advance(1000);
-  assert.equal(JSON.parse(h.app.window.localStorage.getItem('tmux_state_layout')!).into, 'a', 'the fold is recorded');
-  assert.equal(h.onScreen(), 'work:1.0', 'and A came up with its navigation');
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'm-a claimed its inputs');
 });
 
 test('the boot dials the CURRENT entry s address, not a mirror an unanswered form left behind (board #335 ②b-4)', async (context) => {
@@ -1844,4 +1954,87 @@ test('each server s stored Hub state is read from its own slot: the bell counts 
   await switchTo('beta');
   await app.advance(1000);
   assert.match(bell(), /· 1\b/u, `B s one alert, not A s: ${bell()}`);
+});
+
+// ── Pending inputs (reviewer P1-b/P1-c on cf7e7957): a server that cannot
+// prove the inputs are its own leaves them pending; the owner claims them
+// whenever it shows up, across reloads.
+
+/** m-a's pre-#335 client, whose CURRENT dangled: A's navigation and draft
+ * are live, and the registry knows alpha (m-a) and beta (m-b). */
+const danglingSeed = (over: Record<string, string> = {}) => ({
+  ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+  tmux_server_current: 'gone',
+  tmux_hub_drafts: JSON.stringify({ work: 'draft of m-a' }),
+  tmux_layout_mode: 'desktop',
+  ...over,
+});
+async function connectCard(app: any, settle: () => Promise<void>, address: string) {
+  const field = app.document.querySelector('.card .fields input[type="text"]') as HTMLInputElement;
+  field.value = address;
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  cardButton(app, /^connect$/iu)!.click();
+  for (let i = 0; i < 4; i++) await settle();
+}
+
+test('a deep link to the owner before it has reported its machine: it claims the inputs once it does', async (context) => {
+  // alpha's entry does not know its machine yet; the link makes it current
+  // before any auth, and only the authentication can prove it is m-a.
+  const servers = JSON.parse(twoServers({ live: '', parked: '' }).tmux_servers);
+  delete servers[0].machineId;
+  const { app, onScreen } = await bootApp(context, danglingSeed({ tmux_servers: JSON.stringify(servers) }), undefined,
+    { setup(window) { window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); } });
+  await app.advance(1000);
+  const ls = app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'claimed after the auth');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft of m-a' }));
+  assert.equal(onScreen(), 'work:1.0', 'and its navigation came up');
+});
+
+test('another server first leaves the inputs pending; the owner later claims them — across a reload (reviewer P1-c)', async (context) => {
+  const first = await bootApp(context, danglingSeed());
+  await connectCard(first.app, first.settle, 'ws://b:9899');
+  const ls = first.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'on B');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'B could not prove the inputs: still pending');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), null, 'B got nothing of m-a s');
+  const after = dumpStorage(first.app);
+  await first.app.close();
+
+  // Reload with B legitimately current: B is NOT the owner because it is current.
+  const second = await bootApp(context, after);
+  const ls2 = second.app.window.localStorage;
+  assert.equal(JSON.parse(ls2.getItem('tmux_state_layout')!).state, 'pending', 'still pending after the reload');
+  assert.equal(ls2.getItem('tmux_hub_drafts::b'), null, 'and B still has nothing of m-a s');
+  await second.app.advance(1000);
+  await second.switchTo('alpha');
+  await second.app.advance(1000);
+  assert.deepEqual(JSON.parse(ls2.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'the owner claimed them');
+  assert.equal(ls2.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft of m-a' }));
+  assert.equal(second.onScreen(), 'work:1.0', 'and m-a s navigation came up on alpha');
+});
+
+test('a pending marker that cannot be written at boot blocks before any server can become current (reviewer P1-c)', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  const first = await bootApp(context, danglingSeed(), undefined, { setup: store.setup });
+  await first.app.advance(6000);
+  assert.equal(cardButton(first.app, /^connect$/iu), undefined, 'the card offers no Connect: B cannot become current');
+  const after = dumpStorage(first.app);
+  assert.equal(after.tmux_server_current, 'gone');
+  await first.app.close();
+  const second = await bootApp(context, after);
+  assert.equal(JSON.parse(second.app.window.localStorage.getItem('tmux_state_layout')!).state, 'pending', 'the next boot records it');
+});
+
+test('a saved entry boots even when an unanswered form left the mirror empty (reviewer P2 on cf7e7957)', async (context) => {
+  const events: string[] = [];
+  const { onScreen, app } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_address: '', tmux_token: '',
+  }, undefined, { calls: events });
+  await app.advance(1000);
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://a:9899'], 'the entry s address and token');
+  assert.equal(onScreen(), 'work:1.0');
 });

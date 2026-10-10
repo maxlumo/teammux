@@ -322,9 +322,10 @@ Reading is where the care goes, and three rules carry it:
   parked record into the live key.)
 - **An input nobody can be shown to own is quarantined, not guessed.** Its
   bytes are copied to `tmux_state::unattributed` with the machine id the
-  legacy mirror named at that moment, before anything else runs, and the
-  inputs go only to a server that PROVES that machine is its own (the fold's
-  `requireProof`). Being the next server to authenticate is not evidence of
+  legacy mirror named at that moment, before anything else runs; the inputs
+  are recorded PENDING, and only a server that proves that machine is its own
+  claims them (`claimPending`), however many other servers come first and
+  across reloads. Being the next server to authenticate is not evidence of
   having written them.
 - **An absorbed entry takes its navigation with it, and only an absorbed
   one.** `recordServer` folds a machine's twin entries into one — an

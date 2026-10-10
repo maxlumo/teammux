@@ -29,7 +29,16 @@
     beforeConnect,
     confirmLeave,
     notice = '',
+    frozen = '',
+    onRetry,
   }: {
+    /** Why this form may not connect right now — the boot migration is
+     * blocked, and nothing may move CURRENT until it is recorded (board #335
+     * ②b-4; orchestrator, 21:45). Non-empty: this is shown, and the form's
+     * one button is Retry (`onRetry`) instead of Connect — Retry is the way
+     * out, not a connect. */
+    frozen?: string;
+    onRetry?: () => void;
     /** Why the app came back to this page, from outside the form — an
      * automatic reconnect that reached a peer nobody could identify (board
      * #335 ②b-2-2). Shown in the form's one error slot until it says
@@ -170,6 +179,7 @@
   onDestroy(() => { mounted = false; });
 
   async function doConnect() {
+    if (frozen) return;
     error = '';
     connecting = true;
     cancelled = false;
@@ -327,8 +337,8 @@
 
     <ConnectFields bind:address bind:token bind:socket bind:history onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
 
-    {#if error || notice}
-      <div class="error appear">{error || notice}</div>
+    {#if frozen || error || notice}
+      <div class="error appear">{frozen || error || notice}</div>
     {/if}
     {#if localTrouble}
       <div class="config-note" role="status">{localTrouble.label}: {localTrouble.value}</div>
@@ -341,6 +351,10 @@
         </button>
         <button class="cancel-btn" onclick={cancelConnect}>{t('cancel')}</button>
       </div>
+    {:else if frozen}
+      <button class="connect-btn" onclick={() => onRetry?.()}>
+        {t('configRetry')}
+      </button>
     {:else}
       <button class="connect-btn" onclick={doConnect} disabled={!address}>
         {t('connect')}

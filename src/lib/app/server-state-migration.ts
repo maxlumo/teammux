@@ -32,44 +32,62 @@
 // switch's park, kept here as the one place that still reads the live keys
 // (`fileLive`).
 //
-// CURRENT MUST RESOLVE. An empty CURRENT has no slot to fold into; a CURRENT
-// naming an id that is not in the saved registry (an entry removed, a value
-// written by an older build) has a slot nothing will ever read. Both are a
-// reported no-op with no writes and no marker, so a later run still folds once
-// a connect has resolved which server this is.
+// AN OWNER MUST BE KNOWN, AND THEN IT IS RECORDED (reviewer P1-c on the ②
+// plan; P1-b/c on cf7e7957). The inputs belong to the server the last
+// session left current. When CURRENT names a saved entry, that is the owner,
+// and the fold runs at once. When it does not — empty, or an id nobody saved
+// — the inputs are PENDING: nothing is filed anywhere, the navigation's bytes
+// are copied aside (`quarantineLegacyNav`), and the marker records `pending`
+// with the machine the legacy mirror named. That record is the attribution
+// state, persisted, so a reload never re-infers it from whatever CURRENT
+// says by then: a server a connect made current in the meantime is NOT the
+// owner. Only a server whose machine IS that machine claims the inputs
+// (`claimPending`), whenever it shows up; any other runs on its own empty
+// slots and the inputs stay pending. A claim keeps what the owner wrote
+// since — its slot is newer than the inputs. There is no terminal "consumed,
+// nobody's" state: only a fold ends pending.
 //
-// AND THEN THE SERVER MUST PROVE IT (reviewer P1-c on the ② plan). When the
-// boot could not name a server, the inputs were left by one nobody can
-// identify, and the next server to become current is not evidence of having
-// written them. Such a later run (`requireProof`) folds only into a server
-// whose machine is the one the legacy mirror named — `tmux_machine_id`,
-// which nothing writes after ②b-4, so it is the value the old build left. A
-// server that cannot prove it gets nothing: the inputs are marked consumed
-// with no owner (`unclaimed`) and stay where they are, and nothing is folded
-// over that server's slot later. With no inputs at all there is nothing to
-// prove, and it is an ordinary fold.
+// With no inputs at all there is nothing to attribute: the marker records a
+// fold into CURRENT once one exists.
+//
+// EVERY WRITE CAN FAIL, and a failure is `unrecorded`: the caller treats it
+// as boot migration not complete (no server page, nothing that moves CURRENT,
+// Retry). A thrown error is the same.
 //
 // What it does NOT do: clear the unprefixed keys. Nothing writes them any
 // more, and a client rolled back to a build from before #335 finds exactly
 // the state it left.
 //
 // App runs it at boot, before the deep link and before any page mounts, and
-// again before it builds any server's state (`swapScope`): only then can a
-// fresh client, or one whose CURRENT dangled, fold for the server a connect
-// has since made current.
+// again before it builds any server's state (`swapScope`) — which is where a
+// fresh client folds for its first server and a pending input meets the
+// server that can claim it.
 import { RESIDENT_KEYS, currentServerId, loadServers, residentKey } from './servers.ts';
+import { quarantineLegacyNav } from './nav-saved.ts';
 import type { ServerId } from './refs.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 /** File every legacy live key under `id`'s slot; an absent live key clears
- * the slot (see the header). */
-function fileLive(storage: Store, id: ServerId): void {
+ * the slot (see the header). `keepNewer`: a slot that already holds a value
+ * keeps it — a CLAIM, where the owner has been writing its slot since the
+ * inputs were set aside. */
+function fileLive(storage: Store, id: ServerId, keepNewer = false): { folded: string[]; cleared: string[] } {
+  const folded: string[] = [];
+  const cleared: string[] = [];
   for (const key of RESIDENT_KEYS) {
     const live = storage.getItem(key);
-    if (live != null) storage.setItem(residentKey(key, id), live);
-    else storage.removeItem(residentKey(key, id));
+    const slot = storage.getItem(residentKey(key, id));
+    if (keepNewer && slot != null) continue;
+    if (live != null) { folded.push(key); storage.setItem(residentKey(key, id), live); }
+    else if (slot != null) { cleared.push(key); storage.removeItem(residentKey(key, id)); }
   }
+  return { folded, cleared };
+}
+
+/** Are there pre-#335 inputs to attribute? */
+function hasInputs(storage: Store): boolean {
+  return RESIDENT_KEYS.some((key) => storage.getItem(key) != null);
 }
 
 /** The completion marker. Unprefixed and single: its subject is the INPUTS,
@@ -81,26 +99,32 @@ export const LAYOUT_KEY = 'tmux_state_layout';
  * next" instead of seeing an opaque true. */
 export const LAYOUT_VERSION = '335';
 
-/** What the marker records: the layout, and which server received the inputs
- * (the per-server half of completion, in the same write). */
-export interface LayoutMark {
-  v: string;
-  into: ServerId;
-}
+/** What the marker records — the attribution state of the inputs:
+ * `folded` into a server (the layout and which server received them, in one
+ * write), or `pending` an owner that proves it is the legacy mirror's
+ * machine. */
+export type LayoutMark =
+  | { v: string; state: 'folded'; into: ServerId }
+  | { v: string; state: 'pending'; machineId: string };
 
-/** The marker, or null when the inputs have not been consumed. Anything
- * unparseable still counts as consumed: the one thing worse than not knowing
- * which fold ran is reading the inputs a second time. */
-export function layoutMark(storage: Store): LayoutMark | null {
+/** The marker, or null when nothing has been decided. Anything unparseable
+ * still counts as consumed: the one thing worse than not knowing which fold
+ * ran is reading the inputs a second time. A marker without a state is the
+ * first #335 shape, `{v, into}`; one with an empty `into` read as pending. */
+export function layoutMark(storage: Pick<Storage, 'getItem'>): LayoutMark | null {
   const raw = storage.getItem(LAYOUT_KEY);
   if (raw == null) return null;
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
-      return { v: String(parsed.v ?? ''), into: String(parsed.into ?? '') };
+      const v = String(parsed.v ?? '');
+      if (parsed.state === 'pending' || (parsed.state === undefined && !parsed.into)) {
+        return { v, state: 'pending', machineId: String(parsed.machineId ?? storage.getItem('tmux_machine_id') ?? '') };
+      }
+      return { v, state: 'folded', into: String(parsed.into ?? '') };
     }
   } catch { /* an older or hand-edited marker still means "consumed" */ }
-  return { v: String(raw), into: '' };
+  return { v: String(raw), state: 'folded', into: '' };
 }
 
 export interface MigrationReport {
@@ -108,27 +132,18 @@ export interface MigrationReport {
   ran: boolean;
   /**
    * `folded`: it ran and is recorded.
-   * `unrecorded`: it ran but the marker could not be written — storage is
-   *   failing. The inputs still read as unconsumed, so the next server to
-   *   become current would receive them.
-   *
-   *   ②b must treat this — and a thrown error — as BOOT MIGRATION NOT
-   *   COMPLETE, which is stronger than "do not switch servers" (reviewer,
-   *   2026-10-09): it must also not bring up the pages that WRITE resident
-   *   state and retry afterwards. A writable page plus an unconsumed input set
-   *   is the half-migrated client this whole design exists to avoid — the
-   *   page's new writes land in the slot, and the retry then folds the stale
-   *   unprefixed values over them. Retry before anything can write, or come
-   *   up read-only.
-   * `no-current` / `unknown-current`: nothing to fold into. No writes, no
-   *   marker; ask again once a connect has resolved the server.
-   * `unclaimed`: asked with `requireProof`, there were inputs, and this
-   *   server could not prove they are its own. Marked consumed with no
-   *   owner; nothing moved.
-   * `already-done`: the inputs were consumed by an earlier run, and reading
-   *   them again would overwrite newer resident values.
+   * `unrecorded`: a write failed (the fold's, the marker's, the quarantine
+   *   copy's) — storage is failing, and nothing records what happened to the
+   *   inputs. BOOT MIGRATION NOT COMPLETE (reviewer, 2026-10-09): no page that
+   *   writes resident state, nothing that moves CURRENT, and retry. A
+   *   writable page plus an unconsumed input set is the half-migrated client
+   *   this whole design exists to avoid.
+   * `pending`: the inputs have no proven owner yet; recorded, nothing moved.
+   * `no-current`: no inputs and no server to mark them done for; no writes.
+   * `already-done`: folded by an earlier run, and reading them again would
+   *   overwrite newer resident values.
    */
-  reason: 'folded' | 'unrecorded' | 'no-current' | 'unknown-current' | 'already-done' | 'unclaimed';
+  reason: 'folded' | 'unrecorded' | 'pending' | 'no-current' | 'already-done';
   /** The server the live values were filed under — or, for `already-done`,
    * the one an earlier run filed them under. */
   serverId: ServerId;
@@ -141,50 +156,59 @@ export interface MigrationReport {
 }
 
 /**
- * Fold the live unprefixed per-server keys into the CURRENT server's slot,
- * once and for all.
- *
- * Returns what it did, which is what the ②b caller logs and what the tests
- * assert on.
+ * Decide the inputs' attribution, once: fold them into a CURRENT that names a
+ * saved server, or record them pending a proof. A pending or folded marker
+ * is final for this call.
  */
-export function migrateServerState(storage: Store, { requireProof = false }: { requireProof?: boolean } = {}): MigrationReport {
+export function migrateServerState(storage: Store): MigrationReport {
   const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
     ({ ran: false, reason, serverId, folded: [], cleared: [] });
 
-  const id = currentServerId(storage);
-  if (!id) return none('no-current');
-  // A dangling CURRENT must not guess a slot: filing the live values under an
-  // id no saved server has is losing them quietly.
-  if (!loadServers(storage).some((s) => s.id === id)) return none('unknown-current');
-
   const done = layoutMark(storage);
-  if (done) return none('already-done', done.into);
+  if (done?.state === 'folded') return none('already-done', done.into);
+  if (done?.state === 'pending') return none('pending');
 
-  const mark = (into: ServerId): boolean => {
+  const id = currentServerId(storage);
+  const known = !!id && loadServers(storage).some((s) => s.id === id);
+  if (!known) {
+    if (!hasInputs(storage)) return none('no-current');
+    // A CURRENT that names no saved server must not guess a slot, and the
+    // next server to connect is not evidence either: set aside, recorded.
     try {
-      storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, into } satisfies LayoutMark));
-      return true;
-    } catch { return false; }
-  };
-  if (requireProof && RESIDENT_KEYS.some((key) => storage.getItem(key) != null)) {
-    const legacy = storage.getItem('tmux_machine_id') || '';
-    const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
-    if (!legacy || legacy !== own) {
-      return mark('') ? none('unclaimed') : none('unrecorded', id);
-    }
+      quarantineLegacyNav(storage);
+      storage.setItem(LAYOUT_KEY, JSON.stringify({
+        v: LAYOUT_VERSION, state: 'pending', machineId: storage.getItem('tmux_machine_id') || '',
+      } satisfies LayoutMark));
+    } catch { return none('unrecorded'); }
+    return none('pending');
   }
+  return foldInto(storage, id, false);
+}
 
-  const folded: string[] = [];
-  const cleared: string[] = [];
-  for (const key of RESIDENT_KEYS) {
-    if (storage.getItem(key) != null) folded.push(key);
-    else if (storage.getItem(residentKey(key, id)) != null) cleared.push(key);
-  }
-  fileLive(storage, id);
+/**
+ * A pending input meets server `id`: fold it in only if `id`'s machine is the
+ * one the legacy mirror named, keeping whatever `id` wrote since. Anything
+ * else changes nothing — `pending` again — however often it is asked.
+ */
+export function claimPending(storage: Store, id: ServerId): MigrationReport {
+  const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
+    ({ ran: false, reason, serverId, folded: [], cleared: [] });
+  const done = layoutMark(storage);
+  if (done?.state !== 'pending') return done ? none('already-done', done.into) : none('no-current');
+  const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
+  if (!own || !done.machineId || own !== done.machineId) return none('pending');
+  return foldInto(storage, id, true);
+}
+
+function foldInto(storage: Store, id: ServerId, keepNewer: boolean): MigrationReport {
+  let moved: { folded: string[]; cleared: string[] };
+  try { moved = fileLive(storage, id, keepNewer); } catch { return { ran: true, reason: 'unrecorded', serverId: id, folded: [], cleared: [] }; }
   // Marked AFTER the move, so a failure part-way leaves the inputs readable
   // and the next run redoes the whole fold rather than half of it. Two
   // writes cannot be made atomic in `localStorage`; what is possible is one
   // write, and saying so when even that fails.
-  if (!mark(id)) return { ran: true, reason: 'unrecorded', serverId: id, folded, cleared };
-  return { ran: true, reason: 'folded', serverId: id, folded, cleared };
+  try {
+    storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'folded', into: id } satisfies LayoutMark));
+  } catch { return { ran: true, reason: 'unrecorded', serverId: id, ...moved }; }
+  return { ran: true, reason: 'folded', serverId: id, ...moved };
 }

@@ -367,12 +367,10 @@ test('the multi-server registry wires migrate → deep-link → boot, in that or
   // client a link would otherwise create the registry via upsert, turn
   // migrateServers into a no-op, and silently drop the current user +
   // history. The consumer then upserts the linked server by address.
-  const idxMigrate = source.indexOf('migrateServers(localStorage)');
-  const idxConsume = source.indexOf('consumeConnectUrlParams();');
-  assert.ok(idxMigrate >= 0, 'boot migrates the single-server keys');
-  assert.ok(idxMigrate < idxConsume, 'migrate BEFORE the deep-link consumer');
-  assert.match(source, /activateConnected\(localStorage, \{ address: a2, token: token \|\| ''/u,
-    'a deep-linked server joins the registry AND activates pre-boot (parks the old current)');
+  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);/u, 'boot migrates the single-server keys first');
+  assert.match(source, /prepareStorage\(\);\s*takeBootLink\(takeConnectLink\(\)\);/u, 'migrate BEFORE the deep link is applied');
+  assert.match(source, /if \(address\) activateConnected\(localStorage, \{ address, token: token \|\| '',/u,
+    'a deep-linked server joins the registry AND activates pre-boot');
 });
 
 test('the rail server switcher sits above the configure group and only places (board #55)', () => {
@@ -525,7 +523,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // absorb the entry we booted as into a machine's survivor and re-point
   // CURRENT at it, and from then on the app is on the survivor.
   assert.match(source, /function swapScope\(\) \{\s*const id = currentServerId\(localStorage\);/u);
-  assert.match(source, /if \(held\?\.alive\(\) && !ends\.ending\(held\) && entry && held\.id === entry\.id\) return;/u,
+  assert.match(source, /if \(held\?\.alive\(\) && !ends\.ending\(held\) && entry && held\.id === entry\.id && fold !== 'claimed'\) return;/u,
     'a reconnect keeps its handle — but only a handle that is still alive and not being ended: a revoked lease cannot serve the same id again');
   assert.match(source, /const held = scopeSwap\.bound\(\);/u,
     'and it asks what the swap is already heading for, or one success path mints a handle nobody shows or releases');
@@ -553,7 +551,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
   assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\} \/>/u,
+  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form stands the handle down before it re-dials the socket itself');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what
@@ -570,7 +568,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     // Boot's order is the pin (board #335 ②b-4, orchestrator's ruling on the
     // ② plan): migrate the registry, load it, FOLD, then the deep link, then
     // bind. A fold after the link would file A's live state into B's slot.
-    ['boot', /migrateServers\(localStorage\);\s*loadServerRegistry\(\);[\s\S]{0,2400}?const bootFold = runFold\(false\);[\s\S]{0,300}?consumeConnectUrlParams\(\);[\s\S]{0,600}?swapScope\(\);/u],
+    ['boot', /prepareStorage\(\);\s*takeBootLink\(takeConnectLink\(\)\);[\s\S]{0,900}?swapScope\(\);/u],
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
     // A failover can be the connect that first learns the machine's id, and
@@ -582,7 +580,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
   // never an inference from an id being absent (reviewer P1-a, 2026-10-10).
-  assert.match(source, /const entry = id && foldFor\(\) \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u,
+  assert.match(source, /const fold = id \? foldFor\(id\) : 'ok';\s*const entry = fold !== 'blocked' \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) \?\? null : null;\s*followMerges\(\);\s*const held = scopeSwap\.bound\(\);/u,
     'no server s state is built before the fold has run for it, and none at all while it cannot be recorded');
   assert.match(source, /function followMerges\(\) \{\s*const survivorOf = \(serverId\) => mergedInto\(localStorage, serverId\);/u,
     'the survivor comes from servers.mergedInto');
@@ -769,7 +767,7 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // stay, so the socket is B's and the app arrives at B like the connect page
   // does. Only when CURRENT did not already move.
   const elsewhere = source.match(/async function arrivedElsewhere\(result, addr, token, attempt\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(elsewhere, /^async function arrivedElsewhere\(result, addr, token, attempt\) \{\s*if \(currentServerId\(localStorage\) === result\.entry\.id\) \{ bringUp\(addr, token\); return; \}/u,
+  assert.match(elsewhere, /^async function arrivedElsewhere\(result, addr, token, attempt\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*if \(currentServerId\(localStorage\) === result\.entry\.id\) \{ bringUp\(addr, token\); return; \}/u,
     'an absorbed alias already moved CURRENT: just come up');
   // Arriving destroys A's tree: A's editors are asked first (reviewer, 18:54
   // on 5ca0e79e), and nothing — no verdict, no park — happens before they
@@ -778,9 +776,9 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // second walk opens (reviewer P1 on 085b0e70); a stay keeps everything
   // automatic from dialling again (P2).
   assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
-  assert.match(source, /setOnDisconnect\(\(\) => \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline\) return;/u);
-  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline\) return;/u);
-  assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing, not even the mirror');
+  assert.match(source, /setOnDisconnect\(\(\) => \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
+  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
+  assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing, not even the mirror');
   assert.match(source, /claim: \(\) => handovers\.claim\(\),\s*reconnecting: \(\) => reconnectMachine\.isActive\(\),/u, 'an automatic claim lifts no stay');
   assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf("settle?.('other-server')")
     && elsewhere.indexOf("settle?.('other-server')") < elsewhere.indexOf('activateConnected('), 'ask, then conclude, then write');
@@ -788,14 +786,23 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
     'both kept: arrive at B through the connect page s different-server path');
 });
 
-test('the fold gate: an unrecorded fold binds no server and starts no switch (board #335 ②b-4)', () => {
-  assert.match(source, /function runFold\(requireProof\) \{\s*let reason;\s*try \{ reason = migrateServerState\(localStorage, \{ requireProof \}\)\.reason; \} catch \{ reason = 'unrecorded'; \}\s*migrationBlocked = reason === 'unrecorded';/u,
-    'a thrown fold is unrecorded too');
-  assert.match(source, /function foldFor\(\) \{\s*return runFold\(foldNeedsProof\) !== 'unrecorded';\s*\}/u,
-    'a server that became current after a boot that could not name one must PROVE the inputs are its own');
-  assert.match(source, /const switchTo = \(target\) => \(migrationBlocked \? Promise\.resolve\(\) : serverSwitch\.switchTo\(target\)\);/u);
-  assert.match(source, /if \(foldNeedsProof\) quarantineLegacyNav\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
-    'the legacy navigation is copied aside before anything else runs');
+test('the fold gate: an unrecorded migration binds no server and moves no CURRENT (board #335 ②b-4)', async () => {
+  // ONE persisted attribution state (server-state-migration.ts), and every
+  // step the boot needs before a bind inside one recoverable gate.
+  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*migrationBlocked = migrateServerState\(localStorage\)\.reason === 'unrecorded';\s*\} catch \{ migrationBlocked = true; \}/u,
+    'a registry or attribution write that fails is the same blocked state, never a throw out of App');
+  assert.match(source, /function foldFor\(id\) \{\s*if \(migrationBlocked\) prepareStorage\(\);\s*if \(migrationBlocked\) return 'blocked';/u);
+  assert.match(source, /if \(reason === 'pending'\) \{\s*const claim = claimPending\(localStorage, id\)\.reason;/u, 'a pending input meets every server that is bound');
+  assert.doesNotMatch(source, /requireProof|foldNeedsProof|quarantineLegacyNav/u, 'nothing re-infers the attribution per App instance');
+  // Frozen while blocked: every way CURRENT could move.
+  assert.match(source, /if \(link && migrationBlocked\) deferredLink = link;/u, 'a deep link waits');
+  assert.match(source, /if \(autoConnectAttempted \|\| connected \|\| switching \|\| migrationBlocked\) return;/u, 'no boot dial');
+  assert.match(source, /frozen: \(\) => migrationBlocked,/u, 'no switch, no address connect');
+  assert.match(source, /async function optimizeConnection\(\) \{\s*if \(migrationBlocked\) return;/u, 'no optimizer');
+  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(migrationBlocked\)/u, 'no late reconnect');
+  assert.match(source, /frozen=\{migrationBlocked \? t\('migrationBlockedNote'\) : ''\} onRetry=\{retryMigration\}/u, 'and the form offers only Retry');
+  const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
+  assert.match(settings, /async function doConnect\(\) \{\s*if \(frozen\) return;/u, 'not only its button');
   // Every per-server read and write goes through the server's store.
   assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\),/u);
   assert.match(source, /readNav\(createServerStore\(localStorage, target\.id\)\)/u);

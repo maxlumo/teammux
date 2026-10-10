@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
-import { LAYOUT_KEY, LAYOUT_VERSION, layoutMark, migrateServerState } from './server-state-migration.ts';
+import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, layoutMark, migrateServerState } from './server-state-migration.ts';
 import { RESIDENT_KEYS, activateSwitched, residentKey } from './servers.ts';
 
 /** What a switch on a pre-#335 build did to storage: file the leaving
@@ -212,7 +212,7 @@ test('ONE marker write records both facts, so there is no window between them', 
   // carries the layout AND which server received the inputs.
   const storage = preMigration();
   migrateServerState(storage);
-  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, into: 'a' });
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'folded', into: 'a' });
   assert.equal(storage.getItem(residentKey(LAYOUT_KEY, 'a')), null, 'no second marker to go missing');
   // The marker is not a per-server key, so a server store does not rewrite it
   // on the way past.
@@ -220,7 +220,7 @@ test('ONE marker write records both facts, so there is no window between them', 
   // Unparseable is still "consumed": reading the inputs twice is worse than
   // not knowing which fold ran.
   const old = mem({ ...preMigration().dump(), [LAYOUT_KEY]: 'yes' });
-  assert.deepEqual(layoutMark(old), { v: 'yes', into: '' });
+  assert.deepEqual(layoutMark(old), { v: 'yes', state: 'folded', into: '' });
   assert.equal(migrateServerState(old).reason, 'already-done');
 });
 
@@ -243,20 +243,25 @@ test('a fold that cannot be recorded says so, and a later run records it', () =>
   storage.setItem = real;
   const second = migrateServerState(storage);
   assert.equal(second.reason, 'folded', 'the retry folds the same inputs again');
-  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, into: 'a' });
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'folded', into: 'a' });
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'half a line on A' });
 });
 
-test('a CURRENT that names no saved server does not guess a slot', () => {
-  // An entry removed, or a value from an older build. Filing the live values
-  // under an id no server has is losing them quietly.
-  const storage = preMigration();
-  storage.setItem('tmux_server_current', 'ghost');
+const PENDING_DANGLING = (storage: ReturnType<typeof mem>) => {
   const before = storage.dump();
   const report = migrateServerState(storage);
-  assert.deepEqual(report, { ran: false, reason: 'unknown-current', serverId: '', folded: [], cleared: [] });
-  assert.deepEqual(storage.dump(), before, 'no writes at all');
-  assert.equal(layoutMark(storage), null, 'and no completion marker');
+  assert.deepEqual(report, { ran: false, reason: 'pending', serverId: '', folded: [], cleared: [] });
+  const { [LAYOUT_KEY]: marker, 'tmux_state::unattributed': copy, ...rest } = storage.dump();
+  assert.deepEqual(rest, before, 'nothing filed into any slot');
+  assert.deepEqual(JSON.parse(marker!), { v: LAYOUT_VERSION, state: 'pending', machineId: 'm-a' },
+    'the attribution state is RECORDED, with the legacy mirror s machine as its evidence');
+  assert.equal(JSON.parse(copy!).raw, before.tmux_state, 'and the navigation is copied aside');
+};
+
+test('a CURRENT that names no saved server does not guess a slot: the inputs are recorded pending (reviewer P1-c)', () => {
+  const storage = preMigration();
+  storage.setItem('tmux_server_current', 'ghost');
+  PENDING_DANGLING(storage);
 });
 
 test('a value the user CLEARED does not come back from the old park', () => {
@@ -292,7 +297,7 @@ test('a fold interrupted halfway leaves the inputs, and the next run redoes it a
     if (++writes === 3) throw new Error('QuotaExceededError');
     real(k, v);
   };
-  assert.throws(() => migrateServerState(storage), /Quota/u);
+  assert.equal(migrateServerState(storage).reason, 'unrecorded', 'a failed write is reported, never thrown');
   storage.setItem = real;
 
   assert.equal(storage.getItem(LAYOUT_KEY), null, 'nothing claims the fold happened');
@@ -309,16 +314,16 @@ test('a fold interrupted halfway leaves the inputs, and the next run redoes it a
   }
 });
 
-test('with no current server the fold does nothing and says so', () => {
-  // Guessing a slot would file A's drafts under B. The caller runs it again
-  // once a connect has resolved which server this is.
+test('with no current server the inputs are recorded pending, never guessed', () => {
   const storage = preMigration();
   storage.removeItem('tmux_server_current');
-  const before = storage.dump();
-  const report = migrateServerState(storage);
-  assert.deepEqual(report, { ran: false, reason: 'no-current', serverId: '', folded: [], cleared: [] });
-  assert.deepEqual(storage.dump(), before, 'not one key moved');
-  assert.equal(layoutMark(storage), null, 'and nothing was marked, so a later run still folds');
+  PENDING_DANGLING(storage);
+});
+
+test('with no inputs and no server there is nothing to record', () => {
+  const storage = mem({});
+  assert.equal(migrateServerState(storage).reason, 'no-current');
+  assert.deepEqual(storage.dump(), {}, 'no writes');
 });
 
 test('a fresh client has nothing to fold', () => {
@@ -334,7 +339,7 @@ test('a fresh client has nothing to fold', () => {
   assert.deepEqual(storage.dump(), {
     tmux_server_current: 'only',
     tmux_servers: JSON.stringify([{ id: 'only', name: 'n', address: 'ws://n:9899', token: '' }]),
-    [LAYOUT_KEY]: JSON.stringify({ v: LAYOUT_VERSION, into: 'only' }),
+    [LAYOUT_KEY]: JSON.stringify({ v: LAYOUT_VERSION, state: 'folded', into: 'only' }),
   }, 'only the marker, so the empty client is not folded again either');
 });
 
@@ -376,27 +381,55 @@ test('after the fold nothing writes the legacy keys: a store write and a switch 
   assert.deepEqual(JSON.parse(a.getItem('tmux_hub_drafts')!), { work: 'written after the flip' });
 });
 
-test('a fold that must PROVE its server gives the inputs only to the machine the legacy mirror named (reviewer P1-c)', () => {
-  // The boot could not name a server (CURRENT dangled), so the next server a
-  // connect makes current must show the inputs are its own.
-  for (const [machineId, expected] of [['m-a', 'folded'], ['m-x', 'unclaimed'], ['', 'unclaimed']] as const) {
-    const storage = preMigration();
-    storage.setItem('tmux_servers', JSON.stringify([
-      { id: 'n', name: 'new', address: 'ws://n:9899', token: 't', ...(machineId ? { machineId } : {}) },
-    ]));
-    storage.setItem('tmux_server_current', 'n');
-    const before = storage.dump();
-    const report = migrateServerState(storage, { requireProof: true });
-    assert.equal(report.reason, expected, `a server on ${machineId || 'an unknown machine'}`);
-    if (expected === 'folded') {
-      assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::n')!), { work: 'half a line on A' }, 'proven: it is that machine s state');
-    } else {
-      const { [LAYOUT_KEY]: marker, ...rest } = storage.dump();
-      assert.deepEqual(rest, before, 'unproven: nothing moved');
-      assert.deepEqual(JSON.parse(marker!), { v: LAYOUT_VERSION, into: '' }, 'and the inputs are consumed with no owner');
-      assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'already-done', 'so no later server folds them either');
-    }
+/** A pre-#335 client whose CURRENT dangled: its inputs (m-a's) are pending
+ * once the boot has run, and `servers` is what the registry holds after. */
+function pending(servers: Array<{ id: string; machineId?: string }>) {
+  const storage = preMigration();
+  storage.setItem('tmux_server_current', 'ghost');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  storage.setItem('tmux_servers', JSON.stringify(servers.map((s) => ({ name: s.id, address: `ws://${s.id}:9899`, token: 't', ...s }))));
+  return storage;
+}
+
+test('a pending input is claimed only by the machine the legacy mirror named (reviewer P1-b on cf7e7957)', () => {
+  const storage = pending([{ id: 'x', machineId: 'm-x' }, { id: 'n' }, { id: 'a2', machineId: 'm-a' }]);
+  const before = storage.dump();
+  for (const id of ['x', 'n']) {
+    assert.equal(claimPending(storage, id).reason, 'pending', `${id} cannot prove it: still pending`);
+    assert.deepEqual(storage.dump(), before, 'and nothing moved — no terminal state either');
   }
+  assert.equal(migrateServerState(storage).reason, 'pending', 'a later boot sees it pending too');
+  const claim = claimPending(storage, 'a2');
+  assert.equal(claim.reason, 'folded', 'the machine that proves it claims it, after the others');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a2')!), { work: 'half a line on A' });
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'folded', into: 'a2' });
+  assert.equal(claimPending(storage, 'a2').reason, 'already-done', 'once');
+});
+
+test('pending survives a reload with another server legitimately current (reviewer P1-c on cf7e7957)', () => {
+  // B became current through a connect while the inputs were pending; a
+  // reload must not read "CURRENT is valid" as "CURRENT owns the inputs".
+  const storage = pending([{ id: 'b', machineId: 'm-b' }]);
+  storage.setItem('tmux_server_current', 'b');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  assert.equal(storage.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'half a line on B' }), 'B s own slot, not A s inputs');
+});
+
+test('a claim keeps what the owner wrote since the inputs were set aside', () => {
+  const storage = pending([{ id: 'a2', machineId: 'm-a' }]);
+  storage.setItem('tmux_hub_drafts::a2', JSON.stringify({ work: 'typed on the new build' }));
+  assert.equal(claimPending(storage, 'a2').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a2')!), { work: 'typed on the new build' }, 'newer wins');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_lead::a2')!), { work: 'builder' }, 'and the rest is filled in');
+});
+
+test('a pending input with no machine on record waits; nothing can prove it', () => {
+  const storage = preMigration();
+  storage.removeItem('tmux_server_current');
+  storage.removeItem('tmux_machine_id');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  storage.setItem('tmux_servers', JSON.stringify([{ id: 'n', name: 'n', address: 'ws://n:9899', token: 't' }]));
+  assert.equal(claimPending(storage, 'n').reason, 'pending');
 });
 
 test('with nothing to fold there is nothing to prove', () => {
@@ -404,17 +437,26 @@ test('with nothing to fold there is nothing to prove', () => {
     tmux_servers: JSON.stringify([{ id: 'n', name: 'new', address: 'ws://n:9899', token: 't', machineId: 'm-n' }]),
     tmux_server_current: 'n',
   });
-  assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'folded');
-  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, into: 'n' });
+  assert.equal(migrateServerState(storage).reason, 'folded');
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'folded', into: 'n' });
 });
 
-test('an unproven fold that cannot be recorded says so', () => {
-  const storage = preMigration();
-  storage.setItem('tmux_servers', JSON.stringify([{ id: 'n', name: 'new', address: 'ws://n:9899', token: 't', machineId: 'm-x' }]));
-  storage.setItem('tmux_server_current', 'n');
-  const set = storage.setItem;
-  storage.setItem = (k: string, v: string) => { if (k === LAYOUT_KEY) throw new Error('QuotaExceededError'); set(k, v); };
-  assert.equal(migrateServerState(storage, { requireProof: true }).reason, 'unrecorded');
+test('every write the attribution needs can fail, and each says unrecorded', () => {
+  for (const key of [LAYOUT_KEY, 'tmux_state::unattributed']) {
+    const storage = preMigration();
+    storage.setItem('tmux_server_current', 'ghost');
+    const set = storage.setItem;
+    storage.setItem = (k: string, v: string) => { if (k === key) throw new Error('QuotaExceededError'); set(k, v); };
+    assert.equal(migrateServerState(storage).reason, 'unrecorded', `${key} failing`);
+    storage.setItem = set;
+    assert.equal(layoutMark(storage), null, 'nothing recorded, so the retry decides again');
+  }
+  const claim = pending([{ id: 'a2', machineId: 'm-a' }]);
+  const set = claim.setItem;
+  claim.setItem = (k: string, v: string) => { if (k === LAYOUT_KEY) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.equal(claimPending(claim, 'a2').reason, 'unrecorded');
+  claim.setItem = set;
+  assert.equal(layoutMark(claim)?.state, 'pending', 'and a failed claim leaves it pending');
 });
 
 test('a key the server never had leaves no slot behind', () => {

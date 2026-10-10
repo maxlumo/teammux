@@ -95,6 +95,7 @@ function app(storage = mem({
   const published: string[] = [];
   const handovers = createHandovers({ end: () => {} });
   let looping = false;
+  let frozen = false;
   const sw = createServerSwitch({
     storage,
     connected: () => connected,
@@ -102,6 +103,7 @@ function app(storage = mem({
     currentName: () => loadServers(storage).find((s) => s.id === currentServerId(storage))?.name ?? '',
     confirmLeave: () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} }),
     claim: () => handovers.claim(),
+    frozen: () => frozen,
     stopReconnect: () => { reconnects.push('stop'); looping = false; },
     reconnecting: () => looping,
     startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); looping = true; },
@@ -121,7 +123,7 @@ function app(storage = mem({
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, unmountWrites, resets, suspenders, reconnects, published,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, freeze: (on: boolean) => { frozen = on; }, unmountWrites, resets, suspenders, reconnects, published,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -392,4 +394,16 @@ test('a stay puts a FAILED frozen address connect back to the reconnect loop', a
   answer(false);
   await walk;
   assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), ['start ws://a:1']);
+});
+
+test('frozen: no switch and no address connect starts (board #335 ②b-4)', async () => {
+  const t = app();
+  t.freeze(true);
+  await t.sw.switchTo(t.b);
+  assert.equal(currentServerId(t.storage), t.a.id);
+  assert.equal(t.w.at, 'ws://a:1');
+  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), false);
+  t.freeze(false);
+  await t.sw.switchTo(t.b);
+  assert.equal(currentServerId(t.storage), t.b.id, 'thawed, it works');
 });

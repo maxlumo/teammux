@@ -51,6 +51,10 @@ export interface SwitchDeps {
    * #335 ②b-2-3, reviewer P1 on 085b0e70): ONE owner counter for every
    * socket change, and the answer to "is this still mine". */
   claim(): { current(): boolean };
+  /** Is the socket's owner frozen — CURRENT must not move (the boot
+   * migration is blocked, board #335 ②b-4)? Then no switch and no address
+   * connect starts. */
+  frozen(): boolean;
   stopReconnect(): void;
   /** Is the reconnect loop running? A walk freezes it, and a "stay" starts
    * it again. */
@@ -86,7 +90,7 @@ export function createServerSwitch(d: SwitchDeps) {
   const set = (next: SwitchState | null) => { state = next; d.onstate(next); };
 
   async function switchTo(target: SwitchTarget): Promise<void> {
-    if (state?.phase === 'connecting' || guarding) return; // one intent at a time
+    if (state?.phase === 'connecting' || guarding || d.frozen()) return; // one intent at a time
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected) {
@@ -136,7 +140,7 @@ export function createServerSwitch(d: SwitchDeps) {
    * Resolves true when the address answered and is now the connection.
    */
   function connectAddress(address: string, token: string): Promise<boolean> {
-    if (state || guarding) return Promise.resolve(false);
+    if (state || guarding || d.frozen()) return Promise.resolve(false);
     const intent = ++seq;
     // It changes the socket, so it takes it from the host's other owners
     // too (reviewer P1 on 085b0e70): an attempt the host was waiting on

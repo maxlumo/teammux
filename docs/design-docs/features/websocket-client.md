@@ -458,19 +458,23 @@ in the fold as the one place that still reads the live keys. Every other
 server's park is untouched, because the live set speaks only for the current
 server.
 
-**CURRENT must resolve.** An empty CURRENT has no slot to fold into, and a
-CURRENT naming an id no saved server has is a slot nothing will ever read.
-Both are a reported no-op with no writes and no marker, so a later run still
-folds once a connect has resolved which server this is.
+**An owner must be known, and the attribution state is persisted.** The
+marker is the inputs' one attribution state: `folded` into a server, or
+`pending` an owner. When CURRENT names a saved entry, that is the owner and
+the fold runs at once. When it does not — empty, or an id nobody saved — the
+inputs are recorded `pending`, with the machine the legacy mirror named, and
+nothing is filed anywhere (the navigation's bytes are copied aside too). A
+reload never re-infers this from whatever CURRENT says by then (reviewer
+P1-c on cf7e7957).
 
-**And then the server must prove it** (reviewer P1-c on the ② plan). When the
-boot could not name a server, the inputs were left by one nobody can identify,
-and the next server a connect makes current is not evidence of having written
-them. That later run (`requireProof`) folds only into a server whose machine is
-the one the legacy mirror named — `tmux_machine_id`, which nothing writes after
-②b-4, so it is the value the old build left. A server that cannot prove it gets
-nothing: the inputs are marked consumed with no owner (`unclaimed`) and left
-where they are. With no inputs there is nothing to prove.
+**A pending input is claimed only by its machine** (reviewer P1-c on the ②
+plan; P1-b on cf7e7957). Every bind meets a pending input (`claimPending`):
+a server whose machine IS the legacy mirror's claims it — keeping whatever
+it wrote to its slot since, which is newer — and any other server runs on
+its own slots while the input stays pending, however many come first. A
+server that has not reported its machine yet claims it after its
+authentication. There is no terminal "consumed, nobody's" state: only a fold
+ends pending.
 
 It does not clear the unprefixed keys: nothing writes them after ②b-4, and a
 client rolled back to a build from before #335 finds the state it left.
@@ -495,17 +499,26 @@ lost to it. In that commit:
   With no server to fold into at boot, it runs again before the first
   server's state is built (`swapScope`), and if CURRENT had dangled, that
   server must prove itself;
-- an `unrecorded` fold (or one that throws) binds no server: no server page
-  mounts, no switch starts, and the content area shows the reason with Retry
-  on the switch panel's own form. Every later bind tries the fold again, so
-  storage that recovers unblocks it; Retry is such a bind. The shell, the
-  connect card and Preferences stay;
+- any write the boot needs before a bind — the registry's, the attribution
+  marker, the quarantine copy, the fold, a claim — that fails is ONE blocked
+  state (`unrecorded`; a throw is the same), never a crash out of App. While
+  blocked, CURRENT and the registry are FROZEN (orchestrator, 21:45): no
+  server page mounts, and nothing that could move CURRENT or record an
+  identity runs — the boot dial, a deep link's activation (the link is parsed
+  and stripped from the URL at once and applied after the migration is
+  recorded), a switch, an address row, the optimizer, the reconnect loop or a
+  late reconnect success, an arrival. The connect card shows the reason and
+  offers only Retry; connected, the content area's panel does. Retry re-runs
+  every step that had not completed; every later bind tries again too. The
+  shell and Preferences stay;
 - where to reach a server is its ENTRY, for every id (`server-target.ts`), and
   every path that moves the active address records it there once it answers —
   the form and the deep link (`activateConnected`), a failover
   (`recordServer`), an address row and the optimizer (`addressUp`); the boot
-  comes up on, and records, the address the runtime dialled. The mirror keys
-  are still written for the connect card and the share link.
+  comes up on, and records, the address the runtime dialled, and whether it
+  dials at all is the entry's to say, not the mirror's (reviewer P2 on
+  cf7e7957). The mirror keys are still written for the connect card and the
+  share link.
 
 ### A subtree is bound to one server, in that order (board #335 ②b-1)
 

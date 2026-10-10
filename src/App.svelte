@@ -39,10 +39,10 @@
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore } from './lib/app/server-store.ts';
-  import { migrateServerState } from './lib/app/server-state-migration.ts';
+  import { claimPending, migrateServerState } from './lib/app/server-state-migration.ts';
   import { createHandovers } from './lib/app/handover.ts';
   import { createHandleEnds } from './lib/app/handle-end.ts';
-  import { navFor, quarantineLegacyNav, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
+  import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
@@ -172,14 +172,17 @@
    * mint a handle nobody ever shows or releases. */
   function swapScope() {
     const id = currentServerId(localStorage);
-    // No server's state is built before the fold has run for it (board #335
-    // ②b-4): a server that became current only after the boot — a fresh
-    // client's first connect — folds here, and a fold that cannot be
-    // recorded binds nothing at all (`migrationBlocked`).
-    const entry = id && foldFor() ? loadServers(localStorage).find((s) => s.id === id) : null;
+    // No server's state is built before the inputs' attribution has been
+    // asked for it (board #335 ②b-4): a fresh client's first server folds
+    // here, a pending input meets the server that can claim it, and a
+    // migration that cannot be recorded binds nothing at all.
+    const fold = id ? foldFor(id) : 'ok';
+    const entry = fold !== 'blocked' ? loadServers(localStorage).find((s) => s.id === id) ?? null : null;
     followMerges();
     const held = scopeSwap.bound();
-    if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id) return;
+    // A claim just filed the inputs into THIS server's slots: its state,
+    // read before the claim, is rebuilt from them.
+    if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id && fold !== 'claimed') return;
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
     handovers.endAll();
@@ -865,7 +868,8 @@
     if (switching) return; // the switch owns the socket now
     // A leave walk is asking about this socket, or the person chose to stay
     // offline: an automatic reconnect would take the socket under them.
-    if (serverSwitch.guarding || heldOffline) return;
+    // Nor while the migration is blocked: nothing may move CURRENT.
+    if (serverSwitch.guarding || heldOffline || migrationBlocked) return;
     // Keep connected=true during reconnect to avoid UI flicker
     reconnectMachine.start();
   });
@@ -878,6 +882,8 @@
   }
 
   function onReconnectSuccess(useAddr, primaryAddr, handover) {
+    // An attempt already out when the migration blocked records nothing.
+    if (migrationBlocked) { handover?.settle('unresolved'); disconnect(); connected = false; return; }
     // WHO answered decides what this success means, and the identity layer
     // is the one that knows (reviewer P1-b on 372cb4af): the entry
     // `recordServer` returns for the machine that answered. "CURRENT did not
@@ -993,6 +999,7 @@
    * was taken under: if someone else took it anyway, this arrival is not
    * the app's any more and does nothing. */
   async function arrivedElsewhere(result, addr, token, attempt) {
+    if (migrationBlocked) { attempt.settle?.('unresolved'); disconnect(); connected = false; return; }
     if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
     if (!attempt.current()) return;
     let leave = false;
@@ -1367,7 +1374,10 @@
     claim: () => handovers.claim(),
     reconnecting: () => reconnectMachine.isActive(),
     stopReconnect: () => reconnectMachine.cancel(),
-    startReconnect: () => reconnectMachine.start(),
+    startReconnect: () => { if (!migrationBlocked) reconnectMachine.start(); },
+    // While the migration is blocked nothing moves CURRENT (orchestrator,
+    // 21:45): no switch, no address connect.
+    frozen: () => migrationBlocked,
     addressUp: (address) => {
       serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
       // The address that just answered is the server's active one, on its
@@ -1414,7 +1424,7 @@
   });
   // No switch while the fold is unrecorded: there is no server state to
   // arrive with.
-  const switchTo = (target) => (migrationBlocked ? Promise.resolve() : serverSwitch.switchTo(target));
+  const switchTo = (target) => serverSwitch.switchTo(target);
   function switchRetry() { void serverSwitch.retry(); }
   function switchBack() { void serverSwitch.back(loadServers(localStorage)); }
 
@@ -1453,6 +1463,7 @@
   }
 
   async function optimizeConnection() {
+    if (migrationBlocked) return;
     const addrs = getAllAddresses();
     if (addrs.length <= 1 || optimizing) return;
     const current = localStorage.getItem('tmux_address');
@@ -1477,7 +1488,7 @@
       // And after a "stay" it is not the person's connect, so it does not
       // lift the stay (reviewer P2 on 4fbce02e); a walk since the probe
       // began has moved the intent anyway.
-      if (!serverSwitch.owns(intent) || serverSwitch.guarding || heldOffline) return;
+      if (!serverSwitch.owns(intent) || serverSwitch.guarding || heldOffline || migrationBlocked) return;
       if (!best || best === current) return;
       // Only switch if the new address is higher priority (lower class number)
       if (classifyAddress(best) >= curClass) return;
@@ -1502,24 +1513,37 @@
   // token isn't left sitting in the address bar or re-applied on refresh.
   // (Caveat: a token in a link can still land in browser/proxy history before we
   // strip it — only share such links over trusted channels.)
-  function consumeConnectUrlParams() {
+  /** The connection a deep link names, or null; the link is stripped from the
+   * address bar either way, so a token never stays there. */
+  function takeConnectLink() {
     try {
       const hashQ = location.hash.includes('?') ? location.hash.split('?')[1] : '';
       const q = new URLSearchParams(location.search || hashQ);
       const addrRaw = q.get('addr') || q.get('address') || q.get('server');
       const token = q.get('token');
       const socket = q.get('socket');
-      if (!addrRaw && token == null) return;
+      if (!addrRaw && token == null) return null;
+      history.replaceState(null, '', location.pathname + location.hash.split('?')[0]);
+      let address = '';
       if (addrRaw) {
-        let a = addrRaw.trim();
-        if (!/^wss?:\/\//.test(a)) a = (location.protocol === 'https:' ? 'wss://' : 'ws://') + a;
-        localStorage.setItem('tmux_address', a);
+        address = addrRaw.trim();
+        if (!/^wss?:\/\//.test(address)) address = (location.protocol === 'https:' ? 'wss://' : 'ws://') + address;
+      }
+      return { address, token, socket };
+    } catch { return null; } // malformed URL — ignore, fall back to saved/settings
+  }
+  /** Apply a deep link: the same keys the normal flow uses, so the boot dial
+   * picks them up, and — with an address — the registry. */
+  function applyConnectLink({ address, token, socket }) {
+    try {
+      if (address) {
+        localStorage.setItem('tmux_address', address);
         try {
           const hist = JSON.parse(localStorage.getItem('tmux_address_history') || '[]')
             .map(h => (typeof h === 'string' ? { address: h, token: '' } : h));
-          const entry = { address: a, token: token || '' };
+          const entry = { address, token: token || '' };
           localStorage.setItem('tmux_address_history',
-            JSON.stringify([entry, ...hist.filter(h => h.address !== a)].slice(0, 8)));
+            JSON.stringify([entry, ...hist.filter(h => h.address !== address)].slice(0, 8)));
         } catch {}
       }
       if (token != null) localStorage.setItem('tmux_token', token);
@@ -1529,69 +1553,84 @@
       // #55) — and ACTIVATES like one: a different server becomes CURRENT
       // (this runs pre-boot, so no reload is needed on top), while an
       // alternate address of the current machine folds into its entry. The
-      // leaving server's live state was folded into ITS slot just before
-      // (`bootFold`), so nothing of it can land in the linked server's.
-      if (addrRaw) {
-        let a2 = addrRaw.trim();
-        if (!/^wss?:\/\//.test(a2)) a2 = (location.protocol === 'https:' ? 'wss://' : 'ws://') + a2;
-        try { activateConnected(localStorage, { address: a2, token: token || '', ...(socket ? { socket } : {}) }); } catch {}
-      }
-      history.replaceState(null, '', location.pathname + location.hash.split('?')[0]);
-    } catch { /* malformed URL — ignore, fall back to saved/settings */ }
+      // inputs were attributed just before, so nothing of the server being
+      // left can land in the linked server's slots.
+      if (address) activateConnected(localStorage, { address, token: token || '', ...(socket ? { socket } : {}) });
+    } catch { /* storage refused: the saved connection stays as it was */ }
   }
   // Multi-server registry (board #55): migrate the single-server keys into
   // named entries BEFORE the deep-link consumer runs, so a link on a
   // pre-registry client first preserves the current user as entry one and
   // then upserts the linked server — never the reverse (an upsert creating
   // the registry would make migrateServers a no-op and drop the history).
-  migrateServers(localStorage);
-  loadServerRegistry();
-  /** The fold could not be RECORDED (or threw): storage is failing, and the
-   * inputs still read as unconsumed (board #335 ②b-4, reviewer 2026-10-09).
-   * Then no server's state is built and no server page mounts — a writable
-   * page plus an unconsumed input set is the half-migrated client, whose
-   * next fold would overwrite the page's newer writes — and no switch
-   * starts. The shell, Settings and Preferences stay; the panel offers
-   * Retry. */
+  /** The boot migration is NOT COMPLETE (board #335 ②b-4; reviewer P1s on
+   * cf7e7957): a write it needed failed — the registry's, the inputs'
+   * attribution, the fold — and nothing records what happened to the
+   * pre-#335 inputs. Until a retry records it, CURRENT and the registry are
+   * FROZEN (orchestrator, 21:45): no server's state is built and no server
+   * page mounts, and nothing that would move CURRENT or record an identity
+   * runs — the boot dial, a deep link's activation, a switch, an address
+   * row, the optimizer, the reconnect loop, the connect form. The shell,
+   * the connect card (disabled, with the reason) and Preferences stay; the
+   * panel's Retry is the way out. */
   let migrationBlocked = $state(false);
-  function runFold(requireProof) {
+  /** Everything the boot needs written before a server may be bound, in its
+   * order: the registry, then the inputs' attribution. Safe to run again —
+   * each step is idempotent — which is what Retry does. */
+  function prepareStorage() {
+    try {
+      migrateServers(localStorage);
+      migrationBlocked = migrateServerState(localStorage).reason === 'unrecorded';
+    } catch { migrationBlocked = true; }
+    loadServerRegistry();
+  }
+  /** Before server `id`'s state is built: `claimed` when a pending input
+   * was just filed into its slots, `blocked` when the migration cannot be
+   * recorded (and then nothing is bound), else `ok`. A blocked migration is
+   * tried again first, so storage that recovered unblocks the next bind. */
+  function foldFor(id) {
+    if (migrationBlocked) prepareStorage();
+    if (migrationBlocked) return 'blocked';
     let reason;
-    try { reason = migrateServerState(localStorage, { requireProof }).reason; } catch { reason = 'unrecorded'; }
-    migrationBlocked = reason === 'unrecorded';
-    return reason;
+    try {
+      reason = migrateServerState(localStorage).reason;
+      if (reason === 'pending') {
+        const claim = claimPending(localStorage, id).reason;
+        reason = claim === 'folded' ? 'claimed' : claim;
+      }
+    } catch { reason = 'unrecorded'; }
+    if (reason === 'unrecorded') { migrationBlocked = true; return 'blocked'; }
+    return reason === 'claimed' ? 'claimed' : 'ok';
   }
-  /** Before any server's state is built: has the fold run, for that server
-   * if it had not yet? An unrecorded one is simply tried again, so storage
-   * that has recovered unblocks the next bind (and Retry is that bind). */
-  function foldFor() {
-    return runFold(foldNeedsProof) !== 'unrecorded';
-  }
+  /** A deep link that arrived while the migration was blocked: parsed and
+   * stripped from the address bar at once, APPLIED only once the migration
+   * is recorded — applying it makes its server current, and the inputs must
+   * be attributed first (reviewer P1-a on cf7e7957). */
+  let deferredLink = null;
   function retryMigration() {
+    prepareStorage();
+    if (migrationBlocked) return;
+    if (deferredLink) { const link = deferredLink; deferredLink = null; applyConnectLink(link); loadServerRegistry(); }
     swapScope();
     const bound = scopeSwap.bound();
     if (bound && connected) { serverReady(); void restoreNavFor(bound); }
   }
-  /** The one-time fold of the pre-#335 live keys into a server's slot (board
-   * #335 ②b-4, `server-state-migration.ts`), BEFORE the deep link: a link to
-   * B makes B current, and folding after it would file A's live state —
-   * drafts, read marks, the navigation — into B's slot.
-   *
-   * It may find no server to fold into: a fresh client (nothing to fold), or
-   * a CURRENT that names no saved entry. Then it runs again for the first
-   * server a connect makes current (`foldFor`, from `swapScope`) — and in the
-   * second case that server must PROVE the inputs are its own, so the
-   * navigation's bytes are copied aside here, before anything else runs. */
-  const bootFold = runFold(false);
-  const foldNeedsProof = bootFold === 'no-current' || bootFold === 'unknown-current';
-  if (foldNeedsProof) quarantineLegacyNav(localStorage);
-  consumeConnectUrlParams();
+  /** The boot (board #335 ②b-4): the registry and the inputs' attribution
+   * FIRST, then the deep link — a link to B makes B current, and attributing
+   * after it would file A's live state into B's slot — then the bind. */
+  prepareStorage();
+  takeBootLink(takeConnectLink());
+  function takeBootLink(link) {
+    if (link && migrationBlocked) deferredLink = link;
+    else if (link) { applyConnectLink(link); loadServerRegistry(); }
+  }
   // Bind the content tree before its first render (board #335 ②b-1): the
   // deep-link consumer above can make a different server current, and a bind
   // that arrived a tick later would mount every page unbound and then rebuild
   // them. With nothing bound yet this is immediate, by that rule.
   swapScope();
 
-  // Copy the CURRENT connection as a deep link (consumed by consumeConnectUrlParams
+  // Copy the CURRENT connection as a deep link (consumed by takeConnectLink
   // on the other device). Plain clipboard copy with a brief ✓ — no share sheet,
   // no prompt (copyText already falls back to execCommand on http).
   let linkCopied = $state(false);
@@ -1749,7 +1788,7 @@
     const handler = () => {
       // Not while a leave walk asks about the socket, and not after the
       // person chose to stay offline (reviewer P2 on 085b0e70).
-      if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline) return;
+      if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline || migrationBlocked) return;
       if (!isConnected() && !reconnectMachine.isActive()) {
         reconnectMachine.start();
       } else if (isConnected()) {
@@ -1772,9 +1811,15 @@
   });
 
   $effect(() => {
-    if (autoConnectAttempted || connected || switching) return;
-    const addr = localStorage.getItem('tmux_address');
-    const token = localStorage.getItem('tmux_token');
+    // Not while the migration is blocked; Retry unblocks it and this runs.
+    if (autoConnectAttempted || connected || switching || migrationBlocked) return;
+    // Where: the CURRENT entry when there is one (board #335 ②b-4, reviewer
+    // P2 on cf7e7957 — a mirror an unanswered form emptied must not keep a
+    // saved server from coming up); the mirror only for a client with no
+    // saved entry yet.
+    const route = targetOf(localStorage, currentServerId(localStorage));
+    const addr = route?.address || localStorage.getItem('tmux_address');
+    const token = route ? route.token : localStorage.getItem('tmux_token');
     if (!addr || !token) return;
     if (localStorage.getItem('tmux_disconnected')) return;
     autoConnectAttempted = true;
@@ -1784,9 +1829,9 @@
     // The bound runtime dials (board #335 ②b-2-2): the same connection the
     // facade would have used (the Single runtime borrows it), with the
     // runtime's attempt identity and its identity recording. It dials the
-    // route the one reader names, which for the server the app is on is the
-    // active mirror — `addr` and `token` here. A client with no saved entry
-    // yet has nothing bound, and connects through the facade as before.
+    // route the one reader names, its entry — `addr` and `token` here. A
+    // client with no saved entry yet has nothing bound, and connects through
+    // the facade as before.
     //
     // The dial OWNS the socket only until another attempt takes it — the
     // connect form, a reconnect attempt, a switch (reviewer P1-b,
@@ -2517,7 +2562,8 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if page === 'settings' || holdPages}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError} />
+      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError}
+        frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} />
     </div>
     {/if}
     <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,
@@ -2546,6 +2592,7 @@
       agentsEditRequest={landingFor(agentsEditReq)}
       openRequest={prefsOpenReq}
       onAddress={(address) => {
+        if (migrationBlocked) return;  // nothing moves the socket while it is blocked
         localStorage.setItem('tmux_address', address);
         activeAddress = address;
         pendingAddress = address;

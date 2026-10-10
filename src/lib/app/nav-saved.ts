@@ -46,7 +46,7 @@ export const NAV_VERSION = 2;
 /** Where an input nobody can be shown to own is kept (reviewer P1-c): the raw
  * bytes, when they were found, and the machine the legacy mirror named at that
  * moment. A server claims the inputs only by PROVING that machine is its own
- * (the fold's `requireProof`); being the next to authenticate proves nothing. */
+ * (`claimPending`); being the next to authenticate proves nothing. */
 export const QUARANTINE_KEY = 'tmux_state::unattributed';
 
 /** The most panes a split can be restored into. The shell offers a smaller
