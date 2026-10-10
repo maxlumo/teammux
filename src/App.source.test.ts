@@ -558,7 +558,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     // then identity repair can absorb the entry the app was on. Read within
     // the function's own body: an unbounded pattern is satisfied by any later
     // `swapScope();` in the file (a negative control showed it).
-    ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
+    ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
@@ -577,7 +577,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // other two paths left it shut on the replaced handle for good.
   assert.equal([...source.matchAll(/navRestored = target;/gu)].length, 2, 'the restore and the keep, nothing else');
   assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*navRestored = target;/u);
-  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
+  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'a failover keeps');
   assert.match(source, /to keeps its handle and remounts nothing\.\s*swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'and so does the connect page s same-server return');
@@ -653,7 +653,7 @@ test('failover success RECORDS by machine identity — and never moves CURRENT (
   // "server" (the lead-review invariant: multi-server must not break the
   // multi-address semantics), and recording is NOT activating: CURRENT
   // stays put, no reload, the failover semantics own the socket swap.
-  const fn = source.match(/function onReconnectSuccess\(useAddr, primaryAddr\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  const fn = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.match(fn, /recordServer\(localStorage, \{[\s\S]*?address: useAddr/u, 'the active address follows the connect');
   assert.match(fn, /machineId: mid/u, 'merged by machine identity, never by address alone');
   assert.ok(!fn.includes('activateConnected') && !fn.includes('applySwitch'),
@@ -727,8 +727,10 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   assert.match(source, /const owner = handovers\.claim\(\);\s*const runtime = scopeSwap\.bound\(\);\s*const dialled = runtime \? runtime\.dial\(owner\.current\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
   assert.match(source, /\.catch\(\(\) => \{\s*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) page = 'settings';/u);
   assert.match(source, /if \(result\.ok\) \{ bringUp\(addr, token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ arrivedElsewhere\(result, addr, token\); return; \}/u);
-  // And every reconnect attempt takes the socket too.
-  assert.match(source, /connect: \(url, token, ms\) => \{ handovers\.claim\(\); return connect\(url, token, ms\); \},/u);
+  // And every reconnect attempt takes the socket through a handover of its
+  // own, concluded like the form's (reviewer P1 on c5487bef).
+  assert.match(source, /attempt: \(\) => handovers\.open\(scopeSwap\.bound\(\)\),/u);
+  assert.match(source, /handover\?\.settle\(held && held\.id === currentServerId\(localStorage\) \? 'same-server' : 'other-server'\);/u);
   // A SUPERSEDED dial reports nothing: whoever took the socket over owns the
   // outcome, and sending the app to Settings would undo a connect that is
   // succeeding. No mount can stage the race on the boot path, so it is pinned.

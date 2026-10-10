@@ -303,3 +303,66 @@ test('the machine reads no connection keys of its own (board #335 ②b-2-2)', as
     .split('\n').filter((l) => !/^\s*(\/\/|\*)/u.test(l)).join('\n');
   assert.doesNotMatch(src, /tmux_|localStorage|getItem\(/u);
 });
+
+test('an attempt whose handover was taken over does nothing, and the loop yields (reviewer P1 on c5487bef)', async () => {
+  // The connect form opens its own handover while a reconnect attempt is
+  // still out. That attempt's late success must not run onSuccess, its late
+  // failure must not mark the address unreachable or schedule a retry that
+  // would take the socket back from the form — and the machine must be idle
+  // again, so a later start() is not a no-op forever.
+  const { createHandovers } = await import('./handover.ts');
+  for (const outcome of ['resolve', 'reject'] as const) {
+    const handovers = createHandovers();
+    const timers = fakeTimers();
+    const events: string[] = [];
+    let finish: () => void = () => {};
+    const dialled: string[] = [];
+    const machine = createReconnectMachine({
+      connect: (url) => { dialled.push(url); return new Promise<void>((res, rej) => { finish = outcome === 'resolve' ? res : () => rej(new Error('timeout')); }); },
+      findBestAddress: async (a) => a[0] ?? null, isAddressViable: () => true,
+      noteAddressUnreachable: (u) => events.push(`cooldown:${u}`),
+      classifyAddress: () => 0, addressLabels: ['LAN'],
+      target: () => ({ address: 'ws://192.168.1.2:9899', token: 't', machineId: '', alternates: [] }),
+      attempt: () => handovers.open(null),
+      onStateChange: () => {}, onSuccess: () => events.push('success'), onGiveUp: () => events.push('gave up'),
+      setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    machine.start();
+    await timers.advance(1);
+    handovers.open(null);           // the form takes the socket
+    finish();
+    await timers.advance(10_000);
+    assert.deepEqual(events, [], `${outcome}: no success, no give-up, no cooldown`);
+    assert.equal(dialled.length, 1, `${outcome}: no retry took the socket back`);
+    assert.equal(machine.isActive(), false, `${outcome}: the loop yielded`);
+    assert.equal(machine.start(), true, `${outcome}: and can start again`);
+  }
+});
+
+test('a failed attempt resumes the handle it stood down; a success hands its handover to the host', async () => {
+  const { createHandovers } = await import('./handover.ts');
+  const log: string[] = [];
+  let tickets = 0;
+  const runtime = { suspend: () => ++tickets, settle: (t: number, v: string) => log.push(`${t}:${v}`) } as never;
+  const handovers = createHandovers();
+  const timers = fakeTimers();
+  let n = 0;
+  let handed: unknown = null;
+  const machine = createReconnectMachine({
+    connect: async () => { if (++n === 1) throw new Error('timeout'); },
+    findBestAddress: async (a) => a[0] ?? null, isAddressViable: () => true, noteAddressUnreachable: () => {},
+    classifyAddress: () => 0, addressLabels: ['LAN'],
+    target: () => ({ address: 'ws://192.168.1.2:9899', token: 't', machineId: '', alternates: [] }),
+    attempt: () => handovers.open(runtime),
+    onStateChange: () => {}, onSuccess: (_u, _p, h) => { handed = h; }, onGiveUp: () => {},
+    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+  });
+  machine.start();
+  await timers.advance(1);
+  await timers.advance(1000);
+  await timers.advance(1);
+  assert.deepEqual(log, ['1:resume'], 'the failed attempt (no peer) resumed its ticket');
+  assert.ok(handed && typeof (handed as { settle?: unknown }).settle === 'function', 'the success carries its handover');
+  (handed as { settle(o: string): void }).settle('same-server');
+  assert.deepEqual(log, ['1:resume', '2:resume']);
+});

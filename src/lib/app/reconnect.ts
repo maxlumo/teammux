@@ -36,8 +36,17 @@ export interface ReconnectDeps {
    * is saved for it (which gives up). */
   target: () => ServerTarget | null;
   onStateChange: (state: ReconnectState) => void;
-  /** An attempt authenticated. The machine is already idle when this runs. */
-  onSuccess: (useAddr: string, primaryAddr: string) => void;
+  /** Take the socket for ONE attempt (board #335 ②b-2-2, reviewer P1 on
+   * c5487bef): the host's handover for it. The attempt is the app's only
+   * while `current()` holds — another owner (the connect form) opening its
+   * own makes this one stale, and then its late success, failure or retry is
+   * nobody's. A failed attempt reports `no-peer`; a success hands the
+   * handover to `onSuccess`, which knows whose server answered. Omitted, the
+   * machine owns every attempt itself, as before. */
+  attempt?: () => { current(): boolean; settle(outcome: 'no-peer'): void };
+  /** An attempt authenticated. The machine is already idle when this runs;
+   * `handover` is that attempt's, for the host to conclude. */
+  onSuccess: (useAddr: string, primaryAddr: string, handover?: unknown) => void;
   /** Max attempts exhausted, no stored address, or watchdog fired. */
   onGiveUp: () => void;
   maxAttempts?: number;
@@ -53,7 +62,7 @@ const DEFAULT_WATCHDOG_MS = 180000;
 export function createReconnectMachine(deps: ReconnectDeps) {
   const {
     connect, findBestAddress, isAddressViable, noteAddressUnreachable,
-    classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp,
+    classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp, attempt: takeSocket,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     watchdogMs = DEFAULT_WATCHDOG_MS,
     setTimeoutFn = setTimeout,
@@ -151,14 +160,31 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     const cls = classifyAddress(useAddr);
     const attemptTimeout = cls === 0 ? 2000 : cls === 1 ? 3000 : 5000;
 
-    connect(useAddr, token, attemptTimeout).then(() => {
+    // This attempt takes the socket from whoever had it, and keeps it only
+    // until somebody takes it back. When that happens the LOOP is over, not
+    // just this attempt: a retry would take the socket from the owner that
+    // superseded it. It stops quietly — no give-up, no cooldown — because
+    // nothing failed; somebody else is connecting.
+    const handover = takeSocket?.();
+    const owned = () => live() && (handover?.current() ?? true);
+    const yieldLoop = () => {
       if (!live()) return;
       reconnecting = false;
       clearTimers();
       emit();
-      onSuccess(useAddr, primary);
+    };
+
+    connect(useAddr, token, attemptTimeout).then(() => {
+      if (!owned()) { yieldLoop(); return; }
+      reconnecting = false;
+      clearTimers();
+      emit();
+      onSuccess(useAddr, primary, handover);
     }).catch((e: Error) => {
-      if (!live()) return;
+      if (!owned()) { yieldLoop(); return; }
+      // No peer was reached: the handle this attempt stood down serves its
+      // own server again (the next attempt stands it down anew).
+      handover?.settle('no-peer');
       // Reachability failures (timeout / refused, NOT auth errors) feed the
       // same cooldown memory the prober uses, so the next attempts skip
       // this address instead of re-burning its timeout.

@@ -935,3 +935,77 @@ test('a late boot dial records nothing after a SAME-server reconnect through the
   assert.equal(app.window.localStorage.getItem('tmux_servers'), before, 'and recorded no machine nobody dialled for');
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a');
 });
+
+test('a reconnect attempt the connect form took over does nothing when it answers late (reviewer P1 on c5487bef)', async (context) => {
+  // R1 (the reconnect loop) is out when the person connects through the card
+  // (D2, to B). R1 then answers — as a machine nobody saved, so any identity
+  // write shows. Nothing may come of it, and no retry may take B's socket.
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { app, settle, onScreen, net } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url, n) => (n === 2 ? 'm-x' : url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, gate: (_url, n) => (n === 2 ? held : null) });
+  net.drop();                                  // R1 starts, and hangs
+  await settle();
+  assert.ok(events.includes('connect:ws://a:9899') && events.filter((e) => e.startsWith('connect:')).length === 2, 'R1 is out');
+  // The person gives up waiting and connects to B through the card.
+  const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://b:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle(); await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b', 'D2 arrived at B');
+  const before = app.window.localStorage.getItem('tmux_servers');
+  const dials = events.filter((e) => e.startsWith('connect:')).length;
+  release();
+  await settle(); await app.advance(10_000); await settle();
+  assert.ok(events.includes('answered:ws://a:9899#2'), 'R1 did answer, late');
+  assert.equal(app.window.localStorage.getItem('tmux_servers'), before, 'and recorded nothing');
+  assert.equal(events.filter((e) => e.startsWith('connect:')).length, dials, 'and no retry took B s socket');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+  assert.equal(onScreen(), 'work:2.0');
+});
+
+test('a reconnect that takes over a suspended form leaves the handle working (reviewer P1 on c5487bef)', async (context) => {
+  // The form suspends A's handle for its attempt; the reconnect loop then
+  // takes the socket, reaches A again, and succeeds. The handle must be
+  // usable afterwards — a suspended one refuses every call for good.
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { app, settle, net, openSession, restored } = await bootApp(context,
+    { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { calls: events, gate: (_url, n) => (n === 2 ? held : null) });
+  // The form's dial (n = 2) hangs, with A's handle suspended for it.
+  const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://a:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle();
+  // Now the reconnect loop takes the socket (n = 3) and reaches A.
+  net.drop();
+  await settle(); await settle();
+  release(); await settle(); await settle();
+  // The handle works: a navigation change is SAVED, which the save effect
+  // does only for a live, bound handle — and the sidebar's list call went out.
+  await openSession('other');
+  assert.equal(restored(), 'a:other:3.0', 'the handle is working, not left suspended');
+});

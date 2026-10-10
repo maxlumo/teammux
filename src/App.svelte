@@ -785,9 +785,13 @@
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
 
   const reconnectMachine = createReconnectMachine({
-    // Each attempt takes the socket: a boot dial still waiting is no longer
-    // the app's (reviewer P1-b, 2026-10-10).
-    connect: (url, token, ms) => { handovers.claim(); return connect(url, token, ms); },
+    connect,
+    // Each attempt takes the socket through a HANDOVER of its own, the same
+    // one the connect form opens (reviewer P1s, 2026-10-10): the handle
+    // stands down for the attempt, a boot dial or a form still out stops
+    // being the app's, and the attempt in turn stops being the app's the
+    // moment the form opens one. Its verdict settles the same way.
+    attempt: () => handovers.open(scopeSwap.bound()),
     findBestAddress,
     isAddressViable,
     noteAddressUnreachable,
@@ -803,7 +807,7 @@
       reconnectAttempt = st.attempt;
       reconnectClass = st.label;
     },
-    onSuccess: (useAddr, primaryAddr) => onReconnectSuccess(useAddr, primaryAddr),
+    onSuccess: (useAddr, primaryAddr, handover) => onReconnectSuccess(useAddr, primaryAddr, handover),
     onGiveUp: () => { connected = false; page = 'settings'; },
   });
 
@@ -820,7 +824,7 @@
     page = 'settings';
   }
 
-  function onReconnectSuccess(useAddr, primaryAddr) {
+  function onReconnectSuccess(useAddr, primaryAddr, handover) {
     connected = true;
     serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
     if (useAddr !== primaryAddr) { localStorage.setItem('tmux_address', useAddr); activeAddress = useAddr; }
@@ -837,6 +841,13 @@
       });
     } catch {}
     loadServerRegistry(); // the entry's active address moved
+    // Conclude this attempt's handover the way the form does: still the
+    // handle's own server → it resumes; identity repair moved CURRENT to
+    // another entry → that handle is done, and the swap below binds the one
+    // now current. A handle left suspended here would refuse every call for
+    // the rest of the session (reviewer P1, 2026-10-10).
+    const held = scopeSwap.bound();
+    handover?.settle(held && held.id === currentServerId(localStorage) ? 'same-server' : 'other-server');
     // A failover can be the connect that first learns this machine's id, and
     // then `recordServer` absorbs the entry we were on into the machine's
     // survivor: CURRENT moved, so the tree's handle and every reference the
