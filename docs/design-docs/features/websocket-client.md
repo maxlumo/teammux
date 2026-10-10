@@ -475,16 +475,17 @@ its owner wrote since (reviewer P1-1 on 08fdb6ba). A non-empty slot is not
 evidence of that: it may be the owner's pre-#335 park, older than the inputs.
 So the pending record fingerprints every slot that existed when the inputs
 were set aside, and only a slot that changed, appeared or disappeared since is
-kept. A slot the identity layer MOVED is not one its owner wrote: before a
-merge hands the current alias's slots to its canonical entry, `moveSlots`
-records the move on the pending record, in one write that is never undone
-(reviewer P1s on cde052f7 and 4ef4dd07). A claim then treats a slot as
-untouched if it matches the baseline of ANY server recorded as moved into it,
-or its own, so a claim into the canonical entry folds the inputs over the
-alias's old park — including after a move that failed part-way and was never
-retried — while an edit the alias really made after the inputs went pending
-matches no baseline and stays. If even the record cannot be written, nothing
-moves. It fingerprints the inputs too (P2-a): if a build from before #335 has
+kept. A slot the identity layer MOVED is not one its owner wrote, and a
+merge that hands the current alias's slots to its canonical entry hands their
+baselines over too, as ONE recoverable unit (`moveSlots`; reviewer P1s on
+cde052f7, 4ef4dd07 and 4807242f): the intent `{from, to}` is written on the
+pending record first, the slots are copied, and one write then moves the
+baselines and clears the intent. A failure leaves the intent open, and it is
+finished (`resumeSlotMove`) at boot and before every claim; a claim that
+cannot finish it does not fold (`unrecorded`, the blocked shell, Retry). Each
+slot is then compared only with its own baseline, so an edit or a clear the
+alias made after the inputs went pending stays, and a moved old park takes
+the inputs. If even the intent cannot be written, nothing moves. It fingerprints the inputs too (P2-a): if a build from before #335 has
 rewritten them since, the machine they belong to is read again from its
 mirror before anybody claims them. Any other server runs on its own slots
 while the input stays pending, however many come first. A

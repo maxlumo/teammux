@@ -602,3 +602,58 @@ test('if even the move s record cannot be written, nothing moves', () => {
   restore();
   assert.deepEqual(storage.dump(), before);
 });
+
+test('an alias edit not yet copied when the move failed reaches canonical: the move is finished before the claim (reviewer P1-A on 4807242f)', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.deepEqual(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, { from: 'a', to: 'c' }, 'the intent is open');
+  // A reload: the boot finishes it.
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'and closes it');
+  // Straight to the canonical address, which does not re-run the alias merge.
+  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the alias s edit, not LATEST over it');
+  assert.equal(storage.getItem('tmux_hub_drawer::c'), null);
+});
+
+test('a claim refuses while the move cannot be finished, and folds nothing', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.equal(migrateServerState(storage).reason, 'unrecorded', 'the boot cannot finish it');
+  assert.equal(claimPending(storage, 'c').reason, 'unrecorded', 'nor the claim, which does not fold');
+  assert.equal(layoutMark(storage)?.state, 'pending', 'still pending, intent open');
+  restore();
+  assert.equal(claimPending(storage, 'c').reason, 'folded', 'once storage works');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
+});
+
+test('a value the alias really cleared after pending stays cleared through a completed move (reviewer P1-B on 4807242f)', () => {
+  const storage = aliasPending({ tmux_hub_project: 'LATEST', 'tmux_hub_project::a': 'OLD-A' });
+  storage.removeItem('tmux_hub_project::a');             // the person cleared it on the alias
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.equal(storage.getItem('tmux_hub_project::c'), null, 'the clear is kept, LATEST is not written back');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'LATEST' }, 'and the untouched rest folds');
+});
+
+test('a claim refuses when the move cannot be finished, even where the fold itself could write', () => {
+  // The resume fails on a slot the fold would leave alone (canonical edited
+  // its project after pending), so only the barrier stops the fold.
+  const storage = aliasPending({ 'tmux_hub_project::c': 'OLD-C-PROJECT' });
+  storage.setItem('tmux_hub_project::c', 'EDITED ON C');
+  storage.setItem('tmux_hub_project::a', 'ALIAS PROJECT');
+  const restore = refuse(storage, 'tmux_hub_project::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.equal(claimPending(storage, 'c').reason, 'unrecorded', 'the half-done move blocks the claim');
+  assert.equal(layoutMark(storage)?.state, 'pending', 'nothing folded');
+  assert.equal(storage.getItem('tmux_hub_drafts::c'), JSON.stringify({ work: 'OLD-CANON' }), 'no slot written');
+  restore();
+});

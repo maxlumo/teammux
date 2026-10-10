@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from './lib/test/mount.ts';
+import { recordServer } from './lib/app/servers.ts';
+import { migrateServerState } from './lib/app/server-state-migration.ts';
 
 /** The harness types a mocked module as functions only, and `ADDRESS_LABELS`
  * is a constant the facade exports. Mocked modules are replaced wholesale, so
@@ -2176,4 +2178,65 @@ test('while blocked, rename and remove are refused with the reason, not ignored 
   const remove = list.querySelector<HTMLButtonElement>('button[aria-label^="Remove"]');
   assert.ok(rename?.disabled, 'rename is disabled');
   assert.ok(remove?.disabled, 'and remove');
+});
+
+/** Storage as a failed alias→canonical slot move leaves it (reviewer's
+ * fixture on 4807242f): m-a's inputs pending, the alias edited after that,
+ * and the drafts slot write failing mid-move. Built with the real identity
+ * and migration functions, then handed to a fresh App — a reload. */
+function afterFailedMove(): Record<string, string> {
+  const m = new Map<string, string>(Object.entries({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+      { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+    ]),
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::a': JSON.stringify({ work: 'OLD-ALIAS' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  }));
+  let failing = false;
+  const store = {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => { if (failing && k === 'tmux_hub_drafts::c') throw new Error('QuotaExceededError'); m.set(k, v); },
+    removeItem: (k: string) => { m.delete(k); },
+  };
+  assert.equal(migrateServerState(store).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  failing = true;
+  assert.throws(() => recordServer(store, { address: 'ws://alias:9899', token: 'tok', machineId: 'm-a' }), /Quota/u);
+  m.set('tmux_server_current', 'ghost');
+  m.set('tmux_address', ''); m.set('tmux_token', '');
+  return Object.fromEntries(m);
+}
+
+test('a reload after a failed slot move finishes it; a connect straight to canonical then claims with the alias s edit (reviewer P1-A on 4807242f)', async (context) => {
+  const seed = afterFailedMove();
+  assert.ok(JSON.parse(seed.tmux_state_layout!).moving, 'the move is open in the seed');
+  const { app, settle } = await bootApp(context, seed);
+  const ls = app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'the boot finished it');
+  await connectCard(app, settle, 'ws://canonical:9899');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the alias s real edit, not LATEST');
+});
+
+test('a reload after a failed slot move that still cannot finish it is blocked, and Retry finishes it (reviewer P1-A on 4807242f)', async (context) => {
+  const store = refusing(['tmux_hub_drafts::c']);
+  const { app, settle } = await bootApp(context, afterFailedMove(), undefined, { setup: store.setup });
+  await app.advance(1000);
+  const ls = app.window.localStorage;
+  assert.ok(cardButton(app, /retry/iu), 'blocked: the card offers only Retry');
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the intent is still open');
+  store.state.failing = false;
+  cardButton(app, /retry/iu)!.click();
+  for (let i = 0; i < 4; i++) await settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry finished it');
+  await connectCard(app, settle, 'ws://canonical:9899');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });

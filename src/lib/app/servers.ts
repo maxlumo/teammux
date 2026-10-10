@@ -455,17 +455,43 @@ export const LAYOUT_KEY = 'tmux_state_layout';
 
 /** Hand every slot of `fromId` to `toId`, replacing what `toId` had.
  *
- * While pre-#335 inputs are PENDING, the move is first RECORDED on the
- * pending record (reviewer P1s on cde052f7 and 4ef4dd07): a slot the identity
- * layer moved is not a slot its owner wrote, and the claim needs to know
- * which baselines a slot of `toId` may now carry. The record is one write,
- * made before any slot moves, and it is never undone — so a move that fails
- * part-way, and is never retried, still leaves a claim able to tell every
- * slot of `toId` (its own old value, or the one moved from `fromId`) from an
- * edit. If even that write fails, nothing has moved. */
+ * While pre-#335 inputs are PENDING it is a RECOVERABLE unit (reviewer P1s on
+ * cde052f7, 4ef4dd07 and 4807242f; orchestrator 22:52): the claim compares
+ * each slot of `toId` with a baseline, and a moved slot must be compared with
+ * the baseline of the slot it came FROM. So:
+ *
+ *   1. the intent `{from, to}` is written on the pending record first — if
+ *      that fails, nothing has moved;
+ *   2. every slot is copied (the source is not touched);
+ *   3. completion is ONE write: `toId`'s baselines become `fromId`'s, and the
+ *      intent is cleared.
+ *
+ * A failure in 2 or 3 leaves the intent open. `resumeSlotMove` finishes it —
+ * the migration runs it at boot and before every claim, and a claim refuses
+ * while one is open — so a half-done move is never read against the wrong
+ * baselines. The source slots outlive the intent: the merge removes them only
+ * after this returns. */
 function moveSlots(storage: Store, fromId: string, toId: string): void {
   if (!fromId || fromId === toId) return;
-  noteRelocation(storage, fromId, toId);
+  const mark = pendingMark(storage);
+  if (mark) storage.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moving: { from: fromId, to: toId } }));
+  copySlots(storage, fromId, toId);
+  if (mark) completeMove(storage, fromId, toId);
+}
+
+/** Finish a slot move a failure left open (see `moveSlots`). Idempotent; a
+ * write that fails throws, and the intent stays open. Returns whether one
+ * was open. */
+export function resumeSlotMove(storage: Store): boolean {
+  const mark = pendingMark(storage);
+  const moving = mark?.moving as { from?: unknown; to?: unknown } | undefined;
+  if (!moving || typeof moving.from !== 'string' || typeof moving.to !== 'string') return false;
+  copySlots(storage, moving.from, moving.to);
+  completeMove(storage, moving.from, moving.to);
+  return true;
+}
+
+function copySlots(storage: Store, fromId: string, toId: string): void {
   for (const key of RESIDENT_KEYS) {
     const value = storage.getItem(residentKey(key, fromId));
     if (value != null) storage.setItem(residentKey(key, toId), value);
@@ -473,13 +499,25 @@ function moveSlots(storage: Store, fromId: string, toId: string): void {
   }
 }
 
-function noteRelocation(storage: Store, fromId: string, toId: string): void {
-  let mark: { state?: unknown; moved?: unknown } | null = null;
-  try { mark = JSON.parse(storage.getItem(LAYOUT_KEY) || 'null'); } catch { return; }
-  if (!mark || mark.state !== 'pending') return;
-  const moved = Array.isArray(mark.moved) ? mark.moved : [];
-  if (moved.some((m) => m?.from === fromId && m?.to === toId)) return;
-  storage.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moved: [...moved, { from: fromId, to: toId }] }));
+function completeMove(storage: Store, fromId: string, toId: string): void {
+  const mark = pendingMark(storage);
+  if (!mark) return;
+  const slots: Record<string, string> = { ...(mark.slots && typeof mark.slots === 'object' ? mark.slots as Record<string, string> : {}) };
+  for (const key of RESIDENT_KEYS) {
+    const from = residentKey(key, fromId);
+    const to = residentKey(key, toId);
+    if (from in slots) slots[to] = slots[from]!; else delete slots[to];
+  }
+  const { moving: _done, ...rest } = mark;
+  storage.setItem(LAYOUT_KEY, JSON.stringify({ ...rest, slots }));
+}
+
+/** The pending record, raw, or null. */
+function pendingMark(storage: Store): Record<string, unknown> | null {
+  try {
+    const mark = JSON.parse(storage.getItem(LAYOUT_KEY) || 'null');
+    return mark && typeof mark === 'object' && mark.state === 'pending' ? mark : null;
+  } catch { return null; }
 }
 
 /**
