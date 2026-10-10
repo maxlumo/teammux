@@ -476,6 +476,51 @@ and writers move is not a partial improvement, it is a way to lose a draft.
 ②b flips the fold, the stores, park/point and the reset entry points in ONE
 commit; `server-state.test.ts` carries that coupling as an executable fact.
 
+### A subtree is bound to one server, in that order (board #335 ②b-1)
+
+`App` holds a `ServerRuntime` and the server-bound tree is keyed on that
+HANDLE. The handle is the right key because it is the thing whose lifetime
+matches what the tree may assume: a reconnect replaces the socket INSIDE one
+runtime, so the handle does not change and the always-mounted pages keep the
+state they are always mounted for; a different server is a different handle, so
+every page, listener and subscription is rebuilt. `ServerScope.svelte` binds
+the subtree at init and `useServerApi()` resolves once, which is what makes
+"an operation cannot re-target itself" true for the pages inside it.
+
+The key gives the swap and NOT its order — Svelte creates the new branch before
+destroying the old one — so `app/server-scope.ts` owns the order, framework-free
+so it is a test rather than a comment: unbind, let the host settle (where the
+old subtree's teardown runs), invalidate what was aimed at the old tree, then
+bind the new runtime. A FIRST bind skips all of it, because with nothing bound
+there is nothing to tear down and a bind deferred by a tick would mount every
+page unbound and then rebuild them. Two rules come from the await in the
+middle: the same handle is never re-shown, and a SUPERSEDED swap shows nothing
+while the handles it unbound are still carried to whoever finishes, since the
+swap that supersedes it starts with nothing shown and so has no orphan of its
+own to find.
+
+Which server the tree is bound to is READ from the registry's CURRENT rather
+than passed in, so no caller can name a different one, and identity repair is
+the reason it must be read: `recordServer` can absorb the entry the app booted
+as into a machine's survivor and re-point CURRENT at it, and from then on the
+app IS on the survivor. A handle is replaced when the SERVER changes, which is
+why a reconnect through the connect page and a failed switch's Back both keep
+the handle they had.
+
+Production holds exactly ONE runtime through ②b, and it is built on the
+facade's compatibility slot (`app/single-runtime.ts`). Sixteen modules still
+import their RPCs from `ws.ts` at module level, and a runtime minted through
+the fleet builds its own connection — a second, never-dialled client beside
+the live one, with the un-migrated pages on the other socket. Sharing the slot
+is what makes every ②b commit behaviour-identical in Single mode instead of a
+flag day. It lives in its own file so `server-runtime.ts` stays facade-free
+(its own pin, for the reason that a runtime reaching the compatibility slot IS
+the "whichever server is current" bug), and RELEASING it closes the socket
+rather than ending the object: `Connection.dispose()` is terminal, that object
+is everyone's transport, and `dial`'s own terminal paths reach dispose from a
+call that must report a result and recover. b3-4 deletes the file, the slot and
+the provider-less fallback together.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this
@@ -789,6 +834,25 @@ the SAME commit that moves every live read and write: `parkFrom` writes the
 very string a resident slot uses, so a half-migrated client either overwrites
 a resident slot on the next switch or loses a live write to a reader that has
 already moved.
+
+### A subtree is bound to one server, and the binding is ordered (#335 ②b)
+
+The server-bound tree is keyed on the runtime HANDLE: a reconnect keeps the
+handle, so the always-mounted pages keep their state, and a different server is
+a different handle, so nothing of the old one survives into the new tree.
+`{#key}` gives that swap and not its ORDER — Svelte creates the new branch
+before destroying the old — so `app/server-scope.ts` sequences it: unbind,
+settle (where the teardown runs), invalidate the landings aimed at the old
+tree, then bind. A first bind is immediate, because deferring it would mount
+every page unbound and rebuild them; a superseded swap shows nothing but its
+orphans are still invalidated by whoever finishes. The bound server is READ
+from CURRENT, never passed, so identity repair re-pointing CURRENT at a
+machine's survivor moves the app with it, and a handle is replaced only when
+the server changes. Through ②b production holds ONE runtime, built on the
+facade's compatibility slot in `app/single-runtime.ts` so there is one socket
+while the consumers move — in its own file to keep `server-runtime.ts`
+facade-free, and releasing it closes the socket instead of ending the object
+every un-migrated module is still using.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

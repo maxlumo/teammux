@@ -5,10 +5,10 @@
 //   - the `<key>::<id>` layout is spelled in ONE function. Phase ② adds a
 //     second reader of these slots beside `servers.ts`'s park/point, and two
 //     places building the string by hand is how they come to disagree.
-//   - nothing in ②a is wired into production. The orchestrator's revised scope
-//     ships the capability and leaves every live read and write where it was,
-//     because enabling the fold while the legacy switch still owns the live
-//     keys loses a draft rather than improving anything.
+//   - a page never names a server behind its provider's back. The identity
+//     modules have exactly the production consumers the current commit gives
+//     them, one row at a time, so the diff says which layer just gained the
+//     right to choose a server.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -47,30 +47,47 @@ test('the store keeps the storage layout and none of the semantics', async () =>
   }
 });
 
-test('the ②a identity modules have no production consumer yet', async () => {
-  // The revised scope: the capability ships, the switch-over is ②b. If any
-  // existing module imported one of these, Single mode would have changed and
-  // the review would be looking at the wrong diff.
+test('the identity modules have exactly the production consumers this commit gives them', async () => {
+  // ②a's version of this test said the identity modules had NO production
+  // consumer, which was the revised scope then and stopped being true the
+  // moment ②b-1 made App provide a runtime. The rule it was protecting is
+  // still the one worth keeping, so it is rewritten rather than deleted: a
+  // PAGE must not reach for a server of its own. It asks its provider (the
+  // context) and gets the one its subtree is bound to; a page that imported
+  // the runtime, the fleet or the store would be choosing a server behind the
+  // provider's back, and in Single mode it would look right.
   //
-  // This is about the IDENTITY modules only — the ones that would give a
-  // consumer a second server. The per-server FACTORIES (downloads, the
-  // backend catalog, FilesMemory, hub prefs, the alert log) are deliberately
-  // not in this list: production calls each of them through its one default
-  // instance today, exactly as it called the module state they replaced, and
-  // "not wired into production" was the wrong phrase for that (reviewer P2).
-  const added = ['refs.ts', 'server-runtime.ts', 'server-fleet.ts', 'server-store.ts',
-    'server-state-migration.ts', 'server-context.ts', 'server-union.ts'];
-  const importers: string[] = [];
+  // One row widens per commit, which is the point — the diff says which layer
+  // just gained the right to name a server:
+  //   ②b-1  App (the constructor) and ServerScope (the provider)
+  //   ②b-2  App's nav keeps refs; the resident stores reach server-store
+  //   ②b-3  every bound page reaches server-context
+  const allowed: Record<string, string[]> = {
+    'refs.ts': [],
+    'server-runtime.ts': [],
+    'single-runtime.ts': ['src/App.svelte'],
+    'server-scope.ts': ['src/App.svelte'],
+    'server-fleet.ts': [],
+    'server-store.ts': [],
+    'server-state-migration.ts': [],
+    'server-context.ts': ['src/lib/app/ServerScope.svelte'],
+    'server-union.ts': [],
+  };
+  const found: Record<string, string[]> = {};
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     if (/\.(test|fixture)\.(ts|svelte)$/u.test(file) || /\.test\.[a-z]+\.svelte$/u.test(file)) continue;
-    if (added.some((a) => file.endsWith(`/app/${a}`))) continue;
+    const path = file.replaceAll('\\', '/');
+    // The modules' own edges are theirs to have: the layering between them is
+    // server-fleet.source.test.ts's subject, not this one's.
+    if (Object.keys(allowed).some((a) => path.endsWith(`/app/${a}`))) continue;
     const text = await readFile(file, 'utf8');
-    for (const a of added) {
+    for (const a of Object.keys(allowed)) {
       const base = a.replace(/\.ts$/u, '');
-      if (new RegExp(`from '[^']*${base}\\.ts'`, 'u').test(text)) importers.push(`${file} → ${a}`);
+      if (new RegExp(`from '[^']*${base}(\\.ts)?'`, 'u').test(text)) (found[a] ??= []).push(path);
     }
   }
-  // The only allowed edges are among the five new modules themselves.
-  assert.deepEqual(importers, [],
-    `these are ②a capability only; their consumers wait for ②b:\n  ${importers.join('\n  ')}`);
+  for (const [module, expected] of Object.entries(allowed)) {
+    assert.deepEqual((found[module] ?? []).sort(), [...expected].sort(),
+      `${module}: a page that names a server behind its provider's back would look right in Single mode`);
+  }
 });

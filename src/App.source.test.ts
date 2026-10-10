@@ -415,7 +415,7 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // App wires the effects into that one module and calls nothing else.
   assert.match(source, /const serverSwitch = createServerSwitch\(\{/u);
   assert.match(source, /onstate: \(st\) => \{\s*switching = st;/u);
-  assert.match(source, /comeUp: \(target\) => \{[\s\S]*?serverEpoch\+\+;[\s\S]*?bringUp\(target\.address, target\.token\);/u);
+  assert.match(source, /comeUp: \(target\) => \{[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(target\.address, target\.token\);/u);
   assert.doesNotMatch(source, /location\.reload\(/u, 'no reload remains on any switch or connect path');
   assert.doesNotMatch(source, /applySwitch/u, 'the reload-era plan is gone');
 });
@@ -448,13 +448,49 @@ test('the leave walk holds Settings mounted while guards are asked (board 315 re
 
 test('the shell stays through a switch; only the server-bound content tree goes (board 315)', () => {
   assert.match(source, /const shell = \$derived\(connected \|\| !!switching\);/u);
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key serverEpoch\}/u,
-    'the panel replaces the content tree; a different server remounts it');
+  // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
+  // provider bound to it: a different server is a different handle, and every
+  // page below reads that server's api at init.
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}\s*<ServerScope runtime=\{scopeRuntime\}>/u,
+    'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
     'FAILED: page buttons stay disabled, only the server control works');
   assert.match(source, /<nav class="tabbar" inert=\{!!switching\}>/u);
   assert.match(source, /let sysMounted = \$derived\(connected\);/u, 'the old server’s readings unmount with the connection');
+});
+
+test('the content tree is bound to one server, and only the swap binds it (board #335 ②b-1)', () => {
+  // The handle is assigned in exactly ONE place — the swap's `show` — so no
+  // path can hand the tree a different server without the order that makes
+  // the hand-over safe (unbind, settle, invalidate, bind). A direct
+  // assignment would compile, look right, and mount the new server's pages
+  // beside the old server's still-live ones, because `{#key}` creates the new
+  // branch before destroying the old.
+  assert.match(source, /let scopeRuntime = \$state\(null\);/u, 'the handle is App state');
+  assert.equal([...source.matchAll(/(?<!let )scopeRuntime = /gu)].length, 1,
+    'and after its declaration only createScopeSwap({ show }) assigns it');
+  assert.match(source, /show: \(runtime\) => \{ scopeRuntime = runtime; \},/u);
+  assert.match(source, /settle: \(\) => tick\(\),/u, 'the settle is where Svelte runs the teardown');
+  assert.match(source, /invalidate: \(\) => clearLandings\(\),/u);
+  // WHICH server is read from the registry, never passed: identity repair can
+  // absorb the entry we booted as into a machine's survivor and re-point
+  // CURRENT at it, and from then on the app is on the survivor.
+  assert.match(source, /function swapScope\(\) \{\s*const id = currentServerId\(localStorage\);/u);
+  assert.match(source, /if \(held && entry && held\.id === entry\.id\) return;/u,
+    'a reconnect keeps its handle: only a different SERVER is a different handle');
+  assert.match(source, /createSingleRuntime\(entry, \{ storage: localStorage \}\)/u,
+    'one runtime, on the facade s slot, so Single mode keeps one socket');
+  // Every path that can change which server the app is on binds the tree.
+  for (const [name, pattern] of [
+    ['boot', /consumeConnectUrlParams\(\);[\s\S]{0,400}?swapScope\(\);/u],
+    ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
+    ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
+  ] as const) assert.match(source, pattern, `${name} binds the content tree`);
+  // One definition of what a landing is: the swap and the reset share it.
+  assert.match(source, /function resetServerMemory\(\) \{[\s\S]*?clearLandings\(\);/u);
+  assert.equal([...source.matchAll(/filesNavReq = null/gu)].length, 1,
+    'the landings are cleared in clearLandings and nowhere else');
 });
 
 test('failover success RECORDS by machine identity — and never moves CURRENT (board #55)', () => {
@@ -486,8 +522,8 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?hubPrefs\.reloadServerState\(\);[\s\S]*?serverEpoch\+\+;[\s\S]*?bringUp\(/u,
-    'the same reset + remount + bring-up as an in-place switch');
+  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?hubPrefs\.reloadServerState\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
+    'the same reset + rebind + bring-up as an in-place switch');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {

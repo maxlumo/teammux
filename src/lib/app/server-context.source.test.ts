@@ -6,7 +6,11 @@
 //     door, open for one commit range so a provider-less component keeps
 //     taking today's path. A page that reaches for it directly is a page that
 //     has gone back to "whichever server is current", and it would look
-//     correct for as long as production holds one server.
+//     correct for as long as production holds one server. Since ②b-1 the door
+//     has exactly one other named user, `app/single-runtime.ts`, which builds
+//     the ONE runtime production holds over that slot so there is one socket
+//     while the consumers move; b3-4 deletes that file, this export and the
+//     fallback together, and the list goes back to the facade alone.
 //   - a context read that is not at component init. `getContext` works during
 //     initialisation and nowhere else, so a read inside a handler or after an
 //     `await` silently yields nothing — and the whole point of reading once is
@@ -24,8 +28,15 @@ const code = (text: string) => text
   .filter(line => !/^\s*(\/\/|\*)/u.test(line))
   .join('\n');
 
-test('only the context fallback reaches the compatibility slot', async () => {
-  const allowed = new Set(['src/lib/app/server-context.ts', 'src/lib/core/ws.ts']);
+test('only the context fallback and the single runtime reach the compatibility slot', async () => {
+  const allowed = new Set([
+    'src/lib/app/server-context.ts',
+    // The ONE runtime production holds while ws.ts still owns the socket
+    // (②b-1). It is a separate file precisely so `server-runtime.ts` stays
+    // facade-free, which server-fleet.source.test.ts pins.
+    'src/lib/app/single-runtime.ts',
+    'src/lib/core/ws.ts',
+  ]);
   const found: string[] = [];
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     if (/\.(test|fixture)\.(ts|svelte)$/u.test(file) || /\.test\.[a-z]+\.svelte$/u.test(file)) continue;

@@ -6,9 +6,9 @@
   // (projects/scratch.rs). Desktop only — App renders it only off touch.
   //
   // App keeps the frame's STATE (open, edge, sizes) outside the server key;
-  // this component is rendered INSIDE `{#key serverEpoch}`, so a server switch
-  // destroys it with its Terminal and subscription. `live` goes false the
-  // moment a switch starts: every pending ensure/kill/focus completion is
+  // this component is rendered INSIDE the server-bound tree, so a server
+  // switch destroys it with its Terminal and subscription. `live` goes false
+  // the moment a switch starts: every pending ensure/kill/focus completion is
   // dropped from then on (one intent counter), and nothing ensures again until
   // the reader opens the panel on the server they are on.
   //

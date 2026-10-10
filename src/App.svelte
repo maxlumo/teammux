@@ -33,6 +33,9 @@
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_DRAG_THRESHOLD, RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
+  import ServerScope from './lib/app/ServerScope.svelte';
+  import { createSingleRuntime } from './lib/app/single-runtime.ts';
+  import { createScopeSwap } from './lib/app/server-scope.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
@@ -77,9 +80,41 @@
   // server-bound content tree is not mounted. `connected` is false then —
   // honestly, the socket is down.
   let switching = $state(null);
-  // Bumped whenever the app comes up against a DIFFERENT server; keys the
-  // content tree so it remounts (board 315).
-  let serverEpoch = $state(0);
+  // WHICH SERVER the content tree is bound to (board #335 ②b-1), and the key
+  // it is keyed on. A new handle is a different server: the tree is torn down
+  // and rebuilt, and `ServerScope` binds every page below it to that runtime
+  // for the page instance's whole life. An ordinary reconnect keeps the same
+  // handle — a new socket inside one object — and remounts nothing, which is
+  // why the always-mounted pages survive a blip. Null until a server is
+  // current (a fresh client on the connect page): pages then fall back to the
+  // facade, the path they all took before this (board 315's serverEpoch
+  // counter said "a different server" without saying WHICH, so nothing below
+  // could be bound to one).
+  let scopeRuntime = $state(null);
+  const scopeSwap = createScopeSwap({
+    show: (runtime) => { scopeRuntime = runtime; },
+    // Where the unbound tree's teardown runs.
+    settle: () => tick(),
+    // A Files/Board/Agents jump still aimed at the tree that is going away.
+    invalidate: () => clearLandings(),
+  });
+  /** Bind the content tree to whichever server is current — the registry's
+   * CURRENT is the one answer to "which server is the app on", so no caller
+   * has to pass an entry and none can pass a different one.
+   *
+   * A handle is replaced when the SERVER changes, not when a connect happens:
+   * a reconnect through the connect page, and a failed switch's Back to the
+   * server it left, keep the handle they had. Identity repair is the reason
+   * this is read rather than passed — `recordServer` can absorb the current
+   * entry into a machine's survivor and re-point CURRENT at it, and after
+   * that the app IS on the survivor. */
+  function swapScope() {
+    const id = currentServerId(localStorage);
+    const entry = id ? loadServers(localStorage).find((s) => s.id === id) : null;
+    const held = scopeSwap.shown();
+    if (held && entry && held.id === entry.id) return;
+    void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
+  }
   const shell = $derived(connected || !!switching);
   let terminalTarget = $state('');
   let terminalSession = $state('');
@@ -178,7 +213,7 @@
 
   // The scratch terminal (board #324): App owns the frame's state — open,
   // edge, sizes — outside the server key; the panel itself (and its Terminal)
-  // mounts inside `{#key serverEpoch}`, so a switch destroys it. A switch
+  // mounts inside the server-bound tree, so a switch destroys it. A switch
   // closes it the moment it starts; the next explicit open ensures the
   // session on the server you are on.
   let scratchOpen = $state(false);
@@ -679,7 +714,7 @@
       resetServerMemory();
       hubPrefs.reloadServerState();
       centre.reload();
-      serverEpoch++;
+      swapScope();
       localStorage.removeItem('tmux_disconnected');
       activeAddress = localStorage.getItem('tmux_address') || '';
       loadServerRegistry();
@@ -690,6 +725,11 @@
     reconnectMachine.cancel();
     connected = true;
     serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
+    // A first-ever connect is where this client's registry entry comes from,
+    // so it is also where the content tree first has a server to be bound to
+    // (board #335 ②b-1). A plain reconnect to the server it is already bound
+    // to keeps its handle and remounts nothing.
+    swapScope();
     // The device default (Chat), never a hard-coded Terminal (board #333); a
     // hubless server falls back to Terminal through the redirect above.
     page = defaultPage();
@@ -942,6 +982,18 @@
     if (page !== next) { page = next; await tick(); }
   }
 
+  /** Requests aimed at the server-bound tree: a Files or Board jump from the
+   * Hub, an agent to open in the editor, the breadcrumb back to where the
+   * jump came from. They name a tree, so when that tree is replaced they are
+   * not stale data to be refreshed — they are addressed to something that no
+   * longer exists, and the swap clears them between the teardown and the new
+   * mount (board #335 ②b-1). `resetServerMemory` calls this rather than
+   * repeating it, so "what a landing is" has one definition. */
+  function clearLandings() {
+    filesNavReq = null; boardIssueReq = null; agentsEditReq = null;
+    jumpedFrom = null;
+  }
+
   /** Everything in memory that belongs to the server being left (board 315),
    * reset AFTER the content tree is gone and the socket closed. The rest of
    * the per-server state is in storage, parked by parkFrom; components and
@@ -960,15 +1012,18 @@
     // the target's own from its parked tmux_state.
     terminalTarget = ''; terminalSession = '';
     splitCells = []; splitLayout = 1; activeCellId = null;
-    filesSession = ''; filesNavReq = null; boardIssueReq = null; agentsEditReq = null;
-    jumpedFrom = null; sessListOpen = false;
+    filesSession = '';
+    clearLandings();
+    sessListOpen = false;
   }
 
   // THE server switch (board 315): every entry — the switcher popover,
   // Settings › Connection, Add server, the panel's Retry and Back — goes
   // through server-switch.ts, which owns the order and the source/candidate
   // split. App supplies the effects: the content tree unmounts while
-  // `switching` is set and remounts (keyed by serverEpoch) in comeUp.
+  // `switching` is set, and `comeUp` binds it to the target's runtime handle
+  // (board #335 ②b-1) — a failed switch's Back keeps the handle it had,
+  // because Back returns to the server it left.
   const serverSwitch = createServerSwitch({
     storage: localStorage,
     connected: () => connected,
@@ -996,7 +1051,7 @@
     comeUp: (target) => {
       hubPrefs.reloadServerState();
       centre.reload();
-      serverEpoch++;
+      swapScope();
       activeAddress = target.address;
       loadServerRegistry();
       addrSetVersion++;
@@ -1127,6 +1182,11 @@
   migrateServers(localStorage);
   loadServerRegistry();
   consumeConnectUrlParams();
+  // Bind the content tree before its first render (board #335 ②b-1): the
+  // deep-link consumer above can make a different server current, and a bind
+  // that arrived a tick later would mount every page unbound and then rebuild
+  // them. With nothing bound yet this is immediate, by that rule.
+  swapScope();
 
   // Copy the CURRENT connection as a deep link (consumed by consumeConnectUrlParams
   // on the other device). Plain clipboard copy with a brief ✓ — no share sheet,
@@ -1187,6 +1247,12 @@
         localStorage.setItem('tmux_machine_id', mid);
       }
     } catch {}
+    // Identity repair may have moved CURRENT: `recordServer` absorbs the
+    // machine's twins, and when the entry we booted as is one of the absorbed
+    // the app is now on the survivor. Binding the tree is therefore the last
+    // step of recording identity, not a step of connecting — and it is a
+    // no-op whenever the id did not move (board #335 ②b-1).
+    swapScope();
     serverReady();
     try {
       const s = JSON.parse(localStorage.getItem('tmux_state') || '{}');
@@ -1973,10 +2039,16 @@
         {/if}
       </div>
     {:else}
-    <!-- Keyed by the server (board 315): a different server remounts every
-         server-bound component from scratch — no component state, listener or
-         subscription of the old server survives into the new tree. -->
-    {#key serverEpoch}
+    <!-- Keyed by the server's RUNTIME HANDLE (board #335 ②b-1, board 315): a
+         different server is a different handle, so every server-bound
+         component is rebuilt from scratch — no component state, listener or
+         subscription of the old server survives into the new tree — while a
+         reconnect inside one runtime keeps the handle and remounts nothing.
+         `ServerScope` binds the subtree to that handle, and the order
+         (teardown, invalidate, mount) is server-scope.ts's, because `{#key}`
+         creates the new branch before destroying the old one. -->
+    {#key scopeRuntime}
+    <ServerScope runtime={scopeRuntime}>
     {#if page === 'settings'}
       <Settings {onConnected} />
     {/if}
@@ -2113,6 +2185,7 @@
       <ScratchPanel open={scratchOpen} live={!switching} edge={scratchEdge} {fontSize}
         onclose={() => (scratchOpen = false)} onedge={setScratchEdge} />
     {/if}
+    </ServerScope>
     {/key}
     {/if}
   </div>

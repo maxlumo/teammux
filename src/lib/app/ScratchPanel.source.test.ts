@@ -24,8 +24,11 @@ test('Escape closes from the head only; the terminal keeps it', () => {
   assert.doesNotMatch(source, /window\.addEventListener\('keydown'|<section[^>]*onkeydown/u, 'no Escape catcher over the terminal');
 });
 
-test('App: desktop only, inside the server key, closed when a switch starts; the toggle is a registry shortcut', async () => {
-  const keyed = app.slice(app.indexOf('{#key serverEpoch}'), app.indexOf('{/key}'));
+test('App: desktop only, inside the server scope, closed when a switch starts; the toggle is a registry shortcut', async () => {
+  // Inside the PROVIDER, not merely inside the key (board #335 ②b-1): the
+  // panel's Terminal has to be bound to the same server as the pages, and a
+  // panel mounted beside `<ServerScope>` would keep answering from the facade.
+  const keyed = app.slice(app.indexOf('{#key scopeRuntime}'), app.indexOf('</ServerScope>'));
   assert.match(keyed, /\{#if !layout\.isTouchDevice && connected\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
   assert.match(app, /\$effect\(\(\) => \{ if \(switching\) scratchOpen = false; \}\);/u);
   assert.match(app, /function resetServerMemory\(\) \{\s*scratchOpen = false;/u);

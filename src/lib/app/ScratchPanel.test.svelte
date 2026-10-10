@@ -1,6 +1,8 @@
 <script>
   // Host for the scratch panel mount test (board #324): the frame state lives
-  // here like App's, and `epoch` stands in for App's {#key serverEpoch}.
+  // here like App's, and `epoch` stands in for App's server key (the runtime
+  // handle since board #335 ②b-1; what this fixture needs is only that the
+  // key CHANGES on a switch).
   import ScratchPanel from './ScratchPanel.svelte';
   let open = $state(false);
   let live = $state(true);
