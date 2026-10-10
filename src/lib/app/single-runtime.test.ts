@@ -225,6 +225,33 @@ test('only the CURRENT handover s ticket may resume', async (t) => {
     'and the right conclusion does');
 });
 
+test('a stale ticket cannot END the handle either', async (t) => {
+  t.after(cleanup);
+  // The verdict that kills is the one a stale attempt must least be allowed
+  // to give (reviewer, 2026-10-10): "another server authenticated" from an
+  // attempt the app has moved on from would end the handle the LIVE handover
+  // is protecting — and that one may still resume.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+  const first = rt.suspend();
+  const second = rt.suspend();
+
+  rt.settle(first, 'release');
+  assert.equal(rt.alive(), true, 'the stale release did not end the handle');
+  rt.settle(second, 'resume');
+  fire(rt.api.listSessions());
+  await settle();
+  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
+    'and the live handover could still resume it');
+
+  // The current ticket's release is the one that counts.
+  const third = rt.suspend();
+  rt.settle(third, 'release');
+  assert.equal(rt.alive(), false);
+  await assert.rejects(() => rt.api.listSessions(), /detached/u);
+});
+
 test('an unidentified peer leaves the handle suspended, not released', async (t) => {
   t.after(cleanup);
   // The orchestrator's refinement (2026-10-10): a peer authenticated and the

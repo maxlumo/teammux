@@ -254,13 +254,7 @@
   const shareLifetime = createFeedbackLifetime(value => { shareFeedback = value; });
   const shareContext = $derived({ address, token, socket });
   $effect(() => { void shareContext; shareLifetime.clear(); });
-  onDestroy(() => {
-    shareLifetime.dispose();
-    // An instance that goes away mid-dial takes its attempts with it: the
-    // dial it started must not come back and write identity, bring the app up
-    // or conclude a handover the next instance now owns (board #335 ②b-1).
-    attempts++;
-  });
+  onDestroy(() => shareLifetime.dispose());
   function buildShareUrl() {
     const url = normalizeAddress(address);
     const params = new URLSearchParams();

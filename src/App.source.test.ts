@@ -570,10 +570,11 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // app is no longer waiting on writes no identity and brings nothing up —
   // including one from an instance that has been unmounted.
   assert.match(fn, /const live = \(\) => attempt === attempts && !cancelled && \(handover\?\.current\(\) \?\? true\);/u);
-  const iIdentity = fn.indexOf('activateConnected(localStorage');
-  const iGuard = fn.lastIndexOf('if (!live()) return;', iIdentity);
-  assert.ok(iGuard > fn.indexOf('await connect(url, token)'),
-    'liveness is re-checked after the socket awaits and BEFORE the first identity write');
+  // Adjacent to the first identity write, not merely somewhere above it: the
+  // socket and import awaits sit between the post-connect check and this
+  // point, and a handover can take over while they resolve.
+  assert.match(fn, /if \(!live\(\)\) return;\s*\/\/ Save machine_id → address mapping/u,
+    'liveness is re-checked immediately before the first identity write');
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
