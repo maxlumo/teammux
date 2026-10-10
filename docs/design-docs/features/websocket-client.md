@@ -483,8 +483,12 @@ cde052f7, 4ef4dd07, 4807242f and 6a2ba341). The order is fixed: the intent
 moves to the survivor, the registry is committed without the alias, the merge
 is noted, and only then are the alias's slots removed; one last write hands
 the baselines over and closes the intent. A failure anywhere leaves the
-intent open, and it is finished (`resumeSlotMove`) at boot and before every
-claim. Which half it stopped in is the REGISTRY's to say: the alias still
+intent open, and it is finished (`resumeSlotMove`) at boot, before every
+claim, and before every identity write (`recordServer`, `repairServers`;
+reviewer P1 on b5adcb3b): a new absorption of the same source must not
+replace the open intent and then delete the only copy it still owes. If it
+cannot be finished, the identity write is refused and writes nothing, and the
+migration reports itself blocked; one handoff is open at a time. Which half it stopped in is the REGISTRY's to say: the alias still
 saved means nothing was committed and its slots are intact, so they are
 copied again; the alias gone means the copy was already done, so nothing is
 copied (an emptied source must never overwrite the survivor) and the cleanup

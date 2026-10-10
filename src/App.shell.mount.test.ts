@@ -2210,7 +2210,8 @@ function afterFailedMove(failKey = 'tmux_hub_drafts::c'): Record<string, string>
   failing = true;
   assert.throws(() => recordServer(store, { address: 'ws://alias:9899', token: 'tok', machineId: 'm-a' }), /Quota/u);
   if (failKey === 'tmux_hub_drafts::c') m.set('tmux_server_current', 'ghost');
-  m.set('tmux_address', ''); m.set('tmux_token', '');
+  if (failKey === 'tmux_server_current') m.set('tmux_address', 'ws://alias:9899');
+  if (failKey !== 'tmux_server_current') { m.set('tmux_address', ''); m.set('tmux_token', ''); }
   return Object.fromEntries(m);
 }
 
@@ -2250,6 +2251,20 @@ test('a reload after an absorption whose registry commit failed: CURRENT is cano
   await app.advance(1000);
   const ls = app.window.localStorage;
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://canonical:9899'], 'the boot dials canonical, not a ghost');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
+});
+
+test('a reload after an absorption whose CURRENT write failed: CURRENT is the alias, the boot dials it, and the merge completes with TYPED (reviewer P2 on b5adcb3b)', async (context) => {
+  const seed = afterFailedMove('tmux_server_current');
+  assert.equal(seed.tmux_server_current, 'a');
+  const events: string[] = [];
+  const { app } = await bootApp(context, seed, () => 'm-a', { calls: events });
+  await app.advance(1000);
+  for (let i = 0; i < 4; i++) await app.flush();
+  const ls = app.window.localStorage;
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://alias:9899'], 'the boot dials the alias');
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'which answers as m-a and is merged into canonical');
   assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });

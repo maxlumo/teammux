@@ -392,6 +392,12 @@ export function mergedInto(storage: Store, id: string): string {
  * else the first.
  */
 export function repairServers(storage: Store): ServerEntry[] {
+  // An absorption a failure left open is finished FIRST, or this throws and
+  // writes nothing (see `recordServer`). The repair itself never begins one
+  // — the CURRENT entry is always the survivor of its group, so no slot of
+  // CURRENT's moves — and this keeps it from committing a registry over a
+  // handoff that is still owed.
+  resumeSlotMove(storage);
   const servers = loadServers(storage);
   const cur = currentServerId(storage);
   const rank = (e: ServerEntry) => (e.id === cur ? 2 : e.machineId ? 1 : 0);
@@ -418,6 +424,13 @@ export function recordServer(
   storage: Store,
   conn: { address: string; token: string; socket?: string; machineId?: string },
 ): { servers: ServerEntry[]; entry: ServerEntry } {
+  // A handoff a failure left open is finished BEFORE any new identity is
+  // written (reviewer P1 on b5adcb3b, orchestrator 23:31): a new absorption
+  // of the same source must not replace its intent and then delete the only
+  // copy the old one still owes its destination. If it cannot be finished,
+  // this throws and writes nothing — the identity write is refused, and the
+  // migration's next run reports it blocked, with Retry.
+  resumeSlotMove(storage);
   const servers = loadServers(storage);
   const mid = conn.machineId || ownerOfAddr(machinesMap(storage), conn.address);
   let entry = mid ? servers.find((s) => s.machineId === mid) : undefined;
@@ -481,6 +494,9 @@ export const LAYOUT_KEY = 'tmux_state_layout';
 function beginMove(storage: Store, fromId: string, toId: string): void {
   if (!fromId || fromId === toId) return;
   const mark = pendingMark(storage);
+  // One open handoff at a time: the entries resume any open one first, so
+  // another here is a bug, and replacing it would lose what it owes.
+  if (mark?.moving) throw new Error('beginMove: another slot handoff is still open');
   if (mark) storage.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moving: { from: fromId, to: toId } }));
   copySlots(storage, fromId, toId);
 }

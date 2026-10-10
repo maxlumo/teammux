@@ -625,7 +625,8 @@ test('a claim refuses while the move cannot be finished, and folds nothing', () 
   storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
   const restore = refuse(storage, 'tmux_hub_drafts::c');
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
-  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.throws(() => activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' }), /Quota/u,
+    'a new identity write is refused while the handoff cannot be finished');
   assert.equal(migrateServerState(storage).reason, 'unrecorded', 'the boot cannot finish it');
   assert.equal(claimPending(storage, 'c').reason, 'unrecorded', 'nor the claim, which does not fold');
   assert.equal(layoutMark(storage)?.state, 'pending', 'still pending, intent open');
@@ -651,7 +652,8 @@ test('a claim refuses when the move cannot be finished, even where the fold itse
   storage.setItem('tmux_hub_project::a', 'ALIAS PROJECT');
   const restore = refuse(storage, 'tmux_hub_project::c');
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
-  activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
+  assert.throws(() => activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' }), /Quota/u,
+    'a new identity write is refused while the handoff cannot be finished');
   assert.equal(claimPending(storage, 'c').reason, 'unrecorded', 'the half-done move blocks the claim');
   assert.equal(layoutMark(storage)?.state, 'pending', 'nothing folded');
   assert.equal(storage.getItem('tmux_hub_drafts::c'), JSON.stringify({ work: 'OLD-CANON' }), 'no slot written');
@@ -704,4 +706,54 @@ test('an open intent whose merge is committed and whose source is already empty 
   assert.equal(storage.getItem('tmux_hub_drafts::a'), null, 'the source is empty');
   assert.equal(migrateServerState(storage).reason, 'pending');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the empty source did not delete TYPED');
+});
+
+/** aliasPending plus a third known machine, d (m-d), on its own address. */
+function aliasPendingWithD() {
+  const storage = aliasPending();
+  const servers = JSON.parse(storage.getItem('tmux_servers')!);
+  servers.push({ id: 'd', name: 'other', address: 'ws://other:9899', token: 't', machineId: 'm-d' });
+  storage.setItem('tmux_servers', JSON.stringify(servers));
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  return storage;
+}
+
+test('a new identity write finishes an open handoff first: a→c then a→d, and c still gets TYPED (reviewer P1 on b5adcb3b)', () => {
+  const storage = aliasPendingWithD();
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.deepEqual(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, { from: 'a', to: 'c' });
+  // The same route answers as m-d next.
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-d' });
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'a→c was finished before a→d began');
+  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'and no handoff is left open');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the claim keeps it');
+});
+
+test('if the open handoff still cannot be finished, the new identity write is refused and changes nothing', () => {
+  const storage = aliasPendingWithD();
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  const before = storage.dump();
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-d' }), /Quota/u);
+  assert.deepEqual(storage.dump(), before, 'the old intent and its source are as they were');
+  assert.equal(migrateServerState(storage).reason, 'unrecorded', 'and the migration reports it blocked');
+  restore();
+});
+
+test('an absorption that fails at the CURRENT write recovers on reload, and the alias s next answer finishes the merge (reviewer P2 on b5adcb3b)', () => {
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const restore = failNth(storage, 'tmux_server_current', 1);
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  restore();
+  assert.equal(storage.getItem('tmux_server_current'), 'a', 'CURRENT stayed on the alias, which is still saved');
+  assert.equal(migrateServerState(storage).reason, 'pending');
+  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'the reload closed the intent');
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+  assert.equal(storage.getItem('tmux_server_current'), 'c');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });
