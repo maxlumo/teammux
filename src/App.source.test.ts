@@ -543,6 +543,11 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /const terminalSession = \$derived\(termPane\?\.session \?\? ''\);/u);
   assert.match(source, /const filesSession = \$derived\(filesRef\?\.session \?\? ''\);/u);
   assert.match(source, /<SplitView cells=\{splitViewCells\}/u, 'and the split hands over strings too');
+  // What it hands over is the pane's own names and NOTHING else: a serverId
+  // that reached a `target` would be sent to tmux as part of a pane address.
+  const adapter = source.match(/const splitViewCells = \$derived\([\s\S]*?\)\);/u)?.[0] ?? '';
+  assert.match(adapter, /target: c\.pane\?\.target \?\? '',\s*session: c\.pane\?\.session \?\? '',/u);
+  assert.doesNotMatch(adapter, /serverId/u, 'the serverId stops at this boundary');
   // A rename belongs to ONE server.
   assert.match(source, /const rename = \{ serverId: navServerId\(\), from, to \};\s*const move = \(ref\) => \(ref \? retargetRef\(ref, rename\) : ref\);/u);
   // A landing names its tree, and is delivered only to that tree.
