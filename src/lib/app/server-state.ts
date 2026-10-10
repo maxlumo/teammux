@@ -57,3 +57,30 @@ export function createServerState(storage: Store): ServerState {
     files: { memory: createFilesMemory(), downloads: createDownloads() },
   };
 }
+
+/**
+ * The state a new runtime for entry `id` starts with (reviewer P1 on
+ * bdac94bd, 2026-10-10).
+ *
+ * Usually a fresh bundle. The exception is the runtime it replaces being the
+ * SAME MACHINE under an id identity repair has since folded into `id` — an
+ * alias absorbed into its canonical entry on a same-server reconnect or a
+ * failover. That is not a different server, so its state is not a different
+ * state, and it TRANSFERS: a fresh bundle would empty the Downloads rows and
+ * browse positions of the machine still on screen, and — the dangerous half —
+ * orphan every download attempt in flight, which outlives the components that
+ * started it. A later switch suspends only the bundle it can find, so those
+ * attempts would never be stopped, and their retries would go out over
+ * whatever the socket reaches next.
+ *
+ * WHICH ids merged is the identity layer's record (`survivorOf`, i.e.
+ * `servers.mergedInto`), never an inference from an id being absent.
+ */
+export function stateForRuntime(
+  replaced: { id: string; state: ServerState | undefined } | null,
+  id: string,
+  deps: { survivorOf: (id: string) => string; create: () => ServerState },
+): ServerState {
+  const merged = !!replaced && replaced.id !== id && deps.survivorOf(replaced.id) === id;
+  return (merged && replaced.state) || deps.create();
+}

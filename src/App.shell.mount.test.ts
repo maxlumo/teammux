@@ -294,7 +294,7 @@ const byAddress: MachineAt = (url) => (url.includes('//b') ? 'm-b' : 'm-a');
 
 /** A transport that answers as whichever machine the address belongs to, and
  * that a case can DROP — which is how a failover begins. */
-function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress) {
+function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}) {
   let connected = false;
   let machine = '';
   let dials = 0;
@@ -348,15 +348,19 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress) {
     fsList: rpc('fs_list', { entries: [] }),
     getPrefs: rpc('get_prefs', {}),
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
+    ...extra,
   };
   return { module, net };
 }
 
 /** The app booted on a seeded storage, with the transport mocked: ONE harness,
  * and each case says what the client wakes up with. */
-async function bootApp(context: TestContext, seed: Record<string, string>, machineAt?: MachineAt) {
-  const calls: string[] = [];
-  const transport = twoServerTransport(calls, machineAt);
+async function bootApp(
+  context: TestContext, seed: Record<string, string>, machineAt?: MachineAt,
+  more: { rpc?: Record<string, unknown>; setup?: (window: any) => void; calls?: string[] } = {},
+) {
+  const calls: string[] = more.calls ?? [];
+  const transport = twoServerTransport(calls, machineAt, more.rpc);
   const app = await (await compiled).mount(context, {
     props: {},
     modules: [asModule(transport.module), terminalStub],
@@ -364,6 +368,7 @@ async function bootApp(context: TestContext, seed: Record<string, string>, machi
       window.localStorage.clear();
       window.localStorage.setItem('tmux_locale', 'en');
       for (const [key, value] of Object.entries(seed)) window.localStorage.setItem(key, value);
+      more.setup?.(window);
       (window as any).HTMLCanvasElement.prototype.getContext = () => new Proxy({
         font: '', measureText: () => ({ width: 0 }),
       } as Record<string, unknown>, {
@@ -684,4 +689,64 @@ test('a merge on a failover keeps saving', async (context) => {
 
   await openSession('other');
   assert.equal(restored(), 'canon:other:3.0', 'and so is what comes after it');
+});
+
+test('a same-machine merge keeps a download in flight, and the next switch still stops it before dialling', async (context) => {
+  // reviewer P1 on bdac94bd. The alias's Files record — rows, browse
+  // positions, and the attempt table — was replaced by a fresh one when
+  // identity repair folded the alias into its canonical entry, so the attempt
+  // already running outlived every component that knew about it. A later
+  // switch to another server suspended only the new, empty record, and the
+  // orphan kept going over whatever the socket reached next.
+  // ONE ordered trace: the transport writes its dials into it, the transfer
+  // its start and its stop, so "stopped BEFORE the next server was dialled"
+  // is an order in a list rather than two separate facts.
+  const events: string[] = [];
+  const machineAt: MachineAt = (url, n) => (url.includes('//c') ? 'm-c' : n === 1 ? '' : 'm-a');
+  const { app, settle, switchTo, reconnectThroughForm } = await bootApp(context, {
+    ...aliasAndCanonical(legacyNav('work:1.0')),
+    tmux_servers: JSON.stringify([
+      { id: 'alias', name: 'home', address: 'ws://a:9899', token: 'tok', named: true },
+      { id: 'canon', name: 'canonical', address: 'ws://b:9899', token: 'tok', machineId: 'm-a', named: true },
+      { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+    ]),
+  }, machineAt, {
+    calls: events,
+    rpc: {
+      fsList: async () => ({ path: '/home', entries: [{ name: 'big.bin', path: '/home/big.bin', type: 'file', size: 9e9 }] }),
+      fsStat: async (path: string) => ({ path, is_text: false, writable: true, readable: true, size: 9e9 }),
+      fsDownloadHttp: async () => ({ url: 'https://a/dl?path=%2Fhome%2Fbig.bin&sig=s' }),
+      gitCmd: async () => ({ code: 1, stdout: '' }),
+    },
+    setup(window) {
+      // A transfer that never finishes on its own: it ends only when its
+      // signal says so, and records WHY — which is the observable that a
+      // suspend reached it.
+      window.fetch = (_url: string, init: { signal?: AbortSignal } = {}) => new window.Promise((_resolve: unknown, reject: (e: unknown) => void) => {
+        events.push('fetch');
+        init.signal?.addEventListener('abort', () => { events.push('aborted'); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+      });
+    },
+  });
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+  assert.ok(files, 'the Files tab is on screen');
+  files.click();
+  await settle();
+  const download = app.document.querySelector<HTMLButtonElement>('button[aria-label="Download: big.bin"]');
+  assert.ok(download, `Files offers the download: ${[...app.document.querySelectorAll('.files-page button[aria-label]')].map((b) => b.getAttribute('aria-label')).join(' | ')}`);
+  download.click();
+  await settle();
+  const transfer = () => events.filter((e) => e === 'fetch' || e === 'aborted' || e.startsWith('connect:'));
+  assert.deepEqual(transfer(), ['connect:ws://a:9899', 'fetch'], 'the transfer is running');
+
+  await reconnectThroughForm('ws://a:9899');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'canon', 'the reconnect absorbed the alias');
+  assert.deepEqual(transfer(), ['connect:ws://a:9899', 'fetch', 'connect:ws://a:9899'],
+    'a same-machine merge does not stop it: it is still this machine s download');
+
+  await switchTo('charlie');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'c', 'the switch arrived');
+  assert.deepEqual(transfer(), ['connect:ws://a:9899', 'fetch', 'connect:ws://a:9899', 'aborted', 'connect:ws://c:9899'],
+    'and the switch away from it stopped it — before the next server was dialled');
 });

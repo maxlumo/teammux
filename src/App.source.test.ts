@@ -488,8 +488,8 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // server is current (board #335 ②b-2-1).
   assert.equal([...source.matchAll(/createServerState\(/gu)].length, 1, 'one place builds a server s state');
   assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 1, 'and one place hands it to a runtime');
-  assert.match(source, /function swapScope\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, createServerState\(localStorage\)\);/u,
-    'inside swapScope');
+  assert.match(source, /function swapScope\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, stateForRuntime\(/u,
+    'inside swapScope — and a same-machine merge hands the replaced handle s state over (stateForRuntime)');
   assert.match(source, /invalidate: \(gone\) => \{[\s\S]*?gone\.dispose\(\);[\s\S]*?clearLandings\(\);/u,
     'the replaced handle is DETACHED, not merely forgotten: two generations can borrow one connection');
   // WHICH server is read from the registry, never passed: identity repair can
@@ -517,7 +517,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function suspendScope\(\) \{\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
-  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) serverStates\.set\(next, createServerState\(localStorage\)\);\s*void scopeSwap\.swap\(next\);/u,
+  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(localStorage\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');

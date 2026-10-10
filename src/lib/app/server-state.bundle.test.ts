@@ -65,3 +65,24 @@ test('each server s centre holds its own alerts, and every centre shares the one
   centreSurface.reset();
   assert.equal(a.centre.jump, null);
 });
+
+test('a same-machine merge hands the replaced runtime s state over; anything else starts fresh', async () => {
+  // reviewer P1 on bdac94bd: identity repair folding alias A into canonical B
+  // replaces the handle, and a fresh bundle there orphaned A's Files record —
+  // its rows, its browse positions, and every attempt in flight, which a
+  // later switch could then no longer find to suspend.
+  const { stateForRuntime } = await import('./server-state.ts');
+  live.clear();
+  const old = createServerState(localStorage);
+  const create = () => createServerState(localStorage);
+  const merged = (id: string) => (id === 'alias' ? 'canon' : id);
+  assert.equal(stateForRuntime({ id: 'alias', state: old }, 'canon', { survivorOf: merged, create }), old,
+    'the canonical runtime adopts the SAME bundle — the attempt table included');
+  assert.notEqual(stateForRuntime({ id: 'other', state: old }, 'canon', { survivorOf: merged, create }), old,
+    'a different server is a different state');
+  assert.notEqual(stateForRuntime({ id: 'gone', state: old }, 'canon', { survivorOf: () => '', create }), old,
+    'an id nothing shows to be merged hands nothing over');
+  assert.notEqual(stateForRuntime(null, 'canon', { survivorOf: merged, create }), old, 'a first bind is fresh');
+  assert.notEqual(stateForRuntime({ id: 'alias', state: undefined }, 'canon', { survivorOf: merged, create }), undefined,
+    'and there is always a state');
+});

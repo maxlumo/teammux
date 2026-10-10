@@ -36,7 +36,7 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
-  import { createServerState } from './lib/app/server-state.ts';
+  import { createServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createHandovers } from './lib/app/handover.ts';
   import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
@@ -157,9 +157,17 @@
     // the one the app is waiting on.
     handovers.endAll();
     const next = entry ? createSingleRuntime(entry, { storage: localStorage }) : null;
-    // Its server's state, built NOW: CURRENT already names `entry`, so the
-    // bare live keys are that server's (board #335 ②b-2-1).
-    if (next) serverStates.set(next, createServerState(localStorage));
+    // Its server's state: built NOW, since CURRENT already names `entry` and
+    // the bare live keys are that server's (board #335 ②b-2-1) — or, when
+    // identity repair folded the replaced handle's id into `entry`, the SAME
+    // machine's state handed over, attempts in flight and all.
+    if (next) {
+      const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
+      serverStates.set(next, stateForRuntime(replaced, entry.id, {
+        survivorOf: (id) => mergedInto(localStorage, id),
+        create: () => createServerState(localStorage),
+      }));
+    }
     void scopeSwap.swap(next);
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
