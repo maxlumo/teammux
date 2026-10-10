@@ -22,7 +22,7 @@
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
   import { centre } from './lib/hub/notify-centre.svelte.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
-  import { hubPrefs } from './lib/hub/hub-prefs.svelte.ts';
+  import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
   import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, backendsList, setSocket } from './lib/core/ws.ts';
   import { setServedBackends } from './lib/core/agents.ts';
@@ -36,6 +36,7 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
+  import { createServerState } from './lib/app/server-state.ts';
   import { createHandovers } from './lib/app/handover.ts';
   import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
@@ -103,6 +104,12 @@
    * waits for it, so nothing writes an empty navigation over the record the
    * restore is about to read (board #335 ②b-2). */
   let navRestored = $state.raw(null);
+  /** What the app remembers about each runtime's server (board #335 ②b-2-1),
+   * built in `swapScope` when the runtime is — after CURRENT moved, so it
+   * reads the server being bound and not the one being left — and handed to
+   * the subtree with the runtime. A WeakMap because the bundle's life is the
+   * handle's: a handle nobody holds takes its server's memory with it. */
+  const serverStates = new WeakMap();
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -145,7 +152,11 @@
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
     handovers.endAll();
-    void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
+    const next = entry ? createSingleRuntime(entry, { storage: localStorage }) : null;
+    // Its server's state, built NOW: CURRENT already names `entry`, so the
+    // bare live keys are that server's (board #335 ②b-2-1).
+    if (next) serverStates.set(next, createServerState(localStorage));
+    void scopeSwap.swap(next);
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
    * names its survivor now (reviewer P1, 2026-10-10).
@@ -863,7 +874,6 @@
       reconnectMachine.cancel();
       serverSwitch.supersede();
       resetServerMemory();
-      hubPrefs.reloadServerState();
       centre.reload();
       navLiveOwner = navProvenance();
       swapScope();
@@ -1214,7 +1224,6 @@
     setSocket,
     machineId: () => getMachineId() || '',
     comeUp: (target) => {
-      hubPrefs.reloadServerState();
       centre.reload();
       // Arriving surfaced the target's parked slot into the live key.
       navLiveOwner = navProvenance();
@@ -1839,10 +1848,10 @@
   const pageReselect = {};
   // ONE primary-sidebar state for the whole shell (board #200, owner
   // 2026-09-14: "这个折叠收起在不同的页面是同步的，不然我点击chat terminal board，展开状态
-  // 不一致"): the Hub's toggle writes hubPrefs.sidebarCollapsed; the Terminal
+  // 不一致"): the Hub's toggle writes appPrefs.sidebarCollapsed; the Terminal
   // page's and the Board's sidebars and the system-status bar follow it, and a
   // rail reselect on any of the three pages opens it again (#199).
-  const shellSideCollapsed = $derived(shell && !layout.isTouchDevice && hubPrefs.sidebarCollapsed);
+  const shellSideCollapsed = $derived(shell && !layout.isTouchDevice && appPrefs.sidebarCollapsed);
   // Only three pages HAVE the primary sidebar; the toggle and the page-head
   // room it takes exist there alone (board #219, owner 2026-09-20: "files页面里，
   // 多显示了折叠左侧边栏的按钮，还有设置这些页面也都没兼容好"). The collapsed state
@@ -1851,7 +1860,7 @@
   const SIDEBAR_PAGES = new Set(['hub', 'terminal', 'board']);
   const pageHasSidebar = $derived(SIDEBAR_PAGES.has(page));
   // A reselect TOGGLES (owner, 2026-09-14: "选中点击也能展开，也能折叠"; board #201).
-  pageReselect.terminal = pageReselect.board = () => hubPrefs.setSidebarCollapsed(!hubPrefs.sidebarCollapsed);
+  pageReselect.terminal = pageReselect.board = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
   // The Terminal page moves its track the way the Hub does (reveal.ts): the
   // sidebar pinned at its width, the factor moving, xterm fitted once at rest.
   let termPageEl = $state(null);
@@ -1868,7 +1877,7 @@
   // if it has one (the Hub animates with its reading anchor), else the shared
   // state directly.
   function toggleShellSidebar() {
-    (pageReselect[page] ?? (() => hubPrefs.setSidebarCollapsed(!hubPrefs.sidebarCollapsed)))();
+    (pageReselect[page] ?? (() => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed)))();
   }
   function railActivate(slot) {
     if (railClickGuard) { railClickGuard = false; return; }
@@ -2166,8 +2175,8 @@
          it through `.side-toggle-row` / `.page-head` (app.css). -->
     {#if pageHasSidebar && !switching}
       <div class="shell-side-toggle">
-        <CommandButton variant="secondary" iconOnly icon="panel-left" expanded={!hubPrefs.sidebarCollapsed} inside
-          label={hubPrefs.sidebarCollapsed ? t('hubSidebarExpand') : t('hubSidebarCollapse')}
+        <CommandButton variant="secondary" iconOnly icon="panel-left" expanded={!appPrefs.sidebarCollapsed} inside
+          label={appPrefs.sidebarCollapsed ? t('hubSidebarExpand') : t('hubSidebarCollapse')}
           onclick={toggleShellSidebar} />
       </div>
     {/if}
@@ -2342,7 +2351,7 @@
          server-scope.ts's, because `{#key}` creates the new branch before
          destroying the old one. -->
     {#key scopeRuntime}
-    <ServerScope runtime={scopeRuntime}>
+    <ServerScope runtime={scopeRuntime} state={serverStates.get(scopeRuntime)}>
     {#if hubEligible}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
            Files/Terminal below) and merely hidden when inactive, so the

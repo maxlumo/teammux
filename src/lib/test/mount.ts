@@ -28,9 +28,16 @@ interface ClientApi {
   stop(): Promise<void>;
 }
 
+interface CompileOptions {
+  /** Mount the component bound to ONE server's scope, the way App's provider
+   * binds every server-bound page (board #335 ②b-2-1) — see
+   * `server-scope-host.ts`. */
+  serverScope?: boolean;
+}
+
 /** Compile once, then execute each scenario in a fresh browser-like realm.
  * This is a client bundle, never Vite SSR, and it opens no server or socket. */
-export async function compileMount(component: URL, mockedModules: readonly URL[]) {
+export async function compileMount(component: URL, mockedModules: readonly URL[], compileOptions: CompileOptions = {}) {
   const started = performance.now();
   const scratch = await mkdtemp(join(tmpdir(), 'tmm-mount-'));
   const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -81,9 +88,12 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
             if (id === entry) return `
               import Component from ${JSON.stringify(fileURLToPath(component))};
               import { mount, unmount, tick, flushSync } from 'svelte';
+              ${compileOptions.serverScope
+                ? `import { testScopeContext as context } from ${JSON.stringify(join(root, 'src/lib/test/server-scope-host.ts'))};`
+                : 'const context = () => undefined;'}
               let instance;
               globalThis.__mountClient = {
-                start(props) { instance = mount(Component, { target: document.body, props }); },
+                start(props) { instance = mount(Component, { target: document.body, props, context: context() }); },
                 tick, flushSync,
                 async stop() { const held = instance; instance = undefined; if (held) await unmount(held); }
               };

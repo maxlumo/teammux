@@ -12,7 +12,9 @@ const writes: string[] = [];
 };
 (globalThis as any).$state = (v: unknown) => v;
 
-const { hubPrefs } = await import('./hub-prefs.svelte.ts');
+const { createHubPrefs } = await import('./hub-prefs.svelte.ts');
+// One server's prefs over this storage, as App builds a runtime's (②b-2-1).
+const hubPrefs = createHubPrefs(localStorage);
 
 test('the lead has three states: a name, the ROOM (empty string), and nobody chose (null)', () => {
   // Review C (2026-09-03): '' used to be stored as an ABSENT key, so choosing
@@ -41,8 +43,10 @@ test('renameSession carries the lead — including the room choice — onto the 
 const ROSTER_KEY = 'tmux_hub_roster_expanded';
 let moduleVersion = 0;
 async function freshPrefs(): Promise<typeof hubPrefs> {
-  // Bypass Node's module cache to exercise the real localStorage read on reload.
-  return (await import(new URL(`./hub-prefs.svelte.ts?roster=${++moduleVersion}`, import.meta.url).href)).hubPrefs;
+  // A fresh module AND a fresh instance: the real localStorage read on reload,
+  // through the factory App builds each runtime's prefs with.
+  const fresh = await import(new URL(`./hub-prefs.svelte.ts?roster=${++moduleVersion}`, import.meta.url).href);
+  return fresh.createHubPrefs(localStorage, fresh.createAppPrefs(localStorage));
 }
 
 test('roster expansion is per session and survives a fresh-module reload (#168)', async () => {

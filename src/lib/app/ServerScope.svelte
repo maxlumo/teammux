@@ -19,13 +19,17 @@
   // the preferences that belong to them and not to a machine — is rendered by
   // the host OUTSIDE this subtree, so suppressing the children here cannot
   // strand a fresh client on an empty screen.
-  import { setServerRuntime } from './server-context.ts';
+  //
+  // It binds the runtime AND that server's state (②b-2-1), as one scope: the
+  // host built the state for this runtime, and the two arrive together so no
+  // page can see one server's runtime with another server's memory.
+  import { setServerScope } from './server-context.ts';
 
-  let { runtime, children } = $props();
+  let { runtime, state, children } = $props();
 
   // svelte-ignore state_referenced_locally
-  // One runtime for this instance's whole life.
-  if (runtime) setServerRuntime(runtime);
+  // One runtime, and its state, for this instance's whole life.
+  if (runtime) setServerScope({ runtime, state });
 </script>
 
 {#if runtime}{@render children?.()}{/if}

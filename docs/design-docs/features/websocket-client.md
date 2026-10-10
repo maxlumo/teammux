@@ -614,6 +614,24 @@ the provider binds what App hands it. Source pins hold all four. No production
 list projects a union yet — that arrives with the mode switch in ③ — so what
 ships here is the one mechanism and the pins every such list will be held to.
 
+**One server's state is one value** (②b-2-1, `app/server-state.ts`). What the
+app remembers about a server — so far the Hub's per-project maps (lead, read
+mark, draft, drawer, roster, open project) — is a `ServerState` that belongs
+to a RUNTIME. App builds it in `swapScope`, beside the runtime and after
+CURRENT moved, and the provider hands both to the subtree as one scope
+(`useServerScope()`, one context key, read once at init). A different server
+is a different runtime and so a different bundle, so a switch re-reads
+nothing: `reloadServerState` is gone. Two rules carry it. A field joins the
+bundle in the SAME commit its module singleton is deleted, because two live
+instances over the same keys would each keep a copy and the later write would
+win. And through ②b the store is still the bare `localStorage`, whose live
+keys are whichever server is current, so a bundle is never built on first
+sight of an entry — only once its server is current; b2-4 gives each bundle a
+store scoped to its server, and then the timing stops mattering. The person's
+own preferences (feed level, tool-row cap, sidebar) are not in it: they are
+`appPrefs`, one owner however many servers are on screen, read directly by
+App and Preferences.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this
@@ -639,7 +657,7 @@ doc already describes. Design decisions, in the order they bit:
   4. **Park the source, once**: `parkFrom` files every key in `PARKED_KEYS` under the leaving id. Only a switch that began CONNECTED parks; Retry and Back reuse the frozen `from` and never park again, so a half-switched world can never overwrite the source's slot.
   5. Socket closed (`disconnect()` rejects every pending RPC), `resetServerMemory()`.
   6. **Connect without touching the mirror or CURRENT**: a reload mid-switch boots the server you left.
-  7. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, `pointTo` the canonical entry, write the mirror. Then `comeUp`: `hubPrefs.reloadServerState()`, `serverEpoch++`, `bringUp` (the boot path's own half after connect).
+  7. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, `pointTo` the canonical entry, write the mirror. Then `comeUp`: `centre.reload()`, `swapScope()` — which builds the target's runtime and its server state (§ One server's state is one value) — and `bringUp` (the boot path's own half after connect).
 
   **One socket owner.** Moving the socket to another address of the SAME server (the Connection page's address rows, the periodic optimizer) goes through `connectAddress` in the same module, under the same intent counter: a switch that starts while it dials makes it stale, and a stale attempt neither publishes its result nor restarts the reconnect loop (review P1: it used to call `reconnectMachine.start()` in its catch, and that loop reads the mirror, i.e. the server just left, over the new server's socket). `probeHub` and `loadBackends` drop an answer that arrives after a switch began. The reconnect machine's own starts (`setOnDisconnect`, the visibility resume) are skipped while `switching` is set.
 

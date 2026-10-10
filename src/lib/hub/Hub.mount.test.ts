@@ -6,7 +6,7 @@ import { compileMount } from '../test/mount.ts';
 let compilation: ReturnType<typeof compileMount> | undefined;
 const compiledHub = () => compilation ??= compileMount(new URL('./Hub.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
-]);
+], { serverScope: true });
 
 /** Everyone lives at the head of the EXPANDED roster (#204): expand first when needed. */
 async function allButton(app: { document: Document; flush: () => Promise<void> }): Promise<HTMLButtonElement> {
@@ -2530,7 +2530,7 @@ test('a group Interrupt names the member whose interrupt failed; the others are 
 let hosted: ReturnType<typeof compileMount> | undefined;
 const compiledHost = () => hosted ??= compileMount(new URL('./Hub.test.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
-]);
+], { serverScope: true });
 const served = (name: string, toggle: boolean) => ({ name, icon: `/assets/${name}.svg`, color: `--backend-${name}`, efforts: [], input_modes: true, input_mode_toggle: toggle });
 
 async function menuOf(app: { document: Document; window: any; flush: () => Promise<void> }, name: string) {

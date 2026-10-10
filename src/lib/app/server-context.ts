@@ -34,12 +34,22 @@ import { compatSlotApi } from '../core/ws.ts';
 import type { WsApi } from '../core/ws-api.ts';
 import type { ServerId } from './refs.ts';
 import type { ServerRuntime } from './server-runtime.ts';
+import type { ServerState } from './server-state.ts';
 
-const KEY = Symbol('tmm.server-runtime');
+const KEY = Symbol('tmm.server-scope');
+
+/** Everything a server-bound subtree is bound to: the runtime it talks
+ * through and the state the app remembers about that server (②b-2-1). ONE
+ * context key for both — two keys could each answer "which server is this
+ * subtree on" differently. */
+export interface ServerScope {
+  runtime: ServerRuntime;
+  state: ServerState;
+}
 
 /**
- * Bind this subtree to one server. Call it during the initialisation of the
- * component that OWNS the subtree.
+ * Bind this subtree to one server — its runtime and its state. Call it during
+ * the initialisation of the component that OWNS the subtree.
  *
  * ②b's contract on top of this: the subtree's owner is the runtime HANDLE, so
  * a replacement runtime for the same cell, target or serverId swaps the owner
@@ -52,14 +62,29 @@ const KEY = Symbol('tmm.server-runtime');
  * cleared, landings aimed at it invalidated — before the new one mounts" is a
  * separate, explicit step ②b has to sequence itself.
  */
-export function setServerRuntime(runtime: ServerRuntime): void {
-  setContext(KEY, runtime);
+export function setServerScope(scope: ServerScope): void {
+  setContext(KEY, scope);
+}
+
+/** The context a component MOUNTED on its own needs to be bound to `scope` —
+ * `mount(Component, { context })`, for a host that mounts a server-bound
+ * component outside any provider (the mount tests). The same key, so there is
+ * still one way to bind a scope. */
+export function scopeContext(scope: ServerScope): Map<symbol, ServerScope> {
+  return new Map([[KEY, scope]]);
+}
+
+/** The scope this subtree is bound to, or null when nothing provided one.
+ * Init only — and ONE read per component (pinned): `scope.runtime` and
+ * `scope.state` come from the same answer. */
+export function useServerScope(): ServerScope | null {
+  return getContext<ServerScope | undefined>(KEY) ?? null;
 }
 
 /** The runtime this subtree is bound to, or null when nothing provided one.
  * Init only. */
 export function useServerRuntime(): ServerRuntime | null {
-  return getContext<ServerRuntime | undefined>(KEY) ?? null;
+  return useServerScope()?.runtime ?? null;
 }
 
 /**

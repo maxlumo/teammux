@@ -3,6 +3,12 @@
 // something of the server being left) or listed here as GLOBAL with the
 // reason it cannot hold a server's data. A new module cache must pick a side.
 // The behaviour proof is server-switch.test.ts; this only keeps the list honest.
+//
+// Since #335 ②b-2-1 there is a third side, and it is where every per-server
+// store is moving: it belongs to a RUNTIME (`app/server-state.ts`), so it has
+// NO module instance at all and goes away with its runtime instead of being
+// reset. `IN_RUNTIME` lists them; a module instance of one is a second owner
+// of the same keys and fails here.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
@@ -28,15 +34,16 @@ const PER_SERVER: Record<string, Record<string, RegExp>> = {
   // because they describe what this BUILD ships, not what a server serves.
   'core/agents.ts': { backendCatalog: /setServedBackends\(null\)/u },
   'ui/hover.svelte.ts': { shown: /hoverCard\.hide\(\)/u, hiddenAt: /hoverCard\.hide\(\)/u },
-  // Re-read from the parked keys after pointTo (comeUp), not reset here.
-  // Since #335 ②a-4 it is an INSTANCE of createHubPrefs(storage); ②b builds
-  // each runtime's on that server's scoped store.
-  'hub/hub-prefs.svelte.ts': { hubPrefs: /./u },   // the per-SERVER half
   // The notification centre (board #322): its list is a parked key too,
   // re-read by centre.reload() beside hubPrefs on comeUp. Since #335 ②a-4
   // the list is an INSTANCE of createAlertLog(storage); the popover and the
   // jump request are this WINDOW's and are listed as GLOBAL below.
   'hub/notify-centre.svelte.ts': { alertLog: /./u },
+};
+/** Per-server stores that belong to a runtime: the `ServerState` field, and
+ * the factory nothing may instantiate at module level. */
+const IN_RUNTIME: Record<string, { file: string; factory: string }> = {
+  prefs: { file: 'hub/hub-prefs.svelte.ts', factory: 'createHubPrefs' },
 };
 const GLOBAL: Record<string, Record<string, string>> = {
   'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself' },
@@ -97,18 +104,35 @@ test('every module-level store is reset on a switch or named global (board 315)'
       const per = PER_SERVER[rel]?.[name];
       const glob = GLOBAL[rel]?.[name];
       assert.ok(per || glob, `${rel}: module-level "${name}" must be reset by a switch or listed as GLOBAL`);
-      if (per && rel !== 'hub/hub-prefs.svelte.ts' && rel !== 'hub/notify-centre.svelte.ts' && !per.test(reset) && !/suspendDownloads/u.test(per.source)) {
+      if (per && rel !== 'hub/notify-centre.svelte.ts' && !per.test(reset) && !/suspendDownloads/u.test(per.source)) {
         assert.fail(`${rel}:${name} is per-server but resetServerMemory does not reset it`);
       }
     }
   }
   for (const instance of [
     'files/downloads.svelte.ts:downloadStore', 'core/agents.ts:backendCatalog',
-    'files/Files.svelte:memory', 'hub/hub-prefs.svelte.ts:hubPrefs',
+    'files/Files.svelte:memory',
     'hub/notify-centre.svelte.ts:alertLog', 'hub/notify-centre.svelte.ts:centreSurface',
   ]) {
     assert.ok(found.includes(instance), `the scan sees the factory instance ${instance}`);
   }
   assert.match(app, /resetMemory: resetServerMemory,/u, 'the switch runs the reset');
-  assert.match(app, /comeUp: \(target\) => \{\s*hubPrefs\.reloadServerState\(\);\s*centre\.reload\(\);/u, 'hub prefs and the centre re-read the target’s parked keys');
+  assert.match(app, /comeUp: \(target\) => \{\s*centre\.reload\(\);/u, 'the centre re-reads the target’s parked keys');
+});
+
+test('a store that belongs to a runtime has no module instance, and the bundle builds it (#335 ②b-2-1)', async () => {
+  const bundle = await readFile(new URL('./server-state.ts', import.meta.url), 'utf8');
+  for (const [field, { file, factory }] of Object.entries(IN_RUNTIME)) {
+    assert.match(bundle, new RegExp(`\\b${field}: ${factory}\\(storage`, 'u'), `the bundle builds ${field} with ${factory}`);
+    for await (const url of walk(LIB)) {
+      const rel = decodeURIComponent(url.pathname.slice(LIB.pathname.length));
+      if (rel === 'app/server-state.ts') continue;
+      const text = await readFile(url, 'utf8');
+      assert.doesNotMatch(text, new RegExp(`^(?:export )?(?:let|const) \\w+[^=\\n]*= ${factory}\\(`, 'mu'),
+        `${rel} holds a module instance of ${factory} — a second owner of ${file}'s per-server keys`);
+    }
+  }
+  // Nothing re-reads them on a switch any more: the next server's bundle is a
+  // new one, built once that server is current.
+  assert.doesNotMatch(app, /reloadServerState/u);
 });

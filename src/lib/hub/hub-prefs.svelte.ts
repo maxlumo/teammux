@@ -12,8 +12,10 @@
 //
 //   per SERVER — the per-project maps (lead, read mark, draft, drawer, roster
 //     disclosure) and which project was open. They are keyed by tmux session
-//     NAME, and `app` on one server is not `app` on another; that is why a
-//     switch parks them and `reloadServerState` re-reads them.
+//     NAME, and `app` on one server is not `app` on another. Each RUNTIME has
+//     its own instance (`app/server-state.ts`, ②b-2-1), built once that
+//     server is current — so a switch re-reads nothing: the next server's
+//     instance is a new one.
 //   per PERSON and WINDOW — the feed level, the tool-row cap and the sidebar
 //     collapse. Scoping those would give the same human a different app
 //     depending on which machine they are looking at.
@@ -24,9 +26,10 @@
 // split above a property of the storage view rather than of a second code
 // path here.
 //
-// NOT YET WIRED PER RUNTIME, which is not the same as uncalled: production
-// reads `hubPrefs` below, built on `localStorage`, exactly as it read the
-// module state before.
+// Wired per runtime since ②b-2-1: there is no module instance of the
+// per-server half any more. Until b2-4 each runtime's store is still the bare
+// `localStorage`, which is why the bundle is built only after its server is
+// current.
 import { draftUpdate, STEPS_ROWS, clampStepsRows, type SeenMark } from './hub.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -125,7 +128,7 @@ export function createAppPrefs(storage: Store): AppPrefs {
   };
 }
 
-/** The one owner. ②b passes THIS to every runtime's hub prefs. */
+/** The one owner. Every runtime's hub prefs delegate to THIS. */
 export const appPrefs = createAppPrefs(localStorage);
 
 export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
@@ -153,17 +156,6 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
 
 
   return {
-    /** Re-read the per-server state after a switch pointed the live keys at
-     * another server (servers.ts pointTo). The Hub is not mounted then, so no
-     * component holds the old values. */
-    reloadServerState() {
-      state.leads = readMap<string>(LEAD_KEY);
-      state.seen = readMap<number | SeenMark>(SEEN_KEY);
-      state.project = storage.getItem(PROJECT_KEY) ?? '';
-      state.drafts = readMap<string>(DRAFT_KEY);
-      state.drawers = readMap<string>(DRAWER_KEY);
-      state.rosterExpanded = readMap<boolean>(ROSTER_EXPANDED_KEY);
-    },
     /** The person's and the window's preferences, from their ONE owner — not
      * a copy, so two servers on screen cannot disagree about them. */
     get feedLevel() { return prefs.feedLevel; },
@@ -262,9 +254,5 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
     },
   };
 }
-
-/** The app's one set of Hub preferences, for as long as it looks at one
- * server. ②b gives each runtime its own, built on that server's store. */
-export const hubPrefs = createHubPrefs(localStorage);
 
 export type HubPrefs = ReturnType<typeof createHubPrefs>;

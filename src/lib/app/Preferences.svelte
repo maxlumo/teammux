@@ -16,7 +16,7 @@
   import { fonts, uiFont, displayFont, availableFamilies } from './fonts.svelte.ts';
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
   import { terminalPrefs, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX } from './terminal-prefs.svelte.ts';
-  import { hubPrefs } from '../hub/hub-prefs.svelte.ts';
+  import { appPrefs } from '../hub/hub-prefs.svelte.ts';
   import { notifyEnabled, setNotifyEnabled, ensurePermission, previewCue, notifyPermission, systemNotify, notifyLevel, setNotifyLevel, NOTIFY_LEVELS, type NotifyLevel } from '../hub/notifications.ts';
   import { SHORTCUTS, SHORTCUT_GROUPS, isCharacterInput, shortcutFromEvent, shortcutLabel, type ShortcutAction, type ShortcutDef, type ShortcutHost } from './shortcuts.ts';
   import { shortcuts } from './shortcuts.svelte.ts';
@@ -723,16 +723,16 @@
           <div class="preference-row">
             <div class="pref-label"><strong class="config-field-label">{t('hubFeedLevel')}</strong></div>
             <div class="pref-control">
-            <Segmented value={hubPrefs.feedLevel} onchange={(l) => hubPrefs.setFeedLevel(l)} ariaLabel={t('hubFeedLevel')}
+            <Segmented value={appPrefs.feedLevel} onchange={(l) => appPrefs.setFeedLevel(l)} ariaLabel={t('hubFeedLevel')}
               options={[{ value: 'chat', label: t('hubFeedChat') }, { value: 'status', label: t('hubFeedStatus') }, { value: 'tools', label: t('hubFeedTools') }]} />
             </div>
           </div>
           <div class="preference-row">
             <div class="pref-label"><strong class="config-field-label">{t('hubStepsRows')}</strong></div>
             <div class="pref-control">
-              <Stepper value={hubPrefs.stepsRows} min={3} max={30} label={t('hubStepsRows')}
+              <Stepper value={appPrefs.stepsRows} min={3} max={30} label={t('hubStepsRows')}
                 decreaseLabel={`${t('configDecrease')} ${t('hubStepsRows')}`}
-                increaseLabel={`${t('configIncrease')} ${t('hubStepsRows')}`} onchange={hubPrefs.setStepsRows} />
+                increaseLabel={`${t('configIncrease')} ${t('hubStepsRows')}`} onchange={appPrefs.setStepsRows} />
             </div>
           </div>
         </div>

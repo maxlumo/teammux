@@ -80,13 +80,18 @@ test('the identity modules have exactly the production consumers this commit giv
     'server-fleet.ts': [],
     'server-store.ts': [],
     'server-state-migration.ts': [],
-    'server-context.ts': ['src/lib/app/ServerScope.svelte'],
+    // ②b-2-1: a page that holds this server's state reads it from its scope.
+    'server-context.ts': ['src/lib/app/ServerScope.svelte', 'src/lib/hub/Hub.svelte'],
+    // ②b-2-1: App builds each runtime's state bundle; pages never do.
+    'server-state.ts': ['src/App.svelte'],
     'server-union.ts': [],
   };
   const found: Record<string, string[]> = {};
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     if (/\.(test|fixture)\.(ts|svelte)$/u.test(file) || /\.test\.[a-z]+\.svelte$/u.test(file)) continue;
     const path = file.replaceAll('\\', '/');
+    // The test harness stands in for the provider; it is not a page.
+    if (path.startsWith('src/lib/test/')) continue;
     // The modules' own edges are theirs to have: the layering between them is
     // server-fleet.source.test.ts's subject, not this one's.
     if (Object.keys(allowed).some((a) => path.endsWith(`/app/${a}`))) continue;
@@ -107,18 +112,20 @@ test('only App constructs a runtime or binds a scope', async () => {
   // who may MAKE what they describe (②b-1-3). A runtime or a scope built
   // anywhere but the one host is a second answer to "which server is this
   // subtree on", and every page under it would believe it.
-  const constructors = /\b(createServerRuntime|createSingleRuntime|createServerFleet|createScopeSwap|createServerStore|setServerRuntime)\(/u;
+  const constructors = /\b(createServerRuntime|createSingleRuntime|createServerFleet|createScopeSwap|createServerStore|createServerState|setServerScope)\(/u;
   const allowed = new Set([
     'src/App.svelte',
     // The provider: it binds the runtime App hands it, and makes none.
     'src/lib/app/ServerScope.svelte',
+    // The mount harness's stand-in for that provider (②b-2-1): test-only.
+    'src/lib/test/server-scope-host.ts',
   ]);
   const found: string[] = [];
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     const path = file.replaceAll('\\', '/');
     if (/\.(test|fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     // The modules that define them.
-    if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-context)\.ts$/u.test(path)) continue;
+    if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-state|server-context)\.ts$/u.test(path)) continue;
     if (allowed.has(path)) continue;
     if (constructors.test(code(await readFile(file, 'utf8')))) found.push(path);
   }
@@ -134,6 +141,6 @@ test('a union list takes each action s runtime from its row, never from its cont
     if (/\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     const text = code(await readFile(file, 'utf8'));
     if (!/from '[^']*server-union(\.ts)?'/u.test(text)) continue;
-    assert.doesNotMatch(text, /\buseServer(Api|Runtime)\(/u, `${path} projects a union and reads one api for it`);
+    assert.doesNotMatch(text, /\buseServer(Api|Runtime|Scope)\(/u, `${path} projects a union and reads one api for it`);
   }
 });

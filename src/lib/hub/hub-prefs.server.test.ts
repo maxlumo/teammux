@@ -165,22 +165,6 @@ test('a rename follows the project on its own server only', () => {
   assert.equal(b.project, 'old');
 });
 
-test('a reload of one server s state does not read the other s', () => {
-  // `reloadServerState` exists because a switch re-pointed the live keys. With
-  // one instance per server it re-reads that server's slot and no other.
-  const disk = mem();
-  const a = createHubPrefs(scoped(disk, 'a'));
-  const b = createHubPrefs(scoped(disk, 'b'));
-  a.setDraft('app', 'A s text');
-  b.setDraft('app', 'B s text');
-
-  // Something outside wrote A's slot (another tab, the migration).
-  disk.setItem('tmux_hub_drafts::a', JSON.stringify({ app: 'A s newer text' }));
-  a.reloadServerState();
-  assert.equal(a.draft('app'), 'A s newer text');
-  assert.equal(b.draft('app'), 'B s text', 'B did not re-read anything');
-});
-
 test('an empty draft leaves no row behind, per server', () => {
   // Called as the user types, so an empty draft REMOVES its key rather than
   // storing '' — otherwise every project ever visited leaves a row.

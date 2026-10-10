@@ -51,11 +51,17 @@
   import ContextMenu from '../ui/ContextMenu.svelte';
   import { groupActions, groupScope, runGroup } from './group-actions.ts';
   import { revealMs } from '../ui/motion.ts';
-  import { hubPrefs } from './hub-prefs.svelte.ts';
+  import { useServerScope } from '../app/server-context.ts';
   import { pinTrack, moveTrack } from './reveal.ts';
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { activeModal } from '../ui/modal.ts';
+
+  // This server's memory — per-project lead, read mark, draft, drawer, roster
+  // and the open project — from the scope the subtree is bound to (board #335
+  // ②b-2-1), read once at init. The person's own preferences come through it
+  // from `appPrefs`, their one owner.
+  const hubPrefs = useServerScope().state.prefs;
 
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null } = $props();
   const drawerId = $props.id();

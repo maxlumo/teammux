@@ -423,7 +423,7 @@ app.css rules, the three head classes), `Sidebar.source.test.ts`.
 
 The desktop primary sidebar (the Hub's projects, Terminal's sessions and the
 Board's projects; the phone has its sheet + scrim) is one app-wide state:
-`hubPrefs.sidebarCollapsed` / `tmux_hub_sidebar`. Every page is a REVEAL track
+`appPrefs.sidebarCollapsed` / `tmux_hub_sidebar`. Every page is a REVEAL track
 on `--side-open`: its content is pinned at the final width,
 `hub/reveal.ts` moves only the registered factor on `--t-move`, and at rest
 collapsed content is `visibility: hidden` — unreachable, not narrowed.
@@ -469,7 +469,7 @@ its own opener. Pins: `App.source.test.ts`, `Hub.source.test.ts`.
 
 **ONE sidebar state for the whole shell (2026-09-14, board #200).** Owner: "左侧边栏
 收起的时候，底下的系统状态显示也要收起，而且这个折叠收起在不同的页面是同步的，不然我点击chat
-terminal board，展开状态不一致". `hubPrefs.sidebarCollapsed` was app-wide by intent
+terminal board，展开状态不一致". `appPrefs.sidebarCollapsed` (then `hubPrefs`) was app-wide by intent
 (#174) but only the Hub's grid read it: the Terminal page's `term-side` and the
 Board's `.sidebar` were fixed `--sidebar-w` tracks and the fixed system-status
 bar (#85) was always shown, so Chat collapsed and Terminal/Board did not. Now
@@ -481,7 +481,7 @@ while they are on screen; the system-status bar retracts to width 0 on
 `--t-move` and is unreachable at rest. The rail's stable panel control (#202)
 and the rail reselect on any of the three pages (#199/#201, a toggle) change
 it — `pageReselect.terminal = pageReselect.board = () =>
-hubPrefs.setSidebarCollapsed(!hubPrefs.sidebarCollapsed)`. Measured at 1440 on a live server:
+appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed)`. Measured at 1440 on a live server:
 collapse in Chat → Terminal and Board tracks at factor 0, sidebars hidden,
 status bar 1px/hidden, on every page; reselect on Board → `.moving` with the
 sidebar pinned at 240px, factor 0 → 0.99 at 188ms → 1 unpinned by 279ms, the

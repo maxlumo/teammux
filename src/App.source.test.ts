@@ -453,7 +453,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}\s*<ServerScope runtime=\{scopeRuntime\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}\s*<ServerScope runtime=\{scopeRuntime\} state=\{serverStates\.get\(scopeRuntime\)\}>/u,
     'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
@@ -478,6 +478,14 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'and after its declaration only createScopeSwap({ show }) assigns it');
   assert.match(source, /show: \(runtime\) => \{ scopeRuntime = runtime; \},/u);
   assert.match(source, /settle: \(\) => tick\(\),/u, 'the settle is where Svelte runs the teardown');
+  // Each runtime's server state is built in ONE place, beside the runtime and
+  // after swapScope read CURRENT — never on first sight of an entry: through
+  // ②b the store is the bare localStorage, whose live keys are whichever
+  // server is current (board #335 ②b-2-1).
+  assert.equal([...source.matchAll(/createServerState\(/gu)].length, 1, 'one place builds a server s state');
+  assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 1, 'and one place hands it to a runtime');
+  assert.match(source, /function swapScope\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, createServerState\(localStorage\)\);/u,
+    'inside swapScope');
   assert.match(source, /invalidate: \(gone\) => \{[\s\S]*?gone\.dispose\(\);[\s\S]*?clearLandings\(\);/u,
     'the replaced handle is DETACHED, not merely forgotten: two generations can borrow one connection');
   // WHICH server is read from the registry, never passed: identity repair can
@@ -505,7 +513,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function suspendScope\(\) \{\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
-  assert.match(source, /handovers\.endAll\(\);\s*void scopeSwap\.swap\(/u,
+  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) serverStates\.set\(next, createServerState\(localStorage\)\);\s*void scopeSwap\.swap\(next\);/u,
     'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
     'and the form stands the handle down before it re-dials the socket itself');
@@ -681,8 +689,8 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?hubPrefs\.reloadServerState\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
-    'the same reset + rebind + bring-up as an in-place switch');
+  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centre\.reload\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
+    'the same reset + rebind + bring-up as an in-place switch — and swapScope builds the new server s state');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {
@@ -927,9 +935,9 @@ test('a second click on the active rail tab hands the page a reselect — the Hu
 test('one shell-wide sidebar state: the Terminal page and the system status follow the Hub\'s collapse; reselect opens it on every page (board #200)', async () => {
   // Owner 2026-09-14: "左侧边栏收起的时候，底下的系统状态显示也要收起，而且这个折叠收起在不同的
   // 页面是同步的，不然我点击chat terminal board，展开状态不一致".
-  assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && hubPrefs\.sidebarCollapsed\);/u);
+  assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && appPrefs\.sidebarCollapsed\);/u);
   assert.match(source, /<main class:with-rail=\{[^}]+\} class:touch-layout=\{[^}]+\} class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u);
-  assert.match(source, /pageReselect\.terminal = pageReselect\.board = \(\) => hubPrefs\.setSidebarCollapsed\(!hubPrefs\.sidebarCollapsed\);/u, '#199 on every page, a toggle since #201');
+  assert.match(source, /pageReselect\.terminal = pageReselect\.board = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);/u, '#199 on every page, a toggle since #201');
   assert.match(source, /<Board session=\{filesSession\} guardPage="board" visible=\{page === 'board'\} sideCollapsed=\{shellSideCollapsed\}/u);
   // The Terminal page's track is the Hub's technique: factor, gate, pin, hidden at rest.
   assert.match(source, /const unpin = pinTrack\(termSideEl, 'end'\);\s*\n\s*void moveTrack\(termPageEl, '--side-open', collapsed \? 1 : 0\)\.then\(unpin\);/u);
@@ -957,7 +965,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   const rail = source.match(/<nav\s+class="rail"[\s\S]*?<\/nav>/u)?.[0] ?? '';
   assert.doesNotMatch(rail, /CommandButton|panel-left|rail-head/u, 'the rail is brand + tabs again; no toggle, no head group, no rule');
   assert.match(source, /<img class="rail-brand"[^>]*\/>\s*\n\s*\{#each railSlots as slot \(slot\)\}/u, 'the brand is followed by the tabs');
-  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="secondary" iconOnly icon="panel-left" expanded=\{!hubPrefs\.sidebarCollapsed\} inside\s+label=\{hubPrefs\.sidebarCollapsed \? t\('hubSidebarExpand'\) : t\('hubSidebarCollapse'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
+  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="secondary" iconOnly icon="panel-left" expanded=\{!appPrefs\.sidebarCollapsed\} inside\s+label=\{appPrefs\.sidebarCollapsed \? t\('hubSidebarExpand'\) : t\('hubSidebarCollapse'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
     'rendered once, beside the rail, under the desktop-connected guard AND only on a page that has the sidebar (#219); a quiet surface so it reads over a terminal');
   // #219 (owner: "files页面里，多显示了折叠左侧边栏的按钮，还有设置这些页面也都没兼容好"):
   // Files, Settings and Agents have no primary sidebar — no toggle, no head room.
@@ -965,7 +973,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   assert.match(source, /class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u,
     'the collapsed state stays app-wide (#200); which page is on screen is a second class');
   assert.equal([...source.matchAll(/icon="panel-left"/gu)].length, 1, 'ONE node — never one per state or per page');
-  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(pageReselect\[page\] \?\? \(\(\) => hubPrefs\.setSidebarCollapsed\(!hubPrefs\.sidebarCollapsed\)\)\)\(\);/u,
+  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(pageReselect\[page\] \?\? \(\(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\)\)\)\(\);/u,
     'the same act as a reselect: the page\'s delegate, else the shared state');
   const style = source.match(/<style>[\s\S]*<\/style>/u)?.[0] ?? '';
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';
