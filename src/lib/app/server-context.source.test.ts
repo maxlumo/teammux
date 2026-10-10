@@ -56,18 +56,35 @@ test('the context is read at component init and nowhere else', async () => {
   assert.doesNotMatch(src, /async function|await /u,
     'nothing here may await: a context read after an await returns nothing');
 
-  // Every consumer: the context helpers are called at the top level of the
-  // instance script, not inside a handler, an effect or an async function.
+  // Every consumer reads the context ONCE, at the top level of the instance
+  // script (②b-1-3): not inside a handler, an effect or an async function,
+  // and not twice — a second read is a second chance to see a different
+  // server, and `useServerRuntime()` already gives both the id and the api.
   for await (const file of glob('src/**/*.svelte')) {
     const text = await readFile(file, 'utf8');
     if (!/\buseServer(Api|Id|Runtime)\b/u.test(text)) continue;
-    const script = /<script[^>]*>([\s\S]*?)<\/script>/u.exec(text)?.[1] ?? '';
-    for (const line of code(script).split('\n')) {
-      if (!/\buseServer(Api|Id|Runtime)\(/u.test(line)) continue;
+    const script = /<script(?![^>]*\bmodule\b)[^>]*>([\s\S]*?)<\/script>/u.exec(text)?.[1] ?? '';
+    const calls = code(script).split('\n').filter((line) => /\buseServer(Api|Id|Runtime)\(/u.test(line));
+    // A test consumer exists to observe both answers, so it may read twice.
+    if (!/\.test\.[a-z]+\.svelte$/u.test(file)) {
+      assert.ok(calls.length <= 1, `${file}: ${calls.length} context reads — read it once, into one local const`);
+    }
+    for (const line of calls) {
       // An init read is an assignment at the script's top level, so it is not
       // indented inside a function, an effect or a block.
       assert.match(line, /^\s{0,2}(const|let) /u,
         `${file}: "${line.trim()}" — read the context once at init into a local const`);
     }
+    assert.doesNotMatch(/<script[^>]*\bmodule\b[^>]*>([\s\S]*?)<\/script>/u.exec(text)?.[1] ?? '', /\buseServer(Api|Id|Runtime)\(/u,
+      `${file}: a module script is not a component instance — it has no context to read`);
+  }
+  // And nothing that is not a component reads it: a `.ts` / `.svelte.ts`
+  // module has no init, so a read there either throws or — called from a
+  // component's handler — returns nothing. Helpers take an explicit api.
+  for await (const file of glob('src/**/*.ts')) {
+    const path = file.replaceAll('\\', '/');
+    if (path.endsWith('/app/server-context.ts') || /\.test\.ts$/u.test(path)) continue;
+    assert.doesNotMatch(code(await readFile(file, 'utf8')), /\buseServer(Api|Id|Runtime)\(/u,
+      `${path} reads the server context outside a component; take an explicit api or serverId instead`);
   }
 });

@@ -597,6 +597,23 @@ success path asks twice, so comparing against the gap would mint a handle
 nobody ever shows or releases. b3-4 deletes the file, the slot, the borrow and
 the provider-less fallback together.
 
+**A page reads its server ONCE; a union row names its own** (②b-1-3). Inside
+a bound subtree a component reads the context once, at the top level of its
+instance script, into one local const — `getContext` works only during init,
+and a second read is a second chance to see a different server. Nothing that
+is not a component reads it at all: a helper takes an explicit api. A union
+list is the exception that proves the rule — it spans servers, so it has no
+owner one context read could name, and one `useServerApi()` for every row
+would send B's delete to A. Its row actions go through `server-union.onRow`,
+which looks the runtime up ONCE from the clicked row's ref, hands the action
+that api before its first await (so a reconnect or a switch while it waits
+cannot re-target the rest), and does nothing at all when that server has no
+live runtime: there is no "current server" fallback, because falling back is
+how a click on B acts on A. Only App constructs a runtime or binds a scope;
+the provider binds what App hands it. Source pins hold all four. No production
+list projects a union yet — that arrives with the mode switch in ③ — so what
+ships here is the one mechanism and the pins every such list will be held to.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

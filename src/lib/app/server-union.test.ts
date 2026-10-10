@@ -4,7 +4,8 @@
 // projection and the ref outputs, and ②b wires the consumers.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contributors, unionRows, type ServerSlice } from './server-union.ts';
+import { contributors, onRow, unionRows, type RowRuntime, type ServerSlice } from './server-union.ts';
+import type { WsApi } from '../core/ws-api.ts';
 import { issueRef, projectRef, refKey, sessionRef } from './refs.ts';
 import { compareRows, compareRowsWithClock, projectUpdatedMs, sortRows, type Project, type ProjectRow } from '../projects/projects.ts';
 
@@ -269,4 +270,65 @@ test('contributors are listed in saved-server order, failures included', () => {
     slice('a', 0, [row('a1', 'alpha')]),
   ];
   assert.deepEqual(contributors(slices).map((s) => `${s.serverId}:${s.ok}`), ['a:true', 'b:false']);
+});
+
+// ── Row actions (board #335 ②b-1-3) ─────────────────────────────────────
+// A union list has no owner a component could read from its context, so a
+// row action takes its runtime from the CLICKED row's ref. These run the
+// action through two runtimes whose apis record every call, which is what
+// "B's click reaches B and nothing else" has to mean.
+
+
+/** A runtime double whose api records each call as `<server>:<method>:<arg>`. */
+function runtimeFor(id: string, sent: string[], alive = () => true): RowRuntime {
+  const api = { killSession: async (name: string) => { sent.push(`${id}:kill_session:${name}`); } } as unknown as WsApi;
+  return { api, alive };
+}
+
+test('a row action runs on the server its row came from, and only there', async () => {
+  const sent: string[] = [];
+  const fleet = new Map([['a', runtimeFor('a', sent)], ['b', runtimeFor('b', sent)]]);
+  const list = unionRows([
+    slice('a', 0, [{ name: 'app' }]),
+    slice('b', 1, [{ name: 'app' }]),
+  ], { ref: (serverId, s) => sessionRef(serverId, s.name) });
+  const bRow = list.rows.find((r) => r.serverId === 'b')!;
+  await onRow(bRow, (id) => fleet.get(id), (api, ref) => api.killSession(ref.session));
+  assert.deepEqual(sent, ['b:kill_session:app'], 'B s same-named session, on B, and nothing on A');
+});
+
+test('the api is frozen at the click: what changes while the action waits does not re-target it', async () => {
+  // The action awaits between two calls. Meanwhile B's handle is replaced —
+  // a reconnect that mints a new runtime, or a switch. The rest of the action
+  // must not move to the new handle: an operation started on one runtime
+  // finishes on it (or is refused by its gate), never on another.
+  const sent: string[] = [];
+  const fleet = new Map([['b', runtimeFor('b', sent)]]);
+  let lookups = 0;
+  const row = { ref: sessionRef('b', 'app') };
+  let release = () => {};
+  const waiting = new Promise<void>((resolve) => { release = resolve; });
+  const done = onRow(row, (id) => { lookups++; return fleet.get(id); }, async (api, ref) => {
+    await api.killSession(ref.session);
+    await waiting;
+    await api.killSession(`${ref.session}-2`);
+  });
+  fleet.set('b', runtimeFor('b-new', sent));
+  release();
+  await done;
+  assert.equal(lookups, 1, 'the runtime is looked up once, at the click');
+  assert.deepEqual(sent, ['b:kill_session:app', 'b:kill_session:app-2'], 'both calls went to the handle that was clicked');
+});
+
+test('no live runtime for the row s server means no action, and no fallback', async () => {
+  // Falling back to "the current server" is exactly how a click on B's row
+  // acts on A, so a row whose server is absent or dead does nothing at all.
+  const sent: string[] = [];
+  const fleet = new Map([['a', runtimeFor('a', sent)], ['dead', runtimeFor('dead', sent, () => false)]]);
+  let acted = false;
+  const act = (api: WsApi) => { acted = true; return api.killSession('app'); };
+  assert.equal(onRow({ ref: sessionRef('b', 'app') }, (id) => fleet.get(id), act), null, 'B is not in the fleet');
+  assert.equal(onRow({ ref: sessionRef('dead', 'app') }, (id) => fleet.get(id), act), null, 'a detached runtime');
+  assert.equal(acted, false);
+  assert.deepEqual(sent, [], 'and A — the one that IS there — received nothing');
 });

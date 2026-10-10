@@ -62,6 +62,9 @@ test('the identity modules have exactly the production consumers this commit giv
   //   ②b-1  App (the constructor) and ServerScope (the provider)
   //   ②b-2  App's nav keeps refs; the resident stores reach server-store
   //   ②b-3  every bound page reaches server-context
+  // Since ②b-1-3 the test after this one says who may CONSTRUCT a runtime or
+  // a scope (App alone), and the one after it that a union list acts through
+  // its rows rather than through one context.
   const allowed: Record<string, string[]> = {
     // ②b-2: App mints the refs its navigation keeps, and the saved-nav
     // decoder reads and attributes them. No page names a server itself.
@@ -96,5 +99,41 @@ test('the identity modules have exactly the production consumers this commit giv
   for (const [module, expected] of Object.entries(allowed)) {
     assert.deepEqual((found[module] ?? []).sort(), [...expected].sort(),
       `${module}: a page that names a server behind its provider's back would look right in Single mode`);
+  }
+});
+
+test('only App constructs a runtime or binds a scope', async () => {
+  // The importer table above says who may SEE the identity modules; this says
+  // who may MAKE what they describe (②b-1-3). A runtime or a scope built
+  // anywhere but the one host is a second answer to "which server is this
+  // subtree on", and every page under it would believe it.
+  const constructors = /\b(createServerRuntime|createSingleRuntime|createServerFleet|createScopeSwap|createServerStore|setServerRuntime)\(/u;
+  const allowed = new Set([
+    'src/App.svelte',
+    // The provider: it binds the runtime App hands it, and makes none.
+    'src/lib/app/ServerScope.svelte',
+  ]);
+  const found: string[] = [];
+  for await (const file of glob('src/**/*.{ts,svelte}')) {
+    const path = file.replaceAll('\\', '/');
+    if (/\.(test|fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
+    // The modules that define them.
+    if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-context)\.ts$/u.test(path)) continue;
+    if (allowed.has(path)) continue;
+    if (constructors.test(code(await readFile(file, 'utf8')))) found.push(path);
+  }
+  assert.deepEqual(found, [], `these construct a runtime or bind a scope themselves:\n  ${found.join('\n  ')}`);
+});
+
+test('a union list takes each action s runtime from its row, never from its context', async () => {
+  // A list that spans servers has no single owner: one `useServerApi()` for
+  // every row would send B's action to A, and in Single mode it would look
+  // right. A component that projects a union acts through `onRow`.
+  for await (const file of glob('src/**/*.svelte')) {
+    const path = file.replaceAll('\\', '/');
+    if (/\.test\.[a-z]+\.svelte$/u.test(path)) continue;
+    const text = code(await readFile(file, 'utf8'));
+    if (!/from '[^']*server-union(\.ts)?'/u.test(text)) continue;
+    assert.doesNotMatch(text, /\buseServer(Api|Runtime)\(/u, `${path} projects a union and reads one api for it`);
   }
 });

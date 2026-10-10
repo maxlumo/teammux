@@ -31,11 +31,15 @@
 //     than from a single "current" api, which is what keeps a click on B's
 //     row from acting on A.
 //
-// Not wired into production: no component changes in ②a. The server TAG below
-// is the data a view would show; the visual atom for it is ②b's, because a new
-// visual species needs the design-language review that ②a cannot do from here.
+// No production list projects a union yet: that arrives with the mode switch
+// (③). ②b-1-3 adds `onRow`, the one way a row's action reaches its server,
+// and the pins that hold any future union list to it. The server TAG below is
+// the data a view would show; its visual atom needs the design-language review
+// and is not here.
 import type { Ref, ServerId } from './refs.ts';
 import { refKey } from './refs.ts';
+import type { WsApi } from '../core/ws-api.ts';
+import type { ServerRuntime } from './server-runtime.ts';
 
 /** What one server contributed. */
 export interface ServerSlice<T> {
@@ -165,4 +169,38 @@ export function unionRows<T, R extends Ref>(
  * needs a per-server section header or an "unreachable" notice. */
 export function contributors<T>(slices: readonly ServerSlice<T>[]): ServerSlice<T>[] {
   return slices.slice().sort((a, b) => a.order - b.order);
+}
+
+/** What a row action needs from the runtime its row names. `ServerFleet.get`
+ * satisfies the lookup. */
+export type RowRuntime = Pick<ServerRuntime, 'api' | 'alive'>;
+
+/**
+ * Run a union row's action on the server THAT ROW came from (board #335
+ * ②b-1-3).
+ *
+ * A union list spans servers, so it has no owner a component could read once
+ * from its context: one `useServerApi()` for every row would send B's delete
+ * to A. The owner is the clicked row's REF, and this is the one place a row
+ * action turns that ref into an api:
+ *
+ *   - the runtime is looked up ONCE, from `row.ref.serverId`, and `act` is
+ *     handed that api synchronously — FROZEN before its first await. A switch,
+ *     a reconnect that replaces the handle, or the fleet dropping B while the
+ *     action waits cannot re-target the rest of it; a runtime that was
+ *     detached meanwhile refuses the call through its own gate, which is the
+ *     right failure for an action whose server went away.
+ *   - no live runtime for that server means NO action: `null`, and nothing is
+ *     called on any api. There is deliberately no "current server" fallback —
+ *     falling back is exactly how a click on B's row acts on A.
+ */
+export function onRow<R extends Ref, T>(
+  row: { ref: R },
+  runtimeOf: (id: ServerId) => RowRuntime | null | undefined,
+  act: (api: WsApi, ref: R) => T | Promise<T>,
+): Promise<T> | null {
+  const runtime = runtimeOf(row.ref.serverId);
+  if (!runtime || !runtime.alive()) return null;
+  const { api } = runtime;
+  return Promise.resolve(act(api, row.ref));
 }
