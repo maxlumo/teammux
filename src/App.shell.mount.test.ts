@@ -691,7 +691,7 @@ test('a merge on a failover keeps saving', async (context) => {
   assert.equal(restored(), 'canon:other:3.0', 'and so is what comes after it');
 });
 
-test('a same-machine merge keeps a download in flight, and the next switch still stops it before dialling', async (context) => {
+test('a same-machine merge keeps a download in flight, and the next switch aborts it before dialling', async (context) => {
   // reviewer P1 on bdac94bd. The alias's Files record — rows, browse
   // positions, and the attempt table — was replaced by a fresh one when
   // identity repair folded the alias into its canonical entry, so the attempt
@@ -748,5 +748,9 @@ test('a same-machine merge keeps a download in flight, and the next switch still
   await switchTo('charlie');
   assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'c', 'the switch arrived');
   assert.deepEqual(transfer(), ['connect:ws://a:9899', 'fetch', 'connect:ws://a:9899', 'aborted', 'connect:ws://c:9899'],
-    'and the switch away from it stopped it — before the next server was dialled');
+    'and the switch away from it aborted it — before the next server was dialled');
+  // What this trace proves is ABORT before dial. That the attempt also
+  // SETTLED before the dial is `memory.suspend`'s own await chain (its unit
+  // tests), not something this stub can show: it rejects the moment it is
+  // aborted (reviewer P2, 2026-10-10).
 });

@@ -629,7 +629,15 @@ instances over the same keys would each keep a copy and the later write would
 win. And through ②b the store is still the bare `localStorage`, whose live
 keys are whichever server is current, so a bundle is never built on first
 sight of an entry — only once its server is current; b2-4 gives each bundle a
-store scoped to its server, and then the timing stops mattering. The person's
+store scoped to its server, and then the timing stops mattering. One
+exception to "a new runtime starts fresh": when the identity layer RECORDS
+that the replaced handle's id was folded into the new one (`mergedInto`, an
+alias absorbed into its canonical entry on a same-server reconnect or a
+failover), it is the same machine, and the whole bundle is HANDED OVER
+(`stateForRuntime`). A fresh one there emptied the Downloads rows and browse
+positions of the machine still on screen and orphaned every download attempt
+in flight, which a later switch then could not find to suspend (reviewer P1,
+2026-10-10). Only a real change of server starts fresh. The person's
 own preferences (feed level, tool-row cap, sidebar) are not in it: they are
 `appPrefs`, one owner however many servers are on screen, read directly by
 App and Preferences. Files' record is memory only (parked
