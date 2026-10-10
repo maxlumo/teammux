@@ -546,21 +546,33 @@ another server. Three rules follow, and each was a hole first:
   before the await and sends after it; a gate on the property read would let
   both through. So each method is wrapped once, the wrappers are stable, and a
   caller that captured one still holds the gate.
-- **The lease is revoked BEFORE the shared socket is re-dialled**, on both
-  paths that can reach another server: the switch (whose `resetMemory` step
-  runs before its connect) and the connect form (which re-dials the socket
-  itself, so it is handed a `beforeConnect` hook). Clearing the landings after
-  the DOM is gone is the second line, never the first — it runs ticks later,
-  by which time the socket would already have changed hands.
+- **The handle stands down BEFORE the shared socket is re-dialled**, on both
+  paths that can reach another server. The switch REVOKES, because leaving is
+  already decided there: the tree is unmounted, the guards have answered, and
+  the target is by definition another server (its `resetMemory` step runs
+  before its connect). The connect form SUSPENDS and is handed the resume,
+  because its address may turn out to be this very server — revoking there
+  would replace the handle on every ordinary reconnect, rebuild every
+  always-mounted page and throw away the state they exist to keep, without
+  asking a single leave guard. A suspended handle refuses calls (the socket is
+  mid-flight anyway) and then resumes as the SAME handle, is released by the
+  swap if the server turned out to be different, or resumes after a failure
+  onto the server it never left. Clearing the landings after the DOM is gone is
+  the second line, never the first — it runs ticks later, by which time the
+  socket would already have changed hands.
 
 The provider renders NOTHING without a runtime. Rendering the children
 anyway — merely without a context — built a whole provider-less
 Files/Terminal/Hub tree during the gap in a swap, falling back to the facade,
 and `{#key}` mounts the new branch before destroying the old, so that unbound
-tree came up while the old server's was still alive. What a person can do
-before there is a server (the Connection surface) therefore lives OUTSIDE the
-subtree, which is also why suppressing the children cannot strand a fresh
-client. A caller asking whether a swap is needed asks what the swap is already
+tree came up while the old server's was still alive. Both PERSON-LEVEL
+surfaces therefore live outside the subtree: the Connection card, which a
+fresh client must reach with no server at all, and Preferences — theme, fonts,
+zoom, language, shortcuts — which the gear opens whenever the shell is there,
+including when no runtime is bound, and which inside the subtree would have
+rendered a blank page exactly then. Preferences' one server-bound guest, the
+Agents editor on touch, is already gated on a live server, and b3-3 gives it a
+scope of its own. A caller asking whether a swap is needed asks what the swap is already
 HEADING for, not what is shown: during the gap nothing is shown, and one
 success path asks twice, so comparing against the gap would mint a handle
 nobody ever shows or releases. b3-4 deletes the file, the slot, the borrow and
@@ -911,9 +923,11 @@ terminal handle, loss reported, connection left to its owner — and on
 `elsewhere` it detaches even when its entry survived, because the socket it
 holds now reaches someone else. Its api is gated at CALL time, not at property
 read, so a captured method and a call that awaits mid-way are both refused
-after the detach. The lease is revoked BEFORE the socket is re-dialled
-elsewhere, by the switch and by the connect form alike; clearing landings after
-the DOM is gone is a second line, never the first.
+after the detach. The handle stands down BEFORE the socket is re-dialled
+elsewhere: the switch revokes (leaving is decided), the connect form suspends
+and resumes (its address may be the same server, and revoking would rebuild
+every page on an ordinary reconnect). Clearing landings after the DOM is gone
+is a second line, never the first.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

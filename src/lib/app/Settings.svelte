@@ -24,13 +24,19 @@
      *
      * This form can reach a DIFFERENT server than the one the app is on, and
      * through ②b every page is talking over the same connection object. So
-     * the host gets to revoke the current server's handle FIRST: after the
+     * the host gets to put the current server's handle aside FIRST: after the
      * socket points elsewhere, a call still in flight from the old tree — or
      * a callback that settles before the new tree mounts — would be the old
-     * server's work sent to the new one. Optional, because Settings is a
-     * person-level surface that also renders with no server at all.
+     * server's work sent to the new one.
+     *
+     * It may return a function to call when the attempt SETTLES, whatever the
+     * outcome: nobody knows until the server authenticates whether this
+     * address is the same server (the ordinary reconnect, where the host must
+     * keep its handle and remount nothing) or another one, and the host is
+     * the one that finds out. Optional, because Settings is a person-level
+     * surface that also renders with no server at all.
      */
-    beforeConnect?: (() => void) | undefined;
+    beforeConnect?: (() => (() => void) | void) | undefined;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
@@ -123,6 +129,12 @@
     error = '';
     connecting = true;
     cancelled = false;
+    // The handover of the shared socket: the host puts its current server's
+    // handle aside before the dial and takes it back when this attempt
+    // settles, whichever way it goes. Suspending rather than revoking is what
+    // keeps an ordinary reconnect to the SAME server from remounting every
+    // page (board #335 ②b-1).
+    let handover: (() => void) | void = undefined;
     try {
       const url = normalizeAddress(address);
       localStorage.setItem('tmux_address', url);
@@ -131,8 +143,8 @@
       else localStorage.removeItem('tmux_socket');
       saveHistory(url, token);
       // The socket is about to point at whatever this address reaches, which
-      // may be another server: the current handle gives up its lease first.
-      beforeConnect?.();
+      // may be another server: the current handle stands down first.
+      handover = beforeConnect?.();
       await connect(url, token);
       if (cancelled) return;
       if (socket.trim()) {
@@ -175,6 +187,9 @@
     } catch (e) {
       if (!cancelled) error = (e as Error).message;
     } finally {
+      // Whatever happened — same server, another server, or no server at all —
+      // the host decides what its handle does next.
+      handover?.();
       connecting = false;
     }
   }

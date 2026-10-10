@@ -140,9 +140,34 @@
    * before the new tree mounts — would be A's work sent to B. Detaching first
    * makes those refuse instead. Clearing the landings after the DOM is gone
    * (the swap's `invalidate`) is the second line, never the first: it runs
-   * ticks later, and by then the socket has already changed hands. */
+   * ticks later, and by then the socket has already changed hands.
+   *
+   * This is the SWITCH's revoke, where leaving is already decided: the tree
+   * is unmounted, the leave guards have answered, and the target is by
+   * definition another server. */
   function revokeScope() {
     scopeSwap.bound()?.dispose();
+  }
+  /** The connect form's version: SUSPEND, and hand back the resume.
+   *
+   * That form re-dials the same socket at an address that may turn out to be
+   * this very server — the ordinary reconnect — and nobody knows which until
+   * it authenticates. Revoking outright would replace the handle on every
+   * reconnect, remount every always-mounted page and throw away the state
+   * they exist to keep, without asking a single leave guard (reviewer,
+   * 2026-10-10). Suspended, the handle refuses calls for the length of the
+   * handover — the socket is mid-flight anyway — and then:
+   *
+   *   - the same server: `onConnected(false)`, the resume runs, the handle is
+   *     alive and `swapScope` keeps it. Nothing remounts.
+   *   - another server: `onConnected(true)` swaps the scope, which releases
+   *     this handle; the resume then finds it dead and does nothing.
+   *   - a failure: the resume puts the tree back on its own server, which is
+   *     still the server it was on. */
+  function suspendScope() {
+    const held = scopeSwap.bound();
+    held?.suspend();
+    return () => held?.resume();
   }
   const shell = $derived(connected || !!switching);
   let terminalTarget = $state('');
@@ -2078,38 +2103,16 @@
          what lets the subtree render nothing at all while it has no runtime
          (board #335 ②b-1, reviewer P1-b). -->
     {#if page === 'settings'}
-      <Settings {onConnected} beforeConnect={revokeScope} />
+      <Settings {onConnected} beforeConnect={suspendScope} />
     {/if}
-    <!-- Keyed by the server's RUNTIME HANDLE (board #335 ②b-1, board 315): a
-         different server is a different handle, so every server-bound
-         component is rebuilt from scratch — no component state, listener or
-         subscription of the old server survives into the new tree — while a
-         reconnect inside one runtime keeps the handle and remounts nothing.
-         `ServerScope` binds the subtree to that handle and renders NOTHING
-         without one; the order (teardown, release, mount) is
-         server-scope.ts's, because `{#key}` creates the new branch before
-         destroying the old one. -->
-    {#key scopeRuntime}
-    <ServerScope runtime={scopeRuntime}>
-    {#if hubEligible}
-      <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
-           Files/Terminal below) and merely hidden when inactive, so the
-           selected project, chat scroll, and embedded terminal survive tab
-           switches. Desktop-eligible only (needs width + the desktop server):
-           mobile keeps the tab layout untouched. -->
-      <div class="page-layer" class:hidden={page !== 'hub'}>
-        <Hub visible={page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) filesSession = s; }} onGoBack={(fn) => hubGoBack = fn} onReselect={(fn) => { pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) filesSession = s; if (path || file) filesNavReq = { path, file, n: (filesNavReq?.n ?? 0) + 1 }; switchTab('files'); jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) filesSession = s; if (issue) boardIssueReq = { session: s, id: issue, n: (boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); jumpedFrom = 'hub'; }} />
-      </div>
-    {/if}
-    <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
-         touch the only instance is the one Settings embeds, so this layer is not
-         mounted there — two live copies would both load and both claim a back
-         chain. -->
-    {#if hubEligible && !agentsLivesInSettings(layout.isTouchDevice)}
-      <div class="page-layer" class:hidden={page !== 'agents'}>
-        <AgentsPage visible={page === 'agents'} guardPage="agents" onGoBack={(fn) => agentsGoBack = fn} editRequest={agentsEditReq} />
-      </div>
-    {/if}
+    <!-- Preferences is the PERSON's surface — theme, fonts, zoom, language,
+         shortcuts, notification switches — so it must open with or without a
+         server: the gear is reachable whenever the shell is, including with no
+         runtime at all, and inside the server-bound subtree it would have
+         rendered a blank page there (reviewer, 2026-10-10). Its one
+         server-bound guest, the Agents editor on touch, is already gated on a
+         live server through `showAgents`; b3-3 gives that guest a scope of its
+         own. -->
     {#if page === 'prefs' || holdPages}
     <div class="page-layer" class:hidden={page !== 'prefs'}>
     <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
@@ -2147,6 +2150,36 @@
       }}
       onConnectionSetup={() => { page = 'settings'; }} />
     </div>
+    {/if}
+    <!-- Keyed by the server's RUNTIME HANDLE (board #335 ②b-1, board 315): a
+         different server is a different handle, so every server-bound
+         component is rebuilt from scratch — no component state, listener or
+         subscription of the old server survives into the new tree — while a
+         reconnect inside one runtime keeps the handle and remounts nothing.
+         `ServerScope` binds the subtree to that handle and renders NOTHING
+         without one; the order (teardown, release, mount) is
+         server-scope.ts's, because `{#key}` creates the new branch before
+         destroying the old one. -->
+    {#key scopeRuntime}
+    <ServerScope runtime={scopeRuntime}>
+    {#if hubEligible}
+      <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
+           Files/Terminal below) and merely hidden when inactive, so the
+           selected project, chat scroll, and embedded terminal survive tab
+           switches. Desktop-eligible only (needs width + the desktop server):
+           mobile keeps the tab layout untouched. -->
+      <div class="page-layer" class:hidden={page !== 'hub'}>
+        <Hub visible={page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) filesSession = s; }} onGoBack={(fn) => hubGoBack = fn} onReselect={(fn) => { pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) filesSession = s; if (path || file) filesNavReq = { path, file, n: (filesNavReq?.n ?? 0) + 1 }; switchTab('files'); jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) filesSession = s; if (issue) boardIssueReq = { session: s, id: issue, n: (boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); jumpedFrom = 'hub'; }} />
+      </div>
+    {/if}
+    <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
+         touch the only instance is the one Settings embeds, so this layer is not
+         mounted there — two live copies would both load and both claim a back
+         chain. -->
+    {#if hubEligible && !agentsLivesInSettings(layout.isTouchDevice)}
+      <div class="page-layer" class:hidden={page !== 'agents'}>
+        <AgentsPage visible={page === 'agents'} guardPage="agents" onGoBack={(fn) => agentsGoBack = fn} editRequest={agentsEditReq} />
+      </div>
     {/if}
     <div class="page-layer" class:hidden={page !== 'files'}>
       <Files session={filesSession} guardPage="files" visible={page === 'files'} {fontSize} onGoBack={(fn) => filesGoBack = fn} onimmersive={(on) => filesImmersive = on} navRequest={filesNavReq} jumped={!!jumpedFrom} />

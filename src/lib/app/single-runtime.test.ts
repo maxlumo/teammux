@@ -138,6 +138,43 @@ test('releasing the handle leaves the connection to its owner', async (t) => {
   assert.equal(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'), true);
 });
 
+test('a suspended handle refuses, and resumes as the SAME handle', async (t) => {
+  t.after(cleanup);
+  // The connect form's handover: the socket is about to be re-dialled at an
+  // address that may be this very server. Revoking for that would replace the
+  // handle on every reconnect — a new key, every always-mounted page rebuilt,
+  // no leave guard asked — so the handle stands down instead and comes back.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  await handshakePlain(connection, 'ws://a:9899', 'tokA', 'm-a');
+  const held = rt.api.listSessions;              // what a page is holding
+
+  rt.suspend();
+  assert.equal(rt.alive(), true, 'suspended is not released: it is the same handle');
+  await assert.rejects(() => held(), /suspended/u, 'and it does not send during the handover');
+  await assert.rejects(() => rt.api.capturePane('work:1.0'), /suspended/u);
+
+  rt.resume();
+  fire(held());
+  await settle();
+  assert.ok(MockWebSocket.instances.at(-1)!.texts().some((m: any) => m.method === 'list_sessions'),
+    'the very api a page was holding works again — nothing was rebuilt');
+});
+
+test('a handle released while suspended stays released', async (t) => {
+  t.after(cleanup);
+  // The other outcome of the same handover: the address was ANOTHER server,
+  // the scope swap released this handle, and the form's resume then arrives.
+  const e = entry();
+  const rt = createSingleRuntime(e, { storage: saved(e) });
+  rt.suspend();
+  rt.dispose();
+  rt.resume();                                   // the form settles afterwards
+  assert.equal(rt.alive(), false);
+  await assert.rejects(() => rt.api.listSessions(), /detached/u,
+    'resume cannot bring back a handle whose server is gone');
+});
+
 test('the entry is read fresh, so a rename shows through', () => {
   const e = entry();
   const storage = saved(e);

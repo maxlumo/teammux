@@ -487,14 +487,19 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function revokeScope\(\) \{\s*scopeSwap\.bound\(\)\?\.dispose\(\);/u);
   assert.match(source, /function resetServerMemory\(\) \{[\s\S]{0,400}?revokeScope\(\);/u,
     'the switch revokes before its connect (resetMemory runs before connect in server-switch.ts)');
-  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{revokeScope\} \/>/u,
-    'and the connect form revokes before it re-dials the socket itself');
-  // The person-level surface is OUTSIDE the server-bound subtree, which is
-  // what lets that subtree render nothing while it has no runtime.
+  // The connect form SUSPENDS instead, because its address may be the same
+  // server: revoking there would rebuild every page on an ordinary reconnect.
+  assert.match(source, /function suspendScope\(\) \{\s*const held = scopeSwap\.bound\(\);\s*held\?\.suspend\(\);\s*return \(\) => held\?\.resume\(\);/u);
+  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} \/>/u,
+    'and the form stands the handle down before it re-dials the socket itself');
+  // The person-level surfaces are OUTSIDE the server-bound subtree, which is
+  // what lets that subtree render nothing while it has no runtime — and what
+  // keeps the gear from opening a blank page when there is no server.
   const beforeKey = source.slice(0, source.indexOf('{#key scopeRuntime}'));
   assert.ok(beforeKey.includes('<Settings {onConnected}'), 'Settings renders outside the scope');
+  assert.ok(beforeKey.includes('<Preferences {connected}'), 'and so does Preferences');
   const keyed = source.slice(source.indexOf('{#key scopeRuntime}'), source.indexOf('</ServerScope>'));
-  assert.ok(!keyed.includes('<Settings'), 'and not inside it');
+  assert.ok(!keyed.includes('<Settings') && !keyed.includes('<Preferences'), 'and neither is inside it');
   assert.match(source, /createSingleRuntime\(entry, \{ storage: localStorage \}\)/u,
     'one runtime, on the facade s slot, so Single mode keeps one socket');
   // Every path that can change which server the app is on binds the tree.

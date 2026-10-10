@@ -99,8 +99,29 @@ export interface ServerRuntime {
   /** Is this handle still the one serving its server? False once it has been
    * released or detached, which a caller must check before REUSING a handle
    * it is holding: a failed switch's Back finds the same entry id, but the
-   * handle whose lease was revoked on the way out cannot serve it again. */
+   * handle whose lease was revoked on the way out cannot serve it again.
+   *
+   * A SUSPENDED handle is still alive: it is the same handle, waiting out a
+   * socket handover that may well land on its own server. */
   alive(): boolean;
+  /**
+   * Stop using the slot, WITHOUT giving the handle up (board #335 ②b-1,
+   * reviewer 2026-10-10).
+   *
+   * The connect form can re-dial the shared socket at an address that turns
+   * out to be this very server — the ordinary reconnect — or at another one,
+   * and nobody knows which until it authenticates. Revoking the lease
+   * outright for that would replace the handle on every reconnect, remount
+   * every always-mounted page and throw away the state they are mounted for,
+   * without asking a single leave guard. So the handle is suspended for the
+   * length of the handover: calls are refused (the socket is mid-flight
+   * anyway), and then it either resumes as the same handle or is released for
+   * good by whoever finds out the server changed.
+   */
+  suspend(): void;
+  /** Use the slot again. A no-op on a handle that has since been released,
+   * so a caller can resume unconditionally when its attempt settles. */
+  resume(): void;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime.
@@ -172,13 +193,18 @@ export interface ServerRuntimeDeps {
  * actually calls — holding `api` for its whole life, and reading a method
  * before an `await` that finishes after the handover.
  */
-function gateApi(api: WsApi, alive: () => boolean, id: ServerId): WsApi {
+function gateApi(api: WsApi, state: () => 'live' | 'suspended' | 'detached', id: ServerId): WsApi {
   const gated: Record<string, unknown> = {};
+  const refuse = (why: string) =>
+    Promise.reject(new Error(`server runtime ${why}: ${id} is not serving this subtree right now`));
   for (const [name, value] of Object.entries(api as unknown as Record<string, unknown>)) {
     gated[name] = typeof value === 'function'
-      ? (...args: unknown[]) => (alive()
-        ? (value as (...a: unknown[]) => unknown).apply(api, args)
-        : Promise.reject(new Error(`server runtime detached: ${id} no longer serves this subtree`)))
+      ? (...args: unknown[]) => {
+        const now = state();
+        return now === 'live'
+          ? (value as (...a: unknown[]) => unknown).apply(api, args)
+          : refuse(now);
+      }
       : value;
   }
   return gated as unknown as WsApi;
@@ -191,6 +217,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
   let known: ServerEntry = entry;
   let caps: ServerCaps = { hub: null, backends: null };
   let dead = false;
+  /** Waiting out a socket handover: the same handle, not using the slot. */
+  let suspended = false;
   /** How many dials this runtime has started. The counter IS the attempt
    * identity: only the latest may record, adopt, disconnect or report ok. */
   let dialled = 0;
@@ -216,7 +244,9 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
    * another server. The wrappers are built once and are stable, so a caller
    * that captured a method still holds the gate rather than the raw call.
    */
-  const api: WsApi = borrowed ? gateApi(slot.api, () => !dead, id) : slot.api;
+  const api: WsApi = borrowed
+    ? gateApi(slot.api, () => (dead ? 'detached' : suspended ? 'suspended' : 'live'), id)
+    : slot.api;
 
   /** End this runtime's USE of the slot. A borrowed connection outlives every
    * runtime that borrows it (see `borrowed`), so the handle goes terminal and
@@ -421,6 +451,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
     alive: () => !dead,
+    suspend: () => { if (!dead) suspended = true; },
+    resume: () => { if (!dead) suspended = false; },
     dispose,
   };
 }
