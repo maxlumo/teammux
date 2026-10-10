@@ -37,6 +37,8 @@
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createHandovers } from './lib/app/handover.ts';
+  import { navFor, readLegacyNav, saveNav } from './lib/app/nav-saved.ts';
+  import { paneRef } from './lib/app/refs.ts';
   import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
@@ -134,6 +136,14 @@
     // the one the app is waiting on.
     handovers.endAll();
     void scopeSwap.swap(entry ? createSingleRuntime(entry, { storage: localStorage }) : null);
+  }
+  /** The server every navigation reference names: the one the content tree is
+   * bound to (board #335 ②b-2). Empty when nothing is bound — and then
+   * nothing in the saved state can be attributed, so none of its panes are
+   * restored. A reference is minted only here and in the saved-state effect,
+   * both from this one answer. */
+  function navServerId() {
+    return scopeRuntime?.id ?? '';
   }
   /** Give up the handle the tree is bound to, BEFORE the shared socket is
    * re-dialled at another server (reviewer P1-b, 2026-10-10).
@@ -663,12 +673,20 @@
   // its own; the terminal fields ride along when there are any.
   // splitLayout/splitCells are only meaningful on desktop; a desktop-saved state
   // degrades to single-pane on a phone because restore re-gates on splitEligible.
+  // Since #335 ②b-2 every saved pane NAMES ITS SERVER (`nav-saved.ts`):
+  // `work:1.0` on its own does not say whose `work` it is, and a restore runs
+  // against ONE runtime. The ids come from the server the tree is bound to,
+  // which is the only server anything in this state can be about.
   $effect(() => {
     if (!connected) return;
-    localStorage.setItem('tmux_state', JSON.stringify({
-      page, terminalTarget, terminalSession,
-      splitLayout, splitCells,
-    }));
+    const server = navServerId();
+    const pane = (session, target) => (target ? paneRef(server, session || target.split(':')[0], target) : null);
+    saveNav(localStorage, {
+      page,
+      pane: pane(terminalSession, terminalTarget),
+      splitLayout,
+      splitCells: splitCells.map((c) => ({ id: c.id, pane: pane(c.session, c.target) })),
+    });
   });
 
   // Reconnect UI state, mirrored from the reconnect machine
@@ -1236,6 +1254,13 @@
   // the registry would make migrateServers a no-op and drop the history).
   migrateServers(localStorage);
   loadServerRegistry();
+  /** Who the ONE unprefixed `tmux_state` belongs to, read BEFORE anything in
+   * this boot can move CURRENT (board #335 ②b-2, reviewer P1-c): the deep
+   * link below activates its own server, and attributing the old record to
+   * that one would hand it another server's panes. Empty when CURRENT does
+   * not resolve — then nothing of it is restored and the record stays for a
+   * server that can prove it owns it (②b-4). */
+  const navLegacyOwner = currentServerId(localStorage);
   consumeConnectUrlParams();
   // Bind the content tree before its first render (board #335 ②b-1): the
   // deep-link consumer above can make a different server current, and a bind
@@ -1310,42 +1335,51 @@
     swapScope();
     serverReady();
     try {
-      const s = JSON.parse(localStorage.getItem('tmux_state') || '{}');
+      // The saved state, attributed and then FILTERED to the server this
+      // restore is running against (board #335 ②b-2). A pane belonging to
+      // another server cannot be resolved over this connection — at best the
+      // capture fails, at worst that server has a pane by the same name and
+      // the reader lands on a stranger's terminal.
+      const s = navFor(readLegacyNav(localStorage, navLegacyOwner), navServerId());
       // A saved target names a session that may not exist any more — killed
       // while we were away, or RENAMED (a project rename renames its session).
       // Restoring it anyway lands the user on a pane that cannot be captured,
       // so check first and come back to the tab without a target instead.
-      if (s.terminalTarget && s.terminalSession) {
+      if (s.pane) {
+        const named = s.pane.session;
         const intent = serverSwitch.intent;
         listSessions()
           .then((sessions) => {
             if (!serverSwitch.owns(intent)) return; // a switch began: not this server's tree
             // list_sessions answers with a bare array (list_sessions_with_panes
             // is the one that wraps).
-            if (!(sessions ?? []).some((x) => x.name === s.terminalSession)) {
+            if (!(sessions ?? []).some((x) => x.name === named)) {
               terminalTarget = '';
               terminalSession = '';
-              splitCells = splitCells.filter((c) => c.session !== s.terminalSession);
+              splitCells = splitCells.filter((c) => c.session !== named);
             }
           })
           .catch(() => {});
-      }
-      if (s.terminalTarget) {
-        terminalTarget = s.terminalTarget;
-        terminalSession = s.terminalSession || '';
+        terminalTarget = s.pane.target;
+        terminalSession = named;
         // Restore split layout only on eligible (desktop + wide) clients;
         // a desktop-saved state silently stays single-pane on a phone.
-        if (splitEligible && s.splitLayout > 1 && Array.isArray(s.splitCells) && s.splitCells.length) {
-          splitCells = s.splitCells;
+        if (splitEligible && s.splitLayout > 1 && s.splitCells.length) {
+          splitCells = s.splitCells.map((c) => ({
+            id: c.id,
+            target: c.pane?.target ?? '',
+            session: c.pane?.session ?? '',
+          }));
           splitLayout = s.splitLayout;
-          nextCellId = Math.max(0, ...s.splitCells.map(c => c.id ?? 0)) + 1;
+          nextCellId = Math.max(0, ...s.splitCells.map((c) => c.id)) + 1;
           activeCellId = s.splitCells[0]?.id ?? null;
         }
       }
       // The tab is restored whether or not a terminal came with it; only an
       // unknown name falls back to the device default. On touch a saved
       // `agents` resolves to Settings opened at its Agents category — there is
-      // no Agents tab to land on there.
+      // no Agents tab to land on there. The tab is the PERSON's, so it
+      // survives even when nothing could be attributed to a server.
       const nav = restoreNav(s.page, layout.isTouchDevice);
       page = nav.page;
       if (nav.settingsTab) prefsOpenReq = { tab: nav.settingsTab, n: ++prefsOpenSeq };

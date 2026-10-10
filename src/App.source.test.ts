@@ -519,6 +519,17 @@ test('the content tree is bound to one server, and only the swap binds it (board
     ['bringUp', /function bringUp\(addr, token\) \{[\s\S]*?swapScope\(\);/u],
     ['a first connect', /page = defaultPage\(\)|swapScope\(\);\s*\n\s*\/\/ The device default/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
+  // The saved navigation names its server, and the restore is filtered to the
+  // server it runs against (board #335 ②b-2).
+  assert.match(source, /function navServerId\(\) \{\s*return scopeRuntime\?\.id \?\? '';\s*\}/u,
+    'one answer to which server a reference names');
+  assert.match(source, /saveNav\(localStorage, \{[\s\S]{0,300}?pane: pane\(terminalSession, terminalTarget\),/u);
+  assert.match(source, /const s = navFor\(readLegacyNav\(localStorage, navLegacyOwner\), navServerId\(\)\);/u,
+    'attributed, then filtered to this runtime');
+  assert.match(source, /const navLegacyOwner = currentServerId\(localStorage\);\s*consumeConnectUrlParams\(\);/u,
+    'the legacy owner is frozen BEFORE the deep link can activate another server');
+  assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem\('tmux_state'\)/u,
+    'nothing parses the saved state by hand any more');
   // One definition of what a landing is: the swap and the reset share it.
   assert.match(source, /function resetServerMemory\(\) \{[\s\S]*?clearLandings\(\);/u);
   assert.equal([...source.matchAll(/filesNavReq = null/gu)].length, 1,

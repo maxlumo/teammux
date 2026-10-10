@@ -63,7 +63,10 @@ test('the identity modules have exactly the production consumers this commit giv
   //   ②b-2  App's nav keeps refs; the resident stores reach server-store
   //   ②b-3  every bound page reaches server-context
   const allowed: Record<string, string[]> = {
-    'refs.ts': [],
+    // ②b-2: App mints the refs its navigation keeps, and the saved-nav
+    // decoder reads and attributes them. No page names a server itself.
+    'refs.ts': ['src/App.svelte'],
+    'nav-saved.ts': ['src/App.svelte'],
     'server-runtime.ts': [],
     'single-runtime.ts': ['src/App.svelte'],
     'server-scope.ts': ['src/App.svelte'],
