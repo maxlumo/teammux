@@ -29,6 +29,7 @@ import { createHubPrefs, type HubPrefs } from '../hub/hub-prefs.svelte.ts';
 import { createAlertLog, createCentre, type Centre } from '../hub/notify-centre.svelte.ts';
 import { createFilesMemory, type FilesMemory } from '../files/files-memory.ts';
 import { createDownloads, type DownloadStore } from '../files/downloads.svelte.ts';
+import { SUSPEND } from '../files/download.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -83,4 +84,25 @@ export function stateForRuntime(
 ): ServerState {
   const merged = !!replaced && replaced.id !== id && deps.survivorOf(replaced.id) === id;
   return (merged && replaced.state) || deps.create();
+}
+
+/**
+ * Release one server's state (board #335 ②b-2-3): what removing a runtime
+ * owes the work it started, in the order ②a ruled.
+ *
+ *   1. FORBID NEW ATTEMPTS. `suspend` snapshots what is tracked when it is
+ *      called and does not seal off a later `track`, so this is its own step:
+ *      a download started in the gap is aborted the moment it registers.
+ *   2. SUSPEND every attempt tracked, keeping its part on disk (the bytes are
+ *      that server's file, resumed when the user is back on it).
+ *   3. AWAIT their settle, so no retry, re-sign or fallback of that server's
+ *      chain can go out after this resolves — over a socket that may by then
+ *      reach another server.
+ *   4. Drop: the caller lets go of the bundle.
+ *
+ * Idempotent, so every path that ends a runtime may call it.
+ */
+export async function releaseServerState(state: ServerState): Promise<void> {
+  state.files.memory.seal(SUSPEND);
+  await state.files.memory.suspend(SUSPEND);
 }

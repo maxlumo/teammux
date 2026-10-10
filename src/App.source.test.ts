@@ -423,7 +423,14 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // The downloads the switch suspends are the LEAVING server's, from that
   // runtime's own record (board #335 ②b-2-1): `bound()` still names it here,
   // because the switch suspends before `resetMemory` revokes the handle.
-  assert.match(source, /suspendDownloads: \(\) => suspendFiles\(serverStates\.get\(scopeSwap\.bound\(\)\)\?\.files\),/u);
+  // ②b-2-3: the switch RELEASES the leaving server's state — new attempts
+  // forbidden, running ones suspended, all of them settled — before the
+  // socket moves; and it asks only the guards of the handle it destroys.
+  assert.match(source, /suspendDownloads: async \(\) => \{ const st = serverStates\.get\(scopeSwap\.bound\(\)\); if \(st\) await releaseServerState\(st\); \},/u);
+  assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,/u);
+  // Every other way a handle ends releases its state too — unless the handle
+  // replacing it ADOPTED that very state (a same-machine merge).
+  assert.match(source, /gone\.dispose\(\);[\s\S]{0,400}?const state = serverStates\.get\(gone\);\s*if \(state && serverStates\.get\(scopeSwap\.bound\(\)\) !== state\) void releaseServerState\(state\);/u);
   assert.match(source, /comeUp: \(target\) => \{[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(target\.address, target\.token\);/u);
   assert.doesNotMatch(source, /location\.reload\(/u, 'no reload remains on any switch or connect path');
   assert.doesNotMatch(source, /applySwitch/u, 'the reload-era plan is gone');
@@ -455,7 +462,7 @@ test('every App socket owner goes through the switch module and loses ownership 
 test('the leave walk holds Settings mounted while guards are asked (board 315 review P1)', () => {
   assert.match(source, /\{#if page === 'prefs' \|\| holdPages\}\s*<div class="page-layer" class:hidden=\{page !== 'prefs'\}>/u,
     'revealing another page never unmounts an Agents editor that has not answered (LeaveHost.test.svelte mirrors this)');
-  assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ current: page, reveal: revealPage, hold: \(on\) => \{ holdPages = on; \} \}\),/u);
+  assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page, reveal: revealPage, hold: \(on\) => \{ holdPages = on; \} \}\),/u);
   // Both server lists read one connection-state input.
   assert.equal([...source.matchAll(/<ServerList [^>]*link=\{serverLink\}/gu)].length, 2);
 });

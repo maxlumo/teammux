@@ -5,7 +5,7 @@
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
   import SplitView from './lib/sessions/SplitView.svelte';
-  import Files, { suspendFiles } from './lib/files/Files.svelte';
+  import Files from './lib/files/Files.svelte';
   import Hub from './lib/hub/Hub.svelte';
   import AgentsPage from './lib/hub/AgentsPage.svelte';
   import Board from './lib/hub/Board.svelte';
@@ -37,7 +37,7 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createSingleRuntime } from './lib/app/single-runtime.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
-  import { createServerState, stateForRuntime } from './lib/app/server-state.ts';
+  import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createHandovers } from './lib/app/handover.ts';
   import { navFor, quarantineLegacyNav, readLegacyNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
@@ -128,6 +128,11 @@
       // leaves the connection to the facade; b3-4 routes it through the
       // fleet's drop, where it ends the connection too.
       gone.dispose();
+      // Its server's state is released with it — unless the handle that
+      // replaces it ADOPTED that very state (a same-machine merge, which is
+      // the same server). `bound()` already names the replacement here.
+      const state = serverStates.get(gone);
+      if (state && serverStates.get(scopeSwap.bound()) !== state) void releaseServerState(state);
       // And a Files/Board/Agents jump aimed at the tree that is going away.
       clearLandings();
     },
@@ -1242,7 +1247,7 @@
     connected: () => connected,
     currentId: () => serverCurId,
     currentName: () => serverName,
-    confirmLeave: () => confirmLeave({ current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
+    confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
     stopReconnect: () => reconnectMachine.cancel(),
     startReconnect: () => reconnectMachine.start(),
     addressUp: () => {
@@ -1255,7 +1260,10 @@
       if (st) { serverMenuOpen = false; connected = false; }
     },
     // The leaving server's attempts, from ITS record (board #335 ②b-2-1).
-    suspendDownloads: () => suspendFiles(serverStates.get(scopeSwap.bound())?.files),
+    // The leaving server's state is RELEASED before the socket moves (board
+    // #335 ②b-2-3): new attempts forbidden, running ones suspended, and all
+    // of them settled — not merely asked to stop.
+    suspendDownloads: async () => { const st = serverStates.get(scopeSwap.bound()); if (st) await releaseServerState(st); },
     afterUnmount: () => tick(),
     disconnect,
     resetMemory: resetServerMemory,

@@ -8,6 +8,10 @@
   import Files from '../files/Files.svelte';
   import AgentsPage from '../hub/AgentsPage.svelte';
   import { confirmLeave } from './leave-guards.ts';
+  import { useServerRuntime } from './server-context.ts';
+  // The handle this host's subtree is bound to: a leave destroys THAT one
+  // (board #335 ②b-2-3), so its guards are the ones asked.
+  const leaving = useServerRuntime();
   let { expose = () => {} } = $props();
   let page = $state('files');
   let holdPages = $state(false);
@@ -15,7 +19,7 @@
   $effect(() => expose({
     go: (next) => { page = next; },
     page: () => page,
-    leave: () => confirmLeave({ current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
+    leave: () => confirmLeave({ leaving, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
   }));
 </script>
 

@@ -86,3 +86,22 @@ test('a same-machine merge hands the replaced runtime s state over; anything els
   assert.notEqual(stateForRuntime({ id: 'alias', state: undefined }, 'canon', { survivorOf: merged, create }), undefined,
     'and there is always a state');
 });
+
+test('releasing a server s state forbids new attempts, then suspends and awaits the running ones', async () => {
+  const { releaseServerState } = await import('./server-state.ts');
+  const { SUSPEND } = await import('../files/download.ts');
+  live.clear();
+  const st = createServerState(localStorage);
+  const running = new AbortController();
+  let settle = () => {};
+  st.files.memory.track('r', running, new Promise<void>((r) => { settle = r; }));
+  let done = false;
+  const releasing = releaseServerState(st).then(() => { done = true; });
+  assert.equal(st.files.memory.sealed(), true, 'sealed first');
+  assert.equal(running.signal.reason, SUSPEND, 'suspended, so its part is kept');
+  await Promise.resolve();
+  assert.equal(done, false, 'not released until the attempt settled');
+  settle();
+  await releasing;
+  assert.equal(done, true);
+});

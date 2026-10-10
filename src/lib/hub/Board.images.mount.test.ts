@@ -18,7 +18,7 @@ type Opts = { projects?: string[]; stateful?: boolean; download?: (path: string)
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
-const walk = () => confirmLeave({ current: 'hub', reveal: async () => {}, hold: () => {} });
+const walk = () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} });
 async function mount(context: TestContext, opts: Opts = {}) {
   clearLeaveGuardsForTests(); guardsSeen.length = 0;
   const calls: Calls = { saves: [], notes: [], posts: [], uploads: [] };
@@ -527,7 +527,7 @@ test('the walk reveals a hidden Board before it asks, and a destroyed Board unre
   const app = await mount(context);
   app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
   await app.type(app.q<HTMLTextAreaElement>('.note-input')!, 'unsent');
-  const asked = confirmLeave({ current: 'terminal', reveal: async (p) => { revealed.push(p); }, hold: () => {} });
+  const asked = confirmLeave({ leaving: null, current: 'terminal', reveal: async (p) => { revealed.push(p); }, hold: () => {} });
   await app.flush();
   assert.deepEqual(revealed, ['board'], 'its own page is revealed first');
   app.q<HTMLButtonElement>('.dlg-actions button:first-child')!.click();
@@ -536,7 +536,7 @@ test('the walk reveals a hidden Board before it asks, and a destroyed Board unre
   // Destroyed: the walk no longer reaches it (the cleanup removes it).
   await app.close();
   for (const g of guardsSeen) unregister(g);
-  assert.equal(await confirmLeave({ current: 'terminal', reveal: async () => {}, hold: () => {} }), true, 'nothing left to ask');
+  assert.equal(await confirmLeave({ leaving: null, current: 'terminal', reveal: async () => {}, hold: () => {} }), true, 'nothing left to ask');
 });
 
 test('a note in flight holds the project: a pick waits, and the answer lands on the board it was written on', async (context) => {

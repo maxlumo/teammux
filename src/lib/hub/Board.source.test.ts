@@ -941,7 +941,7 @@ test('every submit acts on its frozen context, never the live cur/sel; the page 
     assert.match(body, /submitting = true/u, `${fn} locks its editors`);
   }
   assert.match(source, /const owns = \(c: OpCtx\) => alive && c\.gen === opGen;/u);
-  assert.match(source, /registerLeaveGuard\(\{\s*page: guardPage,/u, 'the #315 walk reaches the Board');
+  assert.match(source, /registerLeaveGuard\(\{\s*runtime: guardOwner,\s*page: guardPage,/u, 'the #315 walk reaches the Board, as its owner s guard');
   assert.match(source, /if \(noteDirty\) \{ await refetchSel\(ctx\); return; \}/u, 'a body save keeps a note draft on screen');
 });
 

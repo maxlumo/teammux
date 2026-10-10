@@ -15,10 +15,6 @@
   // the PROCESS, not of any server, so it stays here.
   if (isTauri) invokeNative('download_release_all').catch(() => {});
 
-  /** A server switch (board 315) stops every running download of the server
-   * being left and KEEPS its part; it resolves once every attempt has
-   * settled. App's switch calls it with that server's record. */
-  export async function suspendFiles(files) { await files?.memory.suspend(SUSPEND); }
 </script>
 
 <script>
@@ -97,7 +93,8 @@
   // (goSessionDir) keeps offering the pane cwd explicitly either way.
   // This server's Files record — memory and download rows together — from
   // the scope this subtree is bound to (board #335 ②b-2-1), read once at init.
-  const { files } = useServerScope().state;
+  const scope = useServerScope();
+  const { files } = scope.state;
   const memory = files.memory;
   const store = files.downloads;
 
@@ -373,6 +370,7 @@
   // A server switch destroys this instance (board 315): it asks through the
   // editor's own discard dialog first, after any delete in flight finished.
   $effect(() => registerLeaveGuard({
+    runtime: scope.runtime,
     page: guardPage,
     dirty: () => untrack(() => !!pendingAct?.busy || leaveDecision({ view, edited: isEdited }) !== 'go'),
     ask: async () => {

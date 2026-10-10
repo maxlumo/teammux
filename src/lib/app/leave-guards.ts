@@ -7,6 +7,10 @@
 // asks them all BEFORE anything changes. There is no second confirmation
 // flow: the question is the component's own, in its own dialog.
 //
+// Only the guards of what is being DESTROYED are asked (board #335 ②b-2-3):
+// each guard names the runtime handle whose subtree holds it, and a leave
+// names the handle it ends. In Single mode that is every guard.
+//
 // A guard on a page the user is not looking at is asked on THAT page: the
 // switch reveals it first, so the dialog is seen next to what it would
 // discard. Revealing must not destroy anything that has not answered yet
@@ -23,6 +27,14 @@
 // plumbing that a new host forgets.
 
 export interface LeaveGuard {
+  /** The runtime HANDLE whose subtree holds this instance (board #335
+   * ②b-2-3), or null for one outside any server's subtree. A leave asks only
+   * the guards of the handle it destroys — by identity, never by server id: a
+   * new handle for the same id is a different owner, and must neither answer
+   * for the old one's editors nor be asked about them. A null owner is asked
+   * on every leave, which is what every guard was before (Preferences' Agents
+   * editor sits outside the subtrees until b3-3). */
+  runtime: object | null;
   /** The page whose layer holds this instance ('' = always visible). */
   page: string;
   /** Something would be lost, or a mutation is still in flight. */
@@ -41,6 +53,9 @@ export function registerLeaveGuard(guard: LeaveGuard): () => void {
 }
 
 export interface LeaveWalk {
+  /** The runtime handle being destroyed: only its guards (and owner-less
+   * ones) are asked. Another handle's editors are not being thrown away. */
+  leaving: object | null;
   /** The page the user is on: its guards ask first, without navigating. */
   current: string;
   /** Show a page so its guard's dialog is visible. */
@@ -52,7 +67,8 @@ export interface LeaveWalk {
 /** Ask every dirty guard in turn, one dialog at a time. Resolves true to
  * leave, false to stay; either way the user ends on `current`. */
 export async function confirmLeave(walk: LeaveWalk): Promise<boolean> {
-  const order = [...guards].sort((a, b) => Number(b.page === walk.current) - Number(a.page === walk.current));
+  const asked = (g: LeaveGuard) => g.runtime === null || g.runtime === walk.leaving;
+  const order = [...guards].filter(asked).sort((a, b) => Number(b.page === walk.current) - Number(a.page === walk.current));
   if (!order.some((g) => g.dirty())) return true;
   walk.hold(true);
   try {

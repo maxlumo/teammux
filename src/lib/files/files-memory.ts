@@ -76,6 +76,14 @@ export interface FilesMemory {
    * of the old server's chain can go out afterwards.
    */
   suspend(reason: unknown): Promise<void>;
+  /** Forbid new attempts, for good (board #335 ②b-2-3): the first step of
+   * releasing this server's record. `suspend` snapshots what is tracked when
+   * it is called and does not stop a LATER `track`, so without this an
+   * attempt started in the gap would outlive the release. A `track` after
+   * this aborts its attempt at once with `reason`. Idempotent. */
+  seal(reason: unknown): void;
+  /** Has the record been sealed? A new download must not start. */
+  sealed(): boolean;
   /** Per-server memory a switch drops: the browse positions. */
   reset(): void;
 }
@@ -86,6 +94,7 @@ export function createFilesMemory(): FilesMemory {
   const cancels = new Map<string, AbortController>();
   const settles = new Map<string, Promise<void>>();
   let webSeq = 0;
+  let sealedBy: { reason: unknown } | null = null;
 
   return {
     position: (session) => browsed.get(session),
@@ -94,6 +103,9 @@ export function createFilesMemory(): FilesMemory {
     claim: (partId, writer) => { inFlight.set(partId, writer); },
     release: (partId) => { inFlight.delete(partId); },
     track(rowId, control, settled) {
+      // Released: this attempt never runs. Tracked anyway, so its settle is
+      // still awaited by a release that is already waiting.
+      if (sealedBy) control.abort(sealedBy.reason);
       cancels.set(rowId, control);
       settles.set(rowId, settled);
     },
@@ -111,5 +123,7 @@ export function createFilesMemory(): FilesMemory {
       await Promise.allSettled(running);
     },
     reset() { browsed.clear(); },
+    seal(reason) { sealedBy ??= { reason }; },
+    sealed: () => sealedBy !== null,
   };
 }

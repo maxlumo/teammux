@@ -19,6 +19,7 @@
   import { t, hanLang } from '../core/i18n.svelte.ts';
   import { onDestroy, untrack, tick } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
+  import { useServerRuntime } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
   import Select from '../ui/Select.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
@@ -37,6 +38,8 @@
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
 
+  // The runtime whose subtree holds this board, for its leave guard (#335 ②b-2-3).
+  const guardOwner = useServerRuntime();
   let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '' }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean } = $props();
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
@@ -329,6 +332,7 @@
   let endLeaveAsk: ((leave: boolean) => void) | null = null;
   function cancelDiscard() { pendingDiscard = null; const end = endLeaveAsk; endLeaveAsk = null; end?.(false); }
   $effect(() => registerLeaveGuard({
+    runtime: guardOwner,
     page: guardPage,
     dirty: () => untrack(() => busy || dirty || noteDirty || createDirty),
     ask: async () => {

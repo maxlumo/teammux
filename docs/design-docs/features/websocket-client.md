@@ -645,7 +645,13 @@ cwds, the one-writer claim per part, each attempt's abort handle, the rows),
 and its two halves travel together because the page and the Hub's drawer share
 one record and a download is not stopped by dropping a reference: the switch
 suspends the LEAVING server's attempts through `suspendFiles(thatServer.files)`
-and awaits them before the socket moves.
+and awaits them before the socket moves. Since ②b-2-3 this is one function, `releaseServerState`, in the order ②a
+ruled: SEAL the record so a download that registers afterwards is aborted the
+moment it does (`suspend` only snapshots what is tracked when it is called),
+suspend every running attempt keeping its part, and await their settle. The
+switch awaits it before the socket moves; every other end of a handle —
+an unbind, a replacement — releases the state it held, unless the handle
+replacing it adopted that very state (a same-machine merge).
 
 **The runtime asks; the reconnect loop is told where** (②b-2-2). The
 capability handshake every connect path runs (`serverReady`) is the bound
@@ -684,7 +690,7 @@ doc already describes. Design decisions, in the order they bit:
   machine's alternates never re-materialize as entries, an unseen machine
   yields one entry, unattributed addresses dedupe by address.
 - **Switching is in place, no reload** (board 315, owner 2026-10-08: "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key serverEpoch}` on arrival. The ORDER is the contract, each step finished before the next:
-  1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened.
+  1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
   2. **One intent**: the reconnect machine stops, `switching` unmounts the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing.
   3. **Downloads suspended**: every running attempt aborts with `SUSPEND` and is awaited, so no retry, re-sign or WS fallback of the old server's chain can go out on the next connection (`download.ts` re-checks the signal after its retry sleep, before `freshUrl`). Its part is KEPT (see file-handling.md). Then `tick()` lets the unmounted tree's persistence run (the composer's last keystroke) — under the old server.
   4. **Park the source, once**: `parkFrom` files every key in `PARKED_KEYS` under the leaving id. Only a switch that began CONNECTED parks; Retry and Back reuse the frozen `from` and never park again, so a half-switched world can never overwrite the source's slot.

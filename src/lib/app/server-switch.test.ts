@@ -93,7 +93,7 @@ function app(storage = mem({
     connected: () => connected,
     currentId: () => currentServerId(storage),
     currentName: () => loadServers(storage).find((s) => s.id === currentServerId(storage))?.name ?? '',
-    confirmLeave: () => confirmLeave({ current: 'hub', reveal: async () => {}, hold: () => {} }),
+    confirmLeave: () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} }),
     stopReconnect: () => { reconnects.push('stop'); },
     startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); },
     addressUp: (addr) => { published.push(addr); },
@@ -204,7 +204,7 @@ test('a dirty editor’s cancel leaves A connected and every key untouched', asy
   const t = app();
   const snapshot = JSON.stringify(PARKED_KEYS.map((k) => t.storage.getItem(k)));
   let asked = 0;
-  const off = registerLeaveGuard({ page: 'files', dirty: () => true, ask: async () => { asked++; return false; } });
+  const off = registerLeaveGuard({ runtime: null, page: 'files', dirty: () => true, ask: async () => { asked++; return false; } });
   await t.sw.switchTo(t.b);
   off();
   assert.equal(asked, 1);

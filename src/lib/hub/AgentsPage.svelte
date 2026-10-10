@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
+  import { useServerRuntime } from '../app/server-context.ts';
   // AgentsPage — the agent configuration page, in the Hub page format
   // (ui-unification.md "Page skeleton"): a real sidebar (bg2, .side-h,
   // .side-row entries) + a main column with a .page-head. Definitions
@@ -37,6 +38,9 @@
   // instructions, agents, teams, skills, MCP) and the main column shows the
   // chosen one's rows, then its editor (owner, 2026-09-04: "左边侧边栏先写配置
   // 条目 右边展示详细内容 不要全堆在一起了").
+  // The runtime whose subtree holds this editor, for its leave guard (#335
+  // ②b-2-3); null for the copy Preferences hosts outside any subtree.
+  const guardOwner = useServerRuntime();
   let { visible = false, onGoBack = null, editRequest = null, onDrilled = null,
     onGuardExit = null, guardPage = '', section: requestedSection = null } = $props();
   let section = $state(untrack(() => requestedSection));
@@ -171,6 +175,7 @@
   // same leave confirmation, and waits for a save/remove in flight first.
   let leaveCancel = null;
   $effect(() => registerLeaveGuard({
+    runtime: guardOwner,
     page: guardPage,
     dirty: () => untrack(() => dirty || saving || removing),
     ask: () => new Promise((resolve) => {
