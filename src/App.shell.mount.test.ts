@@ -907,3 +907,31 @@ test('the Hub shows when its own probe answers, not after a slow backends list',
   assert.equal(!!app.document.querySelector('.rail-bell'), true, 'the Hub is up while backends_list is still out');
   release(); await settle();
 });
+
+test('a late boot dial records nothing after a SAME-server reconnect through the card either', async (context) => {
+  // The case where the runtime's own check is the only guard: the form
+  // reconnects to A's own address, so the handle is suspended and RESUMED,
+  // not ended, and is still alive when the boot dial answers. Without the
+  // host's claim the runtime would record that stale answer.
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const { app, settle } = await bootApp(context,
+    twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (_url, n) => (n === 1 ? 'm-x' : 'm-a'),
+    { calls: events, gate: (_url, n) => (n === 1 ? held : null) });
+  await app.advance(5000); await settle();
+  const field = app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://a:9899';
+  field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settle();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await settle(); await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'the form reconnected A');
+  const before = app.window.localStorage.getItem('tmux_servers');
+  release();
+  await settle(); await settle();
+  assert.ok(events.includes('answered:ws://a:9899#1'), 'the boot dial did answer, late');
+  assert.equal(app.window.localStorage.getItem('tmux_servers'), before, 'and recorded no machine nobody dialled for');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a');
+});
