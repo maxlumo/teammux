@@ -661,7 +661,13 @@ only by an accepted category choice while it is shown — another member's
 choice never writes it, and when focus returns to a guest the page follows
 that guest's section, not the reverse; any choice that would move a shown
 guest's editor asks its guard, and a confirmation answering after focus moved
-commits nothing. A guest takes input — `visible`, its Back, its guard, a lazy
+commits nothing. When that choice is made from a person category, the
+guest's editor is hidden, so the page first REVEALS it on its own section and
+asks there — its confirmation is seen and answered where it lives; "keep
+editing" puts the page back (the guard reports a cancel to its host), and only
+"discard" moves the section (reviewer P1 on c0969d20). While a guest is held
+an agent category lands on its own section, so page and guest never disagree
+after Retry. A guest takes input — `visible`, its Back, its guard, a lazy
 first mount — only while Preferences is on screen, the server is not held and
 the touch guest applies (`guestInput`); a kept, hidden page or a block leaves
 it mounted and untouched. An edit request names the server of

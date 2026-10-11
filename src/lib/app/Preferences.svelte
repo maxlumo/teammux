@@ -404,7 +404,8 @@
   // Per guest (③a): each member's editor registers its own, and the page asks
   // the SHOWN one's at use time — a registration made at init must not stand
   // for whichever guest is in front later.
-  type Guest = { back: (() => boolean) | null; guard: ((action: () => void) => void) | null };
+  type Guard = (action: () => void, cancel?: () => void) => void;
+  type Guest = { back: (() => boolean) | null; guard: Guard | null };
   // Plain map (handles are identities, not state); `drilled` is the one
   // value the template follows, so it is a reactive map of its own.
   const guestRegs = new Map<object, Guest>();
@@ -441,10 +442,14 @@
   // Focus moved to a guest that is on another section: the PAGE follows
   // that guest (its own last section), the guest does not follow the page.
   let lastShown: object | null = null;
+  let lastInput = false;
   $effect(() => {
     const shown = guestShown;
+    const input = guestInput;
     untrack(() => {
-      if (shown === lastShown) return;
+      const thawed = input && !lastInput;
+      lastInput = input;
+      if (shown === lastShown && !thawed) return;
       lastShown = shown;
       const own = shown ? sections.get(shown) : undefined;
       if (own && AGENT_TABS.includes(tab) && own !== tab) { tab = own; localStorage.setItem(TAB_KEY, own); }
@@ -466,7 +471,7 @@
   };
   let navigation = 0;
   let acceptedAgentRequest = $state<{ serverId: string; name: string; kind?: 'agent' | 'team'; n: number } | null>(null);
-  function registerAgentsGuard(runtime: object, guard: (action: () => void) => void) {
+  function registerAgentsGuard(runtime: object, guard: Guard) {
     reg(runtime).guard = guard;
     return () => { const r = guestRegs.get(runtime); if (r?.guard === guard) r.guard = null; };
   }
@@ -580,6 +585,10 @@
     // The guest the choice was made for: a confirmation that answers after
     // focus moved commits nothing for the next one.
     const guestAt = guestShown;
+    // A held guest's section cannot move (its guard cannot be asked): an
+    // agent category chosen while it is held lands on ITS section, so page
+    // and guest never disagree (reviewer P2 on c0969d20).
+    if (guestAt && !guestInput && opened.includes(guestAt) && AGENT_TABS.includes(value)) value = sectionOf(guestAt);
     const apply = () => {
       if (!alive || intent !== navigation || !current() || guestShown !== guestAt) return;
       // Only an accepted category jump may push, persist or forward an edit.
@@ -604,6 +613,17 @@
     // categories (as before), or a choice that moves its own section — also
     // from a non-agent category, where the page shows it on another section.
     const movesGuest = !!guestAt && AGENT_TABS.includes(value) && opened.includes(guestAt) && sectionOf(guestAt) !== value;
+    if (guard && movesGuest && !AGENT_TABS.includes(tab)) {
+      // The editor that has to answer is hidden (the page is on a person
+      // category): REVEAL it on its own section first, so its confirmation is
+      // seen and answered where it lives; "keep editing" puts the page back
+      // (reviewer P1 on c0969d20). Its section is not touched until accepted.
+      const back = { tab, catOpen };
+      tab = sectionOf(guestAt);
+      catOpen = true;
+      guard(apply, () => { if (intent === navigation && guestShown === guestAt) { tab = back.tab; catOpen = back.catOpen; } });
+      return;
+    }
     if (guard && ((value !== tab && AGENT_TABS.includes(tab)) || movesGuest)) guard(apply);
     else apply();
   }
@@ -713,7 +733,7 @@
         section={sectionOf(g.runtime)}
         visible={on && guestInput}
         editRequest={acceptedAgentRequest?.serverId === g.runtime.id && sectionOf(g.runtime) === (acceptedAgentRequest.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
-        onGuardExit={(guard: (action: () => void) => void) => registerAgentsGuard(g.runtime, guard)}
+        onGuardExit={(guard: Guard) => registerAgentsGuard(g.runtime, guard)}
         guardPage="prefs"
         onGoBack={(fn: () => boolean) => { reg(g.runtime).back = fn; }}
         onDrilled={(d: boolean) => setDrilled(g.runtime, d)}

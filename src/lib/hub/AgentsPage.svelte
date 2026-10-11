@@ -163,18 +163,20 @@
   const savable = $derived(!saving && !removing && !pendingExit && !pending
     && configValid(draft, creating) && (creating || dirty));
   const rememberDraft = () => { original = configFingerprint(draft); };
-  function requestLeave(action) {
-    if (pending || pendingExit) return;
-    if (saving || removing) { exitIntent = { action, confirm: false }; return; }
-    if (dirty) exitIntent = { action, confirm: true };
+  /** `cancel` runs when the person answers "keep editing" (#335 ③a): a host
+   * that revealed this editor to ask can put its view back. */
+  function requestLeave(action, cancel = null) {
+    if (pending || pendingExit) { cancel?.(); return; }
+    if (saving || removing) { exitIntent = { action, confirm: false, cancel }; return; }
+    if (dirty) exitIntent = { action, confirm: true, cancel };
     else action();
   }
   $effect(() => {
     if (!exitIntent || exitIntent.confirm || saving || removing) return;
     untrack(() => {
-      const action = exitIntent.action;
+      const { action, cancel } = exitIntent;
       exitIntent = null;
-      requestLeave(action);
+      requestLeave(action, cancel);
     });
   });
   $effect(() => onGuardExit?.(requestLeave));
@@ -1167,7 +1169,7 @@
   title={t('discardChanges')} note={t('configDiscardNote')}
   confirmLabel={t('configDiscard')} confirmIcon="check" cancelLabel={t('configKeepEditing')}
   onconfirm={() => { const action = pendingExit; exitIntent = null; action?.(); }}
-  oncancel={() => { exitIntent = null; leaveCancel?.(); leaveCancel = null; }} />
+  oncancel={() => { const cancel = exitIntent?.cancel; exitIntent = null; leaveCancel?.(); leaveCancel = null; cancel?.(); }} />
 
 <style>
   .agents-root { height: 100%; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 0; background: var(--bg); }

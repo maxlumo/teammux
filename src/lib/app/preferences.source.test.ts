@@ -212,7 +212,7 @@ test('Settings adopts shared configuration geometry and semantic controls (#156)
     'retired per-page cards, controls and dimensions must not survive the migration');
   assert.match(source, /class="config-input mono shortcut-key"[\s\S]*?data-shortcut-recorder/u,
     'the native key recorder retains its own input semantics and shares field geometry');
-  assert.match(source, /onGuardExit=\{\(guard: \(action: \(\) => void\) => void\) => registerAgentsGuard\(g\.runtime, guard\)\}/u);
+  assert.match(source, /onGuardExit=\{\(guard: Guard\) => registerAgentsGuard\(g\.runtime, guard\)\}/u);
   assert.match(source, /editRequest=\{acceptedAgentRequest\?\.serverId === g\.runtime\.id && sectionOf\(g\.runtime\) === \(acceptedAgentRequest\.kind === 'team' \? 'teams' : 'agents'\) \? acceptedAgentRequest : null\}/u,
     'a queued Agent (or, #258, Team) jump is never forwarded into another section');
   assert.doesNotMatch(source, /addEventListener\(['"]popstate|pushState\(/u,

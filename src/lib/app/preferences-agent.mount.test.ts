@@ -283,7 +283,18 @@ test('each member keeps its OWN section: A dirty on Agents, B picks Teams, focus
   } finally { await app.close(); }
 });
 
-test('from a non-agent category, a choice that would move A s editor to another section asks A first (#335 ③a)', async context => {
+/** The open confirmation, and whether a person could answer it: no ancestor
+ * hidden (`.off`, `.hidden`, display:none) or inert. */
+function reachableDialog(app: App) {
+  const dialog = app.document.querySelector('[role=alertdialog]');
+  if (!dialog) return { dialog: null, reachable: false };
+  for (let el: Element | null = dialog; el; el = el.parentElement) {
+    if (el.classList.contains('off') || el.classList.contains('hidden') || el.hasAttribute('inert') || (el as unknown as { inert?: boolean }).inert === true) return { dialog, reachable: false };
+  }
+  return { dialog, reachable: true };
+}
+
+test('from a non-agent category, a choice that would move A s editor reveals A and asks there; Keep editing goes back, Discard moves (#335 ③a, reviewer P1 on c0969d20)', async context => {
   const { app, flush, show } = await twoGuests(context);
   try {
     await edit(app);                                  // A dirty on Agents
@@ -293,9 +304,36 @@ test('from a non-agent category, a choice that would move A s editor to another 
     await show('a');                                  // the page stays on Appearance
     assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance');
     category(app, 'Teams'); await flush();            // would move A from Agents to Teams
-    assert.ok(app.document.querySelector('[role=alertdialog]'), 'A s guard is asked');
-    assert.equal(draftA.value, 'Unsaved', 'and the draft is untouched while it asks');
-    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'nothing moved yet');
+    const asked = reachableDialog(app);
+    assert.ok(asked.dialog, 'A s guard is asked');
+    assert.ok(asked.reachable, 'and its confirmation is on screen, in A s revealed editor — not in a hidden, inert container');
+    assert.ok(draftA.closest('.guest:not(.off)') && !draftA.closest('.agents-embed.off'), 'A s editor is shown, on its own section');
+    assert.equal(draftA.value, 'Unsaved', 'the draft is untouched while it asks');
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=alertdialog] button')].find((b) => /keep editing/iu.test(b.textContent ?? ''))!.click();
+    await flush();
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'Keep editing: back on Appearance');
+    assert.ok(app.document.querySelector('.agents-embed.off'), 'A s editor hidden again');
+    assert.equal(draftA.isConnected && draftA.value, 'Unsaved', 'with its draft');
+    category(app, 'Teams'); await flush();
+    assert.ok(reachableDialog(app).reachable, 'asked again, reachably');
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=alertdialog] button')].find((b) => /discard/iu.test(b.textContent ?? ''))!.click();
+    await flush();
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'teams', 'Discard: A moves to Teams');
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null);
+  } finally { await app.close(); }
+});
+
+test('while held, an agent category lands on the held guest s own section; unheld, it is shown with its draft (#335 ③a, reviewer P2 on c0969d20)', async context => {
+  const { app, flush, props } = await twoGuests(context);
+  try {
+    await edit(app);                                  // A dirty on Agents
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await props({ guestHeld: 'blocked' });
+    category(app, 'Teams'); await flush();
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'agents', 'the page stays on A s section: A cannot be asked while held');
+    await props({ guestHeld: '' });
+    assert.ok(draftA.closest('.guest:not(.off)') && !draftA.closest('.agents-embed.off'), 'unheld: A s editor is shown, not a blank pane');
+    assert.equal(draftA.value, 'Unsaved');
   } finally { await app.close(); }
 });
 
@@ -315,5 +353,26 @@ test('a guest hidden with its page, or held by a block, takes no Back (#335 ③a
     assert.equal(draftA.value, 'Unsaved');
     await props({ guestHeld: '' });
     assert.equal(back!(), true, 'shown and free again: Back peels the guest s editor');
+  } finally { await app.close(); }
+});
+
+test('only a shown, free guest is visible: a request waits while its guest is hidden or held, and lands once it is shown and free (#335 ③a, validator NO BITEs on 9958bbfd)', async context => {
+  const { app, flush, show, props } = await twoGuests(context);
+  const editorIn = (id: 'a' | 'b') => [...app.document.querySelectorAll('.agents-embed .guest')]
+    .filter((g) => (g.querySelector('.editor textarea') as HTMLTextAreaElement | null)?.value === `prompt on ${id}`).length;
+  try {
+    await show('b'); await show('a');                 // both mounted, A shown
+    await props({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { serverId: 'b', name: 'alpha', n: 1 } });
+    assert.equal(editorIn('b'), 0, 'B is hidden: B s request waits');
+    await show('b');
+    assert.equal(editorIn('b'), 1, 'shown, B takes it');
+    await props({ guestHeld: 'blocked' });
+    await props({ openRequest: { tab: 'agents', n: 2 }, agentsEditRequest: { serverId: 'b', name: 'alpha', n: 2 } });
+    // (B is already on alpha; a held guest must not re-run anything either.)
+    await show('a');
+    await props({ agentsEditRequest: { serverId: 'a', name: 'alpha', n: 3 }, openRequest: { tab: 'agents', n: 3 } });
+    assert.equal(editorIn('a'), 0, 'A is held: A s request waits');
+    await props({ guestHeld: '' });
+    assert.equal(editorIn('a'), 1, 'free again, A takes it');
   } finally { await app.close(); }
 });
