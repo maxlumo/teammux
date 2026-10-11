@@ -31,11 +31,6 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import {
-    projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
-    addTeamMessageListener, removeTeamMessageListener,
-  } from '../core/ws.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import { currentServerId } from '../app/servers.ts';
@@ -61,7 +56,15 @@
   // the open project, and its notification centre — from the scope the
   // subtree is bound to (board #335 ②b-2-1), read once at init. The person's own preferences come through it
   // from `appPrefs`, their one owner.
-  const { prefs: hubPrefs, centre } = useServerScope().state;
+  const scope = useServerScope();
+  const { prefs: hubPrefs, centre } = scope.state;
+  // And this server's RPCs and push stream (②b-3): the team-message stream
+  // lives on the connection, the calls on the api — both from the one read.
+  const {
+    projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
+    hubPost, hubCommand, modelsList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+  } = scope.runtime.api;
+  const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
 
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null } = $props();
   const drawerId = $props.id();
@@ -946,6 +949,7 @@
   // (owner, 2026-08-26: "消息框内部不展示完整的上传图片的 markdown 格式路径")
   // and their refs join the body at SEND time, where each token stood.
   const stager = createStager({
+    api: scope.runtime.api,
     ws: () => selectedRow?.project.path,
     getText: () => composerText,
     setText: (v) => { composerText = v; },

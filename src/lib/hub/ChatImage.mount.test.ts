@@ -8,7 +8,8 @@ import { compileMount } from '../test/mount.ts';
 // signature that dies at 60 s → 403 → failed. The signature belongs to the
 // FETCH: mint it when the image nears the viewport, re-sign once on error,
 // and hand the viewer a fresh URL.
-const compiled = compileMount(new URL('./ChatImage.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b).
+const compiled = compileMount(new URL('./ChatImage.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 
 type Observer = { targets: Element[]; fire(isIntersecting: boolean): void };
 /** A hand-driven IntersectionObserver: jsdom has none, and the test decides

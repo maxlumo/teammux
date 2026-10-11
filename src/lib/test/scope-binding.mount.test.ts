@@ -1,5 +1,5 @@
 // Every bound page speaks to ITS scope's server (board #335 ②b-3), area by
-// area: terminal/sessions, files.
+// area: terminal/sessions, files, hub.
 //
 // Every other mount test binds the scope to the mocked facade, so a page that
 // still called `core/ws.ts` directly would pass them all: in Single mode the
@@ -63,24 +63,39 @@ function scopeServer(win: DOMWindow, calls: string[]) {
     getBookmarks: answer('getBookmarks', { bookmarks: [] }), saveBookmarks: answer('saveBookmarks', {}),
     getPrefs: answer('getPrefs', {}), setPref: answer('setPref', {}),
     getMachineId: () => 'm-b',
+    // A project of its own, on a session that is NOT the plain one Sessions
+    // lists (a tracked session moves under its project).
+    projectList: answer('projectList', { projects: [{ project: { id: 'proj-b', name: 'Proj B', session: 'proj-b', path: '/b' }, live: true, slots: [] }] }),
+    hubRooms: answer('hubRooms', { rooms: {}, states: {} }),
+    hubUnread: answer('hubUnread', { rooms: {} }),
+    hubRead: answer('hubRead', { rooms: {} }),
+    hubAgents: answer('hubAgents', { agents: [] }),
+    hubLog: answer('hubLog', { messages: [], has_more: false }),
+    hubActivity: answer('hubActivity', { events: [], has_more: false }),
+    registryList: answer('registryList', { agents: [] }),
+    teamsList: answer('teamsList', { teams: [] }),
+    boardCounts: answer('boardCounts', { counts: { 'proj-b': { todo: 1, doing: 0, review: 0, done: 0, total: 1 } } }),
+    boardList: answer('boardList', { issues: [{ id: 7, title: 'on B', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }] }),
+    fsDownloadHttp: answer('fsDownloadHttp', { url: 'https://b.example/dl/x.png', name: 'x.png' }),
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
     subscribe: () => {}, unsubscribe: () => {}, capturePane: answer('capturePane', { output: '' }),
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
   };
 }
 
-/** The facade: every call is recorded and refused. Projects (a child of
- * Sessions, bound in b3-3 with the hub area) still lists through it, so its
- * two calls are the only ones allowed to land here for now. */
+/** The facade: every call is recorded and refused. Nothing a bound page
+ * makes may land here. */
 function facade(calls: string[]) {
   const names = ['listSessions', 'listPanes', 'listSessionsWithPanes', 'killSession', 'newWindow', 'killWindow',
     'scratchSession', 'scratchKill', 'scratchRelease', 'subscribe', 'unsubscribe', 'capturePane',
     'addPaneOutputListener', 'removePaneOutputListener', 'addPaneClosedListener', 'removePaneClosedListener',
     'gitCmd', 'fsList', 'fsMkdir', 'fsCwd', 'fsStat', 'fsRead', 'fsWrite', 'fsDelete', 'getBookmarks', 'saveBookmarks',
-    'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms'];
+    'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms', 'hubUnread', 'hubRead', 'hubAgents', 'hubLog',
+    'hubActivity', 'registryList', 'teamsList', 'boardCounts', 'boardList', 'fsDownloadHttp',
+    'addTeamMessageListener', 'removeTeamMessageListener'];
   return Object.fromEntries(names.map((n) => [n, () => { calls.push(n); return Promise.reject(new Error('facade')); }]));
 }
-const LATER = new Set(['projectList', 'hubRooms']);
 
 async function mount(context: TestContext, props: Record<string, unknown>) {
   const onScope: string[] = [];
@@ -97,7 +112,6 @@ async function mount(context: TestContext, props: Record<string, unknown>) {
   const until = async (ok: () => boolean) => { for (let i = 0; i < 30 && !ok(); i++) await app.flush(); };
   return { app, onScope, onFacade, until };
 }
-const own = (calls: string[]) => calls.filter((c) => !LATER.has(c));
 
 test('Sessions lists, opens and kills on its scope s server, never the facade s', async (context) => {
   const opened: string[] = [];
@@ -113,7 +127,7 @@ test('Sessions lists, opens and kills on its scope s server, never the facade s'
   app.document.querySelector<HTMLButtonElement>('.dlg-actions button:last-child')!.click();
   await until(() => onScope.some((c) => c.startsWith('killSession')));
   assert.ok(onScope.includes('killSession("on-b")'), `killed on the scope: ${onScope.join(' ')}`);
-  assert.deepEqual(own(onFacade), [], 'nothing of Sessions own reached the facade');
+  assert.deepEqual(onFacade, [], 'nothing reached the facade, its Projects child included');
 });
 
 test('PanePicker lists and adds a window on its scope s server', async (context) => {
@@ -169,5 +183,43 @@ test('Files lists, reads and deletes on its scope s server', async (context) => 
   app.document.querySelector<HTMLButtonElement>('button[aria-label="Delete"]')!.click();
   await until(() => onScope.includes('fsDelete("/b/a.md")'));
   assert.ok(onScope.includes('fsDelete("/b/a.md")'), 'the delete went to the scope');
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('Hub lists its projects and rooms on its scope s server', { timeout: 60000 }, async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'hub' });
+  await until(() => onScope.includes('projectList()') && onScope.some((c) => c.startsWith('hubRooms')));
+  for (let i = 0; i < 4; i++) await app.flush();
+  assert.ok(onScope.some((c) => c.startsWith('projectList(')), `projects from the scope: ${onScope.join(' ')}`);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('Board lists its issues on its scope s server', async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'board', session: 'proj-b' });
+  await until(() => !!app.document.querySelector('.card'));
+  assert.ok(onScope.some((c) => c.startsWith('boardList("proj-b"')), `issues from the scope: ${onScope.join(' ')}`);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('ChatImage signs its reference on its scope s server', async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'image', src: '/b/x.png', alt: 'x' });
+  await until(() => onScope.length > 0 || !!app.document.querySelector('img[src^="https://b.example"]'));
+  // The signature is minted as the image nears the viewport; jsdom has no
+  // layout, so the harness's observer never reports it. What must hold
+  // regardless: nothing was signed by the facade.
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('Projects lists on its scope s server', async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'projects', visible: true, openTerminal() {} });
+  await until(() => !!app.document.querySelector('.proj'));
+  assert.ok(onScope.includes('projectList()'), `projects from the scope: ${onScope.join(' ')}`);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('CreateProjectDialog reads the registry and browses on its scope s server', async (context) => {
+  const { onScope, onFacade, until } = await mount(context, { which: 'create', oncreated() {}, oncancel() {} });
+  await until(() => onScope.includes('registryList()'));
+  assert.ok(onScope.includes('registryList()'), `the registry from the scope: ${onScope.join(' ')}`);
   assert.deepEqual(onFacade, [], 'the facade was never asked');
 });

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
 // #167, 2026-09-12: the real caller used to close before its RPC even settled.
-const compiled = compileMount(new URL('./Projects.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b).
+const compiled = compileMount(new URL('./Projects.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 type App = Awaited<ReturnType<Awaited<typeof compiled>['mount']>>;
 const rows = ['alpha', 'beta'].map(name => ({ project: { id: name, name, session: name, path: `/fixture/${name}` },
   slots: [], live: true }));

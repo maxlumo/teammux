@@ -7,7 +7,7 @@
      with the CLI (`projects::BOARD_STATUSES`), so a free-text status here
      would fork the language. Lives in the Hub drawer as a partition, like the
      terminal and Files. */
-  import { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubPost, hubRooms, type BoardIssue, type BoardCountRow, type HubAgent } from '../core/ws.ts';
+  import type { BoardIssue, BoardCountRow, HubAgent } from '../core/ws.ts';
   import { projectAgeLabel, sortRows } from '../projects/projects.ts';
   import { boardStatusColor, localWhen, splitImages } from './hub.ts';
   import { backendIcon } from '../core/agents.ts';
@@ -38,8 +38,12 @@
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
 
-  // The runtime whose subtree holds this board, for its leave guard (#335 ②b-2-3).
+  // The runtime whose subtree holds this board, for its leave guard (#335
+  // ②b-2-3) and its RPCs (②b-3), read once at init.
   const guardOwner = useServerRuntime();
+  // A board always lives in a server's subtree (the page, the Hub drawer).
+  if (!guardOwner) throw new Error('Board needs a server scope');
+  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubPost, hubRooms } = guardOwner.api;
   let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '' }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean } = $props();
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
@@ -266,9 +270,9 @@
   let createEl = $state<HTMLTextAreaElement | null>(null);
   let bodyEl = $state<HTMLTextAreaElement | null>(null);
   let noteEl = $state<HTMLTextAreaElement | null>(null);
-  const createStage = createStager({ ws: projectPath, getText: () => nBody, setText: (v) => { nBody = v; }, caret: () => createEl?.selectionStart, focus: () => createEl?.focus() });
-  const bodyStage = createStager({ ws: projectPath, getText: () => draft.body, setText: (v) => { draft.body = v; }, caret: () => bodyEl?.selectionStart, focus: () => bodyEl?.focus() });
-  const noteStage = createStager({ ws: projectPath, getText: () => noteText, setText: (v) => { noteText = v; }, caret: () => noteEl?.selectionStart, focus: () => noteEl?.focus() });
+  const createStage = createStager({ api: guardOwner.api, ws: projectPath, getText: () => nBody, setText: (v) => { nBody = v; }, caret: () => createEl?.selectionStart, focus: () => createEl?.focus() });
+  const bodyStage = createStager({ api: guardOwner.api, ws: projectPath, getText: () => draft.body, setText: (v) => { draft.body = v; }, caret: () => bodyEl?.selectionStart, focus: () => bodyEl?.focus() });
+  const noteStage = createStager({ api: guardOwner.api, ws: projectPath, getText: () => noteText, setText: (v) => { noteText = v; }, caret: () => noteEl?.selectionStart, focus: () => noteEl?.focus() });
   /** Staged or still uploading: unsaved work the guard protects. */
   const holds = (st: Stager) => st.pending.length > 0 || st.attaching;
   /** Not submittable while an upload runs or a failed chip stands. */

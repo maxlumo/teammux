@@ -7,14 +7,7 @@
   //
   // Hidden entirely on a server without project support (mobile builds), the
   // same method-not-found contract the Team tab uses.
-  import {
-    listPanes,
-    hubRooms,
-    projectArchive,
-    projectDown,
-    projectList,
-    projectUp,
-  } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import type { TmuxPane } from '../core/ws.ts';
   import type { ProjectRow } from './projects.ts';
   import { flip } from 'svelte/animate';
@@ -50,6 +43,8 @@
      * (owner, 2026-08-24: "选中的有一个背景底色terminal的侧边栏也应该加上"). */
     activeTarget?: string;
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b).
+  const { listPanes, hubRooms, projectArchive, projectDown, projectList, projectUp } = useServerApi();
 
   let rows = $state<ProjectRow[]>([]);
   let talkMap = $state<Record<string, number>>({});

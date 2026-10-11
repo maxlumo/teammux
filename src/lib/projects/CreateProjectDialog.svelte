@@ -12,12 +12,14 @@
   import Icon from '../ui/Icon.svelte';
   import Dialog from '../ui/Dialog.svelte';
   import DirPicker from '../files/DirPicker.svelte';
-  import { projectCreate, projectUp, hubSpawn, registryList } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import { backendColor } from '../hub/hub.ts';
   import { backendIcon } from '../core/agents.ts';
   import { t } from '../core/i18n.svelte.ts';
 
   let { compact = false, oncreated, oncancel } = $props();
+  // This server's RPCs, read once at init (board #335 ②b).
+  const { projectCreate, projectUp, hubSpawn, registryList } = useServerApi();
 
   let pickerEl = $state(null);   // the DirPicker instance, for its own layer
 

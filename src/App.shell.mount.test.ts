@@ -152,6 +152,12 @@ function withSlot<M extends Record<string, any>>(module: M): M {
   m.connection = {
     connect: (url: string, token: string) => m.connect(url, token), disconnect: m.disconnect,
     isConnected: m.isConnected, getMachineId: m.getMachineId, getHostname: m.getHostname,
+    // The push streams a bound page subscribes through its runtime's
+    // connection (board #335 ②b-3).
+    addTeamMessageListener: m.addTeamMessageListener, removeTeamMessageListener: m.removeTeamMessageListener,
+    subscribe: m.subscribe, unsubscribe: m.unsubscribe,
+    addPaneOutputListener: m.addPaneOutputListener, removePaneOutputListener: m.removePaneOutputListener,
+    addPaneClosedListener: m.addPaneClosedListener, removePaneClosedListener: m.removePaneClosedListener,
   };
   return module;
 }

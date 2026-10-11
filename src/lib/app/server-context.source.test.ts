@@ -60,6 +60,11 @@ const BOUND = [
   'src/lib/sessions/SplitView.svelte', 'src/lib/app/ScratchPanel.svelte',
   // files
   'src/lib/files/Files.svelte', 'src/lib/files/GitPanel.svelte', 'src/lib/files/DirPicker.svelte',
+  // hub
+  'src/lib/hub/Hub.svelte', 'src/lib/hub/Board.svelte', 'src/lib/hub/ChatImage.svelte',
+  'src/lib/projects/Projects.svelte', 'src/lib/projects/CreateProjectDialog.svelte',
+  // Not a component: it takes the api its host read (StagerHost.api).
+  'src/lib/hub/attachments.svelte.ts',
 ];
 /** The value names a file imports from core/ws (type-only imports excluded). */
 function facadeValues(text: string): string[] {

@@ -7,7 +7,8 @@ import { clearLeaveGuardsForTests, confirmLeave, registerLeaveGuard, type LeaveG
 // Board #329: images in the Board through the chat's ONE pipeline. The real
 // Board, the real stager, fake RPCs; the browser's encoder is stubbed in the
 // window (jsdom has no canvas), so the upload carries a fixed webp body.
-const compiled = compileMount(new URL('./Board.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url), new URL('../app/leave-guards.ts', import.meta.url)]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b).
+const compiled = compileMount(new URL('./Board.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url), new URL('../app/leave-guards.ts', import.meta.url)], { serverScope: true });
 const WS = '/work/fixture';
 const REF = /!\[\]\(\/work\/fixture\/\.tmm\/uploads\/[a-z0-9]+-[a-z0-9]{8}\.webp\)/u;
 const issueA = { id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] };
@@ -18,7 +19,10 @@ type Opts = { projects?: string[]; stateful?: boolean; download?: (path: string)
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
-const walk = () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} });
+// The switch leaves the Board's OWN server (board #335 ②b-3: the Board now
+// mounts in a scope, so its guard's owner is that scope's runtime, and a leave
+// asks only the handle it destroys).
+const walk = () => confirmLeave({ leaving: guardsSeen[0]?.runtime ?? null, current: 'hub', reveal: async () => {}, hold: () => {} });
 async function mount(context: TestContext, opts: Opts = {}) {
   clearLeaveGuardsForTests(); guardsSeen.length = 0;
   const calls: Calls = { saves: [], notes: [], posts: [], uploads: [] };
@@ -527,7 +531,7 @@ test('the walk reveals a hidden Board before it asks, and a destroyed Board unre
   const app = await mount(context);
   app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
   await app.type(app.q<HTMLTextAreaElement>('.note-input')!, 'unsent');
-  const asked = confirmLeave({ leaving: null, current: 'terminal', reveal: async (p) => { revealed.push(p); }, hold: () => {} });
+  const asked = confirmLeave({ leaving: guardsSeen[0]!.runtime, current: 'terminal', reveal: async (p) => { revealed.push(p); }, hold: () => {} });
   await app.flush();
   assert.deepEqual(revealed, ['board'], 'its own page is revealed first');
   app.q<HTMLButtonElement>('.dlg-actions button:first-child')!.click();
@@ -535,8 +539,9 @@ test('the walk reveals a hidden Board before it asks, and a destroyed Board unre
   assert.deepEqual(revealed, ['board', 'terminal'], 'and the user is put back');
   // Destroyed: the walk no longer reaches it (the cleanup removes it).
   await app.close();
+  const owner = guardsSeen[0]!.runtime;
   for (const g of guardsSeen) unregister(g);
-  assert.equal(await confirmLeave({ leaving: null, current: 'terminal', reveal: async () => {}, hold: () => {} }), true, 'nothing left to ask');
+  assert.equal(await confirmLeave({ leaving: owner, current: 'terminal', reveal: async () => {}, hold: () => {} }), true, 'nothing left to ask');
 });
 
 test('a note in flight holds the project: a pick waits, and the answer lands on the board it was written on', async (context) => {

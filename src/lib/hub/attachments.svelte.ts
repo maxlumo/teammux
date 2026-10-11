@@ -5,7 +5,7 @@
 // editors each own one stager; the code — downscale, encode, upload, the
 // staleness guard, the failed chip — exists once, here. Moved out of
 // Hub.svelte unchanged (board #329); the history of each rule stays with it.
-import { fsMkdir, fsUpload } from '../core/ws.ts';
+import type { WsApi } from '../core/ws.ts';
 import { t } from '../core/i18n.svelte.ts';
 import { imageId, uploadImagePath, uploadFilePath, pastedFiles, textIsThePaste } from './hub.ts';
 import { attachToken, attachmentBody } from './hub-composer.ts';
@@ -35,6 +35,10 @@ export const FILE_CAP = 32 * 1024 * 1024; // base64 over one RPC; beyond this, p
 export type Attachment = { key: string; path: string; kind: 'image' | 'file'; name: string; n: number; thumb: string; error?: string };
 
 export type StagerHost = {
+  /** The RPCs the uploads go through, the host's own server's (board #335
+   * ②b-3). A module, not a component: it has no context to read, so its
+   * host hands it the api it read at init. */
+  api: Pick<WsApi, 'fsMkdir' | 'fsUpload'>;
   /** The project directory uploads land under (none: nothing stages). */
   ws: () => string | null | undefined;
   getText: () => string;
@@ -79,6 +83,7 @@ export function attachPaste(e: ClipboardEvent, stage: (files: File[]) => unknown
 }
 
 export function createStager(host: StagerHost) {
+  const { fsMkdir, fsUpload } = host.api;
   // The staged set's generation: bumped whenever it is invalidated (project
   // switch, explicit clear). An async stage job snapshots it at entry and
   // refuses to touch the staged set or the text once stale — without this,

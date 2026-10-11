@@ -5,6 +5,11 @@
   import { setServerScope } from '../app/server-context.ts';
   import { createServerState } from '../app/server-state.ts';
   import Files from '../files/Files.svelte';
+  import Hub from '../hub/Hub.svelte';
+  import Board from '../hub/Board.svelte';
+  import ChatImage from '../hub/ChatImage.svelte';
+  import Projects from '../projects/Projects.svelte';
+  import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
   import Sessions from '../sessions/Sessions.svelte';
   import PanePicker from '../sessions/PanePicker.svelte';
   import ScratchPanel from '../app/ScratchPanel.svelte';
@@ -30,4 +35,14 @@
   <DirPicker {...rest} />
 {:else if which === 'files'}
   <Files visible {...rest} />
+{:else if which === 'hub'}
+  <Hub visible {...rest} />
+{:else if which === 'board'}
+  <Board visible {...rest} />
+{:else if which === 'image'}
+  <ChatImage {...rest} />
+{:else if which === 'projects'}
+  <Projects {...rest} />
+{:else if which === 'create'}
+  <CreateProjectDialog {...rest} />
 {/if}

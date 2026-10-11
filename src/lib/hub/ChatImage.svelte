@@ -20,12 +20,15 @@
   // thumbnail's. A failed load falls back to showing the reference itself,
   // which is still information ("it sent /tmp/x.png").
   import { isDirectUrl } from './hub.ts';
-  import { fsDownloadHttp } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
 
   // `onviewstart` (optional, board #329): called at the TAP, before the
   // signature is minted; whatever it returns is handed back with the URL, so
   // the host can tell this tap's answer from a later one's.
   let { src = '', alt = '', onview = null, onviewstart = null } = $props();
+  // The server this image's reference is signed by: the subtree's (board
+  // #335 ②b-3), read once at init.
+  const { fsDownloadHttp } = useServerApi();
 
   let url = $state('');
   let failed = $state(false);
