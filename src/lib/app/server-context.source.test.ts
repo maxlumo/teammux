@@ -79,8 +79,13 @@ function facadeValues(text: string): string[] {
 
 test('a page bound to its scope takes no RPC from the facade', async () => {
   for (const file of BOUND) {
-    const values = facadeValues(await readFile(file, 'utf8'));
+    const text = await readFile(file, 'utf8');
+    const values = facadeValues(text);
     assert.deepEqual(values, [], `${file} imports ${values.join(', ')} from core/ws — take it from the scope`);
+    // Nor its server's id from CURRENT (reviewer P1 on the b3 binding range):
+    // "the server that is current" is not "the server this page is bound
+    // to" once two are on screen; the scope's runtime says which.
+    assert.doesNotMatch(code(text), /\bcurrentServerId\b/u, `${file} reads CURRENT — take the id from the scope`);
   }
   assert.deepEqual(facadeValues("import { listPanes, type TmuxPane } from '../core/ws.ts';"), ['listPanes'], 'the rule sees a value import');
   assert.deepEqual(facadeValues("import type { TmuxPane } from '../core/ws.ts';"), [], 'and lets a type through');

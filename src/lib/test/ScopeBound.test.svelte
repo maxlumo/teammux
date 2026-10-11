@@ -20,7 +20,9 @@
   let { which, ...rest } = $props();
   const transport = globalThis.__scopeTransport;
   // svelte-ignore state_referenced_locally
-  setServerScope({ runtime: { id: 'b', api: transport, connection: transport }, state: createServerState(localStorage) });
+  const state = createServerState(localStorage);
+  globalThis.__scopeState = state;
+  setServerScope({ runtime: { id: 'b', api: transport, connection: transport }, state });
 </script>
 
 {#if which === 'sessions'}

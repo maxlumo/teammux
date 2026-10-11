@@ -2954,7 +2954,10 @@ function jumpFixture(over: Record<string, unknown> = {}) {
     },
   };
 }
-const alertFor = (id = 'target', seq = 50, server = 's1') => ({
+// The Hub's server is its SCOPE's ('test', the mount harness's runtime), not
+// CURRENT (reviewer P1 on the b3 binding range) — the setup's CURRENT of 's1'
+// is deliberately another id.
+const alertFor = (id = 'target', seq = 50, server = 'test') => ({
   key: `proj:other|${id}`, server, room: 'proj:other', session: 'other', project: 'other',
   seq, id, ts: 1_050, from: 'alice', toHuman: true, kind: 'reply', excerpt: 'the reply you heard', viewed: false,
 });

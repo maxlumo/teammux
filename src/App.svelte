@@ -790,13 +790,15 @@
   // place instead of dropping the user on a dead pane.
   $effect(() => {
     const onRenamed = (e) => {
-      const { from, to } = e.detail ?? {};
-      if (!from || !to || from === to) return;
-      // The rename happened on the server whose tree dispatched it — the one
-      // the content tree is bound to — and `retargetRef` refuses to apply it
-      // to a reference belonging to any other (board #335 ②b-2). The
-      // prefix-exact rule itself still lives in `nav-state.retarget`.
-      const rename = { serverId: navServerId(), from, to };
+      const { serverId, from, to } = e.detail ?? {};
+      if (!serverId || !from || !to || from === to) return;
+      // The rename happened on the server the DISPATCHER names, from its own
+      // scope (reviewer P1 on the b3 binding range) — not whichever one is
+      // bound now — and `retargetRef` refuses to apply it to a reference
+      // belonging to any other (board #335 ②b-2). An event that names no
+      // server is nobody's, and moves nothing. The prefix-exact rule itself
+      // still lives in `nav-state.retarget`.
+      const rename = { serverId, from, to };
       const move = (ref) => (ref ? retargetRef(ref, rename) : ref);
       termPane = move(termPane);
       filesRef = move(filesRef);

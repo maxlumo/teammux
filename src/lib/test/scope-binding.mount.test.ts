@@ -81,6 +81,8 @@ function scopeServer(win: DOMWindow, calls: string[]) {
     boardList: answer('boardList', { issues: [{ id: 7, title: 'on B', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }] }),
     fsDownloadHttp: answer('fsDownloadHttp', { url: 'https://b.example/dl/x.png', name: 'x.png' }),
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    projectRename: answer('projectRename', { session: 'proj-b2' }),
+    hubLogAround: answer('hubLogAround', { messages: [], has_more_before: false, has_more_after: false }),
     subscribe: () => {}, unsubscribe: () => {}, capturePane: answer('capturePane', { output: '' }),
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
@@ -96,7 +98,7 @@ function facade(calls: string[]) {
     'gitCmd', 'fsList', 'fsMkdir', 'fsCwd', 'fsStat', 'fsRead', 'fsWrite', 'fsDelete', 'getBookmarks', 'saveBookmarks',
     'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms', 'hubUnread', 'hubRead', 'hubAgents', 'hubLog',
     'hubActivity', 'registryList', 'teamsList', 'skillsList', 'mcpList', 'globalPromptGet', 'boardCounts', 'boardList', 'fsDownloadHttp',
-    'addTeamMessageListener', 'removeTeamMessageListener'];
+    'addTeamMessageListener', 'removeTeamMessageListener', 'projectRename', 'hubLogAround'];
   return Object.fromEntries(names.map((n) => [n, () => { calls.push(n); return Promise.reject(new Error('facade')); }]));
 }
 
@@ -205,11 +207,13 @@ test('Board lists its issues on its scope s server', async (context) => {
 });
 
 test('ChatImage signs its reference on its scope s server', async (context) => {
+  // jsdom has no IntersectionObserver, and ChatImage treats that as "near"
+  // and signs at once, so the signature itself is observable here (reviewer
+  // P2 on the binding range: a zero-facade assertion alone proved nothing).
   const { app, onScope, onFacade, until } = await mount(context, { which: 'image', src: '/b/x.png', alt: 'x' });
-  await until(() => onScope.length > 0 || !!app.document.querySelector('img[src^="https://b.example"]'));
-  // The signature is minted as the image nears the viewport; jsdom has no
-  // layout, so the harness's observer never reports it. What must hold
-  // regardless: nothing was signed by the facade.
+  await until(() => onScope.includes('fsDownloadHttp("/b/x.png")') && !!app.document.querySelector('img[src^="https://b.example"]'));
+  assert.ok(onScope.includes('fsDownloadHttp("/b/x.png")'), `signed by the scope: ${onScope.join(' ')}`);
+  assert.ok(app.document.querySelector('img[src="https://b.example/dl/x.png"]'), 'and the image shows the scope s URL');
   assert.deepEqual(onFacade, [], 'the facade was never asked');
 });
 
@@ -232,4 +236,48 @@ test('AgentsPage reads its registry on its scope s server', async (context) => {
   await until(() => onScope.includes('registryList()'));
   assert.ok(onScope.includes('registryList()'), `the registry from the scope: ${onScope.join(' ')}`);
   assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('a Hub rename names ITS scope s server, not whichever one is current (reviewer P1 on the binding range)', { timeout: 60000 }, async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'hub' });
+  // Another server is CURRENT: the Hub must not take its id from there.
+  app.window.localStorage.setItem('tmux_server_current', 'somewhere-else');
+  const renamed: unknown[] = [];
+  app.window.addEventListener('project-renamed', (e) => renamed.push((e as CustomEvent).detail));
+  await until(() => !!app.document.querySelector('.proj-row'));
+  app.document.querySelector('.proj-row')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true }));
+  await app.flush();
+  const items = [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button, [role=menuitem]')];
+  const rename = items.find((b) => b.textContent?.trim() === 'Project name');
+  assert.ok(rename, `the row menu offers Rename: ${items.map((b) => b.textContent?.trim()).join(' | ')}`);
+  rename.click();
+  // The editor opens on the next task (timers are mocked).
+  await app.advance(1);
+  await until(() => !!app.document.querySelector<HTMLInputElement>('input.h1-edit'));
+  const input = app.document.querySelector<HTMLInputElement>('input.h1-edit')!;
+  input.value = 'Proj B2';
+  input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  input.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await until(() => renamed.length > 0);
+  assert.ok(onScope.some((c) => c.startsWith('projectRename(')), `renamed on the scope: ${onScope.join(' ')}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(renamed)), [{ serverId: 'b', from: 'proj-b', to: 'proj-b2' }], 'the event names the Hub s own server');
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('a Hub jumps to an alert of ITS scope s server while another one is current (reviewer P1 on the binding range)', { timeout: 60000 }, async (context) => {
+  const { app, onScope, until } = await mount(context, { which: 'hub' });
+  app.window.localStorage.setItem('tmux_server_current', 'somewhere-else');
+  await until(() => !!app.document.querySelector('.proj-row'));
+  const centre = (app.window as unknown as { __scopeState: { centre: {
+    record(a: unknown): void; requestJump(a: unknown): void; items: { key: string; failed?: string }[];
+  } } }).__scopeState.centre;
+  const alert = { key: 'proj-b|1', server: 'b', room: 'proj-b', session: 'proj-b', project: 'Proj B', seq: 1, id: '1', ts: 1,
+    from: 'alice', toHuman: true, kind: 'message', excerpt: 'hi', viewed: false };
+  centre.record(alert);
+  centre.requestJump(alert);
+  await until(() => onScope.some((c) => c.startsWith('hubLogAround(')));
+  const row = centre.items.find((a) => a.key === 'proj-b|1');
+  assert.notEqual(row?.failed, 'On another server', 'the alert is this Hub s, whatever CURRENT says');
+  assert.ok(onScope.some((c) => c.startsWith('hubLogAround(')), 'and the jump went on to open it, on the scope');
+  await app.close();
 });

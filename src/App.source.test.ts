@@ -642,8 +642,9 @@ test('the content tree is bound to one server, and only the swap binds it (board
   const adapter = source.match(/const splitViewCells = \$derived\([\s\S]*?\)\);/u)?.[0] ?? '';
   assert.match(adapter, /target: c\.pane\?\.target \?\? '',\s*session: c\.pane\?\.session \?\? '',/u);
   assert.doesNotMatch(adapter, /serverId/u, 'the serverId stops at this boundary');
-  // A rename belongs to ONE server.
-  assert.match(source, /const rename = \{ serverId: navServerId\(\), from, to \};\s*const move = \(ref\) => \(ref \? retargetRef\(ref, rename\) : ref\);/u);
+  // A rename belongs to ONE server — the one its event names (reviewer P1 on
+  // the b3 binding range; the rename-event test below pins the source).
+  assert.match(source, /const rename = \{ serverId, from, to \};\s*const move = \(ref\) => \(ref \? retargetRef\(ref, rename\) : ref\);/u);
   // A landing names its tree, and is delivered only to that tree.
   assert.match(source, /function landingFor\(request\) \{\s*return request && request\.serverId === navServerId\(\) \? request : null;/u);
   for (const req of ['filesNavReq', 'boardIssueReq']) {
@@ -1185,4 +1186,14 @@ test('the fixed rail and the sidebar toggle start under the Android status bar (
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';
   assert.match(seat, /var\(--sat\)/u, 'and so does the collapse button');
   assert.match(style, /main \{[\s\S]*?padding-top: var\(--sat\);/u, 'in-flow content keeps main\'s one inset');
+});
+
+test('a project rename moves only the references of the server that renamed it (reviewer P1 on the b3 binding range)', () => {
+  // The Hub names its own server on the event, from its scope; App does not
+  // fill in whichever server is bound, and an event naming none moves nothing.
+  const handler = source.match(/const onRenamed = \(e\) => \{([\s\S]*?)\n    \};/u)?.[1] ?? '';
+  assert.match(handler, /const \{ serverId, from, to \} = e\.detail \?\? \{\};/u);
+  assert.match(handler, /if \(!serverId \|\| !from/u, 'no server named, nothing moves');
+  assert.match(handler, /const rename = \{ serverId, from, to \};/u);
+  assert.doesNotMatch(handler, /navServerId\(\)/u, 'never the bound server s id');
 });

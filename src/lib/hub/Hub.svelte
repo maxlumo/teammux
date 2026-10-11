@@ -33,7 +33,6 @@
   import { t } from '../core/i18n.svelte.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
-  import { currentServerId } from '../app/servers.ts';
   import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch } from './hub.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
@@ -623,7 +622,11 @@
   // news BEFORE mute/level/away decide the sound, under this server's id. A
   // message that lands while the reader is at that room's visible tail is
   // recorded already viewed.
-  const serverId = () => currentServerId(localStorage);
+  // The server this Hub is bound to — its scope's, never CURRENT (reviewer P1
+  // on the b3 binding range): an alert filed under whichever server is current
+  // would be mislabelled the moment two are on screen. Constant for this
+  // instance; a switch destroys the Hub and its in-flight work with it.
+  const serverId = () => scope.runtime.id;
   function newsCtx(roomName, session, first) {
     const here = !!selected && roomName === room(selected);
     const away = !here || isAway(visible);
@@ -1196,8 +1199,10 @@
         // The Terminal may be pointing at `<old session>:<win>.<pane>`, which
         // stops resolving the moment tmux renames the session. Nothing here can
         // reach that state, so say it out loud and let App remap.
+        // It names the server the rename happened on, from this Hub's scope
+        // (reviewer P1): App retargets only that server's references.
         window.dispatchEvent(new CustomEvent('project-renamed', {
-          detail: { from: was, to: res.session },
+          detail: { serverId: scope.runtime.id, from: was, to: res.session },
         }));
         await reload();
         await selectProject(res.session);
