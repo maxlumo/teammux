@@ -1953,6 +1953,55 @@ test('a deep link that arrives while the migration is blocked is applied only af
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://b:9899'], 'and B is dialled');
 });
 
+test('a deferred deep link that blocks again on its own Retry is still there for the next one (validator P2-a on ea56861b)', async (context) => {
+  // Retry #1's preparation records A's fold, then APPLYING the link fails,
+  // and the gate's own preparation cannot even read the marker: blocked
+  // again in that same Retry. The link is consumed only once applying it did
+  // not block (reviewer P1 on fedd17eb), so Retry #2 still has it.
+  const store = { failing: true, trip: false, down: false };
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, undefined, {
+    calls: events,
+    setup(window: any) {
+      const set = window.Storage.prototype.setItem;
+      const get = window.Storage.prototype.getItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (store.failing && k === 'tmux_state_layout') throw new Error('QuotaExceededError');
+        if (store.trip && k === 'tmux_address') { store.trip = false; store.down = true; throw new Error('QuotaExceededError'); }
+        return set.call(this, k, v);
+      };
+      window.Storage.prototype.getItem = function (this: Storage, k: string) {
+        if (store.down && k === 'tmux_state_layout') throw new Error('SecurityError');
+        return get.call(this, k);
+      };
+      window.history.replaceState(null, '', '/?addr=ws://b:9899&token=tokB');
+    },
+  });
+  await h.app.advance(6000);
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'blocked at boot: the link waits');
+
+  store.failing = false;
+  store.trip = true;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(store.down, true, 'applying the link failed, and the gate could not read the marker');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the link was not applied');
+  assert.ok(cardButton(h.app, /retry/iu), 'blocked again: Retry is offered');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'nothing dialled');
+
+  store.down = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the second Retry applies the link it kept');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://b:9899'], 'and dials B');
+});
+
 for (const [what, key] of [['the registry', 'tmux_servers'], ['the quarantine copy', 'tmux_state::unattributed']] as const) {
   test(`a failure writing ${what} before the fold is the same blocked state, not a crash (reviewer P1-d on cf7e7957)`, async (context) => {
     const store = refusing([key]);
