@@ -1555,6 +1555,12 @@
     filesRef = null;
     clearLandings();
     sessListOpen = false;
+    // And nothing saves that emptiness over a server's record until its
+    // restore has run: Back from a failed switch comes up on the SAME
+    // runtime it left (order (a)), whose save gate was still open, and the
+    // reset navigation overwrote A's slot before the restore read it
+    // (reviewer 04:05 on the switch order).
+    navRestored = null;
   }
 
   // THE server switch (board 315): every entry — the switcher popover,

@@ -2902,3 +2902,29 @@ test('P2-1: the App s own end stops every reconnect loop', async (context) => {
   for (let i = 0; i < 6; i++) await h.app.advance(30_000);
   assert.equal(attempts, before, 'and stops with the shell');
 });
+
+test('order (a): a failed switch s Back returns to A on the SAME connection, with A s latest navigation from its slot (reviewer 04:05)', async (context) => {
+  // A's runtime and connection survive a failed switch, but the content tree
+  // is hidden while the switch runs, so its page instances do not: what Back
+  // brings back is A's navigation as A's own slot recorded it.
+  const events: string[] = [];
+  const h = await bootApp(context,
+    { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { calls: events, gate: (url, n) => (n > 0 && url.includes('//b') ? Promise.reject(new Error('B refused')) : null) });
+  await h.openSession('other');                            // A's latest navigation
+  assert.equal(h.restored(), 'a:other:3.0');
+  const a = conn(h, 'a')!;
+  await h.switchTo('beta');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'B did not come up: CURRENT is back on A');
+  assert.equal(conn(h, 'b')?.disposed() ?? true, true, 'B left no live connection');
+  assert.ok(a.isConnected() && !a.disposed(), 'A s connection was never touched');
+  const back = [...h.app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^back to/iu.test((b.textContent ?? '').trim()));
+  assert.ok(back, 'the failed switch offers Back');
+  back.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(conn(h, 'a'), a, 'Back is A on the same connection, not a new one');
+  assert.ok(a.isConnected() && !a.disposed());
+  assert.equal(h.onScreen(), 'other:3.0', 'with A s latest navigation, restored from A s slot');
+  assert.equal(h.restored(), 'a:other:3.0');
+});
