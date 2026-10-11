@@ -500,7 +500,9 @@ the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
 panel of its own (which would cover the migration's Retry with one the freeze
 refuses); the gate keeps the switch's target, and Retry, once storage is
 recorded, resumes that switch through the switch itself (reviewer P1 on
-af59fb5d). Which half it stopped in is the REGISTRY's to say: the alias still
+af59fb5d). What the gate kept — the switch, a deferred deep link — is consumed
+only once nothing blocks it: if Retry's own bind blocks again, the next Retry
+still has it (reviewer P1 on fedd17eb). Which half it stopped in is the REGISTRY's to say: the alias still
 saved means nothing was committed and its slots are intact, so they are
 copied again; the alias gone means the copy was already done, so nothing is
 copied (an emptied source must never overwrite the survivor) and the cleanup

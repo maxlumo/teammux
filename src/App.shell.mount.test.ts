@@ -2413,3 +2413,58 @@ test('a switch whose identity write fails mid-handoff: the migration Retry is th
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED kept');
   assert.ok(h.app.document.querySelector('.term-page'), 'and the server is up');
 });
+
+test('a Retry whose bind blocks again keeps the switch it owes: the next Retry still arrives (reviewer P1 on fedd17eb)', async (context) => {
+  // Reviewer's switcher path, then a second failure during Retry's own bind:
+  // the navigation's merge rewrite for the bound server cannot be written.
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry,
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_address', 'ws://alias:9899'); m.set('tmux_token', 'tok');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const refused = new Set<string>();
+  const events: string[] = [];
+  const h = await bootApp(context, Object.fromEntries(m), () => 'm-a', {
+    calls: events,
+    gate: (_url, n) => (n === 1 ? new Promise<void>(() => {}) : null),
+    setup(window) {
+      const set = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (refused.has(k)) throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+    },
+  });
+  const ls = h.app.window.localStorage;
+  refused.add('tmux_hub_drafts::c');
+  await h.switchTo('alias');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(cardButton(h.app, /retry/iu), 'blocked by the switch s merge');
+  // The handoff can finish now, but the bind's nav rewrite cannot: the bound
+  // alias's record names an id the identity layer merged into it.
+  refused.delete('tmux_hub_drafts::c');
+  ls.setItem('tmux_server_merges', JSON.stringify({ zz: 'a' }));
+  ls.setItem('tmux_state::a', savedNav('zz', 'work:1.0'));
+  refused.add('tmux_state::a');
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(cardButton(h.app, /retry/iu), 'the bind blocked again: the same one Retry');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'and the switch did not run under the freeze');
+  // Storage works: the next Retry still owes the switch, and makes it.
+  refused.clear();
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'the kept switch arrived');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
+  assert.ok(h.app.document.querySelector('.term-page'), 'and the server is up');
+});

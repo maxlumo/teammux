@@ -1655,10 +1655,20 @@
   function retryMigration() {
     prepareStorage();
     if (migrationBlocked) return;
-    if (deferredLink) { const link = deferredLink; deferredLink = null; applyConnectLink(link); loadServerRegistry(); }
+    // What the gate kept is consumed only once nothing blocks it any more
+    // (reviewer P1 on fedd17eb): the link once applying it did not block,
+    // the switch once the bind did not — a failure there blocks again, and
+    // the next Retry still has them.
+    if (deferredLink) {
+      const link = deferredLink;
+      applyConnectLink(link);
+      if (migrationBlocked) return;
+      deferredLink = null;
+      loadServerRegistry();
+    }
     swapScope();
-    if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
     if (migrationBlocked) return;
+    if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
     const bound = scopeSwap.bound();
     if (!bound || !connected) return;
     void restoreNavFor(bound);
