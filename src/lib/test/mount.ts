@@ -33,6 +33,11 @@ interface CompileOptions {
    * binds every server-bound page (board #335 ②b-2-1) — see
    * `server-scope-host.ts`. */
   serverScope?: boolean;
+  /** A heavy package this fixture REPLACES with a stand-in of its own, by
+   * exact specifier (board #335 ③a: Terminal's stream, which needs an
+   * `@xterm/xterm` that records writes). The real package is still never
+   * bundled; every heavy package not named here still fails when used. */
+  standIns?: Record<string, URL>;
 }
 
 /** Compile once, then execute each scenario in a fresh browser-like realm.
@@ -55,6 +60,8 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
           enforce: 'pre',
           async resolveId(source, importer) {
             if (source === entry) return entry;
+            const standIn = compileOptions.standIns?.[source];
+            if (standIn) return fileURLToPath(standIn);
             if (/^(?:katex|mermaid|pdfjs-dist|highlight\.js|@xterm\/[^/]+)(?:\/|$)/u.test(source)) {
               return `\0mount-heavy:${source}`;
             }

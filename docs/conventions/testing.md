@@ -312,6 +312,12 @@ component, not in a general mock framework.
   are excluded at the test-build boundary; bare lazy package imports stay
   deferred. Attempting to use them fails explicitly. Never modify production
   components to make a fixture cheaper.
+- A fixture may REPLACE a heavy package with a stand-in of its own, named by
+  exact specifier (`compileMount(..., { standIns })`). The real package is
+  still never bundled, and the stand-in paints nothing: it records calls.
+  `Terminal.isolation.mount.test.ts` (#335 ③a) is the one user — two real
+  runtimes, a real Terminal bound to each, and `test/xterm-stand-in.ts`
+  recording which terminal each frame reached.
 
 The initial proof is one `Hub.mount.test.ts` characterization: actual card
 clicks select the recipient, defer its menu until 260ms, cancel a pending
