@@ -148,32 +148,33 @@ test('nothing to deploy but the gateway does not answer is a failure', async (t)
   assert.ok(!h.told('now at'), 'and the commit is not reported as running');
 });
 
-// Reviewer P1-A(i), as ruled: confirm before recording. A restart that was
-// accepted and then died records nothing and reports nothing, so the next run
-// deploys again.
-test('a restart that is accepted and then stops answering records nothing', async (t) => {
+// Reviewer P1-A(i) with the orchestrator's 17:15 calibration: the run ends on
+// one check and fails when the gateway does not answer, while the receipt
+// records the ACTIVATION that did happen — so the next same-bytes run
+// re-probes instead of restarting a gateway that activated and then died.
+test('a restart that is accepted and then stops answering fails the run', async (t) => {
   const fresh = await host(t);
   fresh.status = 7;
   assert.equal(await fresh.update(), 7, 'no receipt yet: deploy, then the check fails');
   assert.equal(fresh.restarts(), 1);
   assert.ok(!fresh.told('now at'), fresh.said.join('\n'));
-  assert.ok(fresh.told('NOTHING is recorded'));
-  assert.equal(await fresh.receipt(), null, 'an unconfirmed deploy is not an activation');
+  assert.ok(fresh.told('not a healthy gateway'));
+  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin), 'the activation is recorded');
 
+  assert.equal(await fresh.update(), 7, 'the fault is surfaced again, not restarted away');
+  assert.equal(fresh.restarts(), 0);
   fresh.status = 0;
-  assert.equal(await fresh.update(), 0, 'the same bytes deploy again next time');
-  assert.equal(fresh.restarts(), 1);
-  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin));
+  assert.equal(await fresh.update(), 0);
+  assert.equal(fresh.restarts(), 0, 'and once it answers, these bytes are already deployed');
 
   const moved = await host(t);
   await moved.update();
-  const before = await moved.receipt();
   moved.bytes = 'B';
   moved.status = 7;
   assert.equal(await moved.update(), 7, 'a stale receipt: deploy, then the check fails');
   assert.equal(moved.restarts(), 1);
   assert.ok(!moved.told('now at'), moved.said.join('\n'));
-  assert.deepEqual(await moved.receipt(), before, 'and the old receipt is not advanced');
+  assert.equal((await moved.receipt()).hash, hashFile(moved.bin), 'advanced to what was activated');
 });
 
 // Reviewer P1-A(ii): the service's identity is the binary AND the config root

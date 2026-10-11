@@ -31,15 +31,17 @@
 // the file and a run whose restart FAILED looks, next time, exactly like a run
 // with nothing to do — the build produces the same bytes, "nothing changed",
 // and we would report a commit the gateway never started. So the comparison is
-// against an ACTIVATION RECEIPT: the hash of the binary a restart deployed AND
-// the gateway was then seen answering with, written last of all. A missing,
-// stale or mismatched receipt means deploy — the direction that retries rather
-// than the one that skips.
+// against an ACTIVATION RECEIPT: the hash a successful `gateway restart`
+// accepted, written only after it returned (and it returns only once our
+// instance answers). A missing, stale or mismatched receipt means deploy — the
+// direction that retries rather than the one that skips.
 //
-// Confirm, then record, then report, in that order and on BOTH paths: the
-// script's job is to leave the gateway confirmed answering, so a restart that
-// was accepted and then died records nothing and reports nothing (the
-// orchestrator's ruling on reviewer P1-A(i), 2026-10-11).
+// A receipt is an activation, NOT a health claim. Both paths — deployed now,
+// or deployed earlier — end on ONE check of whether this machine's gateway
+// answers as ours, and a run that cannot confirm that exits non-zero and
+// reports no commit, however much it did (reviewer P1-A(i)). A later run on
+// the same bytes then re-probes instead of blindly restarting a gateway that
+// activated and died (settled on #343, 2026-10-11 17:15).
 //
 // The receipt lives beside the binary it describes (`.tmm-gateway-deployed
 // .json` in `target/release`, gitignored) and names the whole identity the
@@ -145,9 +147,8 @@ export function receiptPath(tmm) {
   return join(dirname(tmm), RECEIPT_FILE);
 }
 
-/** The hash this binary+service+config root was last ACTIVATED AND CONFIRMED
- * with, or null. Anything unreadable, unparseable or about something else is
- * null: deploy. */
+/** The hash this binary+service+config root was last ACTIVATED with, or null.
+ * Anything unreadable, unparseable or about something else is null: deploy. */
 export function deployedHash(tmm, service, home) {
   try {
     const r = JSON.parse(readFileSync(receiptPath(tmm), 'utf8'));
@@ -237,26 +238,30 @@ export async function gatewayUpdate({
       return code;
     }
     restarted = true;
+    try {
+      // The receipt records the ACTIVATION, which has happened: restart
+      // returned only once our instance answered. It is not a health claim —
+      // the check below is — and writing it here is what stops a later
+      // same-bytes run from blindly restarting a gateway that activated and
+      // then died; that run takes the no-op branch and surfaces the fault.
+      // (The orchestrator settled this against recording after the check:
+      // #343, 2026-10-11 17:15.)
+      writeReceipt(tmm, service, home, want, commit);
+    } catch (error) {
+      warn(`[gateway:update] the restart succeeded but the receipt could not be written (${error.message}) — the next run will restart again`);
+    }
   }
 
-  // ONE confirmation for both paths, read after everything this run did, and
-  // BEFORE anything is recorded or reported: success is the gateway answering
-  // as ours. `restart` waiting for Ours is its own success, not this script's
-  // (reviewer P1-A(i)) — so a deploy that was accepted and then died records
-  // no receipt, reports no commit, and the next run deploys again.
+  // ONE confirmation for both paths, read after everything this run did:
+  // success is the gateway answering as ours. `restart` waiting for Ours is
+  // its own success, not this script's (reviewer P1-A(i)) — so a deploy that
+  // was accepted and then died exits non-zero and reports no commit.
   const state = await run(tmm, ['gateway', 'status']);
   if (state !== 0) {
     warn(restarted
-      ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer — see the status above. NOTHING is recorded as deployed; fix the service (tmm gateway, or docs/reference/install.md) and run this again.'
+      ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer now — see the status above. The activation is recorded, not a healthy gateway; fix the service (tmm gateway, or docs/reference/install.md) and run this again.'
       : '[gateway:update] nothing needed deploying, but this machine\'s gateway does not answer — see the status above. Nothing was restarted; fix the service (tmm gateway, or the runbook in docs/reference/install.md) and run this again.');
     return state;
-  }
-  if (restarted) {
-    try {
-      writeReceipt(tmm, service, home, want, commit);
-    } catch (error) {
-      warn(`[gateway:update] deployed, but the receipt could not be written (${error.message}) — the next run will restart again`);
-    }
   }
   if (commit) log(`[gateway:update] now at ${commit}`);
   return 0;
