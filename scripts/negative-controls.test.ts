@@ -39,7 +39,7 @@ test('a guarded break bites, an unguarded one does not, and the file is restored
   assert.match(lines[0]!, /^BITES  add subtracts\n {7}not ok 1 - adds/u);
   assert.equal(lines[1], '*** NO BITE *** name changes', 'an unguarded break is the finding');
   assert.equal(lines[2], 'SKIP (anchor missing) anchor gone');
-  assert.equal(lines.at(-1), 'tree restored: the whole worktree is as it was before the run');
+  assert.equal(lines.at(-1), 'tree clean: the whole worktree is as committed, before and after the run');
   assert.equal(await readFile(join(dir, 'lib.mjs'), 'utf8'), original);
 });
 
@@ -113,7 +113,58 @@ test('a test that writes into the tree fails the whole-tree check', async (t) =>
       cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['litter.test.mjs'],
       cases: [['lib.mjs', 'anything', '"lib"', '"x"']],
     });
-    assert.match(lines.at(-1)!, /^\*\*\* TREE CHANGED during the run \*\*\*[\s\S]*stray\.txt/u);
+    assert.match(lines.at(-1)!, /^\*\*\* TREE NOT CLEAN after the run \*\*\*[\s\S]*stray\.txt/u);
+    assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = before; }
+});
+
+test('a break that compiles and fails every test is BITES, flagged for a human, not BROKE BUILD (reviewer P2-a on a05a996e)', async (t) => {
+  const { dir, git } = await repo(t);
+  await writeFile(join(dir, 'lib.test.mjs'),
+    "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add } from './lib.mjs';\n"
+    + "test('adds', () => assert.equal(add(2, 3), 5));\ntest('adds again', () => assert.equal(add(1, 1), 2));\n");
+  git('add', '.'); git('commit', '-q', '-m', 'two');
+  const lines = await negativeControls({
+    cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['lib.test.mjs'],
+    cases: [['lib.mjs', 'subtracts', 'a + b', 'a - b']],
+  });
+  assert.match(lines[0]!, /^BITES  subtracts \(every test failed, 2 — read them/u);
+});
+
+test('it refuses to start on ANY dirty path, tracked or untracked, named or not (reviewer P2-b on a05a996e)', async (t) => {
+  const { dir, git } = await repo(t);
+  await writeFile(join(dir, 'other.mjs'), 'export const x = 1;\n');
+  git('add', '.'); git('commit', '-q', '-m', 'other');
+  const before = process.exitCode;
+  try {
+    for (const [path, text] of [['other.mjs', 'export const x = 2;\n'], ['untracked.txt', 'x']] as const) {
+      await writeFile(join(dir, path), text);
+      const lines = await negativeControls({
+        cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['lib.test.mjs'],
+        cases: [['lib.mjs', 'x', 'a + b', 'a - b']],
+      });
+      assert.match(lines[0]!, /^refusing to run: the worktree is not clean/u, path);
+      assert.equal(await readFile(join(dir, path), 'utf8'), text, 'and leaves it alone');
+      git('checkout', '--', '.'); git('clean', '-fdq');
+    }
+  } finally { process.exitCode = before; }
+});
+
+test('a test that edits a tracked file the spec does not name fails the end check', async (t) => {
+  // The case the status-text comparison missed: the edit leaves the same
+  // " M" line it would have had if the file were dirty before.
+  const { dir, git } = await repo(t);
+  await writeFile(join(dir, 'other.mjs'), 'export const x = 1;\n');
+  await writeFile(join(dir, 'edit.test.mjs'),
+    "import test from 'node:test';\nimport { writeFileSync } from 'node:fs';\ntest('edits', () => writeFileSync('other.mjs', 'export const x = 9;\\n'));\n");
+  git('add', '.'); git('commit', '-q', '-m', 'edit');
+  const before = process.exitCode;
+  try {
+    const lines = await negativeControls({
+      cwd: dir, log: () => {}, files: ['lib.mjs'], tests: ['edit.test.mjs'],
+      cases: [['lib.mjs', 'anything', '"lib"', '"x"']],
+    });
+    assert.match(lines.at(-1)!, /^\*\*\* TREE NOT CLEAN after the run \*\*\*[\s\S]*other\.mjs/u);
     assert.equal(process.exitCode, 1);
   } finally { process.exitCode = before; }
 });

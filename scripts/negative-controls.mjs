@@ -11,11 +11,15 @@
 //
 // Five verdicts, because only one of them is evidence (validator and
 // reviewer P2s, 2026-10-10):
-//   BITES        a test failed, and every test file still LOADED;
+//   BITES        a test failed, and every test file still LOADED — even when
+//                every test of several failed: a small file guarding one rule can fail
+//                whole from a break that compiles (reviewer and validator
+//                P2s on a05a996e), so that is flagged for a human to read,
+//                never called a build failure;
 //   NO BITE      the tests ran and none failed — the finding;
 //   BROKE BUILD  the replacement stopped a test FILE from loading (a parse or
-//                import error), or failed every test there is: that is the
-//                break failing to compile, not a test noticing it;
+//                import error), as node reports it: the break failing to
+//                compile, not a test noticing it;
 //   ERROR        the run itself failed — a timeout, a crash, no TAP, or no
 //                tests at all — so nothing can be concluded;
 //   SKIP         the anchor was not found.
@@ -28,10 +32,14 @@
 // once with the rest of a worktree (#335 ②b, 2026-10-10). So:
 //   - restore with `git checkout --`: the baseline is the committed blob, not
 //     something this process is holding;
-//   - refuse to START on a dirty file: a crash's leftovers cannot pass for the
-//     baseline;
-//   - restore on exit however we exit, and verify the tree is clean before
-//     reporting success;
+//   - refuse to START unless the WHOLE worktree is clean — tracked and
+//     untracked, not only the named files (reviewer P2-b on a05a996e): a
+//     crash's leftovers cannot pass for the baseline, and a clean start is
+//     what lets the end check be "still clean" rather than "the status text
+//     did not change", which misses a dirty file edited again. Specs and
+//     reports live in gitignored `temp/`;
+//   - restore on exit however we exit, and verify the whole tree is clean
+//     before reporting success;
 //   - ignore EPIPE on stdout, so a truncated pipe cannot kill the run.
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
@@ -59,18 +67,15 @@ const run = promisify(execFile);
 export async function negativeControls({ files, tests, cases, prelude = {}, cwd = process.cwd(), report, log = console.log, timeoutMs = 600_000 }) {
   if (!process.stdout.listenerCount('error')) process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
   const git = (...args) => run('git', args, { cwd }).then((r) => r.stdout);
-  const dirty = async () => (await git('status', '--porcelain', '--', ...files)).trim();
   const lines = [];
   const say = (text) => { lines.push(text); log(text); };
 
-  const before = await dirty();
-  // The WHOLE worktree as it stands now — untracked specs and all — so the end
-  // check can say "nothing changed anywhere", not only "the named files are
-  // back": a test that writes into the tree is a leftover too.
+  // The WHOLE worktree, untracked files included: it must be clean to start,
+  // and clean again at the end.
   const tree = async () => (await git('status', '--porcelain', '--untracked-files=all')).trim();
-  const treeBefore = before ? '' : await tree();
+  const before = await tree();
   if (before) {
-    say(`refusing to run: these files already differ from HEAD\n${before}\ncommit or restore them first — otherwise the baseline is unknown.`);
+    say(`refusing to run: the worktree is not clean\n${before}\ncommit, stash or remove these first (specs belong in gitignored temp/) — otherwise the baseline is unknown.`);
     process.exitCode = 1;
     return lines;
   }
@@ -115,12 +120,10 @@ export async function negativeControls({ files, tests, cases, prelude = {}, cwd 
     process.off('exit', restore);
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGPIPE']) process.off(sig, onSignal);
   }
-  const after = await dirty();
-  const treeAfter = await tree();
-  if (after) say(`*** TREE NOT RESTORED ***\n${after}`);
-  else if (treeAfter !== treeBefore) say(`*** TREE CHANGED during the run ***\nbefore:\n${treeBefore || '(clean)'}\nafter:\n${treeAfter || '(clean)'}`);
-  else say('tree restored: the whole worktree is as it was before the run');
-  if (after || treeAfter !== treeBefore) process.exitCode = 1;
+  const after = await tree();
+  if (after) say(`*** TREE NOT CLEAN after the run ***\n${after}`);
+  else say('tree clean: the whole worktree is as committed, before and after the run');
+  if (after) process.exitCode = 1;
   if (report) await writeFile(join(cwd, report), lines.join('\n') + '\n');
   return lines;
 }
@@ -140,6 +143,8 @@ function verdict(name, out, crash, tests) {
   const isFile = (l) => { const title = l.replace(/^(?:not )?ok \d+ - /u, ''); return files.some((f) => title === f || title.endsWith(`/${f}`)); };
   if (failed.some(isFile)) return `*** BROKE BUILD *** ${name}: a test file did not load${list}`;
   if (out.split('\n').some((l) => /^ok \d+ - /u.test(l) && isFile(l))) return `*** ERROR *** ${name}: no tests ran in a test file${list}`;
-  if (total > 1 && failed.length >= total) return `*** BROKE BUILD *** ${name}: every test failed (${total}), which a break that compiles does not do${list}`;
+  // One test failing is "every test" only by arithmetic; the flag is for a
+  // file of several that all fell together.
+  if (total > 1 && failed.length >= total) return `BITES  ${name} (every test failed, ${total} — read them: is it this rule?)${list}`;
   return failed.length ? `BITES  ${name}${list}` : `*** NO BITE *** ${name}`;
 }

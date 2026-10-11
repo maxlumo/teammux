@@ -114,29 +114,45 @@ test('the identity modules have exactly the production consumers this commit giv
   }
 });
 
-test('only App constructs a runtime or binds a scope', async () => {
+/** Who may do which (reviewer P2-b on b1-3): CONSTRUCTING a runtime, a fleet,
+ * a scope swap, a store or a server state is App's alone; BINDING a scope is
+ * the provider's alone. One allowlist for both let the provider construct. */
+const CONSTRUCT = /\b(createServerRuntime|createSingleRuntime|createServerFleet|createScopeSwap|createServerStore|createServerState)\(/u;
+const BIND = /\bsetServerScope\(/u;
+const MAY_CONSTRUCT = new Set(['src/App.svelte', 'src/lib/test/server-scope-host.ts']);
+const MAY_BIND = new Set(['src/lib/app/ServerScope.svelte', 'src/lib/test/server-scope-host.ts']);
+/** The violations in one file. */
+function hostRights(path: string, text: string): string[] {
+  const src = code(text);
+  const out: string[] = [];
+  if (!MAY_CONSTRUCT.has(path) && CONSTRUCT.test(src)) out.push(`${path} constructs`);
+  if (!MAY_BIND.has(path) && BIND.test(src)) out.push(`${path} binds a scope`);
+  return out;
+}
+
+test('only App constructs a runtime or a state, and only the provider binds a scope', async () => {
   // The importer table above says who may SEE the identity modules; this says
   // who may MAKE what they describe (②b-1-3). A runtime or a scope built
   // anywhere but the one host is a second answer to "which server is this
   // subtree on", and every page under it would believe it.
-  const constructors = /\b(createServerRuntime|createSingleRuntime|createServerFleet|createScopeSwap|createServerStore|createServerState|setServerScope)\(/u;
-  const allowed = new Set([
-    'src/App.svelte',
-    // The provider: it binds the runtime App hands it, and makes none.
-    'src/lib/app/ServerScope.svelte',
-    // The mount harness's stand-in for that provider (②b-2-1): test-only.
-    'src/lib/test/server-scope-host.ts',
-  ]);
   const found: string[] = [];
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     const path = file.replaceAll('\\', '/');
     if (/\.(test|fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     // The modules that define them.
     if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-state|server-context)\.ts$/u.test(path)) continue;
-    if (allowed.has(path)) continue;
-    if (constructors.test(code(await readFile(file, 'utf8')))) found.push(path);
+    found.push(...hostRights(path, await readFile(file, 'utf8')));
   }
-  assert.deepEqual(found, [], `these construct a runtime or bind a scope themselves:\n  ${found.join('\n  ')}`);
+  assert.deepEqual(found, [], `these act outside their right:\n  ${found.join('\n  ')}`);
+});
+
+test('the rights rule catches the provider constructing and App binding on its own', () => {
+  // Its own negative controls: once the importer table widens in b3, this
+  // rule is the only thing that stands between the provider and a runtime.
+  assert.deepEqual(hostRights('src/lib/app/ServerScope.svelte', 'setServerScope({ runtime, state });'), []);
+  assert.deepEqual(hostRights('src/lib/app/ServerScope.svelte', 'const rt = createServerRuntime(entry, deps);'), ['src/lib/app/ServerScope.svelte constructs']);
+  assert.deepEqual(hostRights('src/App.svelte', 'setServerScope({ runtime, state });'), ['src/App.svelte binds a scope']);
+  assert.deepEqual(hostRights('src/lib/hub/Hub.svelte', 'createServerState(store); setServerScope(x);'), ['src/lib/hub/Hub.svelte constructs', 'src/lib/hub/Hub.svelte binds a scope']);
 });
 
 test('a union list takes each action s runtime from its row, never from its context', async () => {

@@ -19,6 +19,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { glob } from 'node:fs/promises';
+import { parse } from 'svelte/compiler';
 
 const read = (name: string) => readFile(new URL(`./${name}`, import.meta.url), 'utf8');
 /** Code only: a rule about imports must not trip over a comment naming one. */
@@ -60,23 +61,15 @@ test('the context is read at component init and nowhere else', async () => {
   // script (②b-1-3): not inside a handler, an effect or an async function,
   // and not twice — a second read is a second chance to see a different
   // server, and `useServerRuntime()` already gives both the id and the api.
+  // Decided on the parsed script, not on lines (reviewer P2-a on b1-3): two
+  // reads on one line are two reads, and `const later = () => useServerApi()`
+  // starts like an init and reads in a handler.
   for await (const file of glob('src/**/*.svelte')) {
     const text = await readFile(file, 'utf8');
     if (!/\buseServer(Api|Id|Runtime|Scope)\b/u.test(text)) continue;
-    const script = /<script(?![^>]*\bmodule\b)[^>]*>([\s\S]*?)<\/script>/u.exec(text)?.[1] ?? '';
-    const calls = code(script).split('\n').filter((line) => /\buseServer(Api|Id|Runtime|Scope)\(/u.test(line));
     // A test consumer exists to observe both answers, so it may read twice.
-    if (!/\.test\.[a-z]+\.svelte$/u.test(file)) {
-      assert.ok(calls.length <= 1, `${file}: ${calls.length} context reads — read it once, into one local const`);
-    }
-    for (const line of calls) {
-      // An init read is an assignment at the script's top level, so it is not
-      // indented inside a function, an effect or a block.
-      assert.match(line, /^\s{0,2}(const|let) /u,
-        `${file}: "${line.trim()}" — read the context once at init into a local const`);
-    }
-    assert.doesNotMatch(/<script[^>]*\bmodule\b[^>]*>([\s\S]*?)<\/script>/u.exec(text)?.[1] ?? '', /\buseServer(Api|Id|Runtime|Scope)\(/u,
-      `${file}: a module script is not a component instance — it has no context to read`);
+    const problems = contextReads(text, { once: !/\.test\.[a-z]+\.svelte$/u.test(file) });
+    assert.deepEqual(problems, [], `${file}: ${problems.join('; ')}`);
   }
   // And nothing that is not a component reads it: a `.ts` / `.svelte.ts`
   // module has no init, so a read there either throws or — called from a
@@ -87,4 +80,69 @@ test('the context is read at component init and nowhere else', async () => {
     assert.doesNotMatch(code(await readFile(file, 'utf8')), /\buseServer(Api|Id|Runtime|Scope)\(/u,
       `${path} reads the server context outside a component; take an explicit api or serverId instead`);
   }
+});
+
+/** What is wrong with a component's context reads: each must be the whole
+ * initializer of a top-level declaration of the instance script, and (with
+ * `once`) there is at most one. A module script reads none. */
+function contextReads(source: string, { once }: { once: boolean }): string[] {
+  const ast = parse(source, { modern: true }) as unknown as {
+    instance?: { content: { body: Node[] } }; module?: { content: Node };
+  };
+  type Node = { type: string; [key: string]: unknown };
+  const isRead = (n: Node) => n.type === 'CallExpression'
+    && (n.callee as Node)?.type === 'Identifier' && /^useServer(Api|Id|Runtime|Scope)$/u.test(String((n.callee as Node).name));
+  const calls = (root: unknown): Node[] => {
+    const out: Node[] = [];
+    const walk = (n: unknown) => {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      const node = n as Node;
+      if (typeof node.type === 'string' && isRead(node)) out.push(node);
+      for (const [k, v] of Object.entries(node)) if (k !== 'parent' && k !== 'loc') walk(v);
+    };
+    walk(root);
+    return out;
+  };
+  const problems: string[] = [];
+  if (ast.module && calls(ast.module.content).length) problems.push('a module script has no context to read');
+  const body = ast.instance?.content.body ?? [];
+  const all = calls(body);
+  const atInit = new Set<Node>();
+  for (const stmt of body) {
+    if (stmt.type !== 'VariableDeclaration') continue;
+    for (const d of stmt.declarations as Node[]) {
+      let init = d.init as Node | null;
+      // `useServerScope().state`, `useServerScope()?.state ?? null`,
+      // `useServerApi() as Api`: still the read itself, at init.
+      for (;;) {
+        if (init && (init.type === 'TSAsExpression' || init.type === 'TSNonNullExpression')) init = init.expression as Node;
+        else if (init && init.type === 'MemberExpression') init = init.object as Node;
+        else if (init && init.type === 'ChainExpression') init = init.expression as Node;
+        else if (init && init.type === 'LogicalExpression') init = init.left as Node;
+        else break;
+      }
+      if (init && isRead(init)) atInit.add(init);
+    }
+  }
+  for (const c of all) if (!atInit.has(c)) problems.push(`useServer…() read outside a top-level declaration (offset ${String(c.start)})`);
+  if (once && all.length > 1) problems.push(`${all.length} context reads — read it once, into one local const`);
+  return problems;
+}
+
+test('the init-read rule reads the script, not its lines (reviewer P2-a on b1-3)', () => {
+  const wrap = (body: string) => `<script lang="ts">\n${body}\n</script>`;
+  assert.deepEqual(contextReads(wrap('const api = useServerApi();'), { once: true }), [], 'the one legitimate shape');
+  assert.deepEqual(contextReads(wrap('const scope = useServerScope() as Scope;'), { once: true }), [], 'with a type assertion');
+  assert.deepEqual(contextReads(wrap('const { prefs } = useServerScope().state;'), { once: true }), [], 'a member of the read');
+  assert.deepEqual(contextReads(wrap('const of = useServerScope()?.state?.of ?? null;'), { once: true }), [], 'an optional chain with a default');
+  assert.ok(contextReads(wrap('const x = ready ?? useServerApi();'), { once: true }).length, 'but not a read on the RIGHT of a default');
+  assert.ok(contextReads(wrap('const api = useServerApi(); const rt = useServerRuntime();'), { once: true }).some((p) => /2 context reads/u.test(p)),
+    'two reads on ONE line are two reads');
+  assert.ok(contextReads(wrap('const later = () => useServerApi();'), { once: true }).some((p) => /outside a top-level/u.test(p)),
+    'a deferred read that starts like an init is not one');
+  assert.ok(contextReads(wrap('function onClick() { const api = useServerApi(); }'), { once: true }).length, 'a handler');
+  assert.ok(contextReads(wrap('$effect(() => { useServerScope(); });'), { once: true }).length, 'an effect');
+  assert.ok(contextReads(wrap('const { api } = { api: useServerApi() };'), { once: true }).length, 'nested in an initializer');
+  assert.ok(contextReads('<script module>\nconst api = useServerApi();\n</script>', { once: true }).length, 'a module script');
 });

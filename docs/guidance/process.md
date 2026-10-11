@@ -19,6 +19,8 @@
    `scripts/negative-controls.mjs` runs a list of such breaks against the
    committed tree and restores it from git, never from memory (an earlier
    scratch version once left a mutated file to be committed; #335 ②a-4).
+   It starts only on a clean worktree and checks it is still clean at the
+   end, so keep specs in gitignored `temp/` (#335 ②b).
 4. **Documentation and code share a commit:** behavior changes update the
    design document's Rules and their reasons. Record decision, reason,
    date and triggering incident or measurement.
