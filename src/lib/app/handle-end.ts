@@ -5,7 +5,7 @@
 // suspend and await every download it started — and that has to be OVER
 // before the handle is disposed: work the state started must finish or stop
 // while its owner still exists. Before this, three paths disposed first and
-// released later (or never): `revokeScope`, the handover's terminal verdict,
+// released later (or never): the switch's old revoke, the handover's terminal verdict,
 // and the swap's invalidate before it learned to await.
 //
 // So ending is two steps, and they are not the same step:

@@ -122,7 +122,7 @@ test('a revoke and the swap after it end the handle once, after its download set
   const b = w.handle('b');
   await w.swap.swap(a as never);
   const finish = w.downloading(a);
-  void w.ends.end(a);                              // App's revokeScope
+  void w.ends.end(a);                              // an end already started (a fleet drop)
   w.states.set(b, createServerState(localStorage));
   const swapped = w.swap.swap(b as never);         // and the swap that follows
   await flush();

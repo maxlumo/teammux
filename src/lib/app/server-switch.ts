@@ -1,28 +1,28 @@
 // THE server switch (board 315), framework-free so its contract is testable
-// against two fake servers. App wires the effects; this owns the ORDER, the
+// against fake servers. App wires the effects; this owns the ORDER, the
 // one-intent rule and the source/candidate split. No reload: the shell stays,
-// the caller unmounts the server-bound tree when `onstate` reports a switch,
-// and remounts it in `comeUp`. Nothing in memory crosses (the state-ownership
-// table is websocket-client.md §#55).
+// the caller hides the server-bound tree while `onstate` reports a switch.
+// Nothing in memory crosses (the state-ownership table is
+// websocket-client.md §#55).
 //
-// Order, each step finished before the next:
+// Order, each step finished before the next (board #335 ②b-4; orchestrator's
+// ruling 2026-10-11 04:04, order (a)):
 //   1. leave guards (unsaved editors ask in their own dialogs; a save or
 //      delete in flight finishes first) — a cancel changes nothing at all;
-//   2. one intent: the reconnect loop stops, the content tree unmounts
-//      (onstate), every older async loses ownership (`owns(intent)`);
-//   3. running downloads are suspended (part kept) and awaited, and the tree's
-//      unmount persistence runs (afterUnmount) — into the leaving server's own
-//      slots, where its state lives (board #335 ②b-4: nothing is parked);
-//   4. the socket closes, the in-memory per-server state resets;
-//   5. connect to the target WITHOUT touching the mirror keys or CURRENT
-//      (a reload mid-switch boots the server we left — honest);
-//   6. only after auth: record by the identity the server reported, point
-//      CURRENT at that canonical entry, write the mirror, come up.
-// A failure keeps `from` (its identity) frozen: Retry and Back reuse it, and
-// the source's state, in its own slots, is never touched by a half-switched
-// world.
+//   2. one intent: the reconnect loop stops, the content tree hides
+//      (onstate), every older async loses ownership (`owns(intent)`). The
+//      server being left is NOT ended: its runtime, its socket and its
+//      downloads keep running, each server has a connection of its own;
+//   3. dial the target as a CANDIDATE, without touching CURRENT;
+//   4. only after auth: record by the identity the server reported, point
+//      CURRENT at that canonical entry, then `comeUp` — the target's OWN
+//      runtime dials and is bound, and only then is the server left ended
+//      (the swap releases its state, then disposes it).
+// A failure at any step leaves the server left INTACT: CURRENT goes back to
+// it, `from` (its identity) stays frozen for Retry and Back, and its state,
+// in its own slots, was never touched.
 
-import { activateSwitched, type ServerEntry } from './servers.ts';
+import { activateSwitched, restoreCurrent, type ServerEntry } from './servers.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -46,10 +46,8 @@ export interface SwitchDeps {
   currentName(): string;
   /** Ask every leave guard; false = stay. */
   confirmLeave(): Promise<boolean>;
-  /** Take the socket from every other owner the host knows — the connect
-   * form, a reconnect attempt, an arrival waiting on its leave walk (board
-   * #335 ②b-2-3, reviewer P1 on 085b0e70): ONE owner counter for every
-   * socket change, and the answer to "is this still mine". */
+  /** Claim the app's activation (app/activation.ts): an address connect
+   * makes every older attempt stale, and loses to a later one. */
   claim(): { current(): boolean };
   /** Is the socket's owner frozen — CURRENT must not move (the boot
    * migration is blocked, board #335 ②b-4)? Then no switch and no address
@@ -61,27 +59,25 @@ export interface SwitchDeps {
    * for a host with no migration. */
   identityFailed?(target: SwitchTarget): void;
   stopReconnect(): void;
-  /** Is the reconnect loop running? A walk freezes it, and a "stay" starts
-   * it again. */
-  reconnecting(): boolean;
-  /** Start the reconnect loop for the CURRENT server (it reads the mirror). */
+  /** Start the CURRENT server's reconnect loop. */
   startReconnect(): void;
-  /** The switch state changed: non-null = the content tree must be unmounted. */
+  /** The switch state changed: non-null = the content tree must be hidden. */
   onstate(state: SwitchState | null): void;
-  suspendDownloads(): Promise<void>;
-  /** Resolves once the unmounted tree's teardown has run. */
-  afterUnmount(): Promise<void>;
+  /** The candidate's teardown: a failed or abandoned switch closes it. */
   disconnect(): void;
-  resetMemory(): void;
-  /** Dial the switch's TARGET (board #335 ②b-4: a candidate of its own). */
+  /** Dial the switch's TARGET as a candidate of its own (board #335 ②b-4). */
   connect(address: string, token: string): Promise<unknown>;
-  /** Dial another address of the CURRENT server, on its own connection
-   * (`connectAddress`). Defaults to `connect`. */
-  redial?(address: string, token: string): Promise<unknown>;
   setSocket(socket: string): Promise<unknown>;
   machineId(): string;
-  /** Authenticated and activated: remount and bring the app up. */
-  comeUp(target: SwitchTarget, entry: ServerEntry): void;
+  /** Another address of the CURRENT server, dialled by its OWN runtime and
+   * checked against its identity (reviewer P1-A on cc45d7d1): 'up' when it
+   * answered as this server, 'handled' when it answered as another one and
+   * the host took that over; a rejection is a dial that got nowhere. */
+  redial(address: string): Promise<'up' | 'handled'>;
+  /** Authenticated and activated: the target's OWN runtime dials and the app
+   * comes up on it. Resolves null once it is bound, or the reason it is not;
+   * the server left is ended only on success. */
+  comeUp(target: SwitchTarget, entry: ServerEntry): Promise<string | null>;
   /** Another address of the CURRENT server answered (connectAddress). */
   addressUp(address: string): void;
 }
@@ -89,12 +85,13 @@ export interface SwitchDeps {
 export function createServerSwitch(d: SwitchDeps) {
   let seq = 0;
   /** A leave walk is open — this module's own or the host's (the connect
-   * form, an arrival elsewhere): while it asks, nothing may take the socket
-   * and no second walk opens. */
+   * form, an arrival elsewhere). ONE QUESTION AT A TIME: no switch, no
+   * address change and no automatic dial starts while the person is being
+   * asked, and an optimizer probe begun before it is not current after it.
+   * That is all a walk does: it takes no socket and stops no loop — every
+   * server has its own connection (board #335 ②b-4; orchestrator 04:03). */
   let guarding = false;
-  /** The address connect in flight, if any: a walk freezes it, and puts its
-   * outcome back on a stay. */
-  let addressing: { address: string; dialled: Promise<'up' | 'failed'> } | null = null;
+  let idleWaiters: (() => void)[] = [];
   let state: SwitchState | null = null;
   const set = (next: SwitchState | null) => { state = next; d.onstate(next); };
 
@@ -102,22 +99,13 @@ export function createServerSwitch(d: SwitchDeps) {
     if (state?.phase === 'connecting' || guarding || d.frozen()) return; // one intent at a time
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
-    if (fromConnected) {
-      if (!(await guard(() => d.confirmLeave()))) return;
-      // The walk froze the reconnect loop and took the socket's owner; the
-      // switch takes it from here.
-    }
+    if (fromConnected && !(await guard(() => d.confirmLeave()))) return;
     const intent = ++seq;
     d.stopReconnect();
     const from = fromConnected ? { id: d.currentId(), name: d.currentName() } : state?.from ?? null;
+    const left = d.currentId();
     set({ intent, from, target, phase: 'connecting', error: '' });
-    if (fromConnected && from) {
-      await d.suspendDownloads();
-      await d.afterUnmount();
-    }
-    if (intent !== seq) return;
-    d.disconnect();
-    d.resetMemory();
+    let moved = false;
     try {
       await d.connect(target.address, target.token);
       if (intent !== seq) return;
@@ -129,12 +117,22 @@ export function createServerSwitch(d: SwitchDeps) {
         ...(target.socket ? { socket: target.socket } : {}),
         ...(mid ? { machineId: mid } : {}),
       });
-      set(null);
-      d.comeUp(target, entry);
+      moved = true;
+      const failure = await d.comeUp(target, entry);
+      if (intent !== seq) return;
+      if (failure === null) { set(null); return; }
+      throw new Error(failure);
     } catch (e) {
       if (intent !== seq) return;
       d.disconnect();
       d.identityFailed?.(target);
+      // The target's own runtime did not come up: CURRENT goes back to the
+      // server left, which is still running (ruling (a)) — unless the
+      // migration is blocked, when CURRENT and the registry are frozen and
+      // the gate owns what happens next.
+      if (moved && left && !d.frozen()) {
+        try { restoreCurrent(d.storage, left); } catch { d.identityFailed?.(target); }
+      }
       // The host's gate blocked the migration (reviewer P1 on af59fb5d): it
       // OWNS the outcome now — its Retry, the target it kept — and a failed
       // panel here would cover that Retry with one the freeze refuses.
@@ -144,100 +142,57 @@ export function createServerSwitch(d: SwitchDeps) {
   }
 
   /**
-   * Move the CURRENT server's socket to another of its addresses (the
-   * Connection page's address rows, the periodic optimizer). The same machine,
-   * so nothing parks or resets; but it is a socket owner like a switch, so it
-   * takes its own intent (board 315 review P1): a switch that starts while
-   * this one dials makes it stale, and a stale attempt neither publishes its
-   * result nor restarts the reconnect loop — that loop reads the mirror and
-   * would dial the server the user just left, over the new server's socket.
-   * Resolves true when the address answered and is now the connection.
+   * Move the CURRENT server to another of its addresses (the Connection
+   * page's address rows, the periodic optimizer). Its OWN runtime dials it
+   * and checks the answer is still this server (reviewer P1-A on cc45d7d1);
+   * it claims the app's activation, so an attempt the host was waiting on is
+   * stale, and a later one makes this stale. A stale attempt neither
+   * publishes nor restarts the reconnect loop. Resolves true when the
+   * address answered as this server.
    */
-  function connectAddress(address: string, token: string): Promise<boolean> {
+  function connectAddress(address: string): Promise<boolean> {
     if (state || guarding || d.frozen()) return Promise.resolve(false);
     const intent = ++seq;
-    // It changes the socket, so it takes it from the host's other owners
-    // too (reviewer P1 on 085b0e70): an attempt the host was waiting on
-    // wakes to find it is not the owner any more, and does nothing. And the
-    // reverse: an owner that takes the socket after this — a leave walk
-    // among them — makes this attempt stale.
     const owner = d.claim();
     const mine = () => intent === seq && !state && owner.current();
     d.stopReconnect();
-    d.disconnect();
-    // What the dial DID, whoever owns it by then: a walk that froze this
-    // attempt and then stays puts its outcome back (`guard`).
-    const dialled = (d.redial ?? d.connect)(address, token).then(() => 'up' as const, () => 'failed' as const);
-    const pending = { address, dialled };
-    addressing = pending;
-    return dialled.then((how) => {
-      if (addressing === pending) addressing = null;
-      if (!mine()) return false;
-      if (how === 'up') { d.addressUp(address); return true; }
-      d.startReconnect();
-      return false;
-    });
+    return d.redial(address).then(
+      (how) => {
+        if (!mine() || how === 'handled') return false;
+        d.addressUp(address);
+        return true;
+      },
+      () => {
+        if (mine()) d.startReconnect();
+        return false;
+      },
+    );
   }
 
-  /**
-   * Run a leave walk as the socket's OWNER (board #335 ②b-2-3, reviewer P1
-   * on 4fbce02e), so nothing — started before it or during it — acts on the
-   * socket while the dialog is open:
-   *
-   *   - ONE WALK AT A TIME. A second request while one asks is refused, and
-   *     a refusal is a stay: its callback never runs.
-   *   - EVERYTHING ALREADY RUNNING LOSES THE SOCKET. The reconnect loop is
-   *     stopped — its timers, its probe, the dial it has out — and the walk
-   *     claims the host's owner counter, so every attempt that checks it (a
-   *     reconnect continuation, a boot dial, an address connect, the connect
-   *     form's older attempt) wakes to find it is not the owner and does
-   *     nothing: it publishes nothing, starts no loop and opens no arrival.
-   *     This module's intent moves too, so an optimizer probe begun before
-   *     the walk does nothing when it answers, during the walk or after it.
-   *   - A STAY PUTS BACK WHAT IT FROZE, once the walk has answered and only
-   *     if nobody took the socket meanwhile: an address connect it froze has
-   *     its outcome applied (published, or handed to the reconnect loop), or
-   *     else a reconnect loop that was running starts again. An accept
-   *     leaves the socket to whoever is leaving.
-   *
-   * `own` is the owner the caller ALREADY holds: an arrival elsewhere runs
-   * its walk under the attempt that reached the other machine, and claiming
-   * again would make that very attempt stale. Everything older than it is
-   * stale already (one counter), and the reconnect loop that produced it is
-   * idle; a stay there is the caller's to carry out.
-   */
-  async function guard(walk: () => Promise<boolean>, own?: { current(): boolean }): Promise<boolean> {
+  /** Run a leave walk: one at a time, and a refused one is a stay — its
+   * callback never runs. */
+  async function guard(walk: () => Promise<boolean>): Promise<boolean> {
     if (guarding) return false;
     guarding = true;
-    try {
-      seq++;
-      if (own) return await walk();
-      const frozen = addressing;
-      addressing = null;
-      const wasReconnecting = d.reconnecting();
-      d.stopReconnect();
-      const owner = d.claim();
-      const untouched = () => owner.current() && !state;
-      let leave = false;
-      try { leave = await walk(); }
-      finally {
-        if (!leave && untouched()) {
-          if (frozen) {
-            const how = await frozen.dialled;
-            if (untouched()) { if (how === 'up') d.addressUp(frozen.address); else d.startReconnect(); }
-          } else if (wasReconnecting) d.startReconnect();
-        }
-      }
-      return leave;
-    } finally { guarding = false; }
+    seq++;
+    try { return await walk(); } finally {
+      guarding = false;
+      const waiting = idleWaiters;
+      idleWaiters = [];
+      for (const go of waiting) go();
+    }
+  }
+  /** Resolves once no walk is asking. */
+  function idle(): Promise<void> {
+    return guarding ? new Promise<void>((go) => { idleWaiters.push(go); }) : Promise.resolve();
   }
 
   return {
     switchTo,
     connectAddress,
     guard,
-    /** Is a leave walk asking right now? Then nothing automatic may take the
-     * socket: not a reconnect, not the address optimizer. */
+    idle,
+    /** Is a leave walk asking right now? */
     get guarding() { return guarding; },
     get state() { return state; },
     /** The current intent: an async begun under it compares on resolve. */

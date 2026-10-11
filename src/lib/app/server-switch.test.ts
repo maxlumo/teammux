@@ -94,8 +94,10 @@ function app(storage = mem({
   const reconnects: string[] = [];
   const published: string[] = [];
   const handovers = createActivations();
-  let looping = false;
   let frozen = false;
+  /** What the TARGET's own runtime bring-up answers (App's `activate`):
+   * null once it is up, or why not. */
+  let bringUp: () => Promise<string | null> = async () => null;
   let gate: (target: SwitchTarget) => void = () => {};
   const sw = createServerSwitch({
     storage,
@@ -106,26 +108,29 @@ function app(storage = mem({
     claim: () => handovers.claim(),
     frozen: () => frozen,
     identityFailed: (target) => { gate(target); },
-    stopReconnect: () => { reconnects.push('stop'); looping = false; },
-    reconnecting: () => looping,
-    startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); looping = true; },
+    stopReconnect: () => { reconnects.push('stop'); },
+    startReconnect: () => { reconnects.push(`start ${currentServerId(storage)}`); },
     addressUp: (addr) => { published.push(addr); },
     onstate: (st) => { states.push(st); if (st) { connected = false; mounted = false; } },
-    suspendDownloads: async () => { for (const s of suspenders) await s(); },
-    afterUnmount: async () => { for (const f of unmountWrites.splice(0)) f(); },
-    disconnect: () => w.disconnect(),
-    resetMemory: () => { resets.push('reset'); },
+    // The candidate: in this world one socket stands for "what the switch
+    // dialled", the server's own runtimes are App's (App.shell covers them).
+    disconnect: () => { resets.push('candidate-closed'); },
     connect: (addr) => w.connect(addr),
     setSocket: async () => {},
     machineId: () => w.machineId(),
-    comeUp: () => { connected = true; mounted = true; },
+    redial: (addr) => w.connect(addr).then(() => 'up' as const),
+    comeUp: async () => {
+      resets.push(`come-up ${currentServerId(storage)}`);
+      const failure = await bringUp();
+      if (failure === null) { connected = true; mounted = true; }
+      return failure;
+    },
   });
-  const suspenders: (() => Promise<void>)[] = [];
   /** What a page writes and reads: the server it is bound to, its slots. */
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, unmountWrites, resets, suspenders, reconnects, published,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -134,9 +139,9 @@ test.beforeEach(() => clearLeaveGuardsForTests());
 test('A→B→A with a same-named project keeps each server’s state (board 315)', async () => {
   const t = app();
   const [a, b] = [t.slot(t.a.id), t.slot(t.b.id)];
-  // The Hub writes its draft on unmount — into A's slot, the server it is
-  // bound to; nothing is parked (board #335 ②b-4).
-  t.unmountWrites.push(() => a.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on A, last keystroke' })));
+  // The Hub's drafts live in A's slot, the server it is bound to; nothing is
+  // parked (board #335 ②b-4).
+  a.setItem('tmux_hub_drafts', JSON.stringify({ app: 'draft on A, last keystroke' }));
   await t.sw.switchTo(t.b);
   assert.equal(t.w.at, 'ws://b:2');
   assert.equal(currentServerId(t.storage), t.b.id);
@@ -173,48 +178,6 @@ test('acceptance: B fails twice → Back to A, A’s page, drafts and terminal t
   assert.equal(t.slot(t.a.id).getItem('tmux_hub_drafts'), JSON.stringify({ app: 'draft on A' }));
 });
 
-test('a delayed read started on A never lands in B’s world', async () => {
-  const t = app();
-  const slow = t.w.hold('fs_list');
-  let landed: string | null = null;
-  const consumer = slow.promise.then((v) => { landed = v; }, () => { landed = 'rejected'; });
-  const intent = t.sw.intent;
-  await t.sw.switchTo(t.b);
-  slow.release(); // A's answer, after B is up
-  await consumer;
-  assert.equal(landed, 'rejected', 'the socket switch rejected A’s pending read');
-  assert.equal(t.sw.owns(intent), false, 'and an App-level async from before the switch is not current');
-});
-
-test('a running download is suspended, keeps its part, and never re-signs after the abort', async () => {
-  const t = app();
-  const signed: string[] = [];
-  const ctrl = new AbortController();
-  let kept: boolean | null = null;
-  const sink: DownloadSink = {
-    async open() { return { received: 0, etag: null }; },
-    async reset() {}, async write() {}, async flush() {},
-  };
-  // The link dropped once; the attempt is waiting out its retry delay when
-  // the switch arrives. Its next step would be a re-sign of the /dl URL.
-  let wake!: () => void;
-  const waiting = new Promise<void>((r) => { wake = r; });
-  let inSleep!: () => void;
-  const sleeping = new Promise<void>((r) => { inSleep = r; });
-  const attempt = download({
-    url: 'http://a/dl?sig=1', sink, signal: ctrl.signal,
-    fetch: (async () => { throw new Error('network down'); }) as never,
-    sleep: async () => { inSleep(); await waiting; },
-    freshUrl: async () => { signed.push(await t.w.call('fs_download_http')); return 'http://x'; },
-  }).catch((e) => { kept = !!(e?.cancelled && e.keepPart); });
-  await sleeping;
-  t.suspenders.push(async () => { ctrl.abort(SUSPEND); wake(); await attempt; });
-  await t.sw.switchTo(t.b);
-  assert.equal(kept, true, 'stopped as a suspend: the part is kept for a resume on A');
-  assert.deepEqual(signed, [], 'no re-sign went out after the abort');
-  assert.ok(!t.w.log.some((l) => l.startsWith('m-b:fs_download')), 'B was never asked for A’s file');
-});
-
 test('a dirty editor’s cancel leaves A connected and every key untouched', async () => {
   const t = app();
   const snapshot = t.everything();
@@ -226,7 +189,7 @@ test('a dirty editor’s cancel leaves A connected and every key untouched', asy
   assert.equal(t.sw.state, null);
   assert.equal(t.w.at, 'ws://a:1');
   assert.ok(t.connected && t.mounted);
-  assert.equal(t.resets.length, 0, 'nothing was reset');
+  assert.deepEqual(t.resets, [], 'nothing was dialled, nothing came up');
   assert.equal(t.everything(), snapshot, 'no slot and no legacy key moved');
 });
 
@@ -267,7 +230,7 @@ test('an address connect of A still dialing when a switch to B starts neither re
     if (addr === 'ws://a-ts:9') { await gate; throw new Error('disconnected'); }
     return real(addr);
   };
-  const tap = t.sw.connectAddress('ws://a-ts:9', 'ta');
+  const tap = t.sw.connectAddress('ws://a-ts:9');
   await new Promise((r) => setTimeout(r, 0));
   // Meanwhile the user picks B.
   await t.sw.switchTo(t.b);
@@ -284,9 +247,9 @@ test('an address connect of A still dialing when a switch to B starts neither re
 test('an address connect that fails on its own (no switch) still hands over to the reconnect loop', async () => {
   const t = app();
   t.w.fail('ws://a:1', 1);
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), false);
-  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), ['start ws://a:1']);
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), true);
+  assert.equal(await t.sw.connectAddress('ws://a:1'), false);
+  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), [`start ${t.a.id}`]);
+  assert.equal(await t.sw.connectAddress('ws://a:1'), true);
   assert.deepEqual(t.published, ['ws://a:1']);
 });
 
@@ -296,7 +259,7 @@ test('an address connect takes the socket from the host s other owners, and lose
   // makes it stale, so when the dialog answers it does nothing.
   const t = app();
   const waiting = t.handovers.claim();
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), true);
+  assert.equal(await t.sw.connectAddress('ws://a:1'), true);
   assert.equal(waiting.current(), false, 'the earlier owner is stale');
 
   // And the reverse: an owner that takes the socket while this one dials.
@@ -304,7 +267,7 @@ test('an address connect takes the socket from the host s other owners, and lose
   const gate = new Promise<void>((r) => { release = r; });
   const real = t.w.connect.bind(t.w);
   (t.w as { connect: (a: string) => Promise<void> }).connect = async (addr: string) => { await gate; return real(addr); };
-  const tap = t.sw.connectAddress('ws://a-ts:9', 'ta');
+  const tap = t.sw.connectAddress('ws://a-ts:9');
   await new Promise((r) => setTimeout(r, 0));
   t.handovers.claim();                         // the connect form, say
   release();
@@ -312,19 +275,28 @@ test('an address connect takes the socket from the host s other owners, and lose
   assert.deepEqual(t.published, ['ws://a:1'], 'and published nothing');
 });
 
-test('while a host leave walk asks, no address connect and no switch starts', async () => {
+test('while a host leave walk asks, nothing starts on top of it — and nothing is frozen either (board #335 ②b-4)', async () => {
+  // One question at a time: no switch and no address change start while the
+  // person is being asked. The walk stops no reconnect loop and takes no
+  // socket — every server has its own connection.
   const t = app();
   let answer!: (v: boolean) => void;
   const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(t.sw.guarding, true);
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), false, 'the optimizer or an address row is refused');
+  assert.deepEqual(t.reconnects, [], 'the walk stopped no reconnect loop');
+  assert.equal(await t.sw.connectAddress('ws://a:1'), false, 'no address change on top of the question');
   await t.sw.switchTo(t.b);
-  assert.equal(currentServerId(t.storage), t.a.id, 'and so is a switch');
+  assert.equal(currentServerId(t.storage), t.a.id, 'and no switch');
+  let idle = false;
+  void t.sw.idle().then(() => { idle = true; });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(idle, false, 'what waits for the walk is still waiting');
   answer(true);
   assert.equal(await walk, true);
-  assert.equal(t.sw.guarding, false);
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), true, 'after it, they work again');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(idle, true, 'and goes on once it is answered');
+  assert.equal(await t.sw.connectAddress('ws://a:1'), true, 'after it, they work again');
 });
 
 test('one walk at a time: a second one is refused, and its callback never runs (reviewer P1 on 4fbce02e)', async () => {
@@ -334,68 +306,9 @@ test('one walk at a time: a second one is refused, and its callback never runs (
   await new Promise((r) => setTimeout(r, 0));
   let ran = false;
   assert.equal(await t.sw.guard(async () => { ran = true; return true; }), false, 'refused: a stay');
-  assert.equal(await t.sw.guard(async () => { ran = true; return true; }, { current: () => true }), false, 'with an owner of its own too');
   assert.equal(ran, false, 'the second walk never asked anything');
   answer(false);
   assert.equal(await first, false);
-});
-
-test('a walk takes the socket from everything already running (reviewer P1 on 4fbce02e)', async () => {
-  const t = app();
-  // The reconnect loop is running, and an attempt of the host's holds the
-  // owner — a reconnect continuation, a boot dial.
-  t.loop(true);
-  const earlier = t.handovers.claim();
-  const intent = t.sw.intent;
-  let answer!: (v: boolean) => void;
-  const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(t.reconnects, ['stop'], 'the loop is frozen');
-  assert.equal(earlier.current(), false, 'the earlier owner is stale');
-  assert.equal(t.sw.owns(intent), false, 'and an optimizer probe begun before it owns nothing when it answers');
-  answer(false);
-  assert.equal(await walk, false);
-  assert.deepEqual(t.reconnects, ['stop', 'start ws://a:1'], 'a stay starts the loop it froze again');
-
-  // An accept leaves it to whoever leaves.
-  t.reconnects.length = 0;
-  t.loop(true);
-  assert.equal(await t.sw.guard(async () => true), true);
-  assert.deepEqual(t.reconnects, ['stop']);
-});
-
-test('a walk freezes an address connect already dialling; a stay puts its outcome back, an accept does not (reviewer P1 on 4fbce02e)', async () => {
-  for (const stay of [true, false]) {
-    const t = app();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    const real = t.w.connect.bind(t.w);
-    (t.w as { connect: (a: string) => Promise<void> }).connect = async (addr: string) => { await gate; return real(addr); };
-    const tap = t.sw.connectAddress('ws://a:1', 'ta');
-    await new Promise((r) => setTimeout(r, 0));
-    let answer!: (v: boolean) => void;
-    const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
-    await new Promise((r) => setTimeout(r, 0));
-    release();                                     // it answers while the dialog is open
-    assert.equal(await tap, false, 'the frozen attempt is not the owner');
-    assert.deepEqual(t.published, [], 'and publishes nothing under the open dialog');
-    answer(!stay);
-    await walk;
-    assert.deepEqual(t.published, stay ? ['ws://a:1'] : [], stay ? 'a stay puts its outcome back' : 'an accept leaves the socket to whoever leaves');
-  }
-});
-
-test('a stay puts a FAILED frozen address connect back to the reconnect loop', async () => {
-  const t = app();
-  t.w.fail('ws://a:1', 1);
-  let answer!: (v: boolean) => void;
-  const tap = t.sw.connectAddress('ws://a:1', 'ta');
-  const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
-  assert.equal(await tap, false);
-  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), [], 'no loop under the open dialog');
-  answer(false);
-  await walk;
-  assert.deepEqual(t.reconnects.filter((r) => r.startsWith('start')), ['start ws://a:1']);
 });
 
 test('frozen: no switch and no address connect starts (board #335 ②b-4)', async () => {
@@ -404,7 +317,7 @@ test('frozen: no switch and no address connect starts (board #335 ②b-4)', asyn
   await t.sw.switchTo(t.b);
   assert.equal(currentServerId(t.storage), t.a.id);
   assert.equal(t.w.at, 'ws://a:1');
-  assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), false);
+  assert.equal(await t.sw.connectAddress('ws://a:1'), false);
   t.freeze(false);
   await t.sw.switchTo(t.b);
   assert.equal(currentServerId(t.storage), t.b.id, 'thawed, it works');
@@ -424,4 +337,31 @@ test('a failure the host gate classifies as blocked is the host s: no failed pan
   t.w.fail('ws://b:2', 1);
   await t.sw.switchTo(t.b);
   assert.equal((t.sw.state as SwitchState | null)?.phase, 'failed');
+});
+
+test('B s own bring-up failing puts CURRENT back on A, which was never ended (ruling (a), 04:04)', async () => {
+  // The candidate reached B and recorded it, so CURRENT moved; B's OWN
+  // runtime then could not come up. A was not reset, not released, not
+  // ended: CURRENT returns to it, the panel offers Back, and Back is A again.
+  const t = app();
+  t.onBringUp(async () => 'B s own dial failed');
+  await t.sw.switchTo(t.b);
+  assert.deepEqual(t.resets, [`come-up ${t.b.id}`, 'candidate-closed'], 'B was activated, its own bring-up failed, the candidate closed');
+  assert.equal(t.sw.state?.phase, 'failed');
+  assert.equal(t.sw.state?.error, 'B s own dial failed');
+  assert.equal(currentServerId(t.storage), t.a.id, 'CURRENT is A s again');
+  t.onBringUp(async () => null);
+  await t.sw.back(loadServers(t.storage));
+  assert.equal(t.sw.state, null);
+  assert.equal(currentServerId(t.storage), t.a.id);
+  assert.ok(t.connected && t.mounted, 'A is up');
+});
+
+test('the switch gives nothing of A up before B is up: no reset step runs ahead of the bring-up (ruling (a))', async () => {
+  const t = app();
+  let current = '';
+  t.onBringUp(async () => { current = currentServerId(t.storage); return null; });
+  await t.sw.switchTo(t.b);
+  assert.equal(current, t.b.id, 'B is CURRENT when its own runtime comes up');
+  assert.deepEqual(t.resets, [`come-up ${t.b.id}`], 'and that is the first thing the switch asks the host to do');
 });

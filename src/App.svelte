@@ -42,7 +42,7 @@
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
-  import { activateConnected, adoptHostname, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
+  import { activateConnected, adoptHostname, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -166,6 +166,7 @@
       // slot that now serves another server. On a borrowed slot that ends
       // the handle and leaves the connection to the facade; b3-4 routes it
       // through the fleet's drop, where it ends the connection too.
+      if (gone) forgetReconnector(gone);
       if (gone && fleet.get(gone.id) === gone) fleet.drop(gone.id);
       await ends.end(gone);
     },
@@ -221,7 +222,8 @@
     fleet.reconcile();
     const stale = entry && fleet.get(entry.id);
     if (stale && (!stale.alive() || ends.ending(stale) || stale === held)) fleet.drop(entry.id);
-    if (held && fleet.get(held.id) === held) fleet.drop(held.id);
+    // The runtime the tree is bound to stays in the fleet, running, until
+    // its replacement is bound (order (a)): the swap's `invalidate` drops it.
     const next = entry ? fleet.include(entry) ?? null : null;
     // Its socket closing is THIS runtime's drop: the reconnect loop takes
     // over only while it is still the one the tree is bound to.
@@ -230,7 +232,10 @@
     // the bare live keys are that server's (board #335 ②b-2-1) — or, when
     // identity repair folded the replaced handle's id into `entry`, the SAME
     // machine's state handed over, attempts in flight and all.
-    if (next) {
+    // A runtime the fleet already holds for this id keeps the state it was
+    // minted with: a later activation reusing it must not swap that state
+    // under the one still dialling (reviewer P1-C on cc45d7d1).
+    if (next && !serverStates.has(next)) {
       const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
       serverStates.set(next, stateForRuntime(replaced, entry.id, {
         survivorOf: (id) => mergedInto(localStorage, id),
@@ -287,33 +292,6 @@
     // P1-a). `bound()` is the confirmed target of the swap in flight, and the
     // shown handle once it has settled.
     return scopeSwap.bound()?.id ?? '';
-  }
-  /** Give up the handle the tree is bound to, BEFORE the shared socket is
-   * re-dialled at another server (reviewer P1-b, 2026-10-10).
-   *
-   * Every page in the tree holds that handle's api, and through ②b the api is
-   * the facade's one slot: the moment the socket points at B, a call still in
-   * flight from A's tree — or a settled callback that runs in the window
-   * before the new tree mounts — would be A's work sent to B. Detaching first
-   * makes those refuse instead. Clearing the landings after the DOM is gone
-   * (the swap's `invalidate`) is the second line, never the first: it runs
-   * ticks later, and by then the socket has already changed hands.
-   *
-   * This is the SWITCH's revoke, where leaving is already decided: the tree
-   * is unmounted, the leave guards have answered, and the target is by
-   * definition another server. */
-  function revokeScope() {
-    // Every open handover stops being current here: leaving is decided, so an
-    // attempt that comes back afterwards must write no identity and bring
-    // nothing up, whatever it found (reviewer P1, 2026-10-10). A candidate
-    // still out is one of them.
-    activations.endAll();
-    candidateOpen?.close();
-    heldOffline = false;               // the person chose another server
-    // STOPPED now — it refuses every call from here on — and ended once its
-    // server's state is released: the swap that follows waits on that end
-    // before it shows anything (reviewer P1-a on 48b40082).
-    void ends.end(scopeSwap.bound());
   }
   /** The app's activation generation (app/activation.ts): the latest
    * attempt to bring a server up is the only one the app waits on. */
@@ -915,110 +893,119 @@
   let reconnectAttempt = $state(0);   // 1-indexed when visible; 0 means not attempting
   let reconnectClass = $state('');    // LAN / Tailscale / WAN label for the current try
 
-  const reconnectMachine = createReconnectMachine({
-    // The bound runtime's OWN connection (board #335 ②b-4): the loop
-    // reconnects the server the tree is on, nothing else.
-    connect: (address, token, timeout) => live()?.connect(address, token, timeout) ?? Promise.reject(new Error('not connected')),
-    // Each attempt takes the socket through a HANDOVER of its own, the same
-    // one the connect form opens (reviewer P1s, 2026-10-10): the handle
-    // stands down for the attempt, a boot dial or a form still out stops
-    // being the app's, and the attempt in turn stops being the app's the
-    // moment the form opens one. Its verdict settles the same way.
-    attempt: () => activations.claim(),
-    findBestAddress,
-    isAddressViable,
-    noteAddressUnreachable,
-    classifyAddress,
-    addressLabels: ADDRESS_LABELS,
-    // The ONE machine reconnects the CURRENT server (board #335 ②b-2-2); a
-    // machine per runtime would pass its own id here.
-    target: () => targetOf(localStorage, currentServerId(localStorage)),
-    maxAttempts: RECONNECT_MAX_ATTEMPTS,
-    watchdogMs: RECONNECT_WATCHDOG_MS,
-    onStateChange: (st) => {
-      reconnecting = st.reconnecting;
-      reconnectAttempt = st.attempt;
-      reconnectClass = st.label;
-    },
-    onSuccess: (useAddr, primaryAddr, attempt) => onReconnectSuccess(useAddr, primaryAddr, attempt),
-    onGiveUp: () => { connected = false; page = 'settings'; },
-  });
+  /** EACH runtime's reconnect loop (board #335 ②b-4; reviewer P1-A on
+   * cc45d7d1): it dials that runtime's OWN connection through `dial`, so
+   * every answer is checked against that server's identity before anything
+   * trusts it, and it reaches the server by that entry's own route — its
+   * addresses and its token, never a mirror's. A loop whose runtime is not
+   * the one the tree is bound to shows nothing and brings nothing up. */
+  const reconnectors = new Map();
+  const noReconnector = { start: () => false, cancel: () => {}, isActive: () => false };
+  /** The bound runtime's loop (the one the shell's reconnect UI shows). */
+  function reconnect() {
+    const runtime = bound();
+    return runtime ? reconnectorOf(runtime) : noReconnector;
+  }
+  function reconnectorOf(runtime) {
+    let machine = reconnectors.get(runtime);
+    if (machine) return machine;
+    let claim = null;
+    let last = null;
+    machine = createReconnectMachine({
+      // Not while the person is being asked something: the dial waits for the
+      // walk to answer, and an attempt someone took over meanwhile is
+      // nobody's (one question at a time; it freezes no socket).
+      connect: (address, _token, timeoutMs) => serverSwitch.idle().then(() => {
+        if (!claim?.current()) throw new Error('superseded');
+        return runtime.dial(() => claim?.current() ?? false, { via: address, timeoutMs });
+      }).then(
+        (result) => {
+          last = result;
+          if (result.ok || result.reason === 'elsewhere') return;
+          throw result.error ?? new Error(result.reason);
+        },
+        // An identity record that failed: the dial closed that socket, and
+        // it is not a reachability failure to retry — it is reported.
+        () => { last = { ok: false, reason: 'unrecorded' }; },
+      ),
+      attempt: () => (claim = activations.claim()),
+      findBestAddress,
+      isAddressViable,
+      noteAddressUnreachable,
+      classifyAddress,
+      addressLabels: ADDRESS_LABELS,
+      target: () => targetOf(localStorage, runtime.id),
+      maxAttempts: RECONNECT_MAX_ATTEMPTS,
+      watchdogMs: RECONNECT_WATCHDOG_MS,
+      onStateChange: (st) => {
+        if (bound() !== runtime) return;
+        reconnecting = st.reconnecting;
+        reconnectAttempt = st.attempt;
+        reconnectClass = st.label;
+      },
+      onSuccess: (_useAddr, _primaryAddr, attempt) => onReconnected(runtime, last, attempt),
+      onGiveUp: () => { if (bound() === runtime) { connected = false; page = 'settings'; } },
+    });
+    reconnectors.set(runtime, machine);
+    return machine;
+  }
+  /** A runtime is over: its loop stops with it. */
+  function forgetReconnector(runtime) {
+    reconnectors.get(runtime)?.cancel();
+    reconnectors.delete(runtime);
+  }
 
+  /** The bound runtime's socket closed under it. */
   function onDrop() {
-    if (switching) return; // the switch owns the socket now
-    // A leave walk is asking about this socket, or the person chose to stay
-    // offline: an automatic reconnect would take the socket under them.
-    // Nor while the migration is blocked: nothing may move CURRENT.
-    if (serverSwitch.guarding || heldOffline || migrationBlocked) return;
+    if (switching) return; // the switch is bringing another server up
+    // The person chose to stay offline, or the migration is blocked:
+    // nothing automatic dials.
+    if (heldOffline || migrationBlocked) return;
     // Keep connected=true during reconnect to avoid UI flicker
-    reconnectMachine.start();
+    reconnect().start();
   }
 
   function cancelReconnect() {
-    reconnectMachine.cancel();
+    reconnect().cancel();
     connected = false;
     live()?.disconnect();
     page = 'settings';
   }
 
-  function onReconnectSuccess(useAddr, primaryAddr, attempt) {
-    // An attempt already out when the migration blocked records nothing.
-    if (migrationBlocked) { live()?.disconnect(); connected = false; return; }
-    // WHO answered decides what this success means, and the identity layer
-    // is the one that knows (reviewer P1-b on 372cb4af): the entry
-    // `recordServer` returns for the machine that answered. "CURRENT did not
-    // move" is not that answer — a known A whose address now reaches known B
-    // keeps both entries and CURRENT on A.
-    const held = scopeSwap.bound();
-    const mid = live()?.getMachineId() || '';
-    let canonical;
-    try {
-      ({ entry: canonical } = recordServer(localStorage, {
-        address: useAddr, token: localStorage.getItem('tmux_token') || '',
-        ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
-        ...(mid ? { machineId: mid } : {}),
-      }));
-    } catch {
+  /** A reconnect attempt of `runtime` answered. Its OWN dial already decided
+   * who that was and recorded it (reviewer P1-A on cc45d7d1): a different
+   * machine closed that socket before anything here ran, so no call of this
+   * server's could reach it. */
+  function onReconnected(runtime, result, attempt) {
+    // (Still bound, if possibly detached: an alias identity repair just
+    // absorbed is detached by its own dial, and the arrival below is what
+    // brings its survivor up.)
+    if (bound() !== runtime) return;
+    // An attempt already out when the migration blocked brings nothing up.
+    if (migrationBlocked) { runtime.connection.disconnect(); connected = false; return; }
+    if (!result?.ok && result?.reason === 'unrecorded') {
       // A peer authenticated and we could not establish which server it is.
-      // That is never "the same server": the handle keeps refusing (hold),
-      // and the person is told, exactly as the connect form does.
+      // That is never "the same server": its socket is closed, and the
+      // person is told, exactly as the connect form does.
       reconnectError = t('configIdentityFailed');
-      live()?.disconnect();
       storageFailed();
       connected = false;
       page = 'settings';
       return;
     }
     reconnectError = '';
-    loadServerRegistry(); // the entry's active address moved
-    // Another known machine answered, and both entries stay: the socket is
-    // B's. The app ARRIVES at B the way the boot and the connect page do —
-    // after A's editors have been asked — and never resumes A's api over B's
-    // socket.
-    if (held && currentServerId(localStorage) !== canonical.id && mergedInto(localStorage, held.id) !== canonical.id) {
-      void arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '', attempt);
-      return;
-    }
+    loadServerRegistry(); // the entry's active address may have moved
+    // Another machine answered, or identity repair absorbed this entry into
+    // its machine's survivor: the app ARRIVES where the dial landed, through
+    // THAT server's own runtime — never by resuming this one over it.
+    if (!result?.ok) { void arrivedElsewhere(result, attempt); return; }
     connected = true;
-    serverInfo = { hostname: live()?.getHostname() || '', machineId: mid };
-    // Keep the registry entry's active address fresh (board #55): failover
-    // just proved a different address of the SAME machine.
-    if (useAddr !== primaryAddr) { localStorage.setItem('tmux_address', useAddr); activeAddress = useAddr; }
-    // The handle's own server (same id) resumes. Otherwise this is the entry
-    // it was folded into: a failover can be the connect that first learns
-    // this machine's id, and then `recordServer` absorbs the entry we were on
-    // into the machine's survivor. CURRENT moved, so the tree's handle and
-    // every reference the app holds have to follow it (reviewer P1,
-    // 2026-10-10) — and the swap below does that WITHOUT a verdict: it ends
-    // every handover and ends the handle itself, after the replacement has
-    // ADOPTED its state. A verdict here would end it first, while nothing had
-    // adopted it, and release the state the survivor is about to take over.
-    // A no-op whenever the id did not move, which is the ordinary failover.
-    swapScope();
-    void keepNavFor(scopeSwap.bound());
+    serverInfo = { hostname: runtime.hostname(), machineId: runtime.machineId() };
+    activeAddress = runtime.entry().address;
+    void keepNavFor(runtime);
     resubscribeAll();
     serverReady();
-    // Tell Terminal to reset stale resize state + re-fit against the new server.
+    // Tell Terminal to reset stale resize state + re-fit against the server.
     announceReconnected();
   }
 
@@ -1079,33 +1066,68 @@
    * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
    * was taken under: if someone else took it anyway, this arrival is not
    * the app's any more and does nothing. */
-  async function arrivedElsewhere(result, addr, token, attempt) {
-    if (migrationBlocked) { live()?.disconnect(); connected = false; return; }
-    if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
+  async function arrivedElsewhere(result, attempt) {
+    if (migrationBlocked) { connected = false; return; }
+    // Someone took over since the dial (a newer connect, a switch): this
+    // arrival is not the app's any more, the alias case included.
     if (!attempt.current()) return;
+    // Identity repair absorbed the entry we were on into the machine's
+    // survivor, and CURRENT already names it: the SAME machine. Its own
+    // runtime dials before anything comes up on it (reviewer P1-B on
+    // cc45d7d1), keeping the tree until it is up — the survivor adopts the
+    // replaced handle's Files record.
+    if (currentServerId(localStorage) === result.entry.id) {
+      activate({ replace: false, up: () => { bringUp(); resubscribeAll(); } });
+      return;
+    }
+    // Another question is already open (a form's walk): this arrival asks
+    // nothing on top of it and changes nothing — the person's answer there
+    // decides what happens next.
+    if (serverSwitch.guarding) { connected = false; return; }
     let leave = false;
     try {
-      // Under the attempt's OWN ownership: claiming again would make it stale.
-      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }), attempt);
+      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
     } catch { leave = false; }
     if (!attempt.current()) return;
     if (!leave) {
-      live()?.disconnect();
       connected = false;
       heldOffline = true;
       reconnectError = t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
       page = 'settings';
       return;
     }
+    const left = currentServerId(localStorage);
     try {
+      const entry = result.entry;
       const act = activateConnected(localStorage, {
-        address: addr, token,
-        ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
+        address: entry.address, token: entry.token,
+        ...(entry.socket ? { socket: entry.socket } : {}),
         ...(result.machineId ? { machineId: result.machineId } : {}),
       });
-      if (act.reload) { onConnected(true); return; }
-      bringUp(addr, token);
+      const run = act.reload ? arriveAt(left) : activate({ replace: false, up: () => { bringUp(); resubscribeAll(); } });
+      void run.done;
     } catch { page = 'settings'; storageFailed(); }
+  }
+
+  /** Come up on ANOTHER server, CURRENT already pointing at it: its own
+   * runtime dials and is bound before the server left is ended (ruling (a),
+   * 04:04), and if it does not come up CURRENT goes back to `left`, which is
+   * still running. */
+  function arriveAt(left, elsewhere = 'arrive') {
+    serverSwitch.supersede();
+    const run = activate({ replace: true, elsewhere, up: () => { bringUp(); resubscribeAll(); } });
+    // Back to the server left, which is still the one bound — unless the
+    // migration froze CURRENT, or something else has been bound since.
+    const back = () => {
+      if (!left || migrationBlocked || bound()?.id !== left || currentServerId(localStorage) === left) return;
+      try { restoreCurrent(localStorage, left); } catch { storageFailed(); return; }
+      loadServerRegistry();
+    };
+    run.done.then((failure) => { if (failure) back(); });
+    // A cancel puts CURRENT back only while this is still the app's latest
+    // activation: one a newer bring-up (an arrival, a switch) has replaced
+    // is that one's to conclude (reviewer P1-C on cc45d7d1).
+    return { done: run.done, current: run.current, cancel: () => { const mine = run.current(); run.cancel(); if (mine) back(); } };
   }
 
   /** The connect page reached a server, and recorded which one. `switched`:
@@ -1116,83 +1138,21 @@
    *
    * The form dialled its own CANDIDATE and has closed it (board #335 ②b-4):
    * what answered there proved nothing about the server's own connection,
-   * which dials now, and ITS handshake is the identity of record
-   * (orchestrator's addendum, 01:46): a dial that reaches another machine
-   * arrives there the way a boot dial does (`arrivedElsewhere`), never as
-   * the server the candidate found. No page is mounted on a runtime before
-   * it has dialled: a new runtime is shown only once its own socket is up,
-   * and for another server the tree it replaces is unmounted first, so
-   * neither side's pages ever talk to the other's server. */
+   * which dials now, and ITS handshake is the identity of record. Returns the
+   * activation, so the form stays busy through this second handshake, shows
+   * its failure, and can cancel it (reviewer P1-D on cc45d7d1). */
   function onConnected(switched = false) {
-    reconnectMachine.cancel();
-    if (switched) {
-      serverSwitch.supersede();
-      resetServerMemory();
-      centreSurface.reset();          // the bell and a jump aimed at the server left
-    }
+    // The server the app was on — the one the tree is bound to — is what a
+    // failed bring-up returns to (ruling (a)).
+    const left = bound()?.id ?? '';
+    reconnect().cancel();
     localStorage.removeItem('tmux_disconnected');
-    activeAddress = localStorage.getItem('tmux_address') || '';
     loadServerRegistry();
-    dialCurrent(switched, (result) => {
-      bringUp(result.entry?.address ?? activeAddress, result.entry?.token ?? (localStorage.getItem('tmux_token') || ''));
-      resubscribeAll();
-    });
-  }
-
-  /** Bring the app up on CURRENT through its OWN runtime's dial (board #335
-   * ②b-4): mint it, claim the app's activation, dial, and only if that dial
-   * is still the latest show it. `switched`: another server — the old tree
-   * comes down first, and `up` brings the new one up. Otherwise the same
-   * server (a reconnect, a first connect): it keeps or rebinds its handle. */
-  /** End a runtime minted for a dial that will not be shown: out of the
-   * fleet, through the host's end. */
-  function endMinted(runtime) {
-    if (fleet.get(runtime.id) === runtime) fleet.drop(runtime.id);
-    else void ends.end(runtime);
-  }
-  function dialCurrent(switched, up) {
-    const minted = mintCurrent();
-    const runtime = minted.runtime;
-    // Claimed AFTER the mint, which ends every older attempt: this dial is
-    // the app's latest activation, and a late answer from one superseded
-    // after it is a no-op.
-    const owner = activations.claim();
-    if (!runtime) {
-      // Nothing to bind — the migration is blocked: the gate's panel shows,
-      // on a page that is not the connect card (board #335 ②b-4).
-      if (!minted.keep) void scopeSwap.swap(null);
-      // Retry brings it up through the boot dial, which dials the runtime
-      // the block stopped before its own dial.
-      if (migrationBlocked) { page = defaultPage(); connected = false; }
-      return;
-    }
-    // Another server: the tree comes down before its runtime dials, so no
-    // page of the server left is mounted while the next one answers. The
-    // SAME machine under a merged id keeps its tree until the replacement is
-    // up — the replacement adopted its Files record, and unbinding first
-    // would release that record (and its downloads) as if the server had
-    // changed.
-    if (!minted.keep && switched) void scopeSwap.swap(null);
-    runtime.dial(owner.current).then((result) => {
-      if (!owner.current()) { if (!minted.keep) endMinted(runtime); return; }
-      if (!result.ok) {
-        if (!minted.keep) endMinted(runtime);
-        if (result.reason === 'elsewhere') { void arrivedElsewhere(result, result.entry.address, result.entry.token, owner); return; }
-        if (result.reason === 'superseded') return;
-        connected = false;
-        page = 'settings';
-        return;
-      }
-      if (!minted.keep) void scopeSwap.swap(runtime);
-      if (switched) { up(result); return; }
+    if (switched) return arriveAt(left);
+    return activate({ replace: false, up: () => {
       connected = true;
       serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '' };
-      // A first-ever connect is where this client's registry entry comes
-      // from, so it is also where the content tree first has a server to be
-      // bound to (board #335 ②b-1). A plain reconnect to the server it is
-      // already bound to keeps its handle and remounts nothing; identity
-      // repair in the dial may still have moved CURRENT, which this follows.
-      swapScope();
+      activeAddress = bound()?.entry().address ?? '';
       void keepNavFor(scopeSwap.bound());
       // The device default (Chat), never a hard-coded Terminal (board #333);
       // a hubless server falls back to Terminal through the redirect above.
@@ -1201,17 +1161,114 @@
       // while Terminals stay mounted across the disconnect and keep their
       // refcounts — so their subscribe() calls will never re-send the wire
       // message themselves. Without this, the terminal shows a frozen
-      // snapshot until a full reload. Mirrors onReconnectSuccess; on a
-      // first-ever connect both are no-ops.
+      // snapshot until a full reload. On a first-ever connect a no-op.
       resubscribeAll();
       serverReady();
       announceReconnected();
+    } });
+  }
+
+  /** Runtimes minted for an activation and not shown yet, and the activation
+   * that owns each (reviewer P1-C on cc45d7d1). A later activation that
+   * reuses the same runtime TAKES it over, so the earlier one's cleanup can
+   * never end what the later one is dialling or has shown. */
+  const provisional = new Map();
+  /** A bring-up the migration gate stopped before its runtime dialled: Retry
+   * dials it (`retryMigration`). */
+  let owedActivation = false;
+  /** Let go of a runtime this activation minted and did not show — only if
+   * it still owns it. */
+  function releaseMinted(runtime, owner) {
+    if (provisional.get(runtime) !== owner) return;
+    provisional.delete(runtime);
+    if (scopeSwap.bound() === runtime) return;
+    forgetReconnector(runtime);
+    if (fleet.get(runtime.id) === runtime) fleet.drop(runtime.id);
+    else void ends.end(runtime);
+  }
+
+  /**
+   * Bring CURRENT up through its OWN runtime (board #335 ②b-4): mint it,
+   * claim the app's activation, DIAL its connection, and only if that dial is
+   * still the latest and answered as this server, bind it and run `up`.
+   * Every way the app comes up on a server goes through here — the boot, the
+   * connect form, a switch, an arrival elsewhere, a merge (reviewer P1-B on
+   * cc45d7d1): nothing is bound to a runtime whose connection has not
+   * authenticated.
+   *
+   *   `replace`   another server: the server left stays as it is until this
+   *               one is up, then its navigation resets and the swap ends it
+   *               — release, then dispose (ruling (a), 04:04);
+   *   `elsewhere` what to do if this dial reaches ANOTHER machine: 'arrive'
+   *               there (its handshake is the identity of record), or 'fail'.
+   *
+   * Returns `{ done, cancel }`: `done` resolves null once `up` has run, or
+   * the reason it did not (a superseded activation resolves null and does
+   * nothing); `cancel` makes this activation stale if it still is the latest.
+   */
+  function activate({ replace = false, elsewhere = 'arrive', up, minted = null }) {
+    const m = minted ?? mintCurrent();
+    const runtime = m.runtime;
+    // Claimed AFTER the mint, whose endAll makes every older attempt stale:
+    // this one is the latest from here (reviewer P1-C — never the reverse).
+    const owner = activations.claim();
+    // A cancel ends the attempt AND lets go of the runtime it minted, now:
+    // its dial may never answer, and a connection nobody waits on must not
+    // stay open (reviewer P1-D on cc45d7d1). A runtime another activation
+    // has since reused is not this one's to end (`releaseMinted`).
+    const cancel = () => { if (owner.current()) activations.endAll(); if (runtime) releaseMinted(runtime, owner); };
+    if (!runtime) {
+      // Nothing to bind — the migration is blocked: the gate's panel shows,
+      // on a page that is not the connect card (board #335 ②b-4), and Retry
+      // owes this activation its dial.
+      if (!m.keep) void scopeSwap.swap(null);
+      if (migrationBlocked) { page = defaultPage(); connected = false; owedActivation = true; }
+      return { done: Promise.resolve(migrationBlocked ? t('migrationBlockedNote') : t('configIdentityFailed')), cancel, current: owner.current };
+    }
+    if (!m.keep) provisional.set(runtime, owner);
+    const done = runtime.dial(owner.current).then((result) => {
+      if (!owner.current()) { releaseMinted(runtime, owner); return null; }
+      if (!result.ok) {
+        releaseMinted(runtime, owner);
+        if (result.reason === 'superseded') return null;
+        if (result.reason === 'elsewhere') {
+          loadServerRegistry();
+          if (elsewhere === 'arrive') { void arrivedElsewhere(result, owner); return null; }
+          return t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
+        }
+        if (!replace) { connected = false; page = 'settings'; }
+        return String(result.error?.message || result.error || result.reason);
+      }
+      provisional.delete(runtime);
+      // Only now is the server left given up (ruling (a)): the swap ends it,
+      // release first — and asks whether this runtime ADOPTED its state
+      // first, so a same-machine merge keeps its downloads. Then the
+      // navigation that named the old server resets (board 315).
+      if (!m.keep) void scopeSwap.swap(runtime);
+      if (replace) {
+        resetServerMemory();
+        centreSurface.reset();          // the bell and a jump aimed at the server left
+      }
+      // The dial may have let the fold claim this server's inputs (it now
+      // knows its machine): that rebuilds its state, and the new runtime it
+      // takes dials first, like any other.
+      const again = mintCurrent();
+      if (!again.keep && again.runtime) {
+        void activate({ replace: false, elsewhere, up, minted: again }).done;
+        return null;
+      }
+      if (!again.runtime) { if (migrationBlocked) page = defaultPage(); return t('migrationBlockedNote'); }
+      up(result);
+      return null;
     }).catch(() => {
-      // The dial resolves every connect failure; what rejects is a write
-      // inside it — the identity record. The host gate classifies it.
-      if (!minted.keep) endMinted(runtime);
+      // The dial resolves every connect failure; what rejects is the
+      // identity record, and the dial has already closed that socket. The
+      // host gate classifies it.
+      releaseMinted(runtime, owner);
       if (owner.current()) { page = 'settings'; storageFailed(); }
+      return t('configIdentityFailed');
     });
+    return { done, cancel, current: owner.current };
   }
 
   function openTerminal(session, target) {
@@ -1253,7 +1310,7 @@
   }
 
   function doDisconnect() {
-    reconnectMachine.cancel();
+    reconnect().cancel();
     live()?.disconnect();
     connected = false;
     page = 'settings';
@@ -1482,10 +1539,10 @@
    * their ws.ts listeners/subscriptions went with the unmount. A source test
    * pins this list against the module-level stores. */
   function resetServerMemory() {
-    // FIRST, and before the shared socket can be re-dialled at the target:
-    // the handle this tree is bound to gives up its lease, so a call in
-    // flight or a settled callback cannot become A's work sent to B.
-    revokeScope();
+    // Not a revoke (board #335 ②b-4): this runs once the next server is up
+    // and bound, and the swap that bound it ends the one left — after the
+    // next one could adopt its state, which a same-machine merge does.
+    heldOffline = false;               // the person chose another server
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
     hoverCard.hide();                   // a card may describe the old server's row
     hubState = { available: false, probed: false };
@@ -1514,32 +1571,20 @@
     currentId: () => serverCurId,
     currentName: () => serverName,
     confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
-    // An address change and a leave walk take the socket from every other
-    // owner (reviewer P1s on 085b0e70 and 4fbce02e): the one owner counter.
+    // An address change claims the app's activation (app/activation.ts).
     claim: () => activations.claim(),
-    reconnecting: () => reconnectMachine.isActive(),
-    stopReconnect: () => reconnectMachine.cancel(),
-    startReconnect: () => { if (!migrationBlocked) reconnectMachine.start(); },
+    stopReconnect: () => reconnect().cancel(),
+    startReconnect: () => { if (!migrationBlocked) reconnect().start(); },
     // While the migration is blocked nothing moves CURRENT (orchestrator,
     // 21:45): no switch, no address connect.
     frozen: () => migrationBlocked,
     identityFailed: storageFailed,
-    addressUp: (address) => {
-      serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '' };
-      // The address that just answered is the server's active one, on its
-      // ENTRY — the one place a reconnect or a reload reads it (board #335
-      // ②b-4 retired the mirror that used to stand in for it).
-      const mid = live()?.getMachineId() || '';
-      if (mid) {
-        try {
-          recordServer(localStorage, {
-            address, token: localStorage.getItem('tmux_token') || '',
-            ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
-            machineId: mid,
-          });
-          loadServerRegistry();
-        } catch { storageFailed(); }      // the entry keeps the address it had
-      }
+    addressUp: () => {
+      // The dial recorded the address on the entry; the shell follows it.
+      const runtime = bound();
+      serverInfo = { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '' };
+      loadServerRegistry();
+      activeAddress = runtime?.entry().address ?? activeAddress;
       resubscribeAll();
       announceReconnected();
     },
@@ -1547,35 +1592,53 @@
       switching = st;
       if (st) { serverMenuOpen = false; connected = false; }
     },
-    // The leaving server's attempts, from ITS record (board #335 ②b-2-1).
-    // The leaving server's state is RELEASED before the socket moves (board
-    // #335 ②b-2-3): new attempts forbidden, running ones suspended, and all
-    // of them settled — not merely asked to stop.
-    suspendDownloads: async () => { const st = serverStates.get(scopeSwap.bound()); if (st) await releaseServerState(st); },
-    afterUnmount: () => tick(),
-    disconnect: () => { switchCandidate?.close(); switchCandidate = null; live()?.disconnect(); },
-    resetMemory: resetServerMemory,
     // A switch dials the target as a CANDIDATE (board #335 ②b-4): its own
     // connection, recorded by machine, closed, and then the target's own
     // runtime dials — the same road the connect form takes.
+    disconnect: () => { switchCandidate?.close(); switchCandidate = null; },
     connect: (address, token) => { switchCandidate = openCandidate(); return switchCandidate.connect(address, token); },
     setSocket: (socket) => switchCandidate?.setSocket(socket) ?? Promise.resolve(),
     machineId: () => switchCandidate?.machineId() || '',
-    // Another address of the CURRENT server: its own runtime's connection.
-    redial: (address, token) => live()?.connect(address, token) ?? Promise.reject(new Error('not connected')),
-    comeUp: (target) => {
+    // Another address of the CURRENT server: its OWN runtime dials it and
+    // checks the answer is still this server (reviewer P1-A on cc45d7d1).
+    redial: (address) => {
+      const runtime = bound();
+      if (!runtime) return Promise.reject(new Error('not connected'));
+      return runtime.dial(() => bound() === runtime, { via: address }).then((result) => {
+        if (result.ok) return 'up';
+        if (result.reason === 'elsewhere') { loadServerRegistry(); void arrivedElsewhere(result, { current: () => bound() === runtime }); return 'handled'; }
+        throw result.error ?? new Error(result.reason);
+      }, () => { storageFailed(); return 'handled'; });
+    },
+    comeUp: () => {
       switchCandidate?.close();
       switchCandidate = null;
-      centreSurface.reset();          // the bell and a jump aimed at the server left
-      activeAddress = target.address;
       loadServerRegistry();
       addrSetVersion++;
-      dialCurrent(true, () => { bringUp(target.address, target.token); resubscribeAll(); });
+      // B's own runtime dials and is bound before A is ended (ruling (a));
+      // the switch puts CURRENT back on A if it does not come up.
+      const run = activate({ replace: true, elsewhere: 'fail', up: () => { bringUp(); resubscribeAll(); } });
+      return run.done;
     },
   });
   // No switch while the fold is unrecorded: there is no server state to
   // arrive with.
   const switchTo = (target) => serverSwitch.switchTo(target);
+  // App's own end (reviewer P2-1 on cc45d7d1): every resource it holds has
+  // an owner here, so nothing outlives the shell — the candidates; every
+  // activation in flight, and with them every runtime's reconnect loop,
+  // whose chain is its attempt's claim (a stale claim yields the loop and
+  // clears its timers); and every runtime in the fleet, the bound one
+  // included (the fleet skips it on purpose, because the swap that replaces
+  // it normally ends it; there is no next swap now).
+  onDestroy(() => {
+    candidateOpen?.close();
+    switchCandidate?.close();
+    activations.endAll();
+    const held = scopeSwap.bound();
+    fleet.dropAll();
+    if (held) void ends.end(held);
+  });
   function switchRetry() { void serverSwitch.retry(); }
   function switchBack() { void serverSwitch.back(loadServers(localStorage)); }
 
@@ -1617,7 +1680,7 @@
     if (migrationBlocked) return;
     const addrs = getAllAddresses();
     if (addrs.length <= 1 || optimizing) return;
-    const current = localStorage.getItem('tmux_address');
+    const current = bound()?.entry().address ?? activeAddress;
     // Only probe addresses that would be a strict UPGRADE over the current
     // class (LAN < Tailscale < WAN). Probing peers/downgrades is pure
     // waste: we'd never switch to them (the check below rejects ≥ current
@@ -1643,11 +1706,10 @@
       if (!best || best === current) return;
       // Only switch if the new address is higher priority (lower class number)
       if (classifyAddress(best) >= curClass) return;
-      localStorage.setItem('tmux_address', best);
-      activeAddress = best;
-      // A failure restarts the reconnect loop (all addresses) — only while
-      // this attempt still owns the socket (connectAddress).
-      await serverSwitch.connectAddress(best, localStorage.getItem('tmux_token') || '');
+      // Its OWN runtime dials it and checks the answer (connectAddress); a
+      // failure restarts the reconnect loop — only while this attempt still
+      // owns the activation.
+      await serverSwitch.connectAddress(best);
     } catch {
       // the probe itself threw: nothing was dialed, nothing to recover
     } finally {
@@ -1751,7 +1813,7 @@
     if (migrationBlocked) return;
     prepareStorage();
     if (!migrationBlocked) return;
-    reconnectMachine.cancel();
+    reconnect().cancel();
     autoConnectAttempted = false;
     // A switch that hit it is the gate's to resume after Retry (reviewer P1
     // on af59fb5d): its target is kept here, and the switch shows nothing.
@@ -1807,26 +1869,29 @@
       deferredLink = null;
       loadServerRegistry();
     }
-    swapScope();
+    // Minted, not shown: a runtime the block stopped before its own dial
+    // dials before anything is bound to it (reviewer P1-B on cc45d7d1).
+    const minted = mintCurrent();
     if (migrationBlocked) return;
     if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
-    const bound = scopeSwap.bound();
-    if (!bound) return;
-    // A bind that blocked stopped this runtime before its own dial (board
-    // #335 ②b-4: a switch's or a form's candidate is closed by then): it
-    // dials now, and the app comes up on what answered.
-    // Only when the boot dial is spent: a re-armed one dials it itself.
-    if (!connected && autoConnectAttempted && !bound.connection.isConnected() && !heldOffline) {
-      dialCurrent(true, (result) => {
-        bringUp(result.entry?.address ?? activeAddress, result.entry?.token ?? (localStorage.getItem('tmux_token') || ''));
-        resubscribeAll();
-      });
+    if (!minted.runtime) return;
+    if (minted.keep && connected) {
+      // The block came mid-session on the server the tree is bound to.
+      void restoreNavFor(minted.runtime);
+      if (minted.runtime.connection.isConnected()) serverReady();
+      else if (!heldOffline) reconnect().start();
       return;
     }
-    if (!connected) return;
-    void restoreNavFor(bound);
-    if (live()?.isConnected()) serverReady();
-    else if (!heldOffline && !reconnectMachine.isActive()) reconnectMachine.start();
+    // Not up yet. Only an ACTIVATION the block stopped before its runtime's
+    // own dial is owed one now (a switch, a connect that had recorded its
+    // server); a form whose own identity write failed is the person's to
+    // connect again, and the boot dial, re-armed by the gate, does its own.
+    if (heldOffline || !owedActivation) return;
+    owedActivation = false;
+    autoConnectAttempted = true;
+    // A NEW runtime replaces whatever the app showed before the block (a
+    // switch's source): its navigation resets once this one is up.
+    void activate({ minted, replace: !minted.keep, up: () => { bringUp(); resubscribeAll(); } }).done;
   }
   /** The boot (board #335 ②b-4): the registry and the inputs' attribution
    * FIRST, then the deep link — a link to B makes B current, and attributing
@@ -1875,37 +1940,15 @@
     linkFeedback.update(attempt, { kind: 'success', message: t('linkCopied') });
   }
 
-  /** Bring the app up against the server the socket just authenticated with:
-   * the boot path's half after `connect` resolves (board 315 shares it with
-   * the in-place switch, so "how the app comes up on a server" is written
-   * once). Records the machine identity onto the current entry, asks the
-   * server what it hosts, and restores that server's navigation. */
-  function bringUp(addr, token) {
+  /** Bring the app up on the server the bound runtime's own dial just
+   * authenticated and recorded (`activate`): ask what it hosts, and restore
+   * its navigation. The identity is the dial's (board #335 ②b-4) — nothing
+   * here reads a mirror or records a second time. */
+  function bringUp() {
+    const runtime = bound();
     connected = true;
-    serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '' };
-    // RECORD the machine identity onto the current registry entry (board
-    // #55): the boot path is how most sessions connect, and without this
-    // stamp an entry never learns its machineId — a later connect to an
-    // alternate address of the SAME machine would then read as a new
-    // server. Record only: the entry booted as current, nothing activates.
-    try {
-      const mid = live()?.getMachineId();
-      // Not while the registry is frozen (a switch that arrived and then
-      // found the migration blocked): the switch has recorded it already.
-      if (mid && !migrationBlocked) {
-        recordServer(localStorage, {
-          address: addr, token,
-          ...(localStorage.getItem('tmux_socket') ? { socket: localStorage.getItem('tmux_socket') } : {}),
-          machineId: mid,
-        });
-      }
-    } catch { storageFailed(); if (migrationBlocked) return; }
-    // Identity repair may have moved CURRENT: `recordServer` absorbs the
-    // machine's twins, and when the entry we booted as is one of the absorbed
-    // the app is now on the survivor. Binding the tree is therefore the last
-    // step of recording identity, not a step of connecting — and it is a
-    // no-op whenever the id did not move (board #335 ②b-1).
-    swapScope();
+    serverInfo = { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '' };
+    activeAddress = runtime?.entry().address ?? activeAddress;
     // Nothing to restore while the fold is unrecorded: the app shows the
     // reason, on a page that is not the connect card (board #335 ②b-4).
     if (migrationBlocked) { page = defaultPage(); return; }
@@ -2004,8 +2047,8 @@
       // Not while a leave walk asks about the socket, and not after the
       // person chose to stay offline (reviewer P2 on 085b0e70).
       if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline || migrationBlocked) return;
-      if (!live()?.isConnected() && !reconnectMachine.isActive()) {
-        reconnectMachine.start();
+      if (!live()?.isConnected() && !reconnect().isActive()) {
+        reconnect().start();
       } else if (live()?.isConnected()) {
         // A suspended mobile WebView can resume with WebSocket.readyState still
         // OPEN even though pane pushes stopped while it was backgrounded. The
@@ -2028,55 +2071,23 @@
   $effect(() => {
     // Not while the migration is blocked; Retry unblocks it and this runs.
     if (autoConnectAttempted || connected || switching || migrationBlocked) return;
-    // Where: the CURRENT entry when there is one (board #335 ②b-4, reviewer
-    // P2 on cf7e7957 — a mirror an unanswered form emptied must not keep a
-    // saved server from coming up); the mirror only for a client with no
-    // saved entry yet.
+    // Where: the CURRENT entry's own route (board #335 ②b-4, reviewer P2 on
+    // cf7e7957 and P1-A on cc45d7d1) — never a mirror an unanswered form left.
     const route = targetOf(localStorage, currentServerId(localStorage));
-    const addr = route?.address || localStorage.getItem('tmux_address');
-    const token = route ? route.token : localStorage.getItem('tmux_token');
-    if (!addr || !token) return;
+    if (!route?.address || !route.token) return;
     if (localStorage.getItem('tmux_disconnected')) return;
     autoConnectAttempted = true;
 
     const timeout = setTimeout(() => { page = 'settings'; }, 5000);
 
-    // The bound runtime dials (board #335 ②b-2-2): the same connection the
-    // facade would have used (the Single runtime borrows it), with the
-    // runtime's attempt identity and its identity recording. It dials the
-    // route the one reader names, its entry — `addr` and `token` here. A
-    // client with no saved entry yet has nothing bound, and connects through
-    // the facade as before.
-    //
-    // The dial OWNS the socket only until another attempt takes it — the
-    // connect form, a reconnect attempt, a switch (reviewer P1-b,
-    // 2026-10-10). It claims the host's one owner counter, the runtime asks
-    // that claim before it records anything, and the outcome below is acted
-    // on only while the claim is still current: a result that had already
-    // resolved when the form took over says nothing about the app now.
-    const owner = activations.claim();
-    // The runtime for CURRENT: the bound one, or — when a bind that blocked
-    // stopped it before its own dial and nothing is bound yet — the one the
-    // fleet holds for it (board #335 ②b-4).
-    const runtime = scopeSwap.bound() ?? mintCurrent().runtime;
-    // A client with a mirror but no saved entry has nothing to dial with
-    // (migrateServers makes an entry from any mirror, so this is a storage
-    // that could not be written): the connect card.
-    const dialled = runtime ? runtime.dial(owner.current) : Promise.resolve({ ok: false, reason: 'failed' });
-    dialled.then((result) => {
+    // CURRENT's own runtime dials, through the one road every bring-up takes
+    // (`activate`): its attempt identity, its identity record, and the app's
+    // activation claimed after the mint, so a later attempt — the connect
+    // form, a reconnect, a switch — makes this one a no-op.
+    const run = activate({ replace: false, up: () => { bringUp(); } });
+    run.done.then((failure) => {
       clearTimeout(timeout);
-      if (!owner.current()) return;
-      // Where the runtime actually dialled is its ENTRY's address (board
-      // #335 ②b-4), which the mirror read above need not be: the app comes
-      // up on what answered, and records that.
-      if (result.ok) { bringUp(result.entry?.address ?? addr, result.entry?.token ?? token); return; }
-      if (result.reason === 'elsewhere') { void arrivedElsewhere(result, result.entry.address, result.entry.token, owner); return; }
-      if (result.reason !== 'superseded') page = 'settings';
-    }).catch(() => {
-      // The dial resolves every connect failure; what rejects is a write
-      // inside it — the identity record. The host gate classifies it.
-      clearTimeout(timeout);
-      if (owner.current()) { page = 'settings'; storageFailed(); }
+      if (failure) page = 'settings';
     });
   });
   // Android back gesture via history API
@@ -2818,8 +2829,6 @@
       openRequest={prefsOpenReq}
       onAddress={(address) => {
         if (migrationBlocked) return;  // nothing moves the socket while it is blocked
-        localStorage.setItem('tmux_address', address);
-        activeAddress = address;
         pendingAddress = address;
         // A typed address is a NEW intent: end any running reconnect loop
         // before the direct connect, or its next attempt races this socket
@@ -2828,7 +2837,7 @@
         // starts meanwhile makes this attempt stale, and a stale one neither
         // publishes nor restarts the reconnect loop.
         heldOffline = false;           // the person picked an address
-        void serverSwitch.connectAddress(address, localStorage.getItem('tmux_token') || '')
+        void serverSwitch.connectAddress(address)
           .finally(() => { if (pendingAddress === address) pendingAddress = ''; });
       }}
       onDisconnect={() => { page = 'settings'; doDisconnect(); }}

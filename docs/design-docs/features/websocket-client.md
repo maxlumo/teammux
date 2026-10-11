@@ -568,11 +568,12 @@ lost to it. In that commit:
 - where to reach a server is its ENTRY, for every id (`server-target.ts`), and
   every path that moves the active address records it there once it answers —
   the form and the deep link (`activateConnected`), a failover
-  (`recordServer`), an address row and the optimizer (`addressUp`); the boot
-  comes up on, and records, the address the runtime dialled, and whether it
-  dials at all is the entry's to say, not the mirror's (reviewer P2 on
-  cf7e7957). The mirror keys are still written for the connect card and the
-  share link.
+  (`recordServer`), an address row and the optimizer (the runtime's own dial
+  with `via`); the boot comes up on, and records, the address the runtime
+  dialled, and whether it dials at all is the entry's to say, not the
+  mirror's (reviewer P2 on cf7e7957). Since reviewer P1-A on cc45d7d1 nothing
+  that dials reads the mirror: the keys are written for the connect card's
+  pre-fill and the share link, and read only there.
 
 ### A subtree is bound to one server, in that order (board #335 ②b-1)
 
@@ -697,12 +698,14 @@ and awaits them before the socket moves. Since ②b-2-3 this is one function, `r
 ruled: SEAL the record — a gate, so a download that tries to register
 afterwards is REFUSED and sends nothing (`suspend` only snapshots what is
 tracked when it is called) — suspend every running attempt keeping its part,
-and await their settle. The switch awaits it before the socket moves.
+and await their settle. Since ②b-4 each server has a socket of its own and
+nothing moves one under its pages: the release runs inside the handle's end,
+which the swap runs only once the next server is bound (order (a), below).
 
 A handle ENDS one way, `app/handle-end.ts` (②b-2-3, reviewer P1-a on
-48b40082), on every path that gives one up — the swap's invalidate, a
-switch's revoke, a connect attempt's "another server" verdict, an arrival
-elsewhere — and ending is two steps that are not the same step. It STOPS
+48b40082), on every path that gives one up — the swap's invalidate, the
+fleet's drop and reconcile, an activation letting go of a runtime it minted,
+the App's own teardown — and ending is two steps that are not the same step. It STOPS
 at once: the handle refuses every call and the host stops treating it as
 reusable, and its state's release starts in that same turn (the seal is the
 release's first step, so a merge found a moment later cannot adopt a state
@@ -732,48 +735,68 @@ answers as another known machine ARRIVES there only after the same walk
 local edits. A stay keeps A's tree with its handle held (refusing), closes
 B's socket and says why on the connect page.
 
-A leave walk — the switcher's, the form's or an arrival's — runs as the
-socket's OWNER (`serverSwitch.guard`, reviewer P1s on 085b0e70 and
-4fbce02e). One walk at a time: a second request while one asks is refused,
-and a refusal is a stay. Everything already running loses the socket when
-the walk begins: the reconnect loop is stopped (timers, probe, the dial it
-has out), the walk claims the host's one owner counter — so a reconnect
-continuation, a boot dial, an address connect or an older form attempt wakes
-to find it is not the owner and does nothing, opening no arrival of its own —
-and the switch's intent moves, so an optimizer probe begun before the walk
-moves nothing when it answers, during the walk or after it (not even the
-mirror key). While it asks, nothing new starts either: no address change, no
-switch, no automatic reconnect. A stay puts back what the walk froze, once it
-has answered and only if nobody took the socket meanwhile: a frozen address
-connect has its outcome applied (published, or handed to the reconnect
-loop), or else a loop that was running starts again. An arrival runs its
-walk under the attempt that reached the other machine (claiming again would
-make that very attempt stale), and every socket change takes the same
-counter: `connectAddress` claims it like the boot dial, the form, the
-reconnect attempts and the switch. After an arrival's stay, nothing
-AUTOMATIC dials (`heldOffline`, reviewer P2s): not the disconnect callback,
-not a foreground resume, not a late optimizer probe; the person's own act —
-the connect form, a switch, an address row — lifts it. (An address change
-still does not check which machine answered; that is unchanged from before
-#335.)
+A leave walk — the switcher's, the form's or an arrival's — is ONE QUESTION
+AT A TIME (`serverSwitch.guard`; reviewer P1s on 085b0e70 and 4fbce02e,
+narrowed by the orchestrator at 2026-10-11 04:03). A second request while one
+asks is refused, and a refusal is a stay. That is all a walk does: since every
+server has its own connection (②b-4) there is no shared socket for it to own,
+so it stops no loop and freezes no address. While it asks nothing NEW is put
+to the person or dialled: no switch, no address change, no optimizer probe or
+foreground resume, and a reconnect attempt that comes due waits on
+`serverSwitch.idle()` before it dials — and then dials only if nobody claimed
+the activation meanwhile. An optimizer probe begun before the walk is stale
+when it answers (the walk moves the switch's intent). An arrival that comes
+in while a walk asks opens no second walk; the person's answer to the first
+decides. An arrival runs its walk under the attempt that reached the other
+machine (claiming again would make that very attempt stale), and a stale
+arrival does nothing at all. After an arrival's stay, nothing AUTOMATIC dials
+(`heldOffline`, reviewer P2s): not the disconnect callback, not a foreground
+resume, not a late optimizer probe; the person's own act — the connect form, a
+switch, an address row — lifts it.
 
-**The runtime asks; the reconnect loop is told where** (②b-2-2). The
-capability handshake every connect path runs (`serverReady`) is the bound
-runtime's `probeCaps()`: asked over its own api, kept as its caps under a round
-number of its own, and mirrored into the shell only while the switch still
-owns the intent AND that runtime is still bound — a late answer from a server
-already left never lands. The Hub flag moves only on a definitive answer, and
-a failed backends probe keeps the list the runtime already had rather than
-wiping it to the fallback. The reconnect machine reads no connection keys: it
-asks `target()` at every attempt, which App answers with
-`server-target.targetOf(storage, CURRENT)` — the active mirror for the current
-server (written ahead of the registry on four paths through ②b), the entry and
-its machine's failover set for any other id. The boot connect is the bound runtime's `dial()`
-too, over that runtime's own connection (②b-4), dialled at the route that
-reader names, with the runtime's attempt identity (a superseded dial brings
-nothing up) and its identity recording (an address-only entry learns its
-machine and is folded by the dial itself). A client with no saved entry has
-nothing to dial and opens the connect card.
+**Every dial is a runtime's own** (reviewer P1-A on cc45d7d1). No path dials
+a raw address for a server, and nothing reads or writes the active mirror to
+decide where a server is. Each runtime has its OWN reconnect loop
+(`reconnectorOf(runtime)`): it asks `targetOf(storage, runtime.id)` at every
+attempt — that entry's address, token and machine's failover set, never
+whichever server is current by then — and dials through `runtime.dial(claim,
+{ via, timeoutMs })`, so the dial checks who answered and records it itself.
+A peer that answers as another machine has its socket closed by that dial
+before anything of this server's can reach it, a method a page captured long
+before included; a peer whose identity cannot be recorded is closed the same
+way and reported through the host gate. The shell's reconnect UI is the
+BOUND runtime's loop; a runtime that ends takes its loop with it. Moving the
+current server to another of its addresses (an address row, the optimizer)
+is `serverSwitch.connectAddress(address)`: the bound runtime redials with
+`via: address` and its own token, and an answer from another machine is an
+arrival, never this server resumed over it.
+
+**One bring-up road** (reviewer P1-B on cc45d7d1). The boot, the connect
+form, a switch, an arrival, a merge and the migration Retry all come up
+through `activate({ replace, elsewhere, up, minted })`: mint CURRENT's
+runtime (its state built), claim the activation AFTER the mint (whose
+`endAll` would otherwise end the claim it is about to make — the boot ended
+its own that way), dial that runtime's connection, and only if the dial
+answered as this server and is still the latest, bind it, reset the memory
+of a server left (`replace`) and run `up`. A merge the dial caused re-mints
+and goes round the road again, so the canonical runtime dials its own
+connection before anything uses it, and the alias's is ended. The result is
+`{ done, cancel, current }`: the connect form waits on `done` (the second
+handshake), and its Cancel calls `cancel`, which lets go of the runtime the
+activation minted at once. A runtime is the activation's while PROVISIONAL:
+`releaseMinted` ends it only if that activation still owns it and it is not
+bound, so a stale activation never ends a runtime a later one reused
+(reviewer P1-C). `bringUp` records and binds nothing; it only asks the
+server what it hosts and restores its navigation.
+
+**The runtime asks** (②b-2-2). The capability handshake every connect path
+runs (`serverReady`) is the bound runtime's `probeCaps()`: asked over its own
+api, kept as its caps under a round number of its own, and mirrored into the
+shell only while the switch still owns the intent AND that runtime is still
+bound — a late answer from a server already left never lands. The Hub flag
+moves only on a definitive answer, and a failed backends probe keeps the list
+the runtime already had rather than wiping it to the fallback. A client with
+no saved entry has nothing to dial and opens the connect card.
 
 ## Multi-Server (board #55)
 
@@ -781,10 +804,10 @@ nothing to dial and opens the connect card.
 doc already describes. Design decisions, in the order they bit:
 
 - **The old keys stay the ACTIVE MIRROR.** `tmux_address`/`tmux_token`/
-  `tmux_socket` keep meaning "the server we are on": ws.ts, the reconnect
-  machine, deep links and the boot auto-connect read them unchanged, and a
-  downgraded client sees the single-server world it expects. The registry
-  (`tmux_servers` + `tmux_server_current`) only remembers what else exists.
+  `tmux_socket` keep meaning "the server we are on" for a downgraded client,
+  the connect card's pre-fill and the share link. Since #335 ②b-4 nothing
+  that DIALS reads them (reviewer P1-A on cc45d7d1): where a server is, is its
+  entry in the registry (`tmux_servers` + `tmux_server_current`).
 - **One entry per known machine; an address is unique unless two different known machines used it** (board 318, owner 2026-10-08: "为什么这里有两个一样的地址，但是显示成两个server了"; refined by validator: identity is the machine, and a loopback tunnel address such as `ws://127.0.0.1:9899` honestly reaches different machines over time). `recordServer` used to match the machine id first and never look further, so a machine-less entry with the same address (migrated from the address history, or recorded before the id was known) stayed as a ghost twin forever. Now every record absorbs twins into the resolved entry — an entry with the same machine id, or with the same address and no machine id (or the same one); two entries with different known machine ids both stay, a machine-less entry is attributed to a machine only when exactly one known machine has used its address (with several it is ambiguous and nothing merges), and a connect by address never takes over another known machine's entry — and `migrateServers` runs `repairServers` on every boot to heal old lists once (idempotent; a healthy list is not rewritten). The survivor keeps its id, machine, address and token, takes a twin's name only if its own is a default and the twin's was typed, inherits CURRENT if the twin held it, and the twin's parked keys are removed. Every absorption is also recorded in `tmux_server_merges` (absorbed id → survivor, capped at 32), because anything still holding the absorbed id has to be able to follow it, and the record of the merge is the only evidence that may move it: an id merely missing from the registry was forgotten or never saved, not merged (`mergedInto`, board #335 ②b-2, reviewer P1-a 2026-10-10).
 - **Identity is the MACHINE, not the address** (lead review). `tmux_machines`
   (machineId → addresses) is the existing failover authority; an entry
@@ -793,16 +816,15 @@ doc already describes. Design decisions, in the order they bit:
   Migration attributes history addresses through the same map: the current
   machine's alternates never re-materialize as entries, an unseen machine
   yields one entry, unattributed addresses dedupe by address.
-- **Switching is in place, no reload** (board 315, owner 2026-10-08: "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key serverEpoch}` on arrival. The ORDER is the contract, each step finished before the next:
+- **Switching is in place, no reload** (board 315, owner 2026-10-08: "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key scopeRuntime}` — the target's runtime handle — on arrival. The ORDER is the contract, each step finished before the next:
   1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
-  2. **One intent**: the reconnect machine stops, `switching` unmounts the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing.
-  3. **Downloads suspended**: every running attempt aborts with `SUSPEND` and is awaited, so no retry, re-sign or WS fallback of the old server's chain can go out on the next connection (`download.ts` re-checks the signal after its retry sleep, before `freshUrl`). Its part is KEPT (see file-handling.md). Then `tick()` lets the unmounted tree's persistence run (the composer's last keystroke) — under the old server.
-  4. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
-  5. Socket closed (`disconnect()` rejects every pending RPC), `resetServerMemory()`.
-  6. **Connect without touching the mirror or CURRENT**: a reload mid-switch boots the server you left.
-  7. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, move CURRENT to the canonical entry, write the mirror. Then `comeUp`: `centreSurface.reset()`, `swapScope()` — which builds the target's runtime and its server state (§ One server's state is one value) — and `bringUp` (the boot path's own half after connect).
+  2. **One intent**: the CURRENT server's reconnect loop stops, `switching` hides the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing. The server being left is NOT stopped: its runtime, its socket and its downloads keep running (order (a), orchestrator 2026-10-11 04:04).
+  3. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
+  4. **Dial the target as a candidate, without touching CURRENT**: a reload mid-switch boots the server you left.
+  5. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, move CURRENT to the canonical entry. Then `comeUp`: the candidate closes and the target's OWN runtime comes up on the one bring-up road (`activate({ replace: true, elsewhere: 'fail' })`).
+  6. **Only once the target is bound** is the server left given up: the swap ends it — its downloads suspended with their parts kept (`releaseServerState`, file-handling.md), then disposed — and `resetServerMemory()` and `centreSurface.reset()` clear what named it.
 
-  **One socket owner.** Moving the socket to another address of the SAME server (the Connection page's address rows, the periodic optimizer) goes through `connectAddress` in the same module, under the same intent counter: a switch that starts while it dials makes it stale, and a stale attempt neither publishes its result nor restarts the reconnect loop (review P1: it used to call `reconnectMachine.start()` in its catch, and that loop reads the mirror, i.e. the server just left, over the new server's socket). `probeHub` and `loadBackends` drop an answer that arrives after a switch began. The reconnect machine's own starts (`setOnDisconnect`, the visibility resume) are skipped while `switching` is set.
+  A failure at any step leaves the server left INTACT, still running: CURRENT goes back to it (`restoreCurrent`) unless the migration froze CURRENT, and the panel shows. Every server has its own connection, so a dial for another address of the current server or a reconnect cannot touch the switch's candidate, and an answer that arrives after a switch began lands nowhere (`probeCaps` checks the intent and the bound runtime).
 
   A failure keeps the panel (Retry · Back to the source · Edit · the server switcher); in FAILED only the server control and the panel work, the page buttons stay disabled. A second address of the SAME machine is not a switch: failover keeps its path and nothing resets. The disconnected connect page reaching a different server comes up the same way (`onConnected(true)`).
 
@@ -815,7 +837,8 @@ doc already describes. Design decisions, in the order they bit:
   | download parts on disk | the shell | kept; `partId` hashes the machine id, Resumable lists only this server's |
 
   What the tests cover, and what they do not:
-  - `server-switch.test.ts` runs the real switch module, the real storage half (`servers.ts`), the real leave walk and the real `download()` against a fake transport that answers as machine A or B (one socket, `disconnect()` rejects what is pending). Around it is a hand-written app double (connected/mounted flags, unmount writes as a function list), not App: it proves the ORDER and the storage rules, plus `connectAddress` ownership (an A address still dialing when B is picked neither reconnects nor touches B). Scenarios: A→B→A with a same-named project; B fails twice → Back to A with every parked key unchanged; a pending read rejected by the switch (the fake rejects it on disconnect, so no late success continuation runs); a suspended download re-signs nothing; a dirty-guard cancel; a second address of A; a superseded intent. Each has a negative control.
+  - `server-switch.test.ts` runs the real switch module, the real storage half (`servers.ts`), the real leave walk and the real `download()` against a fake transport that answers as machine A or B. Around it is a hand-written app double, not App: it proves the ORDER and the storage rules — nothing of A is given up before B is up, and a B whose own bring-up fails puts CURRENT back on A — plus `connectAddress` ownership and the one-question-at-a-time walk (`idle()`). Each has a negative control.
+  - `App.shell.mount.test.ts` mounts App on a connection registry that gives every runtime an INDEPENDENT fake connection with a real dispose (reviewer P2-2 on cc45d7d1): each dial (`dial@<key>:<url>|<token>`), RPC (`rpc@<key>:<name>`) and dispose names the connection it happened on. The ruling's regressions run there: a reconnect answering as B while A's dialog is open, a captured A call refused; an unrecordable peer closed; a failed form connect that wrote the mirror never handing A its address or token; a boot or a failover that absorbs an alias bringing canonical up on its own connection; a reused provisional runtime surviving its stale minter; Cancel during the second handshake binding nothing; and the App's own end disposing every connection.
   - `leave-host.mount.test.ts` mounts the REAL Files and AgentsPage in App's page structure (`LeaveHost.test.svelte`: Files in a hidden layer, Agents under the held `prefs` condition) and drives the real walk: a cancel at either editor loses nothing, Settings stays mounted while Files asks, a save in flight is waited for. The fixture mirrors App's condition; `App.source.test.ts` pins App's own expression.
   - `Files.mount.test.ts` drives Files' real discard dialog through the walk.
   - Not covered by a test: App itself end to end (no App mount harness); the browser check in `temp/check/c315.mjs` (fake ws as two machines) is the evidence for the shell, the panel and no reload.
@@ -1102,7 +1125,7 @@ A caller asks what the swap is HEADING for, not what is shown, or one success
 path mints a handle nobody shows or releases. The bound server is READ from
 CURRENT, never passed, so identity repair re-pointing CURRENT at a machine's
 survivor moves the app with it; a handle is replaced when the server changes,
-and a handle whose lease was revoked is never reused for the same id.
+and a handle that is ending, or has ended, is never reused for the same id.
 
 Through ②b-3 production held one runtime borrowed on the facade's
 compatibility slot, with a suspend/handover protocol for the connect form;
@@ -1130,14 +1153,22 @@ a socket that a server's pages are using.
   candidate found proves nothing about the second dial, because an address
   can change hands between two handshakes. If that dial reaches another
   machine, the app arrives there (`arrivedElsewhere`), as a boot dial does.
-- **Nothing mounts on a runtime before it has dialled.** For another server
-  the old tree comes down first. The SAME machine under a merged id keeps its
-  tree until the replacement is up, because the replacement adopted its Files
-  record, and unbinding first would release that record's downloads.
+- **Nothing mounts on a runtime before it has dialled**, and nothing of the
+  server left is given up before the next one is bound (order (a),
+  orchestrator 2026-10-11 04:04). The swap then ends the one left — after
+  its replacement had the chance to adopt its state (a same-machine merge
+  keeps its Files record and downloads). A bring-up that fails returns to
+  the server left, untouched.
 - **One activation generation.** The candidate, a boot dial, a reconnect
-  attempt and a switch each claim the host's owner counter, so a late result
-  from an activation that has been superseded is a no-op. A revoke closes the
-  candidate.
+  attempt, an address change and a switch each claim the host's owner
+  counter, so a late result from an activation that has been superseded is
+  a no-op. A cancelled or superseded activation lets go of the runtime it
+  minted — only if it still owns it (reviewer P1-C on cc45d7d1).
+- **The connect form is busy for its OWN attempt** (reviewer P1-D). Its busy
+  state and error belong to the attempt (`mine`), apart from whether the app
+  still waits on it (`live`); it waits through the server's second handshake
+  and shows its failure, and Cancel — or leaving the form — cancels that
+  handshake too.
 - **A runtime ends one way: detach, release, dispose.** A runtime that loses
   its identity mid-dial (its entry removed, or absorbed) DETACHES. Its api
   refuses at once, including methods captured earlier, and it never disposes
@@ -1146,7 +1177,12 @@ a socket that a server's pages are using.
   still bound is the exception: the swap that replaces it ends it, after its
   replacement has had the chance to adopt its state.
 - **A reconnect names its server.** `ws-reconnected` carries `serverId`, and a
-  page acts only on its own server's.
+  page acts only on its own server's. Each runtime has its own reconnect
+  loop, told where by its own entry (reviewer P1-A on cc45d7d1).
+- **Nothing outlives the shell.** App's own teardown closes the candidates,
+  ends every activation in flight — which stops every runtime's reconnect
+  loop too, since a loop's chain is its attempt's claim — and ends every
+  runtime in the fleet, the bound one included (reviewer P2-1).
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

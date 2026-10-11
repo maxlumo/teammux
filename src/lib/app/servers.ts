@@ -616,6 +616,13 @@ export function activateSwitched(
   return entry;
 }
 
+/** Point CURRENT back at `id` — a switch whose target did not come up
+ * returns to the server it left (board #335 ②b-4, ruling (a)). Only to an
+ * entry that still exists. */
+export function restoreCurrent(storage: Store, id: string): void {
+  if (loadServers(storage).some((s) => s.id === id)) storage.setItem(CURRENT_KEY, id);
+}
+
 export function renameServer(storage: Store, id: string, name: string): ServerEntry[] {
   const servers = loadServers(storage);
   const entry = servers.find((s) => s.id === id);
