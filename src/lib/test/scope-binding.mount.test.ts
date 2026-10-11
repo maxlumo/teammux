@@ -1,4 +1,5 @@
-// The terminal/sessions area speaks to ITS scope's server (board #335 ②b-3).
+// Every bound page speaks to ITS scope's server (board #335 ②b-3), area by
+// area: terminal/sessions, files.
 //
 // Every other mount test binds the scope to the mocked facade, so a page that
 // still called `core/ws.ts` directly would pass them all: in Single mode the
@@ -51,6 +52,17 @@ function scopeServer(win: DOMWindow, calls: string[]) {
     scratchSession: answer('scratchSession', { session: 'tmm-scratch', target: 'tmm-scratch:1.1' }),
     scratchKill: answer('scratchKill', { killed: true }),
     scratchRelease: answer('scratchRelease', { released: true }),
+    gitCmd: (...a: unknown[]) => answer('gitCmd', { code: 0, stdout: a[0] === 'rev-parse' ? '/b/repo\n' : '', stderr: '' })(a[0]),
+    fsList: answer('fsList', { path: '/b', entries: [{ name: 'src', type: 'dir', path: '/b/src' }, { name: 'a.md', type: 'file', path: '/b/a.md', size: 3 }] }),
+    fsMkdir: answer('fsMkdir', {}),
+    fsCwd: answer('fsCwd', { path: '/b' }),
+    fsStat: answer('fsStat', { path: '/b/a.md', is_text: true, writable: true, readable: true, size: 3, mime_hint: 'text/markdown' }),
+    fsRead: answer('fsRead', { content: '# B' }),
+    fsWrite: answer('fsWrite', {}),
+    fsDelete: answer('fsDelete', {}),
+    getBookmarks: answer('getBookmarks', { bookmarks: [] }), saveBookmarks: answer('saveBookmarks', {}),
+    getPrefs: answer('getPrefs', {}), setPref: answer('setPref', {}),
+    getMachineId: () => 'm-b',
     subscribe: () => {}, unsubscribe: () => {}, capturePane: answer('capturePane', { output: '' }),
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
@@ -64,7 +76,8 @@ function facade(calls: string[]) {
   const names = ['listSessions', 'listPanes', 'listSessionsWithPanes', 'killSession', 'newWindow', 'killWindow',
     'scratchSession', 'scratchKill', 'scratchRelease', 'subscribe', 'unsubscribe', 'capturePane',
     'addPaneOutputListener', 'removePaneOutputListener', 'addPaneClosedListener', 'removePaneClosedListener',
-    'projectList', 'hubRooms'];
+    'gitCmd', 'fsList', 'fsMkdir', 'fsCwd', 'fsStat', 'fsRead', 'fsWrite', 'fsDelete', 'getBookmarks', 'saveBookmarks',
+    'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms'];
   return Object.fromEntries(names.map((n) => [n, () => { calls.push(n); return Promise.reject(new Error('facade')); }]));
 }
 const LATER = new Set(['projectList', 'hubRooms']);
@@ -128,5 +141,33 @@ test('ScratchPanel ensures and kills its session on its scope s server', { timeo
     .find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-head'))!.click();
   await until(() => onScope.includes('scratchKill()'));
   assert.deepEqual(onScope, ['scratchSession()', 'scratchKill()']);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('GitPanel runs git on its scope s server', async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'git', cwd: '/b/repo', onOpenFile() {}, onClose() {} });
+  await until(() => onScope.filter((c) => c.startsWith('gitCmd')).length >= 3);
+  assert.ok(onScope.includes('gitCmd("rev-parse")'), `git asked the scope: ${onScope.join(' ')}`);
+  for (let i = 0; i < 4; i++) await app.flush();
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('DirPicker browses and makes a folder on its scope s server', async (context) => {
+  const { onScope, onFacade, until } = await mount(context, { which: 'dir', start: '/b', onpick() {}, oncancel() {} });
+  await until(() => onScope.includes('fsList("/b",false)'));
+  assert.deepEqual(onScope, ['fsList("/b",false)']);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('Files lists, reads and deletes on its scope s server', async (context) => {
+  const { app, onScope, onFacade, until } = await mount(context, { which: 'files', session: 'on-b' });
+  await until(() => onScope.some((c) => c.startsWith('fsList')));
+  assert.ok(onScope.includes('fsCwd("on-b")'), `the cwd came from the scope: ${onScope.join(' ')}`);
+  assert.ok(onScope.some((c) => c.startsWith('fsList("/b"')), 'and the listing');
+  await until(() => !!app.document.querySelector('button[aria-label="Delete: a.md"]'));
+  app.document.querySelector<HTMLButtonElement>('button[aria-label="Delete: a.md"]')!.click(); await app.flush();
+  app.document.querySelector<HTMLButtonElement>('button[aria-label="Delete"]')!.click();
+  await until(() => onScope.includes('fsDelete("/b/a.md")'));
+  assert.ok(onScope.includes('fsDelete("/b/a.md")'), 'the delete went to the scope');
   assert.deepEqual(onFacade, [], 'the facade was never asked');
 });

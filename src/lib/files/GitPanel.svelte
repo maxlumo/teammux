@@ -16,7 +16,7 @@
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { createFeedbackLifetime, type FeedbackValue } from '../ui/feedback-lifetime.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { gitCmd } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import { moveMs } from '../ui/motion.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { hoverInfo } from '../ui/hover.ts';
@@ -33,6 +33,8 @@
     onOpenFile: (entry: PreviewEntry) => void;
     onClose: () => void;
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b).
+  const { gitCmd } = useServerApi();
 
   let gitTab = $state<'status' | 'log'>('status');
   let gitStatus = $state<GitFile[]>([]);

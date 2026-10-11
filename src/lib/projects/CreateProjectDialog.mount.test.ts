@@ -10,9 +10,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
+// Bound to one server's scope, as App's provider binds it (board #335 ②b):
+// its DirPicker reads its RPCs from the scope.
 const compiled = compileMount(new URL('./CreateProjectDialog.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
-]);
+], { serverScope: true });
 const ws = (extra: Record<string, (...a: any[]) => unknown> = {}) => ({
   registryList: async () => ({ agents: [] }),
   fsList: async () => ({ path: '/home/fixture', entries: [{ name: 'src', type: 'dir', path: '/home/fixture/src' }] }),

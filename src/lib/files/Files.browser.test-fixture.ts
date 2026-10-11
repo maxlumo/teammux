@@ -97,7 +97,12 @@ document.body.style.height = '100vh';
 document.body.style.display = 'flex';
 document.body.style.flexDirection = 'column';
 const { default: Files } = await import('./Files.test.svelte');
-const app = mount(Files, { target: document.body, props: {
+// Files reads its server from its scope (board #335 ②b); the scope speaks
+// through whatever `core/ws.ts` resolves to in this build — the controlled
+// transport.
+const { testScopeContext } = await import('../test/server-scope-host.ts');
+const scopeContext = testScopeContext(await import('../core/ws.ts'));
+const app = mount(Files, { target: document.body, context: scopeContext, props: {
   visible: true, session: 'fixture',
   register: (fn: typeof update) => { update = fn; },
   onGoBack: (fn: typeof back) => { back = fn; },

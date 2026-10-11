@@ -30,7 +30,12 @@ window.addEventListener('unhandledrejection', event => errors.push(String(event.
 localStorage.setItem('tmux_locale', 'en');
 document.documentElement.dataset.theme = new URLSearchParams(location.search).get('theme') || 'dark';
 Object.assign(document.body.style, { display: 'flex', flexDirection: 'column', height: '100vh' });
-const app = mount(GitPanel, { target: document.body, props: {
+// GitPanel reads its server from its scope (board #335 ②b); the scope speaks
+// through whatever `core/ws.ts` resolves to in this build — the controlled
+// transport.
+const { testScopeContext } = await import('../test/server-scope-host.ts');
+const scopeContext = testScopeContext(await import('../core/ws.ts'));
+const app = mount(GitPanel, { target: document.body, context: scopeContext, props: {
   cwd: '/repo', onOpenFile() {}, onClose() {},
   register: (fn: typeof update) => { update = fn; },
 } });

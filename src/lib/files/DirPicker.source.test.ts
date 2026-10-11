@@ -40,7 +40,8 @@ test('the newest tap wins — a slow earlier listing never overwrites a later on
 test('the picker can create the folder it is about to pick, and the caller can track browsing', () => {
   // The Team workspace field needed both (its own picker had them); a project
   // that does not exist yet is the common case for "new".
-  assert.match(source, /import \{ fsList, fsMkdir \} from '\.\.\/core\/ws\.ts';/u);
+  // Both from this subtree's server (board #335 ②b), not the facade.
+  assert.match(source, /const \{ fsList, fsMkdir \} = useServerApi\(\);/u);
   assert.match(source, /await fsMkdir\(dir\);[\s\S]{0,200}?await open\(dir\);/u, 'a created folder becomes the selection');
   assert.match(source, /onnavigate\?\.\(cwd\);/u, 'every browse step is reported');
   // One prop dialect, lowercase like DOM events, for every caller.

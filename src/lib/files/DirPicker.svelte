@@ -9,7 +9,7 @@
   // so it does not grow preview/edit/upload. Callers get an absolute path.
   import Icon from '../ui/Icon.svelte';
   import { revealMs } from '../ui/motion.ts';
-  import { fsList, fsMkdir } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import { t } from '../core/i18n.svelte.ts';
 
   type DirEntry = { name: string; type: string; path: string };
@@ -28,6 +28,8 @@
     /** Every browse step, so a caller's field can track the picker before confirm. */
     onnavigate?: (path: string) => void;
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b).
+  const { fsList, fsMkdir } = useServerApi();
 
   let cwd = $state('');
   let dirs = $state<DirEntry[]>([]);

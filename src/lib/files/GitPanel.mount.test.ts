@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
-const compiled = compileMount(new URL('./GitPanel.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b).
+const compiled = compileMount(new URL('./GitPanel.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 type Reply = { code: number; stdout: string; stderr: string };
 type Call = { subcmd: string; args: string[]; cwd: string };
 const ok = (stdout = ''): Reply => ({ code: 0, stdout, stderr: '' });

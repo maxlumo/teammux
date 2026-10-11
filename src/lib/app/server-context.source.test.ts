@@ -58,6 +58,8 @@ const BOUND = [
   // terminal/sessions
   'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
   'src/lib/sessions/SplitView.svelte', 'src/lib/app/ScratchPanel.svelte',
+  // files
+  'src/lib/files/Files.svelte', 'src/lib/files/GitPanel.svelte', 'src/lib/files/DirPicker.svelte',
 ];
 /** The value names a file imports from core/ws (type-only imports excluded). */
 function facadeValues(text: string): string[] {

@@ -88,11 +88,11 @@ test('the identity modules have exactly the production consumers this commit giv
     // ②b-2-3: every page with a leave guard names its owner, the runtime of
     // its scope, so a leave asks only what it destroys.
     // ②b-3: a page bound to its scope takes its RPCs from it — terminal and
-    // sessions first.
+    // sessions first, then files.
     'server-context.ts': ['src/lib/app/ServerScope.svelte', 'src/lib/hub/Hub.svelte', 'src/lib/files/Files.svelte',
       'src/lib/hub/Board.svelte', 'src/lib/hub/AgentsPage.svelte',
       'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
-      'src/lib/app/ScratchPanel.svelte'],
+      'src/lib/app/ScratchPanel.svelte', 'src/lib/files/GitPanel.svelte', 'src/lib/files/DirPicker.svelte'],
     // ②b-2-1: App builds each runtime's state bundle; pages never do.
     'server-state.ts': ['src/App.svelte'],
     'server-union.ts': [],

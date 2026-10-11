@@ -50,8 +50,18 @@
   import { directoryLoadState, leaveDecision, cwdFollowStep } from './file-view-state.ts';
   import { createFileNavigation, directoryBackFloor } from './file-nav.ts';
   import { handlePathLinkClick, resolvePathRef } from '../core/path-links.ts';
-  import { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, getMachineId, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } from '../core/ws.ts';
   import { uploadProgress, uploadSummary, uploadSizeError } from './file-upload.ts';
+
+  // This server's Files record — memory and download rows together — and its
+  // RPCs, from the scope this subtree is bound to (board #335 ②b-2-1, ②b-3),
+  // read once at init. The machine id is the live socket's, as before: it
+  // stamps a download row with the machine that served it.
+  const scope = useServerScope();
+  const { files } = scope.state;
+  const memory = files.memory;
+  const store = files.downloads;
+  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
+  const { getMachineId } = scope.runtime.connection;
 
   // Tauri plugin imports (tree-shaken in browser builds). The platform flags
   // come from the ONE module (rule 3); `tauriPlugins` is this file's own
@@ -91,12 +101,6 @@
   // agent in a worktree). Empty = no declaration (a direct/adopted session):
   // follow the pane cwd, the pre-#181 rule. The Session-directory tool
   // (goSessionDir) keeps offering the pane cwd explicitly either way.
-  // This server's Files record — memory and download rows together — from
-  // the scope this subtree is bound to (board #335 ②b-2-1), read once at init.
-  const scope = useServerScope();
-  const { files } = scope.state;
-  const memory = files.memory;
-  const store = files.downloads;
 
   let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable('') } = $props();
   const panelId = $props.id();
