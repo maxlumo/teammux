@@ -225,6 +225,35 @@ test('a restart that fails outright also leaves no receipt behind', async (t) =>
   assert.ok(h.told('not recorded as deployed'), h.said.join('\n'));
 });
 
+// Why the receipt goes BEFORE the restart and not only on the failure paths:
+// a run can die between the two (Ctrl-C, a crash, the machine). What it must
+// never leave behind is a receipt for bytes the service is no longer running.
+test('a run killed between the restart and the check leaves no stale receipt', async (t) => {
+  const h = await host(t);
+  await h.update();
+  h.bytes = 'B';
+  await assert.rejects(() => gatewayUpdate({
+    root: h.root,
+    env: {},
+    capture: () => 'abc1234 a merged commit',
+    log: () => {},
+    warn: () => {},
+    run: async (command: string, args: string[]) => {
+      if (command === 'npm') {
+        await writeFile(h.bin, 'B');
+        return 0;
+      }
+      if (args[1] === 'restart') {
+        h.running = 'B';
+        return 0;
+      }
+      throw new Error('killed');
+    },
+  }));
+  assert.equal(h.running, 'B');
+  assert.equal(await h.receipt(), null, 'the old receipt cannot outlive the restart it describes');
+});
+
 test('a build that fails never touches the receipt', async (t) => {
   const h = await host(t);
   await h.update();
