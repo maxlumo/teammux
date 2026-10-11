@@ -190,3 +190,50 @@ test('a union list takes each action s runtime from its row, never from its cont
     assert.doesNotMatch(text, /\buseServer(Api|Runtime|Scope)\(/u, `${path} projects a union and reads one api for it`);
   }
 });
+
+/** The places a server-level key is spelled, outside the identity layer and
+ * its store (validator E2 on the ③ plan): a direct write of a resident key,
+ * or `residentKey(` itself. */
+const RESIDENT = ['tmux_state', 'tmux_machine_id', 'tmux_hub_project', 'tmux_hub_drafts', 'tmux_hub_seen', 'tmux_hub_lead',
+  'tmux_hub_drawer', 'tmux_hub_roster_expanded', 'tmux_hub_alerts'];
+function residentBypass(path: string, text: string): string[] {
+  const src = code(text);
+  const out: string[] = [];
+  for (const m of src.matchAll(/\b(?:localStorage|sessionStorage|window\.localStorage)\.(?:setItem|removeItem)\(\s*['"`]([^'"`]+)['"`]/gu)) {
+    const key = m[1]!.split('::')[0]!;
+    if (RESIDENT.includes(key)) out.push(`${path} writes ${m[1]} past its server's store`);
+  }
+  if (/\bresidentKey\(/u.test(src)) out.push(`${path} spells a resident slot itself`);
+  return out;
+}
+
+test('a server-level key is written only through a server s store, so the write gate sees it (#335 ③a, E2)', async () => {
+  // The write gate holds what a server store writes while the app is
+  // blocked; a write that goes around the store would land in the slot the
+  // block protects. The identity layer and the fold are the only exceptions:
+  // they ARE the storage preparation the gate waits on.
+  const MAY = new Set(['src/lib/app/servers.ts', 'src/lib/app/server-state-migration.ts', 'src/lib/app/server-store.ts']);
+  const found: string[] = [];
+  for await (const file of glob('src/**/*.{ts,svelte}')) {
+    const path = file.replaceAll('\\', '/');
+    if (/\.(test|fixture|test-fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path) || MAY.has(path)) continue;
+    found.push(...residentBypass(path, await readFile(file, 'utf8')));
+  }
+  assert.deepEqual(found, [], found.join('\n'));
+  assert.deepEqual(residentBypass('x.svelte', "localStorage.setItem('tmux_hub_drafts', v);"), ["x.svelte writes tmux_hub_drafts past its server's store"]);
+  assert.deepEqual(residentBypass('x.svelte', 'localStorage.removeItem("tmux_state::a");'), ["x.svelte writes tmux_state::a past its server's store"]);
+  assert.deepEqual(residentBypass('x.svelte', "localStorage.setItem('tmux_theme', v);"), [], 'a person s key is not a server s');
+});
+
+test('every server store App builds goes through the one write gate, and a block closes it in the same turn (#335 ③a)', async () => {
+  const app = code(await readFile('src/App.svelte', 'utf8'));
+  const stores = [...app.matchAll(/createServerStore\(([^)]*)\)/gu)].map((m) => m[1]!);
+  assert.ok(stores.length >= 5, `App builds its server stores: ${stores.length}`);
+  for (const args of stores) assert.match(args, /, writeGate$/u, `createServerStore(${args}) skips the gate`);
+  assert.equal((app.match(/createWriteGate\(\)/gu) ?? []).length, 1, 'one gate');
+  assert.match(app, /function holdStorage\(\) \{\s*migrationBlocked = true;\s*if \(storageHeld\) return;\s*writeGate\.close\(\);\s*storageHeld = true;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(true\);/u);
+  assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\)\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
+  assert.equal((app.match(/\bmigrationBlocked = true\b/gu) ?? []).length, 1, 'a block is decided only in holdStorage');
+  assert.match(app, /next\?\.connection\.setOnDisconnect\([^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);/u,
+    'a runtime minted while held is frozen too: holdStorage froze only the ones it found');
+});

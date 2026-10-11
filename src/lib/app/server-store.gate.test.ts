@@ -129,3 +129,25 @@ test('move hands one server s table to another, the later write of each key winn
   assert.equal(c.getItem('tmux_hub_seen'), 'c-second', 'c wrote it later');
   assert.equal(a.getItem('tmux_state'), null, 'a holds nothing pending now');
 });
+
+test('E4: an alert that arrives during a block is on disk after Retry, and a reload finds it (validator E4)', async () => {
+  // The real alert log over a gated store: the centre records the way the
+  // Hub's push path does, the gate holds it, Retry flushes, and a NEW log
+  // over the storage — what a reload builds — reads it back.
+  (globalThis as { $state?: unknown }).$state = (v: unknown) => v;
+  const { createAlertLog, ALERTS_KEY } = await import('../hub/notify-centre.svelte.ts');
+  const s = mem();
+  const gate = createWriteGate();
+  const store = createServerStore(s, 'a', gate);
+  const log = createAlertLog(store);
+  gate.close();
+  const alert = { key: 'proj:work|7', server: 'a', room: 'proj:work', session: 'work', project: 'work', seq: 7, id: '7',
+    ts: 1, from: 'dev', toHuman: true, kind: 'reply' as const, excerpt: 'done?', viewed: false };
+  log.record(alert);
+  assert.equal(s.m.has(`${ALERTS_KEY}::a`), false, 'nothing on disk while blocked');
+  assert.equal(log.items.length, 1, 'the bell shows it');
+  assert.equal(JSON.parse(store.getItem(ALERTS_KEY)!).length, 1, 'and the store reads it back');
+  assert.equal(gate.flush(s), true);
+  const reloaded = createAlertLog(createServerStore(s, 'a', createWriteGate()));
+  assert.deepEqual(reloaded.items.map((a) => a.key), ['proj:work|7'], 'a reload finds the alert');
+});

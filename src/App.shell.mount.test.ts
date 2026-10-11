@@ -1891,6 +1891,21 @@ const refusing = (keys: string[]) => {
     },
   };
 };
+/** While the app is blocked on its storage, the server tree is HELD, not
+ * gone (board #335 ③a; orchestrator 08:17, one mechanism, Single included):
+ * every server page that is mounted sits inside the inert, hidden wrapper,
+ * where no input reaches it and the write gate holds what it writes. Before
+ * ③a these cases asserted that no server page was mounted at all. */
+/** `inert`, however Svelte set it: jsdom has no `inert` property of its own,
+ * so it may land as an attribute or as the property. */
+const isInert = (el: any) => el.hasAttribute('inert') || el.inert === true;
+const assertHeldTree = (app: any, what: string) => {
+  for (const el of app.document.querySelectorAll('.term-page, .files-page, .file-main')) {
+    const held = el.closest('.scope-tree.held');
+    assert.ok(held, `${what}: ${el.className} is mounted outside the held tree`);
+    assert.ok(isInert(held), `${what}: the held tree takes no input`);
+  }
+};
 const cardButton = (app: any, name: RegExp) => [...app.document.querySelectorAll('.card button')]
   .find((b: any) => name.test((b.textContent ?? '').trim())) as HTMLButtonElement | undefined;
 
@@ -1906,7 +1921,7 @@ test('a blocked migration freezes CURRENT: no boot dial, no switch, the card off
   const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers')];
   const before = frozen();
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'the boot did not dial');
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server page mounted');
+  assertHeldTree(h.app, 'no server page mounted');
   assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not write its storage/iu, 'the card says why');
   assert.equal(cardButton(h.app, /^connect$/iu), undefined, 'and has no Connect');
   // A switch does nothing while it is blocked.
@@ -2052,7 +2067,7 @@ test('blocked mid-session (a claim that cannot be recorded): the optimizer and t
   await h.app.advance(1000);
   await h.switchTo('alpha');
   await h.app.advance(1000);
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'the claim could not be recorded: no server page');
+  assertHeldTree(h.app, 'the claim could not be recorded: no server page');
   const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers'), ls.getItem('tmux_address')];
   const before = frozen();
   const dials = () => events.filter((e) => e.startsWith('connect:')).length;
@@ -2103,7 +2118,7 @@ test('Retry after a mid-session block: A s own runtime dials once, and A comes u
   await h.app.advance(1000);
   await h.switchTo('alpha');
   await h.app.advance(1000);
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'blocked');
+  assertHeldTree(h.app, 'blocked');
   const dials = () => events.filter((e) => e.startsWith('connect:')).length;
   const n = dials();
   store.state.failing = false;
@@ -2269,7 +2284,7 @@ test('a merge rewrite of the navigation that cannot be written blocks with Retry
   }, undefined, { setup: store.setup });
   await h.app.advance(6000);
   const ls = h.app.window.localStorage;
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server page');
+  assertHeldTree(h.app, 'no server page');
   assert.ok(cardButton(h.app, /retry/iu), 'the card offers Retry');
   assert.equal(ls.getItem('tmux_state::canon'), record, 'the record is as it was');
   store.state.failing = false;
@@ -2483,7 +2498,7 @@ test('the boot dial s identity write fails mid-handoff: blocked at once, frozen,
   assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'its merge left the handoff open');
   assert.ok(cardButton(h.app, /retry/iu), 'blocked in this turn: the card offers only Retry');
   assert.equal(cardButton(h.app, /^connect$/iu), undefined);
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server tree');
+  assertHeldTree(h.app, 'no server tree');
   const frozen = blockedNow(h.app);
   const n = events.filter((e) => e.startsWith('connect:')).length;
   h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
@@ -2574,7 +2589,7 @@ test('a switch whose identity write fails mid-handoff: the migration Retry is th
   assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the switch s merge left the handoff open');
   assert.equal([...h.app.document.querySelectorAll('.switch-panel')].length, 0, 'no switch-failed panel over it');
   assert.ok(cardButton(h.app, /retry/iu), 'the migration Retry is on screen');
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server tree');
+  assertHeldTree(h.app, 'no server tree');
   // Retry while storage still fails: the same blocked exit.
   cardButton(h.app, /retry/iu)!.click();
   for (let i = 0; i < 4; i++) await h.settle();
@@ -2869,7 +2884,7 @@ test('P1-C: a boot dial with nothing bound yet mints its runtime first and is st
     tmux_layout_mode: 'desktop',
   }, undefined, { calls: events, setup: store.setup });
   await h.app.advance(6000);
-  assert.equal(h.app.document.querySelector('.term-page'), null, 'blocked: nothing is bound');
+  assertHeldTree(h.app, 'blocked: nothing is bound');
   store.state.failing = false;
   const retry = cardButton(h.app, /retry/iu);
   assert.ok(retry, 'the card offers Retry');
@@ -3089,7 +3104,7 @@ test('P1-3 (ruling K): a dial whose post-dial claim cannot be written publishes 
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(ls.getItem('tmux_servers')!.includes('m-x'), true, 'B s own dial proved m-x');
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'and the claim s marker could not be written');
-  assert.equal(h.app.document.querySelector('.term-page, .files-page, .file-main'), null, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted');
   assert.ok(!events.some((e) => e.startsWith('rpc@b:')), 'nothing of B was published');
   assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
   assert.ok(!events.includes('aborted'), 'and A s download is still running');
@@ -3312,7 +3327,7 @@ test('K, the PRE-dial entry: B s claim fails when B is minted — A keeps runnin
   await h.switchTo('beta');
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(dialsOf(h.events, 'b').length, 0, 'B was blocked before its own dial');
-  assert.equal(h.app.document.querySelector('.term-page, .file-main'), null, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted');
   assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
   assert.ok(!h.events.includes('aborted'), 'and A s download was not released');
   h.store.state.failing = false;
@@ -3360,7 +3375,7 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   const ls = h.app.window.localStorage;
   assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the absorption left the handoff open');
   assert.ok(retryButton(h.app), 'blocked: the migration Retry is offered');
-  assert.equal(h.app.document.querySelector('.term-page, .file-main'), null, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted');
   assert.equal(alias.disposed(), false, 'the source was not ended by the block');
   assert.ok(!events.includes('aborted'), 'and its download was not released');
   store.state.failing = false;
@@ -3378,7 +3393,47 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   assert.ok(!events.includes('aborted'), 'the same machine adopted its download');
 });
 
-test('K on touch with a Hub: while blocked the guest Agents editor does not mount and asks nothing; Retry brings it back for the server bound (reviewer on 027d1a92)', async (context) => {
+test('a block keeps an unsaved editor: held mounted with its text, it saves nothing, and is there after Retry (#335 ③a; orchestrator 08:17)', async (context) => {
+  // The alias is current with an unsaved Files editor; its boot dial did not
+  // learn a machine. The socket drops, the reconnect proves m-a, the identity
+  // layer absorbs the alias into canonical, the slot copy fails, and the host
+  // gate blocks. Before ③a the tree unmounted here and the text was gone.
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry, tmux_server_current: 'ghost', tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'), tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }), tmux_layout_mode: 'desktop',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_address', 'ws://alias:9899'); m.set('tmux_token', 'tok');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const store = refusing(['tmux_hub_drafts::c']);
+  store.state.failing = false;
+  const events: string[] = [];
+  let proves = false;   // the alias answers without a machine until the drop
+  const h = await bootApp(context, Object.fromEntries(m), () => (proves ? 'm-a' : ''),
+    { calls: events, rpc: { ...editorRpc, fsWrite: async () => ({}) }, setup: store.setup });
+  const area = await dirtyEditor(h.app, h.settle);
+  store.state.failing = true;
+  proves = true;
+  h.net.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the reconnect s absorption left the handoff open: blocked');
+  assert.equal(area.isConnected, true, 'the editor is still mounted');
+  assert.equal(area.value, '# notes\n\nunsaved', 'with what the person typed');
+  assertHeldTree(h.app, 'blocked');
+  assert.ok(!events.some((e) => /^rpc@[a-z]+:fsWrite/u.test(e)), 'and nothing saved it to the server');
+  store.state.failing = false;
+  const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry, 'Retry is offered');
+  retry.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
+  assert.equal(area.isConnected, true, 'after Retry the same editor is there');
+  assert.equal(area.value, '# notes\n\nunsaved', 'and so is the text');
+});
+
+test('K on touch with a Hub: while blocked the guest Agents editor is held — mounted, inert, with the reason — and writes nothing; Retry brings it back for the server bound (reviewer on 027d1a92; ③a)', async (context) => {
   const hub = { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) };
   const h = await aRunningWithInputsFor(context, false, { rpc: hub, layout: 'mobile' });
   const openPrefs = async () => {
@@ -3397,9 +3452,16 @@ test('K on touch with a Hub: while blocked the guest Agents editor does not moun
   const before = h.events.length;
   await openPrefs();
   assert.ok(h.app.document.querySelector('.preferences'), 'Preferences still works while blocked');
-  assert.ok(!categories().some((c) => /^(agents|teams)/iu.test(c)), `no Agents or Teams category: ${categories().join(' | ')}`);
-  assert.equal(h.app.document.querySelector('.agents-embed'), null, 'no guest editor is mounted');
-  assert.ok(!h.events.slice(before).some((e) => /^rpc@a:(registryList|teamsList)/u.test(e)), 'and nothing asked A s registry');
+  // One mechanism (orchestrator 08:17): the guest is A s and stays A s; it is
+  // held like the tree — it may read, it takes no input and writes nothing.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /^agents/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const embed = h.app.document.querySelector('.agents-embed');
+  assert.ok(embed, 'the guest editor is mounted');
+  assert.equal(isInert(embed), true, 'and inert');
+  assert.match(h.app.document.querySelector('.preferences [role=status]')?.textContent ?? '', /storage|retry/iu, 'with the reason');
+  const written = h.events.slice(before).filter((e) => /^rpc@a:(registrySave|registryDelete|teamsSave|teamsDelete|globalPromptSet|skillsSave|mcpSave)/u.test(e));
+  assert.deepEqual(written, [], 'and nothing was written to A s registry');
   h.store.state.failing = false;
   // Disconnected, the person reaches Retry through Connection (the card).
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))?.click();

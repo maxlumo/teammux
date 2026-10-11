@@ -37,7 +37,7 @@
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
-  import { createServerStore } from './lib/app/server-store.ts';
+  import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
   import { claimPending, migrateServerState } from './lib/app/server-state-migration.ts';
   import { createActivations } from './lib/app/activation.ts';
   import { createHandleEnds } from './lib/app/handle-end.ts';
@@ -110,6 +110,35 @@
    * Back chains and reselects its pages registered. One view for the one
    * tree; `resetServerMemory` resets it where it always reset these. */
   const view = createServerView();
+  /** The app's ONE write gate (board #335 ③a; orchestrator's P1-D ruling and
+   * 08:17's "one mechanism, Single included"): while the app is blocked on
+   * its storage, every server store App builds holds its resident writes
+   * instead of landing them, and every runtime refuses new write RPCs. The
+   * tree stays MOUNTED — inert and hidden — so nothing a person typed is
+   * lost; the fold's own writes do not go through it. `storageHeld` is the
+   * gate's state as the template sees it. */
+  const writeGate = createWriteGate();
+  let storageHeld = $state(false);
+  /** Close the gate and freeze every runtime, in the same turn the block is
+   * decided — before any page could write. */
+  function holdStorage() {
+    migrationBlocked = true;
+    if (storageHeld) return;
+    writeGate.close();
+    storageHeld = true;
+    for (const runtime of fleet.all()) runtime.setFrozen(true);
+  }
+  /** Once the claim has run: land what was held, in order, under each
+   * server's survivor, and only then thaw. False — still held, still
+   * blocked — when a write fails; what did not land waits for the next
+   * Retry. */
+  function releaseStorage() {
+    if (!storageHeld) return true;
+    if (!writeGate.flush(localStorage, (id) => mergedInto(localStorage, id))) return false;
+    storageHeld = false;
+    for (const runtime of fleet.all()) runtime.setFrozen(false);
+    return true;
+  }
   /** What the app remembers about each runtime's server (board #335 ②b-2-1),
    * built in `swapScope` when the runtime is — after CURRENT moved, so it
    * reads the server being bound and not the one being left — and handed to
@@ -215,7 +244,10 @@
     let fold = id ? foldFor(id) : 'ok';
     // The navigation's merge rewrite is a pre-bind write too (reviewer P1-3
     // on 08fdb6ba): not attempted while blocked, and a failure blocks.
-    if (fold !== 'blocked' && !followMerges()) { migrationBlocked = true; fold = 'blocked'; }
+    // What the block held lands once the claim has run, before the merge
+    // rewrite reads the navigation (P1-D): a write that fails blocks again.
+    if (fold !== 'blocked' && !releaseStorage()) { holdStorage(); fold = 'blocked'; }
+    if (fold !== 'blocked' && !followMerges()) { holdStorage(); fold = 'blocked'; }
     return { id, fold };
   }
   function mintFrom({ id, fold }) {
@@ -241,6 +273,9 @@
     // Its socket closing is THIS runtime's drop: the reconnect loop takes
     // over only while it is still the one the tree is bound to.
     next?.connection.setOnDisconnect(() => { if (bound() === next) onDrop(); });
+    // A runtime minted while the gate is held is held too: holdStorage froze
+    // only the ones it found.
+    if (storageHeld) next?.setFrozen(true);
     // Its server's state: built NOW, since CURRENT already names `entry` and
     // the bare live keys are that server's (board #335 ②b-2-1) — or, when
     // identity repair folded the replaced handle's id into `entry`, the SAME
@@ -259,7 +294,7 @@
     const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
     return stateForRuntime(replaced, id, {
       survivorOf: (serverId) => mergedInto(localStorage, serverId),
-      create: () => createServerState(createServerStore(localStorage, id)),
+      create: () => createServerState(createServerStore(localStorage, id, writeGate)),
     });
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
@@ -290,7 +325,7 @@
     // false and moves nothing in memory either: the caller blocks, and
     // Retry runs this again.
     const id = currentServerId(localStorage);
-    try { if (id) reownSavedNav(createServerStore(localStorage, id), survivorOf); } catch { return false; }
+    try { if (id) reownSavedNav(createServerStore(localStorage, id, writeGate), survivorOf); } catch { return false; }
     const rebind = (ref) => (ref ? reownRef(ref, survivorOf) : ref);
     view.termPane = rebind(view.termPane);
     view.filesRef = rebind(view.filesRef);
@@ -885,7 +920,7 @@
     // effect would write over is the one the restore is about to read. It
     // writes the bound server's own slot (board #335 ②b-4).
     if (!connected || !scopeRuntime || view.navRestored !== scopeRuntime) return;
-    saveNav(createServerStore(localStorage, scopeRuntime.id), { page, pane: view.termPane, splitLayout: view.splitLayout, splitCells: view.splitCells });
+    saveNav(createServerStore(localStorage, scopeRuntime.id, writeGate), { page, pane: view.termPane, splitLayout: view.splitLayout, splitCells: view.splitCells });
   });
 
   // Reconnect UI state, mirrored from the reconnect machine
@@ -1419,7 +1454,7 @@
     connected = false;
     page = 'settings';
     const id = currentServerId(localStorage);
-    if (id) createServerStore(localStorage, id).removeItem('tmux_state');
+    if (id) createServerStore(localStorage, id, writeGate).removeItem('tmux_state');
     localStorage.setItem('tmux_disconnected', '1');
   }
 
@@ -1917,8 +1952,11 @@
   function prepareStorage() {
     try {
       migrateServers(localStorage);
-      migrationBlocked = migrateServerState(localStorage).reason === 'unrecorded';
-    } catch { migrationBlocked = true; }
+      if (migrateServerState(localStorage).reason === 'unrecorded') holdStorage();
+      // Recorded is not yet released: the gate opens in `foldCurrent`, after
+      // the claim, so what it held never lands before the fold it waited on.
+      else migrationBlocked = false;
+    } catch { holdStorage(); }
     loadServerRegistry();
   }
   /** An identity or registry write failed somewhere — a form connect, the
@@ -1963,7 +2001,7 @@
         reason = claim === 'folded' ? 'claimed' : claim;
       }
     } catch { reason = 'unrecorded'; }
-    if (reason === 'unrecorded') { migrationBlocked = true; return 'blocked'; }
+    if (reason === 'unrecorded') { holdStorage(); return 'blocked'; }
     return reason === 'claimed' ? 'claimed' : 'ok';
   }
   /** A deep link that arrived while the migration was blocked: parsed and
@@ -2121,7 +2159,7 @@
       // names another server cannot be resolved over this connection — at
       // best the capture fails, at worst that server has a pane by the same
       // name and the reader lands on a stranger's terminal.
-      const s = navFor(readNav(createServerStore(localStorage, target.id)), target.id);
+      const s = navFor(readNav(createServerStore(localStorage, target.id, writeGate)), target.id);
       // A saved target names a session that may not exist any more — killed
       // while we were away, or RENAMED (a project rename renames its session).
       // Restoring it anyway lands the user on a pane that cannot be captured,
@@ -2941,8 +2979,9 @@
       onShare={shareConnectionLink}
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
-      showAgents={hubEligible && !migrationBlocked && agentsLivesInSettings(layout.isTouchDevice)}
-      guestRuntime={migrationBlocked ? null : scopeRuntime} guestState={migrationBlocked ? undefined : serverStates.get(scopeRuntime)}
+      showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
+      guestRuntime={scopeRuntime} guestState={serverStates.get(scopeRuntime)}
+      guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
       agentsEditRequest={landingFor(view.agentsEditReq)}
       openRequest={prefsOpenReq}
       onAddress={(address) => {
@@ -2989,11 +3028,14 @@
       </div>
     {/if}
     {#key scopeRuntime}
-    <!-- Not while the migration is blocked (reviewer's ruling K on P1-3,
-         06:09): nothing writable of a server is mounted, while the runtime
-         the tree was bound to stays bound and RUNNING — it is ended only
-         once the next one has passed every gate. -->
-    {#if !migrationBlocked}
+    <!-- While the app is blocked on its storage the tree stays MOUNTED, inert
+         and hidden (board #335 ③a; orchestrator 08:17: one mechanism, Single
+         included): no input reaches it, its resident writes are held by the
+         write gate and its runtime refuses new write RPCs, so nothing typed
+         is lost and nothing lands before Retry. The runtime it is bound to
+         stays bound and RUNNING (ruling K) until the next one passes every
+         gate. -->
+    <div class="scope-tree" class:held={storageHeld} inert={storageHeld}>
     <ServerScope runtime={scopeRuntime} state={serverStates.get(scopeRuntime)}>
     {#if hubEligible}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
@@ -3091,7 +3133,7 @@
         onclose={() => (scratchOpen = false)} onedge={setScratchEdge} />
     {/if}
     </ServerScope>
-    {/if}
+    </div>
     {/key}
     {/if}
   </div>
@@ -3527,6 +3569,11 @@
   @keyframes slideInLeft  { from { transform: translateX(-40%); } to { transform: none; } }
   @keyframes slideInRight { from { transform: translateX(40%); } to { transform: none; } }
   @media (prefers-reduced-motion: reduce) { .page.slide-in-left, .page.slide-in-right { animation: none; } }
+  /* The server-bound tree's wrapper takes no box of its own, so every page
+     layer keeps its place; held (the app blocked on its storage, #335 ③a)
+     it is hidden — visibility inherits — and inert. */
+  .scope-tree { display: contents; }
+  .scope-tree.held { visibility: hidden; }
   .page-layer {
     position: absolute;
     inset: 0;

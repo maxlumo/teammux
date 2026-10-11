@@ -310,10 +310,11 @@ test('a saved `agents` page never strands a phone on an unreachable layer', () =
 
 test('Settings only offers the category when there is a bus and no Agents page', () => {
   // hubEligible is the desktop-server gate; agentsLivesInSettings is the device.
-  // And not while the migration is blocked (ruling K, reviewer on 027d1a92):
-  // the runtime kept bound is the source's, and no guest editor may write to it.
-  assert.match(source, /showAgents=\{hubEligible && !migrationBlocked && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
-  assert.match(source, /guestRuntime=\{migrationBlocked \? null : scopeRuntime\}/u);
+  // While the migration is blocked the guest stays the bound runtime's and is
+  // HELD, not unmounted (③a; orchestrator 08:17, one mechanism): inert, with
+  // the reason, its writes refused by the frozen runtime and held by the gate.
+  assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
+  assert.match(source, /guestRuntime=\{scopeRuntime\} guestState=\{serverStates\.get\(scopeRuntime\)\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}/u);
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   assert.match(source, /agentsEditRequest=\{landingFor\(view\.agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
@@ -494,7 +495,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*\{#if !migrationBlocked\}\s*<ServerScope runtime=\{scopeRuntime\} state=\{serverStates\.get\(scopeRuntime\)\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held=\{storageHeld\} inert=\{storageHeld\}>\s*<ServerScope runtime=\{scopeRuntime\} state=\{serverStates\.get\(scopeRuntime\)\}>/u,
     'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
@@ -570,7 +571,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // an identity, and which machine answers is known only after the dial.
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
-  assert.match(source, /activations\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,700}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*return \{ keep: false, runtime: next \};/u,
+  assert.match(source, /activations\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,700}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
@@ -609,14 +610,14 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
   // never an inference from an id being absent (reviewer P1-a, 2026-10-10).
-  assert.match(source, /let fold = id \? foldFor\(id\) : 'ok';[\s\S]{0,300}?if \(fold !== 'blocked' && !followMerges\(\)\) \{ migrationBlocked = true; fold = 'blocked'; \}\s*return \{ id, fold \};\s*\}\s*function mintFrom\(\{ id, fold \}\) \{\s*const entry = fold !== 'blocked' \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) \?\? null : null;\s*const held = scopeSwap\.bound\(\);/u,
+  assert.match(source, /let fold = id \? foldFor\(id\) : 'ok';[\s\S]{0,600}?if \(fold !== 'blocked' && !releaseStorage\(\)\) \{ holdStorage\(\); fold = 'blocked'; \}\s*if \(fold !== 'blocked' && !followMerges\(\)\) \{ holdStorage\(\); fold = 'blocked'; \}\s*return \{ id, fold \};\s*\}\s*function mintFrom\(\{ id, fold \}\) \{\s*const entry = fold !== 'blocked' \? loadServers\(localStorage\)\.find\(\(s\) => s\.id === id\) \?\? null : null;\s*const held = scopeSwap\.bound\(\);/u,
     'no server s state is built before the fold has run for it, and none at all while it cannot be recorded');
   assert.match(source, /function followMerges\(\) \{\s*const survivorOf = \(serverId\) => mergedInto\(localStorage, serverId\);/u,
     'the survivor comes from servers.mergedInto');
   const follow = source.match(/function followMerges\(\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(follow, /known|\.has\(/u, 'and nothing reads absence as a merge');
   for (const held of ['view.termPane = rebind(view.termPane);', 'view.filesRef = rebind(view.filesRef);', 'pane: rebind(c.pane)',
-    'reownSavedNav(createServerStore(localStorage, id), survivorOf);'])
+    'reownSavedNav(createServerStore(localStorage, id, writeGate), survivorOf);'])
     assert.ok(follow.includes(held), `the merge reaches what App holds and the record: ${held}`);
   // Every CONFIRMED runtime opens the save gate: an arrival by restoring the
   // record, a same-server return or a failover by keeping what is on screen
@@ -640,7 +641,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The restore belongs to ONE confirmed runtime, runs after the bind, and
   // does nothing for a runtime that is no longer on screen.
   assert.match(source, /async function restoreNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;/u);
-  assert.match(source, /navFor\(readNav\(createServerStore\(localStorage, target\.id\)\), target\.id\);/u,
+  assert.match(source, /navFor\(readNav\(createServerStore\(localStorage, target\.id, writeGate\)\), target\.id\);/u,
     'read from THIS server s slot, then filtered to this runtime (board #335 ②b-4)');
   // Ownership is WHERE a record is read (board #335 ②b-4): there is no live
   // record left to track the provenance of, and nothing compares bytes.
@@ -648,7 +649,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // And nothing saves over that record until the restore for the bound
   // runtime has finished.
   assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| view\.navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
-  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\), \{ page, pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\), \{ page, pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
     'the saved state writes the refs App already holds, rather than rebuilding them');
   // Every reference is minted in ONE place per kind, from the bound server.
   assert.match(source, /function showPane\(session, target\) \{\s*view\.termPane = target \? paneRef\(navServerId\(\),/u);
@@ -781,7 +782,9 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   const blocked = source.match(/function blockedAfterDial\(runtime, owner\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.match(blocked, /releaseMinted\(runtime, owner\);[\s\S]*?owedActivation = true;/u);
   assert.doesNotMatch(blocked, /scopeSwap\.swap|ends\.end|fleet\.drop/u, 'the runtime the tree is bound to is not ended by the block');
-  assert.match(source, /\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*\{#if !migrationBlocked\}\s*<ServerScope /u, 'and no server tree renders while blocked');
+  // ③a (orchestrator 08:17): the tree stays mounted while blocked, held —
+  // inert and hidden — so nothing typed is lost; this was "no tree renders".
+  assert.match(source, /\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held=\{storageHeld\} inert=\{storageHeld\}>\s*<ServerScope /u, 'and the server tree is held while blocked');
   // A link a redirect or a re-mint starts is part of the SAME chain: awaited,
   // and cancelled with it (reviewer P1-4 on 341554b3).
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
@@ -846,7 +849,9 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
 test('the fold gate: an unrecorded migration binds no server and moves no CURRENT (board #335 ②b-4)', async () => {
   // ONE persisted attribution state (server-state-migration.ts), and every
   // step the boot needs before a bind inside one recoverable gate.
-  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*migrationBlocked = migrateServerState\(localStorage\)\.reason === 'unrecorded';\s*\} catch \{ migrationBlocked = true; \}/u,
+  // ③a: a block is decided through holdStorage, which closes the write gate
+  // and freezes every runtime in the same turn.
+  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*if \(migrateServerState\(localStorage\)\.reason === 'unrecorded'\) holdStorage\(\);(?:\s*\/\/[^\n]*)*\s*else migrationBlocked = false;\s*\} catch \{ holdStorage\(\); \}/u,
     'a registry or attribution write that fails is the same blocked state, never a throw out of App');
   assert.match(source, /function foldFor\(id\) \{\s*if \(migrationBlocked\) prepareStorage\(\);\s*if \(migrationBlocked\) return 'blocked';/u);
   assert.match(source, /if \(reason === 'pending'\) \{\s*const claim = claimPending\(localStorage, id\)\.reason;/u, 'a pending input meets every server that is bound');
@@ -881,14 +886,14 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /function bringUp\(\) \{[\s\S]*?if \(migrationBlocked\) \{ page = defaultPage\(\); return; \}/u, 'bringUp restores nothing while frozen');
   // The merge rewrite is inside the gate (P1-3), and Retry resumes the
   // connection by its real state (P1-2).
-  assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ migrationBlocked = true; fold = 'blocked'; \}/u);
+  assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ holdStorage\(\); fold = 'blocked'; \}/u);
   assert.match(source, /if \(minted\.runtime\.connection\.isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline\) reconnect\(\)\.start\(\);/u,
     'a block mid-session resumes the bound runtime s own loop');
   assert.match(source, /if \(heldOffline \|\| !owedActivation\) return;\s*owedActivation = false;[\s\S]{0,300}?void activate\(\{ minted, replace: !minted\.keep,/u,
     'an owed activation dials the runtime it minted, through the one road');
   // Every per-server read and write goes through the server's store.
-  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\),/u);
-  assert.match(source, /readNav\(createServerStore\(localStorage, target\.id\)\)/u);
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\),/u);
+  assert.match(source, /readNav\(createServerStore\(localStorage, target\.id, writeGate\)\)/u);
   assert.doesNotMatch(source, /localStorage\.(?:getItem|setItem|removeItem)\('tmux_(?:state|hub_project|hub_drafts|hub_seen|hub_lead|hub_drawer|hub_roster_expanded|hub_alerts|machine_id)'/u,
     'App reads and writes no legacy per-server key');
 });

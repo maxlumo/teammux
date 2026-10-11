@@ -50,6 +50,7 @@
     showAgents = false,
     guestRuntime = null,
     guestState = null,
+    guestHeld = '',
     agentsEditRequest = null,
     openRequest = null,
     onAddress = () => {},
@@ -96,6 +97,10 @@
      * the guest renders nothing, like every server-bound subtree. */
     guestRuntime?: import('./server-runtime.ts').ServerRuntime | null;
     guestState?: import('./server-state.ts').ServerState | null;
+    /** Non-empty while the app is blocked on its storage (board #335 ③a): the
+     * guest editor stays mounted — a draft in it survives — but takes no
+     * input, and this says why. */
+    guestHeld?: string;
     /** Forwarded to the embedded AgentsPage: the Hub's "configure agent" jump. */
     agentsEditRequest?: { name: string; kind?: 'agent' | 'team'; n: number } | null;
     /** A one-shot "open this category" request — `{ tab, n }`, the same shape
@@ -610,7 +615,8 @@
            chain is spliced into this page's above. ONE instance for the four
            categories, narrowed by `section` — Agents / Teams / Skills / MCP
            are separate second-level pages on the phone (owner, 2026-09-02). -->
-      <div class="agents-embed">
+      {#if guestHeld}<p class="config-error" role="status">{guestHeld}</p>{/if}
+      <div class="agents-embed" inert={!!guestHeld}>
         <!-- Keyed on the handle, like App's subtree: another server is
              another instance of the editor, never a re-pointed one. -->
         {#key guestRuntime}

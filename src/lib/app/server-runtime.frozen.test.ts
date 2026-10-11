@@ -80,3 +80,26 @@ test('detached still refuses everything, frozen or not', async () => {
   runtime.detach();
   await assert.rejects(runtime.api.listSessionsWithPanes(), /detached/u);
 });
+
+test('a frozen runtime over a REAL connection: a write never reaches the socket, a read does (#335 ③a)', async () => {
+  const { MockWebSocket, handshakePlain, installDoubles } = await import('../core/connection.fixture.ts');
+  const { createConnectionRegistry } = await import('../core/connection-registry.ts');
+  installDoubles();
+  const registry = createConnectionRegistry();
+  const runtime = createServerRuntime({ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a' }, { storage, slot: registry.ensure('a') });
+  const socket = await handshakePlain(runtime.connection, 'ws://a:9899', 'tokA', 'm-a');
+  const sent = () => socket.texts().map((f: { method: string }) => f.method);
+  runtime.setFrozen(true);
+  await assert.rejects(runtime.api.fsWrite('/a/notes.md', 'x'), /frozen/u);
+  await assert.rejects(runtime.api.hubPost('proj:work', 'hi'), /frozen/u);
+  void runtime.api.fsList('/a').catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!sent().includes('fs_write') && !sent().includes('hub_post'), `no write on the wire: ${sent().join(' ')}`);
+  assert.ok(sent().includes('fs_list'), 'the read went out');
+  runtime.setFrozen(false);
+  void runtime.api.fsWrite('/a/notes.md', 'x').catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(sent().includes('fs_write'), 'thawed, the write goes');
+  registry.disposeAll();
+  void MockWebSocket;
+});

@@ -501,7 +501,8 @@ form, the boot dial, a reconnect, an arrival, a switch, an address change, a
 deep link — reports its failure to the ONE host gate (`storageFailed`), which
 classifies it by the migration state, not by the error: it reruns the boot's
 preparation, and if that cannot be recorded the app is blocked in that same
-turn (the server tree unbinds, CURRENT and the registry freeze, Retry is
+turn (the server tree is held — since ③a mounted, inert and hidden, its
+writes held by the write gate — CURRENT and the registry freeze, Retry is
 offered, and the boot dial is re-armed so Retry brings the connection back).
 An ordinary failure keeps the caller's own error (reviewer P1 on 23879812). When
 the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
@@ -797,10 +798,14 @@ own gate), or from the host gate (`storageFailed`, e.g. a candidate's
 identity write failing mid-handoff). All three take the ONE blocked state,
 `enterBlocked`, which never unbinds: a runtime a failing activation minted
 is let go of, while the runtime the tree is bound to stays bound and
-running — its downloads too. What the block removes is every VIEW of that
-server: no server tree renders, and the touch layout's guest Agents/Teams
-editor in Preferences does not mount (`showAgents` and `guestRuntime` are
-off while blocked), while person-level Preferences keep working. Retry owes
+running — its downloads too. What the block takes away is INPUT, not the
+views: since ③a (orchestrator 08:17, one mechanism for Single and Aggregate)
+the server tree stays mounted but inert and hidden, the touch layout's guest
+Agents/Teams editor in Preferences stays mounted but inert with the reason,
+every runtime refuses new write RPCs, and the write gate holds every resident
+write — so an unsaved editor is still there after Retry. Before ③a the tree
+was unmounted here, and its unsaved text with it. Person-level Preferences
+keep working. Retry owes
 the activation its dial, and the server left is ended only once the next
 runtime has passed every gate. A first boot has no source: an empty view
 and Retry. Past a link's point of no return (`committed`: it is
@@ -1194,7 +1199,7 @@ while the next folds the same inputs. The fold files the whole live set, so an a
 key CLEARS the slot — a cleared draft must not come back out of the old park —
 and a CURRENT that is empty or names no saved server writes nothing at all. A
 marker write that fails is reported as `unrecorded`, not as a completed fold,
-and then no server page mounts. It was enabled in the SAME commit that moved
+and then the server pages are held (inert, writes held; ③a). It was enabled in the SAME commit that moved
 every live read and write (②b-4, above).
 
 ### A subtree is bound to one server, and the binding is ordered (#335 ②b)
