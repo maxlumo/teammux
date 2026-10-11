@@ -445,7 +445,7 @@ test('a pending child may replay an external exit later without another request'
     },
   });
   try {
-    await app.update({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { name: 'alice', n: 7 } });
+    await app.update({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { serverId: 'test', name: 'alice', n: 7 } });
     await app.flush();
     assert.equal(calls, 1, 'host does not poll the guard');
     assert.equal(child.section, 'teams');
@@ -467,7 +467,7 @@ test('external category requests and Agent edits wait for approval; old exits ca
     agent(props) { child = props; props.onGuardExit?.(action => { exits.push(action); }); },
   });
   try {
-    await app.update({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { name: 'alice', n: 1 } });
+    await app.update({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { serverId: 'test', name: 'alice', n: 1 } });
     assert.equal(child.section, 'teams');
     assert.equal(edit(), null, 'the Agent request must not leak into Teams');
     assert.equal(exits.length, 1);

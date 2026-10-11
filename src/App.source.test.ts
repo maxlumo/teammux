@@ -285,11 +285,11 @@ test('every route into the agent config goes through ONE device-aware entry', ()
   // call openAgentsConfig, which asks nav-state where Agents lives.
   assert.match(
     source,
-    /function openAgentsConfig\(name = null, kind = 'agent'\) \{[\s\S]*?if \(agentsLivesInSettings\(layout\.isTouchDevice\)\) \{[\s\S]*?prefsOpenReq = \{ tab: kind === 'team' \? 'teams' : 'agents'[\s\S]*?if \(page !== 'prefs'\) togglePrefs\(\);[\s\S]*?\} else \{\s*switchTab\('agents'\);/u,
+    /function openAgentsConfig\(name = null, kind = 'agent', runtime = bound\(\), v = view\) \{[\s\S]*?if \(agentsLivesInSettings\(layout\.isTouchDevice\)\) \{[\s\S]*?prefsOpenReq = \{ tab: kind === 'team' \? 'teams' : 'agents'[\s\S]*?if \(page !== 'prefs'\) togglePrefs\(\);[\s\S]*?\} else \{\s*switchTab\('agents'\);/u,
   );
   // The Hub's "configure agent" item: Settings on a phone, the page on a desktop.
   // #258: a team name's menu asks for its team editor through the same entry.
-  assert.match(source, /openAgentConfig=\{\(name, kind\) => openAgentsConfig\(name, kind\)\}/u);
+  assert.match(source, /openAgentConfig=\{\(name, kind\) => openAgentsConfig\(name, kind, runtime, v\)\}/u);
   assert.doesNotMatch(source, /openAgentConfig=\{\(name\) => \{[^}]*switchTab\('agents'\)/u,
     'it must not switch straight to a page that does not exist on touch');
 });
@@ -320,7 +320,9 @@ test('Settings only offers the category when there is a bus and no Agents page',
   assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{scopeRuntime\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}/u);
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
-  assert.match(source, /agentsEditRequest=\{landingFor\(view\.agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
+  // ③a (reviewer P1-1(b)): the request names its server; Preferences hands
+  // it to that member's guest only.
+  assert.match(source, /agentsEditRequest=\{view\.agentsEditReq\}/u, 'the Hub’s jump reaches the embedded editor');
   assert.match(source, /openRequest=\{prefsOpenReq\}/u);
 });
 
@@ -485,7 +487,7 @@ test('every App socket owner goes through the switch module and loses ownership 
 });
 
 test('the leave walk holds Settings mounted while guards are asked (board 315 review P1)', () => {
-  assert.match(source, /\{#if page === 'prefs' \|\| holdPages\}\s*<div class="page-layer" class:hidden=\{page !== 'prefs'\}>/u,
+  assert.match(source, /\{#if page === 'prefs' \|\| holdPages \|\| prefsKept\}\s*<div class="page-layer" class:hidden=\{page !== 'prefs'\}>/u,
     'revealing another page never unmounts an Agents editor that has not answered (LeaveHost.test.svelte mirrors this)');
   assert.match(source, /\{#if page === 'settings' \|\| holdPages\}\s*<div class="page-layer connect-layer" class:hidden=\{page !== 'settings'\}>\s*<Settings /u,
     'and the connect form: a walk it started must come back to it (reviewer P1-b on 48b40082)');
@@ -499,7 +501,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const shown = runtime === scopeRuntime\}\s*\{@const held = storageHeld \|\| !shown\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== scopeRuntime\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
     'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
@@ -799,7 +801,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.doesNotMatch(blocked, /scopeSwap\.swap|ends\.end|fleet\.drop/u, 'the runtime the tree is bound to is not ended by the block');
   // ③a (orchestrator 08:17): the tree stays mounted while blocked, held —
   // inert and hidden — so nothing typed is lost; this was "no tree renders".
-  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const shown = runtime === scopeRuntime\}\s*\{@const held = storageHeld \|\| !shown\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
+  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== scopeRuntime\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
   // A link a redirect or a re-mint starts is part of the SAME chain: awaited,
   // and cancelled with it (reviewer P1-4 on 341554b3).
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
@@ -1143,7 +1145,7 @@ test('the rail keeps the ONE travelling highlight; the tab bar is foreground-onl
 test('a second click on the active rail tab hands the page a reselect — the Hub expands its sidebar (board #199)', () => {
   // Owner 2026-09-14: "我应该在左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏".
   // switchTab returns when target === page; the rail used to swallow the click.
-  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ \(view\.pageReselect\[slot\] \?\? shellReselect\[slot\]\)\?\.\(\); return; \}/u);
+  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ \(\(storageHeld \? null : view\.pageReselect\[slot\]\) \?\? shellReselect\[slot\]\)\?\.\(\); return; \}/u);
   assert.match(viewSource, /pageReselect: Record<string, \(\(\) => void\) \| undefined> = \{\};/u);
   assert.match(source, /onReselect=\{\(fn\) => \{ v\.pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
 });
@@ -1190,7 +1192,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   assert.match(source, /class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u,
     'the collapsed state stays app-wide (#200); which page is on screen is a second class');
   assert.equal([...source.matchAll(/icon="panel-left"/gu)].length, 1, 'ONE node — never one per state or per page');
-  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(view\.pageReselect\[page\] \?\? toggleShellSide\)\(\);/u,
+  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(\(storageHeld \? null : view\.pageReselect\[page\]\) \?\? toggleShellSide\)\(\);/u,
     'the same act as a reselect: the page\'s delegate, else the shared state');
   const style = source.match(/<style>[\s\S]*<\/style>/u)?.[0] ?? '';
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';

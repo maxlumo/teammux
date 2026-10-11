@@ -161,6 +161,9 @@ const LIFECYCLE = new Set([
  * records `connect:<url>`); this object decides which connection it was. */
 type FakeConnection = {
   key: string; drop(): void; disposed(): boolean; isConnected(): boolean; getMachineId(): string;
+  /** A team message on THIS connection's stream, to the listeners its own
+   * pages registered (③a: per-connection, never a shared table). */
+  push(message: unknown): void;
   /** The api this connection hands its runtime: a case can hold a method the
    * way a page does, and call it later. */
   api: Record<string, (...args: unknown[]) => Promise<unknown>>;
@@ -203,6 +206,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
     let seq = 0;
     let onDrop: (() => void) | null = null;
     const noop = () => {};
+    const team = new Set<(m: unknown) => void>();
     const connection = {
       async connect(url: string, token: string) {
         if (disposed) throw new Error('connection disposed');
@@ -225,7 +229,8 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
       subscribe: noop, unsubscribe: noop, resubscribeActive: noop,
       addPaneOutputListener: noop, removePaneOutputListener: noop,
       addPaneClosedListener: noop, removePaneClosedListener: noop,
-      addTeamMessageListener: noop, removeTeamMessageListener: noop,
+      addTeamMessageListener: (fn: (m: unknown) => void) => { team.add(fn); },
+      removeTeamMessageListener: (fn: (m: unknown) => void) => { team.delete(fn); },
       url: () => null,
     };
     const api: Record<string, unknown> = {};
@@ -241,6 +246,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
     conns.push({
       key, api: api as FakeConnection['api'], disposed: () => disposed, isConnected: () => connected, getMachineId: () => machine,
       drop() { if (connected && !disposed) { connected = false; onDrop?.(); } },
+      push(message) { if (connected && !disposed) for (const fn of [...team]) fn(message); },
     });
     return { connection, api };
   };
@@ -3455,6 +3461,72 @@ test('a block keeps an unsaved editor: held mounted with its text, it saves noth
   assert.equal(area.value, '# notes\n\nunsaved', 'and so is the text');
 });
 
+/** A Hub with one project, `work`, whose room holds message 1. */
+const oneRoomHub = (extra: Record<string, unknown> = {}, log: unknown[] = [{ id: '1', seq: 1, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'hello', room: 'proj:work' }]) => ({
+  projectList: async () => ({ projects: [{ project: { id: 'p-work', name: 'work', session: 'work', path: '/w', room: 'proj:work' }, live: true, slots: [] }] }),
+  listSessionsWithPanes: async () => ({ sessions: [{ name: 'work', windows: 1 }], panes: [] }),
+  hubRooms: async () => ({ rooms: {}, states: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }),
+  hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }),
+  // The server's room log: a case that pushes a message appends it here too.
+  hubLog: async () => ({ messages: [...log], has_more: false }),
+  hubActivity: async () => ({ events: [], has_more: false }),
+  ...editorRpc,
+  ...extra,
+});
+
+test('a held Hub is not a read Hub: a message that arrived unseen stays unread through a block (#335 ③a, reviewer P1-2)', async (context) => {
+  // On B, connected, with a Hub: the person reads room `work`, then goes to
+  // Files. A message for them arrives on B: unread. They switch to alpha
+  // (m-a, which owns pending inputs) and the claim's marker write fails:
+  // blocked, B kept bound and RUNNING (ruling K), its tree held, and the
+  // page is the default, Chat. Behind the Retry panel B's Hub is held
+  // — it must not take the tail it never showed, nor mark the message read
+  // (reviewer P1-2: it was still told `visible`).
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const log: unknown[] = [{ id: '1', seq: 1, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'hello', room: 'proj:work' }];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_server_current: 'gone',
+    tmux_layout_mode: 'desktop',
+  }, undefined, { rpc: oneRoomHub({}, log), setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  const ls = h.app.window.localStorage;
+  await connectCard(h.app, h.settle, 'ws://b:9899');
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'on B');
+  const rail = (name: RegExp) => [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
+    .find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!;
+  for (let i = 0; i < 4; i++) await h.app.advance(500);
+  assert.ok(rail(/^chat$/iu), `B has the Hub: ${[...h.app.document.querySelectorAll('.rail-btn')].map((x: any) => x.getAttribute('aria-label')).join(',')}`);
+  rail(/^chat$/iu).click();
+  for (let i = 0; i < 6; i++) await h.app.advance(200);
+  assert.equal(JSON.parse(ls.getItem('tmux_hub_seen::b') ?? '{}').work?.seq, 1, 'B s room was read up to message 1');
+  rail(/^files$/iu).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const second = { id: '2', seq: 2, ts: 1_800_000_001_000, from: 'dev', to: ['human'], body: 'are you there?', room: 'proj:work' };
+  log.push(second);
+  conn(h, 'b')!.push(second);
+  for (let i = 0; i < 3; i++) await h.settle();
+  store.state.failing = true;
+  await h.switchTo('alpha');
+  await h.app.advance(1000);
+  assert.ok(conn(h, 'b')?.isConnected(), 'B is kept, connected');
+  // The block moved the page to the default, Chat: the shell is gone
+  // (disconnected), the content area shows the Retry panel, and behind it
+  // B's tree is held — its Hub on the page that is "current".
+  for (let i = 0; i < 6; i++) await h.app.advance(200);
+  assertHeldTree(h.app, 'blocked');
+  // Retry lands every held write synchronously, before any frame of a Hub
+  // shown again could legitimately mark anything: what it writes is what
+  // the held Hub did.
+  store.state.failing = false;
+  const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry, 'Retry is offered');
+  retry.click();
+  assert.equal(JSON.parse(ls.getItem('tmux_hub_seen::b') ?? '{}').work?.seq, 1, 'held, the Hub did not move the read mark past message 1');
+  const pushed = (JSON.parse(ls.getItem('tmux_hub_alerts::b') ?? '[]') as { key: string; viewed: boolean }[]).filter((x) => x.key === 'proj:work|2');
+  assert.ok(pushed.length && pushed.every((x) => !x.viewed), `and the alert is still unread: ${JSON.stringify(pushed)}`);
+});
+
 test('K on touch with a Hub: while blocked the guest Agents editor is held — mounted, inert, with the reason — and writes nothing; Retry brings it back for the server bound (reviewer on 027d1a92; ③a)', async (context) => {
   const hub = { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) };
   const h = await aRunningWithInputsFor(context, false, { rpc: hub, layout: 'mobile' });
@@ -3500,4 +3572,63 @@ test('K on touch with a Hub: while blocked the guest Agents editor is held — m
   assert.ok(conn(h, 'b')?.isConnected(), 'Retry brought B up');
   await openPrefs();
   assert.ok(categories().some((c) => /^agents/iu.test(c)), `and the Agents category is back, for B: ${categories().join(' | ')}`);
+});
+
+test('touch: a dirty guest editor survives an automatic block that moves the page away, through Retry (#335 ③a, reviewer P1-1(a))', async (context) => {
+  // The alias is current (touch, Hub). The person edits an agent's prompt in
+  // Preferences › Agents and does not save. The socket drops; the reconnect
+  // proves m-a, absorbs the alias into canonical, and the slot copy fails:
+  // blocked by the host gate, the page moved away. Before ③a's fix
+  // Preferences unmounted with the page and took the draft with it.
+  const saved: string[] = [];
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry, tmux_server_current: 'ghost', tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'), tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }), tmux_layout_mode: 'mobile',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_address', 'ws://alias:9899'); m.set('tmux_token', 'tok');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const store = refusing(['tmux_hub_drafts::c']);
+  store.state.failing = false;
+  let proves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, Object.fromEntries(m), () => (proves ? 'm-a' : ''), {
+    calls: events,
+    rpc: {
+      hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }),
+      registryList: async () => ({ agents: [{ name: 'alpha', backend: 'codex', model: '', system: 'Original', skills: '[]', mcp: '[]' }] }),
+      registrySave: async (def: { system?: string }) => { saved.push(String(def.system)); return {}; },
+      teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }), modelsList: async () => ({ models: [] }),
+      hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }),
+    },
+    setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+  });
+  for (let i = 0; i < 4; i++) await h.app.advance(500);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /^agents/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.agents-embed .guest:not(.off) .side-row')].find((b) => /alpha/u.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const prompt = h.app.document.querySelector<HTMLTextAreaElement>('.agents-embed .editor textarea')!;
+  prompt.value = 'Unsaved'; prompt.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  for (let i = 0; i < 2; i++) await h.settle();
+  store.state.failing = true;
+  proves = true;
+  h.net.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'blocked mid-handoff');
+  assert.equal(prompt.isConnected, true, 'the guest editor is still mounted');
+  assert.equal(prompt.value, 'Unsaved', 'with the draft');
+  assert.deepEqual(saved, [], 'nothing saved while blocked');
+  // Retry closes the handoff; the person connects again, the survivor (the
+  // same machine) comes up, and the draft saves — to that machine.
+  store.state.failing = false;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button, .switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
+  assert.equal(prompt.value, 'Unsaved', 'the draft is still there after Retry');
 });

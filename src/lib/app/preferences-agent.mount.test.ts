@@ -70,7 +70,10 @@ test('real Settings defers its category exit until the Agent Save completes (#15
     finish();
     for (let i = 0; i < 8; i++) await app.flush();
     assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance');
-    assert.equal(app.document.querySelector('.agents-embed'), null);
+    // ③a (reviewer P1-1 on 6b923c0d): the guest's life is its member's, so
+    // leaving the category hides it — inert — instead of destroying it.
+    const embed = app.document.querySelector('.agents-embed');
+    assert.ok(embed?.classList.contains('off') && (embed.hasAttribute('inert') || (embed as unknown as { inert?: boolean }).inert === true), `the editor is kept, hidden and inert: ${embed?.className}`);
     assert.equal(app.document.querySelector('[role=alertdialog]'), null);
   } finally { await app.close(); }
 });
@@ -164,7 +167,7 @@ test('the page asks the SHOWN guest: its exit guard and its Back, never the last
   } finally { await app.close(); }
 });
 
-test('an edit request opens in the SHOWN guest, never in a hidden one (#335 ③a)', async context => {
+test('an edit request opens in the guest of the server it names, and never moves to the next one shown (#335 ③a)', async context => {
   const server = (id: string) => ({
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
@@ -188,9 +191,49 @@ test('an edit request opens in the SHOWN guest, never in a hidden one (#335 ③a
   try {
     realm.__showGuest('b'); await flush();
     realm.__showGuest('a'); await flush();
-    realm.__guestProps({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { name: 'alpha', n: 1 } });
+    realm.__guestProps({ openRequest: { tab: 'agents', n: 1 }, agentsEditRequest: { serverId: 'a', name: 'alpha', n: 1 } });
     await flush();
-    const open = [...app.document.querySelectorAll('.agents-embed .editor')].map((e) => e.closest('.guest')?.classList.contains('off') ? 'hidden' : 'shown');
-    assert.deepEqual(open, ['shown'], `one editor opened, in the shown guest: ${open.join(',')}`);
+    const open = () => [...app.document.querySelectorAll('.agents-embed .editor')].map((e) => e.closest('.guest')?.classList.contains('off') ? 'hidden' : 'shown');
+    assert.deepEqual(open(), ['shown'], `one editor opened, in the shown guest: ${open().join(',')}`);
+    // The request was A's (serverId 'a'): showing B never replays it on B s
+    // same-named agent (reviewer P1-1(c) on 6b923c0d).
+    realm.__showGuest('b'); await flush();
+    assert.deepEqual(open(), ['hidden'], `B opened nothing; A s editor is kept hidden: ${open().join(',')}`);
+  } finally { await app.close(); }
+});
+
+test('A s draft survives B leaving the category, and a hidden guest keeps its own section (#335 ③a, reviewer P1-1(a))', async context => {
+  const server = (id: string) => ({
+    registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
+    teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+  });
+  const app = await (await guests).mount(context, {
+    props: { showAgents: true }, modules: [],
+    setup(window) {
+      window.localStorage.setItem('tmux_settings_tab', 'agents');
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      const realm = window as unknown as Record<string, unknown>;
+      const cloned = (o: Record<string, (...a: any[]) => unknown>) => Object.fromEntries(Object.entries(o).map(([k, f]) =>
+        [k, (...a: unknown[]) => { const r = f(...a); return r instanceof Promise ? r.then((v) => (v === undefined ? v : window.JSON.parse(JSON.stringify(v)))) : r; }]));
+      realm.__guestA = cloned(server('a'));
+      realm.__guestB = cloned(server('b'));
+    },
+  });
+  const show = async (id: string) => { (app.window as unknown as { __showGuest(id: string): void }).__showGuest(id); for (let i = 0; i < 6; i++) await app.flush(); };
+  try {
+    await edit(app);                                 // A dirty, on Agents
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await show('b');
+    category(app, 'Teams'); for (let i = 0; i < 4; i++) await app.flush();      // B moves to Teams
+    category(app, 'Appearance'); for (let i = 0; i < 4; i++) await app.flush(); // and leaves the agent categories
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'B s exits asked only B (clean)');
+    assert.equal(draftA.isConnected, true, 'A s editor was not destroyed');
+    category(app, 'Agents'); for (let i = 0; i < 4; i++) await app.flush();
+    await show('a');
+    assert.equal(draftA.isConnected, true);
+    assert.equal(draftA.value, 'Unsaved', 'back on A, on Agents: the draft is there');
+    assert.ok(draftA.closest('.guest:not(.off)'), 'and shown');
   } finally { await app.close(); }
 });

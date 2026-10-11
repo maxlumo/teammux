@@ -32,7 +32,8 @@ test('the category exists only where Agents is not a page of its own', () => {
   // 2026-09-05 as their own labelled AGENT group.
   assert.match(source, /\.\.\.\(showAgents \? \[\{\s*id: 'agent', label: \(\) => t\('settingsGroupAgent'\), rows: \[\s*\{ id: 'agents', label: \(\) => t\('agentsTitle'\) \},\s*\{ id: 'teams', label: \(\) => t\('teamsTitle'\) \},\s*\{ id: 'skills', label: \(\) => t\('skillsTitle'\) \},\s*\{ id: 'mcp', label: \(\) => t\('mcpTitle'\) \},\s*\],\s*\}\] : \[\]\)/u,
     'four rows, each labelled with its section’s own name, in one AGENT group');
-  assert.match(source, /<AgentsPage\s+section=\{tab\}/u, 'the one instance is narrowed by the category, never copied');
+  // ③a: one instance per MEMBER, each narrowed by its own last category.
+  assert.match(source, /<AgentsPage\s+section=\{sectionOf\(g\.runtime\)\}/u, 'the one instance is narrowed by the category, never copied');
   // The two-group order (owner, 2026-09-05: "分成两组：1. 关于本身应用层面的
   // 一些设置 2. 关于 Agent 层面的设置"): the APP group — Appearance, Chat,
   // Notifications, (Shortcuts,) Connection — precedes the AGENT group. Chat
@@ -212,7 +213,7 @@ test('Settings adopts shared configuration geometry and semantic controls (#156)
   assert.match(source, /class="config-input mono shortcut-key"[\s\S]*?data-shortcut-recorder/u,
     'the native key recorder retains its own input semantics and shares field geometry');
   assert.match(source, /onGuardExit=\{\(guard: \(action: \(\) => void\) => void\) => registerAgentsGuard\(g\.runtime, guard\)\}/u);
-  assert.match(source, /editRequest=\{tab === \(acceptedAgentRequest\?\.kind === 'team' \? 'teams' : 'agents'\) \? acceptedAgentRequest : null\}/u,
+  assert.match(source, /editRequest=\{acceptedAgentRequest\?\.serverId === g\.runtime\.id && sectionOf\(g\.runtime\) === \(acceptedAgentRequest\.kind === 'team' \? 'teams' : 'agents'\) \? acceptedAgentRequest : null\}/u,
     'a queued Agent (or, #258, Team) jump is never forwarded into another section');
   assert.doesNotMatch(source, /addEventListener\(['"]popstate|pushState\(/u,
     'the local guard must not become a second browser-history controller');

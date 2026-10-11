@@ -1664,6 +1664,14 @@
   // While the leave guards are asked, Settings stays mounted even when another
   // page is revealed: its Agents editor may not have answered yet (board 315).
   let holdPages = $state(false);
+  /** Preferences stays mounted (hidden) once it holds a server's guest
+   * editor (③a, reviewer P1-1): the guest's life is its member's, so
+   * leaving the page — by hand, or a block moving it — must not destroy a
+   * draft in it. Before any guest exists it mounts on demand, as always. */
+  let prefsKept = $state(false);
+  $effect(() => {
+    if (page === 'prefs' && hubEligible && agentsLivesInSettings(layout.isTouchDevice)) prefsKept = true;
+  });
   /** What both server lists show about the connection (ServerList `link`). */
   const serverLink = $derived({
     connected: connected && !reconnecting,
@@ -2296,8 +2304,10 @@
    *  (nav-state's agentsLivesInSettings). Every caller — the Hub's "configure
    *  agent" item and the restore path — goes through here, so the two devices
    *  cannot drift apart. */
-  function openAgentsConfig(name = null, kind = 'agent') {
-    if (name) view.agentsEditReq = { serverId: navServerId(), name, kind, n: (view.agentsEditReq?.n ?? 0) + 1 };
+  function openAgentsConfig(name = null, kind = 'agent', runtime = bound(), v = view) {
+    // Named for the tree that asked (③a, reviewer P1-1): only that server's
+    // editor takes it, on touch (Preferences' guest) as on the desktop page.
+    if (name && runtime) v.agentsEditReq = { serverId: runtime.id, name, kind, n: (v.agentsEditReq?.n ?? 0) + 1 };
     if (agentsLivesInSettings(layout.isTouchDevice)) {
       prefsOpenReq = { tab: kind === 'team' ? 'teams' : 'agents', n: ++prefsOpenSeq };
       if (page !== 'prefs') togglePrefs();
@@ -2342,6 +2352,10 @@
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
       if (addServer) { addServer = null; navPush(); return; }
+      // A held tree takes no input, programmatic or not (reviewer P1-2): its
+      // pages' Back chains are not asked while the app is blocked. The Retry
+      // panel is the content area then; Back just stays (re-push).
+      if (storageHeld && page !== 'prefs') { navPush(); return; }
       if (page === 'files' && view.filesGoBack && view.filesGoBack()) return;
       if (page === 'files' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
       // Files with nothing to peel has climbed to /: fall through to the
@@ -2560,12 +2574,12 @@
   // if it has one (the Hub animates with its reading anchor), else the shared
   // state directly.
   function toggleShellSidebar() {
-    (view.pageReselect[page] ?? toggleShellSide)();
+    ((storageHeld ? null : view.pageReselect[page]) ?? toggleShellSide)();
   }
   function railActivate(slot) {
     if (railClickGuard) { railClickGuard = false; return; }
     if (slot === 'prefs') togglePrefs();
-    else if (slot === page) { (view.pageReselect[slot] ?? shellReselect[slot])?.(); return; }
+    else if (slot === page) { ((storageHeld ? null : view.pageReselect[slot]) ?? shellReselect[slot])?.(); return; }
     else switchTab(slot);
   }
   // Escape abandons a drag and a resize invalidates its snapshotted rects —
@@ -2697,14 +2711,17 @@
     openServers() { if (railServerEl && !serverMenuOpen) toggleServerMenu({ currentTarget: railServerEl }); },
     toggleSidebar() { toggleShellSidebar(); },
     toggleSplit() {
+      if (storageHeld) return;
       if (page !== 'terminal') switchTab('terminal');
       setLayout(view.splitLayout > 1 ? 1 : 2);
     },
     async focusComposer() {
+      if (storageHeld) return;
       if (page !== 'hub') { switchTab('hub'); await tick(); }
       document.querySelector('.page-layer:not(.hidden) .c-input')?.focus();
     },
     async focusTerminal() {
+      if (storageHeld) return;
       if (page !== 'terminal') { switchTab('terminal'); await tick(); }
       // The ACTIVE pane (board 316 review): in split screen the active cell,
       // never the first terminal on the page; an empty active cell takes no
@@ -2712,6 +2729,7 @@
       terminalFocusTarget(termPageEl, splitActive ? view.activeCellId : null)?.focus();
     },
     cycleWindow(direction) {
+      if (storageHeld) return;
       window.dispatchEvent(new CustomEvent('terminal-window-shortcut', { detail: { direction } }));
     },
     toggleScratch() { scratchOpen = !scratchOpen; },
@@ -2993,7 +3011,7 @@
          live server through `showAgents`, and bound to that server by a GUEST
          scope (board #335 ②b-3): the bound runtime and its state, keyed on the
          handle like the subtree, so a switch rebuilds the guest too. -->
-    {#if page === 'prefs' || holdPages}
+    {#if page === 'prefs' || holdPages || prefsKept}
     <div class="page-layer" class:hidden={page !== 'prefs'}>
     <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
@@ -3010,7 +3028,7 @@
       showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
       guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={scopeRuntime}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
-      agentsEditRequest={landingFor(view.agentsEditReq)}
+      agentsEditRequest={view.agentsEditReq}
       openRequest={prefsOpenReq}
       onAddress={(address) => {
         if (migrationBlocked) return;  // nothing moves the socket while it is blocked
@@ -3057,8 +3075,8 @@
     {/if}
     {#each members as runtime (runtime)}
     {@const v = viewOf(runtime)}
-    {@const shown = runtime === scopeRuntime}
-    {@const held = storageHeld || !shown}
+    {@const held = storageHeld || runtime !== scopeRuntime}
+    {@const shown = !held}
     <!-- While the app is blocked on its storage the tree stays MOUNTED, inert
          and hidden (board #335 ③a; orchestrator 08:17: one mechanism, Single
          included): no input reaches it, its resident writes are held by the
@@ -3068,7 +3086,10 @@
          gate.
          One tree per bound member (③a-4), keyed by its handle: only the
          FOCUSED one is shown and takes input — every other is held, inert
-         and hidden, keeping its pages, drafts and terminals. Its pages
+         and hidden, keeping its pages, drafts and terminals. `shown` is the
+         ONE definition of "this tree is in front": not held, so a blocked
+         tree is no more shown than an unfocused one, and every `visible`
+         below follows it — a held Hub is not a read Hub (reviewer P1-2). Its pages
          register their Back chains and requests into ITS view `v`; the
          window dispatches only through the focused one. -->
     <div class="scope-tree" class:held inert={held}>
@@ -3080,7 +3101,7 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
-        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On

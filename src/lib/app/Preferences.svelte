@@ -106,7 +106,9 @@
      * input, and this says why. */
     guestHeld?: string;
     /** Forwarded to the embedded AgentsPage: the Hub's "configure agent" jump. */
-    agentsEditRequest?: { name: string; kind?: 'agent' | 'team'; n: number } | null;
+    /** One agent's or team's editor to open, on the server it names
+     * (`serverId`); only that member's guest takes it. */
+    agentsEditRequest?: { serverId: string; name: string; kind?: 'agent' | 'team'; n: number } | null;
     /** A one-shot "open this category" request — `{ tab, n }`, the same shape
      *  the Files/Agents deep links use. Restoring a saved `agents` page on a
      *  phone lands here. */
@@ -409,14 +411,39 @@
     return r;
   };
   const agentsBack = () => (guestShown ? guestRegs.get(guestShown)?.back?.() ?? false : false);
-  const agentsDrilled = $derived(!!guestShown && !!drilledBy.get(guestShown));
+  const agentsDrilled = $derived(!!guestShown && AGENT_TABS.includes(tab) && !!drilledBy.get(guestShown));
   const agentsGuard = () => (guestShown ? guestRegs.get(guestShown)?.guard ?? null : null);
+  /** The guests mounted so far (lazily, on first show) and the section each
+   * was last on — a hidden guest keeps ITS category, whatever the shown one
+   * moves to. Both are let go of with the member. */
+  let opened = $state.raw<object[]>([]);
+  let sections = $state.raw(new Map<object, string>());
+  const sectionOf = (runtime: object) => sections.get(runtime) ?? 'agents';
+  $effect(() => {
+    const shown = guestShown;
+    const t = tab;
+    if (!shown || !showAgents || !AGENT_TABS.includes(t)) return;
+    untrack(() => {
+      if (!opened.includes(shown)) opened = [...opened, shown];
+      if (sections.get(shown) !== t) sections = new Map(sections).set(shown, t);
+    });
+  });
+  $effect(() => {
+    const live = new Set<object>(guests.map((g) => g.runtime));
+    untrack(() => {
+      const keep = opened.filter((r) => live.has(r));
+      if (keep.length !== opened.length) opened = keep;
+      for (const r of [...guestRegs.keys()]) if (!live.has(r)) guestRegs.delete(r);
+      if ([...drilledBy.keys()].some((r) => !live.has(r))) drilledBy = new Map([...drilledBy].filter(([r]) => live.has(r)));
+      if ([...sections.keys()].some((r) => !live.has(r))) sections = new Map([...sections].filter(([r]) => live.has(r)));
+    });
+  });
   const setDrilled = (runtime: object, d: boolean) => {
     if (untrack(() => drilledBy.get(runtime)) === d) return;   // a report that changes nothing writes nothing
     drilledBy = new Map(untrack(() => drilledBy)).set(runtime, d);
   };
   let navigation = 0;
-  let acceptedAgentRequest = $state<{ name: string; kind?: 'agent' | 'team'; n: number } | null>(null);
+  let acceptedAgentRequest = $state<{ serverId: string; name: string; kind?: 'agent' | 'team'; n: number } | null>(null);
   function registerAgentsGuard(runtime: object, guard: (action: () => void) => void) {
     reg(runtime).guard = guard;
     return () => { const r = guestRegs.get(runtime); if (r?.guard === guard) r.guard = null; };
@@ -630,39 +657,39 @@
       </div>
     {/if}
 
-    {#if AGENT_TABS.includes(tab)}
-      <!-- The REAL agent configuration page, not a copy of it: on a phone it is
-           already a single column (its list is the screen, an editor takes it
-           over), which is exactly the shape a Settings category needs. Its back
-           chain is spliced into this page's above. ONE instance for the four
-           categories, narrowed by `section` — Agents / Teams / Skills / MCP
-           are separate second-level pages on the phone (owner, 2026-09-02). -->
-      {#if guestHeld}<p class="config-error" role="status">{guestHeld}</p>{/if}
-      <div class="agents-embed" inert={!!guestHeld}>
-        <!-- Keyed on the handle, like App's subtree: another server is
-             another instance of the editor, never a re-pointed one. -->
-        <!-- One editor per member, keyed by its handle (③a, reviewer P1-C):
-             another server is another instance, never a re-pointed one, and
-             a member out of focus keeps its instance — hidden, inert, its
-             back chain and exit guard not registered — so its draft lives. -->
-        {#each guests as g (g.runtime)}
-        {@const on = g.runtime === guestShown}
-        <div class="guest" class:off={!on} inert={!on}>
-        <ServerScope runtime={g.runtime} state={g.state}>
-        <AgentsPage
-          section={tab}
-          visible={on && AGENT_TABS.includes(tab)}
-          editRequest={tab === (acceptedAgentRequest?.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
-          onGuardExit={(guard: (action: () => void) => void) => registerAgentsGuard(g.runtime, guard)}
-          guardPage="prefs"
-          onGoBack={(fn: () => boolean) => { reg(g.runtime).back = fn; }}
-          onDrilled={(d: boolean) => setDrilled(g.runtime, d)}
-        />
-        </ServerScope>
-        </div>
-        {/each}
+    <!-- The REAL agent configuration page, not a copy of it: on a phone it is
+         already a single column (its list is the screen, an editor takes it
+         over), which is exactly the shape a Settings category needs. Its back
+         chain is spliced into this page's above. ONE instance per member for
+         the four categories, narrowed by `section` — Agents / Teams / Skills /
+         MCP are separate second-level pages on the phone (owner, 2026-09-02).
+         A guest's LIFE is its member's, not this page's tab (③a, reviewer P1-1
+         on 6b923c0d): mounted the first time its server is shown here, kept
+         across every other category and while another member is shown —
+         hidden and inert — and removed only when the member goes. App keeps
+         this page mounted once a guest exists, for the same reason. -->
+    {#if guestHeld && AGENT_TABS.includes(tab)}<p class="config-error" role="status">{guestHeld}</p>{/if}
+    {#if opened.length}
+    <div class="agents-embed" class:off={!AGENT_TABS.includes(tab)} inert={!!guestHeld || !AGENT_TABS.includes(tab)}>
+      {#each guests.filter((g) => opened.includes(g.runtime)) as g (g.runtime)}
+      {@const on = g.runtime === guestShown && AGENT_TABS.includes(tab)}
+      <div class="guest" class:off={!on} inert={!on}>
+      <ServerScope runtime={g.runtime} state={g.state}>
+      <AgentsPage
+        section={sectionOf(g.runtime)}
+        visible={on && !guestHeld}
+        editRequest={acceptedAgentRequest?.serverId === g.runtime.id && sectionOf(g.runtime) === (acceptedAgentRequest.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
+        onGuardExit={(guard: (action: () => void) => void) => registerAgentsGuard(g.runtime, guard)}
+        guardPage="prefs"
+        onGoBack={(fn: () => boolean) => { reg(g.runtime).back = fn; }}
+        onDrilled={(d: boolean) => setDrilled(g.runtime, d)}
+      />
+      </ServerScope>
       </div>
-    {:else}
+      {/each}
+    </div>
+    {/if}
+    {#if !AGENT_TABS.includes(tab)}
     <!-- The accepted category owns this pane and its existing reveal. -->
     {#key tab}
     <div class="pref-content">
@@ -988,7 +1015,7 @@
   .agents-embed { flex: 1; min-width: 0; min-height: 0; }
   /* One guest per member (③a): only the shown one takes the box. */
   .guest { display: contents; }
-  .guest.off { display: none; }
+  .guest.off, .agents-embed.off { display: none; }
   .pref-label { display: flex; flex-direction: column; gap: var(--config-label-gap); }
   /* A recorder and its reset: the Slider's field + undo pair (board 316). */
   .shortcut-control { display: flex; align-items: center; gap: 6px; min-width: 0; }

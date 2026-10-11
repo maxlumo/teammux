@@ -650,7 +650,22 @@ its handle, mounted on first open and kept: only the focused member's is shown
 and takes input, the others stay mounted hidden and inert, so a focus change
 never destroys a draft in one (reviewer P1-C on the ③ plan). Each registers its
 own back chain, exit guard and drilled state, and the page asks the SHOWN one's
-at use time; an edit request reaches only the visible editor. A caller asking whether a swap is needed asks what the swap is already
+at use time. A guest's LIFE is its member's, not the page's tab (reviewer P1-1
+on 6b923c0d): it mounts the first time its server is shown on an agent
+category, then stays mounted — hidden and inert — while another category or
+another member is shown, each guest on its own last section, and App keeps
+Preferences mounted (hidden) once a guest exists, so leaving the page or a
+block moving it never destroys a draft. An edit request names the server of
+the tree that asked (`serverId`) and only that member's guest takes it; a
+request never moves to the next member shown.
+
+**"Shown" has one definition** (reviewer P1-2 on 6b923c0d): a tree is shown
+when it is not held — focused AND not blocked. Every page's `visible` follows
+it, so a blocked tree behind the Retry panel is not a reading tree: its Hub
+does not take the tail or move a read mark, and its guest editor applies no
+request. The window's programmatic entries — Back, reselect, the split, focus
+and window-cycle shortcuts — skip a held tree's pages too: DOM `inert` stops
+pointer and focus, not a handler the window calls. A caller asking whether a swap is needed asks what the swap is already
 HEADING for, not what is shown: during the gap nothing is shown, and one
 success path asks twice, so comparing against the gap would mint a handle
 nobody ever shows or releases. Since ②b-4 there is no provider-less fallback:
