@@ -14,7 +14,7 @@
   import { activeModal } from '../ui/modal.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, scrollMovesTrigger, type AnchorRect } from '../ui/placement.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { listSessionsWithPanes, newWindow } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import type { TmuxPane } from '../core/ws.ts';
   import { paneAgent, paneChipLabel } from '../core/agents.ts';
   type SessionGroup = { name: string; panes: TmuxPane[] };
@@ -40,6 +40,9 @@
     trigger?: Element | null;
     anchor?: AnchorRect | null;
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b): the subtree's
+  // provider decides which server that is, never a module-level default.
+  const api = useServerApi();
 
   let el = $state<HTMLDivElement | null>(null);
   let w = $state(0);
@@ -96,7 +99,7 @@
   let currentSession = $derived(currentMatch?.[1] || '');
 
   async function load(): Promise<SessionGroup[]> {
-    const { sessions: list, panes } = await listSessionsWithPanes();
+    const { sessions: list, panes } = await api.listSessionsWithPanes();
     const bySession = new Map<string, TmuxPane[]>();
     for (const p of panes) {
       const arr = bySession.get(p.session);
@@ -123,7 +126,7 @@
     if (busySession) return;
     busySession = sessionName;
     try {
-      await newWindow(sessionName);
+      await api.newWindow(sessionName);
       const next = await load();
       sessions = next;
       const s = next.find(x => x.name === sessionName);

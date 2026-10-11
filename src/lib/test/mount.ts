@@ -93,7 +93,7 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
                 : 'const context = () => undefined;'}
               let instance;
               globalThis.__mountClient = {
-                start(props) { instance = mount(Component, { target: document.body, props, context: context() }); },
+                start(props) { instance = mount(Component, { target: document.body, props, context: context(globalThis.__mountScopeTransport) }); },
                 tick, flushSync,
                 async stop() { const held = instance; instance = undefined; if (held) await unmount(held); }
               };
@@ -168,6 +168,10 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
           };
         },
       }));
+      // The mocked transport, for a fixture compiled with `serverScope`: the
+      // scope's runtime speaks through it (server-scope-host.ts).
+      const transport = paths.findIndex((path) => /[\\/]core[\\/]ws\.ts$/u.test(path));
+      win.__mountScopeTransport = transport >= 0 ? win.__mountModules[transport] : undefined;
       win.addEventListener('error', (event) => {
         errors.push(event.error ?? new Error(event.message));
         event.preventDefault();

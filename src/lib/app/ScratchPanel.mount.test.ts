@@ -17,7 +17,8 @@ let compiled: ReturnType<typeof compileMount> | undefined;
 const fixture = () => compiled ??= compileMount(new URL('./ScratchPanel.test.svelte', import.meta.url), [
   new URL('../core/ws.ts', import.meta.url),
   new URL('../terminal/Terminal.svelte', import.meta.url),
-]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b).
+], { serverScope: true });
 const terminalStub = {
   default: (anchor: Comment, props: { target: string; visible: boolean; onPaneExit: (t: string) => void }) => {
     const el = anchor.ownerDocument.createElement('div');

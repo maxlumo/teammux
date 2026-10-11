@@ -4,7 +4,10 @@ import { compileMount } from '../test/mount.ts';
 
 // #167, 2026-09-12: execute the caller, including its real Projects child.
 // A swallowed kill rejection used to look like success to ConfirmDialog.
-const compiled = compileMount(new URL('./Sessions.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+// Bound to one server's scope, as App's provider binds it (board #335 ②b):
+// Sessions reads its RPCs from the scope, and the scope speaks through the
+// mocked transport.
+const compiled = compileMount(new URL('./Sessions.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 type App = Awaited<ReturnType<Awaited<typeof compiled>['mount']>>;
 const pane = (window: number) => ({ session: 'alpha', window, pane: 0, window_name: `shell-${window}`,
   current_command: 'zsh', current_path: '/fixture', width: 80, height: 24 });

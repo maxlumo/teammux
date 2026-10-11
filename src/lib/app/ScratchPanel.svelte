@@ -28,7 +28,7 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { scratchSession, scratchKill, scratchRelease } from '../core/ws.ts';
+  import { useServerApi } from './server-context.ts';
   // From rpc-codes, not ws.ts: the mount fixtures mock ws.ts, and a constant
   // read as `undefined` there would silently disable the action (#337).
   import { ERR_SCRATCH_HELD, ERR_SCRATCH_STALE } from '../core/rpc-codes.ts';
@@ -37,6 +37,9 @@
     open = false, live = true, edge = 'bottom', fontSize = 14,
     onclose = () => {}, onedge = (_e) => {},
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b): the subtree's
+  // provider decides which server that is, never a module-level default.
+  const api = useServerApi();
 
   let phase = $state('idle');     // idle | opening | ready | ended | error
   let target = $state('');
@@ -68,7 +71,7 @@
     const n = ++intent;
     phase = 'opening'; error = '';
     try {
-      const r = await scratchSession();
+      const r = await api.scratchSession();
       if (!mine(n)) return;
       target = r.target;
       session = r.session;
@@ -88,7 +91,7 @@
     if (!who) return;
     releasing = true; releaseError = '';
     try {
-      await scratchRelease(who.projectId, who.session);
+      await api.scratchRelease(who.projectId, who.session);
       if (!mine(n)) return;
       releaseAsk = false;
       held = null;
@@ -163,7 +166,7 @@
     const n = intent;
     killing = true; killError = '';
     try {
-      await scratchKill();
+      await api.scratchKill();
       if (!mine(n)) return;
       killAsk = false;
       ended();

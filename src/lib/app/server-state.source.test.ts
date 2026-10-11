@@ -87,8 +87,12 @@ test('the identity modules have exactly the production consumers this commit giv
     // ②b-2-1: a page that holds this server's state reads it from its scope.
     // ②b-2-3: every page with a leave guard names its owner, the runtime of
     // its scope, so a leave asks only what it destroys.
+    // ②b-3: a page bound to its scope takes its RPCs from it — terminal and
+    // sessions first.
     'server-context.ts': ['src/lib/app/ServerScope.svelte', 'src/lib/hub/Hub.svelte', 'src/lib/files/Files.svelte',
-      'src/lib/hub/Board.svelte', 'src/lib/hub/AgentsPage.svelte'],
+      'src/lib/hub/Board.svelte', 'src/lib/hub/AgentsPage.svelte',
+      'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
+      'src/lib/app/ScratchPanel.svelte'],
     // ②b-2-1: App builds each runtime's state bundle; pages never do.
     'server-state.ts': ['src/App.svelte'],
     'server-union.ts': [],
@@ -138,7 +142,8 @@ test('only App constructs a runtime or a state, and only the provider binds a sc
   const found: string[] = [];
   for await (const file of glob('src/**/*.{ts,svelte}')) {
     const path = file.replaceAll('\\', '/');
-    if (/\.(test|fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
+    // A browser fixture (`*.browser.test-fixture.ts`) is a test host too.
+    if (/\.(test|fixture|test-fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     // The modules that define them.
     if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-state|server-context)\.ts$/u.test(path)) continue;
     found.push(...hostRights(path, await readFile(file, 'utf8')));

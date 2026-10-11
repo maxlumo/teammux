@@ -48,6 +48,36 @@ test('only the context fallback and the single runtime reach the compatibility s
     `compatSlotApi is the facade's one temporary door; these reach it instead of using their provider:\n  ${found.join('\n  ')}`);
 });
 
+/** The pages already bound to their scope (board #335 ②b-3), area by area.
+ * Each takes its RPCs from `useServerApi()` / `useServerRuntime()`, so a value
+ * import from the facade here would be a second, unbound way to the wire — the
+ * call would go to "whichever server the facade is on", not to this subtree's.
+ * Types still come from ws.ts. b3-4 deletes the facade's RPCs, and this list
+ * with them. */
+const BOUND = [
+  // terminal/sessions
+  'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
+  'src/lib/sessions/SplitView.svelte', 'src/lib/app/ScratchPanel.svelte',
+];
+/** The value names a file imports from core/ws (type-only imports excluded). */
+function facadeValues(text: string): string[] {
+  const out: string[] = [];
+  for (const m of code(text).matchAll(/import\s+(type\s+)?\{([^}]*)\}\s+from\s+'[./]*(?:lib\/)?core\/ws(?:\.ts)?'/gu)) {
+    if (m[1]) continue;
+    for (const name of m[2]!.split(',').map((n) => n.trim()).filter(Boolean)) if (!name.startsWith('type ')) out.push(name);
+  }
+  return out;
+}
+
+test('a page bound to its scope takes no RPC from the facade', async () => {
+  for (const file of BOUND) {
+    const values = facadeValues(await readFile(file, 'utf8'));
+    assert.deepEqual(values, [], `${file} imports ${values.join(', ')} from core/ws — take it from the scope`);
+  }
+  assert.deepEqual(facadeValues("import { listPanes, type TmuxPane } from '../core/ws.ts';"), ['listPanes'], 'the rule sees a value import');
+  assert.deepEqual(facadeValues("import type { TmuxPane } from '../core/ws.ts';"), [], 'and lets a type through');
+});
+
 test('the context is read at component init and nowhere else', async () => {
   const src = code(await read('server-context.ts'));
   // The module's own helpers are the only legitimate `getContext` callers, and
@@ -84,10 +114,10 @@ test('the context is read at component init and nowhere else', async () => {
 
 /** What is wrong with a component's context reads: each must be the whole
  * initializer of a top-level declaration of the instance script, and (with
- * `once`) there is at most one. A module script reads none. */
+ * `once`) there is at most one. A module script and the markup read none. */
 function contextReads(source: string, { once }: { once: boolean }): string[] {
   const ast = parse(source, { modern: true }) as unknown as {
-    instance?: { content: { body: Node[] } }; module?: { content: Node };
+    instance?: { content: { body: Node[] } }; module?: { content: Node }; fragment: Node;
   };
   type Node = { type: string; [key: string]: unknown };
   const isRead = (n: Node) => n.type === 'CallExpression'
@@ -99,13 +129,16 @@ function contextReads(source: string, { once }: { once: boolean }): string[] {
       if (Array.isArray(n)) { n.forEach(walk); return; }
       const node = n as Node;
       if (typeof node.type === 'string' && isRead(node)) out.push(node);
-      for (const [k, v] of Object.entries(node)) if (k !== 'parent' && k !== 'loc') walk(v);
+      for (const [k, v] of Object.entries(node)) if (k !== 'parent' && k !== 'loc' && k !== 'metadata') walk(v);
     };
     walk(root);
     return out;
   };
   const problems: string[] = [];
   if (ast.module && calls(ast.module.content).length) problems.push('a module script has no context to read');
+  // The markup is never init: `onclick={() => useServerApi()}` reads in a
+  // handler (reviewer P2 on 0a5db703).
+  if (calls(ast.fragment).length) problems.push('the markup reads the context — read it once in the script');
   const body = ast.instance?.content.body ?? [];
   const all = calls(body);
   const atInit = new Set<Node>();
@@ -145,4 +178,7 @@ test('the init-read rule reads the script, not its lines (reviewer P2-a on b1-3)
   assert.ok(contextReads(wrap('$effect(() => { useServerScope(); });'), { once: true }).length, 'an effect');
   assert.ok(contextReads(wrap('const { api } = { api: useServerApi() };'), { once: true }).length, 'nested in an initializer');
   assert.ok(contextReads('<script module>\nconst api = useServerApi();\n</script>', { once: true }).length, 'a module script');
+  assert.ok(contextReads(`${wrap('')}\n<button onclick={() => useServerApi()}>x</button>`, { once: true }).some((p) => /markup/u.test(p)),
+    'a handler in the markup (reviewer P2 on 0a5db703)');
+  assert.ok(contextReads(`${wrap('')}\n{#if useServerScope()}x{/if}`, { once: true }).some((p) => /markup/u.test(p)), 'a block in the markup');
 });

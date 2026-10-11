@@ -83,7 +83,16 @@ Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
 // A rejected modern API must pass through the real copyText fallback as well.
 document.execCommand = command => command === 'copy' ? false : fail(`Unexpected execCommand: ${command}`);
 const { default: Fixture } = await import('./Terminal.test.svelte');
+// Terminal reads its server from its scope (board #335 ②b). The transport is
+// whatever `core/ws.ts` resolves to in this build — the controlled one — so
+// the scope speaks through exactly the boundary this fixture controls.
+const transport = await import('../core/ws.ts');
+const { scopeContext } = await import('../app/server-context.ts');
+const { createServerState } = await import('../app/server-state.ts');
 const app = mount(Fixture, { target: document.body, props: {
   register: (value: typeof controls) => { controls = value; },
-} });
+}, context: scopeContext({
+  runtime: { id: 'fixture', api: transport, connection: transport } as never,
+  state: createServerState(localStorage),
+}) });
 Object.assign(fixture, { unmount: () => unmount(app) });

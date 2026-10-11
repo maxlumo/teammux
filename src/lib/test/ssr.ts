@@ -106,8 +106,12 @@ async function build(): Promise<RenderHarness> {
   // its own files.
   const { render: renderBare } = await vite.ssrLoadModule('svelte/server');
   const { testScopeContext } = await vite.ssrLoadModule('/src/lib/test/server-scope-host.ts');
+  // The facade module is a transport in its own right — its exports are one
+  // connection's members and RPCs — and server rendering runs no effect, so
+  // nothing is ever called through it.
+  const transport = await vite.ssrLoadModule('/src/lib/core/ws.ts');
   const render = (component: any, options: { props?: Record<string, unknown> } = {}) =>
-    renderBare(component, { ...options, context: testScopeContext() });
+    renderBare(component, { ...options, context: testScopeContext(transport) });
   after(async () => { await vite.close(); dom.window.close(); });
   return {
     load: <T = any>(id: string) => vite.ssrLoadModule(id) as Promise<T>,

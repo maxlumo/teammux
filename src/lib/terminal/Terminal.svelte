@@ -1,6 +1,6 @@
 <script>
   import { untrack } from 'svelte';
-  import { subscribe, unsubscribe, addPaneOutputListener, removePaneOutputListener, addPaneClosedListener, removePaneClosedListener, sendKeys, pasteText, listPanes, capturePane, resizePane, newWindow } from '../core/ws.ts';
+  import { useServerRuntime } from '../app/server-context.ts';
   import { Terminal } from '@xterm/xterm';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import Icon from '../ui/Icon.svelte';
@@ -57,6 +57,16 @@
   // agent grid, where each cell is pinned to one agent's pane — there is
   // nothing to switch to, so the bar would only steal vertical space).
   let { target, session, fontSize = 14, embedded = false, active = true, chromeless = false, visible = true, onSwitchPane = null, onPaneExit = () => {}, onClose = null, onOpenSessions = null, splitEligible = false, splitActive = false, splitLayout = 1, onSetLayout = null } = $props();
+  // This server's pane stream and RPCs, read once at init (board #335 ②b).
+  // The stream (subscribe and its listeners) lives on the CONNECTION, not the
+  // api, so Terminal takes the runtime. It stays on the raw connection on
+  // purpose: teardown has to unsubscribe even after the handle is detached,
+  // and the provider tears the old tree down before the next one mounts.
+  // No fallback: a Terminal outside a provider has no server to show.
+  const runtime = useServerRuntime();
+  if (!runtime) throw new Error('Terminal needs a server scope');
+  const { subscribe, unsubscribe, addPaneOutputListener, removePaneOutputListener, addPaneClosedListener, removePaneClosedListener } = runtime.connection;
+  const { sendKeys, pasteText, listPanes, capturePane, resizePane, newWindow } = runtime.api;
   // The chip bar's layout menu is the shared `ui/ContextMenu`, anchored to
   // its toggle exactly like the shell's floating one in split mode (App.svelte).
   // It was a hand-rolled `position:absolute` strip with a backdrop — no

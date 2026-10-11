@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { listSessions, listPanes, listSessionsWithPanes, killSession, newWindow, killWindow } from '../core/ws.ts';
+  import { useServerApi } from '../app/server-context.ts';
   import type { TmuxSession, TmuxPane } from '../core/ws.ts';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -30,6 +30,9 @@
     onGoBack?: ((fn: () => boolean) => void) | null;
     chips?: boolean;
   } = $props();
+  // This server's RPCs, read once at init (board #335 ②b): the subtree's
+  // provider decides which server that is, never a module-level default.
+  const api = useServerApi();
   const openTerminal = (session: string, target: string, command = '') => {
     openTerminalRaw(session, target, command);
     onPick?.();
@@ -207,7 +210,7 @@
       // Single round-trip: server returns sessions[] + panes[] (across all
       // sessions). We group panes by session_name client-side to populate
       // the same shape the rest of the page expects.
-      const { sessions: list, panes: allPanes } = await listSessionsWithPanes();
+      const { sessions: list, panes: allPanes } = await api.listSessionsWithPanes();
       if (generation !== viewEpoch) return;
       const activeSession = activeTarget.split(':')[0];
       sessions = list.sort((a, b) => {
@@ -289,8 +292,8 @@
     killing = true;
     killError = '';
     try {
-      if (act.kind === 'session') await killSession(act.target);
-      else await killWindow(act.target);
+      if (act.kind === 'session') await api.killSession(act.target);
+      else await api.killWindow(act.target);
     } catch (err) {
       if (generation === viewEpoch && pendingKill === act) killError = (err as Error).message || String(err);
       return;
@@ -563,8 +566,8 @@
           {/each}
           <button class="pane-add" onclick={async () => {
             try {
-              await newWindow(s.name);
-              const ps2 = await listPanes(s.name);
+              await api.newWindow(s.name);
+              const ps2 = await api.listPanes(s.name);
               panes[s.name] = ps2;
               const p = ps2[ps2.length - 1];
               if (p) openTerminal(s.name, `${p.session}:${p.window}.${p.pane}`);
@@ -669,7 +672,7 @@
         showNew = false;
         await reloadProjects?.();
         try {
-          const ps = await listPanes(proj.session);
+          const ps = await api.listPanes(proj.session);
           const p = ps[0];
           if (p) {
             openTerminal(proj.session, `${p.session}:${p.window}.${p.pane}`);
