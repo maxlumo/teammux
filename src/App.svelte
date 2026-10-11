@@ -3035,6 +3035,7 @@
       showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
       guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={scopeRuntime}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
+      visible={page === 'prefs'}
       agentsEditRequest={view.agentsEditReq}
       openRequest={prefsOpenReq}
       onAddress={(address) => {

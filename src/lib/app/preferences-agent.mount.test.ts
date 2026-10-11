@@ -237,3 +237,83 @@ test('A s draft survives B leaving the category, and a hidden guest keeps its ow
     assert.ok(draftA.closest('.guest:not(.off)'), 'and shown');
   } finally { await app.close(); }
 });
+
+/** Two guests over two transports, on the agents category. */
+async function twoGuests(context: import('node:test').TestContext, props: Record<string, unknown> = {}) {
+  const server = (id: string) => ({
+    registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
+    teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+  });
+  const app = await (await guests).mount(context, {
+    props: { showAgents: true, ...props }, modules: [],
+    setup(window) {
+      window.localStorage.setItem('tmux_settings_tab', 'agents');
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      const realm = window as unknown as Record<string, unknown>;
+      const cloned = (o: Record<string, (...a: any[]) => unknown>) => Object.fromEntries(Object.entries(o).map(([k, f]) =>
+        [k, (...a: unknown[]) => { const r = f(...a); return r instanceof Promise ? r.then((v) => (v === undefined ? v : window.JSON.parse(JSON.stringify(v)))) : r; }]));
+      realm.__guestA = cloned(server('a'));
+      realm.__guestB = cloned(server('b'));
+    },
+  });
+  const realm = app.window as unknown as { __showGuest(id: string): void; __guestProps(p: unknown): void };
+  const flush = async () => { for (let i = 0; i < 6; i++) await app.flush(); };
+  return { app, flush, show: async (id: string) => { realm.__showGuest(id); await flush(); }, props: async (p: unknown) => { realm.__guestProps(p); await flush(); } };
+}
+
+test('each member keeps its OWN section: A dirty on Agents, B picks Teams, focus straight back to A — A is on Agents with its draft (#335 ③a, reviewer P1-1 residual)', async context => {
+  const { app, flush, show } = await twoGuests(context);
+  try {
+    await edit(app);
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await show('b');
+    category(app, 'Teams'); await flush();                       // B s choice, B is clean
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'teams');
+    await show('a');                                              // straight back, no Agents click
+    assert.equal(draftA.isConnected, true, 'A s editor is the same one');
+    assert.equal(draftA.value, 'Unsaved', 'its draft is untouched — B s Teams never reached A');
+    assert.ok(draftA.closest('.guest:not(.off)'), 'shown, on A s own Agents');
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'agents', 'the page follows A s section');
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'nothing was asked: nothing of A moved');
+    // A changing its OWN category still asks its guard.
+    category(app, 'Teams'); await flush();
+    assert.ok(app.document.querySelector('[role=alertdialog]'), 'A s own move to Teams asks A');
+  } finally { await app.close(); }
+});
+
+test('from a non-agent category, a choice that would move A s editor to another section asks A first (#335 ③a)', async context => {
+  const { app, flush, show } = await twoGuests(context);
+  try {
+    await edit(app);                                  // A dirty on Agents
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await show('b');
+    category(app, 'Appearance'); await flush();       // B, clean, leaves the agent categories
+    await show('a');                                  // the page stays on Appearance
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance');
+    category(app, 'Teams'); await flush();            // would move A from Agents to Teams
+    assert.ok(app.document.querySelector('[role=alertdialog]'), 'A s guard is asked');
+    assert.equal(draftA.value, 'Unsaved', 'and the draft is untouched while it asks');
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'nothing moved yet');
+  } finally { await app.close(); }
+});
+
+test('a guest hidden with its page, or held by a block, takes no Back (#335 ③a, reviewer P1-2 residual)', async context => {
+  let back: (() => boolean) | null = null;
+  const { app, flush, props } = await twoGuests(context, { onGoBack: (fn: () => boolean) => { back = fn; } });
+  try {
+    await edit(app);                                     // A s editor open: its Back would close it
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await props({ visible: false });                     // the person left Preferences (kept mounted)
+    assert.equal(back!(), false, 'hidden page: Back does not reach the guest');
+    assert.equal(draftA.isConnected, true);
+    assert.ok(app.document.querySelector('.guest .editor'), 'its editor is still open');
+    await props({ visible: true, guestHeld: 'blocked' }); // back on Preferences, but blocked
+    assert.equal(back!(), false, 'held: Back does not reach the guest either');
+    assert.ok(app.document.querySelector('.guest .editor'), 'the editor is still open');
+    assert.equal(draftA.value, 'Unsaved');
+    await props({ guestHeld: '' });
+    assert.equal(back!(), true, 'shown and free again: Back peels the guest s editor');
+  } finally { await app.close(); }
+});

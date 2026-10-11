@@ -317,7 +317,7 @@ test('Settings only offers the category when there is a bus and no Agents page',
   // the reason, its writes refused by the frozen runtime and held by the gate.
   assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
   // ③a: one guest per member, the focused one shown (reviewer P1-C).
-  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{scopeRuntime\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}/u);
+  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{scopeRuntime\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs'\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   // ③a (reviewer P1-1(b)): the request names its server; Preferences hands

@@ -1927,8 +1927,11 @@ const refusing = (keys: string[]) => {
 /** `inert`, however Svelte set it: jsdom has no `inert` property of its own,
  * so it may land as an attribute or as the property. */
 const isInert = (el: any) => el.hasAttribute('inert') || el.inert === true;
-const assertHeldTree = (app: any, what: string, opts: { source?: boolean } = {}) => {
+const assertHeldTree = (app: any, what: string, opts: { source?: boolean; fresh?: boolean } = {}) => {
   const pages = [...app.document.querySelectorAll('.term-page, .files-page, .file-main')];
+  // A first boot that never passed its gates has nothing to hold: no server
+  // page at all (reviewer non-blocking 2 on 9958bbfd).
+  if (opts.fresh) assert.equal(pages.length, 0, `${what}: no server page was mounted`);
   // Where the block came with a source tree (ruling K keeps it), that tree is
   // still there — an empty DOM must not pass for "held" (reviewer P2-4).
   if (opts.source) assert.ok(pages.length > 0, `${what}: the source tree is still mounted`);
@@ -1953,7 +1956,7 @@ test('a blocked migration freezes CURRENT: no boot dial, no switch, the card off
   const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers')];
   const before = frozen();
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), [], 'the boot did not dial');
-  assertHeldTree(h.app, 'no server page mounted');
+  assertHeldTree(h.app, 'no server page mounted', { fresh: true });
   assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not write its storage/iu, 'the card says why');
   assert.equal(cardButton(h.app, /^connect$/iu), undefined, 'and has no Connect');
   // A switch does nothing while it is blocked.
@@ -2916,7 +2919,7 @@ test('P1-C: a boot dial with nothing bound yet mints its runtime first and is st
     tmux_layout_mode: 'desktop',
   }, undefined, { calls: events, setup: store.setup });
   await h.app.advance(6000);
-  assertHeldTree(h.app, 'blocked: nothing is bound');
+  assertHeldTree(h.app, 'blocked: nothing is bound', { fresh: true });
   store.state.failing = false;
   const retry = cardButton(h.app, /retry/iu);
   assert.ok(retry, 'the card offers Retry');
@@ -3531,7 +3534,7 @@ test('a held Hub is not a read Hub: a message that arrived unseen stays unread t
   assert.ok(pushed.length && pushed.every((x) => !x.viewed), `and the alert is still unread: ${JSON.stringify(pushed)}`);
 });
 
-test('K on touch with a Hub: while blocked the guest Agents editor is held — mounted, inert, with the reason — and writes nothing; Retry brings it back for the server bound (reviewer on 027d1a92; ③a)', async (context) => {
+test('K on touch with a Hub: while blocked no new guest editor mounts, the reason is shown, nothing is written; Retry brings it back for the server bound (reviewer on 027d1a92; ③a)', async (context) => {
   const hub = { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) };
   const h = await aRunningWithInputsFor(context, false, { rpc: hub, layout: 'mobile' });
   const openPrefs = async () => {
@@ -3550,14 +3553,16 @@ test('K on touch with a Hub: while blocked the guest Agents editor is held — m
   const before = h.events.length;
   await openPrefs();
   assert.ok(h.app.document.querySelector('.preferences'), 'Preferences still works while blocked');
-  // One mechanism (orchestrator 08:17): the guest is A s and stays A s; it is
-  // held like the tree — it may read, it takes no input and writes nothing.
+  // A guest that is not mounted when the block comes is NEW work, and new
+  // work waits for Retry (reviewer P1-2 residual on 9958bbfd: a held guest
+  // takes no input, a lazy mount included). A switch shows its panel in
+  // place of Preferences, so A's guest is not mounted here; a guest that IS
+  // mounted through a block is held — `touch: a dirty guest editor survives…`.
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /^agents/iu.test((b.textContent ?? '').trim()))!.click();
   for (let i = 0; i < 3; i++) await h.settle();
-  const embed = h.app.document.querySelector('.agents-embed');
-  assert.ok(embed, 'the guest editor is mounted');
-  assert.equal(isInert(embed), true, 'and inert');
-  assert.match(h.app.document.querySelector('.preferences [role=status]')?.textContent ?? '', /storage|retry/iu, 'with the reason');
+  assert.equal(h.app.document.querySelector('.agents-embed .guest'), null, 'no guest editor mounts while blocked');
+  assert.match(h.app.document.querySelector('.preferences [role=status]')?.textContent ?? '', /storage|retry/iu, 'the reason is shown');
+  assert.ok(!h.events.slice(before).some((e) => /^rpc@a:(registryList|teamsList)/u.test(e)), 'and nothing asked A s registry');
   const written = h.events.slice(before).filter((e) => /^rpc@a:(registrySave|registryDelete|teamsSave|teamsDelete|globalPromptSet|skillsSave|mcpSave)/u.test(e));
   assert.deepEqual(written, [], 'and nothing was written to A s registry');
   h.store.state.failing = false;
@@ -3628,11 +3633,12 @@ test('touch: a dirty guest editor survives an automatic block that moves the pag
   assert.equal(prompt.isConnected, true, 'the guest editor is still mounted');
   assert.equal(prompt.value, 'Unsaved', 'with the draft');
   assert.deepEqual(saved, [], 'nothing saved while blocked');
-  // Retry closes the handoff; the person connects again, the survivor (the
-  // same machine) comes up, and the draft saves — to that machine.
+  // Retry closes the handoff, and the same editor, with its text, is still
+  // mounted. (Saving it after the person reconnects is not exercised here.)
   store.state.failing = false;
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button, .switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
+  assert.equal(prompt.isConnected, true, 'the editor is still mounted after Retry');
   assert.equal(prompt.value, 'Unsaved', 'the draft is still there after Retry');
 });

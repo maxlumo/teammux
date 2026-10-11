@@ -51,6 +51,7 @@
     guests = [],
     guestShown = null,
     guestHeld = '',
+    visible = true,
     agentsEditRequest = null,
     openRequest = null,
     onAddress = () => {},
@@ -101,6 +102,9 @@
      * draft in one; only the `guestShown` one is visible and takes input. */
     guests?: { runtime: import('./server-runtime.ts').ServerRuntime; state: import('./server-state.ts').ServerState | undefined }[];
     guestShown?: import('./server-runtime.ts').ServerRuntime | null;
+    /** Is this page on screen? App keeps it mounted, hidden, once a guest
+     * exists (③a): hidden, no guest is visible or takes input. */
+    visible?: boolean;
     /** Non-empty while the app is blocked on its storage (board #335 ③a): the
      * guest editor stays mounted — a draft in it survives — but takes no
      * input, and this says why. */
@@ -410,22 +414,40 @@
     if (!r) { r = { back: null, guard: null }; guestRegs.set(runtime, r); }
     return r;
   };
-  const agentsBack = () => (guestShown ? guestRegs.get(guestShown)?.back?.() ?? false : false);
+  /** Does the shown guest take input now: this page on screen, the server
+   * not held, the touch guest offered (reviewer P1-2 residual on 9958bbfd)?
+   * A held or hidden guest keeps its editor; it is just not asked. */
+  const guestInput = $derived(visible && !guestHeld && showAgents);
+  const agentsBack = () => (guestShown && guestInput ? guestRegs.get(guestShown)?.back?.() ?? false : false);
   const agentsDrilled = $derived(!!guestShown && AGENT_TABS.includes(tab) && !!drilledBy.get(guestShown));
-  const agentsGuard = () => (guestShown ? guestRegs.get(guestShown)?.guard ?? null : null);
+  const agentsGuard = () => (guestShown && guestInput ? guestRegs.get(guestShown)?.guard ?? null : null);
   /** The guests mounted so far (lazily, on first show) and the section each
-   * was last on — a hidden guest keeps ITS category, whatever the shown one
-   * moves to. Both are let go of with the member. */
+   * is on. A guest's section is ITS OWN: it is first set when the guest
+   * mounts, and after that changes only through an accepted `selectTab`
+   * while that guest is shown — never by another member's choice (reviewer
+   * P1-1 residual on 9958bbfd). Let go of with the member. */
   let opened = $state.raw<object[]>([]);
   let sections = $state.raw(new Map<object, string>());
   const sectionOf = (runtime: object) => sections.get(runtime) ?? 'agents';
   $effect(() => {
     const shown = guestShown;
     const t = tab;
-    if (!shown || !showAgents || !AGENT_TABS.includes(t)) return;
+    if (!shown || !guestInput || !AGENT_TABS.includes(t)) return;
     untrack(() => {
       if (!opened.includes(shown)) opened = [...opened, shown];
-      if (sections.get(shown) !== t) sections = new Map(sections).set(shown, t);
+      if (!sections.has(shown)) sections = new Map(sections).set(shown, t);
+    });
+  });
+  // Focus moved to a guest that is on another section: the PAGE follows
+  // that guest (its own last section), the guest does not follow the page.
+  let lastShown: object | null = null;
+  $effect(() => {
+    const shown = guestShown;
+    untrack(() => {
+      if (shown === lastShown) return;
+      lastShown = shown;
+      const own = shown ? sections.get(shown) : undefined;
+      if (own && AGENT_TABS.includes(tab) && own !== tab) { tab = own; localStorage.setItem(TAB_KEY, own); }
     });
   });
   $effect(() => {
@@ -547,7 +569,7 @@
       // The embedded AgentsPage peels its OWN layers first (delete dialog, then
       // an open editor) — the same order it uses as a page. Only when it has
       // nothing left does back close the category, and only then the page.
-      if (AGENT_TABS.includes(tab) && agentsBack()) return true;
+      if (AGENT_TABS.includes(tab) && agentsBack()) return true;   // only a guest taking input
       if (catOpen && isCompact()) { closeCat(); return true; }
       return false;
     });
@@ -555,14 +577,22 @@
 
   function selectTab(value: string, applied = () => {}, current = () => true, drill = true) {
     const intent = ++navigation;
+    // The guest the choice was made for: a confirmation that answers after
+    // focus moved commits nothing for the next one.
+    const guestAt = guestShown;
     const apply = () => {
-      if (!alive || intent !== navigation || !current()) return;
+      if (!alive || intent !== navigation || !current() || guestShown !== guestAt) return;
       // Only an accepted category jump may push, persist or forward an edit.
       if (drill) {
         if (!catOpen && isCompact()) { drillAnim = 'fwd'; drillPushed = !!onDrill(); }
         catOpen = true;
       }
       tab = value;
+      // The shown guest's own section moves only here, accepted, and only
+      // while it takes input; a held guest keeps its section.
+      if (guestAt && guestInput && AGENT_TABS.includes(value) && opened.includes(guestAt) && sections.get(guestAt) !== value) {
+        sections = new Map(sections).set(guestAt, value);
+      }
       acceptedAgentRequest = null;
       recordingShortcut = '';
       shortcutError = '';
@@ -570,7 +600,11 @@
       applied();
     };
     const guard = agentsGuard();
-    if (value !== tab && AGENT_TABS.includes(tab) && guard) guard(apply);
+    // Ask the shown guest whenever its editor would change: leaving the agent
+    // categories (as before), or a choice that moves its own section — also
+    // from a non-agent category, where the page shows it on another section.
+    const movesGuest = !!guestAt && AGENT_TABS.includes(value) && opened.includes(guestAt) && sectionOf(guestAt) !== value;
+    if (guard && ((value !== tab && AGENT_TABS.includes(tab)) || movesGuest)) guard(apply);
     else apply();
   }
 
@@ -672,12 +706,12 @@
     {#if opened.length}
     <div class="agents-embed" class:off={!AGENT_TABS.includes(tab)} inert={!!guestHeld || !AGENT_TABS.includes(tab)}>
       {#each guests.filter((g) => opened.includes(g.runtime)) as g (g.runtime)}
-      {@const on = g.runtime === guestShown && AGENT_TABS.includes(tab)}
+      {@const on = g.runtime === guestShown && AGENT_TABS.includes(tab) && sectionOf(g.runtime) === tab}
       <div class="guest" class:off={!on} inert={!on}>
       <ServerScope runtime={g.runtime} state={g.state}>
       <AgentsPage
         section={sectionOf(g.runtime)}
-        visible={on && !guestHeld}
+        visible={on && guestInput}
         editRequest={acceptedAgentRequest?.serverId === g.runtime.id && sectionOf(g.runtime) === (acceptedAgentRequest.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
         onGuardExit={(guard: (action: () => void) => void) => registerAgentsGuard(g.runtime, guard)}
         guardPage="prefs"

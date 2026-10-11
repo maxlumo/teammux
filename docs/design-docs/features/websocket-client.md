@@ -655,7 +655,16 @@ on 6b923c0d): it mounts the first time its server is shown on an agent
 category, then stays mounted — hidden and inert — while another category or
 another member is shown, each guest on its own last section, and App keeps
 Preferences mounted (hidden) once a guest exists, so leaving the page or a
-block moving it never destroys a draft. An edit request names the server of
+block moving it never destroys a draft. A guest's SECTION is its own too
+(reviewer P1-1 residual on 9958bbfd): set when it first mounts, then changed
+only by an accepted category choice while it is shown — another member's
+choice never writes it, and when focus returns to a guest the page follows
+that guest's section, not the reverse; any choice that would move a shown
+guest's editor asks its guard, and a confirmation answering after focus moved
+commits nothing. A guest takes input — `visible`, its Back, its guard, a lazy
+first mount — only while Preferences is on screen, the server is not held and
+the touch guest applies (`guestInput`); a kept, hidden page or a block leaves
+it mounted and untouched. An edit request names the server of
 the tree that asked (`serverId`) and only that member's guest takes it; a
 request never moves to the next member shown.
 
