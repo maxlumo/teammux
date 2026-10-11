@@ -134,7 +134,7 @@ test('dropping one server leaves the other working', async () => {
     assert.equal(fleet.get('a'), undefined);
     assert.deepEqual(fleet.ids(), ['b']);
     assert.equal(sa.readyState, MockWebSocket.CLOSED, 'A s socket is gone');
-    await assert.rejects(ra.api.listSessions(), /connection disposed/u, 'and A is terminal');
+    await assert.rejects(ra.api.listSessions(), /connection disposed|is not serving/u, 'and A is terminal');
 
     // B never noticed.
     assert.ok(rb.connection.isConnected());
@@ -312,9 +312,9 @@ test('two unknown entries racing to one machine leave one runtime, in either ord
       assert.deepEqual(fleet.ids(), [winner.id], 'and one runtime');
       assert.equal(fleet.get(loser.id), undefined, 'the fleet forgot the merged-away id');
       assert.equal(loserSocket.readyState, MockWebSocket.CLOSED, 'its socket is closed');
-      await assert.rejects(loser.api.listSessions(), /connection disposed/u,
+      await assert.rejects(loser.api.listSessions(), /connection disposed|is not serving/u,
         'and the handle is terminal, not merely disconnected');
-      await assert.rejects(loser.connection.connect('ws://n2:9899', 'tok'), /connection disposed/u,
+      await assert.rejects(loser.connection.connect('ws://n2:9899', 'tok'), /connection disposed|is not serving/u,
         'so it cannot dial its way back');
 
       // A reply that was already on the wire when the merge happened resolves
@@ -331,15 +331,21 @@ test('two unknown entries racing to one machine leave one runtime, in either ord
   }
 });
 
-test('a runtime releases itself when its entry is absorbed, with no fleet to help', async () => {
+test('a runtime whose entry is absorbed is terminal at once, with no fleet to help; its host disposes it (board #335 ②b-4)', async () => {
   // The rule belongs to the runtime, not to the fleet: whoever holds a
   // runtime directly (②b's provider, a test) must not be left with a handle
-  // that can dial its way back to a server that no longer exists.
+  // that can serve a server that no longer exists. Since ②b-4 it DETACHES
+  // rather than disposing itself — the connection is the host's to end,
+  // after that server's state is released.
   const known = entry({ id: 'known', name: 'n1', address: 'ws://n1:9899', token: 'tok', machineId: 'm-a' });
   const guess = entry({ id: 'guess', name: 'n1', address: 'ws://n1:9899', token: 'tok' });
   const storage = mem({ tmux_servers: JSON.stringify([known, guess]), tmux_server_current: 'known' });
   const registry = createConnectionRegistry();
-  const runtime = createServerRuntime(guess, { storage, slot: registry.ensure('guess') });
+  const slot = registry.ensure('guess');
+  let disposed = 0;
+  const realDispose = slot.connection.dispose;
+  slot.connection.dispose = () => { disposed++; realDispose(); };
+  const runtime = createServerRuntime(guess, { storage, slot });
   try {
     const dialing = runtime.dial();
     const socket = MockWebSocket.instances.at(-1)!;
@@ -349,7 +355,10 @@ test('a runtime releases itself when its entry is absorbed, with no fleet to hel
     const result = await dialing;
     assert.equal(!result.ok && result.reason, 'elsewhere');
     assert.deepEqual(loadServers(storage).map((s) => s.id), ['known'], 'the guess was absorbed');
-    await assert.rejects(runtime.api.listSessions(), /connection disposed/u);
+    assert.equal(runtime.alive(), false, 'terminal');
+    assert.equal(disposed, 0, 'but it did not dispose its connection itself: that is the host s end');
+    await assert.rejects(runtime.api.listSessions(), /is not serving/u, 'and every call refuses');
+    runtime.dispose();                                     // the host's end
     await assert.rejects(runtime.connection.connect('ws://n1:9899', 'tok'), /connection disposed/u);
   } finally {
     registry.disposeAll();
@@ -501,7 +510,7 @@ test('an entry removed mid-dial is not resurrected by the connection that succee
     assert.equal(!result.ok && result.reason, 'gone');
     assert.deepEqual(loadServers(storage).map((s) => s.id), ['b'], 'the entry stays removed');
     assert.equal(fleet.get('a'), undefined, 'and the fleet let the runtime go');
-    await assert.rejects(ra.api.listSessions(), /connection disposed/u);
+    await assert.rejects(ra.api.listSessions(), /connection disposed|is not serving/u);
   } finally {
     fleet.dropAll();
   }
@@ -544,8 +553,8 @@ test('a runtime absorbed while idle or mid-auth is released by the fleet (P1-c)'
       assert.deepEqual(loadServers(storage).map((s) => s.id), ['known'], 'one entry');
       assert.deepEqual(fleet.ids(), ['known'], `the absorbed runtime is gone from the fleet (${state})`);
       assert.equal(registry.get('guess'), undefined, 'and from the registry');
-      await assert.rejects(rg.api.listSessions(), /connection disposed/u, 'its handle is terminal');
-      await assert.rejects(rg.connection.connect('ws://n1:9899', 'tok'), /connection disposed/u,
+      await assert.rejects(rg.api.listSessions(), /connection disposed|is not serving/u, 'its handle is terminal');
+      await assert.rejects(rg.connection.connect('ws://n1:9899', 'tok'), /connection disposed|is not serving/u,
         'so it cannot dial its way back');
       if (guessSocket) {
         assert.equal(guessSocket.readyState, MockWebSocket.CLOSED, 'its half-finished auth was cancelled');
@@ -585,7 +594,7 @@ test('the reverse direction: the unknown entry authenticates first', async () =>
     assert.deepEqual(loadServers(storage).map((s) => s.id), ['known']);
     assert.deepEqual(fleet.ids(), ['known'], 'the loser left both maps');
     assert.ok(rk.connection, 'and the survivor is untouched');
-    await assert.rejects(rg.api.listSessions(), /connection disposed/u);
+    await assert.rejects(rg.api.listSessions(), /connection disposed|is not serving/u);
   } finally {
     fleet.dropAll();
   }
@@ -883,7 +892,7 @@ function countingSlot(over: Record<string, unknown> = {}) {
   return { slot, calls };
 }
 
-test('a borrowed runtime detaches when its entry is removed mid-auth; an owned one ends its connection', async () => {
+test('a runtime whose entry is removed mid-auth DETACHES, borrowed or owned; only its host s end disposes (board #335 ②b-4)', async () => {
   const { storage, a } = twoServers();
   let resolve: (v: string) => void = () => {};
   const { slot, calls } = countingSlot({ connect: () => new Promise<string>((r) => { resolve = r; }) });
@@ -899,8 +908,10 @@ test('a borrowed runtime detaches when its entry is removed mid-auth; an owned o
     'the borrowed connection is left alive for its owner');
   await assert.rejects(runtime.api.listSessions(), /detached/u, 'and the handle is terminal');
 
-  // The same path on an OWNED slot does end the connection — that contrast is
-  // the whole reason `borrowed` has to be declared rather than assumed.
+  // The same path on an OWNED slot detaches too (the gap recorded at b2-4's
+  // 085b0e70, closed here): disposing itself would skip the host's release
+  // of that server's state. It refuses at once — a method captured before
+  // the dial included — and the connection goes only when the host ends it.
   const owned = twoServers();
   let resolveOwned: (v: string) => void = () => {};
   const second = countingSlot({ connect: () => new Promise<string>((r) => { resolveOwned = r; }) });
@@ -908,8 +919,13 @@ test('a borrowed runtime detaches when its entry is removed mid-auth; an owned o
   const ownedDial = ownedRuntime.dial();
   saveServers(owned.storage, loadServers(owned.storage).filter((s) => s.id !== 'a'));
   resolveOwned('m-a');
+  const captured = ownedRuntime.api.listSessions;
   assert.deepEqual(await ownedDial, { ok: false, reason: 'gone' });
-  assert.equal(second.calls.dispose, 1, 'an owned runtime releases its own connection');
+  assert.equal(second.calls.dispose, 0, 'the owned runtime did not dispose itself');
+  await assert.rejects(captured(), /detached/u, 'a pre-captured method refuses at once');
+  assert.equal(ownedRuntime.alive(), false, 'and the handle is terminal');
+  ownedRuntime.dispose();                                  // the host's end
+  assert.equal(second.calls.dispose, 1, 'the host s end disposes the connection');
 });
 
 test('a borrowed runtime absorbed into another entry keeps the socket the app came up on', async () => {
@@ -987,4 +1003,48 @@ test('a borrowed handle keeps answering until it is detached', async () => {
   assert.deepEqual((await runtime.api.listSessions()).map((s: any) => s.name), ['live']);
   runtime.dispose();
   await assert.rejects(runtime.api.listSessions(), /detached/u);
+});
+
+test('with a host end, drop and reconcile END a runtime release → dispose, and the id is free at once (board #335 ②b-4)', async () => {
+  // Reviewer and orchestrator, 01:46: every fleet drop and reconcile goes
+  // through the host's one end — stop, release that server's state, then
+  // dispose — never a bare connection close. The slot leaves the registry
+  // NOW, so including the id again builds a NEW connection while the old one
+  // is still being ended.
+  const { storage, a, b } = twoServers();
+  const registry = createConnectionRegistry();
+  const order: string[] = [];
+  let finish: () => void = () => {};
+  const fleet = createServerFleet({
+    storage, registry,
+    // What App's end does (handle-end.ts): stop serving at once, release,
+    // dispose last.
+    end: (runtime) => {
+      runtime.detach();
+      order.push(`end:${runtime.id}`);
+      return new Promise<void>((done) => { finish = () => { order.push(`dispose:${runtime.id}`); runtime.dispose(); done(); }; });
+    },
+  });
+  try {
+    const ra = got(fleet.include(a));
+    got(fleet.include(b));
+    const captured = ra.api.listSessions;
+    fleet.drop('a');
+    assert.deepEqual(order, ['end:a'], 'the host s end ran, not a direct dispose');
+    assert.equal(registry.get('a'), undefined, 'the slot left the registry at once');
+    await assert.rejects(captured(), /is not serving/u, 'the ending runtime refuses at once, before its dispose');
+    const again = got(fleet.include(a));
+    assert.notEqual(again, ra, 'a new runtime');
+    assert.notEqual(again.connection, ra.connection, 'over a new connection, while the old one is still ending');
+    finish();
+    await Promise.resolve();
+    assert.deepEqual(order, ['end:a', 'dispose:a'], 'dispose last');
+    await assert.rejects(captured(), /connection disposed|is not serving/u, 'and the old api refuses');
+    // Reconcile takes the same road.
+    saveServers(storage, loadServers(storage).filter((s) => s.id !== 'b'));
+    fleet.reconcile();
+    assert.deepEqual(order.slice(-1), ['end:b'], 'a reconcile ends through the host too');
+  } finally {
+    registry.disposeAll();
+  }
 });

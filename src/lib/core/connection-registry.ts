@@ -35,6 +35,11 @@ export interface ConnectionRegistry {
   get(key: ConnectionKey): ConnectionSlot | undefined;
   /** Drop `key` and dispose ONLY its connection. Unknown keys are a no-op. */
   remove(key: ConnectionKey): void;
+  /** Forget `key`'s slot WITHOUT disposing it, and return it: for an owner
+   * that ends the connection itself, later, after work that still needs it
+   * has settled (board #335 ②b-4: the fleet ends a runtime release → dispose).
+   * A new `ensure(key)` meanwhile builds a fresh object. */
+  take(key: ConnectionKey): ConnectionSlot | undefined;
   /** Dispose every slot of THIS registry. */
   disposeAll(): void;
 }
@@ -66,5 +71,11 @@ export function createConnectionRegistry(): ConnectionRegistry {
     for (const slot of all) slot.connection.dispose();
   }
 
-  return { ensure, get: (key) => slots.get(key), remove, disposeAll };
+  function take(key: ConnectionKey) {
+    const slot = slots.get(key);
+    slots.delete(key);
+    return slot;
+  }
+
+  return { ensure, get: (key) => slots.get(key), remove, take, disposeAll };
 }

@@ -112,6 +112,11 @@ export interface ServerRuntime {
    * A SUSPENDED handle is still alive: it is the same handle, waiting out a
    * socket handover that may well land on its own server. */
   alive(): boolean;
+  /** Stop serving NOW, for good: every call through `api` refuses from here
+   * on, a method captured before included, while the connection is left for
+   * `dispose` (board #335 ②b-4). A host's end calls this first, releases the
+   * server's state, and disposes last. */
+  detach(): void;
   /**
    * Stop using the slot, WITHOUT giving the handle up (board #335 ②b-1,
    * reviewer 2026-10-10).
@@ -280,9 +285,13 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
    * another server. The wrappers are built once and are stable, so a caller
    * that captured a method still holds the gate rather than the raw call.
    */
-  const api: WsApi = borrowed
-    ? gateApi(slot.api, () => (dead ? 'detached' : suspended ? 'suspended' : 'live'), id)
-    : slot.api;
+  //
+  // OWNED too, since board #335 ②b-4 (reviewer and orchestrator, 01:46): an
+  // owned runtime that loses its identity mid-dial DETACHES rather than
+  // disposing its connection — its host ends it, release then dispose — and
+  // a page that captured `api.fsWrite` before that must be refused at once,
+  // not when the connection finally goes.
+  const api: WsApi = gateApi(slot.api, () => (dead ? 'detached' : suspended ? 'suspended' : 'live'), id);
 
   /** End this runtime's USE of the slot. A borrowed connection outlives every
    * runtime that borrows it (see `borrowed`), so the handle goes terminal and
@@ -379,7 +388,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // a decision; recording the connection that just succeeded would undo it
     // and resurrect the entry through `recordServer`.
     if (!loadServers(storage).some((s) => s.id === id)) {
-      dispose();
+      detach();
       onRegistryChanged?.();
       return { ok: false, reason: 'gone' };
     }
@@ -415,7 +424,11 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       // A's work to B. An OWNED handle keeps the narrower rule, because it
       // closed its own socket and its slot is idle: it is still A's handle,
       // and it can dial A again.
-      if (borrowed || !loadServers(storage).some((s) => s.id === id)) dispose();
+      //
+      // DETACH, never dispose (board #335 ②b-4; the gap recorded at b2-4's
+      // 085b0e70): the host ends a runtime — release its server's state, then
+      // dispose — and a runtime that disposed itself here skipped the release.
+      if (borrowed || !loadServers(storage).some((s) => s.id === id)) detach();
       // Whatever happened to this runtime, the entry SET may have changed:
       // the membership layer reconciles, which is how a runtime absorbed
       // while idle or mid-auth is released too.
@@ -477,8 +490,14 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     return caps;
   }
 
-  function dispose() {
+  /** Stop serving: every call through `api` refuses from now on. The
+   * connection is left for the host's end (release, then `dispose`). */
+  function detach() {
     dead = true;
+  }
+
+  function dispose() {
+    detach();
     releaseSlot();
   }
 
@@ -493,6 +512,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
     alive: () => !dead,
+    detach,
     suspend: () => {
       const ticket = ++handovers;
       if (!dead) {

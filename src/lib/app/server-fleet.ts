@@ -29,6 +29,16 @@ export interface ServerFleetDeps {
    * one registry, since object lifetime is the registry's to own. */
   registry?: ConnectionRegistry;
   connectTimeoutMs?: number;
+  /**
+   * How a runtime the fleet lets go of is ENDED (board #335 ②b-4; reviewer
+   * and orchestrator, 01:46): the host's one end — stop it, release its
+   * server's state, then dispose (app/handle-end.ts). Without it the fleet
+   * disposes at once, which is right only for a host with no state to
+   * release. Either way the id is free immediately: its slot leaves the
+   * registry now, so a re-include builds a new connection while the old one
+   * is still being ended.
+   */
+  end?: (runtime: ServerRuntime) => void | Promise<void>;
 }
 
 export interface ServerFleet {
@@ -112,6 +122,14 @@ export function createServerFleet(deps: ServerFleetDeps): ServerFleet {
     const runtime = runtimes.get(id);
     if (!runtime) return;
     runtimes.delete(id);
+    // The host's end, when it has one: release first, dispose last (whose
+    // final step disposes the connection). The slot leaves the registry NOW
+    // either way, so the two maps never disagree about what is alive.
+    if (deps.end) {
+      registry.take(id);
+      void deps.end(runtime);
+      return;
+    }
     // The runtime's dispose releases the connection; removing the key from the
     // registry keeps the two maps from disagreeing about what is alive.
     runtime.dispose();
