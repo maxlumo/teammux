@@ -37,9 +37,10 @@
 // deploy — the direction that retries rather than the one that skips.
 //
 // The receipt lives beside the binary it describes (`.tmm-gateway-deployed
-// .json` in `target/release`, gitignored) and names the binary, the service and
-// the commit, so it cannot be read as evidence about a different tmm, a
-// differently-named service (`TMM_GATEWAY_SERVICE`) or another target dir.
+// .json` in `target/release`, gitignored) and names the whole identity the
+// service has (`gateway::service::Identity`): the binary, the CONFIG ROOT, and
+// the service name (`TMM_GATEWAY_SERVICE`), plus the commit. Any of those
+// differing makes it evidence about another service, so it is not read.
 // `cargo clean` takes it with the binary, which costs one extra restart.
 //
 // `tmm gateway restart` is what actually restarts: it refuses a service that
@@ -49,7 +50,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -69,15 +70,48 @@ export function tmmPath(root = repoRoot, env = process.env) {
   return given ? resolve(given) : join(root, 'src-tauri/target/release/tmm');
 }
 
+/** The config root half of the service's identity, derived the way tmm derives
+ * it (`config::dirs_next` + `service::current_identity`, which takes the XDG
+ * BASE, not the app dir): `$XDG_CONFIG_HOME` when absolute, else `$HOME
+ * /.config`, else `.config` beside the checkout. A receipt that named only the
+ * binary would be read as evidence after a switch to another config root,
+ * where the same binary serves a different service.  */
+export function configHome(root = repoRoot, env = process.env) {
+  const xdg = env.XDG_CONFIG_HOME;
+  if (xdg && isAbsolute(xdg)) return resolve(xdg);
+  if (env.HOME) return resolve(env.HOME, '.config');
+  return resolve(root, '.config');
+}
+
 /** The hash that must be the same file three times over: what we hash, what
  * the build produced, and what the unit execs. Cargo can be told to build
  * somewhere else, and then the default path above is a stale or absent file —
- * so say so and stop, rather than hash one binary and restart another. */
-export function targetDirConflict(env = process.env) {
+ * so say so and stop, rather than hash one binary and restart another.
+ *
+ * Only the default Cargo layout is supported: the env vars below, and a
+ * `target-dir`/`build.target` in a cargo config file we can see. The match is
+ * deliberately crude (no TOML parser) because its only outcome is to STOP and
+ * ask for the artifact by name — a false positive costs one env var, a false
+ * negative is a stale hash. A layout chosen some other way is not detected;
+ * name the artifact with `TMUX_MOBILE_GATEWAY_TMM` and it is used verbatim. */
+export function targetDirConflict(env = process.env, root = repoRoot, read = readFileSync) {
   if (env[TMM_BIN_ENV]) return null;
-  const set = ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET'].filter((k) => env[k]);
-  if (!set.length) return null;
-  return `[gateway:update] ${set.join(' and ')} set: the build will not land in src-tauri/target/release, so the binary this would hash is not the one it builds. Point ${TMM_BIN_ENV} at the real artifact — it must be the same file the unit's ExecStart names.`;
+  const why = ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET'].filter((k) => env[k]);
+  const cargoHome = env.CARGO_HOME || (env.HOME ? join(env.HOME, '.cargo') : null);
+  const configs = [join(root, 'src-tauri/.cargo'), join(root, '.cargo'), ...(cargoHome ? [cargoHome] : [])]
+    // Cargo reads either name; the legacy one has no extension.
+    .flatMap((dir) => [join(dir, 'config.toml'), join(dir, 'config')]);
+  for (const file of configs) {
+    let text = '';
+    try {
+      text = read(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (/^\s*(target-dir|target)\s*=/m.test(text)) why.push(file);
+  }
+  if (!why.length) return null;
+  return `[gateway:update] ${why.join(' and ')} can move the build out of src-tauri/target/release, so the binary this would hash may not be the one it builds. Point ${TMM_BIN_ENV} at the real artifact — it must be the same file the unit's ExecStart names.`;
 }
 
 /** sha256 of a file, or null when it does not exist (nothing built yet). */
@@ -94,26 +128,29 @@ export function receiptPath(tmm) {
   return join(dirname(tmm), RECEIPT_FILE);
 }
 
-/** The hash this binary+service was last ACTIVATED with, or null. Anything
- * unreadable, unparseable or about something else is null: deploy again. */
-export function deployedHash(tmm, service) {
+/** The hash this binary+service+config root was last ACTIVATED with, or null.
+ * Anything unreadable, unparseable or about something else is null: deploy. */
+export function deployedHash(tmm, service, home) {
   try {
     const r = JSON.parse(readFileSync(receiptPath(tmm), 'utf8'));
-    const ok = r?.tmm === tmm && (r?.service ?? '') === service && typeof r?.hash === 'string';
+    const ok = r?.tmm === tmm
+      && (r?.service ?? '') === service
+      && r?.configHome === home
+      && typeof r?.hash === 'string';
     return ok ? r.hash : null;
   } catch {
     return null;
   }
 }
 
-export function writeReceipt(tmm, service, hash, commit) {
-  const body = { tmm, service, hash, commit, at: new Date().toISOString() };
+export function writeReceipt(tmm, service, home, hash, commit) {
+  const body = { tmm, service, configHome: home, hash, commit, at: new Date().toISOString() };
   writeFileSync(receiptPath(tmm), `${JSON.stringify(body, null, 2)}\n`);
 }
 
-function runInherit(root) {
+function runInherit(root, env) {
   return (command, args) => {
-    const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: 'inherit' });
+    const result = spawnSync(command, args, { cwd: root, env, stdio: 'inherit' });
     if (result.error) {
       console.error(`[gateway:update] ${command}: ${result.error.message}`);
       return 1;
@@ -131,26 +168,28 @@ function captureLine(root) {
 
 /**
  * Exit code 0 means ONE thing: the gateway is running this checkout's binary,
- * and said so. Every other outcome is non-zero — a failed build, a refused or
- * failed restart (a host that has not migrated fails here, with the runbook
- * named), and a gateway that does not answer even though we have a receipt for
- * these bytes. "now at <commit>" is printed only on that one success.
+ * and said so on the last check. Every other outcome is non-zero — a failed
+ * build, a refused or failed restart (a host that has not migrated fails here,
+ * with the runbook named), and a gateway that does not answer, whether or not
+ * this run restarted it. "now at <commit>" is printed only on that one
+ * success, after the final check, never before it.
  */
 export async function gatewayUpdate({
   root = repoRoot,
   env = process.env,
-  run = runInherit(root),
+  run = runInherit(root, env),
   capture = captureLine(root),
   log = console.log,
   warn = console.error,
 } = {}) {
-  const conflict = targetDirConflict(env);
+  const conflict = targetDirConflict(env, root);
   if (conflict) {
     warn(conflict);
     return 1;
   }
   const tmm = tmmPath(root, env);
   const service = env[SERVICE_ENV] || '';
+  const home = configHome(root, env);
 
   log('[gateway:update] building (npm run build:server)');
   const built = await run('npm', ['run', 'build:server']);
@@ -165,34 +204,43 @@ export async function gatewayUpdate({
     return 1;
   }
   const commit = capture('git', ['log', '-1', '--format=%h %s']);
-  const deployed = deployedHash(tmm, service);
+  const deployed = deployedHash(tmm, service, home);
 
+  let restarted = false;
   if (want === deployed) {
     log('[gateway:update] the gateway was last started with exactly these bytes — NOT restarting (no client is dropped)');
-    const state = await run(tmm, ['gateway', 'status']);
-    if (state !== 0) {
-      warn('[gateway:update] …but this machine\'s gateway does not answer — see the status above. Nothing was restarted; fix the service (tmm gateway, or the runbook in docs/reference/install.md) and run this again.');
-      return state;
+  } else {
+    log(deployed === null
+      ? '[gateway:update] no activation receipt for these bytes (a first run, a hand-built binary, or a restart that failed) — deploying'
+      : '[gateway:update] the binary changed since the gateway was started — deploying');
+    const code = await run(tmm, ['gateway', 'restart']);
+    if (code !== 0) {
+      warn('[gateway:update] gateway restart FAILED — NOTHING was deployed; the gateway still runs whatever it ran before (or nothing). If the service is not installed, this host has not migrated yet: docs/reference/install.md § Switching a dev host to the gateway. Run this again afterwards.');
+      return code;
     }
-    if (commit) log(`[gateway:update] now at ${commit}`);
-    return 0;
+    restarted = true;
+    try {
+      // The receipt is a fact about the restart, which returned only once our
+      // instance answered — so it is written even if the check below then
+      // finds the service gone, and a later run reads "these bytes were
+      // activated" rather than restarting a service that is failing.
+      writeReceipt(tmm, service, home, want, commit);
+    } catch (error) {
+      warn(`[gateway:update] the restart succeeded but the receipt could not be written (${error.message}) — the next run will restart again`);
+    }
   }
 
-  log(deployed === null
-    ? '[gateway:update] no activation receipt for these bytes (a first run, a hand-built binary, or a restart that failed) — deploying'
-    : '[gateway:update] the binary changed since the gateway was started — deploying');
-  const restarted = await run(tmm, ['gateway', 'restart']);
-  if (restarted !== 0) {
-    warn('[gateway:update] gateway restart FAILED — NOTHING was deployed; the gateway still runs whatever it ran before (or nothing). If the service is not installed, this host has not migrated yet: docs/reference/install.md § Switching a dev host to the gateway. Run this again afterwards.');
-    return restarted;
-  }
-  try {
-    writeReceipt(tmm, service, want, commit);
-  } catch (error) {
-    warn(`[gateway:update] the restart succeeded but the receipt could not be written (${error.message}) — the next run will restart again`);
+  // ONE final confirmation for both paths: success is the gateway answering
+  // as ours, read after everything this run did (reviewer P1-A(i) — a restart
+  // that was accepted and then died must not report a deployed commit).
+  const state = await run(tmm, ['gateway', 'status']);
+  if (state !== 0) {
+    warn(restarted
+      ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer now — see the status above. The activation is recorded; fix the service (tmm gateway restart, or docs/reference/install.md) and run this again.'
+      : '[gateway:update] nothing needed deploying, but this machine\'s gateway does not answer — see the status above. Nothing was restarted; fix the service (tmm gateway, or the runbook in docs/reference/install.md) and run this again.');
+    return state;
   }
   if (commit) log(`[gateway:update] now at ${commit}`);
-  await run(tmm, ['gateway', 'status']);
   return 0;
 }
 

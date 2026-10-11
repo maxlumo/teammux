@@ -85,15 +85,17 @@ hide that.
 
    ```bash
    systemctl --user stop tmux-mobile-dev.service
-   systemd-cgls --user-unit tmux-mobile-dev.service          # what is left in the cgroup
-   pgrep -fa 'dev-stack.mjs|dev-server-watch.sh|target/release/server'
+   systemd-cgls --user-unit tmux-mobile-dev.service          # the authority: what is left in the cgroup
+   pgrep -fa "$PWD/scripts/dev-stack.mjs|$PWD/scripts/dev-server-watch.sh|$PWD/src-tauri/target/release/server"
    kill <the dev-stack.mjs pid>    # top-down: the supervisor first, never the
    #                                 server alone; re-run pgrep until it is empty
    ```
 
-   Never `pkill` by a broad pattern: other agents' builds and servers run on
-   this host. Only once `pgrep` is empty and both ports stay free is the chain
-   gone:
+   The cgroup listing is what decides, and the `pgrep` is scoped to THIS
+   checkout's paths: the question is whether this unit's chain is gone, not
+   whether the machine runs nothing of that shape. Never `pkill` by a broad
+   pattern — other agents' builds and servers run on this host. Only once this
+   unit's processes are gone and both ports stay free is the chain down:
 
    ```bash
    ss -ltn | grep -E '5173|9899'   # expect nothing, and again a few seconds later
@@ -167,13 +169,17 @@ hide that.
 From then on, after every merge to main: `npm run gateway:update`. It runs
 `npm run build:server`, then restarts the gateway unless the binary is already
 the one the gateway was last started with — it records each successful restart
-in a receipt beside the binary (`.tmm-gateway-deployed.json`), because a
-build's output alone cannot say what is RUNNING: after a failed restart the
-next build produces the same bytes, and "nothing changed" would skip the
-deploy for good. A failed build leaves the running gateway alone, a failed
-restart exits non-zero and deploys nothing, and a gateway that stops answering
-is reported rather than papered over. Exit 0 means one thing: the gateway runs
-this commit's binary.
+in a receipt beside the binary (`.tmm-gateway-deployed.json`, naming the
+binary, the config root and the service, as the service's own identity does),
+because a build's output alone cannot say what is RUNNING: after a failed
+restart the next build produces the same bytes, and "nothing changed" would
+skip the deploy for good. A failed build leaves the running gateway alone, a
+failed restart deploys nothing, and whichever path a run took it ends on the
+same check — exit 0, and the commit it prints, mean the gateway answered as
+ours after everything that run did. It supports the default Cargo layout only:
+a `CARGO_TARGET_DIR`, a `--target`, or a `target-dir` in a cargo config moves
+the artifact, and the run stops and asks you to name it with
+`TMUX_MOBILE_GATEWAY_TMM` rather than hash one file and restart another.
 
 To go back: `tmm gateway uninstall`, then run the dev stack with the watcher
 again (`TMUX_MOBILE_DEV_WITH_SERVER=1`).

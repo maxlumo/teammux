@@ -7,6 +7,7 @@ import {
   RECEIPT_FILE,
   SERVICE_ENV,
   TMM_BIN_ENV,
+  configHome,
   gatewayUpdate,
   hashFile,
   receiptPath,
@@ -145,11 +146,66 @@ test('nothing to deploy but the gateway does not answer is a failure', async (t)
   assert.ok(!h.told('now at'), 'and the commit is not reported as running');
 });
 
+// Reviewer P1-A(i): the confirmation is the same on both paths. A restart that
+// was accepted and then died must not report a deployed commit.
+test('a restart that is accepted and then stops answering is a failure too', async (t) => {
+  const fresh = await host(t);
+  fresh.status = 7;
+  assert.equal(await fresh.update(), 7, 'no receipt yet: deploy, then the check fails');
+  assert.equal(fresh.restarts(), 1);
+  assert.ok(!fresh.told('now at'), fresh.said.join('\n'));
+  assert.ok(fresh.told('restart was accepted'));
+  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin), 'the activation happened and is recorded');
+
+  const moved = await host(t);
+  await moved.update();
+  moved.bytes = 'B';
+  moved.status = 7;
+  assert.equal(await moved.update(), 7, 'a stale receipt: deploy, then the check fails');
+  assert.equal(moved.restarts(), 1);
+  assert.ok(!moved.told('now at'), moved.said.join('\n'));
+});
+
+// Reviewer P1-A(ii): the service's identity is the binary AND the config root
+// (gateway::service::Identity), so a receipt from one root says nothing about
+// the other — even when the same binary answers for both.
+test('a receipt from another config root is not evidence', async (t) => {
+  const a = await host(t, { HOME: '/home/a' });
+  await a.update();
+  assert.equal((await a.receipt()).configHome, '/home/a/.config');
+
+  const said: string[] = [];
+  const calls: Call[] = [];
+  const second = await gatewayUpdate({
+    root: a.root,
+    env: { HOME: '/home/b' },
+    capture: () => 'abc1234 a merged commit',
+    log: (line: string) => said.push(line),
+    warn: (line: string) => said.push(line),
+    run: async (command: string, args: string[]) => {
+      if (command !== 'npm') calls.push([command, args]);
+      return 0;
+    },
+  });
+  assert.equal(second, 0);
+  assert.equal(calls.filter(([, args]) => args[1] === 'restart').length, 1,
+    `the same bytes under another config root are a different service: deploy (${said.join(' | ')})`);
+  assert.equal((await a.receipt()).configHome, '/home/b/.config');
+});
+
+test('the config root is derived the way tmm derives it', () => {
+  assert.equal(configHome('/repo', { XDG_CONFIG_HOME: '/x/cfg', HOME: '/home/a' }), '/x/cfg');
+  // tmm ignores a relative XDG_CONFIG_HOME (config.rs filters on is_absolute).
+  assert.equal(configHome('/repo', { XDG_CONFIG_HOME: 'rel', HOME: '/home/a' }), '/home/a/.config');
+  assert.equal(configHome('/repo', {}), '/repo/.config');
+});
+
 test('a receipt about another binary or another service is not evidence', async (t) => {
   const h = await host(t);
   await h.update();
   const receipt = await h.receipt();
 
+  assert.ok(receipt.configHome, 'a receipt names the config root it belongs to');
   await writeFile(receiptPath(h.bin), JSON.stringify({ ...receipt, tmm: '/elsewhere/tmm' }));
   assert.equal(await h.update(), 0);
   assert.equal(h.restarts(), 1, 'another binary’s activation says nothing about this one');
@@ -221,7 +277,29 @@ test('a target dir that moves the artifact is refused before anything is built',
     // Naming the real artifact is the way through.
     assert.equal(targetDirConflict({ [key]: 'x', [TMM_BIN_ENV]: '/real/tmm' }), null);
   }
-  assert.equal(targetDirConflict({}), null);
+  assert.equal(targetDirConflict({}, '/repo', () => { throw Object.assign(new Error('no'), { code: 'ENOENT' }); }), null);
+});
+
+test('a target-dir in a cargo config file is refused as well', () => {
+  const files: Record<string, string> = {
+    '/repo/src-tauri/.cargo/config.toml': '[build]\ntarget-dir = "/elsewhere"\n',
+    '/home/a/.cargo/config.toml': '[build]\njobs = 4\n',
+  };
+  const read = (file: string) => {
+    if (!(file in files)) throw Object.assign(new Error('no'), { code: 'ENOENT' });
+    return files[file];
+  };
+  const why = targetDirConflict({ HOME: '/home/a' }, '/repo', read);
+  assert.match(String(why), /src-tauri\/\.cargo\/config\.toml/);
+  assert.match(String(why), new RegExp(TMM_BIN_ENV));
+
+  files['/home/a/.cargo/config.toml'] = '[build]\ntarget = "aarch64-unknown-linux-gnu"\n';
+  assert.match(String(targetDirConflict({ HOME: '/home/a' }, '/repo', read)), /home\/a\/\.cargo/);
+
+  // A file with neither key, and an explicitly named artifact, both pass.
+  delete files['/repo/src-tauri/.cargo/config.toml'];
+  files['/home/a/.cargo/config.toml'] = '[build]\njobs = 4\n';
+  assert.equal(targetDirConflict({ HOME: '/home/a' }, '/repo', read), null);
 });
 
 test('a missing file hashes to null instead of throwing', () => {
