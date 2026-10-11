@@ -196,7 +196,12 @@
    * (`keep`), else a new one with its server's state built, or null — but
    * not SHOWN, so a caller can dial it before any page is mounted on it. A
    * new runtime the caller never shows is ended by that caller. */
-  function mintCurrent() {
+  function mintCurrent() { return mintFrom(foldCurrent()); }
+  /** The storage gate every bind passes, for whichever server is CURRENT:
+   * the inputs' attribution and the navigation's merge rewrite. Run before a
+   * runtime is minted, and again once its dial has taught it its machine —
+   * before anything is published (reviewer P1-3 on 341554b3). */
+  function foldCurrent() {
     const id = currentServerId(localStorage);
     // No server's state is built before the inputs' attribution has been
     // asked for it (board #335 ②b-4): a fresh client's first server folds
@@ -206,6 +211,9 @@
     // The navigation's merge rewrite is a pre-bind write too (reviewer P1-3
     // on 08fdb6ba): not attempted while blocked, and a failure blocks.
     if (fold !== 'blocked' && !followMerges()) { migrationBlocked = true; fold = 'blocked'; }
+    return { id, fold };
+  }
+  function mintFrom({ id, fold }) {
     const entry = fold !== 'blocked' ? loadServers(localStorage).find((s) => s.id === id) ?? null : null;
     const held = scopeSwap.bound();
     // A claim just filed the inputs into THIS server's slots: its state,
@@ -235,14 +243,19 @@
     // A runtime the fleet already holds for this id keeps the state it was
     // minted with: a later activation reusing it must not swap that state
     // under the one still dialling (reviewer P1-C on cc45d7d1).
-    if (next && !serverStates.has(next)) {
-      const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
-      serverStates.set(next, stateForRuntime(replaced, entry.id, {
-        survivorOf: (id) => mergedInto(localStorage, id),
-        create: () => createServerState(createServerStore(localStorage, entry.id)),
-      }));
-    }
+    if (next && !serverStates.has(next)) serverStates.set(next, stateFor(entry.id));
     return { keep: false, runtime: next };
+  }
+  /** Server `id`'s state for a runtime about to be bound: fresh from its own
+   * slots, or — when identity repair folded the bound handle's id into `id` —
+   * that same machine's Files record handed over. */
+  function stateFor(id) {
+    const held = scopeSwap.bound();
+    const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
+    return stateForRuntime(replaced, id, {
+      survivorOf: (serverId) => mergedInto(localStorage, serverId),
+      create: () => createServerState(createServerStore(localStorage, id)),
+    });
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
    * names its survivor now (reviewer P1, 2026-10-10).
@@ -909,26 +922,31 @@
   function reconnectorOf(runtime) {
     let machine = reconnectors.get(runtime);
     if (machine) return machine;
-    let claim = null;
-    let last = null;
     machine = createReconnectMachine({
-      // Not while the person is being asked something: the dial waits for the
-      // walk to answer, and an attempt someone took over meanwhile is
-      // nobody's (one question at a time; it freezes no socket).
-      connect: (address, _token, timeoutMs) => serverSwitch.idle().then(() => {
+      // Each attempt dials under ITS OWN claim, handed in by the machine and
+      // asked all the way down — the dial's ownership check, the identity
+      // record, the arrival — and its answer comes back as its own result
+      // (reviewer P1-2 on 341554b3). Nothing here is shared between
+      // attempts: a variable the next attempt overwrites would let a stale
+      // one borrow a newer owner. Not while the person is being asked
+      // something: the dial waits for the walk to answer, and an attempt
+      // someone took over meanwhile is nobody's.
+      connect: (address, _token, timeoutMs, claim) => serverSwitch.idle().then(() => {
         if (!claim?.current()) throw new Error('superseded');
-        return runtime.dial(() => claim?.current() ?? false, { via: address, timeoutMs });
+        return runtime.dial(() => claim.current(), { via: address, timeoutMs });
       }).then(
         (result) => {
-          last = result;
-          if (result.ok || result.reason === 'elsewhere') return;
+          if (result.ok || result.reason === 'elsewhere') return result;
           throw result.error ?? new Error(result.reason);
         },
         // An identity record that failed: the dial closed that socket, and
         // it is not a reachability failure to retry — it is reported.
-        () => { last = { ok: false, reason: 'unrecorded' }; },
+        (error) => {
+          if (error?.message === 'superseded') throw error;
+          return { ok: false, reason: 'unrecorded' };
+        },
       ),
-      attempt: () => (claim = activations.claim()),
+      attempt: () => activations.claim(),
       findBestAddress,
       isAddressViable,
       noteAddressUnreachable,
@@ -943,7 +961,7 @@
         reconnectAttempt = st.attempt;
         reconnectClass = st.label;
       },
-      onSuccess: (_useAddr, _primaryAddr, attempt) => onReconnected(runtime, last, attempt),
+      onSuccess: (_useAddr, _primaryAddr, attempt, result) => onReconnected(runtime, result, attempt),
       onGiveUp: () => { if (bound() === runtime) { connected = false; page = 'settings'; } },
     });
     reconnectors.set(runtime, machine);
@@ -1066,37 +1084,38 @@
    * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
    * was taken under: if someone else took it anyway, this arrival is not
    * the app's any more and does nothing. */
-  async function arrivedElsewhere(result, attempt) {
-    if (migrationBlocked) { connected = false; return; }
+  async function arrivedElsewhere(result, attempt, chain = null) {
+    if (migrationBlocked) { connected = false; return t('migrationBlockedNote'); }
     // Someone took over since the dial (a newer connect, a switch): this
     // arrival is not the app's any more, the alias case included.
-    if (!attempt.current()) return;
+    if (!attempt.current()) return null;
     // Identity repair absorbed the entry we were on into the machine's
     // survivor, and CURRENT already names it: the SAME machine. Its own
     // runtime dials before anything comes up on it (reviewer P1-B on
     // cc45d7d1), keeping the tree until it is up — the survivor adopts the
     // replaced handle's Files record.
     if (currentServerId(localStorage) === result.entry.id) {
-      activate({ replace: false, up: () => { bringUp(); resubscribeAll(); } });
-      return;
+      return activate({ replace: false, up: () => { bringUp(); resubscribeAll(); }, chain }).done;
     }
     // Another question is already open (a form's walk): this arrival asks
     // nothing on top of it and changes nothing — the person's answer there
     // decides what happens next.
-    if (serverSwitch.guarding) { connected = false; return; }
+    if (serverSwitch.guarding) { connected = false; return null; }
     let leave = false;
     try {
       leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
     } catch { leave = false; }
-    if (!attempt.current()) return;
+    if (!attempt.current()) return null;
     if (!leave) {
       connected = false;
       heldOffline = true;
       reconnectError = t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
       page = 'settings';
-      return;
+      return reconnectError;
     }
-    const left = currentServerId(localStorage);
+    // What a failure returns to: the server the tree is bound to — CURRENT
+    // may already name the server the dial was meant for.
+    const left = bound()?.id ?? '';
     try {
       const entry = result.entry;
       const act = activateConnected(localStorage, {
@@ -1104,18 +1123,18 @@
         ...(entry.socket ? { socket: entry.socket } : {}),
         ...(result.machineId ? { machineId: result.machineId } : {}),
       });
-      const run = act.reload ? arriveAt(left) : activate({ replace: false, up: () => { bringUp(); resubscribeAll(); } });
-      void run.done;
-    } catch { page = 'settings'; storageFailed(); }
+      const run = act.reload ? arriveAt(left, 'arrive', chain) : activate({ replace: false, up: () => { bringUp(); resubscribeAll(); }, chain });
+      return await run.done;
+    } catch { page = 'settings'; storageFailed(); return t('configIdentityFailed'); }
   }
 
   /** Come up on ANOTHER server, CURRENT already pointing at it: its own
    * runtime dials and is bound before the server left is ended (ruling (a),
    * 04:04), and if it does not come up CURRENT goes back to `left`, which is
    * still running. */
-  function arriveAt(left, elsewhere = 'arrive') {
+  function arriveAt(left, elsewhere = 'arrive', chain = null) {
     serverSwitch.supersede();
-    const run = activate({ replace: true, elsewhere, up: () => { bringUp(); resubscribeAll(); } });
+    const c = chain ?? newChain();
     // Back to the server left, which is still the one bound — unless the
     // migration froze CURRENT, or something else has been bound since.
     const back = () => {
@@ -1123,11 +1142,14 @@
       try { restoreCurrent(localStorage, left); } catch { storageFailed(); return; }
       loadServerRegistry();
     };
-    run.done.then((failure) => { if (failure) back(); });
-    // A cancel puts CURRENT back only while this is still the app's latest
-    // activation: one a newer bring-up (an arrival, a switch) has replaced
-    // is that one's to conclude (reviewer P1-C on cc45d7d1).
-    return { done: run.done, current: run.current, cancel: () => { const mine = run.current(); run.cancel(); if (mine) back(); } };
+    // Only for the chain that is still the app's: a cancel runs it only on
+    // a chain it actually cancelled, and a failure only while the chain is
+    // current — a newer bring-up (an arrival, a switch) concludes its own
+    // (reviewer P1-C on cc45d7d1, P1-4 on 341554b3).
+    c.onCancel(back);
+    const run = activate({ replace: true, elsewhere, up: () => { bringUp(); resubscribeAll(); }, chain: c });
+    const done = run.done.then((failure) => { if (failure && c.current()) back(); return failure; });
+    return { done, cancel: run.cancel, current: run.current };
   }
 
   /** The connect page reached a server, and recorded which one. `switched`:
@@ -1187,88 +1209,154 @@
     else void ends.end(runtime);
   }
 
+  /** ONE user activation, end to end (reviewer P1-4 on 341554b3). A
+   * bring-up can hand over to another before it is done — its dial found
+   * another machine (an arrival), or taught the gate a merge or a claim (a
+   * fresh mint) — and every such link joins THIS chain: the caller's `done`
+   * waits for the last link, its `cancel` reaches whichever link is out, and
+   * it is `current` only while that link is. Once a link has published its
+   * runtime, a cancel undoes nothing: that runtime is bound. */
+  function newChain() {
+    let owner = null;
+    let runtime = null;
+    let published = false;
+    let cancelled = false;
+    const undo = [];
+    return {
+      link(nextOwner, nextRuntime) { owner = nextOwner; runtime = nextRuntime; },
+      publishing() { published = true; },
+      onCancel(fn) { undo.push(fn); },
+      current: () => !cancelled && !!owner?.current(),
+      cancel() {
+        if (published || cancelled) return;
+        // Was this chain still the app's? Only then does its cancel undo
+        // anything: a chain a newer bring-up replaced is that one's to
+        // conclude (reviewer P1-C on cc45d7d1).
+        const mine = !!owner?.current();
+        cancelled = true;
+        if (mine) activations.endAll();
+        // Let go of the runtime the link out minted, now: its dial may never
+        // answer, and a connection nobody waits on must not stay open
+        // (reviewer P1-D on cc45d7d1) — unless another activation has since
+        // reused it (`releaseMinted`). A kept runtime's own dial closes its
+        // unverified socket when it answers (server-runtime, P1-1).
+        if (runtime && owner) releaseMinted(runtime, owner);
+        if (mine) for (const fn of undo) fn();
+      },
+    };
+  }
+
   /**
    * Bring CURRENT up through its OWN runtime (board #335 ②b-4): mint it,
-   * claim the app's activation, DIAL its connection, and only if that dial is
-   * still the latest and answered as this server, bind it and run `up`.
+   * claim the app's activation, DIAL its connection, pass the storage gate
+   * for what that dial learned, and only then publish it — bind, reset, `up`.
    * Every way the app comes up on a server goes through here — the boot, the
    * connect form, a switch, an arrival elsewhere, a merge (reviewer P1-B on
    * cc45d7d1): nothing is bound to a runtime whose connection has not
-   * authenticated.
+   * authenticated, or whose server's storage could not be recorded
+   * (reviewer P1-3 on 341554b3).
    *
    *   `replace`   another server: the server left stays as it is until this
    *               one is up, then its navigation resets and the swap ends it
    *               — release, then dispose (ruling (a), 04:04);
    *   `elsewhere` what to do if this dial reaches ANOTHER machine: 'arrive'
    *               there (its handshake is the identity of record), or 'fail'.
+   *   `chain`     the activation this link continues (`newChain`).
    *
-   * Returns `{ done, cancel }`: `done` resolves null once `up` has run, or
-   * the reason it did not (a superseded activation resolves null and does
-   * nothing); `cancel` makes this activation stale if it still is the latest.
+   * Returns `{ done, cancel, current }`: `done` resolves null once the
+   * chain's runtime is BOUND and `up` has run, or the reason it was not; a
+   * superseded chain resolves null and changes nothing.
    */
-  function activate({ replace = false, elsewhere = 'arrive', up, minted = null }) {
+  function activate({ replace = false, elsewhere = 'arrive', up, minted = null, chain = null }) {
+    const c = chain ?? newChain();
     const m = minted ?? mintCurrent();
     const runtime = m.runtime;
     // Claimed AFTER the mint, whose endAll makes every older attempt stale:
     // this one is the latest from here (reviewer P1-C — never the reverse).
     const owner = activations.claim();
-    // A cancel ends the attempt AND lets go of the runtime it minted, now:
-    // its dial may never answer, and a connection nobody waits on must not
-    // stay open (reviewer P1-D on cc45d7d1). A runtime another activation
-    // has since reused is not this one's to end (`releaseMinted`).
-    const cancel = () => { if (owner.current()) activations.endAll(); if (runtime) releaseMinted(runtime, owner); };
+    c.link(owner, runtime);
+    const handle = (done) => ({ done, cancel: c.cancel, current: c.current });
     if (!runtime) {
       // Nothing to bind — the migration is blocked: the gate's panel shows,
       // on a page that is not the connect card (board #335 ②b-4), and Retry
       // owes this activation its dial.
       if (!m.keep) void scopeSwap.swap(null);
       if (migrationBlocked) { page = defaultPage(); connected = false; owedActivation = true; }
-      return { done: Promise.resolve(migrationBlocked ? t('migrationBlockedNote') : t('configIdentityFailed')), cancel, current: owner.current };
+      return handle(Promise.resolve(migrationBlocked ? t('migrationBlockedNote') : t('configIdentityFailed')));
     }
     if (!m.keep) provisional.set(runtime, owner);
-    const done = runtime.dial(owner.current).then((result) => {
+    const done = runtime.dial(owner.current).then(async (result) => {
       if (!owner.current()) { releaseMinted(runtime, owner); return null; }
       if (!result.ok) {
         releaseMinted(runtime, owner);
         if (result.reason === 'superseded') return null;
         if (result.reason === 'elsewhere') {
           loadServerRegistry();
-          if (elsewhere === 'arrive') { void arrivedElsewhere(result, owner); return null; }
+          if (elsewhere === 'arrive') return arrivedElsewhere(result, owner, c);
           return t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
         }
         if (!replace) { connected = false; page = 'settings'; }
         return String(result.error?.message || result.error || result.reason);
       }
+      // The dial taught the gate this server's machine: it may now claim
+      // pending inputs or rewrite a merge's navigation. Those writes pass
+      // BEFORE anything is published (reviewer P1-3 on 341554b3).
+      const gate = foldCurrent();
+      if (gate.fold === 'blocked') return blockedAfterDial(runtime, owner);
+      if (gate.id !== runtime.id || (gate.fold === 'claimed' && m.keep)) {
+        // CURRENT names another entry now (a merge), or the inputs were just
+        // filed into the slots a SHOWN runtime read at init: a fresh
+        // runtime, which dials first, like any other — the next link.
+        releaseMinted(runtime, owner);
+        return activate({ replace, elsewhere, up, minted: mintFrom(gate), chain: c }).done;
+      }
+      // Claimed for a runtime nobody has shown: its state is simply rebuilt
+      // from the slots the claim just filled.
+      if (gate.fold === 'claimed') serverStates.set(runtime, stateFor(runtime.id));
+      c.publishing();
       provisional.delete(runtime);
       // Only now is the server left given up (ruling (a)): the swap ends it,
       // release first — and asks whether this runtime ADOPTED its state
-      // first, so a same-machine merge keeps its downloads. Then the
-      // navigation that named the old server resets (board 315).
-      if (!m.keep) void scopeSwap.swap(runtime);
+      // first, so a same-machine merge keeps its downloads. The navigation
+      // that named the old server resets in this same turn, before the new
+      // tree can mount on it (board 315).
+      const swapped = m.keep ? Promise.resolve() : scopeSwap.swap(runtime);
       if (replace) {
         resetServerMemory();
         centreSurface.reset();          // the bell and a jump aimed at the server left
       }
-      // The dial may have let the fold claim this server's inputs (it now
-      // knows its machine): that rebuilds its state, and the new runtime it
-      // takes dials first, like any other.
-      const again = mintCurrent();
-      if (!again.keep && again.runtime) {
-        void activate({ replace: false, elsewhere, up, minted: again }).done;
-        return null;
-      }
-      if (!again.runtime) { if (migrationBlocked) page = defaultPage(); return t('migrationBlockedNote'); }
+      // And the activation is DONE only once that bind has finished.
+      await swapped;
+      if (!owner.current() || scopeSwap.bound() !== runtime) return null;
       up(result);
       return null;
     }).catch(() => {
       // The dial resolves every connect failure; what rejects is the
       // identity record, and the dial has already closed that socket. The
-      // host gate classifies it.
+      // host gate classifies it — for the activation that is still the app's.
       releaseMinted(runtime, owner);
-      if (owner.current()) { page = 'settings'; storageFailed(); }
+      if (!owner.current()) return null;
+      page = 'settings';
+      storageFailed();
       return t('configIdentityFailed');
     });
-    return { done, cancel, current: owner.current };
+    return handle(done);
+  }
+  /** The dial authenticated, and the storage gate for what it learned could
+   * not be recorded (reviewer P1-3 on 341554b3; ruling K, 06:09). Nothing of
+   * it is published: the runtime it minted is let go of. Nothing is ENDED
+   * because of the block either: the runtime the tree is bound to — the
+   * server being left, or a boot's own — stays bound and running, its
+   * downloads included, and the tree simply does not render while blocked.
+   * Retry owes this activation its dial, and the server left is ended only
+   * once the next runtime has passed its handshake and every gate. */
+  function blockedAfterDial(runtime, owner) {
+    releaseMinted(runtime, owner);
+    reconnect().cancel();
+    owedActivation = true;
+    connected = false;
+    page = defaultPage();
+    return t('migrationBlockedNote');
   }
 
   function openTerminal(session, target) {
@@ -1607,14 +1695,24 @@
     machineId: () => switchCandidate?.machineId() || '',
     // Another address of the CURRENT server: its OWN runtime dials it and
     // checks the answer is still this server (reviewer P1-A on cc45d7d1).
-    redial: (address) => {
+    redial: (address, owns, owner) => {
       const runtime = bound();
       if (!runtime) return Promise.reject(new Error('not connected'));
-      return runtime.dial(() => bound() === runtime, { via: address }).then((result) => {
+      // The attempt's own ownership, all the way into the dial and its
+      // record (reviewer P1-2 on 341554b3): "A is still bound" is not it —
+      // a newer form connect or activation leaves A bound and makes this
+      // attempt stale.
+      const mine = () => owns() && bound() === runtime;
+      return runtime.dial(mine, { via: address }).then((result) => {
         if (result.ok) return 'up';
-        if (result.reason === 'elsewhere') { loadServerRegistry(); void arrivedElsewhere(result, { current: () => bound() === runtime }); return 'handled'; }
+        if (result.reason === 'elsewhere') {
+          if (!mine()) return 'handled';
+          loadServerRegistry();
+          void arrivedElsewhere(result, owner);
+          return 'handled';
+        }
         throw result.error ?? new Error(result.reason);
-      }, () => { storageFailed(); return 'handled'; });
+      }, () => { if (mine()) storageFailed(); return 'handled'; });
     },
     comeUp: () => {
       switchCandidate?.close();
@@ -1632,15 +1730,17 @@
   const switchTo = (target) => serverSwitch.switchTo(target);
   // App's own end (reviewer P2-1 on cc45d7d1): every resource it holds has
   // an owner here, so nothing outlives the shell — the candidates; every
-  // activation in flight, and with them every runtime's reconnect loop,
-  // whose chain is its attempt's claim (a stale claim yields the loop and
-  // clears its timers); and every runtime in the fleet, the bound one
-  // included (the fleet skips it on purpose, because the swap that replaces
-  // it normally ends it; there is no next swap now).
+  // activation in flight; every runtime's reconnect loop, stopped NOW with
+  // its timers cleared (a stale claim alone would only end a loop at its
+  // next timer, reviewer P2 on 341554b3); and every runtime in the fleet,
+  // the bound one included (the fleet skips it on purpose, because the swap
+  // that replaces it normally ends it; there is no next swap now).
   onDestroy(() => {
     candidateOpen?.close();
     switchCandidate?.close();
     activations.endAll();
+    for (const machine of reconnectors.values()) machine.cancel();
+    reconnectors.clear();
     const held = scopeSwap.bound();
     fleet.dropAll();
     if (held) void ends.end(held);
@@ -2877,6 +2977,11 @@
       </div>
     {/if}
     {#key scopeRuntime}
+    <!-- Not while the migration is blocked (reviewer's ruling K on P1-3,
+         06:09): nothing writable of a server is mounted, while the runtime
+         the tree was bound to stays bound and RUNNING — it is ended only
+         once the next one has passed every gate. -->
+    {#if !migrationBlocked}
     <ServerScope runtime={scopeRuntime} state={serverStates.get(scopeRuntime)}>
     {#if hubEligible}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
@@ -2974,6 +3079,7 @@
         onclose={() => (scratchOpen = false)} onedge={setScratchEdge} />
     {/if}
     </ServerScope>
+    {/if}
     {/key}
     {/if}
   </div>

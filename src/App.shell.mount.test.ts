@@ -2928,3 +2928,296 @@ test('order (a): a failed switch s Back returns to A on the SAME connection, wit
   assert.equal(h.onScreen(), 'other:3.0', 'with A s latest navigation, restored from A s slot');
   assert.equal(h.restored(), 'a:other:3.0');
 });
+
+// ─── Reviewer's re-review of 341554b3: the four boundaries ──────────────
+
+const cardHas = (app: any, name: RegExp) => !!cardButton(app, name);
+
+test('P1-1: Cancel while a KEPT A s second handshake is out — when it answers as B, A s api reaches nobody, and A can dial again', async (context) => {
+  const events: string[] = [];
+  let letA2: () => void = () => {};
+  const h = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url, n) => (n === 2 ? 'm-b' : url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, gate: (url, n) => (n === 2 && url.includes('//a') ? new Promise<void>((r) => { letA2 = r; }) : null) });
+  const a = conn(h, 'a')!;
+  const captured = a.api.listSessions!;
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://a:9899');
+  await submit();
+  assert.equal(dialsOf(events, 'a').length, 2, 'the candidate confirmed A, and A s own (kept) runtime dials');
+  assert.ok(cardHas(h.app, /^cancel$/iu), 'the form is busy with that second handshake');
+  cardButton(h.app, /^cancel$/iu)!.click();
+  await h.settle();
+  letA2();                                                  // it answers — as B
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(a.isConnected(), false, 'the unverified peer s socket is closed');
+  const before = events.length;
+  await assert.rejects(captured(), /not connected/u, 'a call A s page captured is refused');
+  assert.ok(!events.slice(before).some((e) => e.startsWith('rpc@')), 'and reached no connection');
+  assert.equal(conn(h, 'a'), a, 'A is still A s handle and connection');
+  // A legitimate connect to A later reuses it.
+  cardButton(h.app, /^connect$/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(a.isConnected() && !a.disposed(), 'A dialled again on the same connection');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a');
+});
+
+test('P1-1: a kept A s second handshake that another candidate takes over — not a dial on A s connection — closes when it answers as B', async (context) => {
+  const events: string[] = [];
+  let letA2: () => void = () => {};
+  const h = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    (url, n) => (n === 2 ? 'm-b' : url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, gate: (url, n) => (n === 2 && url.includes('//a') ? new Promise<void>((r) => { letA2 = r; })
+      : n > 2 && url.includes('//b') ? new Promise<void>(() => {}) : null) });
+  const a = conn(h, 'a')!;
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://a:9899');
+  await submit();
+  assert.equal(dialsOf(events, 'a').length, 2, 'A s second handshake is out');
+  await h.switchTo('beta');                                 // another candidate claims the app
+  assert.ok(events.includes('candidate:ws://b:9899'), 'the switch dialled its own candidate');
+  const aDials = dialsOf(events, 'a').length;
+  letA2();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(dialsOf(events, 'a').length, aDials, 'nothing dialled A s connection again');
+  assert.equal(a.isConnected(), false, 'and the peer A s stale handshake reached is closed');
+  const captured = a.api.listSessions!;
+  await assert.rejects(captured(), /not connected/u, 'a call of A s reaches nobody');
+});
+
+test('P1-2: an address change still out when a newer activation takes over records nothing and opens no arrival when it answers as another machine', async (context) => {
+  const events: string[] = [];
+  let letLan: () => void = () => {};
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+  }, (url) => (url.includes('//b') || url.includes('a-lan') ? 'm-b' : 'm-a'), {
+    calls: events,
+    rpc: { classifyAddress: (x: string) => (x.includes('lan') ? 0 : 2), findBestAddress: async () => 'ws://a-lan:9899' },
+    gate: (url, n) => (url.includes('a-lan') ? new Promise<void>((r) => { letLan = r; })
+      : n > 0 && url.includes('//b') ? new Promise<void>(() => {}) : null),
+  });
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(events.includes('dial@a:ws://a-lan:9899|tokA'), 'the optimizer s redial of A is out');
+  await h.switchTo('beta');                                 // a newer activation; A stays bound
+  assert.equal(conn(h, 'a')?.disposed(), false, 'A is still bound while B s own dial is out');
+  const registry = h.app.window.localStorage.getItem('tmux_servers');
+  letLan();                                                 // the old redial answers — as B
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_servers'), registry, 'it recorded nothing');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'and opened no arrival');
+  assert.equal(conn(h, 'a')?.isConnected(), false, 'its unverified socket is closed');
+});
+
+test('P1-3 (ruling K): a dial whose post-dial claim cannot be written publishes nothing, keeps A running, mounts no server tree; Retry finishes the switch', async (context) => {
+  // A is current and knows its machine; the legacy inputs are pending for
+  // m-x, the machine B turns out to be. B's entry does not know it yet, and
+  // the switch's candidate learns nothing — only B's OWN dial proves m-x,
+  // and that is when the claim runs. Its marker write fails.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = JSON.parse(twoServers({ live: '', parked: '' }).tmux_servers);
+  delete servers[1].machineId;
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers),
+    tmux_machine_id: 'm-x',
+    tmux_server_current: 'gone',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft of m-x' }),
+    tmux_layout_mode: 'desktop',
+  }, (url, n) => (n === 0 ? '' : url.includes('//b') ? 'm-x' : 'm-a'), {
+    calls: events, rpc: transfer.rpc,
+    setup(window) { store.setup(window); transfer.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  await h.app.advance(1000);
+  const ls = h.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the inputs wait for m-x');
+  await startDownload(h.app, h.settle);
+  const a = conn(h, 'a')!;
+  store.state.failing = true;
+  await h.switchTo('beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_servers')!.includes('m-x'), true, 'B s own dial proved m-x');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'and the claim s marker could not be written');
+  assert.equal(h.app.document.querySelector('.term-page, .files-page, .file-main'), null, 'no writable server tree is mounted');
+  assert.ok(!events.some((e) => e.startsWith('rpc@b:')), 'nothing of B was published');
+  assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
+  assert.ok(!events.includes('aborted'), 'and A s download is still running');
+  // Storage recovers; Retry, from the blocked panel.
+  store.state.failing = false;
+  const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry, 'Retry is offered');
+  retry.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'b' }, 'Retry folded the inputs into B');
+  assert.ok(events.includes('aborted'), 'only then is A given up: its download suspended');
+  transfer.finish();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.equal(a.disposed(), true, 'and A ended, once B passed every gate');
+  assert.ok(conn(h, 'b')?.isConnected(), 'B is up on its own connection');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft of m-x' }));
+});
+
+test('P1-3: a form connect to another server is not DONE before B is bound — the form stays busy while A s download settles', async (context) => {
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  const h = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { calls: events, rpc: transfer.rpc, setup: transfer.setup });
+  await startDownload(h.app, h.settle);
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://b:9899');
+  await submit();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(events.includes('aborted'), 'B passed its gates and A was given up');
+  assert.ok(cardHas(h.app, /^cancel$/iu), 'but the activation is not done: the bind waits on A s release');
+  transfer.finish();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(!cardHas(h.app, /^cancel$/iu), 'once B is bound, the form is free');
+  assert.equal(h.app.document.querySelector('.card .error'), null, 'with no error');
+});
+
+test('P1-4: a form connect redirected to ANOTHER server keeps the form busy through that server s own dial; Cancel there binds nothing', async (context) => {
+  const events: string[] = [];
+  let letC: () => void = () => {};
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+    ]),
+  }, (url, n) => (url.includes('//c') ? 'm-c' : url.includes('//b') ? (n === 0 ? 'm-b' : 'm-c') : 'm-a'), {
+    calls: events,
+    // C's own dial is the third: the address that answered as m-c is where
+    // C is reached now (the dial recorded it on C's entry).
+    gate: (_url, n) => (n === 3 ? new Promise<void>((r) => { letC = r; }) : null),
+  });
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://b:9899');
+  await submit();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(dialsOf(events, 'c').length, 1, 'B s own dial reached C, and C s own runtime dials');
+  assert.ok(cardHas(h.app, /^cancel$/iu), 'the form is still busy: the activation is not over');
+  cardButton(h.app, /^cancel$/iu)!.click();
+  await h.settle();
+  assert.equal(conn(h, 'c')?.disposed(), true, 'the redirect s runtime is let go of');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'CURRENT back on A');
+  letC();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(!events.some((e) => e.startsWith('rpc@c:')), 'nothing was bound to C');
+  assert.equal(conn(h, 'a')?.disposed(), false, 'A is intact (disconnected only by the form s own Disconnect)');
+});
+
+test('P1-4: a redirect whose own dial FAILS reports on the form and returns to A', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+    ]),
+  }, (url, n) => (url.includes('//c') ? 'm-c' : url.includes('//b') ? (n === 0 ? 'm-b' : 'm-c') : 'm-a'), {
+    calls: events,
+    gate: (_url, n) => (n === 3 ? Promise.reject(new Error('C refused its own dial')) : null),
+  });
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://b:9899');
+  await submit();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /C refused its own dial/u, 'the last link s failure is the form s');
+  assert.ok(cardHas(h.app, /^connect$/iu), 'and the form is free');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'CURRENT is back on A');
+  assert.equal(conn(h, 'a')?.disposed(), false, 'A is intact (disconnected only by the form s own Disconnect)');
+});
+
+test('P1-4: a form connect whose dial teaches the gate a claim keeps the form busy through the fresh runtime s dial; Cancel there binds nothing', async (context) => {
+  // A does not know its machine; the inputs wait for m-a. The boot dial and
+  // the candidate learn nothing; A's own (kept) dial in the form's activation
+  // proves m-a, the claim files the inputs into A's slots, and a fresh A
+  // runtime — one that reads them — dials as the next link.
+  const servers = JSON.parse(twoServers({ live: '', parked: '' }).tmux_servers);
+  delete servers[0].machineId;
+  const events: string[] = [];
+  let letA3: () => void = () => {};
+  const h = await bootApp(context, danglingSeed({ tmux_servers: JSON.stringify(servers) }),
+    (url, n) => (n < 2 ? '' : url.includes('//b') ? 'm-b' : 'm-a'), {
+      calls: events,
+      gate: (url, n) => (n === 3 && url.includes('//a') ? new Promise<void>((r) => { letA3 = r; }) : null),
+      setup(window) { window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+    });
+  await h.app.advance(1000);
+  const ls = h.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'boot could not prove m-a');
+  const first = conn(h, 'a')!;
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://a:9899');
+  await submit();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'a' }, 'the dial s gate claimed the inputs');
+  const fresh = conn(h, 'a')!;
+  assert.notEqual(fresh, first, 'a fresh A runtime, on a connection of its own, dials as the next link');
+  assert.ok(cardHas(h.app, /^cancel$/iu), 'and the form is still busy with it');
+  cardButton(h.app, /^cancel$/iu)!.click();
+  await h.settle();
+  assert.equal(fresh.disposed(), true, 'Cancel let go of that runtime');
+  letA3();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(fresh.isConnected(), false, 'its late answer bound nothing: the connection stays ended');
+  assert.ok(!cardHas(h.app, /^cancel$/iu), 'and the form is free');
+});
+
+test('P2: the App s end clears every reconnect timer at once, not at its next tick', async (context) => {
+  const h = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined, {
+    gate: (_url, n) => (n > 1 ? Promise.reject(new Error('down')) : null),
+  });
+  // Track the timers the reconnect machine arms. The app runs in the
+  // window's context, and the machine reads that context's timers when a
+  // runtime's loop is first built — which the drop below does.
+  const win = h.app.window as any;
+  const live = new Set<unknown>();
+  const set = win.setTimeout;
+  const clear = win.clearTimeout;
+  const owner = new Map<unknown, string>();
+  win.setTimeout = (fn: () => void, ms?: number) => {
+    const stack = new Error().stack ?? '';
+    let id: unknown;
+    id = set(() => { live.delete(id); fn(); }, ms);
+    live.add(id);
+    owner.set(id, stack.split('\n').slice(2, 3).join('').trim());
+    return id;
+  };
+  win.clearTimeout = (id: unknown) => { live.delete(id); clear(id); };
+  h.net.drop();
+  for (let i = 0; i < 2; i++) { await h.app.advance(600); await h.settle(); }
+  assert.ok([...live].some((id) => /armWatchdog/u.test(owner.get(id) ?? '')), 'the loop has its watchdog armed');
+  await h.app.unmount();
+  assert.deepEqual([...live].map((id) => owner.get(id)), [], 'and no timer armed since the drop survives the shell');
+});
+
+test('P1-2: a reconnect dial a form TOOK OVER (its candidate claimed the app) records nothing when it answers late as another machine', async (context) => {
+  // R1 hangs. The person connects to B through the card and lets A's editor
+  // go: B's candidate claims the app, and B's own dial is held, so A is
+  // still bound and its connection alive. R1 then answers — as B. It is
+  // not the app's attempt any more, and its dial must know that ITSELF.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const h = await gaveUpOnA(context, (url, n) => (url.includes('//a') ? held : n > 0 && url.includes('//b') ? new Promise<void>(() => {}) : null));
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  assert.equal(h.dials().at(-1), 'connect:ws://a:9899', 'R1 is out');
+  h.field.value = 'ws://b:9899';
+  h.field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(h.events.includes('candidate:ws://b:9899'), 'the form s candidate took over');
+  assert.equal(conn(h, 'a')?.disposed(), false, 'A is still bound: B s own dial is out');
+  const registry = h.app.window.localStorage.getItem('tmux_servers');
+  release();                                       // R1 answers — as B
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_servers'), registry, 'it recorded nothing');
+  assert.equal(h.dialogs(), 0, 'and opened no arrival');
+  assert.equal(conn(h, 'a')?.isConnected(), false, 'its unverified socket is closed');
+});

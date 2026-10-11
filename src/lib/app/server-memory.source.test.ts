@@ -111,7 +111,7 @@ test('every module-level store is reset on a switch or named global (board 315)'
   }
   // Once the next server is up and bound (board #335 ②b-4, ruling (a)): the
   // one bring-up road runs the reset for every server change.
-  assert.match(app, /if \(!m\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(replace\) \{\s*resetServerMemory\(\);\s*centreSurface\.reset\(\);/u, 'a server change runs the reset, after the next one is bound');
+  assert.match(app, /const swapped = m\.keep \? Promise\.resolve\(\) : scopeSwap\.swap\(runtime\);\s*if \(replace\) \{\s*resetServerMemory\(\);\s*centreSurface\.reset\(\);/u, 'a server change runs the reset, after the next one is bound');
 });
 
 test('a store that belongs to a runtime has no module instance, and the bundle builds it (#335 ②b-2-1)', async () => {

@@ -72,8 +72,12 @@ export interface SwitchDeps {
   /** Another address of the CURRENT server, dialled by its OWN runtime and
    * checked against its identity (reviewer P1-A on cc45d7d1): 'up' when it
    * answered as this server, 'handled' when it answered as another one and
-   * the host took that over; a rejection is a dial that got nowhere. */
-  redial(address: string): Promise<'up' | 'handled'>;
+   * the host took that over; a rejection is a dial that got nowhere.
+   * `owns` is THIS attempt's whole ownership — its intent, no switch, its
+   * activation claim — and the host asks it inside the dial, before the
+   * identity record (reviewer P1-2 on 341554b3); `owner` is the claim alone,
+   * which an arrival keeps across its own leave walk. */
+  redial(address: string, owns: () => boolean, owner: { current(): boolean }): Promise<'up' | 'handled'>;
   /** Authenticated and activated: the target's OWN runtime dials and the app
    * comes up on it. Resolves null once it is bound, or the reason it is not;
    * the server left is ended only on success. */
@@ -156,7 +160,7 @@ export function createServerSwitch(d: SwitchDeps) {
     const owner = d.claim();
     const mine = () => intent === seq && !state && owner.current();
     d.stopReconnect();
-    return d.redial(address).then(
+    return d.redial(address, mine, owner).then(
       (how) => {
         if (!mine() || how === 'handled') return false;
         d.addressUp(address);

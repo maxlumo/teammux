@@ -771,23 +771,59 @@ is `serverSwitch.connectAddress(address)`: the bound runtime redials with
 `via: address` and its own token, and an answer from another machine is an
 arrival, never this server resumed over it.
 
-**One bring-up road** (reviewer P1-B on cc45d7d1). The boot, the connect
-form, a switch, an arrival, a merge and the migration Retry all come up
-through `activate({ replace, elsewhere, up, minted })`: mint CURRENT's
-runtime (its state built), claim the activation AFTER the mint (whose
-`endAll` would otherwise end the claim it is about to make — the boot ended
-its own that way), dial that runtime's connection, and only if the dial
-answered as this server and is still the latest, bind it, reset the memory
-of a server left (`replace`) and run `up`. A merge the dial caused re-mints
-and goes round the road again, so the canonical runtime dials its own
-connection before anything uses it, and the alias's is ended. The result is
-`{ done, cancel, current }`: the connect form waits on `done` (the second
-handshake), and its Cancel calls `cancel`, which lets go of the runtime the
-activation minted at once. A runtime is the activation's while PROVISIONAL:
-`releaseMinted` ends it only if that activation still owns it and it is not
-bound, so a stale activation never ends a runtime a later one reused
-(reviewer P1-C). `bringUp` records and binds nothing; it only asks the
-server what it hosts and restores its navigation.
+**One bring-up road** (reviewer P1-B on cc45d7d1, P1-3/P1-4 on 341554b3).
+The boot, the connect form, a switch, an arrival, a merge and the migration
+Retry all come up through `activate({ replace, elsewhere, up, minted,
+chain })`, in this order:
+1. mint CURRENT's runtime (`mintCurrent` = the storage gate `foldCurrent`,
+   then `mintFrom`), and claim the activation AFTER the mint, whose `endAll`
+   would otherwise end the claim it is about to make;
+2. dial that runtime's connection;
+3. if the dial answered as this server and is still the latest, run the
+   storage gate AGAIN for what the dial taught it (a machine that can claim
+   pending inputs, a merge whose navigation needs rewriting) — before
+   anything is published;
+4. only then publish: bind (the swap ends the server left, release then
+   dispose), reset the memory of a server left (`replace`), wait for the
+   bind to FINISH, and run `up`.
+
+A gate that blocks at step 3 publishes nothing and ends nothing (reviewer's
+ruling K, 06:09): the runtime it minted is let go of, the runtime the tree
+is bound to stays bound and running — its downloads too — and no server
+tree renders while the migration is blocked; Retry owes the activation its
+dial, and the server left is ended only once the next runtime has passed
+every gate. A first boot has no source: an empty tree and Retry.
+
+One USER activation is one CHAIN (`newChain`). A link can hand over to
+another — its dial reached another machine (an arrival), or its gate moved
+CURRENT or filed inputs into a shown runtime's slots (a fresh mint, which
+dials first) — and each such link joins the chain: `done` resolves with the
+LAST link's outcome, `cancel` reaches whichever link is out, and the chain
+is `current` only while that link is. A failure or cancel of a chain that is
+no longer current changes nothing: a newer bring-up concludes its own (an
+`arriveAt`'s return to the server left runs only for a current chain). Once
+a link publishes, a cancel undoes nothing. The connect form waits on `done`
+(the second handshake and every link after it), and its Cancel calls
+`cancel`, which lets go of the runtime the link out minted at once. A
+runtime is the activation's while PROVISIONAL: `releaseMinted` ends it only
+if that activation still owns it and it is not bound, so a stale activation
+never ends a runtime a later one reused (reviewer P1-C). A KEPT runtime —
+the one on screen, dialling again — is not the activation's to end; its own
+dial closes the peer it reached if its host has moved on by then (below).
+`bringUp` records and binds nothing; it only asks the server what it hosts
+and restores its navigation.
+
+**Every attempt owns itself** (reviewer P1-1/P1-2 on 341554b3). A dial whose
+host moved on — a cancel, another candidate, a switch — while it is still
+the connection's latest dial closes the socket it reached: nobody will ever
+check who that peer is, and every call of the handle would reach it. A dial
+superseded by a NEWER dial of the same runtime touches nothing, because that
+newer dial already replaced the socket. Each reconnect attempt dials under
+ITS OWN claim, which the machine hands to `connect` and asks again before
+the identity record and before an arrival, and its own answer reaches
+`onSuccess`; nothing is shared between a loop's attempts. An address change
+hands the runtime's dial its own ownership (intent, no switch, claim) — "A
+is still bound" is not ownership, since a newer form connect leaves A bound.
 
 **The runtime asks** (②b-2-2). The capability handshake every connect path
 runs (`serverReady`) is the bound runtime's `probeCaps()`: asked over its own
@@ -1180,9 +1216,10 @@ a socket that a server's pages are using.
   page acts only on its own server's. Each runtime has its own reconnect
   loop, told where by its own entry (reviewer P1-A on cc45d7d1).
 - **Nothing outlives the shell.** App's own teardown closes the candidates,
-  ends every activation in flight — which stops every runtime's reconnect
-  loop too, since a loop's chain is its attempt's claim — and ends every
-  runtime in the fleet, the bound one included (reviewer P2-1).
+  ends every activation in flight, cancels every runtime's reconnect loop
+  with its timers cleared at once (a stale claim alone would end a loop only
+  at its next timer; reviewer P2 on 341554b3), and ends every runtime in the
+  fleet, the bound one included (reviewer P2-1).
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 
