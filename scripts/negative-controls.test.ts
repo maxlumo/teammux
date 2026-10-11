@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { negativeControls } from './negative-controls.mjs';
@@ -166,5 +167,44 @@ test('a test that edits a tracked file the spec does not name fails the end chec
     });
     assert.match(lines.at(-1)!, /^\*\*\* TREE NOT CLEAN after the run \*\*\*[\s\S]*other\.mjs/u);
     assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = before; }
+});
+
+test('wip: uncommitted work is the baseline, and it comes back uncommitted on the same HEAD (#335 ③b)', async (t) => {
+  const { dir, git } = await repo(t);
+  const head = git('rev-parse', 'HEAD').toString().trim();
+  await writeFile(join(dir, 'lib.mjs'), 'export const add = (a, b) => b + a;\nexport const name = "lib";\n');   // the work
+  await writeFile(join(dir, 'new.mjs'), 'export {};\n');                                                   // untracked
+  const lines = await negativeControls({
+    cwd: dir, log: () => {}, wip: true,
+    files: ['lib.mjs'], tests: ['lib.test.mjs'],
+    cases: [['lib.mjs', 'add subtracts', 'b + a', 'b - a']],
+  });
+  assert.match(lines[0]!, /^BITES  add subtracts/u, 'the break is applied to the uncommitted work');
+  assert.match(lines.at(-1)!, /^wip: the transient commit is undone/u);
+  assert.equal(git('rev-parse', 'HEAD').toString().trim(), head, 'HEAD is where it was: no nc-tmp left');
+  assert.equal(git('status', '--porcelain').toString(), ' M lib.mjs\n?? new.mjs\n', 'the work is back, unstaged');
+  assert.match(await readFile(join(dir, 'lib.mjs'), 'utf8'), /b \+ a/u);
+  assert.equal(existsSync(join(dir, '.git', 'nc-in-progress')), false, 'and the marker is gone');
+});
+
+test('a wip run killed before its undo is caught by the next start, which names the way back (#335 ③b, 2026-10-11)', async (t) => {
+  // What a machine move did: the transient commit stayed on the branch.
+  const { dir, git } = await repo(t);
+  const head = git('rev-parse', 'HEAD').toString().trim();
+  await writeFile(join(dir, 'lib.mjs'), 'export const add = (a, b) => b + a;\n');
+  const marker = join(dir, '.git', 'nc-in-progress');
+  await writeFile(marker, `${head}\n`);
+  git('add', '-A'); git('commit', '-q', '-m', 'nc-tmp');
+  const tip = git('rev-parse', 'HEAD').toString().trim();
+  const before = process.exitCode;
+  try {
+    for (const wip of [false, true]) {
+      const lines = await negativeControls({ cwd: dir, log: () => {}, wip, files: ['lib.mjs'], tests: ['lib.test.mjs'], cases: [['lib.mjs', 'x', 'b + a', 'b - a']] });
+      assert.match(lines[0]!, /^refusing to run: an interrupted wip run/u, `wip=${wip}: refused`);
+      assert.ok(lines[0]!.includes(`git reset --soft ${head} && git reset && rm '${marker}'`), 'with the commands that put the work back');
+      assert.equal(process.exitCode, 1);
+      assert.equal(git('rev-parse', 'HEAD').toString().trim(), tip, 'and nothing moved');
+    }
   } finally { process.exitCode = before; }
 });

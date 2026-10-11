@@ -41,9 +41,21 @@
 //   - restore on exit however we exit, and verify the whole tree is clean
 //     before reporting success;
 //   - ignore EPIPE on stdout, so a truncated pipe cannot kill the run.
+//
+// `wip: true` runs the controls against UNCOMMITTED work: it commits the
+// whole tree as a transient `nc-tmp`, runs, and undoes that commit — the work
+// comes back as unstaged changes. A run killed outright (SIGKILL, a machine
+// move) cannot undo it, and once that was noticed only by a person seeing
+// `nc-tmp` on the branch (#335 ③b, 2026-10-11). So before the transient
+// commit the runner writes a marker naming the HEAD it started from
+// (`git rev-parse --git-path nc-in-progress`: per worktree, never in
+// `git status`), removes it only once the commit is undone, and EVERY run —
+// wip or not — refuses to start while a marker exists, printing the two
+// commands that put the work back.
 import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { execFile, execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 const run = promisify(execFile);
 
@@ -57,29 +69,67 @@ const run = promisify(execFile);
  *   report?: string,
  *   log?: (line: string) => void,
  *   timeoutMs?: number,
+ *   wip?: boolean,
  * }} spec
  * `prelude` adds a declaration one case's broken version needs, as
  * `{ [file]: [[caseName, anchor, replacement], ...] }`, applied after the
  * case's own replacement. `report` writes the result lines to a file.
+ * `wip` runs against uncommitted work through a transient commit (header).
  * Resolves to the result lines; sets a non-zero exit code when the tree could
  * not be restored or the run refused to start.
  */
-export async function negativeControls({ files, tests, cases, prelude = {}, cwd = process.cwd(), report, log = console.log, timeoutMs = 600_000 }) {
+export async function negativeControls({ files, tests, cases, prelude = {}, cwd = process.cwd(), report, log = console.log, timeoutMs = 600_000, wip = false }) {
   if (!process.stdout.listenerCount('error')) process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
   const git = (...args) => run('git', args, { cwd }).then((r) => r.stdout);
+  const gitSync = (...args) => execFileSync('git', args, { cwd, stdio: 'pipe' }).toString().trim();
   const lines = [];
   const say = (text) => { lines.push(text); log(text); };
+
+  // An earlier wip run that never undid its transient commit (header).
+  const marker = resolve(cwd, gitSync('rev-parse', '--git-path', 'nc-in-progress'));
+  if (existsSync(marker)) {
+    const pre = readFileSync(marker, 'utf8').trim();
+    say(`refusing to run: an interrupted wip run left its transient commit (marker ${marker}).\n`
+      + `HEAD is ${gitSync('log', '-1', '--format=%h %s')}; the run started from ${pre.slice(0, 8)}.\n`
+      + `If HEAD is that run's nc-tmp, put the work back as uncommitted changes and clear the marker:\n`
+      + `  git reset --soft ${pre} && git reset && rm '${marker}'`);
+    process.exitCode = 1;
+    return lines;
+  }
 
   // The WHOLE worktree, untracked files included: it must be clean to start,
   // and clean again at the end.
   const tree = async () => (await git('status', '--porcelain', '--untracked-files=all')).trim();
+  // wip: the work becomes the transient baseline, marked first.
+  let transient = '';
+  let pre = '';
+  if (wip && await tree()) {
+    pre = gitSync('rev-parse', 'HEAD');
+    await writeFile(marker, `${pre}\n`);
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'nc-tmp');
+    transient = gitSync('rev-parse', 'HEAD');
+  }
+  /** Undo the transient commit — only while it is still HEAD and the tree is
+   * exactly it; otherwise keep the marker, so the next start says so. */
+  const undo = () => {
+    if (!transient) return true;
+    try {
+      if (gitSync('rev-parse', 'HEAD') !== transient || gitSync('status', '--porcelain', '--untracked-files=all')) return false;
+      gitSync('reset', '-q', '--soft', pre);
+      gitSync('reset', '-q');
+      rmSync(marker, { force: true });
+      transient = '';
+      return true;
+    } catch { return false; }
+  };
   const before = await tree();
   if (before) {
     say(`refusing to run: the worktree is not clean\n${before}\ncommit, stash or remove these first (specs belong in gitignored temp/) — otherwise the baseline is unknown.`);
     process.exitCode = 1;
     return lines;
   }
-  const restore = () => { try { execFileSync('git', ['checkout', '--', ...files], { cwd }); } catch { /* best effort */ } };
+  const restore = () => { try { execFileSync('git', ['checkout', '--', ...files], { cwd }); } catch { /* best effort */ } undo(); };
   const onSignal = () => { restore(); process.exit(1); };
   process.on('exit', restore);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGPIPE']) process.on(sig, onSignal);
@@ -124,6 +174,10 @@ export async function negativeControls({ files, tests, cases, prelude = {}, cwd 
   if (after) say(`*** TREE NOT CLEAN after the run ***\n${after}`);
   else say('tree clean: the whole worktree is as committed, before and after the run');
   if (after) process.exitCode = 1;
+  if (pre) {
+    if (undo()) say(`wip: the transient commit is undone; the work is back as uncommitted changes on ${pre.slice(0, 8)}`);
+    else { say(`*** wip: the transient commit was NOT undone *** (marker kept: ${marker})`); process.exitCode = 1; }
+  }
   if (report) await writeFile(join(cwd, report), lines.join('\n') + '\n');
   return lines;
 }

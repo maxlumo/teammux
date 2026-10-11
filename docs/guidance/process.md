@@ -21,6 +21,11 @@
    scratch version once left a mutated file to be committed; #335 ②a-4).
    It starts only on a clean worktree and checks it is still clean at the
    end, so keep specs in gitignored `temp/` (#335 ②b).
+   To control uncommitted work, pass `wip: true`: it commits the tree as a
+   transient `nc-tmp`, runs, and undoes it. A marker in the git dir names
+   the HEAD it started from, so a run killed before its undo is refused on
+   the next start, with the commands that put the work back (#335 ③b,
+   2026-10-11: a machine move left `nc-tmp` on the branch).
 4. **Documentation and code share a commit:** behavior changes update the
    design document's Rules and their reasons. Record decision, reason,
    date and triggering incident or measurement.
