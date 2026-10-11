@@ -75,23 +75,58 @@ hide that.
    #   Listen on [0.0.0.0]: 127.0.0.1   ← what the watcher passed; loopback only
    #   tmux socket …:                   ← Enter (empty = tmux's default, as today)
    #   Keep the existing token? [y]:    ← Enter; a new token re-pairs every saved client
-   #   TLS certificate …:               ← Enter
+   #   TLS certificate …:               ← see below
    ```
 
    It edits the file in place with `toml_edit`: your token, `team_rules` and
    `kiro_engine` stay, comments and all.
 
-3. **Stop the old stack** (this takes vite down with it):
+   On TLS, Enter is not "no TLS": with a certificate already in the file Enter
+   KEEPS it and `-` clears it. Check `config.toml` and decide deliberately. The
+   dev loop needs plain `ws`/`http` on the loopback hop — Vite's proxy speaks
+   nothing else, and the watcher used to force it by passing empty
+   `TLS_CERT`/`TLS_KEY`, which the gateway does not read. So either confirm
+   `tls_cert`/`tls_key` are empty (clear them with `-`), or keep TLS and
+   configure the proxy to match; do not leave a certificate set and expect the
+   plain hop to work.
+
+3. **Stop the whole old supervision chain**, not just whatever holds a port.
+   The chain is the unit → `scripts/dev-stack.mjs` → `scripts/dev-server-watch.sh`
+   → `server`: kill only the server and the watcher starts another one, and a
+   momentarily free port proves nothing.
+
+   First read the unit AS CONFIGURED, drop-ins included:
+
+   ```bash
+   systemctl --user cat tmux-mobile-dev.service
+   ```
+
+   This host carries a `cutover.conf` drop-in with `KillMode=none` and
+   `Restart=no`. Per `systemd.kill(5)`, `none` kills NOTHING on stop (it only
+   runs `ExecStop`), and `process` signals the main process alone; only the
+   default, `control-group`, stops the whole chain. So either remove that
+   drop-in and `systemctl --user daemon-reload` so the default applies again,
+   or stop the unit and then terminate `dev-stack.mjs` yourself — it handles
+   `SIGTERM` by stopping each service's process group, escalating to `SIGKILL`
+   after 5 s:
 
    ```bash
    systemctl --user stop tmux-mobile-dev.service
-   ss -ltn | grep -E '5173|9899'   # expect nothing
+   systemd-cgls --user-unit tmux-mobile-dev.service          # what is left in the cgroup
+   pgrep -fa 'dev-stack.mjs|dev-server-watch.sh|target/release/server'
+   kill <the dev-stack.mjs pid>    # then re-run pgrep until it prints nothing
    ```
 
-   If something still holds a port, check for a drop-in
-   (`systemctl --user cat tmux-mobile-dev.service`): with `KillMode=none`
-   systemd signals only the main process and leaves vite and the server
-   running. Kill those PIDs before continuing.
+   Never `pkill` by a broad pattern: other agents' builds and servers run on
+   this host. Only once `pgrep` is empty and both ports stay free is the chain
+   gone:
+
+   ```bash
+   ss -ltn | grep -E '5173|9899'   # expect nothing, and again a few seconds later
+   ```
+
+   A surviving watcher would otherwise race `install` for the port, or relink
+   `target/release` under the new gateway.
 
 4. **Build the binary the service will run.** The watcher built `--bins`
    WITHOUT `embed-ui`, so the `tmm` sitting in `target/release` right now
@@ -129,9 +164,15 @@ hide that.
    URL the gateway itself serves; open the app.
 
 From then on, after every merge to main: `npm run gateway:update`. It runs
-`npm run build:server`, and restarts the gateway only when the `tmm` binary's
-bytes actually changed (a relink of identical bytes drops nobody); a failed
-build leaves the running gateway alone, and a failed restart exits non-zero.
+`npm run build:server`, then restarts the gateway unless the binary is already
+the one the gateway was last started with — it records each successful restart
+in a receipt beside the binary (`.tmm-gateway-deployed.json`), because a
+build's output alone cannot say what is RUNNING: after a failed restart the
+next build produces the same bytes, and "nothing changed" would skip the
+deploy for good. A failed build leaves the running gateway alone, a failed
+restart exits non-zero and deploys nothing, and a gateway that stops answering
+is reported rather than papered over. Exit 0 means one thing: the gateway runs
+this commit's binary.
 
 To go back: `tmm gateway uninstall`, then run the dev stack with the watcher
 again (`TMUX_MOBILE_DEV_WITH_SERVER=1`).

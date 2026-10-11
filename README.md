@@ -84,7 +84,7 @@ PWA, or as a native app on macOS and Android.
 ```bash
 npm install
 npm run build:server   # the server and the tmm CLI, web UI embedded
-tmm gateway            # the backend, as a background service
+src-tauri/target/release/tmm gateway   # the backend, as a background service
 npm run dev:all        # Vite on :5173 — then open http://<your-machine>:5173
 ```
 

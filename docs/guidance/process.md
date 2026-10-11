@@ -159,13 +159,17 @@ when the branch is on main, cherry-pick when main has moved under it
 (rebase requests go back to the implementer only when a conflict needs
 their judgement). The implementer never merges its own work — a deletion
 merged ahead of review on 2026-09-09 was accepted only because tests and a
-grep backed it. **After every merge, `npm run gateway:update` in the
-integration checkout** (board #343): nothing watches the sources for the
-gateway any more, so the running backend stays on the pre-merge binary until
-someone says now. It rebuilds, restarts only if `tmm`'s bytes changed, and
-prints the commit the gateway now runs. A `post-merge` git hook is
+grep backed it. **Once a host has switched to the gateway (install.md §
+Switching a dev host), every merge is followed by `npm run gateway:update` in
+the launch checkout** (board #343): nothing watches the sources for the
+gateway, so the running backend stays on the pre-merge binary until someone
+says now. It rebuilds, restarts only when the binary differs from the one the
+gateway was last started with, and prints the commit the gateway now runs. Run
+from a worktree it is refused by identity — the unit's `ExecStart` names the
+launch checkout's `tmm`, and any other path is not that service's own — so a
+branch build cannot replace the backend by mistake. A `post-merge` git hook is
 deliberately NOT installed: hooks are per-clone, so every agent's worktree
-would need one, and a merge inside a worktree would restart the owner's
+would need one, and a merge inside a worktree would try to restart the owner's
 backend from a branch. After a wire change the signed APK and any desktop
 bundle are rebuilt from main. The implementer removes its worktree and branch.
 

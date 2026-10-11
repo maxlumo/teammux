@@ -11,10 +11,15 @@ Everything about RUNNING and BUILDING the project. Testing conventions are in `t
 
 ```bash
 npm install
-npm run build:server   # the server and tmm, web UI embedded
-tmm gateway            # the backend, as a per-user background service
-npm run dev:all        # Vite on :5173
+npm run build:server            # the server and tmm, web UI embedded
+ln -s "$PWD/src-tauri/target/release/tmm" ~/.local/bin/tmm   # or call it by path
+tmm gateway                     # the backend, as a per-user background service
+npm run dev:all                 # Vite on :5173
 ```
+
+The build puts `tmm` in `src-tauri/target/release`; nothing installs it on your
+PATH, and the gateway service records the absolute path of the `tmm` that
+installed it, so link the real file rather than copying it.
 
 The first launch generates a token in `~/.config/tmux-mobile/config.toml`.
 Open `http://<your-machine-ip>:5173`; the connection field is pre-filled with
@@ -55,7 +60,7 @@ dev server; see [testing.md](testing.md#3-client-behavior-componentmounttestts).
 ```bash
 npm run dev:all          # one public :5173; proxies /ws + /dl to the gateway
 npm run dev              # Vite dev server only (web UI on 0.0.0.0:5173)
-npm run gateway:update   # rebuild, and restart the gateway if its binary changed
+npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
 npm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
 npm run tauri:dev        # Desktop app + WS server (dev mode)
 npm run tauri:dev:release # Release-mode desktop app + WS server
@@ -82,21 +87,25 @@ changing the project default:
 ```bash
 npm run build:server     # vite build, then server + tmm (embed-ui), release
 npm run dev:all          # Vite alone (the recommended browser dev loop)
-npm run gateway:update   # rebuild; restart the gateway if its binary changed
+npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
 npm run dev:server:watch # watched server only; pair with `npm run dev`
 npm run dev:server       # one-shot server only; pair with `npm run dev`
 npm run test:rust        # the Rust tests
 ```
 
-**On this dev host both halves are already supervised — do not tell the owner
-to restart either.** Since board #343 they are two units with one job each:
+**On this dev host both halves are supervised — do not restart either.** Since
+board #343 the design is two units with one job each; the owner performs the
+switch himself with the runbook below, so until he has, this host still runs
+the single old chain (unit → `dev-stack.mjs` → `dev-server-watch.sh` →
+`server`) and `tmm gateway status` still says the service is not installed.
+
+The two units, after the switch:
 
 - **the backend** is the gateway, `tmux-mobile-gateway.service`, installed by
   `tmm gateway install` and running `<repo>/src-tauri/target/release/tmm
   gateway start --service` (board #323). It reads `config.toml` ALONE, so the
   port and the listen address live there and nowhere else. It is rebuilt and
-  restarted by `npm run gateway:update` after each merge to main, never by a
-  file watcher.
+  restarted by `npm run gateway:update`, never by a file watcher.
 - **the frontend** is the systemd user unit `tmux-mobile-dev.service`
   (`Restart=always`) → `scripts/dev-stack.mjs` (`npm run dev:all`) → vite on
   :5173, which proxies `/ws` and `/dl` to the gateway. Vite serves from disk,
@@ -111,8 +120,8 @@ himself; a reviewer or an issue never does it.
 good by the installed gateway, and the old `dev` preflight (both ports) would
 have refused to start the frontend at all.
 
-The migration from the single dev unit to these two, for a host that still runs
-the old one, is the runbook in
+The switch itself — for this host and any machine still on the old chain — is
+the runbook in
 [install.md § Switching a dev host](../reference/install.md#switching-a-dev-host-to-the-gateway).
 
 **The watcher is still there, for a machine with no gateway**:
@@ -133,8 +142,12 @@ could not say (board #282). A rebuilt `tmm` restarts nothing: each run execs
 the file anew. `scripts/dev-server-watch.test.ts` pins both halves. Restarting
 only when the bytes differ matters — cargo fingerprints by mtime, so a
 `touch`, a checkout, or a comment-only edit relinks an identical binary and
-dropping every client for that would be noise. `gateway:update` keeps that same
-rule, and this is where it comes from. A failed rebuild keeps the last
+dropping every client for that would be noise. `gateway:update` keeps that
+rule, and this is where it comes from; what it compares is the binary against
+the one the gateway was last STARTED with (a receipt it writes after each
+successful restart), because a one-shot script re-reading the file each time
+cannot otherwise tell a finished deploy from a restart that failed. A failed
+rebuild keeps the last
 good binary running and retries on the next change. Owner correction, 2026-08-19.
 These pass `--no-default-features`, which turns off the `gui` Cargo feature —
 `tauri` plus its four plugins (dialog, fs, opener, notification). What remains is what the WebSocket server and
