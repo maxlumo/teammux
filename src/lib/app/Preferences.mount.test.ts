@@ -1,31 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { join } from 'node:path';
 import { compileMount } from '../test/mount.ts';
 
-// A reactive host lets external requests change without remounting Preferences.
-// The temporary source uses the existing client compiler and is removed after it.
-const compiled = (async () => {
-  const temp = fileURLToPath(new URL('../../../temp/', import.meta.url));
-  await mkdir(temp, { recursive: true });
-  const dir = await mkdtemp(join(temp, 'preferences-mount-'));
-  const entry = join(dir, 'Host.svelte');
-  try {
-    await writeFile(entry, `<script>
-      import Preferences from ${JSON.stringify(fileURLToPath(new URL('./Preferences.svelte', import.meta.url)))};
-      let { initial, register } = $props();
-      let props = $state({ ...initial });
-      register(next => Object.assign(props, next));
-    </script>
-    <Preferences {...props} />`);
-    return await compileMount(pathToFileURL(entry), [
-      new URL('../hub/AgentsPage.svelte', import.meta.url),
-    ]);
-  } finally { await rm(dir, { recursive: true, force: true }); }
-})();
+// A reactive host lets external requests change without remounting Preferences;
+// it also gives the embedded Agents editor its guest scope, as App does
+// (board #335 ②b-3).
+const compiled = compileMount(new URL('./Preferences.test.svelte', import.meta.url), [
+  new URL('../hub/AgentsPage.svelte', import.meta.url),
+]);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

@@ -10,6 +10,7 @@
   import ChatImage from '../hub/ChatImage.svelte';
   import Projects from '../projects/Projects.svelte';
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
+  import AgentsPage from '../hub/AgentsPage.svelte';
   import Sessions from '../sessions/Sessions.svelte';
   import PanePicker from '../sessions/PanePicker.svelte';
   import ScratchPanel from '../app/ScratchPanel.svelte';
@@ -45,4 +46,6 @@
   <Projects {...rest} />
 {:else if which === 'create'}
   <CreateProjectDialog {...rest} />
+{:else if which === 'agents'}
+  <AgentsPage visible {...rest} />
 {/if}

@@ -1,11 +1,13 @@
+// Bound to one server's scope, as App's provider binds it (board #335 ②b-3):
+// its RPCs and its backend catalog are that scope's.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
-const compiled = compileMount(new URL('./AgentsPage.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+const compiled = compileMount(new URL('./AgentsPage.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 let hosted: ReturnType<typeof compileMount> | undefined;
 function hostFixture() {
-  return hosted ??= compileMount(new URL('./AgentsPage.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+  return hosted ??= compileMount(new URL('./AgentsPage.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
 }
 const alpha = { name: 'alpha', backend: 'codex', model: '', effort: '', system: 'Original',
   skills: '["missing-skill"]', mcp: '["missing-server",{"name":"inline","expanded":true}]' };

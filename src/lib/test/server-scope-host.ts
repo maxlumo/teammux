@@ -14,11 +14,15 @@ import { scopeContext } from '../app/server-context.ts';
 import { createServerState } from '../app/server-state.ts';
 import type { ServerRuntime } from '../app/server-runtime.ts';
 
-export const testScopeContext = (transport?: unknown) => {
+/** One server's scope over `transport`: what App hands the provider, or —
+ * for Preferences' embedded editor — the guest props (②b-3). */
+export const testScope = (transport?: unknown) => {
   const state = createServerState(localStorage);
   // Reachable from a test, so it can act on the server's state the way App
   // does — release it, say — without a second way to build one.
   (globalThis as { __serverState?: unknown }).__serverState = state;
   const runtime = { id: 'test', api: transport, connection: transport } as unknown as ServerRuntime;
-  return scopeContext({ runtime, state });
+  return { runtime, state };
 };
+
+export const testScopeContext = (transport?: unknown) => scopeContext(testScope(transport));

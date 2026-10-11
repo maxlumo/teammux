@@ -902,7 +902,8 @@ test("the Board's sidebar follows the shell-wide collapse with the Hub's reveal 
 });
 
 test('a card names its assignee with its backend icon, and the working dot only in doing (board #293, #327)', () => {
-  assert.match(source, /\{@const who = assigneeView\(i\.assignee, agents, s, backends\)\}/u, 'one pure helper decides, told the column');
+  assert.match(source, /\{@const who = assigneeView\(i\.assignee, agents, s, backends, catalog\)\}/u,
+    'one pure helper decides, told the column and this server s catalog (#335 ②b-3)');
   assert.match(source, /<span class="c-tile"><img class="ava" src=\{who\.icon\} alt="" \/>/u, 'the backend face in the app-wide .ava atom');
   assert.doesNotMatch(source, /c-tile" style:background|\.slice\(0, 1\)\.toUpperCase\(\)/u, 'no invented lettered tile on the board');
   assert.match(source, /\{#if who\.live\}<span class="c-live live-dot" aria-hidden="true"><\/span>\{\/if\}/u, 'the status language\u2019s own live cue');

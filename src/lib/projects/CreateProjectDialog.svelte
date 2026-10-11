@@ -12,14 +12,18 @@
   import Icon from '../ui/Icon.svelte';
   import Dialog from '../ui/Dialog.svelte';
   import DirPicker from '../files/DirPicker.svelte';
-  import { useServerApi } from '../app/server-context.ts';
-  import { backendColor } from '../hub/hub.ts';
-  import { backendIcon } from '../core/agents.ts';
+  import { useServerScope } from '../app/server-context.ts';
+  import { backendColor as colorOf } from '../hub/hub.ts';
   import { t } from '../core/i18n.svelte.ts';
 
   let { compact = false, oncreated, oncancel } = $props();
-  // This server's RPCs, read once at init (board #335 ②b).
-  const { projectCreate, projectUp, hubSpawn, registryList } = useServerApi();
+  // This server's RPCs and backend catalog, read once at init (board #335 ②b).
+  const scope = useServerScope();
+  if (!scope) throw new Error('CreateProjectDialog needs a server scope');
+  const { projectCreate, projectUp, hubSpawn, registryList } = scope.runtime.api;
+  const catalog = scope.state.backends;
+  const backendIcon = catalog.icon;
+  const backendColor = (backend) => colorOf(backend, catalog);
 
   let pickerEl = $state(null);   // the DirPicker instance, for its own layer
 

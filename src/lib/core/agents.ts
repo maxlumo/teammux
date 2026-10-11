@@ -78,10 +78,10 @@ export interface BackendInfo {
  * fallback lists and the avatar switch. Those describe this build, not any
  * server, so they belong to no instance.
  *
- * NOT YET WIRED PER RUNTIME, which is not the same as uncalled: production
- * reads this catalog today through the named exports below, exactly as it read
- * the module variables before. ②b gives each runtime its own, at which point
- * "reset it on a switch" becomes "drop that server's instance".
+ * Each runtime's state bundle holds its own (board #335 ②b-3,
+ * `ServerState.backends`): a page reads it from its scope, a pure helper
+ * takes it as a parameter, and a switch drops it with the runtime instead of
+ * resetting a module variable.
  */
 export interface BackendCatalog {
   /** The server answered. An empty list counts as "not answered": a present
@@ -132,7 +132,8 @@ export function createBackendCatalog(): BackendCatalog {
     },
     known: () => served !== null,
     spawnable: () => served?.map((b) => b.name) ?? FALLBACK_BACKENDS,
-    defaultBackend() { return this.spawnable()[0] ?? FALLBACK_BACKENDS[0]!; },
+    // No `this`: a page destructures the catalog it read from its scope.
+    defaultBackend: () => (served?.map((b) => b.name) ?? FALLBACK_BACKENDS)[0] ?? FALLBACK_BACKENDS[0]!,
     efforts: (backend) => of(backend)?.efforts ?? FALLBACK_EFFORTS[backend ?? ''] ?? [],
     switchesInputMode: (backend) => of(backend)?.input_modes === true,
     togglesInputMode: (backend) => of(backend)?.input_mode_toggle === true,
@@ -152,30 +153,15 @@ const FALLBACK_EFFORTS: Record<string, string[]> = {
   grok: ['low', 'medium', 'high', 'xhigh'],
 };
 
-/** The app's one catalog, for as long as the app looks at one server. The
- * named exports below are its methods, so every existing caller is unchanged
- * and the function identities stay stable. */
-export const backendCatalog = createBackendCatalog();
 
-export const setServedBackends = (list: BackendInfo[] | null) => backendCatalog.set(list);
-export const onServedBackends = (fn: () => void) => backendCatalog.onChange(fn);
-export const servedBackendsKnown = () => backendCatalog.known();
-export const spawnableBackends = () => backendCatalog.spawnable();
-export const defaultBackend = () => backendCatalog.defaultBackend();
-export const backendEfforts = (backend: string | null | undefined) => backendCatalog.efforts(backend);
-export const backendSwitchesInputMode = (backend: string | null | undefined) => backendCatalog.switchesInputMode(backend);
-export const backendTogglesInputMode = (backend: string | null | undefined) => backendCatalog.togglesInputMode(backend);
-export const backendColorToken = (backend: string | null | undefined) => backendCatalog.colorToken(backend);
 
-// Backend id → the backend's avatar icon, for agent AVATARS (roster cards,
-// registry rows, presets): the logo says which CLI an agent runs on at a
-// glance, where a colored initial said nothing (owner, 2026-08-21: "agent的
-// icon可以用backend的logo，不用字母了"). The served list answers first; the
-// switch is the older-server fallback plus the detection-only CLIs. Null for
-// a backend we ship no avatar for — callers keep the lettered fallback.
-export const backendIcon = (backend: string | null | undefined) => backendCatalog.icon(backend);
-
-/** The avatars this build ships: the older-server fallback plus the
+/** Backend id → the backend's avatar icon, for agent AVATARS (roster cards,
+ * registry rows, presets): the logo says which CLI an agent runs on at a
+ * glance, where a colored initial said nothing (owner, 2026-08-21: "agent的
+ * icon可以用backend的logo，不用字母了"). A catalog's `icon` asks its server's
+ * list first and falls back here.
+ *
+ * The avatars this build ships: the older-server fallback plus the
  * detection-only CLIs. The detection-only openclaw is never in a server's
  * list — recognised in panes, not spawned — so its avatar stays here on
  * purpose; kimi joined the served list with board #224 and keeps its row for

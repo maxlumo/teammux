@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { rowAgentCounts, rowAgents } from './sidebar.ts';
+import { createBackendCatalog } from '../core/agents.ts';
+
+/** An unanswered catalog: the faces this build ships (board #335 ②b-3). */
+const catalog = createBackendCatalog();
 import type { SidebarPane } from './sidebar.ts';
 import type { ProjectRow, Slot } from '../projects/projects.ts';
 
@@ -29,7 +33,7 @@ test('live chips keep every active agent window in input order and exclude shell
     pane('shell', 12, { current_command: 'bash', agent: undefined }),
     live[0]!, pane('duplicate', 0), ...live.slice(1),
   ];
-  const chips = rowAgents(row, panes, { 'alpha:alice': 'working', 'alpha:bob': 'waiting' });
+  const chips = rowAgents(row, panes, { 'alpha:alice': 'working', 'alpha:bob': 'waiting' }, catalog);
   assert.deepEqual(chips.map((a) => [a.name, a.state]), [
     ['alice', 'working'], ['bob', 'waiting'], ['carol', 'idle'], ['dave', 'idle'], ['erin', 'idle'],
   ]);
@@ -38,8 +42,8 @@ test('live chips keep every active agent window in input order and exclude shell
 
 test('renumbering windows does not change name-keyed chip states (#120)', () => {
   const states = { 'alpha:alice': 'working', 'alpha:0': 'failed' };
-  const before = rowAgents(row, live, states);
-  const after = rowAgents(row, live.map((p) => ({ ...p, window: p.window + 100 })), states);
+  const before = rowAgents(row, live, states, catalog);
+  const after = rowAgents(row, live.map((p) => ({ ...p, window: p.window + 100 })), states, catalog);
   assert.deepEqual(after, before);
   assert.equal(after[0]!.state, 'working');
 });
@@ -53,7 +57,7 @@ test('closed chips list every declared agent with its backend and no live state 
       slot('carol', 3), slot('dave', 4), slot('erin', 5),
     ],
   };
-  assert.deepEqual(rowAgents(closed, live, { 'alpha:alice': 'working' }), [
+  assert.deepEqual(rowAgents(closed, live, { 'alpha:alice': 'working' }, catalog), [
     { name: 'alice', icon: '/assets/codex.svg', state: '' },
     { name: 'unknown', icon: null, state: '' },
     { name: 'carol', icon: '/assets/kiro.svg', state: '' },
@@ -67,7 +71,7 @@ test('hover counts all live names and missing slots; the chips show every live o
     ...live, live[0]!, pane('shell', 90, { current_command: 'bash', agent: undefined }),
     pane('frank', 5, { active: false }), pane('elsewhere', 0, { session: 'other' }),
   ];
-  assert.equal(rowAgents(row, panes, {}).length, 5);
+  assert.equal(rowAgents(row, panes, {}, catalog).length, 5);
   assert.deepEqual(rowAgentCounts(row, panes), { live: 5, stopped: 1 });
   assert.deepEqual(rowAgentCounts(row, [...panes, pane('ad-hoc', 91)]), { live: 6, stopped: 1 });
 });

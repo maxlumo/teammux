@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 
-const compiled = compileMount(new URL('./Preferences.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
+// Through the host that gives the embedded editor its guest scope, as App
+// does (board #335 ②b-3): the editor's RPCs are that scope's.
+const compiled = compileMount(new URL('./Preferences.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)]);
 const alpha = { name: 'alpha', backend: 'codex', model: '', system: 'Original', skills: '[]', mcp: '[]' };
 const rpc = {
   registryList: async () => ({ agents: [alpha] }),

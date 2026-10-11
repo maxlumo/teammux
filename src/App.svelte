@@ -25,7 +25,6 @@
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
   import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, setSocket } from './lib/core/ws.ts';
-  import { setServedBackends } from './lib/core/agents.ts';
   import { t } from './lib/core/i18n.svelte.ts';
   import { layout } from './lib/app/layout.svelte.ts';
   import { applyFontVars } from './lib/app/fonts.svelte.ts';
@@ -975,7 +974,9 @@
     void runtime.probeCaps((caps) => {
       if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
       if (caps.hub !== null) hubState = { available: caps.hub, probed: true };
-      setServedBackends(caps.backends);
+      // Into THIS runtime's catalog (board #335 ②b-3): the list is one
+      // machine's answer, and its pages read it from their scope.
+      serverStates.get(runtime)?.backends.set(caps.backends);
     });
   }
 
@@ -1351,7 +1352,6 @@
     // flight or a settled callback cannot become A's work sent to B.
     revokeScope();
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
-    setServedBackends(null);            // the backend list is the server's answer
     hoverCard.hide();                   // a card may describe the old server's row
     hubState = { available: false, probed: false };
     serverInfo = { hostname: '', machineId: '' };
@@ -2636,8 +2636,9 @@
          runtime at all, and inside the server-bound subtree it would have
          rendered a blank page there (reviewer, 2026-10-10). Its one
          server-bound guest, the Agents editor on touch, is already gated on a
-         live server through `showAgents`; b3-3 gives that guest a scope of its
-         own. -->
+         live server through `showAgents`, and bound to that server by a GUEST
+         scope (board #335 ②b-3): the bound runtime and its state, keyed on the
+         handle like the subtree, so a switch rebuilds the guest too. -->
     {#if page === 'prefs' || holdPages}
     <div class="page-layer" class:hidden={page !== 'prefs'}>
     <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
@@ -2653,6 +2654,7 @@
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
+      guestRuntime={scopeRuntime} guestState={serverStates.get(scopeRuntime)}
       agentsEditRequest={landingFor(agentsEditReq)}
       openRequest={prefsOpenReq}
       onAddress={(address) => {

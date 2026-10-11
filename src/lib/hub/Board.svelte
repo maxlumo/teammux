@@ -10,7 +10,6 @@
   import type { BoardIssue, BoardCountRow, HubAgent } from '../core/ws.ts';
   import { projectAgeLabel, sortRows } from '../projects/projects.ts';
   import { boardStatusColor, localWhen, splitImages } from './hub.ts';
-  import { backendIcon } from '../core/agents.ts';
   import { createStager, attachPaste, type Stager } from './attachments.svelte.ts';
   import AttachStrip from './AttachStrip.svelte';
   import ChatImage from './ChatImage.svelte';
@@ -19,7 +18,7 @@
   import { t, hanLang } from '../core/i18n.svelte.ts';
   import { onDestroy, untrack, tick } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
-  import { useServerRuntime } from '../app/server-context.ts';
+  import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
   import Select from '../ui/Select.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
@@ -38,11 +37,15 @@
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
 
-  // The runtime whose subtree holds this board, for its leave guard (#335
-  // ②b-2-3) and its RPCs (②b-3), read once at init.
-  const guardOwner = useServerRuntime();
+  // The scope whose subtree holds this board, read once at init: its runtime
+  // for the leave guard (#335 ②b-2-3) and the RPCs (②b-3), its state for that
+  // server's backend catalog (the assignee faces).
+  const scope = useServerScope();
   // A board always lives in a server's subtree (the page, the Hub drawer).
-  if (!guardOwner) throw new Error('Board needs a server scope');
+  if (!scope) throw new Error('Board needs a server scope');
+  const guardOwner = scope.runtime;
+  const catalog = scope.state.backends;
+  const backendIcon = catalog.icon;
   const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubPost, hubRooms } = guardOwner.api;
   let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '' }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean } = $props();
 
@@ -1114,7 +1117,7 @@
                 #{i.id}
                 {#if i.created_by}· {t('boardBy')} {i.created_by}{/if}
                 {#if i.assignee}
-                  {@const who = assigneeView(i.assignee, agents, s, backends)}
+                  {@const who = assigneeView(i.assignee, agents, s, backends, catalog)}
                   <!-- WHO is on it (board #293): the app's .ava tile in the
                        agent's own ink + the name; a dot on the tile's corner
                        while that agent is running (hub_agents, stateIsLive). -->

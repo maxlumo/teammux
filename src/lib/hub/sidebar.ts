@@ -1,4 +1,4 @@
-import { backendIcon, paneAgent } from '../core/agents.ts';
+import { paneAgent, type BackendCatalog } from '../core/agents.ts';
 import type { TmuxPane } from '../core/ws.ts';
 import type { ProjectRow } from '../projects/projects.ts';
 
@@ -15,7 +15,7 @@ interface RowAgent {
  * agent slot. No cap (board #261): the chips wrap, and a row that hid its
  * fifth agent behind a hover count read as if that agent were not there
  * (owner, 2026-09-28: tmux-mobile's archivist, blog's two last members). */
-export function rowAgents(row: ProjectRow, panes: readonly SidebarPane[], agentStates: Readonly<Record<string, string>>): RowAgent[] {
+export function rowAgents(row: ProjectRow, panes: readonly SidebarPane[], agentStates: Readonly<Record<string, string>>, catalog: Pick<BackendCatalog, 'icon'>): RowAgent[] {
   if (row.live) {
     const out: RowAgent[] = [];
     const seen = new Set<number>();
@@ -33,7 +33,7 @@ export function rowAgents(row: ProjectRow, panes: readonly SidebarPane[], agentS
   }
   return (row.slots ?? [])
     .filter((s) => s.kind === 'agent')
-    .map((s) => ({ icon: backendIcon(s.command), name: s.window_name, state: '' }));
+    .map((s) => ({ icon: catalog.icon(s.command), name: s.window_name, state: '' }));
 }
 
 /** Hover counts the roster split into live and stopped. */

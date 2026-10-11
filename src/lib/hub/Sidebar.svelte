@@ -5,6 +5,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import { projectAgeLabel, type ProjectRow } from '../projects/projects.ts';
   import { rowAgentCounts, rowAgents, type SidebarPane } from './sidebar.ts';
+  import { useServerScope } from '../app/server-context.ts';
   import { stateDotColor, stateIsLive } from './hub.ts';
   import { anchorOf } from '../ui/placement.ts';
   import { longpress } from '../ui/longpress.ts';
@@ -42,6 +43,9 @@
     roomUnread = {}, onselect = () => {}, oncreate = () => {}, onclose = () => {},
     onmenu = () => {}, onrestore = () => {}, onpurge = () => {},
   }: Props = $props();
+  // This server's backend catalog (board #335 ②b-3), for the rows' agent
+  // faces. From the Hub's scope, read once at init.
+  const catalog = useServerScope()!.state.backends;
   let trashOpen = $state(false);
   /* The open row's wash is ONE marker that glides (motion principle 14); it
      re-measures when the choice or the order changes. */
@@ -97,9 +101,9 @@
               {#if unread}<span class="side-unread appear-pop"><span class="unread-dot"></span>{unread}</span>{/if}
               <span class="side-age">{projectAgeLabel(row, talkMap, tick)}</span>
             </span>
-            {#if rowAgents(row, panes, agentStates).length}
+            {#if rowAgents(row, panes, agentStates, catalog).length}
               <span class="side-wins" class:dim={!row.live}>
-                {#each rowAgents(row, panes, agentStates) as a (a.name)}
+                {#each rowAgents(row, panes, agentStates, catalog) as a (a.name)}
                   <span class="side-win">
                     {#if a.icon}<img src={a.icon} alt="" width="11" height="11" />{/if}
                     <span class="side-win-name">{a.name}</span>

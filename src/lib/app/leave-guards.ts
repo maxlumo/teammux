@@ -32,8 +32,9 @@ export interface LeaveGuard {
    * the guards of the handle it destroys — by identity, never by server id: a
    * new handle for the same id is a different owner, and must neither answer
    * for the old one's editors nor be asked about them. A null owner is asked
-   * on every leave, which is what every guard was before (Preferences' Agents
-   * editor sits outside the subtrees until b3-3). */
+   * on every leave, which is what every guard was before; since ②b-3 every
+   * production guard has one (Preferences' Agents editor is bound by its
+   * guest scope). */
   runtime: object | null;
   /** The page whose layer holds this instance ('' = always visible). */
   page: string;

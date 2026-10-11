@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createBackendCatalog } from '../core/agents.ts';
 import { draftOf, draftDirty, draftValid, draftPatch, rebaseDraft, issueRef, ISSUE_REF_CHARS, assignNotes, chipCols, assigneeView } from './board.ts';
 
 // Since board #15 a draft carries all four editable fields; these helpers
@@ -290,22 +291,25 @@ test('chipCols: one row when it fits, else 2×2, else one column — never three
 });
 
 test('assigneeView: an agent wears its backend icon; the dot only in doing, only while running (board #293, #327)', () => {
+  // An unanswered catalog: the faces this build ships (board #335 ②b-3 —
+  // the catalog is the caller's, the server whose board this is).
+  const catalog = createBackendCatalog();
   const agents = [
     { name: 'builder', state: 'working', managed: true, agent: 'kiro' },
     { name: 'validator', state: 'idle', managed: true, agent: 'codex' },
     { name: 'shell', state: 'working', managed: false, agent: 'claude' },
   ];
-  assert.equal(assigneeView('', agents, 'doing'), null, 'unassigned: nothing');
-  assert.deepEqual(assigneeView('builder', agents, 'doing'), { name: 'builder', icon: '/assets/kiro.svg', live: true }, 'its own backend face, lit while working in DOING');
+  assert.equal(assigneeView('', agents, 'doing', {}, catalog), null, 'unassigned: nothing');
+  assert.deepEqual(assigneeView('builder', agents, 'doing', {}, catalog), { name: 'builder', icon: '/assets/kiro.svg', live: true }, 'its own backend face, lit while working in DOING');
   for (const col of ['todo', 'review', 'done']) {
-    assert.deepEqual(assigneeView('builder', agents, col), { name: 'builder', icon: '/assets/kiro.svg', live: false }, `${col}: the face, never the working dot`);
+    assert.deepEqual(assigneeView('builder', agents, col, {}, catalog), { name: 'builder', icon: '/assets/kiro.svg', live: false }, `${col}: the face, never the working dot`);
   }
-  assert.deepEqual(assigneeView('validator', agents, 'doing'), { name: 'validator', icon: '/assets/codex.svg', live: false }, 'idle: no dot');
-  assert.deepEqual(assigneeView('reviewer', agents, 'doing', { reviewer: 'claude' }), { name: 'reviewer', icon: '/assets/claude.svg', live: false },
+  assert.deepEqual(assigneeView('validator', agents, 'doing', {}, catalog), { name: 'validator', icon: '/assets/codex.svg', live: false }, 'idle: no dot');
+  assert.deepEqual(assigneeView('reviewer', agents, 'doing', { reviewer: 'claude' }, catalog), { name: 'reviewer', icon: '/assets/claude.svg', live: false },
     'stopped: the remembered backend keeps its face');
-  assert.deepEqual(assigneeView('ghost', agents, 'doing'), { name: 'ghost', icon: null, live: false }, 'never seen: no picture to wear, never an invented letter');
-  assert.equal(assigneeView('shell', agents, 'doing')?.live, false, 'a direct window is not a managed agent');
-  assert.deepEqual(assigneeView('human', agents, 'doing'), { name: 'human', icon: null, live: false }, 'the human is not an agent: no picture');
+  assert.deepEqual(assigneeView('ghost', agents, 'doing', {}, catalog), { name: 'ghost', icon: null, live: false }, 'never seen: no picture to wear, never an invented letter');
+  assert.equal(assigneeView('shell', agents, 'doing', {}, catalog)?.live, false, 'a direct window is not a managed agent');
+  assert.deepEqual(assigneeView('human', agents, 'doing', {}, catalog), { name: 'human', icon: null, live: false }, 'the human is not an agent: no picture');
 });
 
 test('rememberBackends folds each poll into what was known', async () => {

@@ -1145,14 +1145,15 @@ test('the phone tab bar hides for Files\' reading mode through one signal, gated
 
 test('every connect path runs the one server handshake, which loads backends_list (board #253)', () => {
   // The boot path (a page load with a saved token, the most common connect)
-  // called probeHub alone, so setServedBackends never ran and the Agents
+  // called probeHub alone, so the backend list was never loaded and the Agents
   // editor hid the queue/steer field on the live app while the mount tests,
   // which serve the list directly, passed. Each place that marks the socket
   // connected must reach serverReady(), and nothing may probe or load
   // backends on its own beside it.
   const ready = source.match(/function serverReady\(\) \{([\s\S]*?)\n  \}/u)?.[1] ?? '';
   assert.match(ready, /runtime\.probeCaps\(/u, 'one probe, both questions');
-  assert.match(ready, /setServedBackends\(caps\.backends\);/u);
+  // Into the bound runtime's own catalog (board #335 ②b-3).
+  assert.match(ready, /serverStates\.get\(runtime\)\?\.backends\.set\(caps\.backends\);/u);
   const sites = [...source.matchAll(/connected = true;/gu)].map((m) => m.index!);
   assert.equal(sites.length, 3, 'boot, reconnect success, manual connect');
   for (const at of sites) {

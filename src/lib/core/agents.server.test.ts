@@ -7,10 +7,7 @@
 // MACHINE's installed CLIs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  backendCatalog, backendIcon, createBackendCatalog, setServedBackends,
-  spawnableBackends, type BackendInfo,
-} from './agents.ts';
+import { createBackendCatalog, type BackendInfo } from './agents.ts';
 
 const info = (over: Partial<BackendInfo> & { name: string }): BackendInfo =>
   ({ icon: `/assets/${over.name}.svg`, color: `--backend-${over.name}`, efforts: [], ...over });
@@ -84,13 +81,17 @@ test('what the client SHIPS is not per server', () => {
   assert.equal(b.icon('kiro'), '/assets/kiro.svg', 'and only for that server');
 });
 
-test('the module exports are one catalog, so today s callers are unchanged', () => {
-  try {
-    setServedBackends([info({ name: 'grok' })]);
-    assert.deepEqual(spawnableBackends(), ['grok'], 'the named export read the default catalog');
-    assert.equal(backendCatalog.known(), true, 'which IS the exported instance');
-    assert.equal(backendIcon('grok'), '/assets/grok.svg');
-  } finally {
-    setServedBackends(null);
-  }
+test('a catalog keeps answering once a page destructures it (board #335 ②b-3)', () => {
+  // The module-level catalog and its named exports are gone: each runtime's
+  // state holds one, and a page takes its methods apart once at init
+  // (`const { defaultBackend, icon } = scope.state.backends`). A method that
+  // leaned on `this` would answer from nothing then.
+  const c = createBackendCatalog();
+  const { defaultBackend, spawnable, icon, known } = c;
+  assert.equal(defaultBackend(), 'kiro', 'unanswered: the build s first fallback');
+  c.set([info({ name: 'grok' })]);
+  assert.equal(known(), true);
+  assert.deepEqual(spawnable(), ['grok']);
+  assert.equal(defaultBackend(), 'grok', 'the server s first, through the destructured method');
+  assert.equal(icon('grok'), '/assets/grok.svg');
 });

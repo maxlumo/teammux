@@ -19,10 +19,6 @@ const reset = app.match(/function resetServerMemory\(\) \{[\s\S]*?\n  \}/u)?.[0]
 
 /** file → store name → how a switch handles it. */
 const PER_SERVER: Record<string, Record<string, RegExp>> = {
-  // Since #335 ②a-4 the list and its listeners are an INSTANCE of
-  // createBackendCatalog(); the frozen fallback lists stayed module-level
-  // because they describe what this BUILD ships, not what a server serves.
-  'core/agents.ts': { backendCatalog: /setServedBackends\(null\)/u },
   'ui/hover.svelte.ts': { shown: /hoverCard\.hide\(\)/u, hiddenAt: /hoverCard\.hide\(\)/u },
 };
 /** Per-server stores that belong to a runtime: how the bundle builds the
@@ -38,6 +34,11 @@ const IN_RUNTIME: Record<string, { file: string; built: string; instance: string
   // keyed by session name, the one-writer claim per part, each attempt's
   // abort handle and settle, and the rows. Memory only, so no storage.
   files: { file: 'files/files-memory.ts', built: '\\{ memory: createFilesMemory\\(\\), downloads: createDownloads\\(\\) \\}', instance: '(?:createFilesMemory|createDownloads)\\(' },
+  // The backends this server can spawn (#335 ②b-3): an instance per runtime
+  // since the module catalog and its named exports were deleted. The frozen
+  // fallback lists stay module-level because they describe what this BUILD
+  // ships, not what a server serves.
+  backends: { file: 'core/agents.ts', built: 'createBackendCatalog\\(\\)', instance: 'createBackendCatalog\\(' },
 };
 const GLOBAL: Record<string, Record<string, string>> = {
   'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself' },
@@ -104,7 +105,6 @@ test('every module-level store is reset on a switch or named global (board 315)'
     }
   }
   for (const instance of [
-    'core/agents.ts:backendCatalog',
     'hub/notify-centre.svelte.ts:centreSurface',
   ]) {
     assert.ok(found.includes(instance), `the scan sees the factory instance ${instance}`);

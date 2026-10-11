@@ -34,14 +34,13 @@
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import { currentServerId } from '../app/servers.ts';
-  import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch } from './hub.ts';
+  import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch } from './hub.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
   import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamTarget } from './hub-composer.ts';
   import { walkFeedGap } from './hub-history.ts';
   import { createHubBackRegistry } from './hub-back.ts';
   import { notifyNews, isAway, roomProjectName, playCue, systemNotify, notifyEnabled, notifyLevel, excerpt } from './notifications.ts';
-  import { backendIcon, backendTogglesInputMode } from '../core/agents.ts';
   import { anchorOf } from '../ui/placement.ts';
   import ContextMenu from '../ui/ContextMenu.svelte';
   import { groupActions, groupScope, runGroup } from './group-actions.ts';
@@ -65,6 +64,11 @@
     hubPost, hubCommand, modelsList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
+  // This server's backend catalog (②b-3): the avatars and whether a running
+  // agent can switch its input mode are its answer.
+  const catalog = scope.state.backends;
+  const { icon: backendIcon, togglesInputMode: backendTogglesInputMode } = catalog;
+  const backendColor = (backend) => colorOf(backend, catalog);
 
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null } = $props();
   const drawerId = $props.id();

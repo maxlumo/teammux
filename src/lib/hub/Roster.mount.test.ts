@@ -6,7 +6,7 @@ import { compileMount } from '../test/mount.ts';
 // no layout, so the strip's widths are supplied: `.cards` is 300px wide and
 // its single row needs `rowWidth` px — but only in the single-row form, as a
 // browser reports once the wrapped class is lifted.
-const compiled = compileMount(new URL('./Roster.svelte', import.meta.url), []);
+const compiled = compileMount(new URL('./Roster.svelte', import.meta.url), [], { serverScope: true });
 
 const agent = (name: string) => ({ name, window: 1, managed: true, agent: 'kiro', state: 'idle', since: 10 });
 

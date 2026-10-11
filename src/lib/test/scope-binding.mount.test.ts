@@ -73,6 +73,9 @@ function scopeServer(win: DOMWindow, calls: string[]) {
     hubLog: answer('hubLog', { messages: [], has_more: false }),
     hubActivity: answer('hubActivity', { events: [], has_more: false }),
     registryList: answer('registryList', { agents: [] }),
+    skillsList: answer('skillsList', { skills: [] }),
+    mcpList: answer('mcpList', { mcp: [] }),
+    globalPromptGet: answer('globalPromptGet', { text: '', path: '/b/AGENTS.md', max_bytes: 1 }),
     teamsList: answer('teamsList', { teams: [] }),
     boardCounts: answer('boardCounts', { counts: { 'proj-b': { todo: 1, doing: 0, review: 0, done: 0, total: 1 } } }),
     boardList: answer('boardList', { issues: [{ id: 7, title: 'on B', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }] }),
@@ -92,7 +95,7 @@ function facade(calls: string[]) {
     'addPaneOutputListener', 'removePaneOutputListener', 'addPaneClosedListener', 'removePaneClosedListener',
     'gitCmd', 'fsList', 'fsMkdir', 'fsCwd', 'fsStat', 'fsRead', 'fsWrite', 'fsDelete', 'getBookmarks', 'saveBookmarks',
     'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms', 'hubUnread', 'hubRead', 'hubAgents', 'hubLog',
-    'hubActivity', 'registryList', 'teamsList', 'boardCounts', 'boardList', 'fsDownloadHttp',
+    'hubActivity', 'registryList', 'teamsList', 'skillsList', 'mcpList', 'globalPromptGet', 'boardCounts', 'boardList', 'fsDownloadHttp',
     'addTeamMessageListener', 'removeTeamMessageListener'];
   return Object.fromEntries(names.map((n) => [n, () => { calls.push(n); return Promise.reject(new Error('facade')); }]));
 }
@@ -219,6 +222,13 @@ test('Projects lists on its scope s server', async (context) => {
 
 test('CreateProjectDialog reads the registry and browses on its scope s server', async (context) => {
   const { onScope, onFacade, until } = await mount(context, { which: 'create', oncreated() {}, oncancel() {} });
+  await until(() => onScope.includes('registryList()'));
+  assert.ok(onScope.includes('registryList()'), `the registry from the scope: ${onScope.join(' ')}`);
+  assert.deepEqual(onFacade, [], 'the facade was never asked');
+});
+
+test('AgentsPage reads its registry on its scope s server', async (context) => {
+  const { onScope, onFacade, until } = await mount(context, { which: 'agents', section: 'agents' });
   await until(() => onScope.includes('registryList()'));
   assert.ok(onScope.includes('registryList()'), `the registry from the scope: ${onScope.join(' ')}`);
   assert.deepEqual(onFacade, [], 'the facade was never asked');

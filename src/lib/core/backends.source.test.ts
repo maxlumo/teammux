@@ -56,7 +56,7 @@ test('no client file spells the spawnable backend list; the server publishes it'
     const allowed = ALLOWED[rel] ?? 0;
     if (hits.length > allowed) leaks.push(`${rel}: ${hits.join(' | ')}`);
   }
-  assert.deepEqual(leaks, [], 'a backend list written by hand — read spawnableBackends() (core/agents.ts) instead');
+  assert.deepEqual(leaks, [], 'a backend list written by hand — read the scope catalog (state.backends.spawnable()) instead');
 });
 
 test('the allowance is not larger than what exists (a removed array lowers it)', async () => {

@@ -63,6 +63,7 @@ const BOUND = [
   // hub
   'src/lib/hub/Hub.svelte', 'src/lib/hub/Board.svelte', 'src/lib/hub/ChatImage.svelte',
   'src/lib/projects/Projects.svelte', 'src/lib/projects/CreateProjectDialog.svelte',
+  'src/lib/hub/AgentsPage.svelte',
   // Not a component: it takes the api its host read (StagerHost.api).
   'src/lib/hub/attachments.svelte.ts',
 ];
@@ -188,4 +189,18 @@ test('the init-read rule reads the script, not its lines (reviewer P2-a on b1-3)
   assert.ok(contextReads(`${wrap('')}\n<button onclick={() => useServerApi()}>x</button>`, { once: true }).some((p) => /markup/u.test(p)),
     'a handler in the markup (reviewer P2 on 0a5db703)');
   assert.ok(contextReads(`${wrap('')}\n{#if useServerScope()}x{/if}`, { once: true }).some((p) => /markup/u.test(p)), 'a block in the markup');
+});
+
+test('a server s backend list has no module-level owner (board #335 ②b-3)', async () => {
+  // The catalog is one machine's answer, so each runtime's state holds one and
+  // a page reads it from its scope; a pure helper takes it as a parameter. A
+  // module-level catalog (or the named exports that fronted it) would be a
+  // second answer to "what can THIS server spawn", shared by every server.
+  const agents = code(await readFile('src/lib/core/agents.ts', 'utf8'));
+  assert.doesNotMatch(agents, /^export const \w+ = createBackendCatalog\(/mu, 'no module catalog');
+  assert.doesNotMatch(agents, /^export (const|function) (setServedBackends|onServedBackends|servedBackendsKnown|spawnableBackends|defaultBackend|backendEfforts|backendSwitchesInputMode|backendTogglesInputMode|backendColorToken|backendIcon)\b/mu,
+    'and no named front for one');
+  // Preferences' embedded editor is bound by a guest scope, keyed like App's.
+  const prefs = await readFile('src/lib/app/Preferences.svelte', 'utf8');
+  assert.match(prefs, /\{#key guestRuntime\}\s*<ServerScope runtime=\{guestRuntime\} state=\{guestState\}>\s*<AgentsPage/u);
 });

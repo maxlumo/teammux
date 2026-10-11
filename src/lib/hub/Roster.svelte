@@ -4,8 +4,8 @@
   import { t } from '../core/i18n.svelte.ts';
   import { untrack } from 'svelte';
   import { ALL_TARGET, targetMembers, targetTeam, teamTarget } from './hub-composer.ts';
-  import { backendIcon } from '../core/agents.ts';
-  import { backendColor, stateDotColor, stateIsLive, chipExtras, ctxColor, fmtElapsed, wakeLine, modelLabel, runtimeLabel, agentHue, namedGroup, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
+  import { useServerScope } from '../app/server-context.ts';
+  import { backendColor as colorOf, stateDotColor, stateIsLive, chipExtras, ctxColor, fmtElapsed, wakeLine, modelLabel, runtimeLabel, agentHue, namedGroup, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import { longpress } from '../ui/longpress.ts';
   import { anchorOf } from '../ui/placement.ts';
@@ -26,6 +26,11 @@
     allMenuOpen = false, onall = (_event) => {},
     onallcontext = (_at) => {}, onteamcontext = (_at, _team) => {},
   } = $props();
+  // This server's backend catalog (board #335 ②b-3): the avatars are its
+  // answer. From the Hub's scope, read once at init.
+  const catalog = useServerScope().state.backends;
+  const backendIcon = catalog.icon;
+  const backendColor = (backend) => colorOf(backend, catalog);
 
   const cardsId = $props.id();
   /* Expanding is only meaningful when the single row OVERFLOWS (#266, ruling

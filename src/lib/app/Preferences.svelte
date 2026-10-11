@@ -23,6 +23,7 @@
   import { moveMs } from '../ui/motion.ts';
   import { RAIL_DRAG_THRESHOLD, listDropAt, railDropIndex, railDropOffset } from './nav-order.ts';
   import AgentsPage from '../hub/AgentsPage.svelte';
+  import ServerScope from './ServerScope.svelte';
 
   let {
     connected = false,
@@ -47,6 +48,8 @@
     onGoBack = null,
     onDrill = () => {},
     showAgents = false,
+    guestRuntime = null,
+    guestState = null,
     agentsEditRequest = null,
     openRequest = null,
     onAddress = () => {},
@@ -87,6 +90,12 @@
      *  of its own (nav-state's agentsLivesInSettings). The desktop rail keeps
      *  its own Agents page, so this stays false there. */
     showAgents?: boolean;
+    /** The server the embedded AgentsPage is bound to — its GUEST scope
+     * (board #335 ②b-3): App's bound runtime and that runtime's state.
+     * Preferences itself is the person's and needs neither; with no runtime
+     * the guest renders nothing, like every server-bound subtree. */
+    guestRuntime?: import('./server-runtime.ts').ServerRuntime | null;
+    guestState?: import('./server-state.ts').ServerState | null;
     /** Forwarded to the embedded AgentsPage: the Hub's "configure agent" jump. */
     agentsEditRequest?: { name: string; kind?: 'agent' | 'team'; n: number } | null;
     /** A one-shot "open this category" request — `{ tab, n }`, the same shape
@@ -602,6 +611,10 @@
            categories, narrowed by `section` — Agents / Teams / Skills / MCP
            are separate second-level pages on the phone (owner, 2026-09-02). -->
       <div class="agents-embed">
+        <!-- Keyed on the handle, like App's subtree: another server is
+             another instance of the editor, never a re-pointed one. -->
+        {#key guestRuntime}
+        <ServerScope runtime={guestRuntime} state={guestState}>
         <AgentsPage
           section={tab}
           visible={AGENT_TABS.includes(tab)}
@@ -611,6 +624,8 @@
           onGoBack={(fn: () => boolean) => agentsBack = fn}
           onDrilled={(d: boolean) => agentsDrilled = d}
         />
+        </ServerScope>
+        {/key}
       </div>
     {:else}
     <!-- The accepted category owns this pane and its existing reveal. -->

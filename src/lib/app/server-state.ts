@@ -29,6 +29,7 @@ import { createAlertLog, createCentre, type Centre } from '../hub/notify-centre.
 import { createFilesMemory, type FilesMemory } from '../files/files-memory.ts';
 import { createDownloads, type DownloadStore } from '../files/downloads.svelte.ts';
 import { SUSPEND } from '../files/download.ts';
+import { createBackendCatalog, type BackendCatalog } from '../core/agents.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -46,6 +47,9 @@ export interface ServerState {
    * the runtime has to forbid new attempts, suspend and await, then release
    * (②a's ruling). Memory only — nothing of it is stored. */
   files: { memory: FilesMemory; downloads: DownloadStore };
+  /** The backends THIS server can spawn (②b-3): its `backends_list` answer,
+   * set when its probe lands. Memory only; a new runtime starts unanswered. */
+  backends: BackendCatalog;
 }
 
 /** One server's state, over `storage` — that server's own store. */
@@ -54,6 +58,7 @@ export function createServerState(storage: Store): ServerState {
     prefs: createHubPrefs(storage),
     centre: createCentre(createAlertLog(storage)),
     files: { memory: createFilesMemory(), downloads: createDownloads() },
+    backends: createBackendCatalog(),
   };
 }
 

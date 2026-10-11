@@ -99,7 +99,7 @@ export function rebaseDraft(
 
 import type { BoardCountRow } from '../core/ws.ts';
 import { stateIsLive, HUMAN } from './hub.ts';
-import { backendIcon } from '../core/agents.ts';
+import type { BackendCatalog } from '../core/agents.ts';
 
 export const BOARD_STATUSES = ['todo', 'doing', 'review', 'done'] as const;
 
@@ -226,7 +226,7 @@ export function chipCols(w: number, chip: number, gap: number): 1 | 2 | 4 {
 
 /** WHO is on a card (board #293; #327, owner 2026-10-09: "这里你用的 logo 好
  * 像又是自己发明的一个字母头像…就用他的头像就好…不要去发明新的头像"). An agent
- * assignee wears its BACKEND's own icon (`backendIcon` — kiro, claude, codex…,
+ * assignee wears its BACKEND's own icon (`catalog.icon` — kiro, claude, codex…,
  * the roster's and drawer's avatar) and its name. The backend comes from the
  * agent's hub_agents row, or the one remembered from an earlier poll (a
  * stopped agent keeps its face); one never seen has no picture to wear, so it
@@ -239,13 +239,15 @@ export function assigneeView(
   assignee: string | null | undefined,
   agents: readonly { name: string; state: string; managed?: boolean; agent?: string | null }[],
   status: string,
-  known: Readonly<Record<string, string>> = {},
+  known: Readonly<Record<string, string>>,
+  /** This server's catalog (board #335 ②b-3): the face is ITS answer. */
+  catalog: Pick<BackendCatalog, 'icon'>,
 ): { name: string; icon: string | null; live: boolean } | null {
   if (!assignee) return null;
   if (assignee === HUMAN) return { name: assignee, icon: null, live: false };
   const row = agents.find((a) => a.name === assignee && a.managed !== false);
   const backend = row?.agent || known[assignee] || null;
-  return { name: assignee, icon: backendIcon(backend), live: status === 'doing' && !!row && stateIsLive(row.state) };
+  return { name: assignee, icon: catalog.icon(backend), live: status === 'doing' && !!row && stateIsLive(row.state) };
 }
 
 /** Each managed agent's backend, as last seen: the poll's rows folded into

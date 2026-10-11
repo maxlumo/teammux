@@ -1,7 +1,7 @@
 <script>
   import { untrack } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
-  import { useServerRuntime } from '../app/server-context.ts';
+  import { useServerScope } from '../app/server-context.ts';
   // AgentsPage — the agent configuration page, in the Hub page format
   // (ui-unification.md "Page skeleton"): a real sidebar (bg2, .side-h,
   // .side-row entries) + a main column with a .page-head. Definitions
@@ -11,10 +11,8 @@
   import SideHandle from '../ui/SideHandle.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { registryList, registrySave, registryDelete, modelsList, skillsList, skillsSave, skillsDelete, skillsRefresh, skillsImport, skillsFiles, skillsFile, mcpList, mcpSave, mcpDelete, teamsList, teamsSave, teamsDelete, globalPromptGet, globalPromptSet } from '../core/ws.ts';
   import { renderMarkdown } from '../core/markdown.ts';
-  import { backendColor } from '../hub/hub.ts';
-  import { backendIcon, spawnableBackends, defaultBackend, backendEfforts, backendSwitchesInputMode, onServedBackends, servedBackendsKnown } from '../core/agents.ts';
+  import { backendColor as colorOf } from '../hub/hub.ts';
   import { moveMs, revealMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import Select from '../ui/Select.svelte';
@@ -30,6 +28,18 @@
   // kept hand mirrors of both and the effort one had drifted (omp was
   // missing). Read on each reload so a list that arrived after the page
   // painted still lands; core/agents.ts holds the older-server fallback.
+  //
+  // The server is this subtree's (board #335 ②b-3), read once at init: its
+  // runtime for the leave guard and the RPCs, its state for that server's
+  // backend catalog. On the rail that is the page's subtree; inside
+  // Preferences it is the guest scope App gives the embedded editor.
+  const scope = useServerScope();
+  if (!scope) throw new Error('AgentsPage needs a server scope');
+  const guardOwner = scope.runtime;
+  const { registryList, registrySave, registryDelete, modelsList, skillsList, skillsSave, skillsDelete, skillsRefresh, skillsImport, skillsFiles, skillsFile, mcpList, mcpSave, mcpDelete, teamsList, teamsSave, teamsDelete, globalPromptGet, globalPromptSet } = guardOwner.api;
+  const catalog = scope.state.backends;
+  const { icon: backendIcon, spawnable: spawnableBackends, defaultBackend, efforts: backendEfforts, switchesInputMode: backendSwitchesInputMode, onChange: onServedBackends, known: servedBackendsKnown } = catalog;
+  const backendColor = (backend) => colorOf(backend, catalog);
   let backends = $state(spawnableBackends());
   // `section` narrows the page to ONE kind — 'agents' | 'teams' | 'skills' |
   // 'mcp' — for the phone's Settings, where each is its own second-level page
@@ -38,9 +48,6 @@
   // instructions, agents, teams, skills, MCP) and the main column shows the
   // chosen one's rows, then its editor (owner, 2026-09-04: "左边侧边栏先写配置
   // 条目 右边展示详细内容 不要全堆在一起了").
-  // The runtime whose subtree holds this editor, for its leave guard (#335
-  // ②b-2-3); null for the copy Preferences hosts outside any subtree.
-  const guardOwner = useServerRuntime();
   let { visible = false, onGoBack = null, editRequest = null, onDrilled = null,
     onGuardExit = null, guardPage = '', section: requestedSection = null } = $props();
   let section = $state(untrack(() => requestedSection));

@@ -1,6 +1,6 @@
 // Pure display logic for the Hub view — testable with node --test, no Svelte.
 import type { HubAgent, HubActivityEvent } from '../core/ws.ts';
-import { backendColorToken } from '../core/agents.ts';
+import type { BackendCatalog } from '../core/agents.ts';
 import { ALL_TARGET, busyTargetsFor, targetMembers, targetTeam, teamRoot } from './hub-composer.ts';
 
 /**
@@ -138,10 +138,11 @@ export function gapWalkStep<T extends { ts?: number }>(
  * glance identifies who is who. The VALUES live in app.css (`--backend-*`) with
  * the other tokens — a literal colour in a component is a new visual species
  * (design-language.md §Colour); this only names the token (review C, 2026-09-03). */
-export function backendColor(backend: string | null | undefined): string {
-  // The served list names the token (board #130); the switch is the older-
-  // server fallback (kimi included since board #224 made it spawnable).
-  const token = backendColorToken(backend);
+export function backendColor(backend: string | null | undefined, catalog: Pick<BackendCatalog, 'colorToken'>): string {
+  // The served list names the token (board #130) — THAT server's list, which
+  // the caller passes (board #335 ②b-3); the switch is the older-server
+  // fallback (kimi included since board #224 made it spawnable).
+  const token = catalog.colorToken(backend);
   if (token) return `var(${token})`;
   switch (backend) {
     case 'kiro': case 'claude': case 'codex': case 'kimi': case 'grok': case 'omp':
