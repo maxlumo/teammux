@@ -56,9 +56,10 @@ export interface SwitchDeps {
    * connect starts. */
   frozen(): boolean;
   /** A connect or identity write failed: the host's one gate decides
-   * whether it was storage (board #335 ②b-4). Optional for a host with no
-   * migration. */
-  identityFailed?(): void;
+   * whether it was storage (board #335 ②b-4). Given the target, so a gate
+   * that blocks can keep it and resume this switch after its Retry. Optional
+   * for a host with no migration. */
+  identityFailed?(target: SwitchTarget): void;
   stopReconnect(): void;
   /** Is the reconnect loop running? A walk freezes it, and a "stay" starts
    * it again. */
@@ -129,7 +130,11 @@ export function createServerSwitch(d: SwitchDeps) {
     } catch (e) {
       if (intent !== seq) return;
       d.disconnect();
-      d.identityFailed?.();
+      d.identityFailed?.(target);
+      // The host's gate blocked the migration (reviewer P1 on af59fb5d): it
+      // OWNS the outcome now — its Retry, the target it kept — and a failed
+      // panel here would cover that Retry with one the freeze refuses.
+      if (d.frozen()) { set(null); return; }
       set({ intent, from, target, phase: 'failed', error: String((e as Error)?.message || e) });
     }
   }

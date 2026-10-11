@@ -96,6 +96,7 @@ function app(storage = mem({
   const handovers = createHandovers({ end: () => {} });
   let looping = false;
   let frozen = false;
+  let gate: (target: SwitchTarget) => void = () => {};
   const sw = createServerSwitch({
     storage,
     connected: () => connected,
@@ -104,6 +105,7 @@ function app(storage = mem({
     confirmLeave: () => confirmLeave({ leaving: null, current: 'hub', reveal: async () => {}, hold: () => {} }),
     claim: () => handovers.claim(),
     frozen: () => frozen,
+    identityFailed: (target) => { gate(target); },
     stopReconnect: () => { reconnects.push('stop'); looping = false; },
     reconnecting: () => looping,
     startReconnect: () => { reconnects.push(`start ${storage.getItem('tmux_address')}`); looping = true; },
@@ -123,7 +125,7 @@ function app(storage = mem({
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, freeze: (on: boolean) => { frozen = on; }, unmountWrites, resets, suspenders, reconnects, published,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, loop: (on: boolean) => { looping = on; }, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, unmountWrites, resets, suspenders, reconnects, published,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -406,4 +408,20 @@ test('frozen: no switch and no address connect starts (board #335 ②b-4)', asyn
   t.freeze(false);
   await t.sw.switchTo(t.b);
   assert.equal(currentServerId(t.storage), t.b.id, 'thawed, it works');
+});
+
+test('a failure the host gate classifies as blocked is the host s: no failed panel, the target handed over (reviewer P1 on af59fb5d)', async () => {
+  const t = app();
+  t.w.fail('ws://b:2', 1);
+  const handed: string[] = [];
+  t.onGate((target) => { handed.push(target.id); t.freeze(true); });     // the gate blocks
+  await t.sw.switchTo(t.b);
+  assert.equal(t.sw.state, null, 'no failed panel over the host s Retry');
+  assert.deepEqual(handed, [t.b.id], 'the gate got the target to keep');
+  // An ordinary failure, the gate not blocking, is the switch s failed panel.
+  t.freeze(false);
+  t.onGate(() => {});
+  t.w.fail('ws://b:2', 1);
+  await t.sw.switchTo(t.b);
+  assert.equal((t.sw.state as SwitchState | null)?.phase, 'failed');
 });

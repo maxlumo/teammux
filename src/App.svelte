@@ -1606,14 +1606,21 @@
    * CURRENT and the registry freeze, and Retry is offered. Otherwise it was
    * an ordinary failure and the caller's own error stands. When it blocks,
    * the boot dial is re-armed, so Retry brings the connection back. */
-  function storageFailed() {
+  function storageFailed(switchTarget = null) {
     if (migrationBlocked) return;
     prepareStorage();
     if (!migrationBlocked) return;
     reconnectMachine.cancel();
     autoConnectAttempted = false;
+    // A switch that hit it is the gate's to resume after Retry (reviewer P1
+    // on af59fb5d): its target is kept here, and the switch shows nothing.
+    if (switchTarget) deferredSwitch = switchTarget;
     swapScope();
+    // Disconnected, the Retry is on the connect card.
+    if (!connected) page = 'settings';
   }
+  /** A switch the gate blocked, resumed by Retry through the switch itself. */
+  let deferredSwitch = null;
   /** Before server `id`'s state is built: `claimed` when a pending input
    * was just filed into its slots, `blocked` when the migration cannot be
    * recorded (and then nothing is bound), else `ok`. A blocked migration is
@@ -1650,6 +1657,7 @@
     if (migrationBlocked) return;
     if (deferredLink) { const link = deferredLink; deferredLink = null; applyConnectLink(link); loadServerRegistry(); }
     swapScope();
+    if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
     if (migrationBlocked) return;
     const bound = scopeSwap.bound();
     if (!bound || !connected) return;

@@ -495,7 +495,12 @@ classifies it by the migration state, not by the error: it reruns the boot's
 preparation, and if that cannot be recorded the app is blocked in that same
 turn (the server tree unbinds, CURRENT and the registry freeze, Retry is
 offered, and the boot dial is re-armed so Retry brings the connection back).
-An ordinary failure keeps the caller's own error (reviewer P1 on 23879812). Which half it stopped in is the REGISTRY's to say: the alias still
+An ordinary failure keeps the caller's own error (reviewer P1 on 23879812). When
+the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
+panel of its own (which would cover the migration's Retry with one the freeze
+refuses); the gate keeps the switch's target, and Retry, once storage is
+recorded, resumes that switch through the switch itself (reviewer P1 on
+af59fb5d). Which half it stopped in is the REGISTRY's to say: the alias still
 saved means nothing was committed and its slots are intact, so they are
 copied again; the alias gone means the copy was already done, so nothing is
 copied (an emptied source must never overwrite the survivor) and the cleanup

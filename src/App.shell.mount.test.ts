@@ -2365,3 +2365,51 @@ test('the connect form s identity write fails mid-handoff: blocked at once, the 
   assert.equal(ls.getItem('tmux_server_current'), 'c');
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED kept');
 });
+
+test('a switch whose identity write fails mid-handoff: the migration Retry is the one exit, and it resumes the switch to its target (reviewer P1 on af59fb5d)', async (context) => {
+  // m-a's inputs pending; the address-only alias is current, its boot dial
+  // hangs; the person picks the alias in the switcher. Its auth reports m-a,
+  // so the switch's activateSwitched absorbs it into canonical, and the slot
+  // copy fails: the switch's own catch, not a fold after comeUp.
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry,
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'OLD-CANON' }),
+    tmux_layout_mode: 'desktop',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_address', 'ws://alias:9899'); m.set('tmux_token', 'tok');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const store = refusing(['tmux_hub_drafts::c']);
+  store.state.failing = false;
+  const events: string[] = [];
+  const h = await bootApp(context, Object.fromEntries(m), () => 'm-a',
+    { calls: events, setup: store.setup, gate: (_url, n) => (n === 1 ? new Promise<void>(() => {}) : null) });
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://alias:9899'], 'the boot dial hangs');
+  store.state.failing = true;
+  await h.switchTo('alias');
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the switch s merge left the handoff open');
+  assert.equal([...h.app.document.querySelectorAll('.switch-panel')].length, 0, 'no switch-failed panel over it');
+  assert.ok(cardButton(h.app, /retry/iu), 'the migration Retry is on screen');
+  assert.equal(h.app.document.querySelector('.term-page'), null, 'no server tree');
+  // Retry while storage still fails: the same blocked exit.
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(cardButton(h.app, /retry/iu), 'still the one Retry');
+  // Storage works again.
+  store.state.failing = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'the switch resumed and arrived (the alias is canonical now)');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED kept');
+  assert.ok(h.app.document.querySelector('.term-page'), 'and the server is up');
+});
