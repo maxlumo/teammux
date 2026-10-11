@@ -872,6 +872,21 @@ is `RPC_KIND` in `ws-api.ts`, one table with every wrapper in it (a missing one
 fails the type check and `server-runtime.frozen.test.ts`), and a name the table
 does not know is refused like a write: there is no default to "read".
 
+**A blocked app holds its resident writes** (③a, orchestrator's final P1-D
+ruling). A mounted tree keeps working through a block — an alert still
+arrives, a read mark still moves — but a resident slot written then is the
+half-migrated client the block exists to prevent. So the app's ONE write gate
+(`createWriteGate` in `server-store.ts`), closed during the block, takes every
+resident write of every server store instead of the storage and answers reads
+from it first, so pages and stores never disagree. Retry, once the claim has
+run, flushes the table in the order it was written; the gate opens only when
+all of it landed, and a write that failed stays, with what follows it, for the
+next Retry. It is keyed by server, so every view of one server sees the same
+pending value; a removal is held as an intent; the person's keys pass through;
+an alias's pending writes land under its canonical entry (the later write of a
+key wins), never in the alias's deleted slot. It is memory only: closing the
+page before a Retry has flushed loses what was pending.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

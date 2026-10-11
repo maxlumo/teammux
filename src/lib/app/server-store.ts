@@ -58,21 +58,108 @@ export interface ServerStore extends Store {
 }
 
 /**
+ * The app's ONE pending-write table (board #335 ③a; orchestrator's final
+ * P1-D ruling, 08:20). While the app is blocked on its storage, a mounted
+ * tree keeps working — an alert still arrives, a read mark still moves — but
+ * nothing may land in a resident slot until the migration is recorded,
+ * because a write there is exactly the half-migrated client the block exists
+ * to prevent. So a CLOSED gate takes every resident write instead of the
+ * storage, and gives it back on a read, so what the pages hold and what their
+ * store answers never disagree. Retry, once the claim has run, `flush`es the
+ * table in the order it was written; the gate opens only when every entry has
+ * landed, and an entry that could not be written stays, with everything after
+ * it, for the next Retry. Nothing waits for a "next write": a setter that
+ * returns early on an unchanged value cannot strand anything.
+ *
+ * - One table per APP, keyed by server: every store view of one server — its
+ *   state bundle's, the navigation's — sees the same pending value.
+ * - A removal is an intent of its own (`null`), not "nothing pending".
+ * - The person's keys pass through: they are not a server's slot.
+ * - A merge moves the table with the slot (`move`, and `flush`'s
+ *   `survivorOf`): an alias's pending writes land under its canonical entry,
+ *   never back in the alias's deleted slot; the later write of a key wins.
+ * - Memory only: closing the page before a Retry has flushed loses what is
+ *   pending, as typing into a blocked app always did.
+ */
+export interface WriteGate {
+  readonly closed: boolean;
+  close(): void;
+  /** The pending value of server `id`'s `key`: `undefined` when nothing is
+   * pending, `null` for a pending removal. */
+  peek(id: ServerId, key: string): string | null | undefined;
+  record(id: ServerId, key: string, value: string | null): void;
+  /** Hand server `from`'s pending writes to `to`. */
+  move(from: ServerId, to: ServerId): void;
+  /** Write the table in order, each entry under its server's survivor. True —
+   * and the gate open — only once every entry has landed. */
+  flush(storage: Store, survivorOf?: (id: ServerId) => ServerId): boolean;
+  pendingCount(): number;
+}
+
+export function createWriteGate(): WriteGate {
+  let closed = false;
+  let seq = 0;
+  /** `id \0 key` → the entry; `seq` is the order it was last written. */
+  const table = new Map<string, { id: ServerId; key: string; value: string | null; seq: number }>();
+  const slot = (id: ServerId, key: string) => `${id}\u0000${key}`;
+  const put = (id: ServerId, key: string, value: string | null, at: number) => {
+    const held = table.get(slot(id, key));
+    if (held && held.seq > at) return;            // the later write of a key wins
+    table.set(slot(id, key), { id, key, value, seq: at });
+  };
+  const move = (from: ServerId, to: ServerId) => {
+    if (!from || !to || from === to) return;
+    for (const [k, e] of [...table]) {
+      if (e.id !== from) continue;
+      table.delete(k);
+      put(to, e.key, e.value, e.seq);
+    }
+  };
+  return {
+    get closed() { return closed; },
+    close() { closed = true; },
+    peek: (id, key) => table.get(slot(id, key))?.value,
+    record(id, key, value) { put(id, key, value, ++seq); },
+    move,
+    flush(storage, survivorOf = (id) => id) {
+      for (const id of new Set([...table.values()].map((e) => e.id))) move(id, survivorOf(id));
+      for (const e of [...table.values()].sort((a, b) => a.seq - b.seq)) {
+        const key = residentKey(e.key, e.id);
+        try {
+          if (e.value === null) storage.removeItem(key); else storage.setItem(key, e.value);
+        } catch { return false; }
+        table.delete(slot(e.id, e.key));
+      }
+      closed = false;
+      return true;
+    },
+    pendingCount: () => table.size,
+  };
+}
+
+/**
  * The storage view of ONE server.
  *
  * An empty `serverId` is refused rather than tolerated: a view that silently
  * fell back to the unprefixed keys would write one server's drafts into the
  * place every other server reads, and it would do it only on the path where
  * the current server has not resolved yet — the hardest case to notice.
+ *
+ * With a `gate`, a resident write while it is closed goes to the table, and a
+ * resident read answers from it first (see `WriteGate`).
  */
-export function createServerStore(storage: Store, serverId: ServerId): ServerStore {
+export function createServerStore(storage: Store, serverId: ServerId, gate?: WriteGate): ServerStore {
   if (!serverId) throw new Error('createServerStore: a server store needs a serverId');
   const keyFor = (key: string) => (isResidentKey(key) ? residentKey(key, serverId) : key);
+  const held = (key: string) => !!gate?.closed && isResidentKey(key);
   return {
     serverId,
     keyFor,
-    getItem: (key) => storage.getItem(keyFor(key)),
-    setItem: (key, value) => storage.setItem(keyFor(key), value),
-    removeItem: (key) => storage.removeItem(keyFor(key)),
+    getItem: (key) => {
+      const pending = gate && isResidentKey(key) ? gate.peek(serverId, key) : undefined;
+      return pending !== undefined ? pending : storage.getItem(keyFor(key));
+    },
+    setItem: (key, value) => (held(key) ? gate!.record(serverId, key, String(value)) : storage.setItem(keyFor(key), value)),
+    removeItem: (key) => (held(key) ? gate!.record(serverId, key, null) : storage.removeItem(keyFor(key))),
   };
 }
