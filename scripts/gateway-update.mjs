@@ -267,9 +267,13 @@ export async function gatewayUpdate({
   // no receipt, reports no commit, and the next run deploys again.
   const state = await run(tmm, ['gateway', 'status']);
   if (state !== 0) {
+    // No exit of this script leaves a receipt claiming something we have just
+    // seen contradicted, so the no-restart path drops it too and the next run
+    // deploys instead of re-reporting the same fault (ruling 3, #343 17:26).
+    forgetReceipt(tmm);
     warn(restarted
       ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer — see the status above. NOTHING is recorded as deployed; fix the service (tmm gateway, or docs/reference/install.md) and run this again.'
-      : '[gateway:update] nothing needed deploying, but this machine\'s gateway does not answer — see the status above. Nothing was restarted; fix the service (tmm gateway, or the runbook in docs/reference/install.md) and run this again.');
+      : '[gateway:update] nothing needed deploying, but this machine\'s gateway does not answer — see the status above. Nothing is recorded as deployed any more, so the next run deploys; fix the service (tmm gateway, or the runbook in docs/reference/install.md) first.');
     return state;
   }
   if (restarted) {

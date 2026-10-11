@@ -151,9 +151,16 @@ test('nothing to deploy but the gateway does not answer is a failure', async (t)
   await h.update();
   h.status = 7;
   assert.equal(await h.update(), 7);
-  assert.equal(h.restarts(), 0, 'a dead service is not restarted behind the owner’s back');
+  assert.equal(h.restarts(), 0, 'this run deploys nothing: it found nothing to deploy');
   assert.ok(h.told('does not answer'), h.said.join('\n'));
   assert.ok(!h.told('now at'), 'and the commit is not reported as running');
+  // No exit leaves a receipt we have just seen contradicted, so the next run
+  // deploys rather than reporting the same fault for ever.
+  assert.equal(await h.receipt(), null);
+  h.status = 0;
+  assert.equal(await h.update(), 0);
+  assert.equal(h.restarts(), 1);
+  assert.equal((await h.receipt()).hash, hashFile(h.bin));
 });
 
 // Reviewer P1-A(i), final contract: confirm, then record, then report. A
