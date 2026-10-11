@@ -87,12 +87,18 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/app/connection-mode.ts',
       // ③a: the window's view of a bound tree holds its PaneRef/SessionRef
       // (type imports); App owns it, and it is not a page.
-      'src/lib/app/server-view.svelte.ts'],
+      'src/lib/app/server-view.svelte.ts',
+      // ③b-1: the background member set keys its members by ServerId (a type
+      // import); App owns it, and it is not a page.
+      'src/lib/app/server-members.svelte.ts'],
     'nav-saved.ts': ['src/App.svelte'],
-    'server-runtime.ts': [],
+    // ③b-1: the member set names the runtime and dial-result TYPES only.
+    'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],
     'server-scope.ts': ['src/App.svelte'],
     // ②b-4: the activation generation, App's alone.
-    'activation.ts': ['src/App.svelte'],
+    'activation.ts': ['src/App.svelte',
+      // ③b-1: the member set claims each member's generation (a type import).
+      'src/lib/app/server-members.svelte.ts'],
     // ②b-4: App's runtimes are the fleet's, one connection each.
     'server-fleet.ts': ['src/App.svelte'],
     // ②b-4: App builds each server's state over its own store, saves and
@@ -238,6 +244,8 @@ test('every server store App builds goes through the one write gate, and a block
   assert.match(app, /function holdStorage\(\) \{\s*migrationBlocked = true;\s*(?:\/\/[^\n]*\n\s*)*activations\.endAll\(\);\s*if \(storageHeld\) return;\s*writeGate\.close\(\);\s*storageHeld = true;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(true\);/u);
   assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\), rebindAlerts\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
   assert.equal((app.match(/\bmigrationBlocked = true\b/gu) ?? []).length, 1, 'a block is decided only in holdStorage');
-  assert.match(app, /next\?\.connection\.setOnDisconnect\([^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);/u,
+  // ③b-1: a background member published while held is frozen too.
+  assert.match(app, /onUp\(runtime\) \{\s*if \(!serverStates\.has\(runtime\)\) serverStates\.set\(runtime, freshState\(runtime\.id\)\);\s*if \(storageHeld\) runtime\.setFrozen\(true\);/u);
+  assert.match(app, /if \(next\) wireDrop\(next\);[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);/u,
     'a runtime minted while held is frozen too: holdStorage froze only the ones it found');
 });

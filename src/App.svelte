@@ -35,6 +35,8 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
+  import { createMembers } from './lib/app/server-members.svelte.ts';
+  import { readMode, readExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -122,9 +124,10 @@
    * it. Each tree's pages register into their own (`viewOf(runtime)` in the
    * template). */
   const view = $derived(scopeRuntime ? viewOf(scopeRuntime) : noServerView);
-  /** The trees the app holds mounted, in the order they render. Single holds
-   * one; Aggregate (③b) holds every bound member. */
-  const members = $derived(scopeRuntime ? [scopeRuntime] : []);
+  /** The trees the app holds mounted: the focused server's, and in
+   * Aggregate every background member that passed its gates (③b-1). */
+  let background = $state.raw([]);
+  const members = $derived([...(scopeRuntime ? [scopeRuntime] : []), ...background.filter((r) => r !== scopeRuntime)]);
   /** The app's ONE write gate (board #335 ③a; orchestrator's P1-D ruling and
    * 08:17's "one mechanism, Single included"): while the app is blocked on
    * its storage, every server store App builds holds its resident writes
@@ -294,7 +297,7 @@
     const next = entry ? fleet.include(entry) ?? null : null;
     // Its socket closing is THIS runtime's drop: the reconnect loop takes
     // over only while it is still the one the tree is bound to.
-    next?.connection.setOnDisconnect(() => { if (bound() === next) onDrop(); });
+    if (next) wireDrop(next);
     // A runtime minted while the gate is held is held too: holdStorage froze
     // only the ones it found.
     if (storageHeld) next?.setFrozen(true);
@@ -315,12 +318,16 @@
   /** Server `id`'s state for a runtime about to be bound: fresh from its own
    * slots, or — when identity repair folded the bound handle's id into `id` —
    * that same machine's Files record handed over. */
+  /** A server's state over its own store, behind the write gate: the ONE
+   * place one is built (a bound server's through `stateFor`, a background
+   * member's at its publish). */
+  function freshState(id) { return createServerState(createServerStore(localStorage, id, writeGate)); }
   function stateFor(id) {
     const held = scopeSwap.bound();
     const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
     return stateForRuntime(replaced, id, {
       survivorOf: (serverId) => mergedInto(localStorage, serverId),
-      create: () => createServerState(createServerStore(localStorage, id, writeGate)),
+      create: () => freshState(id),
     });
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
@@ -435,8 +442,11 @@
   /** Point the terminal at a pane on the server the content tree is bound to.
    * Every write goes through here, so a reference without a server cannot be
    * created. */
-  function showPane(session, target) {
-    view.termPane = target ? paneRef(navServerId(), session || target.split(':')[0], target) : null;
+  function showPane(session, target) { showPaneIn(bound(), view, session, target); }
+  /** The same, in ONE tree's view (③b-1): a background tree's own pane exit
+   * moves its own terminal, never the focused one's. */
+  function showPaneIn(runtime, v, session, target) {
+    v.termPane = target && runtime ? paneRef(runtime.id, session || target.split(':')[0], target) : null;
   }
   // Files follows the session the user touched LAST — opening a terminal pane
   // OR selecting a chat project both set it. It used to derive from the
@@ -444,8 +454,9 @@
   // tab while switching terminal panes did (owner, 2026-08-22: "chat里的路径
   // 没有刷新到文件 terminal好像就会刷新路径").
   const filesSession = $derived(view.filesSession);
-  function showSession(session) {
-    view.filesRef = session ? sessionRef(navServerId(), session) : null;
+  function showSession(session) { showSessionIn(bound(), view, session); }
+  function showSessionIn(runtime, v, session) {
+    v.filesRef = session && runtime ? sessionRef(runtime.id, session) : null;
   }
   // A landing is a request aimed at the server-bound TREE rather than a
   // reference to an object, so what it carries is that tree's identity: it is
@@ -576,19 +587,19 @@
       view.activeCellId = next[0]?.id ?? null;
     }
   }
-  function assignCell(id, target, session) {
-    const pane = target ? paneRef(navServerId(), session || target.split(':')[0], target) : null;
-    view.splitCells = view.splitCells.map(c => c.id === id ? { ...c, pane } : c);
+  function assignCell(id, target, session, runtime = bound(), v = view) {
+    const pane = target && runtime ? paneRef(runtime.id, session || target.split(':')[0], target) : null;
+    v.splitCells = v.splitCells.map(c => c.id === id ? { ...c, pane } : c);
     // Keep the single-pane mirror pointed at the active cell so the
     // narrow-screen fallback and Files page follow what the user is using.
     if (id === view.activeCellId && target) {
       view.termPane = pane;
     }
   }
-  function closeCell(id) {
-    view.splitCells = view.splitCells.map(c => c.id === id ? { ...c, pane: null } : c);
+  function closeCell(id, v = view) {
+    v.splitCells = v.splitCells.map(c => c.id === id ? { ...c, pane: null } : c);
   }
-  function cellPaneExit(id) { closeCell(id); }
+  function cellPaneExit(id, v = view) { closeCell(id, v); }
 
   // Re-subscribe after a reconnect / address switch: the server forgot all
   // subscriptions, so re-send the wire `subscribe` for every target with a
@@ -599,8 +610,8 @@
    * addresses): its pages re-fit and refresh. The event NAMES that runtime
    * (board #335 ②b-4, reviewer P2 on the b3 binding range), and a page acts
    * only on its own server's. */
-  function announceReconnected() {
-    const id = bound()?.id;
+  function announceReconnected(runtime = bound()) {
+    const id = runtime?.id;
     if (id) window.dispatchEvent(new CustomEvent('ws-reconnected', { detail: { serverId: id } }));
   }
   function resubscribeAll() {
@@ -1018,13 +1029,13 @@
       maxAttempts: RECONNECT_MAX_ATTEMPTS,
       watchdogMs: RECONNECT_WATCHDOG_MS,
       onStateChange: (st) => {
-        if (bound() !== runtime) return;
+        if (bound() !== runtime) { if (st.reconnecting) aggregate.reconnecting(runtime); return; }
         reconnecting = st.reconnecting;
         reconnectAttempt = st.attempt;
         reconnectClass = st.label;
       },
-      onSuccess: (_useAddr, _primaryAddr, attempt, result) => onReconnected(runtime, result, attempt),
-      onGiveUp: () => { if (bound() === runtime) { connected = false; page = 'settings'; } },
+      onSuccess: (_useAddr, _primaryAddr, attempt, result) => (bound() === runtime ? onReconnected(runtime, result, attempt) : memberReconnected(runtime, result)),
+      onGiveUp: () => { if (bound() === runtime) { connected = false; page = 'settings'; } else aggregate.gaveUp(runtime); },
     });
     reconnectors.set(runtime, machine);
     return machine;
@@ -1034,6 +1045,76 @@
     reconnectors.get(runtime)?.cancel();
     reconnectors.delete(runtime);
   }
+
+  /** A runtime's socket closed under it: the bound one's reconnect is the
+   * shell's; a background member's is its own (③b-1). ONE hook for both, so
+   * a member a failed switch reused keeps reconnecting as a member. */
+  function wireDrop(runtime) {
+    runtime.connection.setOnDisconnect(() => {
+      if (bound() === runtime) { onDrop(); return; }
+      if (!aggregate.holds(runtime) || migrationBlocked) return;
+      aggregate.reconnecting(runtime);
+      reconnectorOf(runtime).start();
+    });
+  }
+
+  /** The servers Aggregate holds besides the focused one (③b-1,
+   * server-members.svelte.ts). Each joins through the same gates as a
+   * bring-up, addressed to its own id and owned by its own generation; none
+   * writes CURRENT or takes the screen. */
+  const aggregate = createMembers({
+    include: (entry) => fleet.include(entry),
+    gate: (id) => (foldFor(id) === 'blocked' ? 'blocked' : 'ok'),
+    activations,
+    // A block ends every attempt in flight (holdStorage's endAll), so a
+    // member's dial out when it lands records nothing; `wanted` is the set.
+    wanted: (id) => memberIds().includes(id),
+    onUp(runtime) {
+      if (!serverStates.has(runtime)) serverStates.set(runtime, freshState(runtime.id));
+      if (storageHeld) runtime.setFrozen(true);
+      wireDrop(runtime);
+      background = aggregate.runtimes();
+      try { fillViewFrom(runtime, viewOf(runtime), () => aggregate.holds(runtime)); } catch { /* an unreadable record restores nothing */ }
+      serverReady(runtime);
+    },
+    onBack(runtime) {
+      runtime.connection.resubscribeActive();
+      serverReady(runtime);
+      announceReconnected(runtime);
+    },
+    release(runtime) {
+      background = aggregate.runtimes().filter((r) => r !== runtime);
+      // Handed to the focus (a switch made it CURRENT): the focus owns it now.
+      if (runtime === bound() || runtime.id === currentServerId(localStorage)) return;
+      forgetReconnector(runtime);
+      if (fleet.get(runtime.id) === runtime) fleet.drop(runtime.id);
+      else void ends.end(runtime);
+    },
+    retry(runtime) { if (!migrationBlocked && runtime !== bound()) reconnectorOf(runtime).start(); },
+    saved: (id) => loadServers(localStorage).some((s) => s.id === id),
+  });
+  /** The ids Aggregate wants as background members: every saved, included
+   * entry but the focused one, in saved order. Single wants none. */
+  function memberIds() {
+    if (readMode(localStorage) !== 'aggregate') return [];
+    const saved = loadServers(localStorage);
+    const current = currentServerId(localStorage);
+    return includedServers(saved, readExcluded(localStorage, saved)).map((s) => s.id).filter((id) => id !== current);
+  }
+  /** Bring the member set in line with the registry, the mode and the
+   * exclusions. Never while blocked: a block ends no member (ruling K), and
+   * Retry syncs again. */
+  function syncMembers() {
+    if (migrationBlocked || switching) return;
+    const want = new Set(memberIds());
+    aggregate.sync(loadServers(localStorage).filter((s) => want.has(s.id)));
+    background = aggregate.runtimes();
+  }
+  // The registry, CURRENT and the block are what the set follows.
+  $effect(() => {
+    void serverList; void serverCurId; void migrationBlocked; void switching;
+    untrack(syncMembers);
+  });
 
   /** The bound runtime's socket closed under it. */
   function onDrop() {
@@ -1050,6 +1131,15 @@
     connected = false;
     live()?.disconnect();
     page = 'settings';
+  }
+
+  /** A background member's own loop answered (③b-1). An identity that could
+   * not be recorded is the host gate's, as for the focused server. */
+  function memberReconnected(runtime, result) {
+    if (!aggregate.holds(runtime)) return;
+    if (!result?.ok && result?.reason === 'unrecorded') { storageFailed(); return; }
+    loadServerRegistry();
+    aggregate.answered(runtime, result);
   }
 
   /** A reconnect attempt of `runtime` answered. Its OWN dial already decided
@@ -1106,14 +1196,18 @@
    * unknown. One rule is the runtime's and differs: a FAILED backends probe
    * keeps the list this runtime already had instead of wiping it to the
    * fallback, as ②a ruled (a list that vanished on a blip was the bug). */
-  function serverReady() {
-    const runtime = scopeSwap.bound();
+  function serverReady(runtime = scopeSwap.bound()) {
     if (!runtime) return;
     const intent = serverSwitch.intent;
+    // Still the app's to publish: the bound runtime while the switch owns the
+    // intent, or a background member while Aggregate holds it (③b-1).
+    const asked = runtime === scopeSwap.bound()
+      ? () => serverSwitch.owns(intent) && scopeSwap.bound() === runtime
+      : () => aggregate.holds(runtime);
     // Published as EACH answer lands (reviewer P2): the Hub shows when its own
     // probe answers, not after a slow backends list.
     void runtime.probeCaps((caps) => {
-      if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
+      if (!asked()) return; // asked of a server we have left
       if (caps.hub !== null) viewOf(runtime).hubState = { available: caps.hub, probed: true };
       // Into THIS runtime's catalog (board #335 ②b-3): the list is one
       // machine's answer, and its pages read it from their scope.
@@ -1266,6 +1360,8 @@
     if (provisional.get(runtime) !== owner) return;
     provisional.delete(runtime);
     if (scopeSwap.bound() === runtime) return;
+    // A background member a failed switch reused stays the member it was (③b-1).
+    if (aggregate.holds(runtime)) return;
     forgetReconnector(runtime);
     if (fleet.get(runtime.id) === runtime) fleet.drop(runtime.id);
     else void ends.end(runtime);
@@ -1459,26 +1555,26 @@
   // pane_closed can arrive while they're on another tab (Terminal stays
   // mounted in a hidden page-layer), and yanking them out of Files for a
   // background pane death would be hostile.
-  async function paneExitFallback(closed) {
+  async function paneExitFallback(closed, runtime = bound(), v = view) {
     let remaining = [];
     try {
       const m = /:(\d+)\.(\d+)$/.exec(closed || '');
       const cw = m ? Number(m[1]) : -1;
       const cp = m ? Number(m[2]) : -1;
-      remaining = (await bound().api.listPanes(terminalSession))
+      remaining = (await runtime.api.listPanes(v.terminalSession))
         .filter((p) => `${p.session}:${p.window}.${p.pane}` !== closed)
         .sort((a, b) => a.window - b.window || a.pane - b.pane);
       const before = remaining.filter((p) => p.window < cw || (p.window === cw && p.pane < cp));
       const pick = before[before.length - 1] || remaining[0];
       if (pick) {
-        showPane(pick.session, `${pick.session}:${pick.window}.${pick.pane}`);
+        showPaneIn(runtime, v, pick.session, `${pick.session}:${pick.window}.${pick.pane}`);
         return;
       }
     } catch {} // list_panes fails when the whole session died with the pane
-    showPane('', '');
+    showPaneIn(runtime, v, '', '');
     // Nothing left to show: the empty state offers the session list (which
     // used to BE the fallback page).
-    if (page === 'terminal' && layout.isTouchDevice) sessListOpen = true;
+    if (v === view && page === 'terminal' && layout.isTouchDevice) sessListOpen = true;
   }
 
   function doDisconnect() {
@@ -1833,6 +1929,7 @@
     for (const machine of reconnectors.values()) machine.cancel();
     reconnectors.clear();
     const held = scopeSwap.bound();
+    aggregate.leaveAll();
     fleet.dropAll();
     if (held) void ends.end(held);
   });
@@ -2190,44 +2287,56 @@
    * one's work, and the saved-state effect waits until the restore for the
    * bound runtime has finished (`navRestored`) rather than writing an empty
    * navigation over the record it was about to read. */
+  /** Fill ONE tree's view from its server's saved navigation (③b-1): the
+   * pane and the split, filtered to this runtime, and dropped again if its
+   * session has gone. The focused restore and a background member's both go
+   * through here; only the focused one also restores the PAGE, which is the
+   * window's. `owns` says whether the answer about the session is still for
+   * this tree. Returns the record. */
+  function fillViewFrom(target, v, owns) {
+    const s = navFor(readNav(createServerStore(localStorage, target.id, writeGate)), target.id);
+    // A saved target names a session that may not exist any more — killed
+    // while we were away, or RENAMED (a project rename renames its session).
+    // Restoring it anyway lands the user on a pane that cannot be captured,
+    // so check first and come back to the tab without a target instead.
+    if (s.pane) {
+      const named = s.pane.session;
+      target.api.listSessions()
+        .then((sessions) => {
+          if (!owns()) return; // not this tree any more
+          // list_sessions answers with a bare array (list_sessions_with_panes
+          // is the one that wraps).
+          if (!(sessions ?? []).some((x) => x.name === named)) {
+            v.termPane = null;
+            v.splitCells = v.splitCells.filter((c) => c.pane?.session !== named);
+          }
+        })
+        .catch(() => {});
+      v.termPane = s.pane;
+      // Restore split layout only on eligible (desktop + wide) clients;
+      // a desktop-saved state silently stays single-pane on a phone.
+      if (splitEligible && s.splitLayout > 1 && s.splitCells.length) {
+        v.splitCells = s.splitCells;
+        v.splitLayout = s.splitLayout;
+        nextCellId = Math.max(0, ...s.splitCells.map((c) => c.id)) + 1;
+        v.activeCellId = s.splitCells[0]?.id ?? null;
+      }
+    }
+    if (v !== view) v.navRestored = target;
+    return s;
+  }
+
   async function restoreNavFor(target) {
     await scopeSwap.settled();
     if (!target || scopeSwap.shown() !== target) return;
+    const intent = serverSwitch.intent;
     try {
       // Read from THIS server's slot, which is what makes it this server's
       // (board #335 ②b-4), then filtered to this runtime: a v2 pane that
       // names another server cannot be resolved over this connection — at
       // best the capture fails, at worst that server has a pane by the same
       // name and the reader lands on a stranger's terminal.
-      const s = navFor(readNav(createServerStore(localStorage, target.id, writeGate)), target.id);
-      // A saved target names a session that may not exist any more — killed
-      // while we were away, or RENAMED (a project rename renames its session).
-      // Restoring it anyway lands the user on a pane that cannot be captured,
-      // so check first and come back to the tab without a target instead.
-      if (s.pane) {
-        const named = s.pane.session;
-        const intent = serverSwitch.intent;
-        target.api.listSessions()
-          .then((sessions) => {
-            if (!serverSwitch.owns(intent)) return; // a switch began: not this server's tree
-            // list_sessions answers with a bare array (list_sessions_with_panes
-            // is the one that wraps).
-            if (!(sessions ?? []).some((x) => x.name === named)) {
-              view.termPane = null;
-              view.splitCells = view.splitCells.filter((c) => c.pane?.session !== named);
-            }
-          })
-          .catch(() => {});
-        view.termPane = s.pane;
-        // Restore split layout only on eligible (desktop + wide) clients;
-        // a desktop-saved state silently stays single-pane on a phone.
-        if (splitEligible && s.splitLayout > 1 && s.splitCells.length) {
-          view.splitCells = s.splitCells;
-          view.splitLayout = s.splitLayout;
-          nextCellId = Math.max(0, ...s.splitCells.map((c) => c.id)) + 1;
-          view.activeCellId = s.splitCells[0]?.id ?? null;
-        }
-      }
+      const s = fillViewFrom(target, viewOf(target), () => serverSwitch.owns(intent));
       // The tab is restored whether or not a terminal came with it; only an
       // unknown name falls back to the device default. On touch a saved
       // `agents` resolves to Settings opened at its Agents category — there is
@@ -3109,7 +3218,7 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
-        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
@@ -3164,15 +3273,15 @@
             <SplitView cells={v.splitViewCells} layout={v.splitLayout} activeCellId={v.activeCellId} {fontSize}
               visible={shown && page === 'terminal'} focused={!held}
               onActivate={(id) => v.activeCellId = id}
-              onAssign={assignCell}
-              onCloseCell={closeCell}
-              onPaneExit={cellPaneExit} />
+              onAssign={(id, tg, se) => assignCell(id, tg, se, runtime, v)}
+              onCloseCell={(id) => closeCell(id, v)}
+              onPaneExit={(id) => cellPaneExit(id, v)} />
           {:else}
             <Terminal target={v.terminalTarget} session={v.terminalSession} {fontSize}
               visible={shown && page === 'terminal'} active={!held}
               splitEligible={splitEligible} splitActive={splitOn(v)} splitLayout={v.splitLayout} onSetLayout={setLayout}
               onOpenSessions={layout.isTouchDevice ? () => sessListOpen = true : null}
-              onSwitchPane={(t) => showPane('', t)} onPaneExit={paneExitFallback} />
+              onSwitchPane={(t) => showPaneIn(runtime, v, '', t)} onPaneExit={(t) => paneExitFallback(t, runtime, v)} />
           {/if}
         </div>
       {:else}

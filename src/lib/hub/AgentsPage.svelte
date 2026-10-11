@@ -194,6 +194,15 @@
       requestLeave(() => { leaveCancel = null; resolve(true); });
     }),
   }));
+  /** "Keep editing" — the dialog's cancel and the phone's Back alike (#335
+   * ③b, reviewer P2 on 27c4ad6f): the edit stays, a waiting leave guard is
+   * told no, and a host that revealed this editor to ask puts its view back. */
+  function keepEditing() {
+    const cancel = exitIntent?.cancel;
+    exitIntent = null;
+    leaveCancel?.(); leaveCancel = null;
+    cancel?.();
+  }
   $effect(() => () => { epoch++; });
   function editorKey(event) {
     if (!visible || !rootEl?.contains(event.target) || activeModal(document)) return;
@@ -287,7 +296,7 @@
     if (!onGoBack) return;
     onGoBack(() => {
       if (saving || removing) return true;
-      if (pendingExit) { exitIntent = null; return true; }
+      if (pendingExit) { keepEditing(); return true; }
       if (pending) { pending = null; return true; }
       if (drilled) { requestLeave(closeAll); return true; }
       if (!section && categoryOpen && paneMode === 'stacked') { categoryOpen = false; return true; }
@@ -1169,7 +1178,7 @@
   title={t('discardChanges')} note={t('configDiscardNote')}
   confirmLabel={t('configDiscard')} confirmIcon="check" cancelLabel={t('configKeepEditing')}
   onconfirm={() => { const action = pendingExit; exitIntent = null; action?.(); }}
-  oncancel={() => { const cancel = exitIntent?.cancel; exitIntent = null; leaveCancel?.(); leaveCancel = null; cancel?.(); }} />
+  oncancel={keepEditing} />
 
 <style>
   .agents-root { height: 100%; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 0; background: var(--bg); }

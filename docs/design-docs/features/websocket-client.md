@@ -665,7 +665,9 @@ commits nothing. When that choice is made from a person category, the
 guest's editor is hidden, so the page first REVEALS it on its own section and
 asks there — its confirmation is seen and answered where it lives; "keep
 editing" puts the page back (the guard reports a cancel to its host), and only
-"discard" moves the section (reviewer P1 on c0969d20). While a guest is held
+"discard" moves the section (reviewer P1 on c0969d20). The phone's Back on that
+confirmation is the same answer as "keep editing" (`keepEditing`, reviewer P2
+on 27c4ad6f). While a guest is held
 an agent category lands on its own section, so page and guest never disagree
 after Retry. A guest takes input — `visible`, its Back, its guard, a lazy
 first mount — only while Preferences is on screen, the server is not held and
@@ -899,7 +901,7 @@ made on first ask and handed over with its state on a same-machine merge; the
 window reads and dispatches — Back, reselect, immersive, the focus shortcuts,
 the sidebar motion — through the FOCUSED one, and each tree's pages register
 into theirs. App renders one tree per bound member, keyed by its handle (Single
-holds one; ③b fills the set): a tree out of focus is held — inert and hidden —
+holds one; Aggregate adds its background members, below): a tree out of focus is held — inert and hidden —
 and its Terminal is not `active`, so the window's terminal shortcut moves the
 focused tree's pane only (`Terminal.isolation.mount.test.ts`, two real
 runtimes on the same target). A landing is delivered to the tree it names.
@@ -957,6 +959,29 @@ guards the wrappers; this guards the dial's own record. Connections, streams
 and downloads are untouched. A chain's Cancel is local — the window's attempts
 and the server it was bringing up (`claim(runtime)`) — and `endAll()` belongs
 to the block and the App's teardown alone.
+
+**Aggregate holds every included server as a background member** (③b-1;
+`app/server-members.svelte.ts`). In Aggregate mode every saved entry that is
+not excluded and not CURRENT is a member: its own runtime from the fleet, its
+own connection, its own `ServerState` and view, and its own tree — held, inert
+and hidden, with a Terminal that is neither visible nor active. Single, or an
+excluded entry, has none and dials nothing. A member joins through the same
+gates as a bring-up, in order: the storage gate for its id, its runtime's own
+dial — owned by `activations.member(runtime)` and asked at every step whether
+the set still wants it — the gate again now that the dial may have taught the
+entry its machine, then publish (`onUp`: state, freeze if held, its drop hook,
+its saved navigation into ITS view, its handshake). No step writes CURRENT or
+takes the screen. Each member's socket drop is its own reconnect loop; the
+window's reconnect banner is the focused server's only. A block publishes
+nothing: `holdStorage`'s `endAll()` ends a member's dial in flight, so an
+authentication that lands during the block records no identity, and Retry's
+sync joins it again. An alias a member's dial finds absorbed leaves no row (its
+canonical entry is a member of its own); two known entries on one machine
+fail with the other's name and wait for the person. The set follows the
+registry, CURRENT, the mode and the exclusions (`syncMembers`), never while
+blocked or mid-switch; a member the focus takes over (a switch made it CURRENT)
+is the focus's from then on, and a failed switch that reused a member leaves it
+a member.
 
 ## Multi-Server (board #55)
 

@@ -35,10 +35,14 @@ const compiled = compileMount(new URL('./App.svelte', import.meta.url), [
 /** Records the target at MOUNT only: it does not follow a prop change, so a
  * case that changes the pane afterwards reads the saved record instead. */
 const terminalStub = {
-  default: (anchor: Comment, props: { target: string }) => {
+  default: (anchor: Comment, props: { target: string; visible?: boolean; active?: boolean }) => {
     const el = anchor.ownerDocument.createElement('div');
     el.className = 'xterm-wrap';
     el.dataset.target = props.target;
+    // What the tree told it at mount: a held tree's Terminal is neither
+    // visible nor active (#335 ③b-1).
+    el.dataset.visible = String(!!props.visible);
+    el.dataset.active = String(!!props.active);
     anchor.before(el);
   },
 };
@@ -3641,4 +3645,128 @@ test('touch: a dirty guest editor survives an automatic block that moves the pag
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
   assert.equal(prompt.isConnected, true, 'the editor is still mounted after Retry');
   assert.equal(prompt.value, 'Unsaved', 'the draft is still there after Retry');
+});
+
+// ─── #335 ③b-1: background members ─────────────────────────────────────
+// Aggregate holds every included server besides the focused one as a
+// BACKGROUND member: its own runtime, its own connection, its own tree —
+// held, inert and hidden — and none of them writes CURRENT. These are the
+// two-live-tree cases ③a owed (orchestrator 10:51).
+
+const aggregateOn = (seed: Record<string, string>, excluded: string[] = []) => ({
+  ...seed, tmux_connection_mode: 'aggregate', ...(excluded.length ? { tmux_excluded_servers: JSON.stringify(excluded) } : {}),
+});
+/** Every tree the app holds mounted, by what its Terminal was handed. */
+const trees = (app: any) => [...app.document.querySelectorAll('.scope-tree')].map((el: any) => ({
+  el, held: el.classList.contains('held'), inert: isInert(el),
+  target: el.querySelector('.term-main .xterm-wrap')?.dataset.target ?? 'none',
+  terminal: (({ visible, active }) => `${visible}/${active}`)(el.querySelector('.term-main .xterm-wrap')?.dataset ?? {}),
+}));
+
+test('③b-1: an included B joins on its own connection, its tree held and inert, and CURRENT stays A', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { calls: events });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the focus is A');
+  assert.deepEqual(dialsOf(events, 'b'), ['dial@b:ws://b:9899|tokB'], 'B dialled its own address with its own token');
+  assert.ok(conn(h, 'b')?.isConnected() && conn(h, 'a')?.isConnected(), 'both are up, each on its own connection');
+  const t = trees(h.app);
+  assert.equal(t.length, 2, `one tree per member: ${t.map((x) => x.target).join(',')}`);
+  assert.deepEqual(t.map((x) => [x.target, x.held, x.inert]), [['work:1.0', false, false], ['work:2.0', true, true]],
+    'A s tree is shown on A s pane; B s holds B s own pane, inert and hidden');
+  assert.deepEqual(t.map((x) => x.terminal), ['true/true', 'false/false'], 'and only A s Terminal is visible and active: B s takes no keys, renders nothing');
+  assert.equal(h.onScreen(), 'work:1.0');
+  assert.equal(h.restored(), 'a:work:1.0', 'and the record CURRENT names is still A s');
+});
+
+for (const [label, seed] of [
+  ['Single', twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') })],
+  ['B excluded', aggregateOn(twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), ['b'])],
+] as const) {
+  test(`③b-1: ${label} holds one tree and never dials B`, async (context) => {
+    const events: string[] = [];
+    const h = await bootApp(context, { ...seed, tmux_layout_mode: 'desktop' }, undefined, { calls: events });
+    for (let i = 0; i < 4; i++) await h.settle();
+    assert.ok(conn(h, 'a')?.isConnected(), 'A is up');
+    assert.deepEqual(dialsOf(events, 'b'), [], 'B was not dialled');
+    assert.equal(trees(h.app).length, 1, 'one tree');
+  });
+}
+
+test('③b-1 (owed P1-3): a block while B s own dial is out records nothing of B; Retry joins B and records it', async (context) => {
+  // The legacy inputs are pending for m-x. B's entry does not know its
+  // machine, so B's own answer is what would record it — and that dial is
+  // held. Meanwhile the person switches to C (excluded, so not a member),
+  // whose own dial proves m-x; the claim's marker cannot be written and the
+  // app blocks with B's dial still out (the 3110 pattern).
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+  ];
+  const b = { let: null as (() => void) | null };
+  let held = true;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }, ['c']), (url, n) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? (n === 0 ? '' : 'm-x') : 'm-a'), {
+    calls: events,
+    gate: (url, n) => (url.includes('//b') && n > 0 && held ? new Promise<void>((r) => { b.let = () => { held = false; r(); }; }) : null),
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'on A');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the inputs wait for m-x');
+  assert.ok(b.let, `B s own dial is out: ${dialsOf(events, 'b').join(',')}`);
+  store.state.failing = true;
+  await h.switchTo('charlie');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok([...h.app.document.querySelectorAll('.switch-panel button, .card button')].some((b: any) => /retry/iu.test(b.textContent ?? '')),
+    'C s claim could not be recorded: the app is blocked, Retry offered');
+  store.state.failing = false;                                // storage works again — but the block stands
+  b.let!();                                                   // B s dial answers late
+  for (let i = 0; i < 4; i++) await h.settle();
+  const beta = () => JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'b');
+  assert.equal(beta().machineId, undefined, 'B s late answer recorded no identity while blocked');
+  assert.ok(!events.some((e) => e.startsWith('rpc@b:')), 'and nothing was asked of B');
+  assert.equal(trees(h.app).filter((x) => x.target === 'work:2.0').length, 0, 'B published no tree');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'Retry finished the switch to C');
+  assert.equal(beta().machineId, 'm-b', 'and B joined again, recording its own machine');
+  assert.ok(conn(h, 'b')?.isConnected(), 'on its own connection');
+  assert.ok(trees(h.app).some((x) => x.target === 'work:2.0' && x.held), 'with its own tree, held behind C s');
+});
+
+test('③b-1: each member reconnects on its own loop — B dropping never touches A, and A dropping never touches B', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { calls: events });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, b = conn(h, 'b')!;
+  const n = { a: dialsOf(events, 'a').length, b: dialsOf(events, 'b').length };
+  b.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(dialsOf(events, 'b').length, n.b + 1, `B s own loop redialled B: ${dialsOf(events, 'b').join(',')}`);
+  assert.equal(dialsOf(events, 'a').length, n.a, 'A was not dialled');
+  assert.ok(a.isConnected(), 'A s connection untouched');
+  assert.equal(h.app.document.querySelector('.reconnect-cancel'), null, 'and the window shows no reconnect: B s is its own');
+  assert.ok(b.isConnected(), 'B is back');
+  assert.equal(trees(h.app).length, 2, 'both trees still mounted');
+  a.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(dialsOf(events, 'a').length, n.a + 1, 'A s loop redialled A');
+  assert.equal(dialsOf(events, 'b').length, n.b + 1, 'B was not dialled again');
+  assert.ok(a.isConnected() && b.isConnected());
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'CURRENT stayed A throughout');
+  assert.equal(h.onScreen(), 'work:1.0');
 });

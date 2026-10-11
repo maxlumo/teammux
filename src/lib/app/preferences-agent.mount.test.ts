@@ -323,6 +323,26 @@ test('from a non-agent category, a choice that would move A s editor reveals A a
   } finally { await app.close(); }
 });
 
+test('phone Back on that confirmation is Keep editing: back on Appearance, the draft kept (#335 ③b, reviewer P2 on 27c4ad6f)', async context => {
+  let back: (() => boolean) | null = null;
+  const { app, flush, show } = await twoGuests(context, { onGoBack: (fn: () => boolean) => { back = fn; } });
+  try {
+    await edit(app);                                  // A dirty on Agents
+    const draftA = app.document.querySelector<HTMLTextAreaElement>('.guest:not(.off) .editor textarea')!;
+    await show('b');
+    category(app, 'Appearance'); await flush();
+    await show('a');
+    category(app, 'Teams'); await flush();            // A revealed, asked
+    assert.ok(reachableDialog(app).reachable, 'A s guard asks, reachably');
+    assert.equal(back!(), true, 'Back answers the confirmation');
+    await flush();
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'the confirmation is gone');
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'and the page is back on Appearance, as Keep editing puts it');
+    assert.ok(app.document.querySelector('.agents-embed.off'), 'A s editor hidden again');
+    assert.equal(draftA.isConnected && draftA.value, 'Unsaved', 'with its draft');
+  } finally { await app.close(); }
+});
+
 test('while held, an agent category lands on the held guest s own section; unheld, it is shown with its draft (#335 ③a, reviewer P2 on c0969d20)', async context => {
   const { app, flush, props } = await twoGuests(context);
   try {

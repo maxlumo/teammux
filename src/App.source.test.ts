@@ -473,7 +473,7 @@ test('every App socket owner goes through the switch module and loses ownership 
   // Server answers land only for the server that was asked.
   // Asked through the bound runtime (board #335 ②b-2-2), and kept only if
   // the switch still owns the intent AND that runtime is still bound.
-  assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*(?:\s*\/\/[^\n]*\n)*\s*void runtime\.probeCaps\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u,
+  assert.match(source, /function serverReady\(runtime = scopeSwap\.bound\(\)\) \{\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*(?:\s*\/\/[^\n]*\n)*\s*const asked = runtime === scopeSwap\.bound\(\)\s*\? \(\) => serverSwitch\.owns\(intent\) && scopeSwap\.bound\(\) === runtime\s*: \(\) => aggregate\.holds\(runtime\);\s*(?:\s*\/\/[^\n]*\n)*\s*void runtime\.probeCaps\(\(caps\) => \{\s*if \(!asked\(\)\) return;/u,
     'published as EACH answer lands, so a quick Hub answer is not held behind backends');
   assert.match(source, /if \(caps\.hub !== null\) viewOf\(runtime\)\.hubState = \{ available: caps\.hub, probed: true \};/u,
     'the Hub flag moves only on a definitive answer');
@@ -542,7 +542,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // Handed to a runtime by its mint — or, when the dial's own gate just
   // filed claimed inputs into the slots of a runtime nobody has shown yet,
   // rebuilt from them before it is published (reviewer P1-3 on 341554b3).
-  assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 2, 'the mint, and the dial gate s claim');
+  assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 3, 'the mint, the dial gate s claim, and a background member s publish (③b-1)');
   assert.match(source, /if \(gate\.fold === 'claimed'\) serverStates\.set\(runtime, stateFor\(runtime\.id\)\);\s*c\.publishing\(\);/u);
   // In mintCurrent, swapScope's first half (board #335 ②b-4: a runtime is
   // minted before it is shown, so it can dial first).
@@ -583,7 +583,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // an identity, and which machine answers is known only after the dial.
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
-  assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
+  assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
@@ -664,8 +664,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\), \{ page, pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
     'the saved state writes the refs App already holds, rather than rebuilding them');
   // Every reference is minted in ONE place per kind, from the bound server.
-  assert.match(source, /function showPane\(session, target\) \{\s*view\.termPane = target \? paneRef\(navServerId\(\),/u);
-  assert.match(source, /function showSession\(session\) \{\s*view\.filesRef = session \? sessionRef\(navServerId\(\), session\) : null;/u);
+  // ③b-1: minted for the tree that asks, from ITS runtime; the window's
+  // forms are that, for the bound tree.
+  assert.match(source, /function showPane\(session, target\) \{ showPaneIn\(bound\(\), view, session, target\); \}/u);
+  assert.match(source, /function showPaneIn\(runtime, v, session, target\) \{\s*v\.termPane = target && runtime \? paneRef\(runtime\.id,/u);
+  assert.match(source, /function showSession\(session\) \{ showSessionIn\(bound\(\), view, session\); \}/u);
+  assert.match(source, /function showSessionIn\(runtime, v, session\) \{\s*v\.filesRef = session && runtime \? sessionRef\(runtime\.id, session\) : null;/u);
+  for (const write of [...source.matchAll(/^\s*v\.termPane = (.+)$/gmu)]) {
+    assert.match(write[1]!, /paneRef\(runtime\.id|^null;$|^s\.pane;$/u, `v.termPane = ${write[1]} — a pane is a reference`);
+  }
   // Every write to the pane assigns a REF or null — never a bare target —
   // which is what makes "the identity has one home" checkable.
   assert.match(viewSource, /termPane = \$state<PaneRef \| null>\(null\);/u);
@@ -719,7 +726,7 @@ test('failover success RECORDS by machine identity — and never moves CURRENT (
     'the active address follows the connect, merged by machine identity, never by address alone');
   assert.match(source, /connect: \(address, _token, timeoutMs, claim\) => serverSwitch\.idle\(\)\.then\(\(\) => \{\s*if \(!claim\?\.current\(\)\) throw new Error\('superseded'\);\s*return runtime\.dial\(\(\) => claim\.current\(\), \{ via: address, timeoutMs \}\);/u,
     'the reconnect loop dials through the runtime it belongs to, under THAT attempt s own claim (reviewer P1-2 on 341554b3)');
-  assert.match(source, /onSuccess: \(_useAddr, _primaryAddr, attempt, result\) => onReconnected\(runtime, result, attempt\),/u, 'and hands on that attempt s own result');
+  assert.match(source, /onSuccess: \(_useAddr, _primaryAddr, attempt, result\) => \(bound\(\) === runtime \? onReconnected\(runtime, result, attempt\) : memberReconnected\(runtime, result\)\),/u, 'and hands on that attempt s own result');
   const rc = source.match(/function reconnectorOf\(runtime\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(rc, /let (claim|last)\b/u, 'nothing in a loop is shared between its attempts');
   const fn = source.match(/function onReconnected\(runtime, result, attempt\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
@@ -1246,7 +1253,7 @@ test('every connect path runs the one server handshake, which loads backends_lis
   // which serve the list directly, passed. Each place that marks the socket
   // connected must reach serverReady(), and nothing may probe or load
   // backends on its own beside it.
-  const ready = source.match(/function serverReady\(\) \{([\s\S]*?)\n  \}/u)?.[1] ?? '';
+  const ready = source.match(/function serverReady\(runtime = scopeSwap\.bound\(\)\) \{([\s\S]*?)\n  \}/u)?.[1] ?? '';
   assert.match(ready, /runtime\.probeCaps\(/u, 'one probe, both questions');
   // Into the bound runtime's own catalog (board #335 ②b-3).
   assert.match(ready, /serverStates\.get\(runtime\)\?\.backends\.set\(caps\.backends\);/u);
@@ -1258,7 +1265,7 @@ test('every connect path runs the one server handshake, which loads backends_lis
     const body = nextFn < 0 ? rest : rest.slice(0, nextFn);
     assert.match(body, /serverReady\(\);/u, `the connect path at offset ${at} runs the handshake`);
   }
-  const outside = source.replace(/function serverReady\(\) \{[\s\S]*?\n  \}/u, '');
+  const outside = source.replace(/function serverReady\(runtime = scopeSwap\.bound\(\)\) \{[\s\S]*?\n  \}/u, '');
   assert.doesNotMatch(outside, /probeCaps\(/u, 'no path does half the handshake');
 });
 
@@ -1296,6 +1303,6 @@ test('a project rename moves only the references of the server that renamed it (
 
 test('a reconnect is announced for ONE server, named (board #335 ②b-4, reviewer P2 on the b3 binding range)', () => {
   assert.equal([...source.matchAll(/'ws-reconnected'/gu)].length, 1, 'one place announces it');
-  assert.match(source, /function announceReconnected\(\) \{\s*const id = bound\(\)\?\.id;\s*if \(id\) window\.dispatchEvent\(new CustomEvent\('ws-reconnected', \{ detail: \{ serverId: id \} \}\)\);/u,
+  assert.match(source, /function announceReconnected\(runtime = bound\(\)\) \{\s*const id = runtime\?\.id;\s*if \(id\) window\.dispatchEvent\(new CustomEvent\('ws-reconnected', \{ detail: \{ serverId: id \} \}\)\);/u,
     'naming the bound runtime, and never with no server');
 });
