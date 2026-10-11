@@ -870,6 +870,17 @@ focused tree's pane only (`Terminal.isolation.mount.test.ts`, two real
 runtimes on the same target). A landing is delivered to the tree it names.
 `resetServerMemory` still resets the focused view where it always did, because
 a failed switch's Back returns to the same runtime and must restore.
+
+**Each member has its own attempt generation** (③a, reviewer P1-A on the ③
+plan; `app/activation.ts`). A member's join and its reconnect attempts claim
+`activations.member(runtime)`, so one server hanging, reconnecting or being
+excluded never makes another's attempt stale. The window's attempts — a focus
+change, the connect form, a switch, an address change — claim the window's
+generation, and one that acts ON a server (`claim(runtime)`) ends that
+server's own attempts in flight, which is ②b's "the form takes over the
+reconnect", and nobody else's. `endAll()` ends every generation: the App's
+teardown, and the cancel of a chain that was the app's. Keys are handles, so a
+new runtime under the same id never inherits an old one's attempts.
 It is a class with rune fields, not a `$state({...})` object, because
 `navRestored` holds a runtime handle and the callbacks are functions: a deep
 proxy over either breaks identity.

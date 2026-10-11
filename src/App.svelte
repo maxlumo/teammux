@@ -272,8 +272,9 @@
     // read before the claim, is rebuilt from them.
     if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id && fold !== 'claimed') return { keep: true, runtime: held };
     // The tree is changing servers: an attempt still in flight is no longer
-    // the one the app is waiting on.
-    activations.endAll();
+    // the one the app is waiting on — the window's, and the leaving server's
+    // own (its reconnect). No other member's (③a, reviewer P1-A).
+    activations.claim(held);
     // The fleet follows the registry first: an id identity repair absorbed
     // leaves it (the bound one is not ended here, see `fleet`), so the
     // survivor's runtime is a NEW one rather than the alias found as a twin.
@@ -381,7 +382,8 @@
   function openCandidate() {
     heldOffline = false;               // the person is connecting
     candidateOpen?.close();
-    const owner = activations.claim();
+    // The form acts on the bound server: its reconnect in flight is stale too.
+    const owner = activations.claim(scopeSwap.bound());
     const connection = createConnection();
     const api = createWsApi(connection);
     let closed = false;
@@ -997,7 +999,10 @@
           return { ok: false, reason: 'unrecorded' };
         },
       ),
-      attempt: () => activations.claim(),
+      // THIS runtime's own generation (③a, reviewer P1-A): its reconnect
+      // never makes another member's attempt stale, and a window attempt
+      // acting on it (the form, a switch) ends it.
+      attempt: () => activations.member(runtime).claim(),
       findBestAddress,
       isAddressViable,
       noteAddressUnreachable,
@@ -1328,9 +1333,10 @@
     const c = chain ?? newChain();
     const m = minted ?? mintCurrent();
     const runtime = m.runtime;
-    // Claimed AFTER the mint, whose endAll makes every older attempt stale:
+    // Claimed AFTER the mint, whose claim makes every older attempt stale:
     // this one is the latest from here (reviewer P1-C — never the reverse).
-    const owner = activations.claim();
+    // It acts on the server bound now: that one's reconnect ends with it.
+    const owner = activations.claim(scopeSwap.bound());
     c.link(owner, runtime);
     const handle = (done) => ({ done, cancel: c.cancel, current: c.current, committed: c.committed });
     if (!runtime) {
@@ -1734,8 +1740,9 @@
     currentId: () => serverCurId,
     currentName: () => serverName,
     confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
-    // An address change claims the app's activation (app/activation.ts).
-    claim: () => activations.claim(),
+    // An address change claims the app's activation (app/activation.ts),
+    // acting on the bound server.
+    claim: () => activations.claim(scopeSwap.bound()),
     stopReconnect: () => reconnect().cancel(),
     startReconnect: () => { if (!migrationBlocked) reconnect().start(); },
     // While the migration is blocked nothing moves CURRENT (orchestrator,
