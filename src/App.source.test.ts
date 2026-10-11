@@ -694,9 +694,15 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // identity, the candidate closes, and onConnected(switched) follows.
   const iAct = fn.indexOf('activateConnected(localStorage');
   const iSwitched = fn.indexOf('switched = act.reload;');
-  const iClose = fn.indexOf('own.close();\n      onConnected(switched);');
+  const iClose = fn.indexOf('own.close();\n      const second = onConnected(switched) || null;');
   assert.ok(iAct >= 0 && iSwitched > iAct && iClose > iSwitched,
     'activate → the verdict → the candidate closes → only then the app is told');
+  // And the form stays busy through the server's OWN handshake, shows its
+  // failure, and Cancel reaches it (reviewer P1-D on cc45d7d1).
+  assert.match(fn, /secondHalf = second;\s*const failure = second \? await second\.done : null;\s*if \(mine\(\) && failure\) error = failure;/u);
+  assert.match(fn, /\} finally \{(?:\s*\/\/[^\n]*)*\s*own\.close\(\);\s*if \(candidate === own\) candidate = null;\s*if \(mine\(\)\) \{ connecting = false; secondHalf = null; \}\s*\}/u,
+    'every end of an attempt closes its candidate and, if it is still the form s, ends the busy state');
+  assert.match(settings, /function cancelConnect\(\) \{[\s\S]*?secondHalf\?\.cancel\(\);/u, 'Cancel covers the second handshake');
   // An identity-activation failure is NOT a success: an error, the
   // candidate closed, the app not told (board #335 ②b-4).
   assert.match(fn, /\} catch \{[\s\S]*?error = t\('configIdentityFailed'\);\s*own\.close\(\);[\s\S]*?\}\s*return;/u,
@@ -705,7 +711,10 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // is still there, this is still the instance's latest attempt, and the app
   // is still waiting on this candidate at all (the host activation
   // generation; orchestrator's addendum, 01:46).
-  assert.match(fn, /const live = \(\) => mounted && attempt === attempts && !cancelled && own\.current\(\);/u);
+  // `mine` (this form's attempt: its busy state and error) is apart from
+  // `live` (may it still conclude anything for the app), so a candidate the
+  // app stopped waiting on can never be what leaves the form busy.
+  assert.match(fn, /const mine = \(\) => mounted && attempt === attempts && !cancelled;\s*const live = \(\) => mine\(\) && own\.current\(\);/u);
   // And the credentials are frozen before the first write, because the fields
   // stay editable while the dial is in flight.
   assert.match(fn, /const url = normalizeAddress\(address\);\s*const tok = token;\s*const sock = socket\.trim\(\);/u);

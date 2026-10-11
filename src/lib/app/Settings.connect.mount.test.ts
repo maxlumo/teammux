@@ -52,12 +52,16 @@ async function mount(
   seed: (storage: Storage) => void = () => {},
   modules: Record<string, (...args: any[]) => unknown>[] = [],
   which = compiled,
+  /** What the app's second handshake does (reviewer P1-D on cc45d7d1): the
+   * server's OWN runtime dials after the candidate, and the form waits on
+   * it. Default: nothing to wait on. */
+  second: (switched: boolean) => { done: Promise<string | null>; cancel(): void } | void = () => {},
 ) {
   const order: string[] = [];
   const pool = candidates(order, dial);
   const app = await (await which).mount(context, {
     props: {
-      onConnected(switched: boolean) { order.push(`connected:${switched}`); },
+      onConnected(switched: boolean) { order.push(`connected:${switched}`); return second(switched); },
       openCandidate: () => pool.open(),
     },
     modules,
@@ -256,4 +260,74 @@ test('a leave walk that fails is a stay: the form stops connecting, and nothing 
   assert.deepEqual(order, [], 'no candidate was opened and nothing was dialled');
   assert.ok([...app.document.querySelectorAll<HTMLButtonElement>('button')].some((b) => /^connect$/iu.test((b.textContent ?? '').trim())),
     'the form is back to Connect, not stuck connecting');
+});
+
+// ── Reviewer P1-D on cc45d7d1: the form's busy state is its OWN attempt's,
+// through the server's second handshake, and Cancel reaches that handshake.
+
+const buttons = (app: { document: Document }) => [...app.document.querySelectorAll<HTMLButtonElement>('button')]
+  .map((b) => (b.textContent ?? '').trim()).filter(Boolean);
+const press = (app: { document: Document }, name: RegExp) =>
+  [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => name.test((b.textContent ?? '').trim()))!.click();
+
+test('after an ordinary auth failure the person can press Connect again, with no Cancel first', async (context) => {
+  let refuse = true;
+  const app = await mount(context, async () => { if (refuse) throw new Error('bad token'); return 'm-a'; }, alpha);
+  await connectTo(app, 'wss://same.test/ws');
+  assert.match(app.document.querySelector('.error')?.textContent ?? '', /bad token/u, 'the failure is shown');
+  assert.ok(buttons(app).includes('Connect') && !buttons(app).includes('Cancel'), `the form is back to Connect: ${buttons(app).join(' | ')}`);
+  refuse = false;
+  press(app, /^connect$/iu);
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.equal(app.order.filter((o) => o === 'candidate').length, 2, 'the second press dialled a candidate of its own');
+  assert.equal(app.order.at(-1), 'connected:false', 'and that one got through');
+});
+
+test('a second handshake that fails shows a usable error and allows a retry', async (context) => {
+  let failure: string | null = 'the server s own dial was refused';
+  const app = await mount(context, async () => 'm-a', alpha, [], compiled, () => ({ done: Promise.resolve(failure), cancel() {} }));
+  await connectTo(app, 'wss://same.test/ws');
+  assert.match(app.document.querySelector('.error')?.textContent ?? '', /own dial was refused/u, 'the second handshake s failure is the form s error');
+  assert.ok(buttons(app).includes('Connect'), `and Connect is offered again: ${buttons(app).join(' | ')}`);
+  failure = null;
+  press(app, /^connect$/iu);
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.equal(app.order.filter((o) => o.startsWith('connected')).length, 2, 'the retry ran the whole road again');
+  assert.equal(app.document.querySelector('.error'), null, 'and the old error is gone');
+});
+
+test('Cancel while the second handshake is out cancels THAT handshake, and its late answer changes nothing in the form', async (context) => {
+  let answer: (failure: string | null) => void = () => {};
+  let cancelled = 0;
+  const app = await mount(context, async () => 'm-a', alpha, [], compiled,
+    () => ({ done: new Promise<string | null>((resolve) => { answer = resolve; }), cancel() { cancelled++; } }));
+  await connectTo(app, 'wss://same.test/ws');
+  assert.ok(buttons(app).includes('Cancel'), `the form stays busy through the second handshake: ${buttons(app).join(' | ')}`);
+  press(app, /^cancel$/iu);
+  await app.flush();
+  assert.equal(cancelled, 1, 'Cancel reached the server s own dial');
+  assert.ok(buttons(app).includes('Connect'), 'and the form is free');
+  answer('refused, late');
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.equal(app.document.querySelector('.error'), null, 'a cancelled attempt reports nothing');
+});
+
+test('leaving the form during the second handshake cancels it too', async (context) => {
+  let cancelled = 0;
+  const app = await mount(context, async () => 'm-a', alpha, [], compiled,
+    () => ({ done: new Promise<string | null>(() => {}), cancel() { cancelled++; } }));
+  await connectTo(app, 'wss://same.test/ws');
+  await app.unmount();
+  assert.equal(cancelled, 1, 'nothing the form started outlives it');
+});
+
+test('a candidate the app stopped waiting on is closed, and the form is not left busy', async (context) => {
+  let release: ((machine: string) => void) | null = null;
+  const app = await mount(context, () => new Promise((resolve) => { release = resolve; }), alpha);
+  await connectTo(app, 'wss://same.test/ws');
+  app.pool.stale();                                       // a newer activation took over
+  release!('m-a');
+  for (let i = 0; i < 8; i++) await app.flush();
+  assert.equal(app.order.at(-1), 'close', `the superseded candidate leaves no live connection: ${app.order.join(' → ')}`);
+  assert.ok(buttons(app).includes('Connect'), `and the form is back to Connect: ${buttons(app).join(' | ')}`);
 });

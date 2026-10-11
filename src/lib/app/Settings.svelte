@@ -19,6 +19,7 @@
    * and closed once identity is recorded; the server's own runtime then
    * dials. `current()` is App's answer to "is the app still waiting on this
    * attempt?": false once a newer attempt, a switch or a leave took over. */
+  type SecondHalf = { done: Promise<string | null>; cancel(): void };
   type Candidate = {
     connect(url: string, token: string): Promise<unknown>;
     setSocket(socket: string): Promise<unknown>;
@@ -53,9 +54,13 @@
     notice?: string;
     /** The attempt authenticated and its identity is recorded: the app
      * comes up on that server, `switched` when it is a different one than
-     * the app was on. The candidate is already closed; App dials the
-     * server's own connection, whose handshake is the identity of record. */
-    onConnected: (switched: boolean) => void;
+     * the app was on. The candidate is already closed; App
+     * dials the server's OWN connection, whose handshake is the identity of
+     * record, and hands back that second half: `done` resolves null once the
+     * server is up or the reason it is not, and `cancel` stops it (reviewer
+     * P1-D on cc45d7d1: the form stays busy, reports and cancels through
+     * BOTH handshakes). */
+    onConnected: (switched: boolean) => SecondHalf | void;
     /** A fresh candidate for one attempt (see `Candidate`). Opening one makes
      * any earlier attempt stale. */
     openCandidate: () => Candidate;
@@ -163,9 +168,11 @@
   /** And an attempt dies with the component: a dial started by a form the
    * reader has since left must not bring anything up. */
   let mounted = true;
-  /** The candidate of the attempt in flight, closed by Cancel. */
+  /** The candidate of the attempt in flight, closed by Cancel; and the
+   * server's own dial after it, which Cancel stops too. */
   let candidate: Candidate | null = null;
-  onDestroy(() => { mounted = false; candidate?.close(); });
+  let secondHalf: SecondHalf | null = null;
+  onDestroy(() => { mounted = false; candidate?.close(); secondHalf?.cancel(); });
 
   async function doConnect() {
     if (frozen) return;
@@ -202,9 +209,13 @@
     // anything is brought up on it.
     const own = openCandidate();
     candidate = own;
-    // Mine AND still the app's: the instance counter orders this form's own
-    // attempts, the candidate says whether the app is still waiting on it.
-    const live = () => mounted && attempt === attempts && !cancelled && own.current();
+    // TWO questions, kept apart (reviewer P1-D on cc45d7d1). `mine`: is this
+    // still this form's attempt — what its busy state and its error belong
+    // to. `live`: may it still conclude anything for the APP — the candidate
+    // is also current only while the app waits on it, and goes stale the
+    // moment it is closed, so it can never be what ends the busy state.
+    const mine = () => mounted && attempt === attempts && !cancelled;
+    const live = () => mine() && own.current();
     try {
       localStorage.setItem('tmux_address', url);
       localStorage.setItem('tmux_token', tok);
@@ -263,16 +274,21 @@
       }
       if (!live()) return;
       // Identity is recorded: the candidate's work is done. The server's own
-      // runtime dials from here (not adopt: one owner per connection).
+      // runtime dials from here (not adopt: one owner per connection), and
+      // the form stays busy until THAT has answered.
       own.close();
-      onConnected(switched);
+      const second = onConnected(switched) || null;
+      secondHalf = second;
+      const failure = second ? await second.done : null;
+      if (mine() && failure) error = failure;
     } catch (e) {
-      if (!live()) return;
-      own.close();
-      error = (e as Error).message;
+      if (mine()) error = (e as Error).message;
     } finally {
-      if (live()) connecting = false;
+      // Every end of an attempt releases its candidate and its busy state,
+      // whatever it concluded (reviewer P1-D on cc45d7d1).
+      own.close();
       if (candidate === own) candidate = null;
+      if (mine()) { connecting = false; secondHalf = null; }
     }
   }
 
@@ -281,6 +297,10 @@
     connecting = false;
     candidate?.close();
     candidate = null;
+    // The second handshake too: the server's own dial is cancelled, so a late
+    // answer binds nothing.
+    secondHalf?.cancel();
+    secondHalf = null;
   }
 
   // Build a deep link that pre-fills + auto-connects (consumed by App.svelte's
