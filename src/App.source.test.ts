@@ -928,7 +928,7 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   assert.match(source, /import SystemStatus from '\.\/lib\/system\/SystemStatus\.svelte'/u,
     'the shared component, not a second rendering');
   // The bound runtime's (board #335 ②b-4): there is no module-level one.
-  assert.doesNotMatch(source, /import \{[^}]*\bsystemStatus\b[^}]*\} from '\.\/lib\/core\/ws\.ts'/u,
+  assert.doesNotMatch(source, /import \{[^}]*\bsystemStatus\b[^}]*\} from ['"]\.\/lib\/core\/ws\.ts['"]/u,
     'no facade import of the sampler');
   assert.equal((source.match(/<SystemStatus\b/gu) ?? []).length, 1, 'exactly one sampler component');
   assert.match(source, /load=\{\(\) => bound\(\)\?\.api\.systemStatus\(\)/u, 'load is INJECTED, from the bound runtime — the component never imports ws');

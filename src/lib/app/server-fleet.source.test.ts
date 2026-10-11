@@ -29,7 +29,7 @@ const code = (text: string) => text
 test('a runtime uses its own connection, never the facade', async () => {
   for (const name of ['server-runtime.ts', 'server-fleet.ts']) {
     const src = code(await read(name));
-    assert.doesNotMatch(src, /from '\.\.\/core\/ws\.ts'/u,
+    assert.doesNotMatch(src, /from ['"]\.\.\/core\/ws\.ts['"]/u,
       `${name} imports the ws.ts facade — a runtime must call through the api bound to ITS connection`);
     assert.doesNotMatch(src, /localStorage|sessionStorage/u,
       `${name} reaches storage directly — the store is injected so identity stays testable and scoped`);

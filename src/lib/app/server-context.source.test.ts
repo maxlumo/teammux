@@ -30,7 +30,7 @@ test('the compatibility slot is gone, and useServerApi has no fallback (board #3
     assert.doesNotMatch(code(await readFile(file, 'utf8')), /\bcompatSlotApi\b|single-runtime/u, `${file} names the retired slot`);
   }
   const ctx = code(await read('server-context.ts'));
-  assert.doesNotMatch(ctx, /^import (?!type )[^\n]*from '\.\.\/core\/ws(?:-api)?\.ts'/mu, 'the context knows no transport (types only)');
+  assert.doesNotMatch(ctx, /^import (?!type )[^\n]*from ['"]\.\.\/core\/ws(?:-api)?\.ts['"]/mu, 'the context knows no transport (types only)');
   assert.match(ctx, /export function useServerApi\(\): WsApi \{\s*const runtime = useServerRuntime\(\);\s*if \(!runtime\) throw new Error\(/u,
     'a page with no provider has no server, and asking is an error');
 });
@@ -38,7 +38,7 @@ test('the compatibility slot is gone, and useServerApi has no fallback (board #3
 /** The value names a file imports from core/ws (type-only imports excluded). */
 function facadeValues(text: string): string[] {
   const out: string[] = [];
-  for (const m of code(text).matchAll(/import\s+(type\s+)?\{([^}]*)\}\s+from\s+'[./]*(?:lib\/)?core\/ws(?:\.ts)?'/gu)) {
+  for (const m of code(text).matchAll(/import\s+(type\s+)?\{([^}]*)\}\s+from\s+['"][./]*(?:lib\/)?core\/ws(?:\.ts)?['"]/gu)) {
     if (m[1]) continue;
     for (const name of m[2]!.split(',').map((n) => n.trim()).filter(Boolean)) if (!name.startsWith('type ')) out.push(name);
   }
@@ -64,6 +64,7 @@ test('nothing but App takes a value from core/ws, and nothing names CURRENT behi
     }
   }
   assert.deepEqual(facadeValues("import { listPanes, type TmuxPane } from '../core/ws.ts';"), ['listPanes'], 'the rule sees a value import');
+  assert.deepEqual(facadeValues('import { listPanes } from "../core/ws.ts";'), ['listPanes'], 'in either quote');
   assert.deepEqual(facadeValues("import type { TmuxPane } from '../core/ws.ts';"), [], 'and lets a type through');
 });
 

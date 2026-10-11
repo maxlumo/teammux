@@ -22,12 +22,12 @@ const code = (text: string) => text
 
 test('refs.ts can name an object but cannot send one', async () => {
   const src = code(await read('refs.ts'));
-  const imports = [...src.matchAll(/from '([^']+)'/gu)].map(m => m[1]);
+  const imports = [...src.matchAll(/from ['"]([^'"]+)['"]/gu)].map(m => m[1]);
   // One import, and it is the single definition of the session-rename rule.
   assert.deepEqual(imports, ['./nav-state.ts'],
     'refs.ts is pure identity: adding an import here is how a serverId would acquire a way onto the wire');
   assert.doesNotMatch(src, /localStorage|sessionStorage/u, 'a ref is not persisted state');
-  assert.doesNotMatch(src, /\$state\b|from 'svelte/u, 'a ref is a value, not a store');
+  assert.doesNotMatch(src, /\$state\b|from ['"]svelte/u, 'a ref is a value, not a store');
 });
 
 test('no serverId is ever concatenated into a tmux address', async () => {

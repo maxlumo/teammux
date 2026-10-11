@@ -21,6 +21,17 @@ const code = (text: string) => text
   .split('\n')
   .filter(line => !/^\s*(\/\/|\*)/u.test(line))
   .join('\n');
+/** Does `text` import the module whose file is `base`(.ts)? Either quote:
+ * a rule that matched only `'` let a double-quoted import through
+ * (validator P2-c on ea56861b). */
+const importsModule = (text: string, base: string) =>
+  new RegExp(`from\\s*['"][^'"]*${base}(\\.ts)?['"]`, 'u').test(text);
+
+test('the importer rule sees either quote', () => {
+  assert.equal(importsModule("import { createServerFleet } from './server-fleet.ts';", 'server-fleet'), true);
+  assert.equal(importsModule('import { createServerFleet } from "../app/server-fleet.ts";', 'server-fleet'), true);
+  assert.equal(importsModule("import { x } from './server-fleet-view.ts';", 'server-fleet'), false);
+});
 
 test('one function spells the per-server key layout', async () => {
   // residentKey, in the identity layer (board #335 ②b-4 retired `parked()`,
@@ -110,7 +121,7 @@ test('the identity modules have exactly the production consumers this commit giv
     const text = await readFile(file, 'utf8');
     for (const a of Object.keys(allowed)) {
       const base = a.replace(/\.ts$/u, '');
-      if (new RegExp(`from '[^']*${base}(\\.ts)?'`, 'u').test(text)) (found[a] ??= []).push(path);
+      if (importsModule(text, base)) (found[a] ??= []).push(path);
     }
   }
   for (const [module, expected] of Object.entries(allowed)) {
@@ -169,7 +180,7 @@ test('a union list takes each action s runtime from its row, never from its cont
     const path = file.replaceAll('\\', '/');
     if (/\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     const text = code(await readFile(file, 'utf8'));
-    if (!/from '[^']*server-union(\.ts)?'/u.test(text)) continue;
+    if (!importsModule(text, 'server-union')) continue;
     assert.doesNotMatch(text, /\buseServer(Api|Runtime|Scope)\(/u, `${path} projects a union and reads one api for it`);
   }
 });

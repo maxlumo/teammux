@@ -28,9 +28,9 @@ test('connection.ts owns the transport and imports nothing above it', async () =
   const src = code(await read('connection.ts'));
   assert.doesNotMatch(src, /localStorage|sessionStorage/u, 'persistence is the app layer s');
   assert.doesNotMatch(src, /\bwindow\b/u, 'device state (reachability, online events) stays in ws.ts');
-  assert.doesNotMatch(src, /\$state\b|from 'svelte|\.svelte(\.ts)?'/u, 'no Svelte reactivity in the transport');
-  assert.doesNotMatch(src, /from '\.\.\/app\//u, 'the transport must not import the app layer');
-  assert.doesNotMatch(src, /from '\.\/ws(-api)?\.ts'/u, 'and never back through its own facade');
+  assert.doesNotMatch(src, /\$state\b|from ['"]svelte|\.svelte(\.ts)?['"]/u, 'no Svelte reactivity in the transport');
+  assert.doesNotMatch(src, /from ['"]\.\.\/app\//u, 'the transport must not import the app layer');
+  assert.doesNotMatch(src, /from ['"]\.\/ws(-api)?\.ts['"]/u, 'and never back through its own facade');
   // The whole point: mutable connection state is per object, not per module.
   const moduleLevel = src.split('\n').filter(l => /^(export )?(let|const) \w+/u.test(l));
   for (const line of moduleLevel) {
@@ -45,7 +45,7 @@ test('ws-api.ts declares each RPC once, against the connection it was handed', a
   const src = code(await read('ws-api.ts'));
   // `window` as a WORD is a protocol field (a tmux window index); what must
   // not appear is the global.
-  assert.doesNotMatch(src, /localStorage|\bwindow\s*\.|from '\.\.\/app\//u);
+  assert.doesNotMatch(src, /localStorage|\bwindow\s*\.|from ['"]\.\.\/app\//u);
   // Every wrapper reaches the wire through the handle's own `call`.
   assert.match(src, /const \{ call \} = connection;/u);
   assert.equal((src.match(/new WebSocket\(/gu) ?? []).length, 0, 'the API never opens a socket');
@@ -56,7 +56,7 @@ test('ws-api.ts declares each RPC once, against the connection it was handed', a
 
 test('the registry owns lifetime only: it never dials and never guesses identity', async () => {
   const src = code(await read('connection-registry.ts'));
-  assert.doesNotMatch(src, /localStorage|\bwindow\s*\.|from '\.\.\/app\//u);
+  assert.doesNotMatch(src, /localStorage|\bwindow\s*\.|from ['"]\.\.\/app\//u);
   assert.doesNotMatch(src, /\.connect\(/u, 'ensure() builds an IDLE connection; dialling is the caller s verb');
   assert.doesNotMatch(src, /machine|URL|address/iu, 'identity lives in app/servers.ts, not here');
   assert.doesNotMatch(src, /current|active/iu, 'the registry has no notion of a focused server');
