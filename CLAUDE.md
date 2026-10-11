@@ -58,7 +58,8 @@ WebSocket JSON-RPC with token auth + optional E2E encryption. Targets: Android
 ## Commands
 
 ```bash
-npm run dev:all          # Vite :5173 + watched Rust server (browser dev loop)
+npm run dev:all          # Vite :5173, proxying /ws to the gateway (browser dev loop)
+npm run gateway:update   # rebuild + restart the gateway (after each merge to main)
 npm run tauri:dev        # desktop app + server
 npm run build:server     # server + tmm, no webview needed
 npm run build:android    # APK (aarch64) — ends with the build-dir postflight
@@ -67,8 +68,9 @@ npm run check            # svelte-check (the ONLY type check)
 npm run test:rust        # Rust tests, sequential, needs a running tmux
 ```
 
-Everything else about running and building — the supervised server on this
-host (**do not restart it**), the `gui` Cargo feature and headless build,
+Everything else about running and building — the two supervised units on this
+host (the gateway and vite; **do not restart either**), the `gui` Cargo feature
+and headless build,
 `incremental = false`, port preflight, the Android build-dir postflight,
 `pnpx` — is in [docs/conventions/development.md](docs/conventions/development.md).
 

@@ -8,6 +8,7 @@
     "dev": "node scripts/preflight.mjs web && vite dev",
     "dev:all": "node scripts/dev-stack.mjs",
     "dev:server:watch": "node scripts/preflight.mjs server && bash scripts/dev-server-watch.sh",
+    "gateway:update": "node scripts/gateway-update.mjs",
     "build": "vite build",
     "test": "node --test 'src/**/*.test.js' 'src/**/*.test.ts' 'scripts/**/*.test.js' 'scripts/**/*.test.ts'",
     "check": "svelte-check --tsconfig ./tsconfig.json",

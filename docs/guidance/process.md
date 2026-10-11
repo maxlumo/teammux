@@ -159,9 +159,15 @@ when the branch is on main, cherry-pick when main has moved under it
 (rebase requests go back to the implementer only when a conflict needs
 their judgement). The implementer never merges its own work — a deletion
 merged ahead of review on 2026-09-09 was accepted only because tests and a
-grep backed it. After a Rust merge the supervised watcher restarts the
-server; after a wire change the signed APK and any desktop bundle are
-rebuilt from main. The implementer removes its worktree and branch.
+grep backed it. **After every merge, `npm run gateway:update` in the
+integration checkout** (board #343): nothing watches the sources for the
+gateway any more, so the running backend stays on the pre-merge binary until
+someone says now. It rebuilds, restarts only if `tmm`'s bytes changed, and
+prints the commit the gateway now runs. A `post-merge` git hook is
+deliberately NOT installed: hooks are per-clone, so every agent's worktree
+would need one, and a merge inside a worktree would restart the owner's
+backend from a branch. After a wire change the signed APK and any desktop
+bundle are rebuilt from main. The implementer removes its worktree and branch.
 
 **Done** is the reviewer's move. Owner-visible behaviour (a click the owner
 reported, a gesture on the phone) stays in `review` after the code is merged

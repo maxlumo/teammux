@@ -7,9 +7,22 @@ import { DEV_SERVER_PORT_ENV, devServerPort } from './dev-ports.mjs';
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STOP_TIMEOUT_MS = 5000;
 
+/** Set to `1` to run the Rust watcher beside Vite (the pure-browser loop on
+ * a machine with no gateway). Off by default since board #343: the backend
+ * is the tmm-managed gateway (`tmm gateway`), rebuilt and restarted by
+ * `npm run gateway:update`, so the dev stack is Vite alone. */
+export const DEV_WITH_SERVER_ENV = 'TMUX_MOBILE_DEV_WITH_SERVER';
+
 /** Commands are kept explicit so neither child re-runs a partial preflight. */
 export function serviceSpecs(root = repoRoot, env = process.env) {
   const port = String(devServerPort(env));
+  const web = {
+    name: 'web',
+    command: join(root, 'node_modules/.bin/vite'),
+    args: ['dev'],
+    env: { [DEV_SERVER_PORT_ENV]: port },
+  };
+  if (env[DEV_WITH_SERVER_ENV] !== '1') return [web];
   return [
     {
       name: 'server',
@@ -17,12 +30,7 @@ export function serviceSpecs(root = repoRoot, env = process.env) {
       args: [join(root, 'scripts/dev-server-watch.sh')],
       env: { HOST: '127.0.0.1', PORT: port, TLS_CERT: '', TLS_KEY: '' },
     },
-    {
-      name: 'web',
-      command: join(root, 'node_modules/.bin/vite'),
-      args: ['dev'],
-      env: { [DEV_SERVER_PORT_ENV]: port },
-    },
+    web,
   ];
 }
 
@@ -66,8 +74,12 @@ async function waitForProcessTrees(children, allExited, timeoutMs) {
   }
 }
 
-function runPreflight(root) {
-  const result = spawnSync(process.execPath, [join(root, 'scripts/preflight.mjs'), 'dev'], {
+/** `mode` is the set of ports this run actually wants: `web` is 5173 alone,
+ * `dev` is 5173 + the server port. Vite alone must NOT check the server port —
+ * once the backend is the installed gateway, something holds 9899 for good
+ * and `dev` would refuse to start the frontend. */
+function runPreflight(root, mode = 'dev') {
+  const result = spawnSync(process.execPath, [join(root, 'scripts/preflight.mjs'), mode], {
     cwd: root,
     env: process.env,
     stdio: 'inherit',
@@ -86,11 +98,16 @@ export async function runDevStack({
   stopProcess = stopProcessTree,
   stopTimeoutMs = STOP_TIMEOUT_MS,
   signalSource = process,
+  env = process.env,
 } = {}) {
-  const preflightStatus = preflight(root);
+  const specs = serviceSpecs(root, env);
+  const withServer = specs.length > 1;
+  const preflightStatus = preflight(root, withServer ? 'dev' : 'web');
   if (preflightStatus !== 0) return preflightStatus;
 
-  console.log('[dev] starting web (Vite HMR) + server (Rust rebuild/restart watcher)');
+  console.log(withServer
+    ? '[dev] starting web (Vite HMR) + server (Rust rebuild/restart watcher)'
+    : '[dev] starting web (Vite HMR); the backend is the tmm gateway (npm run gateway:update)');
 
   const children = [];
   let resolveSignal;
@@ -114,7 +131,7 @@ export async function runDevStack({
   signalSource.on('SIGTERM', onSigterm);
 
   const exits = [];
-  for (const spec of serviceSpecs(root)) {
+  for (const spec of specs) {
     const child = spawnProcess(spec.command, spec.args, {
       cwd: root,
       env: { ...process.env, ...spec.env },

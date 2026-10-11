@@ -83,7 +83,9 @@ PWA, or as a native app on macOS and Android.
 
 ```bash
 npm install
-npm run dev:all    # then open http://<your-machine>:5173
+npm run build:server   # the server and the tmm CLI, web UI embedded
+tmm gateway            # the backend, as a background service
+npm run dev:all        # Vite on :5173 — then open http://<your-machine>:5173
 ```
 
 To install the app and the background gateway rather than build from source, see [docs/reference/install.md](docs/reference/install.md).

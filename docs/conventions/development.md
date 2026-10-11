@@ -11,7 +11,9 @@ Everything about RUNNING and BUILDING the project. Testing conventions are in `t
 
 ```bash
 npm install
-npm run dev:all
+npm run build:server   # the server and tmm, web UI embedded
+tmm gateway            # the backend, as a per-user background service
+npm run dev:all        # Vite on :5173
 ```
 
 The first launch generates a token in `~/.config/tmux-mobile/config.toml`.
@@ -51,8 +53,9 @@ dev server; see [testing.md](testing.md#3-client-behavior-componentmounttestts).
 ## Commands
 
 ```bash
-npm run dev:all          # one public :5173; proxies /ws + /dl to watched Rust
+npm run dev:all          # one public :5173; proxies /ws + /dl to the gateway
 npm run dev              # Vite dev server only (web UI on 0.0.0.0:5173)
+npm run gateway:update   # rebuild, and restart the gateway if its binary changed
 npm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
 npm run tauri:dev        # Desktop app + WS server (dev mode)
 npm run tauri:dev:release # Release-mode desktop app + WS server
@@ -78,40 +81,61 @@ changing the project default:
 
 ```bash
 npm run build:server     # vite build, then server + tmm (embed-ui), release
-npm run dev:all          # Vite + watched server (recommended browser dev loop)
+npm run dev:all          # Vite alone (the recommended browser dev loop)
+npm run gateway:update   # rebuild; restart the gateway if its binary changed
 npm run dev:server:watch # watched server only; pair with `npm run dev`
 npm run dev:server       # one-shot server only; pair with `npm run dev`
 npm run test:rust        # the Rust tests
 ```
 
-**On this dev host the server is already supervised — do not tell the owner to
-restart it.** The chain is the systemd user unit `tmux-mobile-dev.service`
-(`Restart=always`) → `scripts/dev-stack.mjs` (`npm run dev:all`: vite and the
-watcher) → `scripts/dev-server-watch.sh` → the server; it is NOT a `tmm task`
-(verified with `ps` and `systemctl --user status`, 2026-09-29, board #282).
-Starting `tmm task start server -- scripts/dev-server-watch.sh` here would run
-a SECOND watcher and server beside it. A bash script is read when it starts, so
-an edit to the watcher takes effect only when the dev stack itself restarts
-(`systemctl --user restart tmux-mobile-dev.service`), which restarts the server
-and vite too: the owner authorizes that separately; a reviewer or an issue
-never does it. The watcher is what
+**On this dev host both halves are already supervised — do not tell the owner
+to restart either.** Since board #343 they are two units with one job each:
+
+- **the backend** is the gateway, `tmux-mobile-gateway.service`, installed by
+  `tmm gateway install` and running `<repo>/src-tauri/target/release/tmm
+  gateway start --service` (board #323). It reads `config.toml` ALONE, so the
+  port and the listen address live there and nowhere else. It is rebuilt and
+  restarted by `npm run gateway:update` after each merge to main, never by a
+  file watcher.
+- **the frontend** is the systemd user unit `tmux-mobile-dev.service`
+  (`Restart=always`) → `scripts/dev-stack.mjs` (`npm run dev:all`) → vite on
+  :5173, which proxies `/ws` and `/dl` to the gateway. Vite serves from disk,
+  so a frontend edit needs a browser reload, not a restart.
+
+Neither is a `tmm task` (verified with `ps` and `systemctl --user status`,
+2026-09-29, board #282); starting one as a task would run a SECOND backend
+beside the first. Restarting a unit is the owner's call, which he makes
+himself; a reviewer or an issue never does it.
+
+`npm run dev:all` therefore preflights :5173 only. The server port is held for
+good by the installed gateway, and the old `dev` preflight (both ports) would
+have refused to start the frontend at all.
+
+The migration from the single dev unit to these two, for a host that still runs
+the old one, is the runbook in
+[install.md § Switching a dev host](../reference/install.md#switching-a-dev-host-to-the-gateway).
+
+**The watcher is still there, for a machine with no gateway**:
+`TMUX_MOBILE_DEV_WITH_SERVER=1 npm run dev:all` puts
+`scripts/dev-server-watch.sh` back beside vite (and preflights both ports), and
+`npm run dev:server:watch` runs it alone. It is what
 `tauri dev` would have given us for the server half, which cannot build here (no
 webkit2gtk-4.1, no DISPLAY): it restarts the server when it EXITS (2 s backoff),
 polls Rust source mtimes every 3 s (no inotify — NFS-safe, ~4 ms per scan),
 rebuilds release (`--bins`: the server AND `tmm`) after the tree has been quiet
 for one interval, and restarts ONLY when the rebuilt SERVER binary's BYTES
-differ. `tmm` is rebuilt with it because it is the one CLI every agent and the
+differ. A bash script is read when it starts, so an edit to the watcher takes
+effect only when whatever started it restarts. `tmm` is rebuilt with it because
+it is the one CLI every agent and the
 owner run (`~/.local/bin/tmm` → `target/release/tmm`); built alone, the server
 learned verbs (`task --wake`, `wake`, `agent mode`) that a three-day-old `tmm`
 could not say (board #282). A rebuilt `tmm` restarts nothing: each run execs
 the file anew. `scripts/dev-server-watch.test.ts` pins both halves. Restarting
 only when the bytes differ matters — cargo fingerprints by mtime, so a
 `touch`, a checkout, or a comment-only edit relinks an identical binary and
-dropping every client for that would be noise. A failed rebuild keeps the last
-good binary running and retries on the next change. So an edit is live within
-seconds (`[watch] binary changed — restarting server` in that window's log), and
-the frontend needs no restart either — vite serves from disk, so a browser
-reload is enough. `tmm task list` shows both. Owner correction, 2026-08-19.
+dropping every client for that would be noise. `gateway:update` keeps that same
+rule, and this is where it comes from. A failed rebuild keeps the last
+good binary running and retries on the next change. Owner correction, 2026-08-19.
 These pass `--no-default-features`, which turns off the `gui` Cargo feature —
 `tauri` plus its four plugins (dialog, fs, opener, notification). What remains is what the WebSocket server and
 `tmm` actually use, and the webview leaves the dependency graph entirely. Use
@@ -138,7 +162,8 @@ non-incremental build. If you hit that error on a branch that re-enables it,
 that is the cause (this crate emits staticlib + cdylib + rlib, and LLVM's
 per-CGU anonymous symbols get renamed between incremental runs).
 
-Dev commands run a port preflight (`scripts/preflight.mjs`): if 5173/9899 are
+Dev commands run a port preflight (`scripts/preflight.mjs`): if the ports that
+run WANTS (5173 for vite, the server port for a backend it starts itself) are
 already held they fail fast and print the owning PIDs instead of half-starting
 (a second vite instance corrupts the dep-optimizer cache → blank page on every
 open client). `build:android` ends with a postflight that re-points this
