@@ -73,7 +73,11 @@ export interface SwitchDeps {
   afterUnmount(): Promise<void>;
   disconnect(): void;
   resetMemory(): void;
+  /** Dial the switch's TARGET (board #335 ②b-4: a candidate of its own). */
   connect(address: string, token: string): Promise<unknown>;
+  /** Dial another address of the CURRENT server, on its own connection
+   * (`connectAddress`). Defaults to `connect`. */
+  redial?(address: string, token: string): Promise<unknown>;
   setSocket(socket: string): Promise<unknown>;
   machineId(): string;
   /** Authenticated and activated: remount and bring the app up. */
@@ -163,7 +167,7 @@ export function createServerSwitch(d: SwitchDeps) {
     d.disconnect();
     // What the dial DID, whoever owns it by then: a walk that froze this
     // attempt and then stays puts its outcome back (`guard`).
-    const dialled = d.connect(address, token).then(() => 'up' as const, () => 'failed' as const);
+    const dialled = (d.redial ?? d.connect)(address, token).then(() => 'up' as const, () => 'failed' as const);
     const pending = { address, dialled };
     addressing = pending;
     return dialled.then((how) => {

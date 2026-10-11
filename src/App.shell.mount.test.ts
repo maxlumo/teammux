@@ -49,6 +49,7 @@ function transport(calls: string[]) {
     return Promise.reject(new Error('not connected'));
   };
   return {
+    createConnectionRegistry: () => ({ ensure: () => { throw new Error('no runtime on a fresh client'); }, get: () => undefined, take: () => undefined, remove: () => {}, disposeAll: () => {} }),
     connect: rpc('connect'),
     disconnect: () => {},
     isConnected: () => false,
@@ -161,11 +162,21 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
         machine = await (candidateAt ? candidateAt(url) : (url.includes('//b') ? 'm-b' : 'm-a'));
         return machine;
       },
+      setOnDisconnect: () => {},
       getMachineId: () => machine,
       dispose: () => { calls?.push('candidate-closed'); },
     };
   };
   m.createWsApi = () => ({ setSocket: async () => ({}) });
+  // The fleet's registry (board #335 ②b-4): every runtime's connection is
+  // this one fake socket and its api these RPCs, which is what one server at
+  // a time over one socket looks like from here. Disposing a runtime leaves
+  // the fake alone, as the facade's slot was left before.
+  m.dispose = () => {};
+  m.createConnectionRegistry = () => ({
+    ensure: () => ({ connection: m, api: m }),
+    get: () => undefined, take: () => undefined, remove: () => {}, disposeAll: () => {},
+  });
   m.compatSlotApi = m;
   m.connection = {
     connect: (url: string, token: string) => m.connect(url, token), disconnect: m.disconnect,
@@ -405,7 +416,9 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
     ...extra,
   };
-  return { module: withSlot({ __calls: calls, ...module }, (url) => machineAt(url, 0)), net };
+  // The candidate is dial number 0 of an address: the same machine answers
+  // and the same gate applies (a refused address refuses the candidate too).
+  return { module: withSlot({ __calls: calls, ...module }, async (url) => { const held = gate(url, 0); if (held) await held; return machineAt(url, 0); }), net };
 }
 
 /** The app booted on a seeded storage, with the transport mocked: ONE harness,
@@ -1517,7 +1530,8 @@ test('after "keep editing", the person s own connect lifts the stay: a failed on
   await settle();
   answerDialog(app, /^discard$/iu);
   for (let i = 0; i < 6; i++) await settle();
-  assert.ok(events.includes('connect:ws://dead:9899'), 'the person s connect went out');
+  // Through its own candidate since board #335 ②b-4.
+  assert.ok(events.includes('candidate:ws://dead:9899'), 'the person s connect went out');
   const dials = events.filter((e) => e.startsWith('connect:')).length;
   app.document.dispatchEvent(new app.window.Event('visibilitychange'));
   for (let i = 0; i < 4; i++) await settle();
@@ -1944,7 +1958,7 @@ test('blocked mid-session (a claim that cannot be recorded): the optimizer and t
   assert.equal(h.onScreen(), 'work:1.0', 'with m-a s navigation');
 });
 
-test('Retry after a mid-session block with the socket still up: A comes up on it, nothing is dialled again', async (context) => {
+test('Retry after a mid-session block: A s own runtime dials once, and A comes up on it', async (context) => {
   const store = refusing(['tmux_state_layout']);
   store.state.failing = false;
   const events: string[] = [];
@@ -1970,7 +1984,11 @@ test('Retry after a mid-session block with the socket still up: A comes up on it
   for (let i = 0; i < 6; i++) await h.settle();
   await h.app.advance(1000);
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).into, 'a');
-  assert.equal(dials(), n, 'no new dial: the socket was up');
+  // Since board #335 ②b-4 the switch's candidate closed once identity was
+  // recorded, and the block stopped A's OWN runtime before its dial: Retry
+  // dials it once (the boot dial, re-armed), and nothing else.
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:')).slice(n), ['connect:ws://a:9899'], 'A s own runtime dialled, once');
   assert.equal(h.onScreen(), 'work:1.0', 'and m-a s navigation came up on it');
 });
 
@@ -2507,7 +2525,7 @@ test('a form connect to another server: candidate, close, then B s own dial; no 
     calls,
     // B's OWN dial (the facade's socket, which B's Single runtime borrows) is
     // held; the candidate is not.
-    gate: (url) => (url.includes('//b') ? new Promise<void>((r) => { letB = r; }) : null),
+    gate: (url, n) => (n > 0 && url.includes('//b') ? new Promise<void>((r) => { letB = r; }) : null),
   });
   await reconnectThroughForm('ws://b:9899');
   const seq = calls.filter((c) => /^(candidate|candidate-closed|connect:)/u.test(c));
@@ -2548,7 +2566,7 @@ test('a form connect superseded while the server s own dial is out brings nothin
     ]),
   }, (url) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? 'm-c' : 'm-a'), {
     calls,
-    gate: (url, n) => (url.includes('//b') && !letB ? new Promise<void>((r) => { letB = r; }) : (void n, null)),
+    gate: (url, n) => (n > 0 && url.includes('//b') && !letB ? new Promise<void>((r) => { letB = r; }) : null),
   });
   await reconnectThroughForm('ws://b:9899');               // B's own dial is held
   assert.ok(calls.includes('connect:ws://b:9899'), 'B s own dial is out');

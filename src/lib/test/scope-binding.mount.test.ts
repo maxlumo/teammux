@@ -281,3 +281,18 @@ test('a Hub jumps to an alert of ITS scope s server while another one is current
   assert.ok(onScope.some((c) => c.startsWith('hubLogAround(')), 'and the jump went on to open it, on the scope');
   await app.close();
 });
+
+test('a reconnect refreshes only the pages of the server that reconnected (reviewer P2 on the binding range)', async (context) => {
+  const { app, onScope, until } = await mount(context, { which: 'sessions', openTerminal() {} });
+  await until(() => onScope.includes('listSessionsWithPanes()'));
+  const lists = () => onScope.filter((c) => c === 'listSessionsWithPanes()').length;
+  const before = lists();
+  const fire = (detail: unknown) => app.window.dispatchEvent(new app.window.CustomEvent('ws-reconnected', { detail }));
+  fire({ serverId: 'another' });
+  fire(undefined);
+  for (let i = 0; i < 4; i++) await app.flush();
+  assert.equal(lists(), before, 'another server s reconnect, or one that names none, refreshes nothing here');
+  fire({ serverId: 'b' });
+  await until(() => lists() > before);
+  assert.equal(lists(), before + 1, 'its own server s reconnect refreshes it');
+});

@@ -110,7 +110,7 @@ test('every module-level store is reset on a switch or named global (board 315)'
     assert.ok(found.includes(instance), `the scan sees the factory instance ${instance}`);
   }
   assert.match(app, /resetMemory: resetServerMemory,/u, 'the switch runs the reset');
-  assert.match(app, /comeUp: \(target\) => \{\s*centreSurface\.reset\(\);/u, 'the window s bell lets go of the server left');
+  assert.match(app, /comeUp: \(target\) => \{[^}]*?centreSurface\.reset\(\);/u, 'the window s bell lets go of the server left');
 });
 
 test('a store that belongs to a runtime has no module instance, and the bundle builds it (#335 ②b-2-1)', async () => {

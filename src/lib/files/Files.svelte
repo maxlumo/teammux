@@ -924,7 +924,8 @@
   // navigation. The active preview/editor belongs to the user and must survive
   // an app resume even though the underlying file list may have changed.
   $effect(() => {
-    const onReconn = () => { if (visible && cwd) loadDir(cwd, 'refresh'); };
+    // Only for THIS page's server (board #335 ②b-4).
+    const onReconn = (e) => { if (e?.detail?.serverId === scope.runtime.id && visible && cwd) loadDir(cwd, 'refresh'); };
     window.addEventListener('ws-reconnected', onReconn);
     return () => window.removeEventListener('ws-reconnected', onReconn);
   });

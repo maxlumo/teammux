@@ -1449,7 +1449,9 @@
     // Reconnect recovery: the previous server's resize_tracker cleanup auto-fits the pane
     // back to an arbitrary size on disconnect. Clear stale pending confirmation and
     // re-send resize so the new server's tmux pane matches our terminal again.
-    const onReconnected = () => {
+    // Only for THIS Terminal's server (board #335 ②b-4).
+    const onReconnected = (e) => {
+      if (e?.detail?.serverId !== runtime.id) return;
       pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
       // Force doResize to actually send by invalidating the cur===fit check.
       // We do this by momentarily pretending term has different dims.

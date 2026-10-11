@@ -1176,6 +1176,42 @@ establishes it is ours — rather than resumed or released, and a superseded
 attempt concludes nothing, writes no registry and brings nothing up. Clearing landings
 after the DOM is gone is a second line, never the first.
 
+### Every runtime owns its connection; a connect dials a candidate first (#335 ②b-4)
+
+Orchestrator's ruling 2026-10-11 01:43, with the reviewer's addendum at
+01:46. Once every page was bound to its scope, nothing needed the shared
+socket, so each runtime gets a connection of its own from the FLEET, and a
+switch includes the next server and drops the one it left. Nothing re-points
+a socket that a server's pages are using.
+
+- **A connect dials a CANDIDATE.** The connect form and a switch first dial a
+  bare connection App owns (`openCandidate`). It records which machine
+  answered, then closes, and only then does the server's own runtime dial.
+  Handing the authenticated socket to the runtime (adopt) was rejected: it
+  would add a second way for a connection to change owner. The cost is one
+  extra handshake per connect.
+- **The runtime's own handshake is the identity of record.** What the
+  candidate found proves nothing about the second dial, because an address
+  can change hands between two handshakes. If that dial reaches another
+  machine, the app arrives there (`arrivedElsewhere`), as a boot dial does.
+- **Nothing mounts on a runtime before it has dialled.** For another server
+  the old tree comes down first. The SAME machine under a merged id keeps its
+  tree until the replacement is up, because the replacement adopted its Files
+  record, and unbinding first would release that record's downloads.
+- **One activation generation.** The candidate, a boot dial, a reconnect
+  attempt and a switch each claim the host's owner counter, so a late result
+  from an activation that has been superseded is a no-op. A revoke closes the
+  candidate.
+- **A runtime ends one way: detach, release, dispose.** A runtime that loses
+  its identity mid-dial (its entry removed, or absorbed) DETACHES. Its api
+  refuses at once, including methods captured earlier, and it never disposes
+  itself, which would skip the release of that server's state. The fleet's
+  `drop` and `reconcile` hand a runtime to the host's end. The one runtime
+  still bound is the exception: the swap that replaces it ends it, after its
+  replacement has had the chance to adopt its state.
+- **A reconnect names its server.** `ws-reconnected` carries `serverId`, and a
+  page acts only on its own server's.
+
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 
 Both share commands previously ignored `copyText(false)` and displayed success;

@@ -73,13 +73,15 @@ test('the identity modules have exactly the production consumers this commit giv
     'refs.ts': ['src/App.svelte'],
     'nav-saved.ts': ['src/App.svelte'],
     'server-runtime.ts': [],
-    'single-runtime.ts': ['src/App.svelte'],
+    // ②b-4: no production importer; the file goes with the facade's slot.
+    'single-runtime.ts': [],
     'server-scope.ts': ['src/App.svelte'],
     // The handover's rules, extracted from App so they can be tested; the
     // connect form never imports it — it receives the handover the host
     // opened.
     'handover.ts': ['src/App.svelte'],
-    'server-fleet.ts': [],
+    // ②b-4: App's runtimes are the fleet's, one connection each.
+    'server-fleet.ts': ['src/App.svelte'],
     // ②b-4: App builds each server's state over its own store, saves and
     // reads the navigation through it, and runs the fold.
     'server-store.ts': ['src/App.svelte'],

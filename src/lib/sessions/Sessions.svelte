@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { useServerApi } from '../app/server-context.ts';
+  import { useServerRuntime } from '../app/server-context.ts';
   import type { TmuxSession, TmuxPane } from '../core/ws.ts';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -32,7 +32,9 @@
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
-  const api = useServerApi();
+  const runtime = useServerRuntime();
+  if (!runtime) throw new Error('Sessions needs a server scope');
+  const { api, id: serverId } = runtime;
   const openTerminal = (session: string, target: string, command = '') => {
     openTerminalRaw(session, target, command);
     onPick?.();
@@ -200,7 +202,8 @@
   // event. Only acts if the page is currently visible — invisible pages get
   // their refresh from the visibility $effect above the next time they show.
   $effect(() => {
-    const onReconn = () => { if (visible) refresh(); };
+    // Only for THIS list's server (board #335 ②b-4).
+    const onReconn = (e: Event) => { if ((e as CustomEvent).detail?.serverId === serverId && visible) refresh(); };
     window.addEventListener('ws-reconnected', onReconn);
     return () => window.removeEventListener('ws-reconnected', onReconn);
   });

@@ -444,7 +444,9 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   assert.equal([...source.matchAll(/releaseServerState\(/gu)].length, 1, 'the switch s pre-connect release');
   assert.match(source, /const handovers = createHandovers\(\{ end: \(runtime\) => \{ void ends\.end\(runtime\); \} \}\);/u,
     'a connect attempt s "another server" verdict ends the handle the same way');
-  assert.match(source, /comeUp: \(target\) => \{[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(target\.address, target\.token\);/u);
+  // The switch's candidate closes and the target's own runtime dials before
+  // anything comes up on it (board #335 ②b-4).
+  assert.match(source, /comeUp: \(target\) => \{\s*switchCandidate\?\.close\(\);[\s\S]*?dialCurrent\(true, \(\) => \{ bringUp\(target\.address, target\.token\);/u);
   assert.doesNotMatch(source, /location\.reload\(/u, 'no reload remains on any switch or connect path');
   assert.doesNotMatch(source, /applySwitch/u, 'the reload-era plan is gone');
 });
@@ -523,8 +525,8 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function mintCurrent\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, stateForRuntime\(/u,
     'inside mintCurrent — and a same-machine merge hands the replaced handle s state over (stateForRuntime)');
   assert.match(source, /function swapScope\(\) \{\s*const minted = mintCurrent\(\);\s*if \(!minted\.keep\) void scopeSwap\.swap\(minted\.runtime\);\s*\}/u);
-  assert.match(source, /invalidate: async \(gone\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearLandings\(\);\s*(?:\/\/[^\n]*\n\s*)*await ends\.end\(gone\);/u,
-    'the replaced handle is ENDED, not merely forgotten: two generations can borrow one connection');
+  assert.match(source, /invalidate: async \(gone\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearLandings\(\);\s*(?:\/\/[^\n]*\n\s*)*if \(gone && fleet\.get\(gone\.id\) === gone\) fleet\.drop\(gone\.id\);\s*await ends\.end\(gone\);/u,
+    'the replaced handle leaves the fleet and is ENDED, release then dispose, not merely forgotten');
   // WHICH server is read from the registry, never passed: identity repair can
   // absorb the entry we booted as into a machine's survivor and re-point
   // CURRENT at it, and from then on the app is on the survivor.
@@ -553,7 +555,8 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
-  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*return \{ keep: false, runtime: next \};/u,
+  // The runtime is the FLEET's (board #335 ②b-4): one connection each.
+  assert.match(source, /handovers\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,400}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*return \{ keep: false, runtime: next \};/u,
     'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
@@ -565,8 +568,11 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.ok(beforeKey.includes('<Preferences {connected}'), 'and so does Preferences');
   const keyed = source.slice(source.indexOf('{#key scopeRuntime}'), source.indexOf('</ServerScope>'));
   assert.ok(!keyed.includes('<Settings') && !keyed.includes('<Preferences'), 'and neither is inside it');
-  assert.match(source, /createSingleRuntime\(entry, \{ storage: localStorage \}\)/u,
-    'one runtime, on the facade s slot, so Single mode keeps one socket');
+  // Single mode holds one runtime at a time, on a connection of its own from
+  // the fleet (board #335 ②b-4): the switch drops the one it left.
+  assert.match(source, /const next = entry \? fleet\.include\(entry\) \?\? null : null;/u,
+    'the fleet mints the runtime');
+  assert.match(source, /if \(held && fleet\.get\(held\.id\) === held\) fleet\.drop\(held\.id\);/u, 'and lets go of the one replaced');
   // Every path that can change which server the app is on binds the tree.
   for (const [name, pattern] of [
     // Boot's order is the pin (board #335 ②b-4, orchestrator's ruling on the
@@ -718,13 +724,15 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
   const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  const dialFn = source.match(/function dialCurrent\(switched, up\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   // The same reset as an in-place switch; the new server's runtime is minted
   // (its state built), DIALS on its own connection, and only then is shown
   // and brought up (board #335 ②b-4: its handshake is the identity of
   // record, and no page mounts before it answers).
-  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?const minted = mintCurrent\(\);[\s\S]*?const owner = handovers\.claim\(\);[\s\S]*?runtime\.dial\(owner\.current\)\.then\(\(result\) => \{\s*if \(!owner\.current\(\)\)[\s\S]*?if \(!minted\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(switched\) \{\s*bringUp\(/u,
-    'reset → mint → claim → dial → (still the latest) show → bring up');
-  assert.match(on, /if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result,/u, 'what the runtime s own dial found is the identity of record');
+  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?dialCurrent\(switched, \(result\) => \{\s*bringUp\(/u, 'reset → dial the server s own runtime → bring up');
+  assert.match(dialFn, /const minted = mintCurrent\(\);[\s\S]*?const owner = handovers\.claim\(\);[\s\S]*?runtime\.dial\(owner\.current\)\.then\(\(result\) => \{\s*if \(!owner\.current\(\)\)[\s\S]*?if \(!minted\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(switched\) \{ up\(result\); return; \}/u,
+    'mint → claim → dial → (still the latest) show → bring up');
+  assert.match(dialFn, /if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result,/u, 'what the runtime s own dial found is the identity of record');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {
@@ -739,13 +747,13 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // The dial owns the socket only while its claim on the host's owner counter
   // is current (reviewer P1-b on cc5e517e): the runtime asks it before it
   // records anything, and the outcome is acted on only while it still holds.
-  assert.match(source, /const owner = handovers\.claim\(\);\s*const runtime = scopeSwap\.bound\(\);\s*const dialled = runtime \? runtime\.dial\(owner\.current\) : connect\(addr, token\)\.then\(\(\) => \(\{ ok: true \}\)\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
+  assert.match(source, /const owner = handovers\.claim\(\);\s*(?:\/\/[^\n]*\n\s*)*const runtime = scopeSwap\.bound\(\) \?\? mintCurrent\(\)\.runtime;\s*(?:\/\/[^\n]*\n\s*)*const dialled = runtime \? runtime\.dial\(owner\.current\) : Promise\.resolve\(\{ ok: false, reason: 'failed' \}\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
   assert.match(source, /\.catch\(\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) \{ page = 'settings'; storageFailed\(\); \}/u,
     'a write that fails inside the dial goes to the host gate (reviewer P1 on 23879812)');
   // Every identity-write failure path reports to the ONE gate.
   for (const [where, pattern] of [
     ['the form', /onIdentityFailed=\{storageFailed\}/u],
-    ['a reconnect', /reconnectError = t\('configIdentityFailed'\);\s*disconnect\(\);\s*storageFailed\(\);/u],
+    ['a reconnect', /reconnectError = t\('configIdentityFailed'\);\s*live\(\)\?\.disconnect\(\);\s*storageFailed\(\);/u],
     ['an arrival', /\} catch \{ page = 'settings'; storageFailed\(\); \}/u],
     ['a switch', /identityFailed: storageFailed,/u],
     ['an address change', /\} catch \{ storageFailed\(\); \}\s*\/\/ the entry keeps the address it had/u],
@@ -791,8 +799,8 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // While it asks, the socket is held: nothing automatic takes it and no
   // second walk opens (reviewer P1 on 085b0e70); a stay keeps everything
   // automatic from dialling again (P2).
-  assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
-  assert.match(source, /setOnDisconnect\(\(\) => \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
+  assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*live\(\)\?\.disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
+  assert.match(source, /function onDrop\(\) \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing, not even the mirror');
   assert.match(source, /claim: \(\) => handovers\.claim\(\),\s*reconnecting: \(\) => reconnectMachine\.isActive\(\),/u, 'an automatic claim lifts no stay');
@@ -828,7 +836,7 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   // The merge rewrite is inside the gate (P1-3), and Retry resumes the
   // connection by its real state (P1-2).
   assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ migrationBlocked = true; fold = 'blocked'; \}/u);
-  assert.match(source, /if \(isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline && !reconnectMachine\.isActive\(\)\) reconnectMachine\.start\(\);/u);
+  assert.match(source, /if \(live\(\)\?\.isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline && !reconnectMachine\.isActive\(\)\) reconnectMachine\.start\(\);/u);
   // Every per-server read and write goes through the server's store.
   assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\),/u);
   assert.match(source, /readNav\(createServerStore\(localStorage, target\.id\)\)/u);
@@ -874,10 +882,11 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   // wires, it does not re-implement or mount one poller per page.
   assert.match(source, /import SystemStatus from '\.\/lib\/system\/SystemStatus\.svelte'/u,
     'the shared component, not a second rendering');
-  assert.match(source, /import \{[^}]*\bsystemStatus\b[^}]*\} from '\.\/lib\/core\/ws\.ts'/u,
-    'the typed wrapper is the injected transport');
+  // The bound runtime's (board #335 ②b-4): there is no module-level one.
+  assert.doesNotMatch(source, /import \{[^}]*\bsystemStatus\b[^}]*\} from '\.\/lib\/core\/ws\.ts'/u,
+    'no facade import of the sampler');
   assert.equal((source.match(/<SystemStatus\b/gu) ?? []).length, 1, 'exactly one sampler component');
-  assert.match(source, /load=\{systemStatus\}/u, 'load is INJECTED — the component never imports ws');
+  assert.match(source, /load=\{\(\) => bound\(\)\?\.api\.systemStatus\(\)/u, 'load is INJECTED, from the bound runtime — the component never imports ws');
   assert.match(source, /sysMounted = \$derived\(connected\)/u,
     'connected clients share one sampler; layout only decides visibility');
   assert.match(source, /<main[^>]*class:touch-layout=\{shell && layout\.isTouchDevice\}/u,
@@ -960,7 +969,7 @@ test('a typed address ends the running reconnect loop before it connects (review
   // timeout' then marked a reachable address unreachable for two minutes.
   // Since board 315 the order lives in server-switch.ts connectAddress.
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
-  assert.match(mod, /function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*d\.disconnect\(\);[\s\S]*?const dialled = d\.connect\(address, token\)/u,
+  assert.match(mod, /function connectAddress\(address: string, token: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*d\.disconnect\(\);[\s\S]*?const dialled = \(d\.redial \?\? d\.connect\)\(address, token\)/u,
     'claim → cancel → disconnect → connect, in that order');
 });
 
@@ -1172,8 +1181,9 @@ test('every connect path runs the one server handshake, which loads backends_lis
 });
 
 test('a connect lands on the default page, Chat — never a hard-coded Terminal (#333)', () => {
-  const connected = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.ok(connected, 'onConnected found');
+  // The same-server branch of the one connect path (board #335 ②b-4).
+  const connected = source.match(/function dialCurrent\(switched, up\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.ok(connected, 'dialCurrent found');
   assert.match(connected, /page = defaultPage\(\);/u);
   assert.doesNotMatch(connected, /page = 'terminal'/u);
   // The one hubless fallback stays: Chat on a server without the Hub becomes Terminal.
@@ -1200,4 +1210,10 @@ test('a project rename moves only the references of the server that renamed it (
   assert.match(handler, /if \(!serverId \|\| !from/u, 'no server named, nothing moves');
   assert.match(handler, /const rename = \{ serverId, from, to \};/u);
   assert.doesNotMatch(handler, /navServerId\(\)/u, 'never the bound server s id');
+});
+
+test('a reconnect is announced for ONE server, named (board #335 ②b-4, reviewer P2 on the b3 binding range)', () => {
+  assert.equal([...source.matchAll(/'ws-reconnected'/gu)].length, 1, 'one place announces it');
+  assert.match(source, /function announceReconnected\(\) \{\s*const id = bound\(\)\?\.id;\s*if \(id\) window\.dispatchEvent\(new CustomEvent\('ws-reconnected', \{ detail: \{ serverId: id \} \}\)\);/u,
+    'naming the bound runtime, and never with no server');
 });
