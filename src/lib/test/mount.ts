@@ -162,6 +162,11 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
             const fn = options.modules[index]?.[key] as ((...args: unknown[]) => unknown) | undefined;
             if (!fn) return fail(`Unexpected mocked export: ${path}:${key}`);
             const result = fn(...args);
+            // An OBJECT WITH METHODS is a handle the fixture built — a
+            // connection a mocked factory returns (board #335 ②b-4) — never
+            // a wire reply, and cloning would strip it bare.
+            if (result && typeof result === 'object' && !(result instanceof Promise)
+              && Object.values(result).some((v) => typeof v === 'function')) return result;
             // RPCs are JSON on the wire; clone replies into the client realm
             // so Svelte sees that realm's Object/Array prototypes.
             return result instanceof Promise ? result.then(clone) : clone(result);

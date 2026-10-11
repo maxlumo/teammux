@@ -437,7 +437,10 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // revoke, the handover's terminal verdict and the swap all hand the handle
   // to that end (the switch's own pre-connect release above is a release
   // without a dispose, and the end's second release is then a no-op).
-  assert.equal([...source.matchAll(/\.dispose\(\)/gu)].length, 1, 'only App s link feedback disposes itself');
+  // Two `.dispose()`: App's link feedback, and the connect form's CANDIDATE
+  // (board #335 ②b-4), which is a bare connection no runtime ever held.
+  assert.equal([...source.matchAll(/\.dispose\(\)/gu)].length, 2, 'App s link feedback and the candidate dispose themselves');
+  assert.match(source, /function openCandidate\(\) \{[\s\S]*?close\(\) \{[\s\S]*?connection\.dispose\(\);/u, 'the candidate is the second');
   assert.equal([...source.matchAll(/releaseServerState\(/gu)].length, 1, 'the switch s pre-connect release');
   assert.match(source, /const handovers = createHandovers\(\{ end: \(runtime\) => \{ void ends\.end\(runtime\); \} \}\);/u,
     'a connect attempt s "another server" verdict ends the handle the same way');
@@ -515,33 +518,34 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // server is current (board #335 ②b-2-1).
   assert.equal([...source.matchAll(/createServerState\(/gu)].length, 1, 'one place builds a server s state');
   assert.equal([...source.matchAll(/serverStates\.set\(/gu)].length, 1, 'and one place hands it to a runtime');
-  assert.match(source, /function swapScope\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, stateForRuntime\(/u,
-    'inside swapScope — and a same-machine merge hands the replaced handle s state over (stateForRuntime)');
+  // In mintCurrent, swapScope's first half (board #335 ②b-4: a runtime is
+  // minted before it is shown, so it can dial first).
+  assert.match(source, /function mintCurrent\(\) \{(?:(?!\n  \}\n)[\s\S])*?serverStates\.set\(next, stateForRuntime\(/u,
+    'inside mintCurrent — and a same-machine merge hands the replaced handle s state over (stateForRuntime)');
+  assert.match(source, /function swapScope\(\) \{\s*const minted = mintCurrent\(\);\s*if \(!minted\.keep\) void scopeSwap\.swap\(minted\.runtime\);\s*\}/u);
   assert.match(source, /invalidate: async \(gone\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearLandings\(\);\s*(?:\/\/[^\n]*\n\s*)*await ends\.end\(gone\);/u,
     'the replaced handle is ENDED, not merely forgotten: two generations can borrow one connection');
   // WHICH server is read from the registry, never passed: identity repair can
   // absorb the entry we booted as into a machine's survivor and re-point
   // CURRENT at it, and from then on the app is on the survivor.
-  assert.match(source, /function swapScope\(\) \{\s*const id = currentServerId\(localStorage\);/u);
-  assert.match(source, /if \(held\?\.alive\(\) && !ends\.ending\(held\) && entry && held\.id === entry\.id && fold !== 'claimed'\) return;/u,
+  assert.match(source, /function mintCurrent\(\) \{\s*const id = currentServerId\(localStorage\);/u);
+  assert.match(source, /if \(held\?\.alive\(\) && !ends\.ending\(held\) && entry && held\.id === entry\.id && fold !== 'claimed'\) return \{ keep: true, runtime: held \};/u,
     'a reconnect keeps its handle — but only a handle that is still alive and not being ended: a revoked lease cannot serve the same id again');
   assert.match(source, /const held = scopeSwap\.bound\(\);/u,
     'and it asks what the swap is already heading for, or one success path mints a handle nobody shows or releases');
   // The lease is given up BEFORE the shared socket can be re-dialled
   // elsewhere, on both paths that can reach another server.
-  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,600}?void ends\.end\(scopeSwap\.bound\(\)\);/u,
+  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,900}?void ends\.end\(scopeSwap\.bound\(\)\);/u,
     'stopped at once, disposed only after its release (reviewer P1-a on 48b40082)');
   assert.match(source, /function resetServerMemory\(\) \{[\s\S]{0,400}?revokeScope\(\);/u,
     'the switch revokes before its connect (resetMemory runs before connect in server-switch.ts)');
-  // The connect form SUSPENDS instead, because its address may be the same
-  // server: revoking there would rebuild every page on an ordinary reconnect.
-  // The form's handover resumes only on a conclusion that leaves the handle
-  // serving its own server, and only with the ticket of the suspension in
-  // force: a stale attempt's report must not lift a live one's protection.
-  // The handover's rules live in app/handover.ts, where they are tested; App
-  // only opens one per attempt and ends them all when it takes the handle
-  // back itself.
-  assert.match(source, /function suspendScope\(\) \{\s*heldOffline = false;[^\n]*\n\s*return handovers\.open\(scopeSwap\.bound\(\)\);\s*\}/u);
+  // The connect form neither revokes nor suspends (board #335 ②b-4): it
+  // dials its own CANDIDATE, so the handle's socket never moves under it, and
+  // the candidate is the app's latest activation (`claim`) — a revoke closes
+  // it, a newer attempt makes it stale.
+  assert.match(source, /function openCandidate\(\) \{\s*heldOffline = false;[^\n]*\n\s*candidateOpen\?\.close\(\);\s*const owner = handovers\.claim\(\);\s*const connection = createConnection\(\);/u);
+  assert.match(source, /current: \(\) => !closed && owner\.current\(\),/u);
+  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,500}?candidateOpen\?\.close\(\);/u, 'a revoke closes the candidate');
   // And asks the leave walk of the handle a connect to ANOTHER server would
   // destroy, before anything is dialled (reviewer P1-c on 0b8b9038).
   // With NO address exemption (reviewer P1-b on 48b40082): an address is not
@@ -549,10 +553,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
-  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*void scopeSwap\.swap\(next\);/u,
+  assert.match(source, /handovers\.endAll\(\);\s*const next = entry \? createSingleRuntime\(entry, \{ storage: localStorage \}\) : null;\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*return \{ keep: false, runtime: next \};/u,
     'and so does a swap — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} beforeConnect=\{suspendScope\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
-    'and the form stands the handle down before it re-dials the socket itself');
+  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
+    'and the form dials a candidate of its own');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what
   // keeps the gear from opening a blank page when there is no server.
@@ -597,7 +601,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*navRestored = target;/u);
   assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'a failover keeps');
-  assert.match(source, /to keeps its handle and remounts nothing\.\s*swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
+  assert.match(source, /repair in the dial may still have moved CURRENT, which this follows\.\s*swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'and so does the connect page s same-server return');
   // The saved navigation names its server, and the restore is filtered to the
   // server it runs against (board #335 ②b-2).
@@ -679,27 +683,22 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // per-server memory and remounts the tree (board 315; was location.reload()).
   const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
   const fn = settings.match(/async function doConnect\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  // Since board #335 ②b-4 one call carries the verdict: activate records
+  // identity, the candidate closes, and onConnected(switched) follows.
   const iAct = fn.indexOf('activateConnected(localStorage');
-  const iSwitched = fn.indexOf('onConnected(true)');
-  const iDone = fn.indexOf('onConnected(false)');
-  assert.ok(iAct >= 0 && iSwitched > iAct && iDone > iSwitched,
-    'activate → a different server comes up as a switch → only then the same-server path');
-  // Since #335 ②b-1 each branch also reports what it ESTABLISHED, because the
-  // handle may only resume on a conclusion that leaves it serving its own
-  // server. An identity-activation failure is NOT a same-server success.
-  assert.match(fn, /handover\?\.settle\('other-server'\);\s*onConnected\(true\);/u);
-  assert.match(fn, /handover\?\.settle\('same-server'\);\s*onConnected\(false\);/u);
-  assert.match(fn, /\} catch \{[\s\S]*?handover\?\.settle\('unresolved'\);[\s\S]*?\}\s*return;/u,
+  const iSwitched = fn.indexOf('switched = act.reload;');
+  const iClose = fn.indexOf('own.close();\n      onConnected(switched);');
+  assert.ok(iAct >= 0 && iSwitched > iAct && iClose > iSwitched,
+    'activate → the verdict → the candidate closes → only then the app is told');
+  // An identity-activation failure is NOT a success: an error, the
+  // candidate closed, the app not told (board #335 ②b-4).
+  assert.match(fn, /\} catch \{[\s\S]*?error = t\('configIdentityFailed'\);\s*own\.close\(\);[\s\S]*?\}\s*return;/u,
     'a peer that authenticated but could not be identified is an error, not a success');
-  assert.match(fn, /handover\?\.settle\('no-peer'\);/u, 'and a dial that never got there says so');
-  // The host's handover is part of the liveness question, so an attempt the
-  // app is no longer waiting on writes no identity and brings nothing up —
-  // including one from an instance that has been unmounted.
   // Three questions, and each covers a case the others cannot: the component
-  // is still there (a re-dial that bypasses the handover leaves the host's
-  // ticket current), this is still the instance's latest attempt, and the app
-  // is still waiting on this handover at all.
-  assert.match(fn, /const live = \(\) => mounted && attempt === attempts && !cancelled && \(handover\?\.current\(\) \?\? true\);/u);
+  // is still there, this is still the instance's latest attempt, and the app
+  // is still waiting on this candidate at all (the host activation
+  // generation; orchestrator's addendum, 01:46).
+  assert.match(fn, /const live = \(\) => mounted && attempt === attempts && !cancelled && own\.current\(\);/u);
   // And the credentials are frozen before the first write, because the fields
   // stay editable while the dial is in flight.
   assert.match(fn, /const url = normalizeAddress\(address\);\s*const tok = token;\s*const sock = socket\.trim\(\);/u);
@@ -718,9 +717,14 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
     'an await between the check and the identity write is a window for a newer handover');
   assert.match(fn, /machineId: mid/u, 'the learned machine identity rides the activation');
   assert.doesNotMatch(settings, /location\.reload/u);
-  const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?swapScope\(\);[\s\S]*?bringUp\(/u,
-    'the same reset + rebind + bring-up as an in-place switch — and swapScope builds the new server s state');
+  const on = source.match(/function onConnected\(switched = false\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  // The same reset as an in-place switch; the new server's runtime is minted
+  // (its state built), DIALS on its own connection, and only then is shown
+  // and brought up (board #335 ②b-4: its handshake is the identity of
+  // record, and no page mounts before it answers).
+  assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?const minted = mintCurrent\(\);[\s\S]*?const owner = handovers\.claim\(\);[\s\S]*?runtime\.dial\(owner\.current\)\.then\(\(result\) => \{\s*if \(!owner\.current\(\)\)[\s\S]*?if \(!minted\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(switched\) \{\s*bringUp\(/u,
+    'reset → mint → claim → dial → (still the latest) show → bring up');
+  assert.match(on, /if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result,/u, 'what the runtime s own dial found is the identity of record');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {

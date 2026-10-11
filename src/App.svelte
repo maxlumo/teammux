@@ -24,7 +24,7 @@
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
-  import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, setSocket } from './lib/core/ws.ts';
+  import { connect, isConnected, disconnect, setOnDisconnect, subscribe as wsSubscribe, resubscribeActive as wsResubscribeActive, getMachineId, getHostname, findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, listPanes, listSessions, setSocket, createConnection, createWsApi } from './lib/core/ws.ts';
   import { t } from './lib/core/i18n.svelte.ts';
   import { layout } from './lib/app/layout.svelte.ts';
   import { applyFontVars } from './lib/app/fonts.svelte.ts';
@@ -170,6 +170,15 @@
    * one success path calls this twice and comparing against the gap would
    * mint a handle nobody ever shows or releases. */
   function swapScope() {
+    const minted = mintCurrent();
+    if (!minted.keep) void scopeSwap.swap(minted.runtime);
+  }
+  /** `swapScope` without the swap (board #335 ②b-4): the runtime the tree
+   * should be bound to — the held handle when it still serves CURRENT
+   * (`keep`), else a new one with its server's state built, or null — but
+   * not SHOWN, so a caller can dial it before any page is mounted on it. A
+   * new runtime the caller never shows is ended by that caller. */
+  function mintCurrent() {
     const id = currentServerId(localStorage);
     // No server's state is built before the inputs' attribution has been
     // asked for it (board #335 ②b-4): a fresh client's first server folds
@@ -183,7 +192,7 @@
     const held = scopeSwap.bound();
     // A claim just filed the inputs into THIS server's slots: its state,
     // read before the claim, is rebuilt from them.
-    if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id && fold !== 'claimed') return;
+    if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id && fold !== 'claimed') return { keep: true, runtime: held };
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
     handovers.endAll();
@@ -199,7 +208,7 @@
         create: () => createServerState(createServerStore(localStorage, entry.id)),
       }));
     }
-    void scopeSwap.swap(next);
+    return { keep: false, runtime: next };
   }
   /** Identity repair MERGED entries: everything that named an absorbed entry
    * names its survivor now (reviewer P1, 2026-10-10).
@@ -267,8 +276,10 @@
   function revokeScope() {
     // Every open handover stops being current here: leaving is decided, so an
     // attempt that comes back afterwards must write no identity and bring
-    // nothing up, whatever it found (reviewer P1, 2026-10-10).
+    // nothing up, whatever it found (reviewer P1, 2026-10-10). A candidate
+    // still out is one of them.
     handovers.endAll();
+    candidateOpen?.close();
     heldOffline = false;               // the person chose another server
     // STOPPED now — it refuses every call from here on — and ended once its
     // server's state is released: the swap that follows waits on that end
@@ -282,9 +293,37 @@
    * server therefore keeps its handle and remounts nothing, while an
    * authenticated stranger leaves it refusing. */
   const handovers = createHandovers({ end: (runtime) => { void ends.end(runtime); } });
-  function suspendScope() {
+  /** The connect form's CANDIDATE (board #335 ②b-4; orchestrator's ruling
+   * 01:43): its own connection, apart from every bound runtime, so nothing a
+   * server's pages are using is touched while an address nobody has
+   * identified yet answers. One at a time — opening one closes the last —
+   * and it is the app's latest activation (`claim`): a boot dial or a
+   * reconnect attempt out at the time stops being current, and the
+   * candidate stops being current the moment anything newer — a switch, a
+   * revoke, another attempt — takes over. The form closes it once identity
+   * is recorded; the server's own runtime then dials (`onConnected`). */
+  let candidateOpen = null;
+  function openCandidate() {
     heldOffline = false;               // the person is connecting
-    return handovers.open(scopeSwap.bound());
+    candidateOpen?.close();
+    const owner = handovers.claim();
+    const connection = createConnection();
+    const api = createWsApi(connection);
+    let closed = false;
+    const candidate = {
+      connect: (url, tok) => connection.connect(url, tok),
+      setSocket: (socket) => api.setSocket(socket),
+      machineId: () => connection.getMachineId() || '',
+      current: () => !closed && owner.current(),
+      close() {
+        if (closed) return;
+        closed = true;
+        connection.dispose();
+        if (candidateOpen === candidate) candidateOpen = null;
+      },
+    };
+    candidateOpen = candidate;
+    return candidate;
   }
   /** The connect form is about to dial `address` (board #335 ②b-2-3,
    * reviewer P1-c on 0b8b9038). If that can be ANOTHER server, the tree bound
@@ -1038,47 +1077,92 @@
     } catch { page = 'settings'; storageFailed(); }
   }
 
-  /** The disconnected connect page reached a server. `switched`: it is a
-   * DIFFERENT server than the current entry (activateConnected moved CURRENT
-   * here), so the app comes up on it the way an in-place switch does — memory
-   * reset, tree remounted, the target's own state restored — instead of
-   * reloading (board 315). */
+  /** The connect page reached a server, and recorded which one. `switched`:
+   * it is a DIFFERENT server than the current entry (activateConnected moved
+   * CURRENT here), so the app comes up on it the way an in-place switch does
+   * — memory reset, tree remounted, the target's own state restored —
+   * instead of reloading (board 315).
+   *
+   * The form dialled its own CANDIDATE and has closed it (board #335 ②b-4):
+   * what answered there proved nothing about the server's own connection,
+   * which dials now, and ITS handshake is the identity of record
+   * (orchestrator's addendum, 01:46): a dial that reaches another machine
+   * arrives there the way a boot dial does (`arrivedElsewhere`), never as
+   * the server the candidate found. No page is mounted on a runtime before
+   * it has dialled: a new runtime is shown only once its own socket is up,
+   * and for another server the tree it replaces is unmounted first, so
+   * neither side's pages ever talk to the other's server. */
   function onConnected(switched = false) {
+    reconnectMachine.cancel();
     if (switched) {
-      reconnectMachine.cancel();
       serverSwitch.supersede();
       resetServerMemory();
       centreSurface.reset();          // the bell and a jump aimed at the server left
-      swapScope();
-      localStorage.removeItem('tmux_disconnected');
-      activeAddress = localStorage.getItem('tmux_address') || '';
-      loadServerRegistry();
-      bringUp(activeAddress, localStorage.getItem('tmux_token') || '');
-      resubscribeAll();
+    }
+    localStorage.removeItem('tmux_disconnected');
+    activeAddress = localStorage.getItem('tmux_address') || '';
+    loadServerRegistry();
+    const minted = mintCurrent();
+    const runtime = minted.runtime;
+    // Claimed AFTER the mint, which ends every older attempt: this dial is
+    // the app's latest activation, and a late answer from one superseded
+    // after it is a no-op.
+    const owner = handovers.claim();
+    if (!runtime) {
+      // Nothing to bind — the migration is blocked: the gate's panel shows.
+      if (!minted.keep) void scopeSwap.swap(null);
       return;
     }
-    reconnectMachine.cancel();
-    connected = true;
-    serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
-    // A first-ever connect is where this client's registry entry comes from,
-    // so it is also where the content tree first has a server to be bound to
-    // (board #335 ②b-1). A plain reconnect to the server it is already bound
-    // to keeps its handle and remounts nothing.
-    swapScope();
-    void keepNavFor(scopeSwap.bound());
-    // The device default (Chat), never a hard-coded Terminal (board #333); a
-    // hubless server falls back to Terminal through the redirect above.
-    page = defaultPage();
-    localStorage.removeItem('tmux_disconnected');
-    // A manual connect from Settings reaches a server with EMPTY subscription
-    // state, while Terminals stay mounted across the disconnect and keep their
-    // refcounts — so their subscribe() calls will never re-send the wire
-    // message themselves. Without this, the terminal shows a frozen snapshot
-    // (send_keys still works — it's a plain RPC) until a full reload.
-    // Mirrors onReconnectSuccess; on a first-ever connect both are no-ops.
-    resubscribeAll();
-    serverReady();
-    window.dispatchEvent(new Event('ws-reconnected'));
+    // Another server: the tree comes down before its runtime dials, so no
+    // page of the server left is mounted while the next one answers. The
+    // SAME machine under a merged id keeps its tree until the replacement is
+    // up — the replacement adopted its Files record, and unbinding first
+    // would release that record (and its downloads) as if the server had
+    // changed.
+    if (!minted.keep && switched) void scopeSwap.swap(null);
+    runtime.dial(owner.current).then((result) => {
+      if (!owner.current()) { if (!minted.keep) void ends.end(runtime); return; }
+      if (!result.ok) {
+        if (!minted.keep) void ends.end(runtime);
+        if (result.reason === 'elsewhere') { void arrivedElsewhere(result, result.entry.address, result.entry.token, owner); return; }
+        if (result.reason === 'superseded') return;
+        connected = false;
+        page = 'settings';
+        return;
+      }
+      if (!minted.keep) void scopeSwap.swap(runtime);
+      if (switched) {
+        bringUp(result.entry?.address ?? activeAddress, result.entry?.token ?? (localStorage.getItem('tmux_token') || ''));
+        resubscribeAll();
+        return;
+      }
+      connected = true;
+      serverInfo = { hostname: getHostname() || '', machineId: getMachineId() || '' };
+      // A first-ever connect is where this client's registry entry comes
+      // from, so it is also where the content tree first has a server to be
+      // bound to (board #335 ②b-1). A plain reconnect to the server it is
+      // already bound to keeps its handle and remounts nothing; identity
+      // repair in the dial may still have moved CURRENT, which this follows.
+      swapScope();
+      void keepNavFor(scopeSwap.bound());
+      // The device default (Chat), never a hard-coded Terminal (board #333);
+      // a hubless server falls back to Terminal through the redirect above.
+      page = defaultPage();
+      // A manual connect reaches a server with EMPTY subscription state,
+      // while Terminals stay mounted across the disconnect and keep their
+      // refcounts — so their subscribe() calls will never re-send the wire
+      // message themselves. Without this, the terminal shows a frozen
+      // snapshot until a full reload. Mirrors onReconnectSuccess; on a
+      // first-ever connect both are no-ops.
+      resubscribeAll();
+      serverReady();
+      window.dispatchEvent(new Event('ws-reconnected'));
+    }).catch(() => {
+      // The dial resolves every connect failure; what rejects is a write
+      // inside it — the identity record. The host gate classifies it.
+      if (!minted.keep) void ends.end(runtime);
+      if (owner.current()) { page = 'settings'; storageFailed(); }
+    });
   }
 
   function openTerminal(session, target) {
@@ -2628,7 +2712,7 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if page === 'settings' || holdPages}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} beforeConnect={suspendScope} confirmLeave={confirmFormLeave} notice={reconnectError}
+      <Settings {onConnected} {openCandidate} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}

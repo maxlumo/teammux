@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { connect, disconnect, getMachineId, setSocket } from '../core/ws.ts';
   import { defaultConnectionAddress, dropAutofilled, hostedByGateway, localAutofill, normalizeAddress as normalizeAddressFor, type Autofilled, type LocalConfig } from '../core/connection-address.ts';
   import { isAndroid, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { localServerLine, localServer } from './server-mode.svelte.ts';
@@ -13,20 +12,24 @@
 
   type HistoryEntry = { address: string; token: string };
 
-  /** What a connect attempt established about the peer on the other end
-   * (board #335 ②b-1): the host's handle may only resume on one of the two
-   * conclusions that leave it still serving its own server. */
-  type ConnectOutcome = 'same-server' | 'other-server' | 'no-peer' | 'unresolved';
-
-  /** The host's handover for ONE attempt. `current()` is what makes a late
-   * attempt harmless across instances — this form can be unmounted mid-dial
-   * and a new one started, and the old dial must then write no identity, bring
-   * nothing up and conclude nothing. */
-  type ConnectHandover = { current(): boolean; settle(outcome: ConnectOutcome): void };
+  /** One connect attempt's own connection (board #335 ②b-4): App's
+   * CANDIDATE, not the socket any server's pages are using. It reaches
+   * whatever answers at the address, and nobody knows which server that is
+   * until it authenticates — so it is kept apart from every bound runtime,
+   * and closed once identity is recorded; the server's own runtime then
+   * dials. `current()` is App's answer to "is the app still waiting on this
+   * attempt?": false once a newer attempt, a switch or a leave took over. */
+  type Candidate = {
+    connect(url: string, token: string): Promise<unknown>;
+    setSocket(socket: string): Promise<unknown>;
+    machineId(): string;
+    current(): boolean;
+    close(): void;
+  };
 
   let {
     onConnected,
-    beforeConnect,
+    openCandidate,
     confirmLeave,
     notice = '',
     frozen = '',
@@ -48,7 +51,14 @@
      * #335 ②b-2-2). Shown in the form's one error slot until it says
      * something of its own. */
     notice?: string;
+    /** The attempt authenticated and its identity is recorded: the app
+     * comes up on that server, `switched` when it is a different one than
+     * the app was on. The candidate is already closed; App dials the
+     * server's own connection, whose handshake is the identity of record. */
     onConnected: (switched: boolean) => void;
+    /** A fresh candidate for one attempt (see `Candidate`). Opening one makes
+     * any earlier attempt stale. */
+    openCandidate: () => Candidate;
     /**
      * Asked FIRST, before anything is dialled or written (board #335 ②b-2-3,
      * reviewer P1-c): may the server-bound tree be thrown away for this
@@ -58,29 +68,6 @@
      * with the address this attempt froze, which is the one it will dial.
      */
     confirmLeave?: ((address: string) => Promise<boolean>) | undefined;
-    /**
-     * Called once, before this form re-dials the shared socket (board #335
-     * ②b-1, reviewer P1-b).
-     *
-     * This form can reach a DIFFERENT server than the one the app is on, and
-     * through ②b every page is talking over the same connection object. So
-     * the host gets to put the current server's handle aside FIRST: after the
-     * socket points elsewhere, a call still in flight from the old tree — or
-     * a callback that settles before the new tree mounts — would be the old
-     * server's work sent to the new one.
-     *
-     * It may return a function that takes what this attempt CONCLUDED, and
-     * the conclusion is the point: nobody knows until the peer authenticates
-     * whether this address is the same server (the ordinary reconnect, where
-     * the host keeps its handle and remounts nothing), another one, or a
-     * stranger whose identity could not be established. "The function reached
-     * its finally" is not a conclusion — reporting that would hand the old
-     * server's pages to a peer nobody has identified.
-     *
-     * Optional, because Settings is a person-level surface that also renders
-     * with no server at all.
-     */
-    beforeConnect?: (() => ConnectHandover | void) | undefined;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
@@ -169,18 +156,16 @@
 
   let cancelled = false;
   /** Attempts started by THIS instance. Only the latest may conclude: a
-   * superseded one must not write the registry, call `onConnected` or report a
-   * handover conclusion, exactly as a superseded dial must not record its
-   * result (board #335 ②b-1, reviewer 2026-10-10). */
+   * superseded one must not write the registry or call `onConnected`,
+   * exactly as a superseded dial must not record its result (board #335
+   * ②b-1, reviewer 2026-10-10). */
   let attempts = 0;
-  /** And an attempt dies with the component. The host's ticket cannot cover
-   * this one: a re-dial that does NOT go through a handover — the Connection
-   * page's address rows, the periodic optimizer — leaves the host's handover
-   * current, so a dial started by a form the reader has since left would
-   * still look live and could disconnect or write identity over the socket
-   * that re-dial now owns (orchestrator's ruling, 2026-10-10). */
+  /** And an attempt dies with the component: a dial started by a form the
+   * reader has since left must not bring anything up. */
   let mounted = true;
-  onDestroy(() => { mounted = false; });
+  /** The candidate of the attempt in flight, closed by Cancel. */
+  let candidate: Candidate | null = null;
+  onDestroy(() => { mounted = false; candidate?.close(); });
 
   async function doConnect() {
     if (frozen) return;
@@ -197,9 +182,9 @@
     const url = normalizeAddress(address);
     const tok = token;
     const sock = socket.trim();
-    // Before the handover, the dial and every write: a "stay" here must leave
-    // the app exactly as it was. A walk that FAILS is a stay too, and this
-    // attempt ends with it — never an unhandled rejection with the form left
+    // Before the dial and every write: a "stay" here must leave the app
+    // exactly as it was. A walk that FAILS is a stay too, and this attempt
+    // ends with it — never an unhandled rejection with the form left
     // connecting. The host holds this form mounted while the walk shows other
     // pages, so an accept comes back to the instance that asked.
     let leave = true;
@@ -211,37 +196,36 @@
       return;
     }
     if (!mounted || attempt !== attempts || cancelled) return;
+    // The attempt's OWN connection (board #335 ②b-4). Nothing bound to a
+    // server is touched while it dials: the pages of the server the app is
+    // on keep their socket, and whatever answers here is identified before
+    // anything is brought up on it.
+    const own = openCandidate();
+    candidate = own;
     // Mine AND still the app's: the instance counter orders this form's own
-    // attempts, the host's handover says whether the app is still waiting on
-    // this one at all.
-    const live = () => mounted && attempt === attempts && !cancelled && (handover?.current() ?? true);
-    // The handover of the shared socket: the host puts its current server's
-    // handle aside before the dial, and this attempt reports what it
-    // ESTABLISHED about the peer. Suspending rather than revoking is what
-    // keeps an ordinary reconnect to the SAME server from remounting every
-    // page; reporting a conclusion rather than completion is what keeps the
-    // old server's pages off an unidentified peer.
-    const handover = beforeConnect?.() as ConnectHandover | void;
+    // attempts, the candidate says whether the app is still waiting on it.
+    const live = () => mounted && attempt === attempts && !cancelled && own.current();
     try {
       localStorage.setItem('tmux_address', url);
       localStorage.setItem('tmux_token', tok);
       if (sock) localStorage.setItem('tmux_socket', sock);
       else localStorage.removeItem('tmux_socket');
       saveHistory(url, tok);
-      await connect(url, tok);
+      await own.connect(url, tok);
       // A superseded, cancelled or unmounted attempt owns nothing from here
-      // on: not the registry, not `onConnected`, and not the handover.
+      // on: not the registry, not `onConnected`.
       if (!live()) return;
-      if (sock) await setSocket(sock).catch(() => {});
+      // The tmux socket is the SERVER's setting, so it is set through the
+      // candidate and stays set for the server's own connection.
+      if (sock) await own.setSocket(sock).catch(() => {});
+      const mid = own.machineId();
+      let switched = false;
       // Checked again here, after the awaits above and with NO await between
-      // this and the first identity write: a newer handover may have taken
-      // over while `connect` or `setSocket` resolved, and the transport is
-      // imported statically precisely so nothing can resolve in between
-      // (reviewer, 2026-10-10).
+      // this and the first identity write: a newer attempt may have taken
+      // over while `connect` or `setSocket` resolved (reviewer, 2026-10-10).
       if (!live()) return;
       // Save machine_id → address mapping
       try {
-        const mid = getMachineId?.();
         if (mid) {
           const map = JSON.parse(localStorage.getItem('tmux_machines') || '{}');
           const addrs = map[mid] || [];
@@ -256,56 +240,47 @@
         // The multi-server registry (board #55): a successful connect RECORDS
         // by machine identity and then asks whether this was a different
         // server. Same machine (a LAN/Tailscale alternate) — nothing to
-        // activate, the socket swap was the whole event. A DIFFERENT server —
-        // CURRENT moves to it and App brings the app up on it with the
-        // content tree remounted (board 315, no reload); each server's state
-        // is in its own slots already. The mirror keys
-        // already point here — this form wrote them before dialing.
+        // activate. A DIFFERENT server — CURRENT moves to it and App brings
+        // the app up on it with the content tree remounted (board 315, no
+        // reload); each server's state is in its own slots already.
         const act = activateConnected(localStorage, {
           address: url, token: tok,
           ...(sock ? { socket: sock } : {}),
           ...(mid ? { machineId: mid } : {}),
         });
-        if (!live()) return;
-        if (act.reload) {
-          // A different server authenticated: the old handle is terminal.
-          handover?.settle('other-server');
-          onConnected(true);
-          return;
-        }
+        switched = act.reload;
       } catch {
         // A peer DID authenticate and we could not establish which server it
-        // is (the registry write failed). Treating that as a same-server
-        // success is what would resume the old server's handle onto it, so it
-        // is an error and the handle keeps refusing.
+        // is (the registry write failed): an error, and nothing comes up.
         if (live()) {
-          handover?.settle('unresolved');
           error = t('configIdentityFailed');
-          disconnect();
-          // Done before the host's gate, which may end this attempt's
-          // handover (a blocked migration unbinds the server tree).
+          own.close();
+          // Done before the host's gate, which may end this attempt.
           connecting = false;
           onIdentityFailed?.();
         }
         return;
       }
-      handover?.settle('same-server');
-      onConnected(false);
+      if (!live()) return;
+      // Identity is recorded: the candidate's work is done. The server's own
+      // runtime dials from here (not adopt: one owner per connection).
+      own.close();
+      onConnected(switched);
     } catch (e) {
       if (!live()) return;
-      // The dial never reached an authenticated peer, so there is no stranger
-      // on the socket to be confused with this server.
-      handover?.settle('no-peer');
+      own.close();
       error = (e as Error).message;
     } finally {
       if (live()) connecting = false;
+      if (candidate === own) candidate = null;
     }
   }
 
   function cancelConnect() {
     cancelled = true;
     connecting = false;
-    disconnect();
+    candidate?.close();
+    candidate = null;
   }
 
   // Build a deep link that pre-fills + auto-connects (consumed by App.svelte's

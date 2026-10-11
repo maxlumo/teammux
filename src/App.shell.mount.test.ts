@@ -146,8 +146,26 @@ test('a fresh client sees the Connection card, and its own settings behind the g
 /** The facade's ONE connection and the api bound to it, which the Single
  * runtime borrows (single-runtime.ts): the same functions, so a call made
  * through the runtime is a call on this transport. */
-function withSlot<M extends Record<string, any>>(module: M): M {
+function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: string) => Promise<string> | string): M {
   const m = module as Record<string, any>;
+  // The connect form's CANDIDATE (board #335 ②b-4): its own socket, apart
+  // from the facade's. It answers as the machine the address belongs to and
+  // records `candidate:<url>`; closing it is `candidate-closed`. It never
+  // moves the facade's state: the server's own runtime dials that afterwards.
+  const calls: string[] | undefined = m.__calls;
+  m.createConnection = () => {
+    let machine = '';
+    return {
+      connect: async (url: string) => {
+        calls?.push(`candidate:${url}`);
+        machine = await (candidateAt ? candidateAt(url) : (url.includes('//b') ? 'm-b' : 'm-a'));
+        return machine;
+      },
+      getMachineId: () => machine,
+      dispose: () => { calls?.push('candidate-closed'); },
+    };
+  };
+  m.createWsApi = () => ({ setSocket: async () => ({}) });
   m.compatSlotApi = m;
   m.connection = {
     connect: (url: string, token: string) => m.connect(url, token), disconnect: m.disconnect,
@@ -170,6 +188,7 @@ function liveTransport(calls: string[], machine: () => string) {
     return connected ? Promise.resolve(result) : Promise.reject(new Error('not connected'));
   };
   return withSlot({
+    __calls: calls,
     connect: async (url: string) => { calls.push(`connect:${url}`); connected = true; return machine(); },
     disconnect: () => { connected = false; },
     isConnected: () => connected,
@@ -386,7 +405,7 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     getBookmarks: rpc('get_bookmarks', { bookmarks: [] }),
     ...extra,
   };
-  return { module: withSlot(module), net };
+  return { module: withSlot({ __calls: calls, ...module }, (url) => machineAt(url, 0)), net };
 }
 
 /** The app booted on a seeded storage, with the transport mocked: ONE harness,
@@ -2473,4 +2492,69 @@ test('a Retry whose bind blocks again keeps the switch it owes: the next Retry s
   assert.equal(ls.getItem('tmux_server_current'), 'c', 'the kept switch arrived');
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
   assert.ok(h.app.document.querySelector('.term-page'), 'and the server is up');
+});
+
+// ─── The connect form's candidate (board #335 ②b-4) ─────────────────────
+// The form dials a candidate of its own; once identity is recorded it closes
+// it, and the server's own runtime dials. That second handshake is the
+// identity of record (orchestrator's addendum, 01:46), and nothing of the new
+// server mounts before it answers.
+
+test('a form connect to another server: candidate, close, then B s own dial; no B page before that dial answers', async (context) => {
+  const calls: string[] = [];
+  let letB: (() => void) | null = null;
+  const { app, settle, reconnectThroughForm } = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined, {
+    calls,
+    // B's OWN dial (the facade's socket, which B's Single runtime borrows) is
+    // held; the candidate is not.
+    gate: (url) => (url.includes('//b') ? new Promise<void>((r) => { letB = r; }) : null),
+  });
+  await reconnectThroughForm('ws://b:9899');
+  const seq = calls.filter((c) => /^(candidate|candidate-closed|connect:)/u.test(c));
+  assert.deepEqual(seq.slice(-3), ['candidate:ws://b:9899', 'candidate-closed', 'connect:ws://b:9899'],
+    `the candidate answered and closed before B s own dial: ${seq.join(' → ')}`);
+  assert.equal(app.document.querySelector('.term-page'), null, 'nothing server-bound is mounted while B s own dial is out');
+  letB!();
+  await settle(); await settle();
+  assert.ok(app.document.querySelector('.term-page'), 'B comes up once its own handshake answered');
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'b');
+});
+
+test('B s own dial reaching ANOTHER machine is believed over the candidate (the runtime s handshake is the identity of record)', async (context) => {
+  const calls: string[] = [];
+  // The candidate reaches B; the runtime's own dial at the same address then
+  // reaches A — an address can change hands between two handshakes.
+  const machineAt: MachineAt = (url, n) => (n === 0 ? (url.includes('//b') ? 'm-b' : 'm-a') : 'm-a');
+  const { app, settle, reconnectThroughForm } = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), machineAt, { calls });
+  await reconnectThroughForm('ws://b:9899');
+  await settle(); await settle();
+  assert.ok(calls.includes('connect:ws://b:9899'), 'B s own dial ran');
+  // That dial found A, so the app ARRIVES at A (as a boot dial that reaches
+  // another known machine does), never comes up as B on A's socket.
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'a', 'the app follows what its own dial reached');
+  const servers = JSON.parse(app.window.localStorage.getItem('tmux_servers') ?? '[]') as { id: string; machineId?: string }[];
+  assert.equal(servers.find((s) => s.id === 'b')?.machineId, 'm-b', 'and B is not stamped with A s machine');
+});
+
+test('a form connect superseded while the server s own dial is out brings nothing up (the host activation generation)', async (context) => {
+  const calls: string[] = [];
+  let letB: (() => void) | null = null;
+  const { app, settle, switchTo, reconnectThroughForm } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+    ]),
+  }, (url) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? 'm-c' : 'm-a'), {
+    calls,
+    gate: (url, n) => (url.includes('//b') && !letB ? new Promise<void>((r) => { letB = r; }) : (void n, null)),
+  });
+  await reconnectThroughForm('ws://b:9899');               // B's own dial is held
+  assert.ok(calls.includes('connect:ws://b:9899'), 'B s own dial is out');
+  await switchTo('charlie');                                // a newer activation
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'c');
+  letB!();                                                  // B's dial answers late
+  await settle(); await settle();
+  assert.equal(app.window.localStorage.getItem('tmux_server_current'), 'c', 'the late B answer moved nothing');
 });
