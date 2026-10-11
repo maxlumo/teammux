@@ -54,7 +54,12 @@ Object.defineProperty(globalThis, 'crypto', {
   value: { subtle: null },
 });
 
-const wsClient = await import(`./ws.ts?lifecycle=${Date.now()}`);
+// One connection and its bound api, as a runtime holds them (board #335
+// ②b-4 retired ws.ts's own slot; these were its lifecycle tests, and the
+// lifecycle is the connection's).
+const wsModule = await import(`./ws.ts?lifecycle=${Date.now()}`);
+const wsConnection = wsModule.createConnection();
+const wsClient = { ...wsConnection, ...wsModule.createWsApi(wsConnection), httpOriginForWs: wsModule.httpOriginForWs, deriveE2eMaterial: wsModule.deriveE2eMaterial, E2E_VERSION: wsModule.E2E_VERSION };
 
 test('HTTP download base removes only the terminal WebSocket proxy segment', () => {
   assert.equal(wsClient.httpOriginForWs('ws://devbox:5173/ws'), 'http://devbox:5173');

@@ -10,7 +10,7 @@
 //
 // So ending is two steps, and they are not the same step:
 //
-//   1. STOP NOW. The handle refuses new calls at once (`suspend`), and the
+//   1. STOP NOW. The handle refuses new calls at once (`detach`), and the
 //      host stops treating it as reusable (`ending`), so nothing new starts
 //      on it while the release runs.
 //   2. END WHEN RELEASED. Release its state, then dispose it.
@@ -23,7 +23,8 @@
 
 /** What ending needs from a handle. */
 export interface EndableHandle {
-  suspend(): number;
+  /** Stop serving at once (board #335 ②b-4: a runtime's `detach`). */
+  detach(): void;
   dispose(): void;
 }
 
@@ -50,7 +51,7 @@ export function createHandleEnds<H extends EndableHandle, S>(deps: HandleEndsDep
       if (!handle) return Promise.resolve();
       const already = ends.get(handle);
       if (already) return already;
-      handle.suspend();
+      handle.detach();
       const state = deps.stateOf(handle);
       // The release starts SYNCHRONOUSLY (its seal is its first step), so a
       // merge discovered a moment later cannot adopt a state on its way out.

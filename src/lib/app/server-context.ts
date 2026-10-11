@@ -27,10 +27,9 @@
 // list that spans servers has no single owner, so one `useServerApi()` for
 // every row would send B's action to A.
 //
-// Not wired into production yet: ②a ships this; the ②b commit where App
-// provides real runtimes is what mounts a provider.
+// Every server-bound page is under a provider since ②b, and there is no
+// fallback (②b-4): a page outside one has no server, and asking is an error.
 import { getContext, setContext } from 'svelte';
-import { compatSlotApi } from '../core/ws.ts';
 import type { WsApi } from '../core/ws-api.ts';
 import type { ServerId } from './refs.ts';
 import type { ServerRuntime } from './server-runtime.ts';
@@ -90,13 +89,11 @@ export function useServerRuntime(): ServerRuntime | null {
 /**
  * The server id this subtree is bound to, or NULL when nothing provided one.
  *
- * Null rather than a stand-in, deliberately (reviewer P2): until ②b the
- * fallback is the facade's one compatibility slot, and that slot is not a
- * server — the same handle has its server REPLACED on the next connect. A
- * fabricated "current" id would look stable while naming different machines
- * over time, and whatever got filed under it would be filed wrong. A caller
- * that needs an id to scope storage must refuse to act without one, the same
- * way `createServerStore` throws on an empty id.
+ * Null rather than a stand-in, deliberately (reviewer P2): a fabricated
+ * "current" id would look stable while naming different machines over time,
+ * and whatever got filed under it would be filed wrong. A caller that needs
+ * an id to scope storage must refuse to act without one, the same way
+ * `createServerStore` throws on an empty id.
  */
 export function useServerId(): ServerId | null {
   return useServerRuntime()?.id ?? null;
@@ -105,13 +102,15 @@ export function useServerId(): ServerId | null {
 /**
  * The RPC surface for this subtree's server, resolved once at init.
  *
- * With no provider it is the `ws.ts` facade — which is not a compatibility
- * shim with a second behaviour, it IS the path every page takes today. ②b
- * mounts real providers and ②b-3 deletes this fallback; after that a missing
- * provider is a runtime failure rather than a silent fall-back to whatever
- * server is current, so ②b-3 needs mount coverage for every consumer and
- * cannot lean on the compiler to find them.
+ * There is no fallback (board #335 ②b-4): until then a page outside a
+ * provider took the facade's one compatibility slot, "whichever server it
+ * was on". That slot is gone; a page with no provider has no server, so this
+ * THROWS rather than hand it someone else's. The compiler cannot see a
+ * missing provider, which is why every bound page has mount coverage in a
+ * scope (scope-binding.mount.test.ts).
  */
 export function useServerApi(): WsApi {
-  return useServerRuntime()?.api ?? compatSlotApi;
+  const runtime = useServerRuntime();
+  if (!runtime) throw new Error('useServerApi: no server scope — a server-bound page must be under a provider');
+  return runtime.api;
 }

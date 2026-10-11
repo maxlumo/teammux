@@ -152,8 +152,8 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
       win.__mountModules = paths.map((path, index) => new Proxy({}, {
         get(_target, key) {
           if (typeof key !== 'string') return undefined;
-          // An OBJECT export (a constant, or an api object such as ws.ts's
-          // `compatSlotApi` and `connection`) is handed over as it is: a
+          // An OBJECT export (a constant such as `ADDRESS_LABELS`) is
+          // handed over as it is: a
           // call wrapper around it would turn every property read into
           // undefined (board #335 ②b-2-2 — the runtime's api is one).
           const value = options.modules[index]?.[key] as unknown;

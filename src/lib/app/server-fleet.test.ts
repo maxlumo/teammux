@@ -892,116 +892,66 @@ function countingSlot(over: Record<string, unknown> = {}) {
   return { slot, calls };
 }
 
-test('a runtime whose entry is removed mid-auth DETACHES, borrowed or owned; only its host s end disposes (board #335 ②b-4)', async () => {
+test('a runtime whose entry is removed mid-auth DETACHES; only its host s end disposes (board #335 ②b-4)', async () => {
+  // Disposing itself would skip the host's release of that server's state
+  // (the gap recorded at b2-4's 085b0e70, closed in ②b-4). It refuses at
+  // once — a method captured before the dial included — and the connection
+  // goes only when the host ends it.
   const { storage, a } = twoServers();
   let resolve: (v: string) => void = () => {};
   const { slot, calls } = countingSlot({ connect: () => new Promise<string>((r) => { resolve = r; }) });
-  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
-
+  const runtime = createServerRuntime(a, { storage, slot });
   const dial = runtime.dial();
-  // Removed WHILE authenticating: a decision that recording the successful
-  // connection would undo.
   saveServers(storage, loadServers(storage).filter((s) => s.id !== 'a'));
   resolve('m-a');
+  const captured = runtime.api.listSessions;
   assert.deepEqual(await dial, { ok: false, reason: 'gone' });
-  assert.deepEqual(calls, { disconnect: 0, dispose: 0 },
-    'the borrowed connection is left alive for its owner');
-  await assert.rejects(runtime.api.listSessions(), /detached/u, 'and the handle is terminal');
-
-  // The same path on an OWNED slot detaches too (the gap recorded at b2-4's
-  // 085b0e70, closed here): disposing itself would skip the host's release
-  // of that server's state. It refuses at once — a method captured before
-  // the dial included — and the connection goes only when the host ends it.
-  const owned = twoServers();
-  let resolveOwned: (v: string) => void = () => {};
-  const second = countingSlot({ connect: () => new Promise<string>((r) => { resolveOwned = r; }) });
-  const ownedRuntime = createServerRuntime(owned.a, { storage: owned.storage, slot: second.slot });
-  const ownedDial = ownedRuntime.dial();
-  saveServers(owned.storage, loadServers(owned.storage).filter((s) => s.id !== 'a'));
-  resolveOwned('m-a');
-  const captured = ownedRuntime.api.listSessions;
-  assert.deepEqual(await ownedDial, { ok: false, reason: 'gone' });
-  assert.equal(second.calls.dispose, 0, 'the owned runtime did not dispose itself');
+  assert.equal(calls.dispose, 0, 'the runtime did not dispose itself');
   await assert.rejects(captured(), /detached/u, 'a pre-captured method refuses at once');
-  assert.equal(ownedRuntime.alive(), false, 'and the handle is terminal');
-  ownedRuntime.dispose();                                  // the host's end
-  assert.equal(second.calls.dispose, 1, 'the host s end disposes the connection');
+  assert.equal(runtime.alive(), false, 'and the handle is terminal');
+  runtime.dispose();                                       // the host's end
+  assert.equal(calls.dispose, 1, 'the host s end disposes the connection');
 });
 
-test('a borrowed runtime absorbed into another entry keeps the socket the app came up on', async () => {
+test('a runtime absorbed into another entry closes its socket and detaches; the host disposes it', async () => {
   // The ordinary absorption: this id knows no machine, the machine that
-  // answered already has an entry, so `recordServer` folds this one away. The
-  // app is coming up on the machine that answered — cutting that socket from
-  // inside a dial that is REPORTING the canonical entry would take the
-  // connection away from the caller that has to recover.
+  // answered already has an entry, so `recordServer` folds this one away. A
+  // connection under an id that no longer exists must not stay open; the app
+  // arrives at the canonical entry through that entry's own runtime.
   const known = entry({ id: 'canon', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a' });
   const history = entry({ id: 'history', name: 'ws://old:9899', address: 'ws://old:9899', token: 'tokA' });
-  const storage = mem({
-    tmux_servers: JSON.stringify([known, history]),
-    tmux_server_current: 'canon',
-  });
+  const storage = mem({ tmux_servers: JSON.stringify([known, history]), tmux_server_current: 'canon' });
   const { slot, calls } = countingSlot();
-  const runtime = createServerRuntime(history, { storage, slot, borrowed: true });
-
+  const runtime = createServerRuntime(history, { storage, slot });
   const result = await runtime.dial();
-  assert.equal(result.ok, false);
   assert.equal(!result.ok && result.reason, 'elsewhere');
-  assert.equal(!result.ok && result.reason === 'elsewhere' && result.entry.id, 'canon',
-    'it reports the entry for the machine that answered');
+  assert.equal(!result.ok && result.reason === 'elsewhere' && result.entry.id, 'canon', 'it reports the entry for the machine that answered');
   assert.ok(!loadServers(storage).some((s) => s.id === 'history'), 'and this id is gone');
-  assert.deepEqual(calls, { disconnect: 0, dispose: 0 },
-    'the legacy transport is still open: every un-migrated module is on it');
+  assert.deepEqual(calls, { disconnect: 1, dispose: 0 }, 'the socket is closed, the connection left for the host s end');
   await assert.rejects(runtime.api.listSessions(), /detached/u, 'the absorbed handle is inert');
-
-  // Owned, the same dial closes the socket, because a connection under an id
-  // that no longer exists is exactly what must not stay open.
-  const owned = mem({
-    tmux_servers: JSON.stringify([known, history]),
-    tmux_server_current: 'canon',
-  });
-  const second = countingSlot();
-  await createServerRuntime(history, { storage: owned, slot: second.slot }).dial();
-  assert.equal(second.calls.disconnect, 1, 'an owned runtime closes a socket it may not keep');
 });
 
-test('a borrowed runtime that reaches a DIFFERENT known server detaches; an owned one stays A s handle', async () => {
-  // known-A → known-B (reviewer P1-a2): both entries survive, so the
-  // absorption rule above never fires. The dial was A's and the socket it got
-  // reaches B — and the socket is not ours to close — so a BORROWED handle is
-  // provably no longer serving A, and anything still holding its api would be
-  // sending A's work to B. An OWNED handle closed its own socket instead, so
-  // it is still A's handle and may dial A again.
+test('a runtime that reaches a DIFFERENT known server closes that socket and stays its own server s handle', async () => {
+  // known-A → known-B (reviewer P1-a2): both entries survive. The socket the
+  // dial got reaches B, so it is closed; the handle is still A's, free to
+  // dial A again.
   const { storage, a } = twoServers();
   const { slot, calls } = countingSlot({ connect: async () => 'm-b' });
-  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
-
+  const runtime = createServerRuntime(a, { storage, slot });
   const result = await runtime.dial();
   assert.equal(!result.ok && result.reason, 'elsewhere');
   assert.equal(!result.ok && result.reason === 'elsewhere' && result.entry.id, 'b');
   assert.deepEqual(loadServers(storage).map((s) => s.id), ['a', 'b'], 'both entries are kept');
-  assert.deepEqual(calls, { disconnect: 0, dispose: 0 }, 'the owner s socket is untouched');
-  assert.equal(runtime.alive(), false, 'but the handle has let go');
-  await assert.rejects(runtime.api.listSessions(), /detached/u);
-
-  const owned = twoServers();
-  const second = countingSlot({ connect: async () => 'm-b' });
-  const ownedRuntime = createServerRuntime(owned.a, { storage: owned.storage, slot: second.slot });
-  const ownedResult = await ownedRuntime.dial();
-  assert.equal(!ownedResult.ok && ownedResult.reason, 'elsewhere');
-  assert.equal(second.calls.disconnect, 1, 'it closes the socket that reached the wrong server');
-  assert.equal(second.calls.dispose, 0);
-  assert.equal(ownedRuntime.alive(), true, 'and remains A s handle, free to dial A again');
+  assert.deepEqual(calls, { disconnect: 1, dispose: 0 }, 'it closes the socket that reached the wrong server');
+  assert.equal(runtime.alive(), true, 'and remains A s handle');
 });
 
-test('a borrowed handle keeps answering until it is detached', async () => {
-  // The gate is on the handle's own liveness, not on the connection: while the
-  // handle is the one the app shows, its api is the facade's api, so a bound
-  // page and an un-migrated module are provably on one socket.
+test('a handle answers until it is detached', async () => {
   const { storage, a } = twoServers();
   const { slot } = countingSlot();
-  const runtime = createServerRuntime(a, { storage, slot, borrowed: true });
+  const runtime = createServerRuntime(a, { storage, slot });
   assert.deepEqual((await runtime.api.listSessions()).map((s: any) => s.name), ['live']);
-  runtime.dispose();
+  runtime.detach();
   await assert.rejects(runtime.api.listSessions(), /detached/u);
 });
 

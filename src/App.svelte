@@ -38,7 +38,7 @@
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore } from './lib/app/server-store.ts';
   import { claimPending, migrateServerState } from './lib/app/server-state-migration.ts';
-  import { createHandovers } from './lib/app/handover.ts';
+  import { createActivations } from './lib/app/activation.ts';
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
@@ -212,7 +212,7 @@
     if (held?.alive() && !ends.ending(held) && entry && held.id === entry.id && fold !== 'claimed') return { keep: true, runtime: held };
     // The tree is changing servers: an attempt still in flight is no longer
     // the one the app is waiting on.
-    handovers.endAll();
+    activations.endAll();
     // The fleet follows the registry first: an id identity repair absorbed
     // leaves it (the bound one is not ended here, see `fleet`), so the
     // survivor's runtime is a NEW one rather than the alias found as a twin.
@@ -307,7 +307,7 @@
     // attempt that comes back afterwards must write no identity and bring
     // nothing up, whatever it found (reviewer P1, 2026-10-10). A candidate
     // still out is one of them.
-    handovers.endAll();
+    activations.endAll();
     candidateOpen?.close();
     heldOffline = false;               // the person chose another server
     // STOPPED now — it refuses every call from here on — and ended once its
@@ -315,13 +315,9 @@
     // before it shows anything (reviewer P1-a on 48b40082).
     void ends.end(scopeSwap.bound());
   }
-  /** The connect form's handover (app/handover.ts, which holds the rules and
-   * the tests): the handle stands down for the length of one attempt, and
-   * what happens to it next is decided by what that attempt ESTABLISHED about
-   * the peer — never by the attempt merely finishing. A reconnect to the same
-   * server therefore keeps its handle and remounts nothing, while an
-   * authenticated stranger leaves it refusing. */
-  const handovers = createHandovers({ end: (runtime) => { void ends.end(runtime); } });
+  /** The app's activation generation (app/activation.ts): the latest
+   * attempt to bring a server up is the only one the app waits on. */
+  const activations = createActivations();
   /** The connect form's CANDIDATE (board #335 ②b-4; orchestrator's ruling
    * 01:43): its own connection, apart from every bound runtime, so nothing a
    * server's pages are using is touched while an address nobody has
@@ -335,7 +331,7 @@
   function openCandidate() {
     heldOffline = false;               // the person is connecting
     candidateOpen?.close();
-    const owner = handovers.claim();
+    const owner = activations.claim();
     const connection = createConnection();
     const api = createWsApi(connection);
     let closed = false;
@@ -928,7 +924,7 @@
     // stands down for the attempt, a boot dial or a form still out stops
     // being the app's, and the attempt in turn stops being the app's the
     // moment the form opens one. Its verdict settles the same way.
-    attempt: () => handovers.open(scopeSwap.bound()),
+    attempt: () => activations.claim(),
     findBestAddress,
     isAddressViable,
     noteAddressUnreachable,
@@ -944,7 +940,7 @@
       reconnectAttempt = st.attempt;
       reconnectClass = st.label;
     },
-    onSuccess: (useAddr, primaryAddr, handover) => onReconnectSuccess(useAddr, primaryAddr, handover),
+    onSuccess: (useAddr, primaryAddr, attempt) => onReconnectSuccess(useAddr, primaryAddr, attempt),
     onGiveUp: () => { connected = false; page = 'settings'; },
   });
 
@@ -965,9 +961,9 @@
     page = 'settings';
   }
 
-  function onReconnectSuccess(useAddr, primaryAddr, handover) {
+  function onReconnectSuccess(useAddr, primaryAddr, attempt) {
     // An attempt already out when the migration blocked records nothing.
-    if (migrationBlocked) { handover?.settle('unresolved'); live()?.disconnect(); connected = false; return; }
+    if (migrationBlocked) { live()?.disconnect(); connected = false; return; }
     // WHO answered decides what this success means, and the identity layer
     // is the one that knows (reviewer P1-b on 372cb4af): the entry
     // `recordServer` returns for the machine that answered. "CURRENT did not
@@ -986,7 +982,6 @@
       // A peer authenticated and we could not establish which server it is.
       // That is never "the same server": the handle keeps refusing (hold),
       // and the person is told, exactly as the connect form does.
-      handover?.settle('unresolved');
       reconnectError = t('configIdentityFailed');
       live()?.disconnect();
       storageFailed();
@@ -1001,7 +996,7 @@
     // after A's editors have been asked — and never resumes A's api over B's
     // socket.
     if (held && currentServerId(localStorage) !== canonical.id && mergedInto(localStorage, held.id) !== canonical.id) {
-      void arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '', handover);
+      void arrivedElsewhere({ entry: canonical, machineId: mid }, useAddr, localStorage.getItem('tmux_token') || '', attempt);
       return;
     }
     connected = true;
@@ -1019,7 +1014,6 @@
     // ADOPTED its state. A verdict here would end it first, while nothing had
     // adopted it, and release the state the survivor is about to take over.
     // A no-op whenever the id did not move, which is the ordinary failover.
-    if (held && held.id === canonical.id) handover?.settle('same-server');
     swapScope();
     void keepNavFor(scopeSwap.bound());
     resubscribeAll();
@@ -1086,7 +1080,7 @@
    * was taken under: if someone else took it anyway, this arrival is not
    * the app's any more and does nothing. */
   async function arrivedElsewhere(result, addr, token, attempt) {
-    if (migrationBlocked) { attempt.settle?.('unresolved'); live()?.disconnect(); connected = false; return; }
+    if (migrationBlocked) { live()?.disconnect(); connected = false; return; }
     if (currentServerId(localStorage) === result.entry.id) { bringUp(addr, token); return; }
     if (!attempt.current()) return;
     let leave = false;
@@ -1096,7 +1090,6 @@
     } catch { leave = false; }
     if (!attempt.current()) return;
     if (!leave) {
-      attempt.settle?.('unresolved');
       live()?.disconnect();
       connected = false;
       heldOffline = true;
@@ -1104,7 +1097,6 @@
       page = 'settings';
       return;
     }
-    attempt.settle?.('other-server');
     try {
       const act = activateConnected(localStorage, {
         address: addr, token,
@@ -1164,7 +1156,7 @@
     // Claimed AFTER the mint, which ends every older attempt: this dial is
     // the app's latest activation, and a late answer from one superseded
     // after it is a no-op.
-    const owner = handovers.claim();
+    const owner = activations.claim();
     if (!runtime) {
       // Nothing to bind — the migration is blocked: the gate's panel shows,
       // on a page that is not the connect card (board #335 ②b-4).
@@ -1524,7 +1516,7 @@
     confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
     // An address change and a leave walk take the socket from every other
     // owner (reviewer P1s on 085b0e70 and 4fbce02e): the one owner counter.
-    claim: () => handovers.claim(),
+    claim: () => activations.claim(),
     reconnecting: () => reconnectMachine.isActive(),
     stopReconnect: () => reconnectMachine.cancel(),
     startReconnect: () => { if (!migrationBlocked) reconnectMachine.start(); },
@@ -2062,7 +2054,7 @@
     // that claim before it records anything, and the outcome below is acted
     // on only while the claim is still current: a result that had already
     // resolved when the form took over says nothing about the app now.
-    const owner = handovers.claim();
+    const owner = activations.claim();
     // The runtime for CURRENT: the bound one, or — when a bind that blocked
     // stopped it before its own dial and nothing is bound yet — the one the
     // fleet holds for it (board #335 ②b-4).

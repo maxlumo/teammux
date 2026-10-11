@@ -36,16 +36,15 @@ export interface ReconnectDeps {
    * is saved for it (which gives up). */
   target: () => ServerTarget | null;
   onStateChange: (state: ReconnectState) => void;
-  /** Take the socket for ONE attempt (board #335 ②b-2-2, reviewer P1 on
-   * c5487bef): the host's handover for it. The attempt is the app's only
-   * while `current()` holds — another owner (the connect form) opening its
-   * own makes this one stale, and then its late success, failure or retry is
-   * nobody's. A failed attempt reports `no-peer`; a success hands the
-   * handover to `onSuccess`, which knows whose server answered. Omitted, the
-   * machine owns every attempt itself, as before. */
-  attempt?: () => { current(): boolean; settle(outcome: 'no-peer'): void };
+  /** Claim the app's activation for ONE attempt (board #335 ②b-2-2,
+   * reviewer P1 on c5487bef; app/activation.ts since ②b-4). The attempt is
+   * the app's only while `current()` holds — another attempt (the connect
+   * form, a switch) claiming after it makes this one stale, and then its late
+   * success, failure or retry is nobody's. A success hands the claim to
+   * `onSuccess`. Omitted, the machine owns every attempt itself, as before. */
+  attempt?: () => { current(): boolean };
   /** An attempt authenticated. The machine is already idle when this runs;
-   * `handover` is that attempt's, for the host to conclude. */
+   * `handover` is that attempt's claim. */
   onSuccess: (useAddr: string, primaryAddr: string, handover?: unknown) => void;
   /** Max attempts exhausted, no stored address, or watchdog fired. */
   onGiveUp: () => void;
@@ -87,7 +86,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
    * attempt, the watchdog — asks it, and a chain that lost it yields. A new
    * attempt opens its own handover only while the previous one still holds,
    * so a retry can never take back what the form took in the gap. */
-  let held: { current(): boolean; settle(outcome: 'no-peer'): void } | null = null;
+  let held: { current(): boolean } | null = null;
   const chainOwns = () => !held || held.current();
 
   function emit() {
@@ -200,9 +199,6 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       onSuccess(useAddr, primary, handover);
     }).catch((e: Error) => {
       if (!owned()) { yieldLoop(); return; }
-      // No peer was reached: the handle this attempt stood down serves its
-      // own server again (the next attempt stands it down anew).
-      handover?.settle('no-peer');
       // Reachability failures (timeout / refused, NOT auth errors) feed the
       // same cooldown memory the prober uses, so the next attempts skip
       // this address instead of re-burning its timeout.

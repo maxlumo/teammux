@@ -442,8 +442,9 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   assert.equal([...source.matchAll(/\.dispose\(\)/gu)].length, 2, 'App s link feedback and the candidate dispose themselves');
   assert.match(source, /function openCandidate\(\) \{[\s\S]*?close\(\) \{[\s\S]*?connection\.dispose\(\);/u, 'the candidate is the second');
   assert.equal([...source.matchAll(/releaseServerState\(/gu)].length, 1, 'the switch s pre-connect release');
-  assert.match(source, /const handovers = createHandovers\(\{ end: \(runtime\) => \{ void ends\.end\(runtime\); \} \}\);/u,
-    'a connect attempt s "another server" verdict ends the handle the same way');
+  // No connect attempt ends a handle any more (board #335 ②b-4): the
+  // verdicts went with the shared socket; the generation is all that is left.
+  assert.match(source, /const activations = createActivations\(\);/u, 'the activation generation');
   // The switch's candidate closes and the target's own runtime dials before
   // anything comes up on it (board #335 ②b-4).
   assert.match(source, /comeUp: \(target\) => \{\s*switchCandidate\?\.close\(\);[\s\S]*?dialCurrent\(true, \(\) => \{ bringUp\(target\.address, target\.token\);/u);
@@ -545,7 +546,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // dials its own CANDIDATE, so the handle's socket never moves under it, and
   // the candidate is the app's latest activation (`claim`) — a revoke closes
   // it, a newer attempt makes it stale.
-  assert.match(source, /function openCandidate\(\) \{\s*heldOffline = false;[^\n]*\n\s*candidateOpen\?\.close\(\);\s*const owner = handovers\.claim\(\);\s*const connection = createConnection\(\);/u);
+  assert.match(source, /function openCandidate\(\) \{\s*heldOffline = false;[^\n]*\n\s*candidateOpen\?\.close\(\);\s*const owner = activations\.claim\(\);\s*const connection = createConnection\(\);/u);
   assert.match(source, /current: \(\) => !closed && owner\.current\(\),/u);
   assert.match(source, /function revokeScope\(\) \{[\s\S]{0,500}?candidateOpen\?\.close\(\);/u, 'a revoke closes the candidate');
   // And asks the leave walk of the handle a connect to ANOTHER server would
@@ -553,10 +554,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // With NO address exemption (reviewer P1-b on 48b40082): an address is not
   // an identity, and which machine answers is known only after the dial.
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
-  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?handovers\.endAll\(\);/u,
+  assert.match(source, /function revokeScope\(\) \{[\s\S]{0,400}?activations\.endAll\(\);/u,
     'the switch ends every open handover: an attempt that comes back after it writes nothing');
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
-  assert.match(source, /handovers\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,400}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*return \{ keep: false, runtime: next \};/u,
+  assert.match(source, /activations\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,400}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next\) \{\s*const replaced = held \? \{ id: held\.id, state: serverStates\.get\(held\) \} : null;\s*serverStates\.set\(next, stateForRuntime\(replaced, entry\.id, \{\s*survivorOf: \(id\) => mergedInto\(localStorage, id\),\s*create: \(\) => createServerState\(createServerStore\(localStorage, entry\.id\)\),\s*\}\)\);\s*\}\s*return \{ keep: false, runtime: next \};/u,
     'and so does a swap — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
@@ -585,7 +586,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
     // then identity repair can absorb the entry the app was on. Read within
     // the function's own body: an unbounded pattern is satisfied by any later
     // `swapScope();` in the file (a negative control showed it).
-    ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
+    ['a failover', /function onReconnectSuccess\(useAddr, primaryAddr, attempt\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);/u],
   ] as const) assert.match(source, pattern, `${name} binds the content tree`);
   // An ABSORBED entry is followed, in the one place that reads CURRENT — and
   // which ids moved is the identity layer's RECORD of the merges it made,
@@ -605,7 +606,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // other two paths left it shut on the replaced handle for good.
   assert.equal([...source.matchAll(/navRestored = target;/gu)].length, 2, 'the restore and the keep, nothing else');
   assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*navRestored = target;/u);
-  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
+  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, attempt\) \{(?:(?!\n  \}\n)[\s\S])*?swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'a failover keeps');
   assert.match(source, /repair in the dial may still have moved CURRENT, which this follows\.\s*swapScope\(\);\s*void keepNavFor\(scopeSwap\.bound\(\)\);/u,
     'and so does the connect page s same-server return');
@@ -674,7 +675,7 @@ test('failover success RECORDS by machine identity — and never moves CURRENT (
   // "server" (the lead-review invariant: multi-server must not break the
   // multi-address semantics), and recording is NOT activating: CURRENT
   // stays put, no reload, the failover semantics own the socket swap.
-  const fn = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  const fn = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, attempt\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.match(fn, /recordServer\(localStorage, \{[\s\S]*?address: useAddr/u, 'the active address follows the connect');
   assert.match(fn, /machineId: mid/u, 'merged by machine identity, never by address alone');
   assert.ok(!fn.includes('activateConnected') && !fn.includes('applySwitch'),
@@ -730,7 +731,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   // and brought up (board #335 ②b-4: its handshake is the identity of
   // record, and no page mounts before it answers).
   assert.match(on, /if \(switched\) \{[\s\S]*?resetServerMemory\(\);[\s\S]*?centreSurface\.reset\(\);[\s\S]*?dialCurrent\(switched, \(result\) => \{\s*bringUp\(/u, 'reset → dial the server s own runtime → bring up');
-  assert.match(dialFn, /const minted = mintCurrent\(\);[\s\S]*?const owner = handovers\.claim\(\);[\s\S]*?runtime\.dial\(owner\.current\)\.then\(\(result\) => \{\s*if \(!owner\.current\(\)\)[\s\S]*?if \(!minted\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(switched\) \{ up\(result\); return; \}/u,
+  assert.match(dialFn, /const minted = mintCurrent\(\);[\s\S]*?const owner = activations\.claim\(\);[\s\S]*?runtime\.dial\(owner\.current\)\.then\(\(result\) => \{\s*if \(!owner\.current\(\)\)[\s\S]*?if \(!minted\.keep\) void scopeSwap\.swap\(runtime\);\s*if \(switched\) \{ up\(result\); return; \}/u,
     'mint → claim → dial → (still the latest) show → bring up');
   assert.match(dialFn, /if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result,/u, 'what the runtime s own dial found is the identity of record');
 });
@@ -747,7 +748,7 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // The dial owns the socket only while its claim on the host's owner counter
   // is current (reviewer P1-b on cc5e517e): the runtime asks it before it
   // records anything, and the outcome is acted on only while it still holds.
-  assert.match(source, /const owner = handovers\.claim\(\);\s*(?:\/\/[^\n]*\n\s*)*const runtime = scopeSwap\.bound\(\) \?\? mintCurrent\(\)\.runtime;\s*(?:\/\/[^\n]*\n\s*)*const dialled = runtime \? runtime\.dial\(owner\.current\) : Promise\.resolve\(\{ ok: false, reason: 'failed' \}\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
+  assert.match(source, /const owner = activations\.claim\(\);\s*(?:\/\/[^\n]*\n\s*)*const runtime = scopeSwap\.bound\(\) \?\? mintCurrent\(\)\.runtime;\s*(?:\/\/[^\n]*\n\s*)*const dialled = runtime \? runtime\.dial\(owner\.current\) : Promise\.resolve\(\{ ok: false, reason: 'failed' \}\);\s*dialled\.then\(\(result\) => \{\s*clearTimeout\(timeout\);\s*if \(!owner\.current\(\)\) return;/u);
   assert.match(source, /\.catch\(\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*clearTimeout\(timeout\);\s*if \(owner\.current\(\)\) \{ page = 'settings'; storageFailed\(\); \}/u,
     'a write that fails inside the dial goes to the host gate (reviewer P1 on 23879812)');
   // Every identity-write failure path reports to the ONE gate.
@@ -762,22 +763,21 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   ] as const) assert.match(source, pattern, `${where} reports through the gate`);
   assert.match(source, /if \(result\.ok\) \{ bringUp\(result\.entry\?\.address \?\? addr, result\.entry\?\.token \?\? token\); return; \}\s*if \(result\.reason === 'elsewhere'\) \{ void arrivedElsewhere\(result, result\.entry\.address, result\.entry\.token, owner\); return; \}/u,
     'the app comes up on, and records, the address the runtime dialled — its entry s');
-  // And every reconnect attempt takes the socket through a handover of its
-  // own, concluded like the form's (reviewer P1 on c5487bef).
-  assert.match(source, /attempt: \(\) => handovers\.open\(scopeSwap\.bound\(\)\),/u);
+  // And every reconnect attempt claims the activation (reviewer P1 on
+  // c5487bef; a plain claim since ②b-4 — it stands no handle down).
+  assert.match(source, /attempt: \(\) => activations\.claim\(\),/u);
   // ...decided by WHO answered, the entry recordServer returns (reviewer P1-b
   // on 372cb4af), never by CURRENT not having moved; a recording failure is
   // `unresolved`, shown, and never a resume.
-  const rs = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  const rs = source.match(/function onReconnectSuccess\(useAddr, primaryAddr, attempt\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.match(rs, /\(\{ entry: canonical \} = recordServer\(localStorage,/u);
-  assert.match(rs, /\} catch \{[\s\S]*?handover\?\.settle\('unresolved'\);\s*reconnectError = t\('configIdentityFailed'\);/u);
-  assert.match(rs, /void arrivedElsewhere\(\{ entry: canonical, machineId: mid \}, useAddr, localStorage\.getItem\('tmux_token'\) \|\| '', handover\);/u,
-    'another known machine: arrive there — and the ARRIVAL concludes the handover, after the walk');
+  assert.match(rs, /\} catch \{\s*(?:\/\/[^\n]*\n\s*)*reconnectError = t\('configIdentityFailed'\);/u);
+  assert.match(rs, /void arrivedElsewhere\(\{ entry: canonical, machineId: mid \}, useAddr, localStorage\.getItem\('tmux_token'\) \|\| '', attempt\);/u,
+    'another known machine: arrive there, under this attempt s claim');
   // A merge is concluded by the swap, never by a verdict (reviewer P1-a on
   // 48b40082): a verdict would end the handle before the survivor adopted
   // its state, and release what the survivor is about to take over.
-  assert.match(rs, /if \(held && held\.id === canonical\.id\) handover\?\.settle\('same-server'\);\s*swapScope\(\);/u);
-  assert.doesNotMatch(rs, /settle\('other-server'\)/u);
+  assert.doesNotMatch(rs, /settle\(/u, 'no verdict: the swap decides');
   assert.doesNotMatch(rs, /held\.id === currentServerId/u, 'CURRENT not moving is not an identity');
   // A SUPERSEDED dial reports nothing: whoever took the socket over owns the
   // outcome, and sending the app to Settings would undo a connect that is
@@ -799,13 +799,12 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // While it asks, the socket is held: nothing automatic takes it and no
   // second walk opens (reviewer P1 on 085b0e70); a stay keeps everything
   // automatic from dialling again (P2).
-  assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*attempt\.settle\?\.\('unresolved'\);\s*live\(\)\?\.disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
+  assert.match(elsewhere, /if \(!attempt\.current\(\)\) return;[\s\S]*?leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?\}\), attempt\);[\s\S]*?if \(!attempt\.current\(\)\) return;\s*if \(!leave\) \{\s*live\(\)\?\.disconnect\(\);\s*connected = false;\s*heldOffline = true;/u);
   assert.match(source, /function onDrop\(\) \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing, not even the mirror');
-  assert.match(source, /claim: \(\) => handovers\.claim\(\),\s*reconnecting: \(\) => reconnectMachine\.isActive\(\),/u, 'an automatic claim lifts no stay');
-  assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf("settle?.('other-server')")
-    && elsewhere.indexOf("settle?.('other-server')") < elsewhere.indexOf('activateConnected('), 'ask, then conclude, then write');
+  assert.match(source, /claim: \(\) => activations\.claim\(\),\s*reconnecting: \(\) => reconnectMachine\.isActive\(\),/u, 'an automatic claim lifts no stay');
+  assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf('activateConnected('), 'ask, then write');
   assert.match(elsewhere, /activateConnected\(localStorage,[\s\S]*?if \(act\.reload\) \{ onConnected\(true\); return; \}/u,
     'both kept: arrive at B through the connect page s different-server path');
 });
@@ -823,7 +822,7 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /if \(autoConnectAttempted \|\| connected \|\| switching \|\| migrationBlocked\) return;/u, 'no boot dial');
   assert.match(source, /frozen: \(\) => migrationBlocked,/u, 'no switch, no address connect');
   assert.match(source, /async function optimizeConnection\(\) \{\s*if \(migrationBlocked\) return;/u, 'no optimizer');
-  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, handover\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(migrationBlocked\)/u, 'no late reconnect');
+  assert.match(source, /function onReconnectSuccess\(useAddr, primaryAddr, attempt\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(migrationBlocked\)/u, 'no late reconnect');
   assert.match(source, /frozen=\{migrationBlocked \? t\('migrationBlockedNote'\) : ''\} onRetry=\{retryMigration\}/u, 'and the form offers only Retry');
   const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
   assert.match(settings, /async function doConnect\(\) \{\s*if \(frozen\) return;/u, 'not only its button');

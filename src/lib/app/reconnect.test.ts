@@ -311,14 +311,14 @@ test('the machine reads no connection keys of its own (board #335 ②b-2-2)', as
 });
 
 test('an attempt whose handover was taken over does nothing, and the loop yields (reviewer P1 on c5487bef)', async () => {
-  // The connect form opens its own handover while a reconnect attempt is
+  // The connect form claims the activation while a reconnect attempt is
   // still out. That attempt's late success must not run onSuccess, its late
   // failure must not mark the address unreachable or schedule a retry that
   // would take the socket back from the form — and the machine must be idle
   // again, so a later start() is not a no-op forever.
-  const { createHandovers } = await import('./handover.ts');
+  const { createActivations } = await import('./activation.ts');
   for (const outcome of ['resolve', 'reject'] as const) {
-    const handovers = createHandovers({ end: () => {} });
+    const handovers = createActivations();
     const timers = fakeTimers();
     const events: string[] = [];
     let finish: () => void = () => {};
@@ -329,13 +329,13 @@ test('an attempt whose handover was taken over does nothing, and the loop yields
       noteAddressUnreachable: (u) => events.push(`cooldown:${u}`),
       classifyAddress: () => 0, addressLabels: ['LAN'],
       target: () => ({ address: 'ws://192.168.1.2:9899', token: 't', machineId: '', alternates: [] }),
-      attempt: () => handovers.open(null),
+      attempt: () => handovers.claim(),
       onStateChange: () => {}, onSuccess: () => events.push('success'), onGiveUp: () => events.push('gave up'),
       setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
     });
     machine.start();
     await timers.advance(1);
-    handovers.open(null);           // the form takes the socket
+    handovers.claim();           // the form takes the socket
     finish();
     await timers.advance(10_000);
     assert.deepEqual(events, [], `${outcome}: no success, no give-up, no cooldown`);
@@ -345,12 +345,9 @@ test('an attempt whose handover was taken over does nothing, and the loop yields
   }
 });
 
-test('a failed attempt resumes the handle it stood down; a success hands its handover to the host', async () => {
-  const { createHandovers } = await import('./handover.ts');
-  const log: string[] = [];
-  let tickets = 0;
-  const runtime = { suspend: () => ++tickets, settle: (t: number, v: string) => log.push(`${t}:${v}`) } as never;
-  const handovers = createHandovers({ end: () => {} });
+test('a success hands its claim to the host (board #335 ②b-4: no handle is stood down any more)', async () => {
+  const { createActivations } = await import('./activation.ts');
+  const handovers = createActivations();
   const timers = fakeTimers();
   let n = 0;
   let handed: unknown = null;
@@ -359,7 +356,7 @@ test('a failed attempt resumes the handle it stood down; a success hands its han
     findBestAddress: async (a) => a[0] ?? null, isAddressViable: () => true, noteAddressUnreachable: () => {},
     classifyAddress: () => 0, addressLabels: ['LAN'],
     target: () => ({ address: 'ws://192.168.1.2:9899', token: 't', machineId: '', alternates: [] }),
-    attempt: () => handovers.open(runtime),
+    attempt: () => handovers.claim(),
     onStateChange: () => {}, onSuccess: (_u, _p, h) => { handed = h; }, onGiveUp: () => {},
     setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
   });
@@ -367,18 +364,15 @@ test('a failed attempt resumes the handle it stood down; a success hands its han
   await timers.advance(1);
   await timers.advance(1000);
   await timers.advance(1);
-  assert.deepEqual(log, ['1:resume'], 'the failed attempt (no peer) resumed its ticket');
-  assert.ok(handed && typeof (handed as { settle?: unknown }).settle === 'function', 'the success carries its handover');
-  (handed as { settle(o: string): void }).settle('same-server');
-  assert.deepEqual(log, ['1:resume', '2:resume']);
+  assert.ok(handed && (handed as { current(): boolean }).current() === true, 'the success carries its claim, still current');
 });
 
 // reviewer P1-a on 372cb4af: the chain's OTHER phases. In each, the form
 // takes the socket while the chain is between dials; the chain must not dial
 // again, mark cooldown or give up.
 async function takeoverHarness(over: { addresses?: string[]; probe?: (a: string[]) => Promise<string | null>; fail?: boolean; watchdogMs?: number } = {}) {
-  const { createHandovers } = await import('./handover.ts');
-  const handovers = createHandovers({ end: () => {} });
+  const { createActivations } = await import('./activation.ts');
+  const handovers = createActivations();
   const timers = fakeTimers();
   const events: string[] = [];
   const machine = createReconnectMachine({
@@ -388,7 +382,7 @@ async function takeoverHarness(over: { addresses?: string[]; probe?: (a: string[
     noteAddressUnreachable: (u) => events.push(`cooldown:${u}`),
     classifyAddress: () => 0, addressLabels: ['LAN'],
     target: () => ({ address: (over.addresses ?? ['ws://192.168.1.2:9899'])[0]!, token: 't', machineId: 'm', alternates: (over.addresses ?? []).slice(1) }),
-    attempt: () => handovers.open(null),
+    attempt: () => handovers.claim(),
     onStateChange: () => {}, onSuccess: () => events.push('success'), onGiveUp: () => events.push('gave up'),
     maxAttempts: 5, watchdogMs: over.watchdogMs ?? 180000,
     setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
@@ -401,7 +395,7 @@ test('a takeover during the BACKOFF ends the chain: the next attempt never dials
   h.machine.start();
   await h.timers.advance(1);
   assert.deepEqual(h.events, ['dial:ws://192.168.1.2:9899', 'cooldown:ws://192.168.1.2:9899'], 'R1 failed; a retry is scheduled');
-  h.handovers.open(null);                 // the form takes the socket in the gap
+  h.handovers.claim();                 // the form takes the socket in the gap
   await h.timers.advance(10_000);
   assert.deepEqual(h.events.filter((e) => e.startsWith('dial:')).length, 1, 'R2 did not dial');
   assert.ok(!h.events.includes('gave up'));
@@ -417,7 +411,7 @@ test('a takeover while the ADDRESS PROBE is out ends the chain, whether the prob
     });
     h.machine.start();
     await h.timers.advance(1);
-    h.handovers.open(null);
+    h.handovers.claim();
     answer();
     await h.timers.advance(10_000);
     assert.deepEqual(h.events, [], `${outcome}: no dial, no cooldown, no give-up`);
@@ -429,7 +423,7 @@ test('a superseded chain s watchdog does not give up', async () => {
   const h = await takeoverHarness({ watchdogMs: 5000 });
   h.machine.start();
   await h.timers.advance(1);                // R1 is out, and never answers
-  h.handovers.open(null);
+  h.handovers.claim();
   await h.timers.advance(6000);
   assert.ok(!h.events.includes('gave up'), 'somebody else is connecting: not a give-up');
   assert.equal(h.machine.isActive(), false);

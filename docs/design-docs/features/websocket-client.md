@@ -8,7 +8,9 @@ Custom WebSocket client with auto-reconnect, pending promise cleanup, and
 multi-address failover. Since board #335 ① it is four modules —
 `core/connection.ts` (one link as an object), `core/ws-api.ts` (every RPC,
 bound to one connection), `core/connection-registry.ts` (object lifetime) and
-`core/ws.ts`, the facade every caller still imports. See
+`core/ws.ts`, which since ②b-4 holds only the factories, the types and the
+device's reachability cache (it was the one-slot facade every caller imported
+through ②b-3). See
 § The transport is an object, not a module. Phase ② adds `app/refs.ts`: every
 reference to a session, pane, room, issue or project carries its `ServerId`
 (§ A name stopped being an address).
@@ -159,7 +161,8 @@ Four modules, one direction of dependency (`ws.ts` → registry → `ws-api.ts` 
   of a current entry — `app/servers.ts` remains the one authority on which
   saved server is which.
 - **`core/ws.ts` — the facade.** Every export name, type and return shape
-  callers had, forwarding to ONE registry slot. No app file changed.
+  callers had, forwarding to ONE registry slot. No app file changed. (Retired
+  in ②b-4: the slot and its RPC exports are gone, see § A subtree is bound.)
 
 Decisions worth keeping:
 
@@ -197,7 +200,7 @@ Decisions worth keeping:
   `dispose()` is idempotent and touches no other object. The test fixture
   tracks `setTimeout` as well as `setInterval`: counting only intervals is what
   let the dial timeout hide.
-- **The facade's slot key is a Symbol, in memory only.** Not persisted, not
+- **The facade's slot key was a Symbol, in memory only** (until ②b-4). Not persisted, not
   derived from a URL and not a stand-in for `ServerEntry.id`. A facade that
   picked its object by address or by the machine id a candidate CLAIMS would
   have had to guess during a #315 switch, before auth decides what the target
@@ -243,7 +246,8 @@ Decisions worth keeping:
   subscriptions, cipher and recovery callback alone, refcount 0→1→2→1→0,
   signed-download origin, and a negative control for each),
   `connection-registry.test.ts` pins lifetime, and `connection-facade.test.ts`
-  drives the real facade through A→B→A.
+  drove the real facade through A→B→A (deleted with the facade in ②b-4; the
+  fleet and App.shell tests carry A→B→A since).
 
 Known limit carried over from before the split: the `.catch` on `call()`'s
 `sendOnSocket` calls `notifyDisconnect` without checking which socket the send
@@ -601,82 +605,28 @@ app IS on the survivor. A handle is replaced when the SERVER changes, which is
 why a reconnect through the connect page and a failed switch's Back both keep
 the handle they had.
 
-Production holds exactly ONE runtime through ②b, and it is built on the
-facade's compatibility slot (`app/single-runtime.ts`). Sixteen modules still
-import their RPCs from `ws.ts` at module level, and a runtime minted through
-the fleet builds its own connection — a second, never-dialled client beside
-the live one, with the un-migrated pages on the other socket. Sharing the slot
-is what makes every ②b commit behaviour-identical in Single mode instead of a
-flag day. It lives in its own file so `server-runtime.ts` stays facade-free
-(its own pin, for the reason that a runtime reaching the compatibility slot IS
-the "whichever server is current" bug).
+Through ②b-3 production held ONE runtime, BORROWED on the facade's
+compatibility slot (`app/single-runtime.ts`), so every page still importing
+RPCs from `ws.ts` and every bound page talked over one socket while they moved.
+That forced a suspend/handover protocol for the connect form, which re-dialled
+the very socket the bound pages used. ②b-4 retired all of it once the last page
+was bound: each runtime owns its connection, a connect dials a candidate first,
+and the protocol's one surviving guarantee, the activation generation, is
+`app/activation.ts`. See "Every runtime owns its connection" in the rules
+below. Two rules from the borrowed era still hold:
 
-A BORROWED slot is declared as such (`borrowed: true`) rather than handled by
-convention, because "App never calls dispose" is not the dangerous path.
-`server-runtime.ts` ends a runtime from three places of its OWN: the entry
-removed while a dial authenticates, this id absorbed into the canonical entry
-of the machine that answered, and the wrong machine answering. The second of
-those is the ordinary fate of an old address-only history entry, so owning the
-connection's lifetime there would close the legacy transport for the rest of
-the session and every retry after it would answer "connection disposed". With
-`borrowed` those three DETACH instead: the handle goes terminal, the loss is
-reported through the one `onRegistryChanged` edge, and the connection is left
-alive for its owner.
-
-Detaching is also what makes two GENERATIONS of handles over one slot safe.
-A replaced handle keeps its own attempt counter, so without a detach its late
-continuation would still consider itself current and could record identity,
-and the api object it handed out would send over a slot that now serves
-another server. Three rules follow, and each was a hole first:
-
-- **A borrowed handle detaches on `elsewhere`, whether or not its entry
-  survived.** Both entries staying is the ordinary known-A → known-B case: the
-  dial was A's, the socket it got reaches B, and the socket is not ours to
-  close, so the handle is provably not serving A any more. An owned handle
-  keeps the narrower rule — it closed its own socket, so it is still A's
-  handle and may dial A again.
 - **The api gate is asked when the call is MADE.** A page holds `api` for its
   whole life, and a call like `fsWrite(path, await body)` reads the method
   before the await and sends after it; a gate on the property read would let
   both through. So each method is wrapped once, the wrappers are stable, and a
-  caller that captured one still holds the gate.
-- **The handle stands down BEFORE the shared socket is re-dialled**, on both
-  paths that can reach another server. The switch REVOKES, because leaving is
-  already decided there: the tree is unmounted, the guards have answered, and
-  the target is by definition another server (its `resetMemory` step runs
-  before its connect). The connect form SUSPENDS, because its address may turn
-  out to be this very server — revoking there would replace the handle on
-  every ordinary reconnect, rebuild every always-mounted page and throw away
-  the state they exist to keep, without asking a single leave guard. A
-  suspended handle refuses calls (the socket is mid-flight anyway) and what
-  happens to it next is decided by the VERDICT of the attempt, never by the
-  attempt merely finishing:
+  caller that captured one still holds the gate. A detached runtime refuses
+  every call at once, while its connection waits for the host's end.
+- **An identity that cannot be recorded is an error, never a success.** A
+  peer that authenticated while the registry write failed is reported to the
+  person, and nothing comes up on it.
 
-  | conclusion | verdict | why |
-  |---|---|---|
-  | `same-server` | resume | authenticated, and the identity layer confirmed this entry |
-  | `no-peer` | resume | the dial never got there, so there is no stranger to be confused with |
-  | `other-server` | end (the host's) | a different server authenticated; the handle is ENDED — released, then disposed — and the swap binds the new one |
-  | `unresolved` | hold | a peer authenticated and the registry write FAILED: refusing, but still there for the attempt that works out whose socket this is |
-
-  An identity-activation failure is therefore an error the person sees, never
-  a same-server success — swallowing it and reporting completion would resume
-  the old server's pages onto an unidentified peer. ONE host ticket covers the
-  whole chain, because handovers overlap: a form unmounted mid-dial and a new
-  instance starting its own are two instances, and to the old one its dial is
-  still its latest. So the form asks the handover whether it is still current
-  before the identity write and before bringing the app up, and every
-  verdict — including the terminal one — is refused for an attempt that is
-  no longer current: a late "another server" would end the very handle the
-  live handover is protecting. The terminal verdict is not the runtime's to
-  carry out (②b-2-3, reviewer P1-a on 48b40082): it used to dispose the
-  handle inside `settle`, before anything had released its server's state.
-  The runtime's `settle` knows only `resume` and `hold`; "another server"
-  goes to the host's one end of a handle (below).
-
-  Clearing the landings after the DOM is gone is the second line, never the
-  first — it runs ticks later, by which time the socket would already have
-  changed hands.
+Clearing the landings after the DOM is gone is the second line, never the
+first.
 
 The provider renders NOTHING without a runtime. Rendering the children
 anyway — merely without a context — built a whole provider-less
@@ -688,12 +638,12 @@ fresh client must reach with no server at all, and Preferences — theme, fonts,
 zoom, language, shortcuts — which the gear opens whenever the shell is there,
 including when no runtime is bound, and which inside the subtree would have
 rendered a blank page exactly then. Preferences' one server-bound guest, the
-Agents editor on touch, is already gated on a live server, and b3-3 gives it a
-scope of its own. A caller asking whether a swap is needed asks what the swap is already
+Agents editor on touch, is gated on a live server and bound by a GUEST scope of
+its own (②b-3). A caller asking whether a swap is needed asks what the swap is already
 HEADING for, not what is shown: during the gap nothing is shown, and one
 success path asks twice, so comparing against the gap would mint a handle
-nobody ever shows or releases. b3-4 deletes the file, the slot, the borrow and
-the provider-less fallback together.
+nobody ever shows or releases. Since ②b-4 there is no provider-less fallback:
+`useServerApi()` outside a provider throws.
 
 **A page reads its server ONCE; a union row names its own** (②b-1-3). Inside
 a bound subtree a component reads the context once, at the top level of its
@@ -763,11 +713,9 @@ same-machine merge) ends without a release — which is why a merge is
 concluded by the swap, never by a verdict: a verdict ends the handle before
 anything adopts its state. A state already released is never adopted: its
 record is sealed for good, so a failed switch's Back that discovers a merge
-builds a fresh one. On a borrowed slot the runtime's own detach on an
-identity loss inside `dial` is the stop step only (the gate a suspend also
-closes; nothing is closed), and the host's end follows; the fleet's owned
-slots keep their self-dispose until b3-4, which moves server state into the
-fleet.
+builds a fresh one. A runtime's own detach on an identity loss inside `dial`
+is the stop step only; it never disposes itself (②b-4 closed the self-dispose
+an owned slot used to keep), and the host's end follows.
 
 Before anything destroys a server-bound tree, that tree's editors are asked,
 through the one leave walk. The connect form asks before it dials, about
@@ -821,11 +769,11 @@ asks `target()` at every attempt, which App answers with
 `server-target.targetOf(storage, CURRENT)` — the active mirror for the current
 server (written ahead of the registry on four paths through ②b), the entry and
 its machine's failover set for any other id. The boot connect is the bound runtime's `dial()`
-too: the same borrowed connection, dialled at the route that reader names,
-with the runtime's attempt identity (a superseded dial brings nothing up) and
-its identity recording (an address-only entry learns its machine and is
-folded by the dial itself). A client with no saved entry has nothing bound
-and connects through the facade as before.
+too, over that runtime's own connection (②b-4), dialled at the route that
+reader names, with the runtime's attempt identity (a superseded dial brings
+nothing up) and its identity recording (an address-only entry learns its
+machine and is folded by the dial itself). A client with no saved entry has
+nothing to dial and opens the connect card.
 
 ## Multi-Server (board #55)
 
@@ -1043,7 +991,7 @@ Each entry is a decision with the reason it was made; treat them as normative. T
 
 `connect()` cleans up existing. `onclose` rejects pending. `doDisconnect()` clears timers. Heartbeat ping every 15s; 2 consecutive RPC timeouts → auto-close → reconnect.
 
-### One connection is one object; `ws.ts` is a facade over one slot (#335 ①)
+### One connection is one object; `ws.ts` holds none (#335 ①, ②b-4)
 
 The transport's mutable state belongs to the object `createConnection()`
 returns, never to a module: socket, pending map, request counter, pane/team
@@ -1065,11 +1013,12 @@ not just the socket) and a disposed handle's `connect`/`call` reject with
 `connection disposed` while registration on it is dropped, because an old
 handle that can dial again produces a live connection the registry does not
 know about. Every mutating entry point therefore carries a `disposed` guard,
-pinned by `connection.source.test.ts`. `ws.ts` holds one
-memory-only Symbol slot, never persisted and never chosen by URL or machine
-id, which retires in phase ② when every server gets an explicit runtime keyed
-by its entry id; adding a second door onto the facade re-creates the implicit
-"current server" this slot exists to avoid.
+pinned by `connection.source.test.ts`. `ws.ts` held one memory-only slot
+through ②b-3; since ②b-4 it holds NO connection — only the factories, the
+types and the device's reachability cache — and every connection belongs to a
+runtime the fleet keyed by its entry id. Adding a connection or an RPC export
+back to it re-creates the implicit "current server" (pinned by
+`connection.source.test.ts` and `server-context.source.test.ts`).
 
 ### Every referenced object names its server (#335 ②)
 
@@ -1155,25 +1104,12 @@ CURRENT, never passed, so identity repair re-pointing CURRENT at a machine's
 survivor moves the app with it; a handle is replaced when the server changes,
 and a handle whose lease was revoked is never reused for the same id.
 
-Through ②b production holds ONE runtime, built on the facade's compatibility
-slot in `app/single-runtime.ts` so there is one socket while the consumers
-move — in its own file to keep `server-runtime.ts` facade-free, and declared
-`borrowed`, because the dangerous paths are the three inside
-`server-runtime.ts` that end a runtime on their own: an entry removed
-mid-auth, an id absorbed into the machine's canonical entry (the ordinary fate
-of an old address-only entry, which would close the legacy transport for
-good), and the wrong machine answering. A borrowed runtime DETACHES on those —
-terminal handle, loss reported, connection left to its owner — and on
-`elsewhere` it detaches even when its entry survived, because the socket it
-holds now reaches someone else. Its api is gated at CALL time, not at property
-read, so a captured method and a call that awaits mid-way are both refused
-after the detach. The handle stands down BEFORE the socket is re-dialled
-elsewhere: the switch revokes (leaving is decided), the connect form suspends
-under a TICKET and resumes only on a confirmed conclusion — the same server,
-or no authenticated peer at all. A peer whose identity could not be recorded
-leaves the handle suspended — refusing, but still there for the attempt that
-establishes it is ours — rather than resumed or released, and a superseded
-attempt concludes nothing, writes no registry and brings nothing up. Clearing landings
+Through ②b-3 production held one runtime borrowed on the facade's
+compatibility slot, with a suspend/handover protocol for the connect form;
+both were retired in ②b-4 (next). The api gate is asked at CALL time, so a
+captured method and a call that awaits partway are both refused after a
+detach. A peer whose identity could not be recorded is an error, and a
+superseded attempt writes no registry and brings nothing up. Clearing landings
 after the DOM is gone is a second line, never the first.
 
 ### Every runtime owns its connection; a connect dials a candidate first (#335 ②b-4)

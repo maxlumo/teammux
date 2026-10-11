@@ -1,24 +1,19 @@
-// The single-connection door onto the connection layer.
+// The connection layer's one import for the app (board #335 ②b-4).
 //
-// Every page, store and test in the app imports its RPCs and its lifecycle
-// from here, and that stayed true when the transport became an object
-// (board #335 ①): this module declares no state of its own beyond ONE slot in
-// a registry, and forwards. The names, types and return shapes below are the
-// ones callers already had.
+// Until ②b this module was a FACADE: one connection in one slot, its RPCs and
+// lifecycle re-exported, and every page talked to "whichever server that slot
+// was on". Phase ② gave every server an explicit runtime and every page a
+// scope, so the slot, its RPC exports and the compatibility api went with the
+// last consumer (orchestrator's ruling, 2026-10-11 01:43). What is left:
 //
-// THE COMPATIBILITY SLOT. The slot's key is a Symbol held only in this
-// module's memory: never persisted, never derived from a URL or a machine id,
-// and not a stand-in for `ServerEntry.id`. One stable Connection means a
-// reconnect to the same server replaces a socket INSIDE the object, so a
-// mounted Terminal's listeners and subscription refcounts survive it exactly
-// as they did before the split — and nothing here can quietly decide which
-// server is "current" by guessing. Phase ② gives every server an explicit
-// ServerRuntime keyed by its entry id and this slot goes away with it.
+//   - the types and the factories — a connection, its bound api, a registry
+//     of them — so the app wires runtimes from one import, and a mount test
+//     can mock that one module;
+//   - the DEVICE's reachability memory below, deliberately global.
 //
-// Reach for `createConnection` / `createConnectionRegistry` directly when you
-// need a second connection; do not add a second door here.
-import { createConnectionRegistry } from './connection-registry.ts';
-
+// Do not add a connection or an RPC here again. A page takes its server's
+// api from its scope (app/server-context.ts); App takes it from the runtime
+// it is bound to.
 export type { Cursor, TeamMessage, PaneOutputCb, PaneClosedCb, RpcClientError, Connection } from './connection.ts';
 export { E2E_VERSION, deriveE2eMaterial, createConnection } from './connection.ts';
 export type {
@@ -30,61 +25,10 @@ export { httpOriginForWs, createWsApi } from './ws-api.ts';
 export { createConnectionRegistry } from './connection-registry.ts';
 export type { ConnectionKey, ConnectionRegistry, ConnectionSlot } from './connection-registry.ts';
 
-const registry = createConnectionRegistry();
-/** Memory-only, and the only key this module knows (see the note above). */
-const SINGLE_CURRENT = Symbol('single-current');
-const single = registry.ensure(SINGLE_CURRENT);
-
-/** The connection this facade speaks for. Exported for the app layer's own
- * wiring (phase ② replaces the callers, not the object). */
-export const connection = single.connection;
-
-/**
- * This slot's RPCs as ONE object, for phase ②a's provider-less fallback in
- * `app/server-context.ts` — and for nothing else.
- *
- * It is the second door onto the facade that the rule below warns about, open
- * on purpose and for one commit range: until ②b mounts real providers, a
- * component with no owner must take exactly today's path, and `useServerApi`
- * needs a `WsApi` to hand it. ②b-3 deletes the fallback and this export
- * together. `server-context.source.test.ts` fails if anything else imports
- * it, because a page that reaches for it is a page that has quietly gone back
- * to "whichever server is current".
- */
-export const compatSlotApi = single.api;
-
-// Lifecycle and transport. Connection's members are closures bound to their
-// object, so these are the same functions, not re-wrapped ones.
-export const {
-  connect, disconnect, isConnected, getMachineId, getHostname, setOnDisconnect,
-  addPaneOutputListener, removePaneOutputListener,
-  addPaneClosedListener, removePaneClosedListener,
-  addTeamMessageListener, removeTeamMessageListener,
-  subscribe, unsubscribe, resubscribeActive,
-} = connection;
-
 // The wire error codes a client acts on live in rpc-codes.ts, outside this
 // mocked-in-tests module (board #337); re-exported so the public surface is
 // one import.
 export { ERR_SCRATCH_HELD, ERR_SCRATCH_STALE } from './rpc-codes.ts';
-
-// Every RPC, bound to the connection above.
-export const {
-  listSessions, listPanes, listSessionsWithPanes, capturePane, sendKeys, pasteText,
-  scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
-  resizePane, setSocket, getBookmarks, saveBookmarks, getPrefs, setPref, fsCwd, fsList,
-  fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
-  fsDownloadHttp, fsUpload, fsConvert, gitCmd, projectList, projectCreate, projectAdopt,
-  projectUp, projectDown, projectRename, projectArchive, projectDelete, projectAutostart,
-  hubPost, hubCommand, hubLog, hubLogAround, hubMsgArchive, hubMsgRestore, hubMsgPurge,
-  hubRooms, hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
-  boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
-  hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentRestart,
-  hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
-  globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, modelsList, skillsList,
-  skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
-  skillsFile, mcpList, mcpSave, mcpDelete,
-} = single.api;
 
 // ─── Device reachability (GLOBAL, deliberately not per-connection) ───────
 // What follows is the ONE piece of module state this file still owns, and it

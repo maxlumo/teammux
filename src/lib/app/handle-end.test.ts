@@ -8,7 +8,7 @@ function rig() {
   const log: string[] = [];
   const handle = (id: string) => ({
     id,
-    suspend: () => { log.push(`suspend:${id}`); return 1; },
+    detach: () => { log.push(`detach:${id}`); },
     dispose: () => { log.push(`dispose:${id}`); },
   });
   type H = ReturnType<typeof handle>;
@@ -28,13 +28,13 @@ test('the handle stops at once and is disposed only after its state is released'
   const a = r.handle('a');
   r.states.set(a, 'A');
   const done = r.ends.end(a);
-  assert.deepEqual(r.log, ['suspend:a', 'release:A'], 'stopped, release started, NOT disposed');
+  assert.deepEqual(r.log, ['detach:a', 'release:A'], 'stopped, release started, NOT disposed');
   assert.equal(r.ends.ending(a), true, 'and not reusable');
   await Promise.resolve();
   assert.ok(!r.log.includes('dispose:a'));
   r.finish();
   await done;
-  assert.deepEqual(r.log, ['suspend:a', 'release:A', 'released:A', 'dispose:a']);
+  assert.deepEqual(r.log, ['detach:a', 'release:A', 'released:A', 'dispose:a']);
 });
 
 test('every path waits on the same end', async () => {
@@ -57,34 +57,31 @@ test('an ADOPTED state is not released: the same server keeps running', async ()
   r.states.set(canon, 'A');
   r.adopt(canon);
   await r.ends.end(alias);
-  assert.deepEqual(r.log, ['suspend:alias', 'dispose:alias'], 'ended without a release');
+  assert.deepEqual(r.log, ['detach:alias', 'dispose:alias'], 'ended without a release');
 });
 
 test('a handle with no state ends at once', async () => {
   const r = rig();
   await r.ends.end(r.handle('x'));
   await r.ends.end(null);
-  assert.deepEqual(r.log, ['suspend:x', 'dispose:x']);
+  assert.deepEqual(r.log, ['detach:x', 'dispose:x']);
 });
 
 // The same order with the REAL pieces App wires together — a server's real
-// state and its release, the real handovers and the real scope swap — so the
-// order is not only the helper's promise. Only the handle is a double: on a
-// borrowed slot its dispose flips nothing a mount could observe (the gate a
-// suspend already closed), so the double is where the dispose is recorded.
+// state and its release, and the real scope swap — so the order is not only
+// the helper's promise. Only the handle is a double, so it is where the
+// detach and the dispose are recorded.
 (globalThis as any).$state ??= (value: unknown) => value;
 (globalThis as any).localStorage ??= { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 const { createServerState, releaseServerState } = await import('./server-state.ts');
-const { createHandovers } = await import('./handover.ts');
 const { createScopeSwap } = await import('./server-scope.ts');
 
 function wired() {
   const log: string[] = [];
-  type Handle = { id: string; suspend(): number; settle(t: number, v: string): void; dispose(): void };
+  type Handle = { id: string; detach(): void; dispose(): void };
   const handle = (id: string): Handle => ({
     id,
-    suspend: () => { log.push(`suspend:${id}`); return 1; },
-    settle: (_t, v) => { log.push(`settle:${id}:${v}`); },
+    detach: () => { log.push(`detach:${id}`); },
     dispose: () => { log.push(`dispose:${id}`); },
   });
   const states = new WeakMap<Handle, ReturnType<typeof createServerState>>();
@@ -102,7 +99,6 @@ function wired() {
     },
     release: releaseServerState,
   });
-  const handovers = createHandovers({ end: (runtime) => { void ends.end(runtime as unknown as Handle); } });
   /** A download in flight on `h`'s server: it hears the abort at once and
    * settles only when the case says so. */
   const downloading = (h: Handle) => {
@@ -115,25 +111,10 @@ function wired() {
     assert.equal(state.files.memory.track('row', control, settled), true);
     return finish;
   };
-  return { log, handle, states, swap, ends, handovers, downloading, shown: () => shown };
+  return { log, handle, states, swap, ends, downloading, shown: () => shown };
 }
 
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-
-test('a connect attempt s "another server" verdict ends the handle after its download settles', async () => {
-  const w = wired();
-  const a = w.handle('a');
-  await w.swap.swap(a as never);
-  const finish = w.downloading(a);
-  const attempt = w.handovers.open(a as never);
-  attempt.settle('other-server');
-  await flush();
-  assert.deepEqual(w.log.filter((e) => !e.startsWith('show')), ['suspend:a', 'suspend:a', 'aborted:a'],
-    'stood down for the attempt, stopped by the verdict — and NOT disposed');
-  finish();
-  await flush();
-  assert.deepEqual(w.log.slice(-2), ['settled:a', 'dispose:a'], 'disposed only once the download settled');
-});
 
 test('a revoke and the swap after it end the handle once, after its download settles, before B shows', async () => {
   const w = wired();

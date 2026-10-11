@@ -2,15 +2,10 @@
 // The real wiring cases are server-context.mount.test.ts; these two rules are
 // the ones a mount cannot state, and each is one line away from coming back:
 //
-//   - a second importer of `compatSlotApi`. That export is the facade's second
-//     door, open for one commit range so a provider-less component keeps
-//     taking today's path. A page that reaches for it directly is a page that
-//     has gone back to "whichever server is current", and it would look
-//     correct for as long as production holds one server. Since ②b-1 the door
-//     has exactly one other named user, `app/single-runtime.ts`, which builds
-//     the ONE runtime production holds over that slot so there is one socket
-//     while the consumers move; b3-4 deletes that file, this export and the
-//     fallback together, and the list goes back to the facade alone.
+//   - the retired compatibility slot coming back (board #335 ②b-4): it was
+//     the facade's second door, so a provider-less component took "whichever
+//     server is current". It is gone with its fallback, and so is any page's
+//     value import from core/ws.
 //   - a context read that is not at component init. `getContext` works during
 //     initialisation and nowhere else, so a read inside a handler or after an
 //     `await` silently yields nothing — and the whole point of reading once is
@@ -29,44 +24,17 @@ const code = (text: string) => text
   .filter(line => !/^\s*(\/\/|\*)/u.test(line))
   .join('\n');
 
-test('only the context fallback and the single runtime reach the compatibility slot', async () => {
-  const allowed = new Set([
-    'src/lib/app/server-context.ts',
-    // The ONE runtime production holds while ws.ts still owns the socket
-    // (②b-1). It is a separate file precisely so `server-runtime.ts` stays
-    // facade-free, which server-fleet.source.test.ts pins.
-    'src/lib/app/single-runtime.ts',
-    'src/lib/core/ws.ts',
-  ]);
-  const found: string[] = [];
+test('the compatibility slot is gone, and useServerApi has no fallback (board #335 ②b-4)', async () => {
   for await (const file of glob('src/**/*.{ts,svelte}')) {
-    if (/\.(test|fixture)\.(ts|svelte)$/u.test(file) || /\.test\.[a-z]+\.svelte$/u.test(file)) continue;
-    if (allowed.has(file.replaceAll('\\', '/'))) continue;
-    if (/\bcompatSlotApi\b/u.test(code(await readFile(file, 'utf8')))) found.push(file);
+    if (file.replaceAll('\\', '/').endsWith('server-context.source.test.ts')) continue;   // this rule names it
+    assert.doesNotMatch(code(await readFile(file, 'utf8')), /\bcompatSlotApi\b|single-runtime/u, `${file} names the retired slot`);
   }
-  assert.deepEqual(found, [],
-    `compatSlotApi is the facade's one temporary door; these reach it instead of using their provider:\n  ${found.join('\n  ')}`);
+  const ctx = code(await read('server-context.ts'));
+  assert.doesNotMatch(ctx, /^import (?!type )[^\n]*from '\.\.\/core\/ws(?:-api)?\.ts'/mu, 'the context knows no transport (types only)');
+  assert.match(ctx, /export function useServerApi\(\): WsApi \{\s*const runtime = useServerRuntime\(\);\s*if \(!runtime\) throw new Error\(/u,
+    'a page with no provider has no server, and asking is an error');
 });
 
-/** The pages already bound to their scope (board #335 ②b-3), area by area.
- * Each takes its RPCs from `useServerApi()` / `useServerRuntime()`, so a value
- * import from the facade here would be a second, unbound way to the wire — the
- * call would go to "whichever server the facade is on", not to this subtree's.
- * Types still come from ws.ts. b3-4 deletes the facade's RPCs, and this list
- * with them. */
-const BOUND = [
-  // terminal/sessions
-  'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
-  'src/lib/sessions/SplitView.svelte', 'src/lib/app/ScratchPanel.svelte',
-  // files
-  'src/lib/files/Files.svelte', 'src/lib/files/GitPanel.svelte', 'src/lib/files/DirPicker.svelte',
-  // hub
-  'src/lib/hub/Hub.svelte', 'src/lib/hub/Board.svelte', 'src/lib/hub/ChatImage.svelte',
-  'src/lib/projects/Projects.svelte', 'src/lib/projects/CreateProjectDialog.svelte',
-  'src/lib/hub/AgentsPage.svelte',
-  // Not a component: it takes the api its host read (StagerHost.api).
-  'src/lib/hub/attachments.svelte.ts',
-];
 /** The value names a file imports from core/ws (type-only imports excluded). */
 function facadeValues(text: string): string[] {
   const out: string[] = [];
@@ -77,15 +45,23 @@ function facadeValues(text: string): string[] {
   return out;
 }
 
-test('a page bound to its scope takes no RPC from the facade', async () => {
-  for (const file of BOUND) {
+test('nothing but App takes a value from core/ws, and nothing names CURRENT behind its scope (board #335 ②b-4)', async () => {
+  // Every page is bound to its scope (②b-3), and ws.ts keeps only the
+  // factories and the device's reachability (②b-4). So a value import from
+  // it anywhere else is a page making a connection of its own, or reaching
+  // for reachability that is App's to act on. Types still come from ws.ts.
+  for await (const file of glob('src/**/*.{ts,svelte}')) {
+    const path = file.replaceAll('\\', '/');
+    if (/\.(test|fixture|test-fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path) || path.startsWith('src/lib/test/')) continue;
+    if (path === 'src/App.svelte' || path.startsWith('src/lib/core/')) continue;
     const text = await readFile(file, 'utf8');
     const values = facadeValues(text);
-    assert.deepEqual(values, [], `${file} imports ${values.join(', ')} from core/ws — take it from the scope`);
+    assert.deepEqual(values, [], `${path} imports ${values.join(', ')} from core/ws — take it from the scope`);
     // Nor its server's id from CURRENT (reviewer P1 on the b3 binding range):
-    // "the server that is current" is not "the server this page is bound
-    // to" once two are on screen; the scope's runtime says which.
-    assert.doesNotMatch(code(text), /\bcurrentServerId\b/u, `${file} reads CURRENT — take the id from the scope`);
+    // "the server that is current" is not "the server this page is bound to".
+    if (path.endsWith('.svelte')) {
+      assert.doesNotMatch(code(text), /\bcurrentServerId\b/u, `${path} reads CURRENT — take the id from the scope`);
+    }
   }
   assert.deepEqual(facadeValues("import { listPanes, type TmuxPane } from '../core/ws.ts';"), ['listPanes'], 'the rule sees a value import');
   assert.deepEqual(facadeValues("import type { TmuxPane } from '../core/ws.ts';"), [], 'and lets a type through');

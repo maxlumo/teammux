@@ -4,7 +4,6 @@
   // life — including from a handler that runs long after init, and across an
   // await, where reading the context again would return nothing.
   import { onDestroy } from 'svelte';
-  import { compatSlotApi } from '../core/ws.ts';
   import { useServerApi, useServerId, useServerScope } from './server-context.ts';
 
   let { label } = $props();
@@ -13,10 +12,11 @@
   // The state the provider bound WITH the runtime (②b-2-1): a page must see
   // its own server's memory, never another's beside this server's api.
   const stateOf = useServerScope()?.state?.of ?? null;
-  // Identity, not a call log: an owned subtree must not even HOLD the
-  // compatibility slot's api (reviewer r1 §F). Nothing can leak onto a slot
-  // nobody has a reference to.
-  const usesCompat = api === compatSlotApi;
+  // Identity, not a call log (reviewer r1 §F): the api a consumer holds is its
+  // own runtime's, never anything else. Since ②b-4 there is no other api to
+  // hold — a consumer without a provider does not mount at all.
+  const scope = useServerScope();
+  const usesCompat = api !== scope?.runtime?.api;
   let answer = $state('');
 
   // The instance's own name, captured at init like everything else here: this

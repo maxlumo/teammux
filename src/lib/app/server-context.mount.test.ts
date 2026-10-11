@@ -6,10 +6,8 @@
 // server it was started on, and that an owned subtree never so much as holds
 // the compatibility slot's api (reviewer r1 §F).
 //
-// Nothing here is mocked: the real `ws.ts` is loaded, so the provider-less
-// fallback is checked against the REAL facade — by object identity, and by the
-// error a real unconnected transport gives. The harness turns every mocked
-// export into a function, which cannot stand in for an api object anyway.
+// Nothing here is mocked. Since ②b-4 there is no provider-less fallback: a
+// consumer without a provider fails to mount.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
@@ -46,29 +44,21 @@ const answer = (app: { document: Document }, label: string) =>
   app.document.querySelector(`span.answer[data-label="${label}"]`)?.textContent ?? '';
 const flush = async (app: { flush: () => Promise<void> }, n = 6) => { for (let i = 0; i < n; i++) await app.flush(); };
 
-test('with no provider a consumer takes today s path, and has no server id', async (t) => {
+test('with no provider a consumer does not mount: there is no fallback (board #335 ②b-4)', async (t) => {
+  // Until ②b-4 it took the facade's compatibility slot — "whichever server it
+  // was on". That slot is gone, so a page outside a provider has no server,
+  // and asking for one is an error rather than someone else's api.
   const app = await mount(t);
-  const bare = ask(app, 'no-provider');
-  assert.ok(bare, 'the unprovided consumer mounted');
-  // Not a fabricated id: the facade's one slot is not a server — the same
-  // handle has its server replaced on the next connect, so an id invented for
-  // it would look stable while naming different machines over time.
-  assert.equal(bare.dataset.server, '');
-  assert.equal(bare.dataset.compat, '1', 'its api IS the facade s, by identity');
-  assert.deepEqual(seen(app).filter((s) => s.label === 'no-provider'),
-    [{ label: 'no-provider', serverId: null, usesCompat: true, mounted: true }]);
-
-  // And it is the REAL facade, not a look-alike: an unconnected transport
-  // answers the way it answers every page today.
-  bare.click();
+  ctl(app).bare = true;
   await flush(app);
-  assert.equal(answer(app, 'no-provider'), 'ERR not connected');
+  assert.equal(ask(app, 'no-provider'), null, 'nothing mounted');
+  assert.match(app.document.querySelector('.no-scope')?.textContent ?? '', /no server scope/u, 'and it says why');
+  assert.deepEqual(seen(app).filter((s) => s.label === 'no-provider'), [], 'it never got as far as init');
 });
 
 test('two subtrees on two servers each send to their own, and hold no slot', async (t) => {
   const app = await mount(t);
   const log: string[] = [];
-  ctl(app).bare = false;                       // every consumer has an owner now
   ctl(app).runtimes = [runtime('a', log), runtime('b', log)];
   await flush(app, 4);
 

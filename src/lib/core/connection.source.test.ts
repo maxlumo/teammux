@@ -91,15 +91,15 @@ test('every entry point that would mutate a disposed connection is guarded', asy
   assert.match(src, /dial\.timeout !== null\) clearTimeout\(dial\.timeout\)/u);
 });
 
-test('the facade holds ONE memory-only slot and no second door', async () => {
+test('ws.ts holds NO connection and no second door, only the factories and the device cache (board #335 ②b-4)', async () => {
   const src = code(await read('ws.ts'));
-  assert.match(src, /const SINGLE_CURRENT = Symbol\('single-current'\);/u);
-  assert.equal((src.match(/registry\.ensure\(/gu) ?? []).length, 1, 'exactly one slot is ever ensured');
-  assert.doesNotMatch(src, /localStorage|sessionStorage|tmux_/u, 'the slot key is never persisted');
-  // No duplicate transport: the facade forwards, it does not re-implement.
+  assert.doesNotMatch(src, /registry\.ensure\(|createConnection\(\)|Symbol\(/u, 'no slot of its own');
+  assert.doesNotMatch(src, /localStorage|sessionStorage|tmux_/u, 'nothing persisted');
+  // No duplicate transport: the one WebSocket here is the reachability probe.
   assert.equal((src.match(/new WebSocket\(/gu) ?? []).length, 1,
     'the one WebSocket in ws.ts is the reachability probe, not a second client');
   assert.doesNotMatch(src, /_cipher|pending\.set|requestId/u, 'no parallel socket bookkeeping');
+  assert.doesNotMatch(src, /export const \{/u, 'no RPC or lifecycle re-exported off a connection');
   // The reachability cache is the documented exception and must stay keyed by
   // URL — a device fact, not a server's.
   assert.match(src, /const probeFailedAt = new Map<string, number>\(\);/u);

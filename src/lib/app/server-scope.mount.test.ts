@@ -38,7 +38,7 @@ async function mount(context: TestContext) {
 const trace = (app: { window: any }) =>
   Array.from((app.window.__ctxSeen ?? []) as unknown[], (e: any) =>
     typeof e === 'string' ? e : `${e.mounted ? 'mount' : 'destroy'}:${e.label}`);
-/** Every mount that happened with no provider — i.e. holding the facade. A
+/** Every mount that happened holding anything but its own runtime's api. A
  * page that never mounts cannot send an RPC either, so this is also the
  * answer to "did anything unbound reach the wire". */
 const unbound = (app: { window: any }) =>
@@ -103,7 +103,7 @@ test('each subtree is bound to its own runtime, and keeps it across the handover
   const button = app.document.querySelector<HTMLButtonElement>('button.ask[data-label="a"]');
   assert.ok(button, 'the bound consumer mounted');
   assert.equal(button.dataset.server, 'a');
-  assert.equal(button.dataset.compat, '0', 'it does not even hold the compatibility slot');
+  assert.equal(button.dataset.compat, '0', 'it holds its own runtime s api, by identity');
 
   // And the api it holds is still A's after the tree has moved on — the
   // reason the context is read once at init.

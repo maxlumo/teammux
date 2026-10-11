@@ -73,13 +73,9 @@ test('the identity modules have exactly the production consumers this commit giv
     'refs.ts': ['src/App.svelte'],
     'nav-saved.ts': ['src/App.svelte'],
     'server-runtime.ts': [],
-    // ②b-4: no production importer; the file goes with the facade's slot.
-    'single-runtime.ts': [],
     'server-scope.ts': ['src/App.svelte'],
-    // The handover's rules, extracted from App so they can be tested; the
-    // connect form never imports it — it receives the handover the host
-    // opened.
-    'handover.ts': ['src/App.svelte'],
+    // ②b-4: the activation generation, App's alone.
+    'activation.ts': ['src/App.svelte'],
     // ②b-4: App's runtimes are the fleet's, one connection each.
     'server-fleet.ts': ['src/App.svelte'],
     // ②b-4: App builds each server's state over its own store, saves and
@@ -150,7 +146,7 @@ test('only App constructs a runtime or a state, and only the provider binds a sc
     // A browser fixture (`*.browser.test-fixture.ts`) is a test host too.
     if (/\.(test|fixture|test-fixture)\.(ts|svelte)$/u.test(path) || /\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     // The modules that define them.
-    if (/\/app\/(server-runtime|single-runtime|server-fleet|server-scope|server-store|server-state|server-context)\.ts$/u.test(path)) continue;
+    if (/\/app\/(server-runtime|server-fleet|server-scope|server-store|server-state|server-context)\.ts$/u.test(path)) continue;
     found.push(...hostRights(path, await readFile(file, 'utf8')));
   }
   assert.deepEqual(found, [], `these act outside their right:\n  ${found.join('\n  ')}`);

@@ -11,7 +11,7 @@ import { currentServerId, loadServers, migrateServers, RESIDENT_KEYS, recordServ
 import { migrateServerState } from './server-state-migration.ts';
 import { createServerStore } from './server-store.ts';
 import { clearLeaveGuardsForTests, confirmLeave, registerLeaveGuard } from './leave-guards.ts';
-import { createHandovers } from './handover.ts';
+import { createActivations } from './activation.ts';
 import { download, SUSPEND, type DownloadSink } from '../files/download.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -93,7 +93,7 @@ function app(storage = mem({
   const resets: string[] = [];
   const reconnects: string[] = [];
   const published: string[] = [];
-  const handovers = createHandovers({ end: () => {} });
+  const handovers = createActivations();
   let looping = false;
   let frozen = false;
   let gate: (target: SwitchTarget) => void = () => {};
@@ -295,7 +295,7 @@ test('an address connect takes the socket from the host s other owners, and lose
   // leave dialog holds a handover; the address connect that takes the socket
   // makes it stale, so when the dialog answers it does nothing.
   const t = app();
-  const waiting = t.handovers.open(null);
+  const waiting = t.handovers.claim();
   assert.equal(await t.sw.connectAddress('ws://a:1', 'ta'), true);
   assert.equal(waiting.current(), false, 'the earlier owner is stale');
 
@@ -306,7 +306,7 @@ test('an address connect takes the socket from the host s other owners, and lose
   (t.w as { connect: (a: string) => Promise<void> }).connect = async (addr: string) => { await gate; return real(addr); };
   const tap = t.sw.connectAddress('ws://a-ts:9', 'ta');
   await new Promise((r) => setTimeout(r, 0));
-  t.handovers.open(null);                         // the connect form, say
+  t.handovers.claim();                         // the connect form, say
   release();
   assert.equal(await tap, false, 'the address connect lost the socket');
   assert.deepEqual(t.published, ['ws://a:1'], 'and published nothing');

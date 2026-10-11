@@ -144,9 +144,10 @@ test('a fresh client sees the Connection card, and its own settings behind the g
   assert.deepEqual(app.calls, [], 'the whole walk touched no server');
 });
 
-/** The facade's ONE connection and the api bound to it, which the Single
- * runtime borrows (single-runtime.ts): the same functions, so a call made
- * through the runtime is a call on this transport. */
+/** The mocked transport as the connection layer App wires (board #335
+ * ②b-4): the fleet's registry hands every runtime this one fake socket as its
+ * connection and api, and the connect form's candidates are fakes of their
+ * own. */
 function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: string) => Promise<string> | string): M {
   const m = module as Record<string, any>;
   // The connect form's CANDIDATE (board #335 ②b-4): its own socket, apart
@@ -177,17 +178,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
     ensure: () => ({ connection: m, api: m }),
     get: () => undefined, take: () => undefined, remove: () => {}, disposeAll: () => {},
   });
-  m.compatSlotApi = m;
-  m.connection = {
-    connect: (url: string, token: string) => m.connect(url, token), disconnect: m.disconnect,
-    isConnected: m.isConnected, getMachineId: m.getMachineId, getHostname: m.getHostname,
-    // The push streams a bound page subscribes through its runtime's
-    // connection (board #335 ②b-3).
-    addTeamMessageListener: m.addTeamMessageListener, removeTeamMessageListener: m.removeTeamMessageListener,
-    subscribe: m.subscribe, unsubscribe: m.unsubscribe,
-    addPaneOutputListener: m.addPaneOutputListener, removePaneOutputListener: m.removePaneOutputListener,
-    addPaneClosedListener: m.addPaneClosedListener, removePaneClosedListener: m.removePaneClosedListener,
-  };
+
   return module;
 }
 
