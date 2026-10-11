@@ -246,6 +246,13 @@ test('every server store App builds goes through the one write gate, and a block
   assert.equal((app.match(/\bmigrationBlocked = true\b/gu) ?? []).length, 1, 'a block is decided only in holdStorage');
   // ③b-1: a background member published while held is frozen too.
   assert.match(app, /onUp\(runtime\) \{\s*if \(!serverStates\.has\(runtime\)\) serverStates\.set\(runtime, freshState\(runtime\.id\)\);\s*if \(storageHeld\) runtime\.setFrozen\(true\);/u);
+  // A member's identity record that THREW goes to the one host gate, as the
+  // focused server's does (reviewer P1 on 453f02b8). Pinned rather than
+  // driven: at App level the gate's verdict differs from "not blocked" only
+  // when its own preparation fails too, and the one such path — an open
+  // handoff — needs the CURRENT entry absorbed, which a member's record never
+  // does. The member set's side is driven in server-members.test.ts.
+  assert.match(app, /unrecorded\(\) \{ storageFailed\(\); return migrationBlocked; \},/u);
   assert.match(app, /if \(next\) wireDrop\(next\);[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);/u,
     'a runtime minted while held is frozen too: holdStorage froze only the ones it found');
 });

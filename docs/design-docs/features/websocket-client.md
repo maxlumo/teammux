@@ -975,7 +975,15 @@ takes the screen. Each member's socket drop is its own reconnect loop; the
 window's reconnect banner is the focused server's only. A block publishes
 nothing: `holdStorage`'s `endAll()` ends a member's dial in flight, so an
 authentication that lands during the block records no identity, and Retry's
-sync joins it again. An alias a member's dial finds absorbed leaves no row (its
+sync joins it again. The block is the whole app's until Retry (reviewer P1 on
+453f02b8): a later gate — the next member's join in the same sync — never
+prepares it open (`foldFor` only answers `blocked`; the preparations are the
+boot, the host gate while NOT blocked, and Retry). A published member's
+reconnect passes the post-dial gate too: refused, its socket is closed and
+its tree kept. A member's socket that closes during the block starts no loop;
+Retry's `resume` redials every published member not answering. A member's
+identity record that throws goes to the one host gate (`storageFailed`), as
+the focused server's does. An alias a member's dial finds absorbed leaves no row (its
 canonical entry is a member of its own); two known entries on one machine
 fail with the other's name and wait for the person. The set follows the
 registry, CURRENT, the mode and the exclusions (`syncMembers`), never while

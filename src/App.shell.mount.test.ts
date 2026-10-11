@@ -3770,3 +3770,80 @@ test('③b-1: each member reconnects on its own loop — B dropping never touche
   assert.equal(ls.getItem('tmux_server_current'), 'a', 'CURRENT stayed A throughout');
   assert.equal(h.onScreen(), 'work:1.0');
 });
+
+test('③b-1 (reviewer P1 on 453f02b8): B s gate blocks in a sync, and C s gate in the same sync does not open it again — only Retry does', async (context) => {
+  // The inputs are pending for m-b, and B's entry knows it is m-b, so B's
+  // FIRST gate claims them — and writing B's slot fails. C (m-c) joins in
+  // the same sync; its gate must not prepare the block open behind B.
+  const store = refusing(['tmux_hub_drafts::b']);
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+  ];
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-b', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft of m-b' }),
+  }), (url) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? 'm-c' : 'm-a'), {
+    calls: events,
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'A is up');
+  assert.ok(retry(), `B s claim could not be written: blocked, Retry offered (${dialsOf(events, 'b').length} B dials)`);
+  assert.deepEqual(dialsOf(events, 'b'), [], 'B did not dial');
+  assert.deepEqual(dialsOf(events, 'c'), [], 'and C s gate kept the block: C did not dial either');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the inputs are still pending');
+  store.state.failing = false;
+  for (let i = 0; i < 3; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(retry(), 'storage recovering is not Retry: still blocked');
+  retry()!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft of m-b' }), 'Retry claimed the inputs into B');
+  assert.ok(conn(h, 'b')?.isConnected() && conn(h, 'c')?.isConnected(), 'and both joined');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+});
+
+test('③b-1 (reviewer P1 on 453f02b8): a published member whose socket closed during a block is redialled by Retry', async (context) => {
+  // As the owed P1-3 case: pending for m-x, a switch to C (excluded) whose
+  // own dial proves m-x, and the claim's marker cannot be written. B is a
+  // published member, and its socket closes while the app is blocked.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+  ];
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }, ['c']), (url, n) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? (n === 0 ? '' : 'm-x') : 'm-a'), {
+    calls: events,
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const b = conn(h, 'b')!;
+  assert.ok(b.isConnected(), 'B joined');
+  store.state.failing = true;
+  await h.switchTo('charlie');
+  for (let i = 0; i < 4; i++) await h.settle();
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((x) => /retry/iu.test(x.textContent ?? ''));
+  assert.ok(retry(), 'blocked');
+  const n = dialsOf(events, 'b').length;
+  b.drop();                                                   // B s socket closes during the block
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(dialsOf(events, 'b').length, n, 'nothing dials B while blocked');
+  store.state.failing = false;
+  retry()!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'Retry finished the switch');
+  assert.ok(dialsOf(events, 'b').length > n, `and redialled B: ${dialsOf(events, 'b').join(',')}`);
+  assert.ok(conn(h, 'b')?.isConnected(), 'which is back');
+});

@@ -21,7 +21,11 @@
 // attempt, an exclusion or the mode going back to Single made stale
 // concludes nothing: its runtime is let go of (`release`) and no status is
 // written. A storage block stops a join where it stands and publishes
-// nothing; Retry calls `sync` again.
+// nothing; Retry calls `sync` again, and `resume` redials every published
+// member the block left without a connection (reviewer P1 on 453f02b8). A
+// published member's reconnect passes step 3 too: a refused gate closes its
+// socket and keeps it for Retry. A dial whose identity record THROWS is the
+// host gate's (`unrecorded`), never an unhandled rejection.
 //
 // Each member's status is DERIVED from these edges: `connecting` while its
 // first dial is out, `connected` once published and answering,
@@ -60,6 +64,11 @@ export interface MemberDeps {
   retry(runtime: ServerRuntime): void;
   /** Is this id still a saved entry? */
   saved(id: ServerId): boolean;
+  /** A dial's identity record failed (the dial closed that socket): the
+   * host gate classifies it. Answers whether the app is now blocked. */
+  unrecorded(runtime: ServerRuntime): boolean;
+  /** Close a published member's socket the gate refused; keep its runtime. */
+  hold(runtime: ServerRuntime): void;
 }
 
 export interface Members {
@@ -75,6 +84,10 @@ export interface Members {
   reconnecting(runtime: ServerRuntime): void;
   answered(runtime: ServerRuntime, result: DialResult): void;
   gaveUp(runtime: ServerRuntime): void;
+  /** A member's socket closed while the app is blocked: no loop now. */
+  blocked(runtime: ServerRuntime): void;
+  /** Retry: redial every published member that is not answering. */
+  resume(): void;
   /** Stop one member: its attempts end, it is let go of, its status goes. */
   leave(id: ServerId): void;
   leaveAll(): void;
@@ -100,7 +113,19 @@ export function createMembers(deps: MemberDeps): Members {
     held.set(id, { runtime, published: false });
     set(id, { kind: 'connecting' });
     const owner = deps.activations.member(runtime).claim();
-    const result = await runtime.dial(() => owner.current() && mine(runtime) && deps.wanted(id));
+    let result: DialResult;
+    try {
+      result = await runtime.dial(() => owner.current() && mine(runtime) && deps.wanted(id));
+    } catch {
+      // The identity record threw. Still ours: the host gate decides — a
+      // block keeps nothing of an unpublished member (Retry joins again); an
+      // ordinary failure is one more unanswered dial.
+      if (!owner.current() || !mine(runtime)) return;
+      if (deps.unrecorded(runtime)) { forget(id); set(id, { kind: 'failed', reason: 'storage' }); return; }
+      set(id, { kind: 'failed', reason: 'unreachable' });
+      deps.retry(runtime);
+      return;
+    }
     if (!owner.current()) { if (mine(runtime) && !held.get(id)!.published) forget(id); return; }
     answered(runtime, result);
   }
@@ -112,8 +137,14 @@ export function createMembers(deps: MemberDeps): Members {
     if (!h || h.runtime !== runtime) return;
     if (!deps.wanted(id)) { leave(id); return; }
     if (result.ok) {
+      // Step 3, for a join and a reconnect alike: the dial may have taught
+      // the entry its machine, and a pending input is that machine's.
+      if (deps.gate(id) === 'blocked') {
+        if (!h.published) forget(id); else deps.hold(runtime);
+        set(id, { kind: 'failed', reason: 'storage' });
+        return;
+      }
       if (!h.published) {
-        if (deps.gate(id) === 'blocked') { forget(id); set(id, { kind: 'failed', reason: 'storage' }); return; }
         h.published = true;
         deps.onUp(runtime);
       } else {
@@ -175,6 +206,14 @@ export function createMembers(deps: MemberDeps): Members {
     reconnecting(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'reconnecting' }); },
     answered,
     gaveUp(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
+    blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
+    resume() {
+      for (const [id, h] of held) {
+        if (!h.published || statuses[id]?.kind === 'connected') continue;
+        set(id, { kind: 'reconnecting' });
+        deps.retry(h.runtime);
+      }
+    },
     leave,
     leaveAll() { for (const id of known()) leave(id); },
   };

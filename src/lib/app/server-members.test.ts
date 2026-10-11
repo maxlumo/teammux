@@ -7,7 +7,7 @@ const { createMembers } = await import('./server-members.svelte.ts');
 const { createActivations } = await import('./activation.ts');
 import type { DialResult, ServerRuntime } from './server-runtime.ts';
 
-type Fake = ServerRuntime & { answer(r: DialResult): void; dials: number; owns: (() => boolean)[] };
+type Fake = ServerRuntime & { answer(r: DialResult): void; throws(): void; dials: number; owns: (() => boolean)[] };
 const entry = (id: string) => ({ id, name: id, address: `ws://${id}:9899`, token: 't' });
 
 function world(ids: string[]) {
@@ -16,14 +16,18 @@ function world(ids: string[]) {
   const wanted = new Set(ids);
   const saved = new Set(ids);
   let gate: (id: string) => 'ok' | 'claimed' | 'blocked' = () => 'ok';
+  let blocks = true;
   const make = (id: string): Fake => {
     let resolve: (r: DialResult) => void = () => {};
+    let reject: (e: Error) => void = () => {};
     let alive = true;
     const rt = {
       id, dials: 0, owns: [] as (() => boolean)[],
       alive: () => alive,
-      dial(owns?: () => boolean) { rt.dials++; rt.owns.push(owns ?? (() => true)); log.push(`dial:${id}`); return new Promise<DialResult>((r) => { resolve = r; }); },
+      dial(owns?: () => boolean) { rt.dials++; rt.owns.push(owns ?? (() => true)); log.push(`dial:${id}`); return new Promise<DialResult>((r, j) => { resolve = r; reject = j; }); },
       answer(r: DialResult) { resolve(r); },
+      /** The dial's identity record throws. */
+      throws() { reject(new Error('QuotaExceededError')); },
       detach() { alive = false; },
     } as unknown as Fake;
     return rt;
@@ -38,8 +42,12 @@ function world(ids: string[]) {
     release: (rt) => { log.push(`release:${rt.id}`); (rt as Fake).detach(); },
     retry: (rt) => log.push(`retry:${rt.id}`),
     saved: (id) => saved.has(id),
+    unrecorded: (rt) => { log.push(`unrecorded:${rt.id}`); return blocks; },
+    hold: (rt) => log.push(`hold:${rt.id}`),
   });
-  return { members, runtimes, log, wanted, saved, setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)! };
+  return { members, runtimes, log, wanted, saved, setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)!,
+    /** What the host gate answers for a failed identity record. */
+    blocking: (b: boolean) => { blocks = b; } };
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const ok = (id: string): DialResult => ({ ok: true, entry: entry(id) as never });
@@ -145,4 +153,52 @@ test('a published member s reconnect is reported, and leaving it ends its loop s
   w.members.answered(rt, ok('a'));
   assert.equal(w.members.status('a'), null, 'a left member s late answer writes nothing');
   assert.equal(w.members.runtimes().length, 0);
+});
+
+test('a join whose identity record throws goes to the host gate: blocked, it keeps nothing and the next sync joins again; not blocked, it retries (reviewer P1 on 453f02b8)', async () => {
+  const w = world(['b', 'c']);
+  w.members.sync([entry('b'), entry('c')]);
+  w.rt('b').throws();
+  await settle();
+  assert.ok(w.log.includes('unrecorded:b'), 'the host gate was asked');
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'storage' });
+  assert.ok(w.log.includes('release:b') && !w.members.holds(w.rt('b')), 'and B s runtime is let go of');
+  assert.deepEqual(w.members.status('c'), { kind: 'connecting' }, 'C is untouched');
+  w.members.sync([entry('b'), entry('c')]);                       // Retry
+  assert.equal(w.rt('b').dials, 1, 'a fresh runtime dials again');
+  w.blocking(false);
+  w.rt('c').throws();
+  await settle();
+  assert.deepEqual(w.members.status('c'), { kind: 'failed', reason: 'unreachable' }, 'not a block: one more unanswered dial');
+  assert.ok(w.log.includes('retry:c') && w.members.holds(w.rt('c')), 'its own loop retries it');
+});
+
+test('a published member s reconnect passes the post-dial gate: refused, its socket is held for Retry and nothing comes back (reviewer P1 on 453f02b8)', async () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  w.rt('b').answer(ok('b'));
+  await settle();
+  assert.deepEqual(w.members.runtimes().map((r) => r.id), ['b']);
+  w.setGate(() => 'blocked');
+  w.members.answered(w.rt('b'), ok('b'));                          // its loop answered
+  assert.ok(w.log.includes('hold:b') && !w.log.includes('back:b'), `held, not brought back: ${w.log.join(',')}`);
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'storage' });
+  assert.deepEqual(w.members.runtimes().map((r) => r.id), ['b'], 'still published: its tree stays');
+  w.setGate(() => 'ok');
+  w.members.resume();                                              // Retry
+  assert.ok(w.log.includes('retry:b'), 'Retry redials it');
+  w.members.answered(w.rt('b'), ok('b'));
+  assert.ok(w.log.includes('back:b'));
+  assert.deepEqual(w.members.status('b'), { kind: 'connected' });
+});
+
+test('resume redials only published members that are not answering (reviewer P1 on 453f02b8)', async () => {
+  const w = world(['b', 'c']);
+  w.members.sync([entry('b'), entry('c')]);
+  w.rt('b').answer(ok('b')); w.rt('c').answer(ok('c'));
+  await settle();
+  w.members.blocked(w.rt('b'));                                    // B s socket closed during the block
+  w.members.resume();
+  assert.deepEqual(w.log.filter((l) => l.startsWith('retry:')), ['retry:b'], 'C was answering: left alone');
+  assert.deepEqual(w.members.status('b'), { kind: 'reconnecting' });
 });

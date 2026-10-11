@@ -883,7 +883,12 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   // and freezes every runtime in the same turn.
   assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*if \(migrateServerState\(localStorage\)\.reason === 'unrecorded'\) holdStorage\(\);(?:\s*\/\/[^\n]*)*\s*else migrationBlocked = false;\s*\} catch \{ holdStorage\(\); \}/u,
     'a registry or attribution write that fails is the same blocked state, never a throw out of App');
-  assert.match(source, /function foldFor\(id\) \{\s*if \(migrationBlocked\) prepareStorage\(\);\s*if \(migrationBlocked\) return 'blocked';/u);
+  // A block is the app's until Retry (reviewer P1 on 453f02b8): the gate
+  // never re-prepares it open, and the only preparations are the boot, the
+  // host gate when NOT blocked, and Retry.
+  assert.match(source, /function foldFor\(id\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(migrationBlocked\) return 'blocked';\s*let reason;/u);
+  assert.equal([...source.matchAll(/\bprepareStorage\(\);/gu)].length, 3, 'boot, storageFailed, retryMigration');
+  assert.match(source, /function storageFailed\(switchTarget = null\) \{\s*if \(migrationBlocked\) return;\s*prepareStorage\(\);/u);
   assert.match(source, /if \(reason === 'pending'\) \{\s*const claim = claimPending\(localStorage, id\)\.reason;/u, 'a pending input meets every server that is bound');
   assert.doesNotMatch(source, /requireProof|foldNeedsProof|quarantineLegacyNav/u, 'nothing re-infers the attribution per App instance');
   // Frozen while blocked: every way CURRENT could move.

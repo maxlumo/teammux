@@ -1052,7 +1052,9 @@
   function wireDrop(runtime) {
     runtime.connection.setOnDisconnect(() => {
       if (bound() === runtime) { onDrop(); return; }
-      if (!aggregate.holds(runtime) || migrationBlocked) return;
+      if (!aggregate.holds(runtime)) return;
+      // Blocked: no loop now; Retry's resume redials it.
+      if (migrationBlocked) { aggregate.blocked(runtime); return; }
       aggregate.reconnecting(runtime);
       reconnectorOf(runtime).start();
     });
@@ -1092,6 +1094,10 @@
     },
     retry(runtime) { if (!migrationBlocked && runtime !== bound()) reconnectorOf(runtime).start(); },
     saved: (id) => loadServers(localStorage).some((s) => s.id === id),
+    // The ONE host gate classifies a member's failed identity record, as it
+    // does the focused server's (reviewer P1 on 453f02b8).
+    unrecorded() { storageFailed(); return migrationBlocked; },
+    hold(runtime) { runtime.connection.disconnect(); },
   });
   /** The ids Aggregate wants as background members: every saved, included
    * entry but the focused one, in saved order. Single wants none. */
@@ -1137,7 +1143,9 @@
    * not be recorded is the host gate's, as for the focused server. */
   function memberReconnected(runtime, result) {
     if (!aggregate.holds(runtime)) return;
-    if (!result?.ok && result?.reason === 'unrecorded') { storageFailed(); return; }
+    // An attempt out when the app blocked brings nothing back.
+    if (migrationBlocked) { runtime.connection.disconnect(); aggregate.blocked(runtime); return; }
+    if (!result?.ok && result?.reason === 'unrecorded') { storageFailed(); if (migrationBlocked) aggregate.blocked(runtime); return; }
     loadServerRegistry();
     aggregate.answered(runtime, result);
   }
@@ -2125,10 +2133,11 @@
   let deferredSwitch = null;
   /** Before server `id`'s state is built: `claimed` when a pending input
    * was just filed into its slots, `blocked` when the migration cannot be
-   * recorded (and then nothing is bound), else `ok`. A blocked migration is
-   * tried again first, so storage that recovered unblocks the next bind. */
+   * recorded (and then nothing is bound), else `ok`. A blocked app stays
+   * blocked here: only Retry prepares the migration again. */
   function foldFor(id) {
-    if (migrationBlocked) prepareStorage();
+    // A block is the whole app's until Retry (reviewer P1 on 453f02b8): a
+    // later gate — another member's join — never re-prepares it open.
     if (migrationBlocked) return 'blocked';
     let reason;
     try {
@@ -2172,6 +2181,9 @@
     // dials before anything is bound to it (reviewer P1-B on cc45d7d1).
     const minted = mintCurrent();
     if (migrationBlocked) return;
+    // Every published member the block left without a socket dials again;
+    // the ones it stopped mid-join join again through the set's sync.
+    aggregate.resume();
     if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
     if (!minted.runtime) return;
     if (minted.keep && connected) {
