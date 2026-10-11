@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import {
+  DEFAULT_SERVICE,
   RECEIPT_FILE,
   SERVICE_ENV,
   TMM_BIN_ENV,
   configHome,
+  serviceName,
   gatewayUpdate,
   hashFile,
   receiptPath,
@@ -146,24 +148,32 @@ test('nothing to deploy but the gateway does not answer is a failure', async (t)
   assert.ok(!h.told('now at'), 'and the commit is not reported as running');
 });
 
-// Reviewer P1-A(i): the confirmation is the same on both paths. A restart that
-// was accepted and then died must not report a deployed commit.
-test('a restart that is accepted and then stops answering is a failure too', async (t) => {
+// Reviewer P1-A(i), as ruled: confirm before recording. A restart that was
+// accepted and then died records nothing and reports nothing, so the next run
+// deploys again.
+test('a restart that is accepted and then stops answering records nothing', async (t) => {
   const fresh = await host(t);
   fresh.status = 7;
   assert.equal(await fresh.update(), 7, 'no receipt yet: deploy, then the check fails');
   assert.equal(fresh.restarts(), 1);
   assert.ok(!fresh.told('now at'), fresh.said.join('\n'));
-  assert.ok(fresh.told('restart was accepted'));
-  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin), 'the activation happened and is recorded');
+  assert.ok(fresh.told('NOTHING is recorded'));
+  assert.equal(await fresh.receipt(), null, 'an unconfirmed deploy is not an activation');
+
+  fresh.status = 0;
+  assert.equal(await fresh.update(), 0, 'the same bytes deploy again next time');
+  assert.equal(fresh.restarts(), 1);
+  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin));
 
   const moved = await host(t);
   await moved.update();
+  const before = await moved.receipt();
   moved.bytes = 'B';
   moved.status = 7;
   assert.equal(await moved.update(), 7, 'a stale receipt: deploy, then the check fails');
   assert.equal(moved.restarts(), 1);
   assert.ok(!moved.told('now at'), moved.said.join('\n'));
+  assert.deepEqual(await moved.receipt(), before, 'and the old receipt is not advanced');
 });
 
 // Reviewer P1-A(ii): the service's identity is the binary AND the config root
@@ -225,6 +235,25 @@ test('a service named by TMM_GATEWAY_SERVICE gets its own receipt', async (t) =>
   assert.equal((await h.receipt()).service, 'scratch.service');
   assert.equal(await h.update(), 0);
   assert.equal(h.restarts(), 0);
+});
+
+test('a receipt names the service tmm would act on, not "the default"', async (t) => {
+  const h = await host(t);
+  await h.update();
+  assert.equal((await h.receipt()).service, DEFAULT_SERVICE.other, 'on this platform, the unit');
+  assert.equal(serviceName({}, 'darwin'), DEFAULT_SERVICE.darwin);
+  assert.equal(serviceName({}, 'linux'), DEFAULT_SERVICE.other);
+  assert.equal(serviceName({ [SERVICE_ENV]: '' }, 'linux'), DEFAULT_SERVICE.other, 'empty = unset, as tmm reads it');
+  assert.equal(serviceName({ [SERVICE_ENV]: 'other.service' }, 'linux'), 'other.service');
+});
+
+// The names belong to gateway/service.rs; this is a copy, so it is pinned to
+// the original rather than maintained beside it.
+test('the default service names are the ones service.rs installs', async () => {
+  const rust = await readFile(new URL('../src-tauri/src/gateway/service.rs', import.meta.url), 'utf8');
+  const constant = (name: string) => rust.match(new RegExp(`pub const ${name}: &str = "([^"]+)"`))?.[1];
+  assert.equal(constant('LABEL'), DEFAULT_SERVICE.darwin);
+  assert.equal(constant('UNIT'), DEFAULT_SERVICE.other);
 });
 
 test('a failed build exits non-zero and leaves the running gateway alone', async (t) => {

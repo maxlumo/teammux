@@ -168,15 +168,16 @@ hide that.
 
 From then on, after every merge to main: `npm run gateway:update`. It runs
 `npm run build:server`, then restarts the gateway unless the binary is already
-the one the gateway was last started with — it records each successful restart
-in a receipt beside the binary (`.tmm-gateway-deployed.json`, naming the
-binary, the config root and the service, as the service's own identity does),
-because a build's output alone cannot say what is RUNNING: after a failed
-restart the next build produces the same bytes, and "nothing changed" would
-skip the deploy for good. A failed build leaves the running gateway alone, a
-failed restart deploys nothing, and whichever path a run took it ends on the
-same check — exit 0, and the commit it prints, mean the gateway answered as
-ours after everything that run did. It supports the default Cargo layout only:
+the one the gateway is running — the receipt beside the binary
+(`.tmm-gateway-deployed.json`, naming the binary, the config root and the
+service, as the service's own identity does) records a deploy that was
+CONFIRMED answering, written after the check and never before it. A build's
+output alone cannot say what is running: after a failed restart the next build
+produces the same bytes, and "nothing changed" would skip the deploy for good.
+So a failed build leaves the running gateway alone, a failed restart deploys
+nothing, a deploy the gateway did not survive records nothing — and exit 0,
+with the commit it prints, means the gateway answered as ours after everything
+that run did. It supports the default Cargo layout only:
 a `CARGO_TARGET_DIR`, a `--target`, or a `target-dir` in a cargo config moves
 the artifact, and the run stops and asks you to name it with
 `TMUX_MOBILE_GATEWAY_TMM` rather than hash one file and restart another.

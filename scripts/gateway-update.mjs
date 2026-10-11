@@ -31,16 +31,22 @@
 // the file and a run whose restart FAILED looks, next time, exactly like a run
 // with nothing to do — the build produces the same bytes, "nothing changed",
 // and we would report a commit the gateway never started. So the comparison is
-// against an ACTIVATION RECEIPT: the hash we last saw a successful
-// `gateway restart` accept, written only after it returned (and it returns only
-// once our instance answers). A missing, stale or mismatched receipt means
-// deploy — the direction that retries rather than the one that skips.
+// against an ACTIVATION RECEIPT: the hash of the binary a restart deployed AND
+// the gateway was then seen answering with, written last of all. A missing,
+// stale or mismatched receipt means deploy — the direction that retries rather
+// than the one that skips.
+//
+// Confirm, then record, then report, in that order and on BOTH paths: the
+// script's job is to leave the gateway confirmed answering, so a restart that
+// was accepted and then died records nothing and reports nothing (the
+// orchestrator's ruling on reviewer P1-A(i), 2026-10-11).
 //
 // The receipt lives beside the binary it describes (`.tmm-gateway-deployed
 // .json` in `target/release`, gitignored) and names the whole identity the
-// service has (`gateway::service::Identity`): the binary, the CONFIG ROOT, and
-// the service name (`TMM_GATEWAY_SERVICE`), plus the commit. Any of those
-// differing makes it evidence about another service, so it is not read.
+// service has (`gateway::service::Identity`): the binary, the CONFIG ROOT as
+// the child tmm resolves it, and the service's actual name, plus the commit.
+// Any of those differing makes it evidence about another service, so it is not
+// read.
 // `cargo clean` takes it with the binary, which costs one extra restart.
 //
 // `tmm gateway restart` is what actually restarts: it refuses a service that
@@ -64,6 +70,17 @@ export const TMM_BIN_ENV = 'TMUX_MOBILE_GATEWAY_TMM';
 /** tmm's own override for the service name; part of what a receipt describes. */
 export const SERVICE_ENV = 'TMM_GATEWAY_SERVICE';
 export const RECEIPT_FILE = '.tmm-gateway-deployed.json';
+/** What tmm installs when `TMM_GATEWAY_SERVICE` is unset: `gateway::service`'s
+ * `LABEL` (launchd) and `UNIT` (systemd). A receipt names the service it
+ * describes, so the name has to be the REAL one, not "the default" — and
+ * `gateway-update.source.test.ts` keeps these two strings equal to the Rust
+ * constants, which are the single source of truth. */
+export const DEFAULT_SERVICE = { darwin: 'cc.voka.tmux-mobile', other: 'tmux-mobile-gateway.service' };
+
+/** The service tmm would act on: its own override, else this platform's. */
+export function serviceName(env = process.env, platform = process.platform) {
+  return env[SERVICE_ENV] || (platform === 'darwin' ? DEFAULT_SERVICE.darwin : DEFAULT_SERVICE.other);
+}
 
 export function tmmPath(root = repoRoot, env = process.env) {
   const given = env[TMM_BIN_ENV];
@@ -128,13 +145,14 @@ export function receiptPath(tmm) {
   return join(dirname(tmm), RECEIPT_FILE);
 }
 
-/** The hash this binary+service+config root was last ACTIVATED with, or null.
- * Anything unreadable, unparseable or about something else is null: deploy. */
+/** The hash this binary+service+config root was last ACTIVATED AND CONFIRMED
+ * with, or null. Anything unreadable, unparseable or about something else is
+ * null: deploy. */
 export function deployedHash(tmm, service, home) {
   try {
     const r = JSON.parse(readFileSync(receiptPath(tmm), 'utf8'));
     const ok = r?.tmm === tmm
-      && (r?.service ?? '') === service
+      && r?.service === service
       && r?.configHome === home
       && typeof r?.hash === 'string';
     return ok ? r.hash : null;
@@ -188,7 +206,7 @@ export async function gatewayUpdate({
     return 1;
   }
   const tmm = tmmPath(root, env);
-  const service = env[SERVICE_ENV] || '';
+  const service = serviceName(env);
   const home = configHome(root, env);
 
   log('[gateway:update] building (npm run build:server)');
@@ -219,26 +237,26 @@ export async function gatewayUpdate({
       return code;
     }
     restarted = true;
-    try {
-      // The receipt is a fact about the restart, which returned only once our
-      // instance answered — so it is written even if the check below then
-      // finds the service gone, and a later run reads "these bytes were
-      // activated" rather than restarting a service that is failing.
-      writeReceipt(tmm, service, home, want, commit);
-    } catch (error) {
-      warn(`[gateway:update] the restart succeeded but the receipt could not be written (${error.message}) — the next run will restart again`);
-    }
   }
 
-  // ONE final confirmation for both paths: success is the gateway answering
-  // as ours, read after everything this run did (reviewer P1-A(i) — a restart
-  // that was accepted and then died must not report a deployed commit).
+  // ONE confirmation for both paths, read after everything this run did, and
+  // BEFORE anything is recorded or reported: success is the gateway answering
+  // as ours. `restart` waiting for Ours is its own success, not this script's
+  // (reviewer P1-A(i)) — so a deploy that was accepted and then died records
+  // no receipt, reports no commit, and the next run deploys again.
   const state = await run(tmm, ['gateway', 'status']);
   if (state !== 0) {
     warn(restarted
-      ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer now — see the status above. The activation is recorded; fix the service (tmm gateway restart, or docs/reference/install.md) and run this again.'
+      ? '[gateway:update] the restart was accepted, but this machine\'s gateway does not answer — see the status above. NOTHING is recorded as deployed; fix the service (tmm gateway, or docs/reference/install.md) and run this again.'
       : '[gateway:update] nothing needed deploying, but this machine\'s gateway does not answer — see the status above. Nothing was restarted; fix the service (tmm gateway, or the runbook in docs/reference/install.md) and run this again.');
     return state;
+  }
+  if (restarted) {
+    try {
+      writeReceipt(tmm, service, home, want, commit);
+    } catch (error) {
+      warn(`[gateway:update] deployed, but the receipt could not be written (${error.message}) — the next run will restart again`);
+    }
   }
   if (commit) log(`[gateway:update] now at ${commit}`);
   return 0;
