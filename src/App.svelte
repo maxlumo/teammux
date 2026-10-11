@@ -19,7 +19,7 @@
   import ServerList from './lib/app/ServerList.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
-  import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
+  import { createAlertLog, createCentre, centreSurface, rebindAlerts } from './lib/hub/notify-centre.svelte.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
@@ -138,6 +138,12 @@
    * decided — before any page could write. */
   function holdStorage() {
     migrationBlocked = true;
+    // Every attempt in flight stops being the app's, in this same turn
+    // (reviewer P1-3 on 6b923c0d): a dial asks its owner right before it
+    // records an identity, so a late authentication cannot reach the
+    // registry or CURRENT through a frozen app. Connections, streams and
+    // downloads are untouched; Retry starts what it owes afresh.
+    activations.endAll();
     if (storageHeld) return;
     writeGate.close();
     storageHeld = true;
@@ -149,7 +155,7 @@
    * Retry. */
   function releaseStorage() {
     if (!storageHeld) return true;
-    if (!writeGate.flush(localStorage, (id) => mergedInto(localStorage, id))) return false;
+    if (!writeGate.flush(localStorage, (id) => mergedInto(localStorage, id), rebindAlerts)) return false;
     storageHeld = false;
     for (const runtime of fleet.all()) runtime.setFrozen(false);
     return true;
@@ -1296,7 +1302,10 @@
         // conclude (reviewer P1-C on cc45d7d1).
         const mine = !!owner?.current();
         cancelled = true;
-        if (mine) activations.endAll();
+        // The window's attempts and the server this chain was bringing up —
+        // no other member's (reviewer P1-3: a local cancel is not the root's
+        // end, which `endAll()` stays for: the teardown and a block).
+        if (mine) activations.claim(runtime);
         // Let go of the runtime the link out minted, now: its dial may never
         // answer, and a connection nobody waits on must not stay open
         // (reviewer P1-D on cc45d7d1) — unless another activation has since
@@ -1716,14 +1725,12 @@
     heldOffline = false;               // the person chose another server
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
     hoverCard.hide();                   // a card may describe the old server's row
-    view.hubState = { available: false, probed: false };
     serverInfo = { hostname: '', machineId: '' };
     pendingAddress = '';
-    // App navigation that names things on the old server; bringUp restores
-    // the target's own from its parked tmux_state.
-    view.termPane = null;
-    view.splitCells = []; view.splitLayout = 1; view.activeCellId = null;
-    view.filesRef = null;
+    // The pane, split, Files session and Hub answer are the VIEW's, and the
+    // view is the runtime's (③a-4): this runs after the swap, so `view` is
+    // already the next server's own, fresh one — clearing it here cleared
+    // nothing (validator P2-1 on 6b923c0d: its two controls could not bite).
     clearLandings();
     sessListOpen = false;
     // And nothing saves that emptiness over a server's record until its

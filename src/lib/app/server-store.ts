@@ -91,10 +91,18 @@ export interface WriteGate {
   /** Hand server `from`'s pending writes to `to`. */
   move(from: ServerId, to: ServerId): void;
   /** Write the table in order, each entry under its server's survivor. True —
-   * and the gate open — only once every entry has landed. */
-  flush(storage: Store, survivorOf?: (id: ServerId) => ServerId): boolean;
+   * and the gate open — only once every entry has landed. A value that NAMES
+   * its server (an alert carries `server`) is handed to `rebind` when its
+   * entry moves, so it names the survivor too (reviewer P1-4 on 6b923c0d):
+   * the store knows no payload, the module that owns the key does. An id
+   * nothing shows to be any saved entry (`survivorOf` → '') keeps its own. */
+  flush(storage: Store, survivorOf?: (id: ServerId) => ServerId, rebind?: Rebind): boolean;
   pendingCount(): number;
 }
+
+/** Rewrite a held value moving from server `from` to `to`; return it as is
+ * for a key that names no server. */
+export type Rebind = (key: string, value: string, from: ServerId, to: ServerId) => string;
 
 export function createWriteGate(): WriteGate {
   let closed = false;
@@ -107,12 +115,12 @@ export function createWriteGate(): WriteGate {
     if (held && held.seq > at) return;            // the later write of a key wins
     table.set(slot(id, key), { id, key, value, seq: at });
   };
-  const move = (from: ServerId, to: ServerId) => {
+  const move = (from: ServerId, to: ServerId, rebind?: Rebind) => {
     if (!from || !to || from === to) return;
     for (const [k, e] of [...table]) {
       if (e.id !== from) continue;
       table.delete(k);
-      put(to, e.key, e.value, e.seq);
+      put(to, e.key, e.value !== null && rebind ? rebind(e.key, e.value, from, to) : e.value, e.seq);
     }
   };
   return {
@@ -120,9 +128,9 @@ export function createWriteGate(): WriteGate {
     close() { closed = true; },
     peek: (id, key) => table.get(slot(id, key))?.value,
     record(id, key, value) { put(id, key, value, ++seq); },
-    move,
-    flush(storage, survivorOf = (id) => id) {
-      for (const id of new Set([...table.values()].map((e) => e.id))) move(id, survivorOf(id));
+    move: (from, to) => move(from, to),
+    flush(storage, survivorOf = (id) => id, rebind) {
+      for (const id of new Set([...table.values()].map((e) => e.id))) move(id, survivorOf(id), rebind);
       for (const e of [...table.values()].sort((a, b) => a.seq - b.seq)) {
         const key = residentKey(e.key, e.id);
         try {

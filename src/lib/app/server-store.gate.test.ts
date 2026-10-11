@@ -151,3 +151,33 @@ test('E4: an alert that arrives during a block is on disk after Retry, and a rel
   const reloaded = createAlertLog(createServerStore(s, 'a', createWriteGate()));
   assert.deepEqual(reloaded.items.map((a) => a.key), ['proj:work|7'], 'a reload finds the alert');
 });
+
+test('an alert held under an alias names its canonical entry after a merge flush; a third server s alert is left alone (#335 ③a, reviewer P1-4)', async () => {
+  (globalThis as { $state?: unknown }).$state = (v: unknown) => v;
+  const { createAlertLog, ALERTS_KEY, rebindAlerts } = await import('../hub/notify-centre.svelte.ts');
+  const s = mem();
+  const gate = createWriteGate();
+  const log = createAlertLog(createServerStore(s, 'alias', gate));
+  gate.close();
+  const alert = (id: string, server: string) => ({ key: `proj:work|${id}`, server, room: 'proj:work', session: 'work', project: 'work', seq: Number(id), id,
+    ts: Number(id), from: 'dev', toHuman: true, kind: 'reply' as const, excerpt: 'x', viewed: false });
+  log.record(alert('1', 'alias'));
+  log.record(alert('2', 'third'));                 // a ref to a server nothing merged
+  assert.equal(gate.flush(s, (id) => (id === 'alias' ? 'canon' : id), rebindAlerts), true);
+  assert.equal(s.m.has(`${ALERTS_KEY}::alias`), false, 'nothing written back to the alias');
+  const landed = createAlertLog(createServerStore(s, 'canon', createWriteGate())).items;
+  assert.deepEqual(landed.map((a) => [a.id, a.server]).sort(), [['1', 'canon'], ['2', 'third']], 'the alias s alert names canon; the third stays');
+  assert.equal(rebindAlerts('tmux_hub_drafts', '{"work":"alias"}', 'alias', 'canon'), '{"work":"alias"}', 'another key is not touched');
+  assert.equal(rebindAlerts(ALERTS_KEY, '{', 'alias', 'canon'), '{', 'junk is returned as it came');
+});
+
+test('a survivor nothing shows (\'\') keeps the entry where it is — never written to an empty slot', () => {
+  const s = mem();
+  const gate = createWriteGate();
+  const store = createServerStore(s, 'gone', gate);
+  gate.close();
+  store.setItem('tmux_state', 'x');
+  assert.equal(gate.flush(s, () => ''), true);
+  assert.equal(s.m.get('tmux_state::gone'), 'x');
+  assert.equal([...s.m.keys()].some((k) => k.endsWith('::')), false);
+});

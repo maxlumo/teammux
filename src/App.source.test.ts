@@ -842,6 +842,11 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   ] as const) assert.match(source, pattern, `${where} reports through the gate`);
   // Every reconnect attempt claims the activation, and dials through the
   // runtime it belongs to, after any walk has answered.
+  // ③a (reviewer P1-3): a chain's cancel is local — the window's attempts
+  // and the server it was bringing up, never every member's; `endAll()` is
+  // the root's (the teardown) and the block's alone.
+  assert.match(source, /const mine = !!owner\?\.current\(\);\s*cancelled = true;\s*(?:\/\/[^\n]*\n\s*)*if \(mine\) activations\.claim\(runtime\);/u);
+  assert.deepEqual([...source.matchAll(/activations\.endAll\(\)/gu)].length, 2, 'endAll: holdStorage and onDestroy, nowhere else');
   // ③a: a reconnect claims its OWN runtime's generation (reviewer P1-A).
   assert.match(source, /attempt: \(\) => activations\.member\(runtime\)\.claim\(\),/u);
   assert.match(source, /connect: \(address, _token, timeoutMs, claim\) => serverSwitch\.idle\(\)\.then\(\(\) => \{\s*if \(!claim\?\.current\(\)\) throw new Error\('superseded'\);/u,

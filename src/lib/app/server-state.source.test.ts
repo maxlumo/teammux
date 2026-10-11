@@ -194,8 +194,11 @@ test('a union list takes each action s runtime from its row, never from its cont
 /** The places a server-level key is spelled, outside the identity layer and
  * its store (validator E2 on the ③ plan): a direct write of a resident key,
  * or `residentKey(` itself. */
-const RESIDENT = ['tmux_state', 'tmux_machine_id', 'tmux_hub_project', 'tmux_hub_drafts', 'tmux_hub_seen', 'tmux_hub_lead',
-  'tmux_hub_drawer', 'tmux_hub_roster_expanded', 'tmux_hub_alerts'];
+// The ONE list (servers.ts RESIDENT_KEYS), read rather than copied, so a new
+// resident key is covered the day it is added (validator P2-3, reviewer P2-5
+// on 6b923c0d).
+const { RESIDENT_KEYS } = await import('./servers.ts');
+const RESIDENT: readonly string[] = RESIDENT_KEYS;
 function residentBypass(path: string, text: string): string[] {
   const src = code(text);
   const out: string[] = [];
@@ -231,8 +234,9 @@ test('every server store App builds goes through the one write gate, and a block
   assert.ok(stores.length >= 5, `App builds its server stores: ${stores.length}`);
   for (const args of stores) assert.match(args, /, writeGate$/u, `createServerStore(${args}) skips the gate`);
   assert.equal((app.match(/createWriteGate\(\)/gu) ?? []).length, 1, 'one gate');
-  assert.match(app, /function holdStorage\(\) \{\s*migrationBlocked = true;\s*if \(storageHeld\) return;\s*writeGate\.close\(\);\s*storageHeld = true;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(true\);/u);
-  assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\)\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
+  // ③a (reviewer P1-3): and every activation in flight ends in that turn.
+  assert.match(app, /function holdStorage\(\) \{\s*migrationBlocked = true;\s*(?:\/\/[^\n]*\n\s*)*activations\.endAll\(\);\s*if \(storageHeld\) return;\s*writeGate\.close\(\);\s*storageHeld = true;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(true\);/u);
+  assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\), rebindAlerts\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
   assert.equal((app.match(/\bmigrationBlocked = true\b/gu) ?? []).length, 1, 'a block is decided only in holdStorage');
   assert.match(app, /next\?\.connection\.setOnDisconnect\([^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);/u,
     'a runtime minted while held is frozen too: holdStorage froze only the ones it found');

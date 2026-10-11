@@ -490,7 +490,7 @@ export type WsApi = ReturnType<typeof createWsApi>;
  * tmux, so they are too.
  *
  * Every wrapper is here (the `satisfies` makes a missing one a type error,
- * and ws-api.source.test.ts a test failure): a new RPC cannot be added
+ * and app/server-runtime.frozen.test.ts a test failure): a new RPC cannot be added
  * without saying which it is, and there is no default.
  */
 export const RPC_KIND = {

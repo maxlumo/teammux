@@ -103,3 +103,36 @@ test('a frozen runtime over a REAL connection: a write never reaches the socket,
   registry.disposeAll();
   void MockWebSocket;
 });
+
+test('a block that ends every activation stops a dial s identity write mid-auth, and touches nothing else (#335 ③a, reviewer P1-3)', async () => {
+  // B's dial is past connect, before its record; the app blocks (its host
+  // calls `activations.endAll()` in that turn). The dial asks its owner
+  // right before `recordServer`, so nothing is recorded and B is not up.
+  const { createActivations } = await import('./activation.ts');
+  const { createConnectionRegistry } = await import('../core/connection-registry.ts');
+  const { MockWebSocket, installDoubles } = await import('../core/connection.fixture.ts');
+  installDoubles();
+  const m = new Map<string, string>([
+    ['tmux_servers', JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a' },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB' },
+    ])],
+    ['tmux_server_current', 'a'],
+  ]);
+  const store = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); }, removeItem: (k: string) => { m.delete(k); } };
+  const registry = createConnectionRegistry();
+  const activations = createActivations();
+  const b = createServerRuntime({ id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB' }, { storage: store, slot: registry.ensure('b') });
+  const owner = activations.claim();
+  const dialling = b.dial(owner.current);
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  const before = m.get('tmux_servers');
+  activations.endAll();                     // the block, in the same turn
+  socket.message({ result: { authenticated: true, machine_id: 'm-b', hostname: 'b.host' } });
+  assert.deepEqual(await dialling, { ok: false, reason: 'superseded' }, 'the dial concludes nothing');
+  assert.equal(m.get('tmux_servers'), before, 'the registry was not written');
+  assert.equal(m.get('tmux_server_current'), 'a', 'nor CURRENT');
+  registry.disposeAll();
+});

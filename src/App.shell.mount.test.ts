@@ -1927,8 +1927,12 @@ const refusing = (keys: string[]) => {
 /** `inert`, however Svelte set it: jsdom has no `inert` property of its own,
  * so it may land as an attribute or as the property. */
 const isInert = (el: any) => el.hasAttribute('inert') || el.inert === true;
-const assertHeldTree = (app: any, what: string) => {
-  for (const el of app.document.querySelectorAll('.term-page, .files-page, .file-main')) {
+const assertHeldTree = (app: any, what: string, opts: { source?: boolean } = {}) => {
+  const pages = [...app.document.querySelectorAll('.term-page, .files-page, .file-main')];
+  // Where the block came with a source tree (ruling K keeps it), that tree is
+  // still there — an empty DOM must not pass for "held" (reviewer P2-4).
+  if (opts.source) assert.ok(pages.length > 0, `${what}: the source tree is still mounted`);
+  for (const el of pages) {
     const held = el.closest('.scope-tree.held');
     assert.ok(held, `${what}: ${el.className} is mounted outside the held tree`);
     assert.ok(isInert(held), `${what}: the held tree takes no input`);
@@ -2095,7 +2099,7 @@ test('blocked mid-session (a claim that cannot be recorded): the optimizer and t
   await h.app.advance(1000);
   await h.switchTo('alpha');
   await h.app.advance(1000);
-  assertHeldTree(h.app, 'the claim could not be recorded: no server page');
+  assertHeldTree(h.app, 'the claim could not be recorded: no server page', { source: true });
   const frozen = () => [ls.getItem('tmux_server_current'), ls.getItem('tmux_servers'), ls.getItem('tmux_address')];
   const before = frozen();
   const dials = () => events.filter((e) => e.startsWith('connect:')).length;
@@ -2146,7 +2150,7 @@ test('Retry after a mid-session block: A s own runtime dials once, and A comes u
   await h.app.advance(1000);
   await h.switchTo('alpha');
   await h.app.advance(1000);
-  assertHeldTree(h.app, 'blocked');
+  assertHeldTree(h.app, 'blocked', { source: true });
   const dials = () => events.filter((e) => e.startsWith('connect:')).length;
   const n = dials();
   store.state.failing = false;
@@ -3132,7 +3136,7 @@ test('P1-3 (ruling K): a dial whose post-dial claim cannot be written publishes 
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(ls.getItem('tmux_servers')!.includes('m-x'), true, 'B s own dial proved m-x');
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'and the claim s marker could not be written');
-  assertHeldTree(h.app, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted', { source: true });
   assert.ok(!events.some((e) => e.startsWith('rpc@b:')), 'nothing of B was published');
   assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
   assert.ok(!events.includes('aborted'), 'and A s download is still running');
@@ -3355,7 +3359,7 @@ test('K, the PRE-dial entry: B s claim fails when B is minted — A keeps runnin
   await h.switchTo('beta');
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(dialsOf(h.events, 'b').length, 0, 'B was blocked before its own dial');
-  assertHeldTree(h.app, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted', { source: true });
   assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
   assert.ok(!h.events.includes('aborted'), 'and A s download was not released');
   h.store.state.failing = false;
@@ -3403,7 +3407,7 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   const ls = h.app.window.localStorage;
   assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the absorption left the handoff open');
   assert.ok(retryButton(h.app), 'blocked: the migration Retry is offered');
-  assertHeldTree(h.app, 'no writable server tree is mounted');
+  assertHeldTree(h.app, 'no writable server tree is mounted', { source: true });
   assert.equal(alias.disposed(), false, 'the source was not ended by the block');
   assert.ok(!events.includes('aborted'), 'and its download was not released');
   store.state.failing = false;
@@ -3449,7 +3453,7 @@ test('a block keeps an unsaved editor: held mounted with its text, it saves noth
   assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the reconnect s absorption left the handoff open: blocked');
   assert.equal(area.isConnected, true, 'the editor is still mounted');
   assert.equal(area.value, '# notes\n\nunsaved', 'with what the person typed');
-  assertHeldTree(h.app, 'blocked');
+  assertHeldTree(h.app, 'blocked', { source: true });
   assert.ok(!events.some((e) => /^rpc@[a-z]+:fsWrite/u.test(e)), 'and nothing saved it to the server');
   store.state.failing = false;
   const retry = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
@@ -3514,7 +3518,7 @@ test('a held Hub is not a read Hub: a message that arrived unseen stays unread t
   // (disconnected), the content area shows the Retry panel, and behind it
   // B's tree is held — its Hub on the page that is "current".
   for (let i = 0; i < 6; i++) await h.app.advance(200);
-  assertHeldTree(h.app, 'blocked');
+  assertHeldTree(h.app, 'blocked', { source: true });
   // Retry lands every held write synchronously, before any frame of a Hub
   // shown again could legitimately mark anything: what it writes is what
   // the held Hub did.

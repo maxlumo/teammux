@@ -110,6 +110,20 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 // `createCentre(createAlertLog(storage))`, and there is no module instance of
 // a log. That storage is the server's own store (②b-4).
 
+/** A held alert list moving from server `from` to `to` — an identity merge
+ * folded `from` into `to` while the app was blocked (board #335 ③a, reviewer
+ * P1-4): every alert that named `from` names `to`, so the canonical centre
+ * can open it. Alerts naming any other server are left alone; anything that
+ * is not this key, or does not parse, is returned as it came. */
+export function rebindAlerts(key: string, value: string, from: string, to: string): string {
+  if (key !== ALERTS_KEY) return value;
+  try {
+    const list = JSON.parse(value);
+    if (!Array.isArray(list)) return value;
+    return JSON.stringify(list.map((a) => (a && typeof a === 'object' && a.server === from ? { ...a, server: to } : a)));
+  } catch { return value; }
+}
+
 /** One SERVER's alert list. */
 export interface AlertLog {
   readonly items: readonly Alert[];

@@ -928,7 +928,20 @@ next Retry. It is keyed by server, so every view of one server sees the same
 pending value; a removal is held as an intent; the person's keys pass through;
 an alias's pending writes land under its canonical entry (the later write of a
 key wins), never in the alias's deleted slot. It is memory only: closing the
-page before a Retry has flushed loses what was pending.
+page before a Retry has flushed loses what was pending. A held value that
+names its server — an alert carries `server` — is rewritten when an identity
+merge moves its entry (`rebindAlerts`, from the module that owns the key; the
+store knows no payloads), so the canonical centre can open it; alerts naming
+any other server are left alone (reviewer P1-4 on 6b923c0d).
+
+**A block ends every attempt in flight** (reviewer P1-3 on 6b923c0d).
+`holdStorage` calls `activations.endAll()` in the turn it decides the block: a
+dial asks its owner right before it records an identity, so an authentication
+that lands afterwards writes neither the registry nor CURRENT. The frozen api
+guards the wrappers; this guards the dial's own record. Connections, streams
+and downloads are untouched. A chain's Cancel is local — the window's attempts
+and the server it was bringing up (`claim(runtime)`) — and `endAll()` belongs
+to the block and the App's teardown alone.
 
 ## Multi-Server (board #55)
 
