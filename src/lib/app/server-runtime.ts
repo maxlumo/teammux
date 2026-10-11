@@ -75,6 +75,17 @@ export type DialResult =
    * be resurrected by recording the connection that just succeeded. */
   | { ok: false; reason: 'gone' };
 
+/** Where a dial goes (board #335 ②b-4, reviewer P1-A on cc45d7d1). By
+ * default the entry's active address; `via` is another address of THIS
+ * server's machine — a failover, the address optimizer, a Connection-page
+ * row — dialled with the entry's own token, never a mirror's. Either way the
+ * answer is checked against this server's identity before anything trusts
+ * the connection. */
+export interface DialOptions {
+  via?: string;
+  timeoutMs?: number;
+}
+
 export interface ServerRuntime {
   /** `ServerEntry.id`, immutable for this object's lifetime. */
   readonly id: ServerId;
@@ -93,7 +104,7 @@ export interface ServerRuntime {
    * loop — that replace it without dialling through this runtime. A dial whose
    * host has moved on records nothing and reports `superseded`, even when its
    * own connect had already resolved. */
-  dial(owns?: () => boolean): Promise<DialResult>;
+  dial(owns?: () => boolean, how?: DialOptions): Promise<DialResult>;
   /** Ask the server what it can do. Safe to call repeatedly. `each` is called
    * with the caps as EACH answer lands (the newest round only), so a quick
    * Hub answer is not held behind a slow backends one (reviewer P2,
@@ -228,7 +239,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     if (target.id === id) known = next.find((s) => s.id === id) ?? known;
   }
 
-  async function dial(owns: () => boolean = () => true): Promise<DialResult> {
+  async function dial(owns: () => boolean = () => true, how: DialOptions = {}): Promise<DialResult> {
     if (dead) return { ok: false, reason: 'gone' };
     // This attempt's identity, captured before the first await. A runtime may
     // dial more than once, and `Connection` can only reject a dial that has
@@ -252,11 +263,11 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // WHERE to dial is the one reader's answer, the entry (server-target.ts;
     // board #335 ②b-4 retired the mirror it read for the current server).
     const route = targetOf(storage, id);
-    const address = route?.address || target.address;
+    const address = how.via || route?.address || target.address;
     const token = route ? route.token : target.token;
     let reported: string | null;
     try {
-      reported = await connection.connect(address, token, connectTimeoutMs);
+      reported = await connection.connect(address, token, how.timeoutMs ?? connectTimeoutMs);
     } catch (error) {
       // A superseded attempt reports neither the failure nor the success it
       // might otherwise have: whoever took over owns the outcome now.
@@ -290,12 +301,24 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // machine's canonical entry (and absorbs the twin an address-only entry
     // leaves behind) without moving CURRENT — recording and activating are
     // different acts, and a runtime is never allowed to steal the focus.
-    const { entry: canonical } = recordServer(storage, {
-      address,
-      token,
-      ...(target.socket ? { socket: target.socket } : {}),
-      ...(machine ? { machineId: machine } : {}),
-    });
+    // A peer authenticated, and until it is recorded nobody knows which
+    // server it is: a record that FAILS leaves the socket closed (reviewer
+    // P1-A on cc45d7d1), so nothing of this server's — a method a page
+    // captured earlier included — can reach an unidentified peer. The
+    // handle stays this server's, free to dial again; the failure is the
+    // caller's to report.
+    let canonical: ServerEntry;
+    try {
+      ({ entry: canonical } = recordServer(storage, {
+        address,
+        token,
+        ...(target.socket ? { socket: target.socket } : {}),
+        ...(machine ? { machineId: machine } : {}),
+      }));
+    } catch (error) {
+      connection.disconnect();
+      throw error;
+    }
     if (canonical.id !== id) {
       // Either this entry knew its machine and a different one answered, or it
       // knew none and the machine that answered already has an entry. Both are
