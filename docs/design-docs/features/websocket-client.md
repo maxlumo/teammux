@@ -847,6 +847,21 @@ moves only on a definitive answer, and a failed backends probe keeps the list
 the runtime already had rather than wiping it to the fallback. A client with
 no saved entry has nothing to dial and opens the connect card.
 
+### The window's side of a tree: the view (board #335 ③a)
+
+A bound tree has two halves. What the SERVER remembers — drafts, read marks,
+Files' record — is its `ServerState`. What the WINDOW holds about the tree is
+its `ServerView` (`app/server-view.svelte.ts`): the pane and Files session it
+is on, its split, the landings aimed at it, the runtime whose navigation has
+been restored, whether its server has the Hub, and the Back chains and
+reselects its pages registered. Through ③a App holds one view for the one tree
+and resets it exactly where it reset these fields before; ③a-5 gives each bound
+member its own, so a tree out of focus keeps its panes and its Back chain, and
+the window dispatches Back, reselect and immersive to the focused view only.
+It is a class with rune fields, not a `$state({...})` object, because
+`navRestored` holds a runtime handle and the callbacks are functions: a deep
+proxy over either breaks identity.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

@@ -34,6 +34,7 @@
   import { targetOf } from './lib/app/server-target.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
+  import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore } from './lib/app/server-store.ts';
@@ -101,10 +102,14 @@
   // mean something, and under a proxy it never can (found by the A→B→A
   // restore test: the saved-state effect's guard could never pass).
   let scopeRuntime = $state.raw(null);
-  /** The runtime whose navigation has been restored. The saved-state effect
-   * waits for it, so nothing writes an empty navigation over the record the
-   * restore is about to read (board #335 ②b-2). */
-  let navRestored = $state.raw(null);
+  /** The window's side of the bound tree (board #335 ③a, server-view.svelte.ts):
+   * where its navigation stands — the pane, the Files session, the split —
+   * the requests aimed at it, the runtime whose navigation has been restored
+   * (the saved-state effect waits for it, so nothing writes an empty
+   * navigation over the record the restore is about to read; ②b-2), and the
+   * Back chains and reselects its pages registered. One view for the one
+   * tree; `resetServerMemory` resets it where it always reset these. */
+  const view = createServerView();
   /** What the app remembers about each runtime's server (board #335 ②b-2-1),
    * built in `swapScope` when the runtime is — after CURRENT moved, so it
    * reads the server being bound and not the one being left — and handed to
@@ -287,10 +292,10 @@
     const id = currentServerId(localStorage);
     try { if (id) reownSavedNav(createServerStore(localStorage, id), survivorOf); } catch { return false; }
     const rebind = (ref) => (ref ? reownRef(ref, survivorOf) : ref);
-    termPane = rebind(termPane);
-    filesRef = rebind(filesRef);
-    const cells = splitCells.map((c) => ({ ...c, pane: rebind(c.pane) }));
-    if (cells.some((c, i) => c.pane !== splitCells[i].pane)) splitCells = cells;
+    view.termPane = rebind(view.termPane);
+    view.filesRef = rebind(view.filesRef);
+    const cells = view.splitCells.map((c) => ({ ...c, pane: rebind(c.pane) }));
+    if (cells.some((c, i) => c.pane !== view.splitCells[i].pane)) view.splitCells = cells;
     return true;
   }
   /** The server every navigation reference names: the one the content tree is
@@ -363,38 +368,34 @@
   // have a session called `work`. The identity has one home; the two strings
   // every consumer and the wire want are DERIVED from it, so a serverId can
   // never reach a `target` or `session` argument.
-  let termPane = $state(null);
-  const terminalTarget = $derived(termPane?.target ?? '');
-  const terminalSession = $derived(termPane?.session ?? '');
+  const terminalTarget = $derived(view.termPane?.target ?? '');
+  const terminalSession = $derived(view.termPane?.session ?? '');
   /** Point the terminal at a pane on the server the content tree is bound to.
    * Every write goes through here, so a reference without a server cannot be
    * created. */
   function showPane(session, target) {
-    termPane = target ? paneRef(navServerId(), session || target.split(':')[0], target) : null;
+    view.termPane = target ? paneRef(navServerId(), session || target.split(':')[0], target) : null;
   }
   // Files follows the session the user touched LAST — opening a terminal pane
   // OR selecting a chat project both set it. It used to derive from the
   // terminal alone, so browsing a project in the chat never moved the Files
   // tab while switching terminal panes did (owner, 2026-08-22: "chat里的路径
   // 没有刷新到文件 terminal好像就会刷新路径").
-  let filesRef = $state(null);
-  const filesSession = $derived(filesRef?.session ?? '');
+  const filesSession = $derived(view.filesRef?.session ?? '');
   function showSession(session) {
-    filesRef = session ? sessionRef(navServerId(), session) : null;
+    view.filesRef = session ? sessionRef(navServerId(), session) : null;
   }
   // A landing is a request aimed at the server-bound TREE rather than a
   // reference to an object, so what it carries is that tree's identity: it is
   // delivered only to the tree it names (`landingFor`), and the swap clears
-  // the ones aimed at a tree that is going away.
-  let filesNavReq = $state(null);
-  let boardIssueReq = $state(null); // a feed board-line tap: which issue to open
+  // the ones aimed at a tree that is going away. They are the view's:
+  // `filesNavReq`, `boardIssueReq` (a feed board-line tap) and `agentsEditReq`.
   $effect(() => { if (terminalSession) showSession(terminalSession); });
   // The Hub (project rooms, agents, board) is desktop-server-only. We probe
   // once per connection: hub_rooms rejects with method-not-found on a server
   // without the projects store (mobile), so a resolved probe means the Hub
-  // tabs should appear.
-  let hubState = $state({ available: false, probed: false });
-  let hubAvailable = $derived(hubState.available);
+  // tabs should appear. The answer is the view's `hubState`.
+  let hubAvailable = $derived(view.hubState.available);
   // The Hub page-layers only mount when hubAvailable, so page === 'hub'
   // without it would render an empty main area (the state restore sets `page`
   // before the probe resolves, and a reconnect can land on a hubless server).
@@ -407,7 +408,7 @@
     // a persisted/deep-linked 'sessions' lands on the terminal it belonged to.
     if (page === 'sessions') page = 'terminal';
     // The Hub needs the desktop server. Only redirect once the probe answered.
-    if ((page === 'hub' || page === 'agents' || page === 'board') && hubState.probed && !hubState.available) page = 'terminal';
+    if ((page === 'hub' || page === 'agents' || page === 'board') && view.hubState.probed && !view.hubState.available) page = 'terminal';
     // On touch the agent configuration is a Settings CATEGORY, so `agents` as a
     // page has no tab icon and no swipe stop — whatever route set it (a saved
     // state, a deep link, an older build), it becomes Settings opened there.
@@ -423,17 +424,14 @@
   // SplitView. The single `terminalTarget` above stays the source of truth
   // for the Files page, nav pills, and the narrow-screen fallback; cell 0
   // mirrors it.
-  let splitLayout = $state(1);
-  let splitCells = $state([]);   // [{ id, pane: PaneRef | null }]
   /** What SplitView takes: the strings tmux resolves. The serverId stays on
    * this side of the boundary — a cell's identity is App's, the pane's name is
    * the wire's (board #335 ②b-2). */
-  const splitViewCells = $derived(splitCells.map((c) => ({
+  const splitViewCells = $derived(view.splitCells.map((c) => ({
     id: c.id,
     target: c.pane?.target ?? '',
     session: c.pane?.session ?? '',
   })));
-  let activeCellId = $state(null);
   // The top-right layout menu: `ui/ContextMenu` anchored to the toggle (right-
   // aligned, like every dot menu). It was a hand-rolled `position:absolute`
   // panel with a backdrop — no Escape, no close on scroll/resize, no viewport
@@ -442,7 +440,7 @@
   const SPLIT_CHOICES = [1, 2, 3, 4, 6];
   const splitMenuItems = $derived(SPLIT_CHOICES.map((n) => ({
     label: n === 1 ? t('splitSingle') : t('splitPanes').replace('{n}', String(n)),
-    checked: n === 1 ? !splitActive : (splitActive && splitLayout === n),
+    checked: n === 1 ? !splitActive : (splitActive && view.splitLayout === n),
     onselect: () => setLayout(n),
   })));
   function toggleSplitMenu(e) {
@@ -494,40 +492,40 @@
   // without it, same probe). Its LAYOUT adapts: three columns on
   // desktop, a single chat column on touch devices.
   let hubEligible = $derived(hubAvailable);
-  let splitActive = $derived(splitEligible && splitLayout > 1 && splitCells.length > 0);
+  let splitActive = $derived(splitEligible && view.splitLayout > 1 && view.splitCells.length > 0);
 
   function setLayout(n) {
     if (!splitEligible || n <= 1) {
-      splitLayout = 1;
-      splitCells = [];
-      activeCellId = null;
+      view.splitLayout = 1;
+      view.splitCells = [];
+      view.activeCellId = null;
       return;
     }
     // Seed cell 0 from the current single pane; pad to n with empty cells.
-    const base = splitCells.length
-      ? splitCells.slice()
-      : (termPane
-          ? [{ id: nextCellId++, pane: termPane }]
+    const base = view.splitCells.length
+      ? view.splitCells.slice()
+      : (view.termPane
+          ? [{ id: nextCellId++, pane: view.termPane }]
           : []);
     const next = base.slice(0, n);
     while (next.length < n) next.push({ id: nextCellId++, pane: null });
-    splitLayout = n;
-    splitCells = next;
-    if (activeCellId == null || !next.some(c => c.id === activeCellId)) {
-      activeCellId = next[0]?.id ?? null;
+    view.splitLayout = n;
+    view.splitCells = next;
+    if (view.activeCellId == null || !next.some(c => c.id === view.activeCellId)) {
+      view.activeCellId = next[0]?.id ?? null;
     }
   }
   function assignCell(id, target, session) {
     const pane = target ? paneRef(navServerId(), session || target.split(':')[0], target) : null;
-    splitCells = splitCells.map(c => c.id === id ? { ...c, pane } : c);
+    view.splitCells = view.splitCells.map(c => c.id === id ? { ...c, pane } : c);
     // Keep the single-pane mirror pointed at the active cell so the
     // narrow-screen fallback and Files page follow what the user is using.
-    if (id === activeCellId && target) {
-      termPane = pane;
+    if (id === view.activeCellId && target) {
+      view.termPane = pane;
     }
   }
   function closeCell(id) {
-    splitCells = splitCells.map(c => c.id === id ? { ...c, pane: null } : c);
+    view.splitCells = view.splitCells.map(c => c.id === id ? { ...c, pane: null } : c);
   }
   function cellPaneExit(id) { closeCell(id); }
 
@@ -863,9 +861,9 @@
       // still lives in `nav-state.retarget`.
       const rename = { serverId, from, to };
       const move = (ref) => (ref ? retargetRef(ref, rename) : ref);
-      termPane = move(termPane);
-      filesRef = move(filesRef);
-      splitCells = splitCells.map((c) => ({ ...c, pane: move(c.pane) }));
+      view.termPane = move(view.termPane);
+      view.filesRef = move(view.filesRef);
+      view.splitCells = view.splitCells.map((c) => ({ ...c, pane: move(c.pane) }));
     };
     window.addEventListener('project-renamed', onRenamed);
     return () => window.removeEventListener('project-renamed', onRenamed);
@@ -886,8 +884,8 @@
     // Not before the restore for THIS runtime has finished: the record this
     // effect would write over is the one the restore is about to read. It
     // writes the bound server's own slot (board #335 ②b-4).
-    if (!connected || !scopeRuntime || navRestored !== scopeRuntime) return;
-    saveNav(createServerStore(localStorage, scopeRuntime.id), { page, pane: termPane, splitLayout, splitCells });
+    if (!connected || !scopeRuntime || view.navRestored !== scopeRuntime) return;
+    saveNav(createServerStore(localStorage, scopeRuntime.id), { page, pane: view.termPane, splitLayout: view.splitLayout, splitCells: view.splitCells });
   });
 
   // Reconnect UI state, mirrored from the reconnect machine
@@ -1052,7 +1050,7 @@
     // probe answers, not after a slow backends list.
     void runtime.probeCaps((caps) => {
       if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
-      if (caps.hub !== null) hubState = { available: caps.hub, probed: true };
+      if (caps.hub !== null) view.hubState = { available: caps.hub, probed: true };
       // Into THIS runtime's catalog (board #335 ②b-3): the list is one
       // machine's answer, and its pages read it from their scope.
       serverStates.get(runtime)?.backends.set(caps.backends);
@@ -1382,7 +1380,7 @@
     showPane(session, target);
     page = 'terminal';
     navPush();
-    if (from === 'hub') jumpedFrom = 'hub';
+    if (from === 'hub') view.jumpedFrom = 'hub';
   }
 
   // The shown pane died (Ctrl-D, process exit). Stay in the terminal and
@@ -1634,8 +1632,8 @@
    * mount (board #335 ②b-1). `resetServerMemory` calls this rather than
    * repeating it, so "what a landing is" has one definition. */
   function clearLandings() {
-    filesNavReq = null; boardIssueReq = null; agentsEditReq = null;
-    jumpedFrom = null;
+    view.filesNavReq = null; view.boardIssueReq = null; view.agentsEditReq = null;
+    view.jumpedFrom = null;
   }
 
   /** Everything in memory that belongs to the server being left (board 315),
@@ -1651,14 +1649,14 @@
     heldOffline = false;               // the person chose another server
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
     hoverCard.hide();                   // a card may describe the old server's row
-    hubState = { available: false, probed: false };
+    view.hubState = { available: false, probed: false };
     serverInfo = { hostname: '', machineId: '' };
     pendingAddress = '';
     // App navigation that names things on the old server; bringUp restores
     // the target's own from its parked tmux_state.
-    termPane = null;
-    splitCells = []; splitLayout = 1; activeCellId = null;
-    filesRef = null;
+    view.termPane = null;
+    view.splitCells = []; view.splitLayout = 1; view.activeCellId = null;
+    view.filesRef = null;
     clearLandings();
     sessListOpen = false;
     // And nothing saves that emptiness over a server's record until its
@@ -1666,7 +1664,7 @@
     // runtime it left (order (a)), whose save gate was still open, and the
     // reset navigation overwrote A's slot before the restore read it
     // (reviewer 04:05 on the switch order).
-    navRestored = null;
+    view.navRestored = null;
   }
 
   // THE server switch (board 315): every entry — the switcher popover,
@@ -2101,7 +2099,7 @@
   async function keepNavFor(target) {
     await scopeSwap.settled();
     if (!target || scopeSwap.shown() !== target) return;
-    navRestored = target;
+    view.navRestored = target;
   }
 
   /** The navigation the app comes up with, for ONE confirmed runtime.
@@ -2137,19 +2135,19 @@
             // list_sessions answers with a bare array (list_sessions_with_panes
             // is the one that wraps).
             if (!(sessions ?? []).some((x) => x.name === named)) {
-              termPane = null;
-              splitCells = splitCells.filter((c) => c.pane?.session !== named);
+              view.termPane = null;
+              view.splitCells = view.splitCells.filter((c) => c.pane?.session !== named);
             }
           })
           .catch(() => {});
-        termPane = s.pane;
+        view.termPane = s.pane;
         // Restore split layout only on eligible (desktop + wide) clients;
         // a desktop-saved state silently stays single-pane on a phone.
         if (splitEligible && s.splitLayout > 1 && s.splitCells.length) {
-          splitCells = s.splitCells;
-          splitLayout = s.splitLayout;
+          view.splitCells = s.splitCells;
+          view.splitLayout = s.splitLayout;
           nextCellId = Math.max(0, ...s.splitCells.map((c) => c.id)) + 1;
-          activeCellId = s.splitCells[0]?.id ?? null;
+          view.activeCellId = s.splitCells[0]?.id ?? null;
         }
       }
       // The tab is restored whether or not a terminal came with it; only an
@@ -2161,7 +2159,7 @@
       page = nav.page;
       if (nav.settingsTab) prefsOpenReq = { tab: nav.settingsTab, n: ++prefsOpenSeq };
     } catch { page = defaultPage(); }
-    navRestored = target;
+    view.navRestored = target;
   }
 
   // Auto-reconnect and restore state on page load (`autoConnectAttempted`,
@@ -2218,15 +2216,12 @@
   });
   // Android back gesture via history API
   // Every navigation push a state, back pops it naturally
-  let filesGoBack = $state(null);
-  /** Files' reading mode asks for the whole screen (board #226): the tab bar hides while it is on. */
-  let filesImmersive = $state(false);
-  let hubGoBack = $state(null);
-  let agentsGoBack = $state(null);
+  // The pages' back chains are the view's (Files' reading mode, board #226,
+  // is too: the tab bar hides while it is on). Preferences is the person's.
   let prefsGoBack = $state(null);
-  // A request from the Hub's agent menu to open one agent's CONFIG editor:
-  // {name, n} — n increments so asking for the same agent twice still fires.
-  let agentsEditReq = $state(null);
+  // A request from the Hub's agent menu to open one agent's CONFIG editor is
+  // the view's `agentsEditReq`: {name, n} — n increments so asking for the
+  // same agent twice still fires.
   // A one-shot "open this Settings category" request, same {tab, n} shape. The
   // sequence is a plain counter, NOT read back off the state: one of the writers
   // is the page-redirect $effect, and reading the state it writes would make
@@ -2239,7 +2234,7 @@
    *  agent" item and the restore path — goes through here, so the two devices
    *  cannot drift apart. */
   function openAgentsConfig(name = null, kind = 'agent') {
-    if (name) agentsEditReq = { serverId: navServerId(), name, kind, n: (agentsEditReq?.n ?? 0) + 1 };
+    if (name) view.agentsEditReq = { serverId: navServerId(), name, kind, n: (view.agentsEditReq?.n ?? 0) + 1 };
     if (agentsLivesInSettings(layout.isTouchDevice)) {
       prefsOpenReq = { tab: kind === 'team' ? 'teams' : 'agents', n: ++prefsOpenSeq };
       if (page !== 'prefs') togglePrefs();
@@ -2247,16 +2242,13 @@
       switchTab('agents');
     }
   }
-  let boardGoBack = $state(null);
-  let sessionsGoBack = $state(null);
   // A cross-page JUMP from the chat (header toggles, a feed board-line tap,
   // opening a pane full-screen) remembers where it came from, so the phone's
   // back at the target's FLOOR returns to the conversation instead of the
   // terminal root (owner, 2026-08-29: "从聊天跳转到terminal或者board或者file，
   // 我返回 应该回到聊天对话页面"). Any deliberate navigation — a tab tap, a
   // swipe — clears it: the slot only survives while you stay where the jump
-  // landed.
-  let jumpedFrom = $state(null);
+  // landed. The slot is the view's `jumpedFrom`.
 
   // The history dance exists for the PHONE's back gesture (app-shell.md): a
   // seeded `{app:true}` entry, re-pushed on every consumed pop, so the gesture
@@ -2287,8 +2279,8 @@
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
       if (addServer) { addServer = null; navPush(); return; }
-      if (page === 'files' && filesGoBack && filesGoBack()) return;
-      if (page === 'files' && jumpedFrom) { switchTab(jumpedFrom); return; }
+      if (page === 'files' && view.filesGoBack && view.filesGoBack()) return;
+      if (page === 'files' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
       // Files with nothing to peel has climbed to /: fall through to the
       // re-push — the terminal is not below it (board #47).
       // Chat and Agents peel their own layers (menus, dialogs, drawer,
@@ -2297,17 +2289,17 @@
       // navigating away (owner, 2026-08-24: "像是网页刷新了。像文件管理页面
       // 就很好"). The consumed pop re-pushes so the NEXT back has an entry
       // to spend no matter how many layers were peeled.
-      if (page === 'hub' && hubGoBack && hubGoBack()) { navPush(); return; }
-      if (page === 'agents' && agentsGoBack && agentsGoBack()) { navPush(); return; }
-      if (page === 'board' && boardGoBack && boardGoBack()) { navPush(); return; }
-      if (page === 'board' && jumpedFrom) { switchTab(jumpedFrom); return; }
+      if (page === 'hub' && view.hubGoBack && view.hubGoBack()) { navPush(); return; }
+      if (page === 'agents' && view.agentsGoBack && view.agentsGoBack()) { navPush(); return; }
+      if (page === 'board' && view.boardGoBack && view.boardGoBack()) { navPush(); return; }
+      if (page === 'board' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
       // Board with nothing to peel is like Hub: the drawer is its compact
       // floor (lifted by its own chain above), so a fall-through just
       // re-pushes — it never dumps the reader on the terminal (board #47).
       // A terminal JUMPED INTO from Chat returns there before the ordinary
       // terminal floor gets a chance to lift its drawer.
-      if (page === 'terminal' && sessionsGoBack?.()) { navPush(); return; }
-      if (page === 'terminal' && jumpedFrom) { switchTab(jumpedFrom); return; }
+      if (page === 'terminal' && view.sessionsGoBack?.()) { navPush(); return; }
+      if (page === 'terminal' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
       // Compact Terminal has the same FLOOR semantics as Chat/Board (board
       // #58): a bare page lifts the session drawer. Once open, Back falls
       // through to the final re-push — it must never peel closed and then
@@ -2469,8 +2461,8 @@
   // A second click on the ACTIVE tab is not nothing: the page gets a
   // "reselect" — the Hub expands its collapsed project sidebar (owner,
   // 2026-09-14: "左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏"; board
-  // #199). Pages register theirs the way they register their back chain.
-  const pageReselect = {};
+  // #199). Pages register theirs the way they register their back chain,
+  // in the view's `pageReselect`.
   // ONE primary-sidebar state for the whole shell (board #200, owner
   // 2026-09-14: "这个折叠收起在不同的页面是同步的，不然我点击chat terminal board，展开状态
   // 不一致"): the Hub's toggle writes appPrefs.sidebarCollapsed; the Terminal
@@ -2485,7 +2477,7 @@
   const SIDEBAR_PAGES = new Set(['hub', 'terminal', 'board']);
   const pageHasSidebar = $derived(SIDEBAR_PAGES.has(page));
   // A reselect TOGGLES (owner, 2026-09-14: "选中点击也能展开，也能折叠"; board #201).
-  pageReselect.terminal = pageReselect.board = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
+  view.pageReselect.terminal = view.pageReselect.board = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
   // The Terminal page moves its track the way the Hub does (reveal.ts): the
   // sidebar pinned at its width, the factor moving, xterm fitted once at rest.
   let termPageEl = $state(null);
@@ -2502,12 +2494,12 @@
   // if it has one (the Hub animates with its reading anchor), else the shared
   // state directly.
   function toggleShellSidebar() {
-    (pageReselect[page] ?? (() => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed)))();
+    (view.pageReselect[page] ?? (() => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed)))();
   }
   function railActivate(slot) {
     if (railClickGuard) { railClickGuard = false; return; }
     if (slot === 'prefs') togglePrefs();
-    else if (slot === page) { pageReselect[slot]?.(); return; }
+    else if (slot === page) { view.pageReselect[slot]?.(); return; }
     else switchTab(slot);
   }
   // Escape abandons a drag and a resize invalidates its snapshotted rects —
@@ -2582,7 +2574,7 @@
     const t = tabs();
     const curName = page;
     if (target === curName) return;
-    jumpedFrom = null; // deliberate navigation stands the return slot down
+    view.jumpedFrom = null; // deliberate navigation stands the return slot down
     const fromIdx = t.indexOf(curName);
     const toIdx = t.indexOf(target);
     // Apply page change immediately
@@ -2640,7 +2632,7 @@
     toggleSidebar() { toggleShellSidebar(); },
     toggleSplit() {
       if (page !== 'terminal') switchTab('terminal');
-      setLayout(splitLayout > 1 ? 1 : 2);
+      setLayout(view.splitLayout > 1 ? 1 : 2);
     },
     async focusComposer() {
       if (page !== 'hub') { switchTab('hub'); await tick(); }
@@ -2673,7 +2665,7 @@
   });
 </script>
 
-<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={filesImmersive && page === 'files'}>
+<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'}>
   <!-- Shell chrome. Every nav item is in the Tab order (no tabindex="-1" —
        review, 2026-09-03: the whole nav was unreachable by keyboard) and wears
        the global button:focus-visible ring; the current page is aria-current.
@@ -2951,7 +2943,7 @@
       onDrill={() => navPush()}
       showAgents={hubEligible && !migrationBlocked && agentsLivesInSettings(layout.isTouchDevice)}
       guestRuntime={migrationBlocked ? null : scopeRuntime} guestState={migrationBlocked ? undefined : serverStates.get(scopeRuntime)}
-      agentsEditRequest={landingFor(agentsEditReq)}
+      agentsEditRequest={landingFor(view.agentsEditReq)}
       openRequest={prefsOpenReq}
       onAddress={(address) => {
         if (migrationBlocked) return;  // nothing moves the socket while it is blocked
@@ -3010,7 +3002,7 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={page !== 'hub'}>
-        <Hub visible={page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => hubGoBack = fn} onReselect={(fn) => { pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) filesNavReq = { serverId: navServerId(), path, file, n: (filesNavReq?.n ?? 0) + 1 }; switchTab('files'); jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) boardIssueReq = { serverId: navServerId(), session: s, id: issue, n: (boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); jumpedFrom = 'hub'; }} />
+        <Hub visible={page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => view.hubGoBack = fn} onReselect={(fn) => { view.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) view.filesNavReq = { serverId: navServerId(), path, file, n: (view.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); view.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) view.boardIssueReq = { serverId: navServerId(), session: s, id: issue, n: (view.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); view.jumpedFrom = 'hub'; }} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
@@ -3019,15 +3011,15 @@
          chain. -->
     {#if hubEligible && !agentsLivesInSettings(layout.isTouchDevice)}
       <div class="page-layer" class:hidden={page !== 'agents'}>
-        <AgentsPage visible={page === 'agents'} guardPage="agents" onGoBack={(fn) => agentsGoBack = fn} editRequest={landingFor(agentsEditReq)} />
+        <AgentsPage visible={page === 'agents'} guardPage="agents" onGoBack={(fn) => view.agentsGoBack = fn} editRequest={landingFor(view.agentsEditReq)} />
       </div>
     {/if}
     <div class="page-layer" class:hidden={page !== 'files'}>
-      <Files session={filesSession} guardPage="files" visible={page === 'files'} {fontSize} onGoBack={(fn) => filesGoBack = fn} onimmersive={(on) => filesImmersive = on} navRequest={landingFor(filesNavReq)} jumped={!!jumpedFrom} />
+      <Files session={filesSession} guardPage="files" visible={page === 'files'} {fontSize} onGoBack={(fn) => view.filesGoBack = fn} onimmersive={(on) => view.filesImmersive = on} navRequest={landingFor(view.filesNavReq)} jumped={!!view.jumpedFrom} />
     </div>
     <div class="page-layer" class:hidden={page !== 'board'}>
       {#if hubEligible}
-        <Board session={filesSession} guardPage="board" visible={page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => boardGoBack = fn} issueRequest={landingFor(boardIssueReq)} jumped={!!jumpedFrom} />
+        <Board session={filesSession} guardPage="board" visible={page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => view.boardGoBack = fn} issueRequest={landingFor(view.boardIssueReq)} jumped={!!view.jumpedFrom} />
       {/if}
     </div>
     <div class="page-layer term-page" class:hidden={page !== 'terminal'} bind:this={termPageEl}>
@@ -3038,7 +3030,7 @@
       <aside class="term-side" class:side-sheet={layout.isTouchDevice && narrowVp} class:sheet={layout.isTouchDevice} class:open={layout.isTouchDevice && narrowVp && sessListOpen} bind:this={termSideEl}>
         {#if !layout.isTouchDevice}<SideHandle />{/if}
         <Sessions {openTerminal} activeTarget={terminalTarget}
-          onGoBack={(fn) => sessionsGoBack = fn}
+          onGoBack={(fn) => view.sessionsGoBack = fn}
           visible={page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
           chips={false} />
@@ -3062,16 +3054,16 @@
             </div>
           {/if}
           {#if splitActive}
-            <SplitView cells={splitViewCells} layout={splitLayout} {activeCellId} {fontSize}
+            <SplitView cells={splitViewCells} layout={view.splitLayout} activeCellId={view.activeCellId} {fontSize}
               visible={page === 'terminal'}
-              onActivate={(id) => activeCellId = id}
+              onActivate={(id) => view.activeCellId = id}
               onAssign={assignCell}
               onCloseCell={closeCell}
               onPaneExit={cellPaneExit} />
           {:else}
             <Terminal target={terminalTarget} session={terminalSession} {fontSize}
               visible={page === 'terminal'}
-              splitEligible={splitEligible} {splitActive} {splitLayout} onSetLayout={setLayout}
+              splitEligible={splitEligible} {splitActive} splitLayout={view.splitLayout} onSetLayout={setLayout}
               onOpenSessions={layout.isTouchDevice ? () => sessListOpen = true : null}
               onSwitchPane={(t) => showPane('', t)} onPaneExit={paneExitFallback} />
           {/if}

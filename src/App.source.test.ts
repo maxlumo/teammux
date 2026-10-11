@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('./App.svelte', import.meta.url), 'utf8');
+// The bound tree's navigation and back chains live in its view (#335 ③a).
+const viewSource = await readFile(new URL('./lib/app/server-view.svelte.ts', import.meta.url), 'utf8');
 
 test('sharing a connection reports only a current successful copy; failure uses Preferences (#167)', () => {
   // Preferences.mount executes the existing error/retry channel. This source
@@ -121,7 +123,7 @@ test('the session list lives inside the Terminal page, sheeted on a phone', () =
   // matching Chat/Board: a bare Terminal lifts it; once open it falls through
   // and stays open, so Back can never close→open cycle. A Chat jump returns
   // to Chat before the ordinary floor lift.
-  const jumpAt = source.indexOf("if (page === 'terminal' && jumpedFrom)");
+  const jumpAt = source.indexOf("if (page === 'terminal' && view.jumpedFrom)");
   const liftAt = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
   assert.ok(jumpAt >= 0 && liftAt > jumpAt, 'a Chat return slot outranks the Terminal floor');
   assert.match(source, /if \(page === 'terminal' && layout\.isTouchDevice && narrowVp && !sessListOpen\) \{\s*sessListOpen = true;\s*navPush\(\);\s*return;\s*\}/u,
@@ -314,26 +316,26 @@ test('Settings only offers the category when there is a bus and no Agents page',
   assert.match(source, /guestRuntime=\{migrationBlocked \? null : scopeRuntime\}/u);
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
-  assert.match(source, /agentsEditRequest=\{landingFor\(agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
+  assert.match(source, /agentsEditRequest=\{landingFor\(view\.agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
   assert.match(source, /openRequest=\{prefsOpenReq\}/u);
 });
 
 test('a jump from the chat returns THERE on back, and deliberate navigation clears it (2026-08-29)', () => {
   // The one-deep return slot: set by the chat's cross-page jumps, cleared by
   // any real tab switch, consumed at the target page's back FLOOR.
-  assert.match(source, /jumpedFrom = null; \/\/ deliberate navigation stands the return slot down/u,
+  assert.match(source, /view\.jumpedFrom = null; \/\/ deliberate navigation stands the return slot down/u,
     'switchTab clears the slot');
-  assert.match(source, /if \(from === 'hub'\) jumpedFrom = 'hub';/u, 'opening a pane from the chat remembers');
-  assert.match(source, /switchTab\('files'\); jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
-  assert.match(source, /switchTab\('board'\); jumpedFrom = 'hub';/u, 'the board jump too');
+  assert.match(source, /if \(from === 'hub'\) view\.jumpedFrom = 'hub';/u, 'opening a pane from the chat remembers');
+  assert.match(source, /switchTab\('files'\); view\.jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
+  assert.match(source, /switchTab\('board'\); view\.jumpedFrom = 'hub';/u, 'the board jump too');
   for (const p of ['files', 'board', 'terminal']) {
-    assert.match(source, new RegExp(`if \\(page === '${p}' && jumpedFrom\\) \\{ switchTab\\(jumpedFrom\\); return; \\}`, 'u'),
+    assert.match(source, new RegExp(`if \\(page === '${p}' && view\\.jumpedFrom\\) \\{ switchTab\\(view\\.jumpedFrom\\); return; \\}`, 'u'),
       `${p}'s floor prefers the return slot`);
   }
   // Order matters: the slot fires only at the FLOOR — after the page's own
   // onGoBack chain (and the terminal's session sheet) had their turn.
-  const idxGoBack = source.indexOf("if (page === 'board' && boardGoBack && boardGoBack())");
-  const idxSlot = source.indexOf("if (page === 'board' && jumpedFrom)");
+  const idxGoBack = source.indexOf("if (page === 'board' && view.boardGoBack && view.boardGoBack())");
+  const idxSlot = source.indexOf("if (page === 'board' && view.jumpedFrom)");
   assert.ok(idxGoBack >= 0 && idxGoBack < idxSlot, 'peel first, return second');
 });
 
@@ -347,21 +349,21 @@ test('board back on a phone lifts the project drawer, never the terminal (board 
   // parent directories; App adds no terminal fallback below it either.
   assert.ok(!/if \(page === 'files'\) \{ page = 'terminal'; return; \}/u.test(source),
     'the files→terminal floor stays retired');
-  assert.match(source, /<Files [^\n]*jumped=\{!!jumpedFrom\}/u, 'the files page instance gets the return-slot gate');
+  assert.match(source, /<Files [^\n]*jumped=\{!!view\.jumpedFrom\}/u, 'the files page instance gets the return-slot gate');
   // Board is told whether a return slot exists, so its drawer lift can stand
   // aside and let back fall through to the conversation.
-  assert.match(source, /<Board [^\n]*jumped=\{!!jumpedFrom\}/u, 'the return slot reaches the drawer-lift gate');
+  assert.match(source, /<Board [^\n]*jumped=\{!!view\.jumpedFrom\}/u, 'the return slot reaches the drawer-lift gate');
 });
 
 test('Terminal confirmations delegate before jump-back or drawer floor without another history listener (#167)', () => {
   // Actual pending/idle behavior is exercised by Sessions/Projects mount
   // tests; this pins App's wiring and preserves its touch-only history owner.
-  const delegate = source.indexOf("if (page === 'terminal' && sessionsGoBack?.())");
-  const jump = source.indexOf("if (page === 'terminal' && jumpedFrom)");
+  const delegate = source.indexOf("if (page === 'terminal' && view.sessionsGoBack?.())");
+  const jump = source.indexOf("if (page === 'terminal' && view.jumpedFrom)");
   const floor = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
   assert.ok(delegate >= 0 && delegate < jump && delegate < floor);
-  assert.match(source, /if \(page === 'terminal' && sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
-  assert.match(source, /onGoBack=\{\(fn\) => sessionsGoBack = fn\}/u);
+  assert.match(source, /if \(page === 'terminal' && view\.sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
+  assert.match(source, /onGoBack=\{\(fn\) => view\.sessionsGoBack = fn\}/u);
   assert.equal([...source.matchAll(/addEventListener\('popstate'/gu)].length, 1);
 });
 
@@ -466,7 +468,7 @@ test('every App socket owner goes through the switch module and loses ownership 
   // the switch still owns the intent AND that runtime is still bound.
   assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*(?:\s*\/\/[^\n]*\n)*\s*void runtime\.probeCaps\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u,
     'published as EACH answer lands, so a quick Hub answer is not held behind backends');
-  assert.match(source, /if \(caps\.hub !== null\) hubState = \{ available: caps\.hub, probed: true \};/u,
+  assert.match(source, /if \(caps\.hub !== null\) view\.hubState = \{ available: caps\.hub, probed: true \};/u,
     'the Hub flag moves only on a definitive answer');
   assert.doesNotMatch(source, /\bhubRooms\(|\bbackendsList\(/u, 'App asks no capability question over the facade');
   // The only remaining direct starts are the reconnect machine's own owners.
@@ -512,7 +514,9 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // breaks the one thing it is for — identity. The A→B→A restore test found
   // this: the saved-state guard could never pass.
   assert.match(source, /let scopeRuntime = \$state\.raw\(null\);/u, 'the handle is raw App state');
-  assert.match(source, /let navRestored = \$state\.raw\(null\);/u);
+  // The restored-runtime mark is the view's, raw for the same reason (③a).
+  assert.match(source, /const view = createServerView\(\);/u);
+  assert.match(viewSource, /navRestored = \$state\.raw<unknown>\(null\);/u);
   assert.equal([...source.matchAll(/(?<!let )scopeRuntime = /gu)].length, 1,
     'and after its declaration only createScopeSwap({ show }) assigns it');
   assert.match(source, /show: \(runtime\) => \{ scopeRuntime = runtime; \},/u);
@@ -611,15 +615,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
     'the survivor comes from servers.mergedInto');
   const follow = source.match(/function followMerges\(\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(follow, /known|\.has\(/u, 'and nothing reads absence as a merge');
-  for (const held of ['termPane = rebind(termPane);', 'filesRef = rebind(filesRef);', 'pane: rebind(c.pane)',
+  for (const held of ['view.termPane = rebind(view.termPane);', 'view.filesRef = rebind(view.filesRef);', 'pane: rebind(c.pane)',
     'reownSavedNav(createServerStore(localStorage, id), survivorOf);'])
     assert.ok(follow.includes(held), `the merge reaches what App holds and the record: ${held}`);
   // Every CONFIRMED runtime opens the save gate: an arrival by restoring the
   // record, a same-server return or a failover by keeping what is on screen
   // (reviewer P1-b). Before, only a restore opened it, and a merge on the
   // other two paths left it shut on the replaced handle for good.
-  assert.equal([...source.matchAll(/navRestored = target;/gu)].length, 2, 'the restore and the keep, nothing else');
-  assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*navRestored = target;/u);
+  assert.equal([...source.matchAll(/view\.navRestored = target;/gu)].length, 2, 'the restore and the keep, nothing else');
+  assert.match(source, /async function keepNavFor\(target\) \{\s*await scopeSwap\.settled\(\);\s*if \(!target \|\| scopeSwap\.shown\(\) !== target\) return;\s*view\.navRestored = target;/u);
   assert.match(source, /function onReconnected\(runtime, result, attempt\) \{(?:(?!\n  \}\n)[\s\S])*?void keepNavFor\(runtime\);/u,
     'a failover keeps');
   assert.match(source, /return activate\(\{ replace: false, up: \(\) => \{[\s\S]{0,300}?void keepNavFor\(scopeSwap\.bound\(\)\);/u,
@@ -643,24 +647,24 @@ test('the content tree is bound to one server, and only the swap binds it (board
   assert.doesNotMatch(source, /navProvenance|navLiveOwner|navBoot|=== boot\.raw/u, 'no tracked provenance and no byte comparison');
   // And nothing saves over that record until the restore for the bound
   // runtime has finished.
-  assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
-  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\), \{ page, pane: termPane, splitLayout, splitCells \}\);/u,
+  assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| view\.navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id\), \{ page, pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
     'the saved state writes the refs App already holds, rather than rebuilding them');
   // Every reference is minted in ONE place per kind, from the bound server.
-  assert.match(source, /function showPane\(session, target\) \{\s*termPane = target \? paneRef\(navServerId\(\),/u);
-  assert.match(source, /function showSession\(session\) \{\s*filesRef = session \? sessionRef\(navServerId\(\), session\) : null;/u);
+  assert.match(source, /function showPane\(session, target\) \{\s*view\.termPane = target \? paneRef\(navServerId\(\),/u);
+  assert.match(source, /function showSession\(session\) \{\s*view\.filesRef = session \? sessionRef\(navServerId\(\), session\) : null;/u);
   // Every write to the pane assigns a REF or null — never a bare target —
   // which is what makes "the identity has one home" checkable.
-  assert.match(source, /let termPane = \$state\(null\);/u);
-  for (const write of [...source.matchAll(/^\s*termPane = (.+)$/gmu)].slice(1)) {
-    assert.match(write[1]!, /paneRef\(navServerId\(\)|^pane;$|^null;$|^move\(termPane\);$|^rebind\(termPane\);$|^s\.pane;$/u,
-      `termPane = ${write[1]} — a pane is a reference, not a target string`);
+  assert.match(viewSource, /termPane = \$state<PaneRef \| null>\(null\);/u);
+  for (const write of [...source.matchAll(/^\s*view\.termPane = (.+)$/gmu)].slice(1)) {
+    assert.match(write[1]!, /paneRef\(navServerId\(\)|^pane;$|^null;$|^move\(view\.termPane\);$|^rebind\(view\.termPane\);$|^s\.pane;$/u,
+      `view.termPane = ${write[1]} — a pane is a reference, not a target string`);
   }
   // The strings consumers and the wire take are DERIVED: a serverId cannot
   // reach a `target` or `session` argument.
-  assert.match(source, /const terminalTarget = \$derived\(termPane\?\.target \?\? ''\);/u);
-  assert.match(source, /const terminalSession = \$derived\(termPane\?\.session \?\? ''\);/u);
-  assert.match(source, /const filesSession = \$derived\(filesRef\?\.session \?\? ''\);/u);
+  assert.match(source, /const terminalTarget = \$derived\(view\.termPane\?\.target \?\? ''\);/u);
+  assert.match(source, /const terminalSession = \$derived\(view\.termPane\?\.session \?\? ''\);/u);
+  assert.match(source, /const filesSession = \$derived\(view\.filesRef\?\.session \?\? ''\);/u);
   assert.match(source, /<SplitView cells=\{splitViewCells\}/u, 'and the split hands over strings too');
   // What it hands over is the pane's own names and NOTHING else: a serverId
   // that reached a `target` would be sent to tmux as part of a pane address.
@@ -1118,9 +1122,9 @@ test('the rail keeps the ONE travelling highlight; the tab bar is foreground-onl
 test('a second click on the active rail tab hands the page a reselect — the Hub expands its sidebar (board #199)', () => {
   // Owner 2026-09-14: "我应该在左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏".
   // switchTab returns when target === page; the rail used to swallow the click.
-  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ pageReselect\[slot\]\?\.\(\); return; \}/u);
-  assert.match(source, /const pageReselect = \{\};/u);
-  assert.match(source, /onReselect=\{\(fn\) => \{ pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
+  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ view\.pageReselect\[slot\]\?\.\(\); return; \}/u);
+  assert.match(viewSource, /pageReselect: Record<string, \(\(\) => void\) \| undefined> = \{\};/u);
+  assert.match(source, /onReselect=\{\(fn\) => \{ view\.pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
 });
 
 test('one shell-wide sidebar state: the Terminal page and the system status follow the Hub\'s collapse; reselect opens it on every page (board #200)', async () => {
@@ -1128,7 +1132,7 @@ test('one shell-wide sidebar state: the Terminal page and the system status foll
   // 页面是同步的，不然我点击chat terminal board，展开状态不一致".
   assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && appPrefs\.sidebarCollapsed\);/u);
   assert.match(source, /<main class:with-rail=\{[^}]+\} class:touch-layout=\{[^}]+\} class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u);
-  assert.match(source, /pageReselect\.terminal = pageReselect\.board = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);/u, '#199 on every page, a toggle since #201');
+  assert.match(source, /view\.pageReselect\.terminal = view\.pageReselect\.board = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);/u, '#199 on every page, a toggle since #201');
   assert.match(source, /<Board session=\{filesSession\} guardPage="board" visible=\{page === 'board'\} sideCollapsed=\{shellSideCollapsed\}/u);
   // The Terminal page's track is the Hub's technique: factor, gate, pin, hidden at rest.
   assert.match(source, /const unpin = pinTrack\(termSideEl, 'end'\);\s*\n\s*void moveTrack\(termPageEl, '--side-open', collapsed \? 1 : 0\)\.then\(unpin\);/u);
@@ -1164,7 +1168,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   assert.match(source, /class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u,
     'the collapsed state stays app-wide (#200); which page is on screen is a second class');
   assert.equal([...source.matchAll(/icon="panel-left"/gu)].length, 1, 'ONE node — never one per state or per page');
-  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(pageReselect\[page\] \?\? \(\(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\)\)\)\(\);/u,
+  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(view\.pageReselect\[page\] \?\? \(\(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\)\)\)\(\);/u,
     'the same act as a reselect: the page\'s delegate, else the shared state');
   const style = source.match(/<style>[\s\S]*<\/style>/u)?.[0] ?? '';
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';
@@ -1200,8 +1204,8 @@ test('the phone tab bar hides for Files\' reading mode through one signal, gated
   // Owner 2026-09-20: reading mode takes the whole screen; the bottom bar goes
   // the way it goes for the keyboard — a cut — from one explicit prop, never a
   // second class writer on <html>.
-  assert.match(source, /onimmersive=\{\(on\) => filesImmersive = on\}/u, 'Files reports, App mirrors');
-  assert.match(source, /class:immersive=\{filesImmersive && page === 'files'\}/u, 'only while Files is the page on screen');
+  assert.match(source, /onimmersive=\{\(on\) => view\.filesImmersive = on\}/u, 'Files reports, App mirrors');
+  assert.match(source, /class:immersive=\{view\.filesImmersive && page === 'files'\}/u, 'only while Files is the page on screen');
   assert.match(source, /\.immersive \.tabbar \{ display: none; \}/u);
   assert.match(source, /:global\(html\.keyboard-open\) \.tabbar \{ display: none; \}/u, 'the keyboard hide it sits beside');
 });
@@ -1236,7 +1240,7 @@ test('a connect lands on the default page, Chat — never a hard-coded Terminal 
   assert.match(connected, /page = defaultPage\(\);/u);
   assert.doesNotMatch(connected, /page = 'terminal'/u);
   // The one hubless fallback stays: Chat on a server without the Hub becomes Terminal.
-  assert.match(source, /if \(\(page === 'hub' \|\| page === 'agents' \|\| page === 'board'\) && hubState\.probed && !hubState\.available\) page = 'terminal';/u);
+  assert.match(source, /if \(\(page === 'hub' \|\| page === 'agents' \|\| page === 'board'\) && view\.hubState\.probed && !view\.hubState\.available\) page = 'terminal';/u);
 });
 
 test('the fixed rail and the sidebar toggle start under the Android status bar (#332)', () => {

@@ -84,7 +84,10 @@ test('the identity modules have exactly the production consumers this commit giv
     'refs.ts': ['src/App.svelte',
       // ③a: the device's excluded set holds ServerIds (a type import); it
       // reads them through the registry and is not a page.
-      'src/lib/app/connection-mode.ts'],
+      'src/lib/app/connection-mode.ts',
+      // ③a: the window's view of a bound tree holds its PaneRef/SessionRef
+      // (type imports); App owns it, and it is not a page.
+      'src/lib/app/server-view.svelte.ts'],
     'nav-saved.ts': ['src/App.svelte'],
     'server-runtime.ts': [],
     'server-scope.ts': ['src/App.svelte'],
