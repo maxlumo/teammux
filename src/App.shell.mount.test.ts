@@ -3071,10 +3071,14 @@ test('P1-3: a form connect to another server is not DONE before B is bound — t
   await submit();
   for (let i = 0; i < 6; i++) await h.settle();
   assert.ok(events.includes('aborted'), 'B passed its gates and A was given up');
-  assert.ok(cardHas(h.app, /^cancel$/iu), 'but the activation is not done: the bind waits on A s release');
+  const busy = () => !!h.app.document.querySelector('.card .connect-btn.connecting');
+  assert.ok(busy(), 'but the activation is not done: the bind waits on A s release');
+  // Past its point of no return a cancel undoes nothing, so none is offered
+  // (reviewer P2 on 027d1a92).
+  assert.ok(!cardHas(h.app, /^cancel$/iu), 'and the form offers no Cancel it could not honour');
   transfer.finish();
   for (let i = 0; i < 6; i++) await h.settle();
-  assert.ok(!cardHas(h.app, /^cancel$/iu), 'once B is bound, the form is free');
+  assert.ok(!busy(), 'once B is bound, the form is free');
   assert.equal(h.app.document.querySelector('.card .error'), null, 'with no error');
 });
 
@@ -3220,4 +3224,147 @@ test('P1-2: a reconnect dial a form TOOK OVER (its candidate claimed the app) re
   assert.equal(h.app.window.localStorage.getItem('tmux_servers'), registry, 'it recorded nothing');
   assert.equal(h.dialogs(), 0, 'and opened no arrival');
   assert.equal(conn(h, 'a')?.isConnected(), false, 'its unverified socket is closed');
+});
+
+// ─── Reviewer on 027d1a92: every way into the blocked state keeps the
+// source (ruling K), and no editor of it mounts while blocked.
+
+/** A on screen and running, pending inputs for m-x, B the m-x server. */
+async function aRunningWithInputsFor(context: TestContext, bKnowsItsMachine: boolean, more: { rpc?: Record<string, unknown>; layout?: string } = {}) {
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = JSON.parse(twoServers({ live: '', parked: '' }).tmux_servers);
+  if (bKnowsItsMachine) servers[1].machineId = 'm-x'; else delete servers[1].machineId;
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers),
+    tmux_machine_id: 'm-x',
+    tmux_server_current: 'gone',
+    tmux_hub_drafts: JSON.stringify({ work: 'draft of m-x' }),
+    tmux_layout_mode: more.layout ?? 'desktop',
+  }, (url, n) => (url.includes('//b') ? (n === 0 && !bKnowsItsMachine ? '' : 'm-x') : 'm-a'), {
+    calls: events, rpc: { ...transfer.rpc, ...more.rpc },
+    setup(window) { store.setup(window); transfer.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  await h.app.advance(1000);
+  return { ...h, store, events, transfer, ls: h.app.window.localStorage };
+}
+const retryButton = (app: any) => [...app.document.querySelectorAll('.switch-panel button, .card button')]
+  .find((b: any) => /retry/iu.test(b.textContent ?? '')) as HTMLButtonElement | undefined;
+
+test('K, the PRE-dial entry: B s claim fails when B is minted — A keeps running with its download, no tree, and Retry ends A only once B is bound (reviewer on 027d1a92)', async (context) => {
+  const h = await aRunningWithInputsFor(context, true);
+  assert.equal(JSON.parse(h.ls.getItem('tmux_state_layout')!).state, 'pending', 'the inputs wait for m-x');
+  await startDownload(h.app, h.settle);
+  const a = conn(h, 'a')!;
+  h.store.state.failing = true;
+  await h.switchTo('beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(dialsOf(h.events, 'b').length, 0, 'B was blocked before its own dial');
+  assert.equal(h.app.document.querySelector('.term-page, .file-main'), null, 'no writable server tree is mounted');
+  assert.ok(a.isConnected() && !a.disposed(), 'A was not ended by the block');
+  assert.ok(!h.events.includes('aborted'), 'and A s download was not released');
+  h.store.state.failing = false;
+  const retry = retryButton(h.app);
+  assert.ok(retry, 'Retry is offered');
+  retry.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.deepEqual(JSON.parse(h.ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'b' }, 'Retry folded the inputs into B');
+  assert.ok(h.events.includes('aborted'), 'only then is A given up');
+  h.transfer.finish();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.equal(a.disposed(), true, 'and ended, once B passed every gate');
+  assert.ok(conn(h, 'b')?.isConnected(), 'B is up on its own connection');
+});
+
+test('K, the HOST-GATE entry: the form s candidate identity write fails mid-handoff — the source keeps running, no tree, and it ends only once the survivor is bound (reviewer on 027d1a92)', async (context) => {
+  // The alias is current and connected, a download running; the inputs wait
+  // for m-a. The person connects through the card: the candidate reports
+  // m-a, `activateConnected` absorbs the alias into canonical, and the slot
+  // copy fails — the form reports it, and the host gate blocks.
+  const m = new Map(Object.entries({
+    tmux_servers: aliasRegistry,
+    tmux_server_current: 'ghost',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_hub_drafts: JSON.stringify({ work: 'LATEST' }),
+    tmux_layout_mode: 'desktop',
+  }));
+  assert.equal(migrateServerState({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => { m.set(k, v); }, removeItem: (k) => { m.delete(k); } }).reason, 'pending');
+  m.set('tmux_server_current', 'a');
+  m.set('tmux_address', 'ws://alias:9899'); m.set('tmux_token', 'tok');
+  m.set('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const store = refusing(['tmux_hub_drafts::c']);
+  store.state.failing = false;
+  const events: string[] = [];
+  const transfer = slowTransfer(events);
+  const h = await bootApp(context, Object.fromEntries(m), (_url, n) => (n === 1 ? '' : 'm-a'),
+    { calls: events, rpc: transfer.rpc, setup(window) { store.setup(window); transfer.setup(window); } });
+  await startDownload(h.app, h.settle);
+  const alias = conn(h, 'a')!;
+  store.state.failing = true;
+  const { submit } = await toTheCard(h.app, h.settle, 'ws://alias:9899');
+  await submit();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the absorption left the handoff open');
+  assert.ok(retryButton(h.app), 'blocked: the migration Retry is offered');
+  assert.equal(h.app.document.querySelector('.term-page, .file-main'), null, 'no writable server tree is mounted');
+  assert.equal(alias.disposed(), false, 'the source was not ended by the block');
+  assert.ok(!events.includes('aborted'), 'and its download was not released');
+  store.state.failing = false;
+  retryButton(h.app)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  // The registry write never committed, so the handoff resumes on the
+  // alias side: CURRENT stays the alias, the move is closed.
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the open handoff');
+  assert.equal(alias.disposed(), false, 'and still ended nothing');
+  // The person connects again: the survivor's own runtime dials and is bound.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  assert.ok(conn(h, 'c')?.isConnected(), 'the survivor is up on its own connection');
+  assert.equal(alias.disposed(), true, 'and only then is the source ended');
+  assert.ok(!events.includes('aborted'), 'the same machine adopted its download');
+});
+
+test('K on touch with a Hub: while blocked the guest Agents editor does not mount and asks nothing; Retry brings it back for the server bound (reviewer on 027d1a92)', async (context) => {
+  const hub = { hubRooms: async () => ({ rooms: {} }), hubUnread: async () => ({ rooms: {} }), hubRead: async () => ({ rooms: {} }), hubAgents: async () => ({ agents: [] }), registryList: async () => ({ agents: [] }), teamsList: async () => ({ teams: [] }), hubLog: async () => ({ messages: [], has_more: false }), hubActivity: async () => ({ events: [], has_more: false }) };
+  const h = await aRunningWithInputsFor(context, false, { rpc: hub, layout: 'mobile' });
+  const openPrefs = async () => {
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+  };
+  const categories = () => [...h.app.document.querySelectorAll('.preferences .side-row')].map((r) => (r.textContent ?? '').trim());
+  await openPrefs();
+  assert.ok(categories().some((c) => /^agents/iu.test(c)), `A hosts the Hub: the Agents category is offered: ${categories().join(' | ')}`);
+  h.store.state.failing = true;
+  await h.switchTo('beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(dialsOf(h.events, 'b').length, 1, 'B s own dial proved m-x, and its claim could not be written');
+  assert.equal(conn(h, 'a')?.disposed(), false, 'A is kept');
+  const before = h.events.length;
+  await openPrefs();
+  assert.ok(h.app.document.querySelector('.preferences'), 'Preferences still works while blocked');
+  assert.ok(!categories().some((c) => /^(agents|teams)/iu.test(c)), `no Agents or Teams category: ${categories().join(' | ')}`);
+  assert.equal(h.app.document.querySelector('.agents-embed'), null, 'no guest editor is mounted');
+  assert.ok(!h.events.slice(before).some((e) => /^rpc@a:(registryList|teamsList)/u.test(e)), 'and nothing asked A s registry');
+  h.store.state.failing = false;
+  // Disconnected, the person reaches Retry through Connection (the card).
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))?.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /open connection setup/iu.test(b.textContent ?? ''))?.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const retry = retryButton(h.app);
+  assert.ok(retry, `Retry is reachable: ${[...h.app.document.querySelectorAll('button')].map((b) => (b.textContent ?? '').trim()).filter(Boolean).join(' | ')}`);
+  retry.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  h.transfer.finish();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  assert.ok(conn(h, 'b')?.isConnected(), 'Retry brought B up');
+  await openPrefs();
+  assert.ok(categories().some((c) => /^agents/iu.test(c)), `and the Agents category is back, for B: ${categories().join(' | ')}`);
 });

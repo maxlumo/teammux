@@ -19,7 +19,10 @@
    * and closed once identity is recorded; the server's own runtime then
    * dials. `current()` is App's answer to "is the app still waiting on this
    * attempt?": false once a newer attempt, a switch or a leave took over. */
-  type SecondHalf = { done: Promise<string | null>; cancel(): void };
+  /** The server's own bring-up after the candidate. `committed`, when given,
+   * resolves once it can no longer be cancelled (its runtime is being
+   * bound): from then on the form offers no Cancel. */
+  type SecondHalf = { done: Promise<string | null>; cancel(): void; committed?: Promise<unknown> };
   type Candidate = {
     connect(url: string, token: string): Promise<unknown>;
     setSocket(socket: string): Promise<unknown>;
@@ -87,6 +90,8 @@
   let socket = $state(opened.socket);
   let error = $state('');
   let connecting = $state(false);
+  /** The attempt passed its point of no return: still busy, no Cancel. */
+  let committing = $state(false);
 
   let history = $state<HistoryEntry[]>((() => {
     const raw = JSON.parse(localStorage.getItem('tmux_address_history') || '[]');
@@ -178,6 +183,7 @@
     if (frozen) return;
     error = '';
     connecting = true;
+    committing = false;
     cancelled = false;
     const attempt = ++attempts;
     // FROZEN at submit, before the first await, and used for everything
@@ -279,6 +285,7 @@
       own.close();
       const second = onConnected(switched) || null;
       secondHalf = second;
+      second?.committed?.then(() => { if (mine() && secondHalf === second) committing = true; });
       const failure = second ? await second.done : null;
       if (mine() && failure) error = failure;
     } catch (e) {
@@ -288,7 +295,7 @@
       // whatever it concluded (reviewer P1-D on cc45d7d1).
       own.close();
       if (candidate === own) candidate = null;
-      if (mine()) { connecting = false; secondHalf = null; }
+      if (mine()) { connecting = false; committing = false; secondHalf = null; }
     }
   }
 
@@ -352,7 +359,9 @@
         <button class="connect-btn connecting" disabled>
           <span class="spinner"></span> {t('connecting')}
         </button>
-        <button class="cancel-btn" onclick={cancelConnect}>{t('cancel')}</button>
+        {#if !committing}
+          <button class="cancel-btn" onclick={cancelConnect}>{t('cancel')}</button>
+        {/if}
       </div>
     {:else if frozen}
       <button class="connect-btn" onclick={() => onRetry?.()}>

@@ -787,12 +787,21 @@ chain })`, in this order:
    dispose), reset the memory of a server left (`replace`), wait for the
    bind to FINISH, and run `up`.
 
-A gate that blocks at step 3 publishes nothing and ends nothing (reviewer's
-ruling K, 06:09): the runtime it minted is let go of, the runtime the tree
-is bound to stays bound and running — its downloads too — and no server
-tree renders while the migration is blocked; Retry owes the activation its
-dial, and the server left is ended only once the next runtime has passed
-every gate. A first boot has no source: an empty tree and Retry.
+A gate that blocks publishes nothing and ends nothing (reviewer's ruling K,
+06:09), whichever way the app gets there: at step 3, at step 1 (the mint's
+own gate), or from the host gate (`storageFailed`, e.g. a candidate's
+identity write failing mid-handoff). All three take the ONE blocked state,
+`enterBlocked`, which never unbinds: a runtime a failing activation minted
+is let go of, while the runtime the tree is bound to stays bound and
+running — its downloads too. What the block removes is every VIEW of that
+server: no server tree renders, and the touch layout's guest Agents/Teams
+editor in Preferences does not mount (`showAgents` and `guestRuntime` are
+off while blocked), while person-level Preferences keep working. Retry owes
+the activation its dial, and the server left is ended only once the next
+runtime has passed every gate. A first boot has no source: an empty view
+and Retry. Past a link's point of no return (`committed`: it is
+publishing) a cancel undoes nothing, so the connect form stops offering
+Cancel and stays busy until the bind is done (reviewer P2 on 027d1a92).
 
 One USER activation is one CHAIN (`newChain`). A link can hand over to
 another — its dial reached another machine (an arrival), or its gate moved

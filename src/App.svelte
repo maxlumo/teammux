@@ -1149,7 +1149,7 @@
     c.onCancel(back);
     const run = activate({ replace: true, elsewhere, up: () => { bringUp(); resubscribeAll(); }, chain: c });
     const done = run.done.then((failure) => { if (failure && c.current()) back(); return failure; });
-    return { done, cancel: run.cancel, current: run.current };
+    return { done, cancel: run.cancel, current: run.current, committed: run.committed };
   }
 
   /** The connect page reached a server, and recorded which one. `switched`:
@@ -1222,9 +1222,15 @@
     let published = false;
     let cancelled = false;
     const undo = [];
+    let commit = () => {};
+    /** Resolves at the point of no return: a link is publishing its
+     * runtime, and a cancel undoes nothing from here — so a caller stops
+     * offering one (reviewer P2 on 027d1a92). */
+    const committed = new Promise((resolve) => { commit = resolve; });
     return {
+      committed,
       link(nextOwner, nextRuntime) { owner = nextOwner; runtime = nextRuntime; },
-      publishing() { published = true; },
+      publishing() { published = true; commit(); },
       onCancel(fn) { undo.push(fn); },
       current: () => !cancelled && !!owner?.current(),
       cancel() {
@@ -1275,13 +1281,14 @@
     // this one is the latest from here (reviewer P1-C — never the reverse).
     const owner = activations.claim();
     c.link(owner, runtime);
-    const handle = (done) => ({ done, cancel: c.cancel, current: c.current });
+    const handle = (done) => ({ done, cancel: c.cancel, current: c.current, committed: c.committed });
     if (!runtime) {
-      // Nothing to bind — the migration is blocked: the gate's panel shows,
-      // on a page that is not the connect card (board #335 ②b-4), and Retry
-      // owes this activation its dial.
-      if (!m.keep) void scopeSwap.swap(null);
-      if (migrationBlocked) { page = defaultPage(); connected = false; owedActivation = true; }
+      // Nothing to bind. Blocked: the gate's one blocked state, which keeps
+      // the source (`enterBlocked`; ruling K, reviewer on 027d1a92), and
+      // Retry owes this activation its dial. Not blocked, CURRENT names no
+      // saved server: there is nothing to keep showing.
+      if (migrationBlocked) { enterBlocked(); owedActivation = true; }
+      else if (!m.keep) void scopeSwap.swap(null);
       return handle(Promise.resolve(migrationBlocked ? t('migrationBlockedNote') : t('configIdentityFailed')));
     }
     if (!m.keep) provisional.set(runtime, owner);
@@ -1352,11 +1359,22 @@
    * once the next runtime has passed its handshake and every gate. */
   function blockedAfterDial(runtime, owner) {
     releaseMinted(runtime, owner);
-    reconnect().cancel();
     owedActivation = true;
+    enterBlocked();
+    return t('migrationBlockedNote');
+  }
+  /** The ONE blocked state, however the app got there — before a dial, after
+   * one, or from the host gate (ruling K, reviewer 06:09 and on 027d1a92).
+   * The source is KEPT: the runtime the tree is bound to stays bound,
+   * running and in the fleet, its downloads included, so nothing is ended
+   * because of the block; it is ended only once the next runtime has passed
+   * every gate. What the block takes away is the VIEW — no server tree
+   * renders, and no guest editor mounts, while `migrationBlocked` holds —
+   * and every automatic dial. A first boot has no source: an empty view. */
+  function enterBlocked() {
+    reconnect().cancel();
     connected = false;
     page = defaultPage();
-    return t('migrationBlockedNote');
   }
 
   function openTerminal(session, target) {
@@ -1919,14 +1937,16 @@
     if (migrationBlocked) return;
     prepareStorage();
     if (!migrationBlocked) return;
-    reconnect().cancel();
     autoConnectAttempted = false;
     // A switch that hit it is the gate's to resume after Retry (reviewer P1
     // on af59fb5d): its target is kept here, and the switch shows nothing.
     if (switchTarget) deferredSwitch = switchTarget;
-    swapScope();
+    // The one blocked state, which keeps the source (ruling K): never an
+    // unbind, which would end the server the app is on.
+    const wasConnected = connected;
+    enterBlocked();
     // Disconnected, the Retry is on the connect card.
-    if (!connected) page = 'settings';
+    if (!wasConnected) page = 'settings';
   }
   /** A switch the gate blocked, resumed by Retry through the switch itself. */
   let deferredSwitch = null;
@@ -2929,8 +2949,8 @@
       onShare={shareConnectionLink}
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
-      showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
-      guestRuntime={scopeRuntime} guestState={serverStates.get(scopeRuntime)}
+      showAgents={hubEligible && !migrationBlocked && agentsLivesInSettings(layout.isTouchDevice)}
+      guestRuntime={migrationBlocked ? null : scopeRuntime} guestState={migrationBlocked ? undefined : serverStates.get(scopeRuntime)}
       agentsEditRequest={landingFor(agentsEditReq)}
       openRequest={prefsOpenReq}
       onAddress={(address) => {

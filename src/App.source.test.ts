@@ -308,7 +308,10 @@ test('a saved `agents` page never strands a phone on an unreachable layer', () =
 
 test('Settings only offers the category when there is a bus and no Agents page', () => {
   // hubEligible is the desktop-server gate; agentsLivesInSettings is the device.
-  assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
+  // And not while the migration is blocked (ruling K, reviewer on 027d1a92):
+  // the runtime kept bound is the source's, and no guest editor may write to it.
+  assert.match(source, /showAgents=\{hubEligible && !migrationBlocked && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
+  assert.match(source, /guestRuntime=\{migrationBlocked \? null : scopeRuntime\}/u);
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   assert.match(source, /agentsEditRequest=\{landingFor\(agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');
@@ -721,10 +724,13 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
     'activate → the verdict → the candidate closes → only then the app is told');
   // And the form stays busy through the server's OWN handshake, shows its
   // failure, and Cancel reaches it (reviewer P1-D on cc45d7d1).
-  assert.match(fn, /secondHalf = second;\s*const failure = second \? await second\.done : null;\s*if \(mine\(\) && failure\) error = failure;/u);
-  assert.match(fn, /\} finally \{(?:\s*\/\/[^\n]*)*\s*own\.close\(\);\s*if \(candidate === own\) candidate = null;\s*if \(mine\(\)\) \{ connecting = false; secondHalf = null; \}\s*\}/u,
+  assert.match(fn, /secondHalf = second;\s*second\?\.committed\?\.then\([^\n]*\n\s*const failure = second \? await second\.done : null;\s*if \(mine\(\) && failure\) error = failure;/u);
+  assert.match(fn, /\} finally \{(?:\s*\/\/[^\n]*)*\s*own\.close\(\);\s*if \(candidate === own\) candidate = null;\s*if \(mine\(\)\) \{ connecting = false; committing = false; secondHalf = null; \}\s*\}/u,
     'every end of an attempt closes its candidate and, if it is still the form s, ends the busy state');
   assert.match(settings, /function cancelConnect\(\) \{[\s\S]*?secondHalf\?\.cancel\(\);/u, 'Cancel covers the second handshake');
+  // Until its point of no return; past it, no Cancel is offered (reviewer P2 on 027d1a92).
+  assert.match(fn, /second\?\.committed\?\.then\(\(\) => \{ if \(mine\(\) && secondHalf === second\) committing = true; \}\);/u);
+  assert.match(settings, /\{#if !committing\}\s*<button class="cancel-btn" onclick=\{cancelConnect\}>/u);
   // An identity-activation failure is NOT a success: an error, the
   // candidate closed, the app not told (board #335 ②b-4).
   assert.match(fn, /\} catch \{[\s\S]*?error = t\('configIdentityFailed'\);\s*own\.close\(\);[\s\S]*?\}\s*return;/u,
@@ -777,7 +783,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
   assert.doesNotMatch(act, /void activate\(|void arrivedElsewhere\(/u, 'no link is fire-and-forget');
   assert.match(act, /if \(result\.reason === 'elsewhere'\) \{[\s\S]*?if \(elsewhere === 'arrive'\) return arrivedElsewhere\(result, owner, c\);/u, 'what the runtime s own dial found is the identity of record, and that arrival is the chain s next link');
-  assert.match(act, /const handle = \(done\) => \(\{ done, cancel: c\.cancel, current: c\.current \}\);/u, 'and the caller can wait on the whole chain, cancel it, and ask whether it is still the latest');
+  assert.match(act, /const handle = \(done\) => \(\{ done, cancel: c\.cancel, current: c\.current, committed: c\.committed \}\);/u, 'and the caller can wait on the whole chain, cancel it, ask whether it is still the latest, and learn when it can no longer be cancelled');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {
@@ -857,8 +863,17 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /onAddressesChange=\{\(next\) => \{\s*if \(migrationBlocked\) return;/u);
   // No runtime is minted while blocked, so nothing dials and the dial's
   // record never runs; Retry owes the activation the block stopped.
-  assert.match(source, /if \(!runtime\) \{(?:\s*\/\/[^\n]*)*\s*if \(!m\.keep\) void scopeSwap\.swap\(null\);\s*if \(migrationBlocked\) \{ page = defaultPage\(\); connected = false; owedActivation = true; \}/u,
-    'a blocked bring-up dials nothing, records nothing, and is owed its dial');
+  assert.match(source, /if \(!runtime\) \{(?:\s*\/\/[^\n]*)*\s*if \(migrationBlocked\) \{ enterBlocked\(\); owedActivation = true; \}\s*else if \(!m\.keep\) void scopeSwap\.swap\(null\);/u,
+    'a blocked bring-up dials nothing, records nothing, is owed its dial — and keeps the source');
+  // Every way into the blocked state is the ONE `enterBlocked`, which ends
+  // nothing (ruling K; reviewer on 027d1a92: the pre-dial and the host-gate
+  // entries ended A before).
+  const enter = source.match(/function enterBlocked\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.ok(enter, 'enterBlocked found');
+  assert.doesNotMatch(enter, /scopeSwap\.swap|swapScope|ends\.end|fleet\.drop/u, 'the blocked state ends nothing');
+  const gateFn = source.match(/function storageFailed\(switchTarget = null\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(gateFn, /enterBlocked\(\);/u);
+  assert.doesNotMatch(gateFn, /scopeSwap\.swap|swapScope\(/u, 'the host gate unbinds nothing');
   assert.match(source, /function bringUp\(\) \{[\s\S]*?if \(migrationBlocked\) \{ page = defaultPage\(\); return; \}/u, 'bringUp restores nothing while frozen');
   // The merge rewrite is inside the gate (P1-3), and Retry resumes the
   // connection by its real state (P1-2).
