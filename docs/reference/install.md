@@ -93,7 +93,18 @@ hide that.
    systemd signals only the main process and leaves vite and the server
    running. Kill those PIDs before continuing.
 
-4. **Install the gateway** with the `tmm` of this checkout:
+4. **Build the binary the service will run.** The watcher built `--bins`
+   WITHOUT `embed-ui`, so the `tmm` sitting in `target/release` right now
+   carries no web UI: installed as it is, the gateway serves none and `tmm ui`
+   says so until the first `build:server` (that is also what
+   `npm run gateway:update` would fix afterwards). Build it here, with nothing
+   watching the tree to relink a UI-less copy over it:
+
+   ```bash
+   npm run build:server
+   ```
+
+5. **Install the gateway** with the `tmm` of this checkout:
 
    ```bash
    ~/.local/bin/tmm gateway install
@@ -105,16 +116,17 @@ hide that.
    answers. `~/.local/bin/tmm` is a symlink to that same file, so the identity
    the unit records (this `tmm`, this config root) survives every rebuild.
 
-5. **Start the frontend again.** The dev unit needs no edit — `dev-stack.mjs`
+6. **Start the frontend again.** The dev unit needs no edit — `dev-stack.mjs`
    is vite alone by default since #343:
 
    ```bash
    systemctl --user restart tmux-mobile-dev.service
    ```
 
-6. **Verify.** `tmm gateway status` now says the service is installed and
+7. **Verify.** `tmm gateway status` now says the service is installed and
    running and that the gateway answers at `ws://127.0.0.1:9899` (this
-   machine); `ss -ltn | grep -E '5173|9899'` shows both; open the app.
+   machine); `ss -ltn | grep -E '5173|9899'` shows both; `tmm ui` prints the
+   URL the gateway itself serves; open the app.
 
 From then on, after every merge to main: `npm run gateway:update`. It runs
 `npm run build:server`, and restarts the gateway only when the `tmm` binary's
