@@ -15,7 +15,11 @@
   const fleet = createServerFleet({ storage: localStorage });
   const runtimes = loadServers(localStorage).map((entry) => fleet.include(entry));
   let shown = $state([]);
+  /** Which server's tree is focused (board #335 ③a-4): only its Terminal is
+   * `active`. Null = both, the pre-③a shape. */
+  let focus = $state(null);
   const exits = [];
+  const switched = [];
   globalThis.__pair = {
     runtimes,
     exits,
@@ -24,13 +28,17 @@
       shown = runtimes.map((runtime) => ({ runtime, state: createServerState(createServerStore(localStorage, runtime.id)) }));
     },
     hide(id) { shown = shown.filter((s) => s.runtime.id !== id); },
+    focus(id) { focus = id; },
+    switched,
   };
 </script>
 
 {#each shown as s (s.runtime.id)}
   <div class="cell" data-server={s.runtime.id}>
     <ServerScope runtime={s.runtime} state={s.state}>
-      <Terminal {target} session="app" visible onPaneExit={(t) => exits.push(`${s.runtime.id}:${t}`)} />
+      <Terminal {target} session="app" visible active={focus === null || focus === s.runtime.id}
+        onSwitchPane={(t) => switched.push(`${s.runtime.id}:${t}`)}
+        onPaneExit={(t) => exits.push(`${s.runtime.id}:${t}`)} />
     </ServerScope>
   </div>
 {/each}

@@ -43,7 +43,10 @@ test('single pane: the page’s one terminal', () => {
 test('SplitView marks each cell with its id, and App passes the active id in split screen only', async () => {
   const split = await readFile(new URL('./SplitView.svelte', import.meta.url), 'utf8');
   assert.match(split, /class="cell"\s+data-cell-id=\{cell\.id\}\s+class:active=\{cell\.id === activeCellId\}/u);
+  // ③a-4: a cell takes window input only when its tree is focused too.
+  assert.match(split, /active=\{focused && cell\.id === activeCellId\}/u);
   const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
-  assert.match(app, /terminalFocusTarget\(termPageEl, splitActive \? activeCellId : null\)\?\.focus\(\);/u);
+  assert.match(app, /terminalFocusTarget\(termPageEl, splitActive \? view\.activeCellId : null\)\?\.focus\(\);/u);
+  assert.match(app, /<SplitView [^\n]*\n[^\n]*visible=\{shown && page === 'terminal'\} focused=\{!held\}/u, 'and App says whether the tree is focused');
   assert.doesNotMatch(app, /querySelector\('\.term-page \.xterm-helper-textarea'\)/u, 'the first-terminal lookup is gone');
 });

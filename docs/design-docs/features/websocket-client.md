@@ -859,10 +859,17 @@ Files' record — is its `ServerState`. What the WINDOW holds about the tree is
 its `ServerView` (`app/server-view.svelte.ts`): the pane and Files session it
 is on, its split, the landings aimed at it, the runtime whose navigation has
 been restored, whether its server has the Hub, and the Back chains and
-reselects its pages registered. Through ③a App holds one view for the one tree
-and resets it exactly where it reset these fields before; ③a-5 gives each bound
-member its own, so a tree out of focus keeps its panes and its Back chain, and
-the window dispatches Back, reselect and immersive to the focused view only.
+reselects its pages registered. Each runtime handle has its own view (③a-4),
+made on first ask and handed over with its state on a same-machine merge; the
+window reads and dispatches — Back, reselect, immersive, the focus shortcuts,
+the sidebar motion — through the FOCUSED one, and each tree's pages register
+into theirs. App renders one tree per bound member, keyed by its handle (Single
+holds one; ③b fills the set): a tree out of focus is held — inert and hidden —
+and its Terminal is not `active`, so the window's terminal shortcut moves the
+focused tree's pane only (`Terminal.isolation.mount.test.ts`, two real
+runtimes on the same target). A landing is delivered to the tree it names.
+`resetServerMemory` still resets the focused view where it always did, because
+a failed switch's Back returns to the same runtime and must restore.
 It is a class with rune fields, not a `$state({...})` object, because
 `navRestored` holds a runtime handle and the callbacks are functions: a deep
 proxy over either breaks identity.

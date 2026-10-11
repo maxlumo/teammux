@@ -61,8 +61,9 @@ function socketClass(win: DOMWindow, wires: Wire[]) {
       if (frame.method === 'auth') {
         this.deliver({ result: { authenticated: true, machine_id: `m-${this.wire.server}`, hostname: `${this.wire.server}.host` } });
       } else if (frame.id != null) {
+        const pane = (w: number) => ({ session: 'app', window: w, pane: 0, window_name: `w${w}`, current_command: 'zsh', current_path: '/', width: 80, height: 24, active: w === 0, pane_title: '' });
         const result = frame.method === 'capture_pane' ? { output: `screen of ${this.wire.server}` }
-          : frame.method === 'list_panes' ? [] : {};
+          : frame.method === 'list_panes' ? [pane(0), pane(1)] : {};
         this.deliver({ id: frame.id, result });
       }
     }
@@ -88,7 +89,7 @@ async function mount(context: TestContext) {
     },
   });
   const pair = (app.window as unknown as { __pair: {
-    runtimes: { id: string }[]; exits: string[]; dial(): Promise<{ ok: boolean }[]>; show(): void; hide(id: string): void;
+    runtimes: { id: string }[]; exits: string[]; switched: string[]; dial(): Promise<{ ok: boolean }[]>; show(): void; hide(id: string): void; focus(id: string | null): void;
   } }).__pair;
   const flushAll = async () => { for (let i = 0; i < 12; i++) await app.flush(); };
   const dialled = pair.dial();
@@ -153,4 +154,18 @@ test('a reconnect of B re-captures B s terminal, not A s', async (context) => {
   await flushAll();
   assert.equal(sent('b', 'capture_pane'), before.b + 1, 'B re-captured over B s socket');
   assert.equal(sent('a', 'capture_pane'), before.a, 'A did not');
+});
+
+test('a window shortcut moves the FOCUSED tree s terminal only, though both show the same target (#335 ③a-4, reviewer P1-B)', async (context) => {
+  const { app, pair, flushAll } = await mount(context);
+  pair.focus('a');
+  await flushAll();
+  app.window.dispatchEvent(new app.window.CustomEvent('terminal-window-shortcut', { detail: { direction: 1 } }));
+  await flushAll();
+  assert.deepEqual([...pair.switched], ['a:app:1.0'], 'only A s terminal moved to the next window');
+  pair.focus('b');
+  await flushAll();
+  app.window.dispatchEvent(new app.window.CustomEvent('terminal-window-shortcut', { detail: { direction: 1 } }));
+  await flushAll();
+  assert.deepEqual([...pair.switched], ['a:app:1.0', 'b:app:1.0'], 'focus moved: now only B s');
 });

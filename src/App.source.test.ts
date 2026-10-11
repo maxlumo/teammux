@@ -73,7 +73,9 @@ test('Terminal navigation and page layer exist without an active target', () => 
   );
   assert.match(
     source,
-    /<div class="page-layer term-page" class:hidden=\{page !== 'terminal'\} bind:this=\{termPageEl\}>/u,
+    // ③a-4: per tree — hidden unless it is the focused tree's page, and the
+    // element is that tree's view's.
+    /<div class="page-layer term-page" class:hidden=\{!shown \|\| page !== 'terminal'\} bind:this=\{v\.termPageEl\}>/u,
   );
   // The empty state keeps the page HEADER (ui-unification: every page's head
   // survives an empty detail pane — Chat, Agents, Settings all do), so the
@@ -89,7 +91,7 @@ test('Terminal navigation and page layer exist without an active target', () => 
   assert.match(opener, /if \(layout\.isTouchDevice\) \{ sessListOpen = true; return; \}/u);
   assert.match(opener, /termSideEl\?\.querySelector\('\.sessions \.content \[tabindex="0"\], \.sessions \.content button'\)\?\.focus\(\)/u,
     'desktop: focus the list itself, never the SideHandle separator');
-  assert.match(source, /<aside class="term-side"[^>]*bind:this=\{termSideEl\}>/u);
+  assert.match(source, /<aside class="term-side"[^>]*bind:this=\{v\.termSideEl\}>/u);
 });
 
 test('the Terminal page uses the shared sidebar geometry', () => {
@@ -274,7 +276,7 @@ test('the desktop rail keeps Agents as a draggable page icon', () => {
   // The whole point of scoping this to touch: nothing about the rail changes.
   assert.match(source, /agents:\s*\{ icon: 'bots',\s*label: 'agentsTitle' \}/u, 'still a rail item, wearing the crowd glyph the roster\'s All tab wears (owner, 2026-09-23: "tab 栏上的 icon 也用我们新画的吧")');
   assert.match(rail, /\{#each railSlots as slot \(slot\)\}/u, 'still the user’s draggable order');
-  assert.match(source, /\{#if hubEligible && !agentsLivesInSettings\(layout\.isTouchDevice\)\}\s*<div class="page-layer" class:hidden=\{page !== 'agents'\}>/u,
+  assert.match(source, /\{#if v\.hubState\.available && !agentsLivesInSettings\(layout\.isTouchDevice\)\}\s*<div class="page-layer" class:hidden=\{!shown \|\| page !== 'agents'\}>/u,
     'and still a page layer — but not mounted on touch, where Settings owns the only instance');
 });
 
@@ -327,8 +329,9 @@ test('a jump from the chat returns THERE on back, and deliberate navigation clea
   assert.match(source, /view\.jumpedFrom = null; \/\/ deliberate navigation stands the return slot down/u,
     'switchTab clears the slot');
   assert.match(source, /if \(from === 'hub'\) view\.jumpedFrom = 'hub';/u, 'opening a pane from the chat remembers');
-  assert.match(source, /switchTab\('files'\); view\.jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
-  assert.match(source, /switchTab\('board'\); view\.jumpedFrom = 'hub';/u, 'the board jump too');
+  // ③a-4: a jump from a tree's Hub is recorded in THAT tree's view.
+  assert.match(source, /switchTab\('files'\); v\.jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
+  assert.match(source, /switchTab\('board'\); v\.jumpedFrom = 'hub';/u, 'the board jump too');
   for (const p of ['files', 'board', 'terminal']) {
     assert.match(source, new RegExp(`if \\(page === '${p}' && view\\.jumpedFrom\\) \\{ switchTab\\(view\\.jumpedFrom\\); return; \\}`, 'u'),
       `${p}'s floor prefers the return slot`);
@@ -350,10 +353,10 @@ test('board back on a phone lifts the project drawer, never the terminal (board 
   // parent directories; App adds no terminal fallback below it either.
   assert.ok(!/if \(page === 'files'\) \{ page = 'terminal'; return; \}/u.test(source),
     'the files→terminal floor stays retired');
-  assert.match(source, /<Files [^\n]*jumped=\{!!view\.jumpedFrom\}/u, 'the files page instance gets the return-slot gate');
+  assert.match(source, /<Files [^\n]*jumped=\{!!v\.jumpedFrom\}/u, 'the files page instance gets the return-slot gate');
   // Board is told whether a return slot exists, so its drawer lift can stand
   // aside and let back fall through to the conversation.
-  assert.match(source, /<Board [^\n]*jumped=\{!!view\.jumpedFrom\}/u, 'the return slot reaches the drawer-lift gate');
+  assert.match(source, /<Board [^\n]*jumped=\{!!v\.jumpedFrom\}/u, 'the return slot reaches the drawer-lift gate');
 });
 
 test('Terminal confirmations delegate before jump-back or drawer floor without another history listener (#167)', () => {
@@ -364,7 +367,7 @@ test('Terminal confirmations delegate before jump-back or drawer floor without a
   const floor = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
   assert.ok(delegate >= 0 && delegate < jump && delegate < floor);
   assert.match(source, /if \(page === 'terminal' && view\.sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
-  assert.match(source, /onGoBack=\{\(fn\) => view\.sessionsGoBack = fn\}/u);
+  assert.match(source, /onGoBack=\{\(fn\) => v\.sessionsGoBack = fn\}/u, 'registered in its tree s view (③a-4)');
   assert.equal([...source.matchAll(/addEventListener\('popstate'/gu)].length, 1);
 });
 
@@ -469,7 +472,7 @@ test('every App socket owner goes through the switch module and loses ownership 
   // the switch still owns the intent AND that runtime is still bound.
   assert.match(source, /function serverReady\(\) \{\s*const runtime = scopeSwap\.bound\(\);\s*if \(!runtime\) return;\s*const intent = serverSwitch\.intent;\s*(?:\s*\/\/[^\n]*\n)*\s*void runtime\.probeCaps\(\(caps\) => \{\s*if \(!serverSwitch\.owns\(intent\) \|\| scopeSwap\.bound\(\) !== runtime\) return;/u,
     'published as EACH answer lands, so a quick Hub answer is not held behind backends');
-  assert.match(source, /if \(caps\.hub !== null\) view\.hubState = \{ available: caps\.hub, probed: true \};/u,
+  assert.match(source, /if \(caps\.hub !== null\) viewOf\(runtime\)\.hubState = \{ available: caps\.hub, probed: true \};/u,
     'the Hub flag moves only on a definitive answer');
   assert.doesNotMatch(source, /\bhubRooms\(|\bbackendsList\(/u, 'App asks no capability question over the facade');
   // The only remaining direct starts are the reconnect machine's own owners.
@@ -495,7 +498,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held=\{storageHeld\} inert=\{storageHeld\}>\s*<ServerScope runtime=\{scopeRuntime\} state=\{serverStates\.get\(scopeRuntime\)\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const shown = runtime === scopeRuntime\}\s*\{@const held = storageHeld \|\| !shown\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
     'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
@@ -516,7 +519,13 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // this: the saved-state guard could never pass.
   assert.match(source, /let scopeRuntime = \$state\.raw\(null\);/u, 'the handle is raw App state');
   // The restored-runtime mark is the view's, raw for the same reason (③a).
-  assert.match(source, /const view = createServerView\(\);/u);
+  // ③a-4: a view per runtime handle; the window's is the focused one's.
+  // Single holds one member, so a view shared by every runtime would look
+  // the same until ③b mounts two trees: this pins the per-handle map.
+  assert.match(source, /function viewOf\(runtime\) \{\s*let v = views\.get\(runtime\);\s*if \(!v\) \{ v = createServerView\(\); views\.set\(runtime, v\); \}\s*return v;\s*\}/u);
+  // And a tree out of focus takes no window input: its Terminal is inactive.
+  assert.match(source, /<Terminal target=\{v\.terminalTarget\}[^\n]*\n\s*visible=\{shown && page === 'terminal'\} active=\{!held\}/u);
+  assert.match(source, /const view = \$derived\(scopeRuntime \? viewOf\(scopeRuntime\) : noServerView\);/u);
   assert.match(viewSource, /navRestored = \$state\.raw<unknown>\(null\);/u);
   assert.equal([...source.matchAll(/(?<!let )scopeRuntime = /gu)].length, 1,
     'and after its declaration only createScopeSwap({ show }) assigns it');
@@ -571,7 +580,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // an identity, and which machine answers is known only after the dial.
   assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
-  assert.match(source, /activations\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,700}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*return \{ keep: false, runtime: next \};/u,
+  assert.match(source, /activations\.endAll\(\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*next\?\.connection\.setOnDisconnect\(\(\) => \{ if \(bound\(\) === next\) onDrop\(\); \}\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
   assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
@@ -663,22 +672,27 @@ test('the content tree is bound to one server, and only the swap binds it (board
   }
   // The strings consumers and the wire take are DERIVED: a serverId cannot
   // reach a `target` or `session` argument.
-  assert.match(source, /const terminalTarget = \$derived\(view\.termPane\?\.target \?\? ''\);/u);
-  assert.match(source, /const terminalSession = \$derived\(view\.termPane\?\.session \?\? ''\);/u);
-  assert.match(source, /const filesSession = \$derived\(view\.filesRef\?\.session \?\? ''\);/u);
-  assert.match(source, /<SplitView cells=\{splitViewCells\}/u, 'and the split hands over strings too');
+  // ③a-4: they are derived in the VIEW (server-view.svelte.ts), per tree.
+  assert.match(viewSource, /get terminalTarget\(\): string \{ return this\.termPane\?\.target \?\? ''; \}/u);
+  assert.match(viewSource, /get terminalSession\(\): string \{ return this\.termPane\?\.session \?\? ''; \}/u);
+  assert.match(viewSource, /get filesSession\(\): string \{ return this\.filesRef\?\.session \?\? ''; \}/u);
+  assert.match(source, /<SplitView cells=\{v\.splitViewCells\}/u, 'and the split hands over strings too');
   // What it hands over is the pane's own names and NOTHING else: a serverId
   // that reached a `target` would be sent to tmux as part of a pane address.
-  const adapter = source.match(/const splitViewCells = \$derived\([\s\S]*?\)\);/u)?.[0] ?? '';
-  assert.match(adapter, /target: c\.pane\?\.target \?\? '',\s*session: c\.pane\?\.session \?\? '',/u);
+  const adapter = viewSource.match(/get splitViewCells\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(adapter, /target: c\.pane\?\.target \?\? '', session: c\.pane\?\.session \?\? ''/u);
   assert.doesNotMatch(adapter, /serverId/u, 'the serverId stops at this boundary');
   // A rename belongs to ONE server — the one its event names (reviewer P1 on
   // the b3 binding range; the rename-event test below pins the source).
   assert.match(source, /const rename = \{ serverId, from, to \};\s*const move = \(ref\) => \(ref \? retargetRef\(ref, rename\) : ref\);/u);
   // A landing names its tree, and is delivered only to that tree.
-  assert.match(source, /function landingFor\(request\) \{\s*return request && request\.serverId === navServerId\(\) \? request : null;/u);
+  // ③a-4: to the tree it names — each tree asks with its own runtime.
+  assert.match(source, /function landingFor\(request, runtime\) \{\s*return request && runtime && request\.serverId === runtime\.id \? request : null;/u);
+  for (const req of ['agentsEditReq', 'filesNavReq', 'boardIssueReq']) {
+    assert.match(source, new RegExp(`landingFor\\(v\\.${req}, runtime\\)`, 'u'), `${req} is delivered to its own tree`);
+  }
   for (const req of ['filesNavReq', 'boardIssueReq']) {
-    assert.match(source, new RegExp(`${req} = \\{ serverId: navServerId\\(\\),`, 'u'), `${req} names its tree`);
+    assert.match(source, new RegExp(`v\\.${req} = \\{ serverId: runtime\\.id,`, 'u'), `${req} names its tree`);
   }
   assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem\('tmux_state'\)/u,
     'nothing parses the saved state by hand any more');
@@ -784,7 +798,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.doesNotMatch(blocked, /scopeSwap\.swap|ends\.end|fleet\.drop/u, 'the runtime the tree is bound to is not ended by the block');
   // ③a (orchestrator 08:17): the tree stays mounted while blocked, held —
   // inert and hidden — so nothing typed is lost; this was "no tree renders".
-  assert.match(source, /\{#key scopeRuntime\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held=\{storageHeld\} inert=\{storageHeld\}>\s*<ServerScope /u, 'and the server tree is held while blocked');
+  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const shown = runtime === scopeRuntime\}\s*\{@const held = storageHeld \|\| !shown\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
   // A link a redirect or a re-mint starts is part of the SAME chain: awaited,
   // and cancelled with it (reviewer P1-4 on 341554b3).
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
@@ -1127,9 +1141,9 @@ test('the rail keeps the ONE travelling highlight; the tab bar is foreground-onl
 test('a second click on the active rail tab hands the page a reselect — the Hub expands its sidebar (board #199)', () => {
   // Owner 2026-09-14: "我应该在左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏".
   // switchTab returns when target === page; the rail used to swallow the click.
-  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ view\.pageReselect\[slot\]\?\.\(\); return; \}/u);
+  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ \(view\.pageReselect\[slot\] \?\? shellReselect\[slot\]\)\?\.\(\); return; \}/u);
   assert.match(viewSource, /pageReselect: Record<string, \(\(\) => void\) \| undefined> = \{\};/u);
-  assert.match(source, /onReselect=\{\(fn\) => \{ view\.pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
+  assert.match(source, /onReselect=\{\(fn\) => \{ v\.pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
 });
 
 test('one shell-wide sidebar state: the Terminal page and the system status follow the Hub\'s collapse; reselect opens it on every page (board #200)', async () => {
@@ -1137,8 +1151,9 @@ test('one shell-wide sidebar state: the Terminal page and the system status foll
   // 页面是同步的，不然我点击chat terminal board，展开状态不一致".
   assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && appPrefs\.sidebarCollapsed\);/u);
   assert.match(source, /<main class:with-rail=\{[^}]+\} class:touch-layout=\{[^}]+\} class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u);
-  assert.match(source, /view\.pageReselect\.terminal = view\.pageReselect\.board = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);/u, '#199 on every page, a toggle since #201');
-  assert.match(source, /<Board session=\{filesSession\} guardPage="board" visible=\{page === 'board'\} sideCollapsed=\{shellSideCollapsed\}/u);
+  // ③a-4: the shell's toggle is the fallback for a page no tree registered.
+  assert.match(source, /const toggleShellSide = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);[\s\S]{0,200}?const shellReselect = \{ terminal: toggleShellSide, board: toggleShellSide \};/u, '#199 on every page, a toggle since #201');
+  assert.match(source, /<Board session=\{v\.filesSession\} guardPage="board" visible=\{shown && page === 'board'\} sideCollapsed=\{shellSideCollapsed\}/u);
   // The Terminal page's track is the Hub's technique: factor, gate, pin, hidden at rest.
   assert.match(source, /const unpin = pinTrack\(termSideEl, 'end'\);\s*\n\s*void moveTrack\(termPageEl, '--side-open', collapsed \? 1 : 0\)\.then\(unpin\);/u);
   assert.match(source, /\.page-layer\.term-page:global\(\.moving\) \{ transition: --side-open var\(--t-move\) ease-out; \}/u);
@@ -1173,7 +1188,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   assert.match(source, /class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u,
     'the collapsed state stays app-wide (#200); which page is on screen is a second class');
   assert.equal([...source.matchAll(/icon="panel-left"/gu)].length, 1, 'ONE node — never one per state or per page');
-  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(view\.pageReselect\[page\] \?\? \(\(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\)\)\)\(\);/u,
+  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(view\.pageReselect\[page\] \?\? toggleShellSide\)\(\);/u,
     'the same act as a reselect: the page\'s delegate, else the shared state');
   const style = source.match(/<style>[\s\S]*<\/style>/u)?.[0] ?? '';
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';
@@ -1209,7 +1224,7 @@ test('the phone tab bar hides for Files\' reading mode through one signal, gated
   // Owner 2026-09-20: reading mode takes the whole screen; the bottom bar goes
   // the way it goes for the keyboard — a cut — from one explicit prop, never a
   // second class writer on <html>.
-  assert.match(source, /onimmersive=\{\(on\) => view\.filesImmersive = on\}/u, 'Files reports, App mirrors');
+  assert.match(source, /onimmersive=\{\(on\) => v\.filesImmersive = on\}/u, 'Files reports, App mirrors');
   assert.match(source, /class:immersive=\{view\.filesImmersive && page === 'files'\}/u, 'only while Files is the page on screen');
   assert.match(source, /\.immersive \.tabbar \{ display: none; \}/u);
   assert.match(source, /:global\(html\.keyboard-open\) \.tabbar \{ display: none; \}/u, 'the keyboard hide it sits beside');

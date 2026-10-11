@@ -3,12 +3,12 @@
 // registered. The server's own memory (drafts, read marks, Files' record) is
 // `ServerState`; this is the shell's side of the same tree.
 //
-// Through ③a App holds ONE view, for the one tree there is, and resets it
-// exactly where it reset these fields before (`resetServerMemory`). ③a-5
-// gives every bound member its own, so a tree that is not in focus keeps its
-// panes, its split and its Back chain, and the window dispatches Back,
-// reselect and immersive to the focused view only (reviewer P1-B on the ③
-// plan).
+// Every bound member has its own (③a-4): a tree that is not in focus keeps
+// its panes, its split and its Back chain, its pages register into ITS view,
+// and the window dispatches Back, reselect, immersive and its shortcuts to
+// the focused view only (reviewer P1-B on the ③ plan). A view belongs to a
+// runtime handle, like its `ServerState`, and is handed over with it when
+// identity repair hands the state over (a same-machine merge).
 //
 // A class with rune fields rather than a `$state({...})` object: `navRestored`
 // holds a runtime HANDLE, and a deep proxy over a handle breaks the one thing
@@ -51,6 +51,20 @@ export class ServerView {
   pageReselect: Record<string, (() => void) | undefined> = {};
   /** Files' reading mode asks for the whole screen (board #226). */
   filesImmersive = $state(false);
+  /** The Terminal page's own elements, which the window's sidebar motion and
+   * focus shortcuts reach through the FOCUSED view (③a-4). */
+  termPageEl = $state.raw<HTMLElement | null>(null);
+  termSideEl = $state.raw<HTMLElement | null>(null);
+
+  /** The strings every consumer and the wire want, derived from the refs: a
+   * serverId never reaches a `target` or `session` argument (②b-2). */
+  get terminalTarget(): string { return this.termPane?.target ?? ''; }
+  get terminalSession(): string { return this.termPane?.session ?? ''; }
+  get filesSession(): string { return this.filesRef?.session ?? ''; }
+  /** What SplitView takes: the strings tmux resolves. */
+  get splitViewCells() {
+    return this.splitCells.map((c) => ({ id: c.id, target: c.pane?.target ?? '', session: c.pane?.session ?? '' }));
+  }
 }
 
 export function createServerView(): ServerView {

@@ -23,6 +23,9 @@
     onCloseCell = () => {},
     onPaneExit = () => {},
     visible = true,
+    // Is this split's TREE the focused one (board #335 ③a-4)? A cell takes
+    // window input only when its tree is focused AND it is the active cell.
+    focused = true,
   }: {
     cells: SplitCell[];
     layout: number;
@@ -33,6 +36,7 @@
     onCloseCell?: (cellId: number) => void;
     onPaneExit?: (cellId: number) => void;
     visible?: boolean;
+    focused?: boolean;
   } = $props();
 
   // Which cell's pane picker is open (null = none). PanePicker (shared with
@@ -75,7 +79,7 @@
               target={cell.target}
               session={cell.session}
               embedded={true}
-              active={cell.id === activeCellId}
+              active={focused && cell.id === activeCellId}
               {visible}
               {fontSize}
               onSwitchPane={(t2: string) => onAssign(cell.id, t2, t2.split(':')[0] ?? '')}

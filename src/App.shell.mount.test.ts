@@ -934,6 +934,28 @@ test('a capability answer lands only for the runtime still bound (board #335 ②
   // — a negative control removing them both leaves this case green.
 });
 
+test('a switch to a hubless server starts from ITS view: A s Hub answer does not come along (#335 ③a-4)', async (context) => {
+  // Before ③a-4 the window held one view, reset by hand on a switch; the
+  // Hub-answer line in that reset had no test (the a4 negative control did
+  // not bite). Now each runtime has its own view, and B s is empty until B
+  // answers for itself.
+  let lastDial = '';
+  const hubIfA = (value: unknown) => async () => (lastDial.includes('//a') ? value : Promise.reject(Object.assign(new Error('method not found'), { code: -32601 })));
+  const { app, settle, switchTo } = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+  }, (url) => { lastDial = url; return url.includes('//b') ? 'm-b' : 'm-a'; }, { rpc: {
+    hubRooms: hubIfA({ rooms: {} }), hubUnread: hubIfA({ rooms: {} }), hubRead: hubIfA({ rooms: {} }), hubAgents: hubIfA({ agents: [] }),
+    registryList: hubIfA({ agents: [] }), teamsList: hubIfA({ teams: [] }), hubLog: hubIfA({ messages: [], has_more: false }),
+    hubActivity: hubIfA({ events: [], has_more: false }),
+  }, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  assert.ok(app.document.querySelector('.rail-bell'), 'A has the Hub');
+  await switchTo('beta');
+  for (let i = 0; i < 4; i++) await settle();
+  assert.equal(app.document.querySelector('.rail-bell'), null, 'B answered for itself: no Hub, no bell');
+  assert.equal(app.document.querySelector('.hub-root'), null, 'and no Hub page is mounted on B');
+});
+
 test('the handshake reaches the shell: a Hub server gets its bell', async (context) => {
   const { app } = await bootApp(context, {
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),

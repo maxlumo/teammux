@@ -28,8 +28,9 @@ test('App: desktop only, inside the server scope, closed when a switch starts; t
   // Inside the PROVIDER, not merely inside the key (board #335 ②b-1): the
   // panel's Terminal has to be bound to the same server as the pages, and a
   // panel mounted beside `<ServerScope>` would keep answering from the facade.
-  const keyed = app.slice(app.indexOf('{#key scopeRuntime}'), app.indexOf('</ServerScope>'));
-  assert.match(keyed, /\{#if !layout\.isTouchDevice && connected\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
+  // ③a-4: one panel, in the FOCUSED tree only — a tree out of focus has none.
+  const keyed = app.slice(app.indexOf('{#each members as runtime (runtime)}'), app.indexOf('</ServerScope>'));
+  assert.match(keyed, /\{#if !layout\.isTouchDevice && connected && shown\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
   assert.match(app, /\$effect\(\(\) => \{ if \(switching\) scratchOpen = false; \}\);/u);
   // The reset's own ORDER is not this pin's subject (since #335 ②b-1 it gives
   // up the server handle's lease first); that the panel closes there is.

@@ -109,7 +109,22 @@
    * navigation over the record the restore is about to read; ②b-2), and the
    * Back chains and reselects its pages registered. One view for the one
    * tree; `resetServerMemory` resets it where it always reset these. */
-  const view = createServerView();
+  const views = new WeakMap();
+  /** A runtime's view, made on first ask. */
+  function viewOf(runtime) {
+    let v = views.get(runtime);
+    if (!v) { v = createServerView(); views.set(runtime, v); }
+    return v;
+  }
+  /** The view with no server bound: what the shell reads in the gap. */
+  const noServerView = createServerView();
+  /** The FOCUSED tree's view (③a-4): the window reads and dispatches through
+   * it. Each tree's pages register into their own (`viewOf(runtime)` in the
+   * template). */
+  const view = $derived(scopeRuntime ? viewOf(scopeRuntime) : noServerView);
+  /** The trees the app holds mounted, in the order they render. Single holds
+   * one; Aggregate (③b) holds every bound member. */
+  const members = $derived(scopeRuntime ? [scopeRuntime] : []);
   /** The app's ONE write gate (board #335 ③a; orchestrator's P1-D ruling and
    * 08:17's "one mechanism, Single included"): while the app is blocked on
    * its storage, every server store App builds holds its resident writes
@@ -284,6 +299,10 @@
     // minted with: a later activation reusing it must not swap that state
     // under the one still dialling (reviewer P1-C on cc45d7d1).
     if (next && !serverStates.has(next)) serverStates.set(next, stateFor(entry.id));
+    // Its view travels with its state: a same-machine merge that handed the
+    // state over hands the view over too (③a-4), and any other server starts
+    // from an empty one.
+    if (next && !views.has(next) && held && held.id !== entry.id && mergedInto(localStorage, held.id) === entry.id) views.set(next, viewOf(held));
     return { keep: false, runtime: next };
   }
   /** Server `id`'s state for a runtime about to be bound: fresh from its own
@@ -403,8 +422,8 @@
   // have a session called `work`. The identity has one home; the two strings
   // every consumer and the wire want are DERIVED from it, so a serverId can
   // never reach a `target` or `session` argument.
-  const terminalTarget = $derived(view.termPane?.target ?? '');
-  const terminalSession = $derived(view.termPane?.session ?? '');
+  const terminalTarget = $derived(view.terminalTarget);
+  const terminalSession = $derived(view.terminalSession);
   /** Point the terminal at a pane on the server the content tree is bound to.
    * Every write goes through here, so a reference without a server cannot be
    * created. */
@@ -416,7 +435,7 @@
   // terminal alone, so browsing a project in the chat never moved the Files
   // tab while switching terminal panes did (owner, 2026-08-22: "chat里的路径
   // 没有刷新到文件 terminal好像就会刷新路径").
-  const filesSession = $derived(view.filesRef?.session ?? '');
+  const filesSession = $derived(view.filesSession);
   function showSession(session) {
     view.filesRef = session ? sessionRef(navServerId(), session) : null;
   }
@@ -462,11 +481,7 @@
   /** What SplitView takes: the strings tmux resolves. The serverId stays on
    * this side of the boundary — a cell's identity is App's, the pane's name is
    * the wire's (board #335 ②b-2). */
-  const splitViewCells = $derived(view.splitCells.map((c) => ({
-    id: c.id,
-    target: c.pane?.target ?? '',
-    session: c.pane?.session ?? '',
-  })));
+  // (Built per tree as `v.splitViewCells`, server-view.svelte.ts, ③a-4.)
   // The top-right layout menu: `ui/ContextMenu` anchored to the toggle (right-
   // aligned, like every dot menu). It was a hand-rolled `position:absolute`
   // panel with a backdrop — no Escape, no close on scroll/resize, no viewport
@@ -527,7 +542,10 @@
   // without it, same probe). Its LAYOUT adapts: three columns on
   // desktop, a single chat column on touch devices.
   let hubEligible = $derived(hubAvailable);
-  let splitActive = $derived(splitEligible && view.splitLayout > 1 && view.splitCells.length > 0);
+  /** Is a tree's split on? One definition, for the focused view and for each
+   * tree's own (③a-4). */
+  const splitOn = (v) => splitEligible && v.splitLayout > 1 && v.splitCells.length > 0;
+  let splitActive = $derived(splitOn(view));
 
   function setLayout(n) {
     if (!splitEligible || n <= 1) {
@@ -1085,7 +1103,7 @@
     // probe answers, not after a slow backends list.
     void runtime.probeCaps((caps) => {
       if (!serverSwitch.owns(intent) || scopeSwap.bound() !== runtime) return; // asked of a server we have left
-      if (caps.hub !== null) view.hubState = { available: caps.hub, probed: true };
+      if (caps.hub !== null) viewOf(runtime).hubState = { available: caps.hub, probed: true };
       // Into THIS runtime's catalog (board #335 ②b-3): the list is one
       // machine's answer, and its pages read it from their scope.
       serverStates.get(runtime)?.backends.set(caps.backends);
@@ -1655,8 +1673,8 @@
    * the other half: a request that somehow outlived its tree — or arrives
    * while another server is bound — is not handed to the pages of a server it
    * was never about. */
-  function landingFor(request) {
-    return request && request.serverId === navServerId() ? request : null;
+  function landingFor(request, runtime) {
+    return request && runtime && request.serverId === runtime.id ? request : null;
   }
 
   /** Requests aimed at the server-bound tree: a Files or Board jump from the
@@ -2515,10 +2533,13 @@
   const SIDEBAR_PAGES = new Set(['hub', 'terminal', 'board']);
   const pageHasSidebar = $derived(SIDEBAR_PAGES.has(page));
   // A reselect TOGGLES (owner, 2026-09-14: "选中点击也能展开，也能折叠"; board #201).
-  view.pageReselect.terminal = view.pageReselect.board = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
+  const toggleShellSide = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
+  /** What a reselect does on a page none of whose pages registered one: the
+   * shell's, not a server's (③a-4). */
+  const shellReselect = { terminal: toggleShellSide, board: toggleShellSide };
   // The Terminal page moves its track the way the Hub does (reveal.ts): the
   // sidebar pinned at its width, the factor moving, xterm fitted once at rest.
-  let termPageEl = $state(null);
+  const termPageEl = $derived(view.termPageEl);
   let termSideWasCollapsed = untrack(() => shellSideCollapsed); // the rest state at mount; the effect moves from it
   $effect(() => {
     const collapsed = shellSideCollapsed;
@@ -2532,12 +2553,12 @@
   // if it has one (the Hub animates with its reading anchor), else the shared
   // state directly.
   function toggleShellSidebar() {
-    (view.pageReselect[page] ?? (() => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed)))();
+    (view.pageReselect[page] ?? toggleShellSide)();
   }
   function railActivate(slot) {
     if (railClickGuard) { railClickGuard = false; return; }
     if (slot === 'prefs') togglePrefs();
-    else if (slot === page) { view.pageReselect[slot]?.(); return; }
+    else if (slot === page) { (view.pageReselect[slot] ?? shellReselect[slot])?.(); return; }
     else switchTab(slot);
   }
   // Escape abandons a drag and a resize invalidates its snapshotted rects —
@@ -2583,7 +2604,7 @@
   // screen it is a column; on a phone it slides over the terminal, because
   // the terminal wants the whole screen there.
   let sessListOpen = $state(false);
-  let termSideEl = $state(null);
+  const termSideEl = $derived(view.termSideEl);
   // The empty state's "Sessions" action — the ONE way it reaches the list.
   // On a touch layout it lifts the drawer (sessListOpen), like the switcher's
   // hamburger. On the desktop the list is already the left column, so "open"
@@ -2681,7 +2702,7 @@
       // The ACTIVE pane (board 316 review): in split screen the active cell,
       // never the first terminal on the page; an empty active cell takes no
       // input at all rather than handing it to another cell.
-      terminalFocusTarget(termPageEl, splitActive ? activeCellId : null)?.focus();
+      terminalFocusTarget(termPageEl, splitActive ? view.activeCellId : null)?.focus();
     },
     cycleWindow(direction) {
       window.dispatchEvent(new CustomEvent('terminal-window-shortcut', { detail: { direction } }));
@@ -3027,53 +3048,61 @@
         </div>
       </div>
     {/if}
-    {#key scopeRuntime}
+    {#each members as runtime (runtime)}
+    {@const v = viewOf(runtime)}
+    {@const shown = runtime === scopeRuntime}
+    {@const held = storageHeld || !shown}
     <!-- While the app is blocked on its storage the tree stays MOUNTED, inert
          and hidden (board #335 ③a; orchestrator 08:17: one mechanism, Single
          included): no input reaches it, its resident writes are held by the
          write gate and its runtime refuses new write RPCs, so nothing typed
          is lost and nothing lands before Retry. The runtime it is bound to
          stays bound and RUNNING (ruling K) until the next one passes every
-         gate. -->
-    <div class="scope-tree" class:held={storageHeld} inert={storageHeld}>
-    <ServerScope runtime={scopeRuntime} state={serverStates.get(scopeRuntime)}>
-    {#if hubEligible}
+         gate.
+         One tree per bound member (③a-4), keyed by its handle: only the
+         FOCUSED one is shown and takes input — every other is held, inert
+         and hidden, keeping its pages, drafts and terminals. Its pages
+         register their Back chains and requests into ITS view `v`; the
+         window dispatches only through the focused one. -->
+    <div class="scope-tree" class:held inert={held}>
+    <ServerScope {runtime} state={serverStates.get(runtime)}>
+    {#if v.hubState.available}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
            Files/Terminal below) and merely hidden when inactive, so the
            selected project, chat scroll, and embedded terminal survive tab
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
-      <div class="page-layer" class:hidden={page !== 'hub'}>
-        <Hub visible={page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => view.hubGoBack = fn} onReselect={(fn) => { view.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) view.filesNavReq = { serverId: navServerId(), path, file, n: (view.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); view.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) view.boardIssueReq = { serverId: navServerId(), session: s, id: issue, n: (view.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); view.jumpedFrom = 'hub'; }} />
+      <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSession(s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind)} openFilesTab={(s, path, file) => { if (s) showSession(s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSession(s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
          touch the only instance is the one Settings embeds, so this layer is not
          mounted there — two live copies would both load and both claim a back
          chain. -->
-    {#if hubEligible && !agentsLivesInSettings(layout.isTouchDevice)}
-      <div class="page-layer" class:hidden={page !== 'agents'}>
-        <AgentsPage visible={page === 'agents'} guardPage="agents" onGoBack={(fn) => view.agentsGoBack = fn} editRequest={landingFor(view.agentsEditReq)} />
+    {#if v.hubState.available && !agentsLivesInSettings(layout.isTouchDevice)}
+      <div class="page-layer" class:hidden={!shown || page !== 'agents'}>
+        <AgentsPage visible={shown && page === 'agents'} guardPage="agents" onGoBack={(fn) => v.agentsGoBack = fn} editRequest={landingFor(v.agentsEditReq, runtime)} />
       </div>
     {/if}
-    <div class="page-layer" class:hidden={page !== 'files'}>
-      <Files session={filesSession} guardPage="files" visible={page === 'files'} {fontSize} onGoBack={(fn) => view.filesGoBack = fn} onimmersive={(on) => view.filesImmersive = on} navRequest={landingFor(view.filesNavReq)} jumped={!!view.jumpedFrom} />
+    <div class="page-layer" class:hidden={!shown || page !== 'files'}>
+      <Files session={v.filesSession} guardPage="files" visible={shown && page === 'files'} {fontSize} onGoBack={(fn) => v.filesGoBack = fn} onimmersive={(on) => v.filesImmersive = on} navRequest={landingFor(v.filesNavReq, runtime)} jumped={!!v.jumpedFrom} />
     </div>
-    <div class="page-layer" class:hidden={page !== 'board'}>
-      {#if hubEligible}
-        <Board session={filesSession} guardPage="board" visible={page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => view.boardGoBack = fn} issueRequest={landingFor(view.boardIssueReq)} jumped={!!view.jumpedFrom} />
+    <div class="page-layer" class:hidden={!shown || page !== 'board'}>
+      {#if v.hubState.available}
+        <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom} />
       {/if}
     </div>
-    <div class="page-layer term-page" class:hidden={page !== 'terminal'} bind:this={termPageEl}>
+    <div class="page-layer term-page" class:hidden={!shown || page !== 'terminal'} bind:this={v.termPageEl}>
       <!-- The session/window list: a column beside the terminal on a wide
            screen, a slide-over sheet on a phone (opened from the switcher's
            session tag). Kept MOUNTED so its polling and expansion state
            survive; `visible` pauses the poll while the page is hidden. -->
-      <aside class="term-side" class:side-sheet={layout.isTouchDevice && narrowVp} class:sheet={layout.isTouchDevice} class:open={layout.isTouchDevice && narrowVp && sessListOpen} bind:this={termSideEl}>
+      <aside class="term-side" class:side-sheet={layout.isTouchDevice && narrowVp} class:sheet={layout.isTouchDevice} class:open={layout.isTouchDevice && narrowVp && sessListOpen} bind:this={v.termSideEl}>
         {#if !layout.isTouchDevice}<SideHandle />{/if}
-        <Sessions {openTerminal} activeTarget={terminalTarget}
-          onGoBack={(fn) => view.sessionsGoBack = fn}
-          visible={page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
+        <Sessions {openTerminal} activeTarget={v.terminalTarget}
+          onGoBack={(fn) => v.sessionsGoBack = fn}
+          visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
           chips={false} />
       </aside>
@@ -3081,31 +3110,31 @@
         <button class="side-scrim" aria-label={t('close')} onclick={() => sessListOpen = false}></button>
       {/if}
       <div class="term-main">
-      {#if terminalTarget}
+      {#if v.terminalTarget}
         <div class="terminal-body" class:split-capable={splitEligible}>
-          {#if splitActive}
+          {#if splitOn(v)}
             <!-- In split mode the layout control floats top-right (no single
                  win-bar to host it; cells have their own headers). In single-
                  pane mode the control lives in the Terminal's chip bar. -->
             <div class="split-control">
-              <button class="split-toggle state-ctl" class:on={splitActive} aria-label={t('split')} use:hoverInfo={() => ({ title: t('split') })}
+              <button class="split-toggle state-ctl" class:on={splitOn(v)} aria-label={t('split')} use:hoverInfo={() => ({ title: t('split') })}
                 aria-haspopup="menu" aria-expanded={!!splitMenuAt} onclick={toggleSplitMenu}>
                 <Icon name="layout" size={15} />
               </button>
               <ContextMenu at={splitMenuAt} items={splitMenuItems} oncancel={() => (splitMenuAt = null)} />
             </div>
           {/if}
-          {#if splitActive}
-            <SplitView cells={splitViewCells} layout={view.splitLayout} activeCellId={view.activeCellId} {fontSize}
-              visible={page === 'terminal'}
-              onActivate={(id) => view.activeCellId = id}
+          {#if splitOn(v)}
+            <SplitView cells={v.splitViewCells} layout={v.splitLayout} activeCellId={v.activeCellId} {fontSize}
+              visible={shown && page === 'terminal'} focused={!held}
+              onActivate={(id) => v.activeCellId = id}
               onAssign={assignCell}
               onCloseCell={closeCell}
               onPaneExit={cellPaneExit} />
           {:else}
-            <Terminal target={terminalTarget} session={terminalSession} {fontSize}
-              visible={page === 'terminal'}
-              splitEligible={splitEligible} {splitActive} splitLayout={view.splitLayout} onSetLayout={setLayout}
+            <Terminal target={v.terminalTarget} session={v.terminalSession} {fontSize}
+              visible={shown && page === 'terminal'} active={!held}
+              splitEligible={splitEligible} splitActive={splitOn(v)} splitLayout={v.splitLayout} onSetLayout={setLayout}
               onOpenSessions={layout.isTouchDevice ? () => sessListOpen = true : null}
               onSwitchPane={(t) => showPane('', t)} onPaneExit={paneExitFallback} />
           {/if}
@@ -3128,13 +3157,13 @@
       {/if}
       </div>
     </div>
-    {#if !layout.isTouchDevice && connected}
+    {#if !layout.isTouchDevice && connected && shown}
       <ScratchPanel open={scratchOpen} live={!switching} edge={scratchEdge} {fontSize}
         onclose={() => (scratchOpen = false)} onedge={setScratchEdge} />
     {/if}
     </ServerScope>
     </div>
-    {/key}
+    {/each}
     {/if}
   </div>
 
