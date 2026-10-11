@@ -26,7 +26,13 @@ export interface ReconnectState {
 }
 
 export interface ReconnectDeps {
-  connect: (url: string, token: string, timeoutMs: number) => Promise<unknown>;
+  /** Dial one attempt. `handover` is THIS attempt's claim (`attempt()`),
+   * frozen when the attempt took the socket: a host that checks ownership
+   * deeper down — the runtime's dial, the identity record, an arrival — asks
+   * that one claim all the way, never a variable a later attempt has since
+   * overwritten (reviewer P1-2 on 341554b3). What it resolves with is handed
+   * to `onSuccess` as this attempt's own answer. */
+  connect: (url: string, token: string, timeoutMs: number, handover: { current(): boolean } | null) => Promise<unknown>;
   findBestAddress: (addresses: string[]) => Promise<string | null>;
   isAddressViable: (url: string) => boolean;
   noteAddressUnreachable: (url: string) => void;
@@ -44,8 +50,9 @@ export interface ReconnectDeps {
    * `onSuccess`. Omitted, the machine owns every attempt itself, as before. */
   attempt?: () => { current(): boolean };
   /** An attempt authenticated. The machine is already idle when this runs;
-   * `handover` is that attempt's claim. */
-  onSuccess: (useAddr: string, primaryAddr: string, handover?: unknown) => void;
+   * `handover` is that attempt's claim and `answer` what ITS connect
+   * resolved with. */
+  onSuccess: (useAddr: string, primaryAddr: string, handover?: unknown, answer?: unknown) => void;
   /** Max attempts exhausted, no stored address, or watchdog fired. */
   onGiveUp: () => void;
   maxAttempts?: number;
@@ -191,12 +198,12 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     // The attempt keeps the socket only until somebody takes it back. When
     // that happens the LOOP is over, not just this attempt: a retry would
     // take the socket from the owner that superseded it.
-    connect(useAddr, token, attemptTimeout).then(() => {
+    connect(useAddr, token, attemptTimeout, handover).then((answer) => {
       if (!owned()) { yieldLoop(); return; }
       reconnecting = false;
       clearTimers();
       emit();
-      onSuccess(useAddr, primary, handover);
+      onSuccess(useAddr, primary, handover, answer);
     }).catch((e: Error) => {
       if (!owned()) { yieldLoop(); return; }
       // Reachability failures (timeout / refused, NOT auth errors) feed the

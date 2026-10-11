@@ -367,6 +367,43 @@ test('a success hands its claim to the host (board #335 ②b-4: no handle is sto
   assert.ok(handed && (handed as { current(): boolean }).current() === true, 'the success carries its claim, still current');
 });
 
+test('each attempt s connect gets ITS claim, and its own answer reaches onSuccess (reviewer P1-2 on 341554b3)', async () => {
+  // R1 hangs; the loop is cancelled and started again (R2). R1's connect
+  // must still be holding R1's claim — stale now — never R2's, which a
+  // variable shared by the loop would hand it.
+  const { createActivations } = await import('./activation.ts');
+  const activations = createActivations();
+  const timers = fakeTimers();
+  const seen: { current(): boolean }[] = [];
+  let answerR1: (value: unknown) => void = () => {};
+  const answers: unknown[] = [];
+  const machine = createReconnectMachine({
+    connect: (_url, _token, _ms, claim) => {
+      seen.push(claim!);
+      return seen.length === 1 ? new Promise((resolve) => { answerR1 = resolve; }) : Promise.resolve('R2 s answer');
+    },
+    findBestAddress: async (a) => a[0] ?? null, isAddressViable: () => true, noteAddressUnreachable: () => {},
+    classifyAddress: () => 0, addressLabels: ['LAN'],
+    target: () => ({ address: 'ws://192.168.1.2:9899', token: 't', machineId: '', alternates: [] }),
+    attempt: () => activations.claim(),
+    onStateChange: () => {}, onSuccess: (_u, _p, _h, answer) => { answers.push(answer); }, onGiveUp: () => {},
+    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+  });
+  machine.start();
+  await timers.advance(1);
+  machine.cancel();
+  machine.start();
+  await timers.advance(1);
+  assert.equal(seen.length, 2, 'two attempts dialled');
+  assert.notEqual(seen[0], seen[1], 'each with its own claim');
+  assert.equal(seen[0]!.current(), false, 'R1 s claim is stale');
+  assert.equal(seen[1]!.current(), true, 'R2 s is the latest');
+  assert.deepEqual(answers, ['R2 s answer'], 'R2 s own answer reached onSuccess');
+  answerR1('R1 s late answer');
+  await timers.advance(1);
+  assert.deepEqual(answers, ['R2 s answer'], 'and R1 s late one never does');
+});
+
 // reviewer P1-a on 372cb4af: the chain's OTHER phases. In each, the form
 // takes the socket while the chain is between dials; the chain must not dial
 // again, mark cooldown or give up.
