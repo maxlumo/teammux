@@ -63,34 +63,7 @@ hide that.
    installed while a gateway answers; `systemctl --user cat
    tmux-mobile-gateway.service` should find no file.
 
-2. **Write the port and the listen address into `config.toml`.** The service
-   reads that file ALONE, and today's `HOST`/`PORT` come from the watcher's
-   environment, which never reaches it. Skip this and the gateway comes up on
-   the defaults — `0.0.0.0:9899`, reachable from your whole network instead of
-   loopback-only.
-
-   ```bash
-   tmm setup
-   #   Port [9899]:                     ← Enter
-   #   Listen on [0.0.0.0]: 127.0.0.1   ← what the watcher passed; loopback only
-   #   tmux socket …:                   ← Enter (empty = tmux's default, as today)
-   #   Keep the existing token? [y]:    ← Enter; a new token re-pairs every saved client
-   #   TLS certificate …:               ← see below
-   ```
-
-   It edits the file in place with `toml_edit`: your token, `team_rules` and
-   `kiro_engine` stay, comments and all.
-
-   On TLS, Enter is not "no TLS": with a certificate already in the file Enter
-   KEEPS it and `-` clears it. Check `config.toml` and decide deliberately. The
-   dev loop needs plain `ws`/`http` on the loopback hop — Vite's proxy speaks
-   nothing else, and the watcher used to force it by passing empty
-   `TLS_CERT`/`TLS_KEY`, which the gateway does not read. So either confirm
-   `tls_cert`/`tls_key` are empty (clear them with `-`), or keep TLS and
-   configure the proxy to match; do not leave a certificate set and expect the
-   plain hop to work.
-
-3. **Stop the whole old supervision chain**, not just whatever holds a port.
+2. **Stop the whole old supervision chain**, not just whatever holds a port.
    The chain is the unit → `scripts/dev-stack.mjs` → `scripts/dev-server-watch.sh`
    → `server`: kill only the server and the watcher starts another one, and a
    momentarily free port proves nothing.
@@ -114,7 +87,8 @@ hide that.
    systemctl --user stop tmux-mobile-dev.service
    systemd-cgls --user-unit tmux-mobile-dev.service          # what is left in the cgroup
    pgrep -fa 'dev-stack.mjs|dev-server-watch.sh|target/release/server'
-   kill <the dev-stack.mjs pid>    # then re-run pgrep until it prints nothing
+   kill <the dev-stack.mjs pid>    # top-down: the supervisor first, never the
+   #                                 server alone; re-run pgrep until it is empty
    ```
 
    Never `pkill` by a broad pattern: other agents' builds and servers run on
@@ -127,6 +101,33 @@ hide that.
 
    A surviving watcher would otherwise race `install` for the port, or relink
    `target/release` under the new gateway.
+
+3. **Write the port and the listen address into `config.toml`.** The service
+   reads that file ALONE, and the `HOST`/`PORT` the watcher passed came from
+   its environment, which never reaches it. Skip this and the gateway comes up on
+   the defaults — `0.0.0.0:9899`, reachable from your whole network instead of
+   loopback-only.
+
+   ```bash
+   tmm setup
+   #   Port [9899]:                     ← Enter
+   #   Listen on [0.0.0.0]: 127.0.0.1   ← what the watcher passed; loopback only
+   #   tmux socket …:                   ← Enter (empty = tmux's default, as today)
+   #   Keep the existing token? [y]:    ← Enter; a new token re-pairs every saved client
+   #   TLS certificate …:               ← see below
+   ```
+
+   It edits the file in place with `toml_edit`: your token, `team_rules` and
+   `kiro_engine` stay, comments and all.
+
+   On TLS, Enter is not "no TLS": with a certificate already in the file Enter
+   KEEPS it and `-` clears it. Check `config.toml` and decide deliberately. The
+   dev loop needs plain `ws`/`http` on the loopback hop — Vite's proxy speaks
+   nothing else, and the watcher used to force it by passing empty
+   `TLS_CERT`/`TLS_KEY`, which the gateway does not read. So either confirm
+   `tls_cert`/`tls_key` are empty (clear them with `-`), or keep TLS and
+   configure the proxy to match; do not leave a certificate set and expect the
+   plain hop to work.
 
 4. **Build the binary the service will run.** The watcher built `--bins`
    WITHOUT `embed-ui`, so the `tmm` sitting in `target/release` right now
