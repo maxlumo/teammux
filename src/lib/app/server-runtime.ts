@@ -33,7 +33,7 @@
 //     and App's (②b-1).
 import type { Connection } from '../core/connection.ts';
 import type { ConnectionSlot } from '../core/connection-registry.ts';
-import type { WsApi } from '../core/ws-api.ts';
+import { RPC_KIND, type WsApi } from '../core/ws-api.ts';
 import type { BackendInfo } from '../core/agents.ts';
 import type { ServerId } from './refs.ts';
 import { adoptHostname, loadServers, recordServer, saveServers, type ServerEntry } from './servers.ts';
@@ -120,6 +120,11 @@ export interface ServerRuntime {
    * it is holding: a failed switch's Back finds the same entry id, but the
    * handle whose lease was revoked on the way out cannot serve it again. */
   alive(): boolean;
+  /** Refuse NEW write RPCs through `api`, reversibly, with the reason; reads
+   * go on (board #335 ③a: the app is blocked on its storage, and Retry thaws
+   * it). Calls already sent complete. */
+  setFrozen(on: boolean): void;
+  frozen(): boolean;
   /** Stop serving NOW, for good: every call through `api` refuses from here
    * on, a method captured before included, while the connection is left for
    * `dispose` (board #335 ②b-4). A host's end calls this first, releases the
@@ -163,16 +168,26 @@ export interface ServerRuntimeDeps {
  * is MADE. A gate on the property read instead would miss both ways a page
  * actually calls — holding `api` for its whole life, and reading a method
  * before an `await` that finishes after the handover.
+ *
+ * `frozen` is the reversible third state (board #335 ③a, orchestrator's
+ * P1-D ruling): while the app is blocked on its storage, a WRITE is refused
+ * with the reason and a read goes through — the lists, a download's re-sign —
+ * by `RPC_KIND`, the one table. A name the table does not know is refused
+ * like a write: there is no default to "read". A call already on the wire is
+ * not this gate's to stop, and nothing refused is replayed.
  */
-function gateApi(api: WsApi, state: () => 'live' | 'detached', id: ServerId): WsApi {
+function gateApi(api: WsApi, state: () => 'live' | 'detached' | 'frozen', id: ServerId): WsApi {
   const gated: Record<string, unknown> = {};
+  const kinds = RPC_KIND as Record<string, 'read' | 'write' | undefined>;
   const refuse = (why: string) =>
-    Promise.reject(new Error(`server runtime ${why}: ${id} is not serving this subtree right now`));
+    Promise.reject(new Error(why === 'frozen'
+      ? `server runtime frozen: ${id} writes nothing until the app's storage is recorded (Retry)`
+      : `server runtime ${why}: ${id} is not serving this subtree right now`));
   for (const [name, value] of Object.entries(api as unknown as Record<string, unknown>)) {
     gated[name] = typeof value === 'function'
       ? (...args: unknown[]) => {
         const now = state();
-        return now === 'live'
+        return now === 'live' || (now === 'frozen' && kinds[name] === 'read')
           ? (value as (...a: unknown[]) => unknown).apply(api, args)
           : refuse(now);
       }
@@ -188,6 +203,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
   let known: ServerEntry = entry;
   let caps: ServerCaps = { hub: null, backends: null };
   let dead = false;
+  /** Reversibly refusing writes (`setFrozen`, board #335 ③a). */
+  let frozen = false;
   /** How many dials this runtime has started. The counter IS the attempt
    * identity: only the latest may record, adopt, disconnect or report ok. */
   let dialled = 0;
@@ -211,7 +228,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
    * another server. The wrappers are built once and are stable, so a caller
    * that captured a method still holds the gate rather than the raw call.
    */
-  const api: WsApi = gateApi(slot.api, () => (dead ? 'detached' : 'live'), id);
+  const api: WsApi = gateApi(slot.api, () => (dead ? 'detached' : frozen ? 'frozen' : 'live'), id);
 
   /** The saved entry for this id. A removed entry leaves the last known one,
    * so a caller still has a name to show while it tears the runtime down. */
@@ -436,6 +453,8 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
     alive: () => !dead,
+    setFrozen: (on: boolean) => { frozen = on; },
+    frozen: () => frozen,
     detach,
     dispose,
   };

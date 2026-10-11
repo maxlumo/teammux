@@ -862,6 +862,16 @@ It is a class with rune fields, not a `$state({...})` object, because
 `navRestored` holds a runtime handle and the callbacks are functions: a deep
 proxy over either breaks identity.
 
+**A blocked app sends no new write** (③a, orchestrator's P1-D ruling). While
+the app is blocked on its storage, every runtime is `setFrozen(true)`: its api
+refuses a NEW write RPC at call time, with the reason, and lets a read through,
+so the lists stay current and a download in flight can still be re-signed. A
+call already on the wire completes; nothing refused is replayed — the draft
+stays in its editor and the person sends it again after Retry. What is a write
+is `RPC_KIND` in `ws-api.ts`, one table with every wrapper in it (a missing one
+fails the type check and `server-runtime.frozen.test.ts`), and a name the table
+does not know is refused like a write: there is no default to "read".
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

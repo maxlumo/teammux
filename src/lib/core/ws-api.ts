@@ -478,3 +478,50 @@ export function createWsApi(connection: Connection) {
 
 /** The bound RPC surface of one connection. */
 export type WsApi = ReturnType<typeof createWsApi>;
+
+/**
+ * What each wrapper does to its server: `read` asks, `write` changes it —
+ * tmux (keys, panes, sessions), files, projects, the bus (posts, read marks,
+ * agents), the board, the registry, skills, MCP, the server's own prefs
+ * (board #335 ③a, orchestrator's P1-D ruling). A server whose app is blocked
+ * on its storage keeps its reads — the lists, a download's re-sign — and
+ * refuses NEW writes until Retry. `gitCmd` runs whatever subcommand it is
+ * given, so it is a write; `resizePane` and `setSocket` change the server's
+ * tmux, so they are too.
+ *
+ * Every wrapper is here (the `satisfies` makes a missing one a type error,
+ * and ws-api.source.test.ts a test failure): a new RPC cannot be added
+ * without saying which it is, and there is no default.
+ */
+export const RPC_KIND = {
+  listSessions: 'read', listPanes: 'read', listSessionsWithPanes: 'read', capturePane: 'read',
+  sendKeys: 'write', pasteText: 'write',
+  scratchSession: 'write', scratchKill: 'write', scratchRelease: 'write',
+  newSession: 'write', killSession: 'write', newWindow: 'write', killWindow: 'write',
+  paneCommand: 'read', resizePane: 'write', setSocket: 'write',
+  getBookmarks: 'read', saveBookmarks: 'write', getPrefs: 'read', setPref: 'write',
+  fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
+  fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
+  fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read',
+  fsUpload: 'write', fsConvert: 'read', gitCmd: 'write',
+  projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
+  projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',
+  projectAutostart: 'write',
+  hubPost: 'write', hubCommand: 'write', hubLog: 'read', hubLogAround: 'read',
+  hubMsgArchive: 'write', hubMsgRestore: 'write', hubMsgPurge: 'write',
+  hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
+  hubArchive: 'write', hubAgents: 'read',
+  boardList: 'read', boardCounts: 'read', boardGet: 'read',
+  boardSave: 'write', boardNote: 'write', boardDelete: 'write',
+  hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
+  hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write',
+  hubAgentRestart: 'write', hubTeamRestart: 'write',
+  registryList: 'read', registrySave: 'write', registryDelete: 'write',
+  globalPromptGet: 'read', globalPromptSet: 'write',
+  teamsList: 'read', teamsSave: 'write', teamsDelete: 'write',
+  backendsList: 'read', modelsList: 'read',
+  skillsList: 'read', skillsSave: 'write', skillsDelete: 'write', skillsRefresh: 'write',
+  skillsRead: 'read', skillsImport: 'write', skillsFiles: 'read', skillsFile: 'read',
+  mcpList: 'read', mcpSave: 'write', mcpDelete: 'write',
+} as const satisfies Record<keyof WsApi, 'read' | 'write'>;
+export type RpcKind = (typeof RPC_KIND)[keyof typeof RPC_KIND];
