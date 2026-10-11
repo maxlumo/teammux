@@ -413,6 +413,36 @@ test('an older dial whose promise already RESOLVED touches nothing (P1-b)', asyn
   assert.equal(after.find((s) => s.id === 'a')?.machineId, 'm-a', 'and A is still A s machine');
 });
 
+test('a dial whose HOST moved on, with no newer dial of its own, closes the peer it authenticated (reviewer P1-1 on 341554b3)', async () => {
+  // A cancel, or another candidate taking over, makes the host stale without
+  // dialling this runtime again. The socket that then authenticates is this
+  // attempt's own, and nobody will ever check who it is: it must be closed,
+  // or every call through this handle reaches it.
+  const { storage, a } = twoServers();
+  const before = loadServers(storage);
+  let resolve: (v: string) => void = () => {};
+  let disconnects = 0;
+  const slot = {
+    connection: {
+      connect: () => new Promise<string>((r) => { resolve = r; }),
+      disconnect: () => { disconnects++; },
+      dispose: () => {},
+      getMachineId: () => 'm-b', getHostname: () => 'beta-host',
+    },
+    api: {},
+  } as unknown as ConnectionSlot;
+  const runtime = createServerRuntime(a, { storage, slot });
+  let owns = true;
+  const dialling = runtime.dial(() => owns);
+  owns = false;                                     // the host moved on
+  resolve('m-b');                                   // and the peer is someone else
+  const result = await dialling;
+  assert.equal(!result.ok && result.reason, 'superseded');
+  assert.equal(disconnects, 1, 'its own unidentified socket is closed');
+  assert.deepEqual(loadServers(storage), before, 'and nothing was recorded');
+  assert.equal(runtime.alive(), true, 'the handle is still this server s, free to dial again');
+});
+
 test('a dial takes its machine id from its own result, not from the socket', async () => {
   // Production cannot make these two disagree — a current attempt's live
   // socket IS its own socket — so a stub that disagrees is the only way to

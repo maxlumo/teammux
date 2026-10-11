@@ -275,11 +275,21 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       return { ok: false, reason: 'failed', error };
     }
     if (!mine()) {
-      // Deliberately touches nothing — in particular it does NOT disconnect.
-      // The newer attempt's `connect` already replaced the socket this one
-      // dialled, so this attempt has no socket of its own left to close, and
-      // closing the connection's CURRENT socket would cut the attempt that
-      // superseded it.
+      // Two different facts, and they need opposite answers (reviewer P1-1
+      // on 341554b3):
+      //  - a NEWER dial of this runtime started since: its `connect` has
+      //    already replaced the socket this one dialled, so this attempt
+      //    has no socket of its own left, and closing the connection's
+      //    CURRENT socket would cut the attempt that superseded it — touch
+      //    nothing;
+      //  - this is still the connection's latest dial, and only its HOST
+      //    moved on (a cancel, another candidate, a switch): the socket that
+      //    just authenticated is this attempt's, and nobody will ever check
+      //    who it is. Left open it would serve every api call of this
+      //    handle — a method a page captured earlier included — to an
+      //    unidentified peer. Close it; the handle stays this server's and
+      //    can dial again.
+      if (!dead && attempt === dialled) connection.disconnect();
       return { ok: false, reason: 'superseded' };
     }
     // This attempt's own answer. The machine id is what ITS connect resolved
