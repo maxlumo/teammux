@@ -3008,7 +3008,7 @@
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
-      guestRuntime={scopeRuntime} guestState={serverStates.get(scopeRuntime)}
+      guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={scopeRuntime}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
       agentsEditRequest={landingFor(view.agentsEditReq)}
       openRequest={prefsOpenReq}

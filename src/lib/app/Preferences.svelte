@@ -48,8 +48,8 @@
     onGoBack = null,
     onDrill = () => {},
     showAgents = false,
-    guestRuntime = null,
-    guestState = null,
+    guests = [],
+    guestShown = null,
     guestHeld = '',
     agentsEditRequest = null,
     openRequest = null,
@@ -95,8 +95,12 @@
      * (board #335 ②b-3): App's bound runtime and that runtime's state.
      * Preferences itself is the person's and needs neither; with no runtime
      * the guest renders nothing, like every server-bound subtree. */
-    guestRuntime?: import('./server-runtime.ts').ServerRuntime | null;
-    guestState?: import('./server-state.ts').ServerState | null;
+    /** Every bound member's GUEST scope (board #335 ③a, reviewer P1-C on the
+     * ③ plan): its runtime and state. Each member keeps its own Agents editor,
+     * mounted on first open and kept, so a focus change never destroys a
+     * draft in one; only the `guestShown` one is visible and takes input. */
+    guests?: { runtime: import('./server-runtime.ts').ServerRuntime; state: import('./server-state.ts').ServerState | undefined }[];
+    guestShown?: import('./server-runtime.ts').ServerRuntime | null;
     /** Non-empty while the app is blocked on its storage (board #335 ③a): the
      * guest editor stays mounted — a draft in it survives — but takes no
      * input, and this says why. */
@@ -391,14 +395,31 @@
   });
   /** The embedded AgentsPage's own back chain, and whether it is showing an
    *  editor (which brings its own page head). */
-  let agentsBack: (() => boolean) | null = null;
-  let agentsDrilled = $state(false);
-  let agentsGuard: ((action: () => void) => void) | null = null;
+  // Per guest (③a): each member's editor registers its own, and the page asks
+  // the SHOWN one's at use time — a registration made at init must not stand
+  // for whichever guest is in front later.
+  type Guest = { back: (() => boolean) | null; guard: ((action: () => void) => void) | null };
+  // Plain map (handles are identities, not state); `drilled` is the one
+  // value the template follows, so it is a reactive map of its own.
+  const guestRegs = new Map<object, Guest>();
+  let drilledBy = $state.raw(new Map<object, boolean>());
+  const reg = (runtime: object): Guest => {
+    let r = guestRegs.get(runtime);
+    if (!r) { r = { back: null, guard: null }; guestRegs.set(runtime, r); }
+    return r;
+  };
+  const agentsBack = () => (guestShown ? guestRegs.get(guestShown)?.back?.() ?? false : false);
+  const agentsDrilled = $derived(!!guestShown && !!drilledBy.get(guestShown));
+  const agentsGuard = () => (guestShown ? guestRegs.get(guestShown)?.guard ?? null : null);
+  const setDrilled = (runtime: object, d: boolean) => {
+    if (untrack(() => drilledBy.get(runtime)) === d) return;   // a report that changes nothing writes nothing
+    drilledBy = new Map(untrack(() => drilledBy)).set(runtime, d);
+  };
   let navigation = 0;
   let acceptedAgentRequest = $state<{ name: string; kind?: 'agent' | 'team'; n: number } | null>(null);
-  function registerAgentsGuard(guard: (action: () => void) => void) {
-    agentsGuard = guard;
-    return () => { if (agentsGuard === guard) agentsGuard = null; };
+  function registerAgentsGuard(runtime: object, guard: (action: () => void) => void) {
+    reg(runtime).guard = guard;
+    return () => { const r = guestRegs.get(runtime); if (r?.guard === guard) r.guard = null; };
   }
 
   $effect(() => {
@@ -499,7 +520,7 @@
       // The embedded AgentsPage peels its OWN layers first (delete dialog, then
       // an open editor) — the same order it uses as a page. Only when it has
       // nothing left does back close the category, and only then the page.
-      if (AGENT_TABS.includes(tab) && agentsBack?.()) return true;
+      if (AGENT_TABS.includes(tab) && agentsBack()) return true;
       if (catOpen && isCompact()) { closeCat(); return true; }
       return false;
     });
@@ -521,7 +542,8 @@
       localStorage.setItem(TAB_KEY, value);
       applied();
     };
-    if (value !== tab && AGENT_TABS.includes(tab) && agentsGuard) agentsGuard(apply);
+    const guard = agentsGuard();
+    if (value !== tab && AGENT_TABS.includes(tab) && guard) guard(apply);
     else apply();
   }
 
@@ -619,19 +641,26 @@
       <div class="agents-embed" inert={!!guestHeld}>
         <!-- Keyed on the handle, like App's subtree: another server is
              another instance of the editor, never a re-pointed one. -->
-        {#key guestRuntime}
-        <ServerScope runtime={guestRuntime} state={guestState}>
+        <!-- One editor per member, keyed by its handle (③a, reviewer P1-C):
+             another server is another instance, never a re-pointed one, and
+             a member out of focus keeps its instance — hidden, inert, its
+             back chain and exit guard not registered — so its draft lives. -->
+        {#each guests as g (g.runtime)}
+        {@const on = g.runtime === guestShown}
+        <div class="guest" class:off={!on} inert={!on}>
+        <ServerScope runtime={g.runtime} state={g.state}>
         <AgentsPage
           section={tab}
-          visible={AGENT_TABS.includes(tab)}
+          visible={on && AGENT_TABS.includes(tab)}
           editRequest={tab === (acceptedAgentRequest?.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
-          onGuardExit={registerAgentsGuard}
+          onGuardExit={(guard: (action: () => void) => void) => registerAgentsGuard(g.runtime, guard)}
           guardPage="prefs"
-          onGoBack={(fn: () => boolean) => agentsBack = fn}
-          onDrilled={(d: boolean) => agentsDrilled = d}
+          onGoBack={(fn: () => boolean) => { reg(g.runtime).back = fn; }}
+          onDrilled={(d: boolean) => setDrilled(g.runtime, d)}
         />
         </ServerScope>
-        {/key}
+        </div>
+        {/each}
       </div>
     {:else}
     <!-- The accepted category owns this pane and its existing reveal. -->
@@ -957,6 +986,9 @@
      shell's remaining height instead of living inside a padded, scrolling pane —
      it brings its own list scroller and its own editor. */
   .agents-embed { flex: 1; min-width: 0; min-height: 0; }
+  /* One guest per member (③a): only the shown one takes the box. */
+  .guest { display: contents; }
+  .guest.off { display: none; }
   .pref-label { display: flex; flex-direction: column; gap: var(--config-label-gap); }
   /* A recorder and its reset: the Slider's field + undo pair (board 316). */
   .shortcut-control { display: flex; align-items: center; gap: 6px; min-width: 0; }

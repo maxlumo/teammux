@@ -184,5 +184,6 @@ test('a server s backend list has no module-level owner (board #335 ②b-3)', as
     'and no named front for one');
   // Preferences' embedded editor is bound by a guest scope, keyed like App's.
   const prefs = await readFile('src/lib/app/Preferences.svelte', 'utf8');
-  assert.match(prefs, /\{#key guestRuntime\}\s*<ServerScope runtime=\{guestRuntime\} state=\{guestState\}>\s*<AgentsPage/u);
+  // ③a: one guest scope per member, keyed by its handle (reviewer P1-C).
+  assert.match(prefs, /\{#each guests as g \(g\.runtime\)\}\s*\{@const on = g\.runtime === guestShown\}\s*<div class="guest" class:off=\{!on\} inert=\{!on\}>\s*<ServerScope runtime=\{g\.runtime\} state=\{g\.state\}>\s*<AgentsPage/u);
 });

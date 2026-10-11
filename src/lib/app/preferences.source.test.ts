@@ -75,21 +75,23 @@ test('the category is restorable, and it opens on request', () => {
   );
 });
 
+// ③a (reviewer P1-C): each member's guest registers its own back chain,
+// guard and drilled state; the page asks the SHOWN guest's at use time.
 test('back peels the embedded page first, then the category', () => {
   // Same order the page uses on its own: dialog, editor, then out. Getting this
   // backwards drops the user out of Settings mid-edit.
   assert.match(
     source,
-    /onGoBack\?\.\(\(\) => \{[\s\S]*?if \(AGENT_TABS\.includes\(tab\) && agentsBack\?\.\(\)\) return true;[\s\S]*?if \(catOpen && isCompact\(\)\) \{ closeCat\(\); return true; \}/u,
+    /onGoBack\?\.\(\(\) => \{[\s\S]*?if \(AGENT_TABS\.includes\(tab\) && agentsBack\(\)\) return true;[\s\S]*?if \(catOpen && isCompact\(\)\) \{ closeCat\(\); return true; \}/u,
   );
-  assert.match(source, /onGoBack=\{\(fn: \(\) => boolean\) => agentsBack = fn\}/u, 'the embedded page hands its chain up');
+  assert.match(source, /onGoBack=\{\(fn: \(\) => boolean\) => \{ reg\(g\.runtime\)\.back = fn; \}\}/u, 'the embedded page hands its chain up');
 });
 
 test('one head at a time: Settings yields its own to the editor', () => {
   // The embedded editor brings a .page-head of its own; two stacked title bars
   // is most of a phone's first screenful.
   assert.match(source, /\{#if !\(AGENT_TABS\.includes\(tab\) && agentsDrilled\)\}\s*<div class="page-head config-page-head">/u);
-  assert.match(source, /onDrilled=\{\(d: boolean\) => agentsDrilled = d\}/u);
+  assert.match(source, /onDrilled=\{\(d: boolean\) => setDrilled\(g\.runtime, d\)\}/u);
 });
 
 test('a tapped address wears the running cue until the socket settles (2026-09-03)', () => {
@@ -209,7 +211,7 @@ test('Settings adopts shared configuration geometry and semantic controls (#156)
     'retired per-page cards, controls and dimensions must not survive the migration');
   assert.match(source, /class="config-input mono shortcut-key"[\s\S]*?data-shortcut-recorder/u,
     'the native key recorder retains its own input semantics and shares field geometry');
-  assert.match(source, /onGuardExit=\{registerAgentsGuard\}/u);
+  assert.match(source, /onGuardExit=\{\(guard: \(action: \(\) => void\) => void\) => registerAgentsGuard\(g\.runtime, guard\)\}/u);
   assert.match(source, /editRequest=\{tab === \(acceptedAgentRequest\?\.kind === 'team' \? 'teams' : 'agents'\) \? acceptedAgentRequest : null\}/u,
     'a queued Agent (or, #258, Team) jump is never forwarded into another section');
   assert.doesNotMatch(source, /addEventListener\(['"]popstate|pushState\(/u,

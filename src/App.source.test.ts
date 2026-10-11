@@ -316,7 +316,8 @@ test('Settings only offers the category when there is a bus and no Agents page',
   // HELD, not unmounted (③a; orchestrator 08:17, one mechanism): inert, with
   // the reason, its writes refused by the frozen runtime and held by the gate.
   assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
-  assert.match(source, /guestRuntime=\{scopeRuntime\} guestState=\{serverStates\.get\(scopeRuntime\)\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}/u);
+  // ③a: one guest per member, the focused one shown (reviewer P1-C).
+  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{scopeRuntime\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}/u);
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   assert.match(source, /agentsEditRequest=\{landingFor\(view\.agentsEditReq\)\}/u, 'the Hub’s jump reaches the embedded editor');

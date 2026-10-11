@@ -645,7 +645,12 @@ zoom, language, shortcuts — which the gear opens whenever the shell is there,
 including when no runtime is bound, and which inside the subtree would have
 rendered a blank page exactly then. Preferences' one server-bound guest, the
 Agents editor on touch, is gated on a live server and bound by a GUEST scope of
-its own (②b-3). A caller asking whether a swap is needed asks what the swap is already
+its own (②b-3). Since ③a every bound member has its own guest editor, keyed by
+its handle, mounted on first open and kept: only the focused member's is shown
+and takes input, the others stay mounted hidden and inert, so a focus change
+never destroys a draft in one (reviewer P1-C on the ③ plan). Each registers its
+own back chain, exit guard and drilled state, and the page asks the SHOWN one's
+at use time; an edit request reaches only the visible editor. A caller asking whether a swap is needed asks what the swap is already
 HEADING for, not what is shown: during the gap nothing is shown, and one
 success path asks twice, so comparing against the gap would mint a handle
 nobody ever shows or releases. Since ②b-4 there is no provider-less fallback:

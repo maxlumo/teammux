@@ -12,4 +12,4 @@
   const guest = testScope(globalThis.__mountScopeTransport);
 </script>
 
-<Preferences {...props} guestRuntime={guest.runtime} guestState={guest.state} />
+<Preferences {...props} guests={[guest]} guestShown={guest.runtime} />
