@@ -170,14 +170,14 @@ From then on, after every merge to main: `npm run gateway:update`. It runs
 `npm run build:server`, then restarts the gateway unless the binary is already
 the one the gateway is running — the receipt beside the binary
 (`.tmm-gateway-deployed.json`, naming the binary, the config root and the
-service, as the service's own identity does) records each ACTIVATION — the
-restart returns only once our instance answers — which is not the same as a
-healthy gateway later. A build's output alone cannot say what is running:
-after a failed restart the next build produces the same bytes, and "nothing
-changed" would skip the deploy for good. So a failed build leaves the running
-gateway alone, a failed restart deploys nothing, and whichever path a run took
-it ends on one check of this machine's gateway — exit 0, with the commit it
-prints, means it answered as ours after everything that run did. It supports the default Cargo layout only:
+service, as the service's own identity does) records a deploy the gateway was
+then seen answering with, written after that check and dropped before any
+restart that could change what runs. A build's output alone cannot say what is
+running: after a failed restart the next build produces the same bytes, and
+"nothing changed" would skip the deploy for good. So a failed build leaves the
+running gateway alone, a restart that is not confirmed records nothing and is
+tried again next run, and exit 0 — with the commit it prints — means this
+machine's gateway answered as ours after everything that run did. It supports the default Cargo layout only:
 a `CARGO_TARGET_DIR`, a `--target`, or a `target-dir` in a cargo config moves
 the artifact, and the run stops and asks you to name it with
 `TMUX_MOBILE_GATEWAY_TMM` rather than hash one file and restart another.

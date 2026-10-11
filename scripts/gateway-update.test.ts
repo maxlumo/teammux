@@ -32,6 +32,8 @@ async function host(t: { after: (fn: () => Promise<void> | void) => void }, env:
     root,
     bin,
     bytes: 'A' as string | null,
+    /** The bytes the service was last started with, whatever happened next. */
+    running: null as string | null,
     build: 0,
     restart: 0,
     status: 0,
@@ -55,7 +57,13 @@ async function host(t: { after: (fn: () => Promise<void> | void) => void }, env:
             }
             return h.build;
           }
-          return args[1] === 'restart' ? h.restart : h.status;
+          if (args[1] === 'restart') {
+            // What a real restart does even when its own exit is non-zero:
+            // it starts the binary on disk, then waits for it to answer.
+            h.running = h.bytes;
+            return h.restart;
+          }
+          return h.status;
         },
       });
     },
@@ -72,13 +80,13 @@ async function host(t: { after: (fn: () => Promise<void> | void) => void }, env:
   return h;
 }
 
-test('a first update deploys and records what was activated', async (t) => {
+test('a first update deploys and records what is running', async (t) => {
   const h = await host(t);
   assert.equal(await h.update(), 0);
 
   assert.deepEqual(h.calls[0], ['npm', ['run', 'build:server']]);
   assert.equal(h.restarts(), 1);
-  assert.ok(h.told('no activation receipt'), h.said.join('\n'));
+  assert.ok(h.told('no receipt for these bytes'), h.said.join('\n'));
   assert.ok(h.told('now at abc1234 a merged commit'));
   assert.deepEqual(h.calls.at(-1), [h.bin, ['gateway', 'status']]);
 
@@ -105,8 +113,8 @@ test('after a failed restart the next run deploys the same bytes again', async (
   h.restart = 3;
   assert.equal(await h.update(), 3);
   assert.equal(h.restarts(), 1);
-  assert.ok(h.told('NOTHING was deployed'), h.said.join('\n'));
-  assert.equal(await h.receipt(), null, 'a failed restart records no activation');
+  assert.ok(h.told('not recorded as deployed'), h.said.join('\n'));
+  assert.equal(await h.receipt(), null, 'a failed restart leaves nothing recorded');
   assert.ok(!h.told('now at'), 'and never claims the gateway runs this commit');
 
   h.restart = 0;
@@ -126,7 +134,7 @@ test('a binary built by hand between updates is deployed, not assumed', async (t
   h.bytes = 'built by hand';
   assert.equal(await h.update(), 0);
   assert.equal(h.restarts(), 1);
-  assert.ok(h.told('changed since the gateway was started'), h.said.join('\n'));
+  assert.ok(h.told('changed since the gateway was last confirmed'), h.said.join('\n'));
 });
 
 test('new bytes after a deploy restart exactly once', async (t) => {
@@ -135,7 +143,7 @@ test('new bytes after a deploy restart exactly once', async (t) => {
   h.bytes = 'B';
   assert.equal(await h.update(), 0);
   assert.equal(h.restarts(), 1);
-  assert.ok(h.told('changed since the gateway was started'), h.said.join('\n'));
+  assert.ok(h.told('changed since the gateway was last confirmed'), h.said.join('\n'));
 });
 
 test('nothing to deploy but the gateway does not answer is a failure', async (t) => {
@@ -148,24 +156,24 @@ test('nothing to deploy but the gateway does not answer is a failure', async (t)
   assert.ok(!h.told('now at'), 'and the commit is not reported as running');
 });
 
-// Reviewer P1-A(i) with the orchestrator's 17:15 calibration: the run ends on
-// one check and fails when the gateway does not answer, while the receipt
-// records the ACTIVATION that did happen — so the next same-bytes run
-// re-probes instead of restarting a gateway that activated and then died.
-test('a restart that is accepted and then stops answering fails the run', async (t) => {
+// Reviewer P1-A(i), final contract: confirm, then record, then report. A
+// restart that was accepted and then died records nothing and reports nothing,
+// so the next run deploys the same bytes again.
+test('a restart that is accepted and then stops answering records nothing', async (t) => {
   const fresh = await host(t);
   fresh.status = 7;
   assert.equal(await fresh.update(), 7, 'no receipt yet: deploy, then the check fails');
   assert.equal(fresh.restarts(), 1);
   assert.ok(!fresh.told('now at'), fresh.said.join('\n'));
-  assert.ok(fresh.told('not a healthy gateway'));
-  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin), 'the activation is recorded');
+  assert.ok(fresh.told('NOTHING is recorded as deployed'));
+  assert.equal(await fresh.receipt(), null, 'an unconfirmed deploy is not a deployment');
 
-  assert.equal(await fresh.update(), 7, 'the fault is surfaced again, not restarted away');
-  assert.equal(fresh.restarts(), 0);
+  assert.equal(await fresh.update(), 7, 'and it keeps deploying until the gateway answers');
+  assert.equal(fresh.restarts(), 1);
   fresh.status = 0;
   assert.equal(await fresh.update(), 0);
-  assert.equal(fresh.restarts(), 0, 'and once it answers, these bytes are already deployed');
+  assert.equal(fresh.restarts(), 1);
+  assert.equal((await fresh.receipt()).hash, hashFile(fresh.bin));
 
   const moved = await host(t);
   await moved.update();
@@ -174,7 +182,49 @@ test('a restart that is accepted and then stops answering fails the run', async 
   assert.equal(await moved.update(), 7, 'a stale receipt: deploy, then the check fails');
   assert.equal(moved.restarts(), 1);
   assert.ok(!moved.told('now at'), moved.said.join('\n'));
-  assert.equal((await moved.receipt()).hash, hashFile(moved.bin), 'advanced to what was activated');
+  assert.equal(await moved.receipt(), null, 'and the old receipt is gone, not kept');
+});
+
+// Reviewer P1 on 3a3888fe: the receipt stops being true the moment a restart
+// is attempted, because that restart may leave the new binary running however
+// it exits. Keeping it would make a rollback to the old bytes a no-op while
+// the service runs the other ones.
+test('a rollback after an unconfirmed deploy is deployed, not skipped', async (t) => {
+  const h = await host(t);
+  await h.update();
+  assert.equal(h.running, 'A', 'A is deployed and confirmed');
+
+  h.bytes = 'B';
+  h.status = 7;
+  assert.equal(await h.update(), 7);
+  assert.equal(h.running, 'B', 'the service was restarted onto B even though it does not answer');
+  assert.equal(await h.receipt(), null);
+
+  h.bytes = 'A';
+  h.status = 0;
+  assert.equal(await h.update(), 0, 'the rollback build is deployed');
+  assert.equal(h.restarts(), 1);
+  assert.equal(h.running, 'A');
+  assert.equal((await h.receipt()).hash, hashFile(h.bin));
+});
+
+test('a restart that fails outright also leaves no receipt behind', async (t) => {
+  const h = await host(t);
+  await h.update();
+  h.bytes = 'B';
+  h.restart = 9;
+  assert.equal(await h.update(), 9);
+  assert.equal(await h.receipt(), null, 'a non-zero restart may still have started B');
+  assert.ok(h.told('not recorded as deployed'), h.said.join('\n'));
+});
+
+test('a build that fails never touches the receipt', async (t) => {
+  const h = await host(t);
+  await h.update();
+  const receipt = await h.receipt();
+  h.build = 101;
+  assert.equal(await h.update(), 101);
+  assert.deepEqual(await h.receipt(), receipt, 'nothing was restarted, so what was deployed still is');
 });
 
 // Reviewer P1-A(ii): the service's identity is the binary AND the config root
@@ -241,7 +291,8 @@ test('a service named by TMM_GATEWAY_SERVICE gets its own receipt', async (t) =>
 test('a receipt names the service tmm would act on, not "the default"', async (t) => {
   const h = await host(t);
   await h.update();
-  assert.equal((await h.receipt()).service, DEFAULT_SERVICE.other, 'on this platform, the unit');
+  const here = process.platform === 'darwin' ? DEFAULT_SERVICE.darwin : DEFAULT_SERVICE.other;
+  assert.equal((await h.receipt()).service, here, 'the name tmm would act on HERE');
   assert.equal(serviceName({}, 'darwin'), DEFAULT_SERVICE.darwin);
   assert.equal(serviceName({}, 'linux'), DEFAULT_SERVICE.other);
   assert.equal(serviceName({ [SERVICE_ENV]: '' }, 'linux'), DEFAULT_SERVICE.other, 'empty = unset, as tmm reads it');

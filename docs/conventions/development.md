@@ -144,12 +144,12 @@ only when the bytes differ matters — cargo fingerprints by mtime, so a
 `touch`, a checkout, or a comment-only edit relinks an identical binary and
 dropping every client for that would be noise. `gateway:update` keeps that
 rule, and this is where it comes from; what it compares is the binary against
-the one the gateway was last STARTED with (a receipt written after each
-successful restart, naming the binary, the config root and the service — the
-service's own identity), because a one-shot script re-reading the file each
-time cannot otherwise tell a finished deploy from a restart that failed. Both
-paths then end on one check of the gateway, so exit 0 means it answered as ours
-after everything that run did. A failed
+the one the gateway was last CONFIRMED running (a receipt naming the binary,
+the config root and the service — the service's own identity), because a
+one-shot script re-reading the file each time cannot otherwise tell a finished
+deploy from a restart that failed. It confirms, then records, then reports, so
+exit 0 means the gateway answered as ours after everything that run did, and an
+unconfirmed deploy is tried again rather than remembered. A failed
 rebuild keeps the last
 good binary running and retries on the next change. Owner correction, 2026-08-19.
 These pass `--no-default-features`, which turns off the `gui` Cargo feature —
