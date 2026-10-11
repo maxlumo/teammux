@@ -81,7 +81,10 @@ test('the identity modules have exactly the production consumers this commit giv
   const allowed: Record<string, string[]> = {
     // ②b-2: App mints the refs its navigation keeps, and the saved-nav
     // decoder reads and attributes them. No page names a server itself.
-    'refs.ts': ['src/App.svelte'],
+    'refs.ts': ['src/App.svelte',
+      // ③a: the device's excluded set holds ServerIds (a type import); it
+      // reads them through the registry and is not a page.
+      'src/lib/app/connection-mode.ts'],
     'nav-saved.ts': ['src/App.svelte'],
     'server-runtime.ts': [],
     'server-scope.ts': ['src/App.svelte'],
