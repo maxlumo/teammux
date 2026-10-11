@@ -123,3 +123,19 @@ test('a state already released is never handed over, merge or not (reviewer P1-b
   assert.notEqual(next.files, old.files, 'a fresh state instead');
   assert.equal(next.files.memory.sealed(), false, 'which can start downloads');
 });
+
+test('reloadStored: a live state re-reads its slots after a merge wrote under it, and its next write keeps the merged value (#335 ③b)', async () => {
+  const { reloadStored } = await import('./server-state.ts');
+  const { createServerStore } = await import('./server-store.ts');
+  const m = new Map<string, string>([['tmux_hub_drafts::c', JSON.stringify({ ops: 'canon' })]]);
+  const disk = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); }, removeItem: (k: string) => { m.delete(k); } };
+  const state = createServerState(createServerStore(disk, 'c'));
+  // An absorption merges the alias's draft and alert into c's slots.
+  disk.setItem('tmux_hub_drafts::c', JSON.stringify({ ops: 'canon', work: 'TYPED on the alias' }));
+  disk.setItem('tmux_hub_alerts::c', JSON.stringify([{ key: 'proj:work|7', room: 'proj:work', server: 'c', session: 'work', seq: 7, id: '7', ts: 7, from: 'dev', toHuman: true, kind: 'reply', excerpt: 'x', viewed: false }]));
+  reloadStored(state);
+  assert.equal(state.prefs.draft('work'), 'TYPED on the alias', 'the merged draft is seen');
+  assert.equal(state.centre.items.length, 1, 'and the merged alert');
+  state.prefs.setDraft('ops', 'canon, edited');
+  assert.deepEqual(JSON.parse(disk.getItem('tmux_hub_drafts::c')!), { ops: 'canon, edited', work: 'TYPED on the alias' }, 'a later write does not put back what it held before');
+});

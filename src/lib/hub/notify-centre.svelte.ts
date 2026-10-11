@@ -110,20 +110,6 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
 // `createCentre(createAlertLog(storage))`, and there is no module instance of
 // a log. That storage is the server's own store (②b-4).
 
-/** A held alert list moving from server `from` to `to` — an identity merge
- * folded `from` into `to` while the app was blocked (board #335 ③a, reviewer
- * P1-4): every alert that named `from` names `to`, so the canonical centre
- * can open it. Alerts naming any other server are left alone; anything that
- * is not this key, or does not parse, is returned as it came. */
-export function rebindAlerts(key: string, value: string, from: string, to: string): string {
-  if (key !== ALERTS_KEY) return value;
-  try {
-    const list = JSON.parse(value);
-    if (!Array.isArray(list)) return value;
-    return JSON.stringify(list.map((a) => (a && typeof a === 'object' && a.server === from ? { ...a, server: to } : a)));
-  } catch { return value; }
-}
-
 /** One SERVER's alert list. */
 export interface AlertLog {
   readonly items: readonly Alert[];
@@ -133,6 +119,9 @@ export interface AlertLog {
   viewed(key: string): void;
   failed(key: string, reason: string): void;
   clear(): void;
+  /** Read the list again from storage: an identity merge just merged an
+   * absorbed server's alerts into this server's slot (board #335 ③b). */
+  reload(): void;
 }
 
 export function createAlertLog(storage: Store | null): AlertLog {
@@ -152,6 +141,7 @@ export function createAlertLog(storage: Store | null): AlertLog {
     viewed(key) { save(state.items.map((a) => (a.key === key ? { ...a, viewed: true, failed: undefined } : a))); },
     failed(key, reason) { save(state.items.map((a) => (a.key === key ? { ...a, failed: reason } : a))); },
     clear() { save([]); },
+    reload() { state.items = read(storage); },
   };
 }
 
@@ -201,6 +191,8 @@ export const centreSurface = createCentreSurface();
  */
 export function createCentre(log: AlertLog, surface: CentreSurface = centreSurface) {
   return {
+    /** Re-read this server's list (see `AlertLog.reload`). */
+    reload() { log.reload(); },
     get items(): readonly Alert[] { return log.items; },
     get unviewed(): number { return log.unviewed; },
     record(alert: Alert) { log.record(alert); },

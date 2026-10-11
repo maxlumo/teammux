@@ -85,14 +85,10 @@ import type { ServerId } from './refs.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-/** A value's fingerprint: FNV-1a over its UTF-16 units, with its length.
- * Synchronous, because the fold runs before the first render. It decides
- * only "is this still the value that was there", never who owns anything. */
-export function fingerprint(value: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < value.length; i++) { h ^= value.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
-  return `${h.toString(16)}:${value.length}`;
-}
+// A value's fingerprint lives with the slot merge, which hands a moved slot's
+// baseline over (slot-merge.ts); re-exported for the fold's own use.
+export { fingerprint } from './slot-merge.ts';
+import { fingerprint } from './slot-merge.ts';
 
 /** The pre-#335 inputs, fingerprinted as one: an absent key counts. */
 function inputsPrint(storage: Pick<Storage, 'getItem'>): string {

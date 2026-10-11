@@ -39,6 +39,10 @@ export interface ServerFleetDeps {
    * is still being ended.
    */
   end?: (runtime: ServerRuntime) => void | Promise<void>;
+  /** Entries left the registry (absorbed or removed): `gone` are their ids,
+   * after their runtimes were dropped. The host re-reads what a survivor
+   * keeps in memory of its slots, which a merge has just changed. */
+  onReconciled?: (gone: ServerId[]) => void;
 }
 
 export interface ServerFleet {
@@ -115,6 +119,7 @@ export function createServerFleet(deps: ServerFleetDeps): ServerFleet {
     // stops, and a reply already on the wire resolves nothing — so a late
     // answer cannot recreate the entry identity has just absorbed.
     for (const id of gone) drop(id);
+    if (gone.length) deps.onReconciled?.(gone);
     return gone;
   }
 

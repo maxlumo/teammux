@@ -1028,3 +1028,16 @@ test('with a host end, drop and reconcile END a runtime release → dispose, and
     registry.disposeAll();
   }
 });
+
+test('a reconcile that dropped absorbed entries reports their ids, once they are dropped; a reconcile that dropped none reports nothing (#335 ③b)', () => {
+  const { storage, a, b } = twoServers();
+  const reported: string[][] = [];
+  const fleet = createServerFleet({ storage, registry: createConnectionRegistry(), onReconciled: (gone) => reported.push([...gone]) });
+  got(fleet.include(a)); got(fleet.include(b));
+  fleet.reconcile();
+  assert.deepEqual(reported, [], 'nothing left the registry');
+  saveServers(storage, loadServers(storage).filter((e) => e.id !== 'b'));
+  fleet.reconcile();
+  assert.deepEqual(reported, [['b']], 'B is reported');
+  assert.equal(fleet.get('b'), undefined, 'after it was dropped');
+});

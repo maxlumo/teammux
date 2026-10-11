@@ -19,7 +19,7 @@
   import ServerList from './lib/app/ServerList.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
-  import { createAlertLog, createCentre, centreSurface, rebindAlerts } from './lib/hub/notify-centre.svelte.ts';
+  import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
@@ -38,7 +38,7 @@
   import { createMembers } from './lib/app/server-members.svelte.ts';
   import { readMode, readExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
-  import { createServerState, releaseServerState, stateForRuntime } from './lib/app/server-state.ts';
+  import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
   import { claimPending, migrateServerState } from './lib/app/server-state-migration.ts';
   import { createActivations } from './lib/app/activation.ts';
@@ -158,7 +158,7 @@
    * Retry. */
   function releaseStorage() {
     if (!storageHeld) return true;
-    if (!writeGate.flush(localStorage, (id) => mergedInto(localStorage, id), rebindAlerts)) return false;
+    if (!writeGate.flush(localStorage, (id) => mergedInto(localStorage, id))) return false;
     storageHeld = false;
     for (const runtime of fleet.all()) runtime.setFrozen(false);
     return true;
@@ -200,7 +200,16 @@
     storage: localStorage,
     registry: createConnectionRegistry(),
     end: (runtime) => (runtime === scopeSwap.bound() ? undefined : ends.end(runtime)),
+    // An absorption merged the absorbed entries' slots into a survivor's
+    // (servers.ts `forgetDropped`): a survivor that is alive re-reads them,
+    // or its next write would put back what it held before the merge.
+    onReconciled: (gone) => { for (const id of gone) reloadSurvivor(mergedInto(localStorage, id)); },
   });
+  function reloadSurvivor(id) {
+    const runtime = id ? fleet.get(id) : undefined;
+    const state = runtime && serverStates.get(runtime);
+    if (state) reloadStored(state);
+  }
   /** The bound runtime's connection and api: what App itself talks to the
    * server it is on through — never a module-level socket. */
   const bound = () => scopeSwap.bound();
@@ -2166,6 +2175,9 @@
   function retryMigration() {
     prepareStorage();
     if (migrationBlocked) return;
+    // The preparation may have finished a merge a failure left open, into a
+    // survivor that is alive (board #335 ③b): every live state re-reads.
+    for (const runtime of fleet.all()) { const state = serverStates.get(runtime); if (state) reloadStored(state); }
     // What the gate kept is consumed only once nothing blocks it any more
     // (reviewer P1 on fedd17eb): the link once applying it did not block,
     // the switch once the bind did not — a failure there blocks again, and

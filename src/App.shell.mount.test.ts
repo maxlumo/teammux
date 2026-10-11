@@ -1909,6 +1909,9 @@ test('pre-#335 inputs left under a dangling CURRENT go only to the machine that 
   }
 });
 
+/** Is an absorption's slot move open (board #335 ③b: `tmux_slot_moves`,
+ * one intent per pair, on every client)? */
+const movesOpen = (ls: Storage) => (JSON.parse(ls.getItem('tmux_slot_moves') ?? '[]') as unknown[]).length > 0;
 /** Storage that refuses writes to `keys` until the case says otherwise. */
 const refusing = (keys: string[]) => {
   const state = { failing: true };
@@ -2444,10 +2447,10 @@ function afterFailedMove(failKey = 'tmux_hub_drafts::c'): Record<string, string>
 
 test('a reload after a failed slot move finishes it; a connect straight to canonical then claims with the alias s edit (reviewer P1-A on 4807242f)', async (context) => {
   const seed = afterFailedMove();
-  assert.ok(JSON.parse(seed.tmux_state_layout!).moving, 'the move is open in the seed');
+  assert.ok((JSON.parse(seed.tmux_slot_moves ?? '[]') as unknown[]).length, 'the move is open in the seed');
   const { app, settle } = await bootApp(context, seed);
   const ls = app.window.localStorage;
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'the boot finished it');
+  assert.equal(movesOpen(ls), false, 'the boot finished it');
   await connectCard(app, settle, 'ws://canonical:9899');
   assert.equal(ls.getItem('tmux_server_current'), 'c');
   assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'folded', into: 'c' });
@@ -2460,11 +2463,11 @@ test('a reload after a failed slot move that still cannot finish it is blocked, 
   await app.advance(1000);
   const ls = app.window.localStorage;
   assert.ok(cardButton(app, /retry/iu), 'blocked: the card offers only Retry');
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the intent is still open');
+  assert.ok(movesOpen(ls), 'the intent is still open');
   store.state.failing = false;
   cardButton(app, /retry/iu)!.click();
   for (let i = 0; i < 4; i++) await settle();
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry finished it');
+  assert.equal(movesOpen(ls), false, 'Retry finished it');
   await connectCard(app, settle, 'ws://canonical:9899');
   assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });
@@ -2534,7 +2537,7 @@ test('the boot dial s identity write fails mid-handoff: blocked at once, frozen,
   for (let i = 0; i < 4; i++) await h.settle();
   const ls = h.app.window.localStorage;
   assert.deepEqual(events.filter((e) => e.startsWith('connect:')), ['connect:ws://alias:9899'], 'the boot dialled the alias');
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'its merge left the handoff open');
+  assert.ok(movesOpen(ls), 'its merge left the handoff open');
   assert.ok(cardButton(h.app, /retry/iu), 'blocked in this turn: the card offers only Retry');
   assert.equal(cardButton(h.app, /^connect$/iu), undefined);
   assertHeldTree(h.app, 'no server tree');
@@ -2583,14 +2586,14 @@ test('the connect form s identity write fails mid-handoff: blocked at once, the 
   store.state.failing = true;
   await connectCard(h.app, h.settle, 'ws://alias:9899');
   const ls = h.app.window.localStorage;
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the form s merge left the handoff open');
+  assert.ok(movesOpen(ls), 'the form s merge left the handoff open');
   assert.ok(cardButton(h.app, /retry/iu), 'blocked in this turn: the form offers only Retry');
   assert.equal(cardButton(h.app, /^connect$/iu), undefined, 'no Connect');
   assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not write its storage/iu, 'and says why');
   store.state.failing = false;
   cardButton(h.app, /retry/iu)!.click();
   for (let i = 0; i < 4; i++) await h.settle();
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry finished the handoff');
+  assert.equal(movesOpen(ls), false, 'Retry finished the handoff');
   await connectCard(h.app, h.settle, 'ws://alias:9899');
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(ls.getItem('tmux_server_current'), 'c');
@@ -2625,7 +2628,7 @@ test('a switch whose identity write fails mid-handoff: the migration Retry is th
   await h.switchTo('alias');
   for (let i = 0; i < 4; i++) await h.settle();
   const ls = h.app.window.localStorage;
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the switch s merge left the handoff open');
+  assert.ok(movesOpen(ls), 'the switch s merge left the handoff open');
   assert.equal([...h.app.document.querySelectorAll('.switch-panel')].length, 0, 'no switch-failed panel over it');
   assert.ok(cardButton(h.app, /retry/iu), 'the migration Retry is on screen');
   assertHeldTree(h.app, 'no server tree');
@@ -3412,7 +3415,7 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   await submit();
   for (let i = 0; i < 4; i++) await h.settle();
   const ls = h.app.window.localStorage;
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the absorption left the handoff open');
+  assert.ok(movesOpen(ls), 'the absorption left the handoff open');
   assert.ok(retryButton(h.app), 'blocked: the migration Retry is offered');
   assertHeldTree(h.app, 'no writable server tree is mounted', { source: true });
   assert.equal(alias.disposed(), false, 'the source was not ended by the block');
@@ -3422,7 +3425,7 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   for (let i = 0; i < 6; i++) await h.settle();
   // The registry write never committed, so the handoff resumes on the
   // alias side: CURRENT stays the alias, the move is closed.
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the open handoff');
+  assert.equal(movesOpen(ls), false, 'Retry closed the open handoff');
   assert.equal(alias.disposed(), false, 'and still ended nothing');
   // The person connects again: the survivor's own runtime dials and is bound.
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
@@ -3457,7 +3460,7 @@ test('a block keeps an unsaved editor: held mounted with its text, it saves noth
   h.net.drop();
   for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
   const ls = h.app.window.localStorage;
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'the reconnect s absorption left the handoff open: blocked');
+  assert.ok(movesOpen(ls), 'the reconnect s absorption left the handoff open: blocked');
   assert.equal(area.isConnected, true, 'the editor is still mounted');
   assert.equal(area.value, '# notes\n\nunsaved', 'with what the person typed');
   assertHeldTree(h.app, 'blocked', { source: true });
@@ -3467,7 +3470,7 @@ test('a block keeps an unsaved editor: held mounted with its text, it saves noth
   assert.ok(retry, 'Retry is offered');
   retry.click();
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
+  assert.equal(movesOpen(ls), false, 'Retry closed the handoff');
   assert.equal(area.isConnected, true, 'after Retry the same editor is there');
   assert.equal(area.value, '# notes\n\nunsaved', 'and so is the text');
 });
@@ -3633,7 +3636,7 @@ test('touch: a dirty guest editor survives an automatic block that moves the pag
   h.net.drop();
   for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
   const ls = h.app.window.localStorage;
-  assert.ok(JSON.parse(ls.getItem('tmux_state_layout')!).moving, 'blocked mid-handoff');
+  assert.ok(movesOpen(ls), 'blocked mid-handoff');
   assert.equal(prompt.isConnected, true, 'the guest editor is still mounted');
   assert.equal(prompt.value, 'Unsaved', 'with the draft');
   assert.deepEqual(saved, [], 'nothing saved while blocked');
@@ -3642,7 +3645,7 @@ test('touch: a dirty guest editor survives an automatic block that moves the pag
   store.state.failing = false;
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button, .switch-panel button')].find((b) => /retry/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).moving, undefined, 'Retry closed the handoff');
+  assert.equal(movesOpen(ls), false, 'Retry closed the handoff');
   assert.equal(prompt.isConnected, true, 'the editor is still mounted after Retry');
   assert.equal(prompt.value, 'Unsaved', 'the draft is still there after Retry');
 });
@@ -3846,4 +3849,69 @@ test('③b-1 (reviewer P1 on 453f02b8): a published member whose socket closed d
   assert.equal(ls.getItem('tmux_server_current'), 'c', 'Retry finished the switch');
   assert.ok(dialsOf(events, 'b').length > n, `and redialled B: ${dialsOf(events, 'b').join(',')}`);
   assert.ok(conn(h, 'b')?.isConnected(), 'which is back');
+});
+
+test('P1-4 (reviewer 15:06): an alert on a live background alias, absorbed into the canonical while the merge write fails, opens from canonical s centre after Retry', async (context) => {
+  // C (m-a) is the focus. The alias A is a background member: its server
+  // answered without a machine id, so it stayed an entry of its own, and it
+  // holds an alert. Later C's machine reports A's address as one of its own,
+  // and C's reconnect lands on it: recording that absorbs A into C, and the
+  // merge of A's alerts into C's slot fails. Blocked; Retry; the alert is C's.
+  const store = refusing(['tmux_hub_alerts::c']);
+  store.state.failing = false;
+  const alertA = { key: 'proj:work|7', room: 'proj:work', server: 'a', session: 'work', project: 'work', seq: 7, id: '7', ts: 1_800_000_000_000, from: 'dev', toHuman: true, kind: 'reply', excerpt: 'from the alias', viewed: false };
+  let aliasProves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    tmux_servers: JSON.stringify([
+      { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+      { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+    ]),
+    tmux_server_current: 'c', tmux_address: 'ws://canonical:9899', tmux_token: 'tok', tmux_machine_id: 'm-a',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'c' }),
+    'tmux_hub_alerts::a': JSON.stringify([alertA]),
+    tmux_layout_mode: 'desktop',
+  }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events,
+    rpc: { ...oneRoomHub(), findBestAddress: async () => 'ws://alias:9899' },
+    setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.ok(conn(h, 'a')?.isConnected(), `the alias is a live background member: ${dialsOf(events, 'a').join(',')}`);
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).length, 2, 'and still an entry of its own');
+  // C's machine reports the alias's address as its own.
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  store.state.failing = true;
+  conn(h, 'c')!.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(dialsOf(events, 'c').some((d) => d.includes('ws://alias')), `C s reconnect dialled the alias s address: ${dialsOf(events, 'c').join(',')}`);
+  assert.ok(movesOpen(ls), 'the absorption s move is open');
+  assert.ok(retry(), 'the merge write failed: blocked, Retry offered');
+  store.state.failing = false;
+  retry()!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(movesOpen(ls), false, 'Retry finished the move');
+  // The registry commit never happened, so the alias is still an entry: the
+  // resume merged its slots into C and closed the move, and the registry
+  // decides again the next time C's machine answers on the alias's address
+  // (servers.ts `resumeSlotMove`). What matters is where the alert is.
+  const onDisk = (JSON.parse(ls.getItem('tmux_hub_alerts::c') ?? '[]') as { key: string; server: string }[]).find((x) => x.key === 'proj:work|7');
+  assert.equal(onDisk?.server, 'c', `the alert is C s, naming C: ${ls.getItem('tmux_hub_alerts::c')}`);
+  // The person connects to C again (Retry does not redial a reconnect that
+  // an absorption ended: a gap reported on #335, the same on d05806e6).
+  await connectCard(h.app, h.settle, 'ws://canonical:9899');
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'on C');
+  // C's centre shows it, from C's own slot.
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell');
+  assert.ok(bell, 'C has the Hub');
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, `C s bell counts it: ${bell.getAttribute('aria-label')}`);
+  bell.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const item = [...h.app.document.querySelectorAll<HTMLElement>('.nc-list li button, .nc-list .nc-item, .nc-list li')]
+    .find((el) => /from the alias/u.test(el.textContent ?? ''));
+  assert.ok(item, `C s centre lists it: ${h.app.document.querySelector('.nc-list')?.textContent ?? 'no list'}`);
 });

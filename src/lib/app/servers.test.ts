@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CURRENT_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, residentKey,
   activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, RESIDENT_KEYS, hostLabel, loadServers,
-  migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses,
+  migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, MOVES_KEY, resumeSlotMove,
 } from './servers.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -280,7 +280,13 @@ test('a merge hands the CURRENT twin s slots to the survivor (board #335 ②b-4)
   assert.equal(currentServerId(s), 'canon', 'CURRENT followed the merge');
   assert.equal(s.getItem(residentKey('tmux_state', 'canon')), 'alias nav', 'the current twin s state is the survivor s now');
   assert.equal(s.getItem(residentKey('tmux_hub_drafts', 'canon')), 'alias drafts');
-  assert.equal(s.getItem(residentKey('tmux_hub_seen', 'canon')), null, 'whole: what the twin did not have is gone too');
+  // Merged, not copied whole (board #335 ③b; orchestrator 15:04): what the
+  // twin did not have is the survivor's still — under Aggregate the survivor
+  // is a live member with its own state — and the survivor's value the
+  // twin's replaced is recorded, not lost.
+  assert.equal(s.getItem(residentKey('tmux_hub_seen', 'canon')), 'older canon seen', 'a missing source never deletes');
+  assert.deepEqual(JSON.parse(s.getItem('tmux_slot_conflicts')!), [{ from: 'alias', to: 'canon', key: 'tmux_state', value: 'older canon nav' }],
+    'the current twin won the real conflict; the survivor s value is recorded');
   for (const key of RESIDENT_KEYS) assert.equal(s.getItem(residentKey(key, 'alias')), null, `the alias s ${key} went with it`);
 });
 
@@ -569,4 +575,115 @@ test('a merge chain is followed, and a chain into a forgotten entry ends nowhere
   assert.equal(mergedInto(storage, 'x'), '', 'its survivor was forgotten since');
   assert.equal(mergedInto(storage, 'loop1'), '', 'a corrupt cycle terminates');
   assert.equal(mergedInto(mem({ [MERGES_KEY]: 'not json' }), 'a'), '');
+});
+
+// ─── #335 ③b: every absorbed id is MERGED into the survivor ─────────────
+// (orchestrator 15:02/15:04, reviewer 15:03, validator 15:08). Under
+// Aggregate a background alias has state of its own, and so does the
+// canonical entry it is folded into. A folded client (no pending inputs):
+// the focus X takes no part. a1/a2 are address-only twins of canonical c.
+
+const alert = (id: string, server: string, ts: number) => ({ key: `proj:work|${id}`, room: 'proj:work', server, session: 'work', seq: ts, id, ts, from: 'dev', toHuman: true, kind: 'reply', excerpt: 'x' });
+function twins(order: ('a1' | 'a2')[], slots: Record<string, string> = {}) {
+  const entries = {
+    a1: { id: 'a1', name: 'one', address: 'ws://a:1', token: 't' },
+    a2: { id: 'a2', name: 'two', address: 'ws://a:1', token: 't' },
+  };
+  return mem({
+    [SERVERS_KEY]: JSON.stringify([
+      { id: 'x', name: 'xray', address: 'ws://x:1', token: 't', machineId: 'm-x' },
+      { id: 'c', name: 'canon', address: 'ws://a:1', token: 't', machineId: 'm-a' },
+      ...order.map((k) => entries[k]),
+    ]),
+    [CURRENT_KEY]: 'x',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'x' }),
+    [residentKey('tmux_hub_drafts', 'x')]: JSON.stringify({ work: 'X s own' }),
+    ...slots,
+  });
+}
+const drafts = (s: ReturnType<typeof mem>, id: string) => JSON.parse(s.getItem(residentKey('tmux_hub_drafts', id)) ?? 'null');
+
+for (const order of [['a1', 'a2'], ['a2', 'a1']] as const) {
+  test(`two background aliases absorbed at once both land on an empty canonical, in either order (${order.join(' then ')})`, () => {
+    const s = twins([...order], {
+      [residentKey('tmux_hub_drafts', 'a1')]: JSON.stringify({ work: 'TYPED' }),
+      [residentKey('tmux_hub_drafts', 'a2')]: JSON.stringify({ ops: 'TYPED2' }),
+      [residentKey('tmux_hub_seen', 'a2')]: JSON.stringify({ ops: { seq: 4 } }),
+    });
+    migrateServers(s);
+    assert.deepEqual(loadServers(s).map((e) => e.id), ['x', 'c'], 'both absorbed');
+    assert.deepEqual(drafts(s, 'c'), { work: 'TYPED', ops: 'TYPED2' }, 'neither overwrote the other');
+    assert.deepEqual(JSON.parse(s.getItem(residentKey('tmux_hub_seen', 'c'))!), { ops: { seq: 4 } });
+    assert.deepEqual(drafts(s, 'x'), { work: 'X s own' }, 'the focus took no part');
+    assert.equal(s.getItem('tmux_slot_conflicts'), null, 'no conflict to record');
+    assert.equal(s.getItem(MOVES_KEY), null, 'every intent closed');
+    for (const k of RESIDENT_KEYS) assert.equal(s.getItem(residentKey(k, 'a1')) ?? s.getItem(residentKey(k, 'a2')), null, `the twins s ${k} slots are gone`);
+  });
+}
+
+test('the canonical s own state survives an absorbed alias that lacks it, and a real conflict keeps canonical s and RECORDS the alias s (validator 15:08)', () => {
+  const s = twins(['a1'], {
+    [residentKey('tmux_hub_drafts', 'c')]: JSON.stringify({ work: 'TYPED on canonical', ops: 'canon ops' }),
+    [residentKey('tmux_hub_alerts', 'c')]: JSON.stringify([alert('1', 'c', 10)]),
+    [residentKey('tmux_hub_lead', 'c')]: 'canon-lead',
+    [residentKey('tmux_hub_drafts', 'a1')]: JSON.stringify({ work: 'typed on the alias', new: 'only on the alias' }),
+    [residentKey('tmux_hub_alerts', 'a1')]: JSON.stringify([alert('2', 'a1', 20), alert('3', 'elsewhere', 5)]),
+  });
+  migrateServers(s);
+  assert.deepEqual(drafts(s, 'c'), { work: 'TYPED on canonical', ops: 'canon ops', new: 'only on the alias' },
+    'canonical s drafts kept; the alias s non-conflicting draft lands');
+  assert.equal(s.getItem(residentKey('tmux_hub_lead', 'c')), 'canon-lead', 'a key the alias does not have is not deleted');
+  assert.deepEqual(JSON.parse(s.getItem('tmux_slot_conflicts')!), [{ from: 'a1', to: 'c', key: 'tmux_hub_drafts', value: JSON.stringify({ work: 'typed on the alias' }) }],
+    'the alias s draft of the same room is recorded, not lost');
+  const alerts = JSON.parse(s.getItem(residentKey('tmux_hub_alerts', 'c'))!) as { id: string; server: string }[];
+  assert.deepEqual(alerts.map((a) => [a.id, a.server]), [['2', 'c'], ['1', 'c'], ['3', 'elsewhere']],
+    'alerts union, newest first; the alias s names canonical now, a third server s is left alone');
+});
+
+test('a folded client interrupted between two absorbed aliases records both intents, and a reload completes the second (orchestrator 15:04)', () => {
+  const s = twins(['a1', 'a2'], {
+    [residentKey('tmux_hub_drafts', 'a1')]: JSON.stringify({ work: 'TYPED' }),
+    [residentKey('tmux_hub_drafts', 'a2')]: JSON.stringify({ ops: 'TYPED2' }),
+  });
+  const set = s.setItem;
+  let n = 0;
+  s.setItem = (k: string, v: string) => { if (k === residentKey('tmux_hub_drafts', 'c') && ++n === 2) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.throws(() => migrateServers(s), /Quota/u, 'the second alias s merge fails');
+  s.setItem = set;
+  assert.deepEqual((JSON.parse(s.getItem(MOVES_KEY)!) as { from: string }[]).map((m) => m.from).sort(), ['a1', 'a2'], 'one intent per pair, on a folded client');
+  assert.deepEqual(loadServers(s).map((e) => e.id), ['x', 'c', 'a1', 'a2'], 'the registry was not committed');
+  migrateServers(s);                                                  // the reload
+  assert.deepEqual(drafts(s, 'c'), { work: 'TYPED', ops: 'TYPED2' }, 'both landed');
+  assert.deepEqual(loadServers(s).map((e) => e.id), ['x', 'c']);
+  assert.equal(s.getItem(MOVES_KEY), null);
+});
+
+test('one move that cannot finish does not hold another: each resumes on its own (orchestrator 15:04)', () => {
+  const s = twins(['a1', 'a2'], {
+    [residentKey('tmux_hub_lead', 'a1')]: 'a1-lead',                // only a1 writes this key
+    [residentKey('tmux_hub_drafts', 'a2')]: JSON.stringify({ ops: 'TYPED2' }),
+  });
+  s.setItem(MOVES_KEY, JSON.stringify([{ from: 'a1', to: 'c', wins: 'target' }, { from: 'a2', to: 'c', wins: 'target' }]));
+  const set = s.setItem;
+  s.setItem = (k: string, v: string) => { if (k === residentKey('tmux_hub_lead', 'c')) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.throws(() => resumeSlotMove(s), /Quota/u, 'a1 s move fails');
+  s.setItem = set;
+  assert.deepEqual(drafts(s, 'c'), { ops: 'TYPED2' }, 'a2 s completed anyway');
+  assert.deepEqual((JSON.parse(s.getItem(MOVES_KEY)!) as { from: string }[]).map((m) => m.from), ['a1'], 'only a1 s intent is still open');
+  assert.equal(resumeSlotMove(s), true);
+  assert.equal(s.getItem(residentKey('tmux_hub_lead', 'c')), 'a1-lead');
+  assert.equal(s.getItem(MOVES_KEY), null);
+});
+
+test('an intent written before ③b, on the pending record, is still resumed: as the whole move it was', () => {
+  const s = mem({
+    [SERVERS_KEY]: JSON.stringify([{ id: 'c', name: 'canon', address: 'ws://a:1', token: 't', machineId: 'm-a' }]),
+    [CURRENT_KEY]: 'a',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'pending', machine: 'm-a', slots: {}, moving: { from: 'a', to: 'c' } }),
+    [residentKey('tmux_hub_drafts', 'a')]: JSON.stringify({ work: 'TYPED' }),
+  });
+  assert.equal(resumeSlotMove(s), true);
+  assert.equal(currentServerId(s), 'c', 'the registry no longer lists a: CURRENT moved off it');
+  assert.deepEqual(JSON.parse(s.getItem(residentKey('tmux_hub_drafts', 'c'))!), { work: 'TYPED' });
+  assert.equal(JSON.parse(s.getItem('tmux_state_layout')!).moving, undefined, 'and the old intent is closed');
 });

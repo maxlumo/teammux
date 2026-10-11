@@ -486,17 +486,23 @@ were set aside, and only a slot that changed, appeared or disappeared since is
 kept. A slot the identity layer MOVED is not one its owner wrote, and a
 merge that hands the current alias's slots to its canonical entry hands their
 baselines over too, as ONE recoverable unit (`forgetDropped`; reviewer P1s on
-cde052f7, 4ef4dd07, 4807242f and 6a2ba341). The order is fixed: the intent
-`{from, to}` is written on the pending record, the slots are copied, CURRENT
-moves to the survivor, the registry is committed without the alias, the merge
-is noted, and only then are the alias's slots removed; one last write hands
-the baselines over and closes the intent. A failure anywhere leaves the
-intent open, and it is finished (`resumeSlotMove`) at boot, before every
-claim, and before every identity write (`recordServer`, `repairServers`;
-reviewer P1 on b5adcb3b): a new absorption of the same source must not
-replace the open intent and then delete the only copy it still owes. If it
-cannot be finished, the identity write is refused and writes nothing; one
-handoff is open at a time. Every caller of an identity write — the connect
+cde052f7, 4ef4dd07, 4807242f and 6a2ba341). The order is fixed: one intent
+per (absorbed, survivor) pair is written in one write (`tmux_slot_moves`,
+on every client, folded or pending — ③b), the slots are MERGED, CURRENT
+moves to the survivor, the registry is committed without the twins, the
+merge is noted, and only then are the twins' slots removed; one last write
+per pair hands the baselines over and closes its intent. A failure anywhere
+leaves the intents open, and they are finished (`resumeSlotMove`) at boot,
+before every claim, and before every identity write (`recordServer`,
+`repairServers`; reviewer P1 on b5adcb3b), each on its own — one that cannot
+finish does not hold another. If one cannot be finished, the identity write
+is refused and writes nothing. Everything a move decides — who wins a
+conflict, and while inputs are pending the survivor's new baselines — is
+fixed from the values BEFORE its first write, so a resume after a partial
+move decides the same: a merged slot whose both sides were unchanged since
+the inputs went pending is not an edit (the claim folds over it); one that
+carries a change of either side is kept; a key the CURRENT twin cleared since
+clears the survivor's unchanged one too (reviewer P1-B on 4807242f). Every caller of an identity write — the connect
 form, the boot dial, a reconnect, an arrival, a switch, an address change, a
 deep link — reports its failure to the ONE host gate (`storageFailed`), which
 classifies it by the migration state, not by the error: it reruns the boot's
@@ -541,9 +547,19 @@ lost to it. In that commit:
   per-server key, and nothing writes `tmux_machine_id`;
 - `parkFrom`/`pointTo` and the park in the switch are gone: arriving at a
   server is moving CURRENT (`activateConnected`, `activateSwitched`). An
-  identity merge hands the CURRENT twin's slots to the survivor whole — they
-  are what the person was just using on that machine — and drops any other
-  twin's;
+  identity merge MERGES every twin's slots into the survivor's, slot by slot
+  (`slot-merge.ts`; board #335 ③b, orchestrator 15:02/15:04 and reviewer
+  15:03 — under Aggregate a background alias and its canonical are both live
+  members with state of their own, and the whole copy this replaced deleted
+  every survivor key the CURRENT twin lacked, and every other twin's slots
+  outright): a missing source never deletes; a value lands on an empty one;
+  drafts merge by room, read marks by the newer seq, alerts by key with the
+  twin's renamed to the survivor; a real conflict keeps the CURRENT twin's
+  value (what the person was just using), else the survivor's, and the
+  loser is recorded in `tmux_slot_conflicts`, never overwritten in silence.
+  A survivor that is alive re-reads its slots once the fleet has dropped the
+  twins (`onReconciled` → `reloadStored`), and so does every live state
+  after Retry's preparation finished an open move;
 - the boot order is migrateServers → loadServerRegistry → the fold →
   the deep link → bind. The fold runs before the link, because a link to B
   makes B current and a later fold would file A's live state into B's slot.
@@ -943,13 +959,16 @@ run, flushes the table in the order it was written; the gate opens only when
 all of it landed, and a write that failed stays, with what follows it, for the
 next Retry. It is keyed by server, so every view of one server sees the same
 pending value; a removal is held as an intent; the person's keys pass through;
-an alias's pending writes land under its canonical entry (the later write of a
-key wins), never in the alias's deleted slot. It is memory only: closing the
-page before a Retry has flushed loses what was pending. A held value that
-names its server — an alert carries `server` — is rewritten when an identity
-merge moves its entry (`rebindAlerts`, from the module that owns the key; the
-store knows no payloads), so the canonical centre can open it; alerts naming
-any other server are left alone (reviewer P1-4 on 6b923c0d).
+an alias's pending writes land under its canonical entry by the same slot
+rule as a merge on disk (`slot-merge.ts`, ③b): merged with the survivor's
+pending value or, failing that, its value on disk — so a held removal of the
+alias's key deletes nothing of the canonical's — and a real conflict is won
+by the later write, the loser recorded; never in the alias's deleted slot. It
+is memory only: closing the page before a Retry has flushed loses what was
+pending. An alert that named the alias names the canonical after the move, so
+the canonical centre can open it; alerts naming any other server are left
+alone (reviewer P1-4 on 6b923c0d; the App case on a live background alias
+absorbed by the canonical's reconnect is in `App.shell.mount.test.ts`).
 
 **A block ends every attempt in flight** (reviewer P1-3 on 6b923c0d).
 `holdStorage` calls `activations.endAll()` in the turn it decides the block: a

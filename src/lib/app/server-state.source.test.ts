@@ -242,7 +242,7 @@ test('every server store App builds goes through the one write gate, and a block
   assert.equal((app.match(/createWriteGate\(\)/gu) ?? []).length, 1, 'one gate');
   // ③a (reviewer P1-3): and every activation in flight ends in that turn.
   assert.match(app, /function holdStorage\(\) \{\s*migrationBlocked = true;\s*(?:\/\/[^\n]*\n\s*)*activations\.endAll\(\);\s*if \(storageHeld\) return;\s*writeGate\.close\(\);\s*storageHeld = true;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(true\);/u);
-  assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\), rebindAlerts\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
+  assert.match(app, /function releaseStorage\(\) \{\s*if \(!storageHeld\) return true;\s*if \(!writeGate\.flush\(localStorage, \(id\) => mergedInto\(localStorage, id\)\)\) return false;\s*storageHeld = false;\s*for \(const runtime of fleet\.all\(\)\) runtime\.setFrozen\(false\);/u);
   assert.equal((app.match(/\bmigrationBlocked = true\b/gu) ?? []).length, 1, 'a block is decided only in holdStorage');
   // ③b-1: a background member published while held is frozen too.
   assert.match(app, /onUp\(runtime\) \{\s*if \(!serverStates\.has\(runtime\)\) serverStates\.set\(runtime, freshState\(runtime\.id\)\);\s*if \(storageHeld\) runtime\.setFrozen\(true\);/u);

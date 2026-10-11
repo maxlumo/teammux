@@ -36,6 +36,7 @@
 // its own view.
 import type { ServerId } from './refs.ts';
 import { RESIDENT_KEYS, residentKey } from './servers.ts';
+import { mergeSlot, recordLost } from './slot-merge.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -88,21 +89,20 @@ export interface WriteGate {
    * pending, `null` for a pending removal. */
   peek(id: ServerId, key: string): string | null | undefined;
   record(id: ServerId, key: string, value: string | null): void;
-  /** Hand server `from`'s pending writes to `to`. */
-  move(from: ServerId, to: ServerId): void;
   /** Write the table in order, each entry under its server's survivor. True —
-   * and the gate open — only once every entry has landed. A value that NAMES
-   * its server (an alert carries `server`) is handed to `rebind` when its
-   * entry moves, so it names the survivor too (reviewer P1-4 on 6b923c0d):
-   * the store knows no payload, the module that owns the key does. An id
-   * nothing shows to be any saved entry (`survivorOf` → '') keeps its own. */
-  flush(storage: Store, survivorOf?: (id: ServerId) => ServerId, rebind?: Rebind): boolean;
+   * and the gate open — only once every entry has landed. An entry whose
+   * server was absorbed moves to the survivor by the ONE slot rule
+   * (`slot-merge.ts`, board #335 ③b): merged with the survivor's pending
+   * value, else its value on disk — a held removal of the absorbed server's
+   * key deletes nothing of the survivor's, collections merge, an alert
+   * naming the absorbed server names the survivor (reviewer P1-4 on
+   * 6b923c0d), and a real conflict is won by the LATER write (a held write
+   * is later than anything on disk) with the loser recorded, never
+   * overwritten in silence. An id nothing shows to be any saved entry
+   * (`survivorOf` → '') keeps its own. */
+  flush(storage: Store, survivorOf?: (id: ServerId) => ServerId): boolean;
   pendingCount(): number;
 }
-
-/** Rewrite a held value moving from server `from` to `to`; return it as is
- * for a key that names no server. */
-export type Rebind = (key: string, value: string, from: ServerId, to: ServerId) => string;
 
 export function createWriteGate(): WriteGate {
   let closed = false;
@@ -115,12 +115,17 @@ export function createWriteGate(): WriteGate {
     if (held && held.seq > at) return;            // the later write of a key wins
     table.set(slot(id, key), { id, key, value, seq: at });
   };
-  const move = (from: ServerId, to: ServerId, rebind?: Rebind) => {
+  const move = (storage: Store, from: ServerId, to: ServerId) => {
     if (!from || !to || from === to) return;
-    for (const [k, e] of [...table]) {
+    for (const [k, e] of [...table].sort(([, x], [, y]) => x.seq - y.seq)) {
       if (e.id !== from) continue;
       table.delete(k);
-      put(to, e.key, e.value !== null && rebind ? rebind(e.key, e.value, from, to) : e.value, e.seq);
+      const held = table.get(slot(to, e.key));
+      const target = held ? held.value : storage.getItem(residentKey(e.key, to));
+      const wins = held && held.seq > e.seq ? 'target' : 'source';
+      const { value, lost } = mergeSlot(e.key, target, e.value, from, to, wins);
+      if (lost != null) recordLost(storage, { from, to, key: e.key, value: lost });
+      table.set(slot(to, e.key), { id: to, key: e.key, value, seq: Math.max(e.seq, held?.seq ?? 0) });
     }
   };
   return {
@@ -128,9 +133,8 @@ export function createWriteGate(): WriteGate {
     close() { closed = true; },
     peek: (id, key) => table.get(slot(id, key))?.value,
     record(id, key, value) { put(id, key, value, ++seq); },
-    move: (from, to) => move(from, to),
-    flush(storage, survivorOf = (id) => id, rebind) {
-      for (const id of new Set([...table.values()].map((e) => e.id))) move(id, survivorOf(id), rebind);
+    flush(storage, survivorOf = (id) => id) {
+      for (const id of new Set([...table.values()].map((e) => e.id))) move(storage, id, survivorOf(id));
       for (const e of [...table.values()].sort((a, b) => a.seq - b.seq)) {
         const key = residentKey(e.key, e.id);
         try {

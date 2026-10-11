@@ -5,7 +5,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
 import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, layoutMark, migrateServerState } from './server-state-migration.ts';
-import { RESIDENT_KEYS, activateConnected, activateSwitched, recordServer, residentKey } from './servers.ts';
+import { MOVES_KEY, RESIDENT_KEYS, activateConnected, activateSwitched, recordServer, residentKey } from './servers.ts';
+
+/** The open slot moves (board #335 ③b: their own record, one per pair). */
+const openMoves = (storage: { getItem(k: string): string | null }) =>
+  (JSON.parse(storage.getItem(MOVES_KEY) || '[]') as { from: string; to: string }[]).map(({ from, to }) => ({ from, to }));
 
 /** What a switch on a pre-#335 build did to storage: file the leaving
  * server's live keys under its id, surface the target's. The upgrade
@@ -597,7 +601,7 @@ test('a merge that fails part-way and is then retried keeps what the alias reall
 test('if even the move s record cannot be written, nothing moves', () => {
   const storage = aliasPending();
   const before = storage.dump();
-  const restore = refuse(storage, LAYOUT_KEY);
+  const restore = refuse(storage, MOVES_KEY);
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
   restore();
   assert.deepEqual(storage.dump(), before);
@@ -609,10 +613,10 @@ test('an alias edit not yet copied when the move failed reaches canonical: the m
   const restore = refuse(storage, 'tmux_hub_drafts::c');
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
   restore();
-  assert.deepEqual(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, { from: 'a', to: 'c' }, 'the intent is open');
+  assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the intent is open');
   // A reload: the boot finishes it.
   assert.equal(migrateServerState(storage).reason, 'pending');
-  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'and closes it');
+  assert.deepEqual(openMoves(storage), [], 'and closes it');
   // Straight to the canonical address, which does not re-run the alias merge.
   activateConnected(storage, { address: 'ws://canonical:9899', token: 't', machineId: 'm-a' });
   assert.equal(claimPending(storage, 'c').reason, 'folded');
@@ -644,6 +648,26 @@ test('a value the alias really cleared after pending stays cleared through a com
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'LATEST' }, 'and the untouched rest folds');
 });
 
+test('a value the CURRENT alias cleared after pending clears canonical s unchanged old value too: a clear is not a missing key (#335 ③b, reviewer 15:03)', () => {
+  // The alias had a project when the inputs went pending and the person
+  // cleared it; canonical's own old park of it never changed. The merge
+  // must not keep canonical's stale value just because the source is empty.
+  const storage = aliasPending({ tmux_hub_project: 'LATEST', 'tmux_hub_project::a': 'OLD-A', 'tmux_hub_project::c': 'OLD-C' });
+  storage.removeItem('tmux_hub_project::a');
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+  assert.equal(storage.getItem('tmux_hub_project::c'), null, 'the clear reached canonical');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.equal(storage.getItem('tmux_hub_project::c'), null, 'and the claim keeps it cleared');
+});
+
+test('a key the alias never had leaves canonical s value, and the claim folds over it as before (#335 ③b)', () => {
+  const storage = aliasPending({ tmux_hub_project: 'LATEST', 'tmux_hub_project::c': 'OLD-C' });
+  recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
+  assert.equal(storage.getItem('tmux_hub_project::c'), 'OLD-C', 'a missing source never deletes');
+  assert.equal(claimPending(storage, 'c').reason, 'folded');
+  assert.equal(storage.getItem('tmux_hub_project::c'), 'LATEST', 'the claim folds over an unchanged slot');
+});
+
 test('a claim refuses when the move cannot be finished, even where the fold itself could write', () => {
   // The resume fails on a slot the fold would leave alone (canonical edited
   // its project after pending), so only the barrier stops the fold.
@@ -671,7 +695,7 @@ function failNth(storage: ReturnType<typeof mem>, key: string, n: number) {
 for (const [where, key, n] of [
   ['the registry commit', 'tmux_servers', 1],
   ['the merge note', 'tmux_server_merges', 1],
-  ['the closing write', LAYOUT_KEY, 2],
+  ['the closing write', LAYOUT_KEY, 1],
 ] as const) {
   test(`an absorption that fails at ${where} recovers on reload: canonical keeps TYPED, CURRENT is canonical (reviewer P1 on 6a2ba341)`, () => {
     const storage = aliasPending();
@@ -679,11 +703,11 @@ for (const [where, key, n] of [
     const restore = failNth(storage, key, n);
     assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
     restore();
-    assert.ok(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, 'the intent is still open');
+    assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the intent is still open');
     assert.equal(storage.getItem('tmux_server_current'), 'c', 'CURRENT moved before the commit, to an entry that exists');
     // Reload: the boot finishes the absorption.
     assert.equal(migrateServerState(storage).reason, 'pending');
-    assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'closed');
+    assert.deepEqual(openMoves(storage), [], 'closed');
     assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'TYPED intact');
     // The alias's address dials again (the registry may still list it): the
     // merge runs again and still never copies an empty source over TYPED.
@@ -700,7 +724,7 @@ test('an open intent whose merge is committed and whose source is already empty 
   const storage = aliasPending();
   storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
   // The absorption ran up to the source cleanup; only the closing write failed.
-  const restore = failNth(storage, LAYOUT_KEY, 2);
+  const restore = failNth(storage, LAYOUT_KEY, 1);
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
   restore();
   assert.equal(storage.getItem('tmux_hub_drafts::a'), null, 'the source is empty');
@@ -723,11 +747,11 @@ test('a new identity write finishes an open handoff first: a→c then a→d, and
   const restore = refuse(storage, 'tmux_hub_drafts::c');
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
   restore();
-  assert.deepEqual(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, { from: 'a', to: 'c' });
+  assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }]);
   // The same route answers as m-d next.
   recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-d' });
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'a→c was finished before a→d began');
-  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'and no handoff is left open');
+  assert.deepEqual(openMoves(storage), [], 'and no handoff is left open');
   assert.equal(claimPending(storage, 'c').reason, 'folded');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'the claim keeps it');
 });
@@ -751,7 +775,7 @@ test('an absorption that fails at the CURRENT write recovers on reload, and the 
   restore();
   assert.equal(storage.getItem('tmux_server_current'), 'a', 'CURRENT stayed on the alias, which is still saved');
   assert.equal(migrateServerState(storage).reason, 'pending');
-  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).moving, undefined, 'the reload closed the intent');
+  assert.deepEqual(openMoves(storage), [], 'the reload closed the intent');
   recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' });
   assert.equal(storage.getItem('tmux_server_current'), 'c');
   assert.equal(claimPending(storage, 'c').reason, 'folded');

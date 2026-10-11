@@ -52,6 +52,14 @@ export interface ServerState {
   backends: BackendCatalog;
 }
 
+/** Re-read what a server's state keeps of its slots (board #335 ③b): an
+ * identity merge has just merged an absorbed entry's slots into them, under
+ * a state that is alive. Memory-only parts (Files, backends) are untouched. */
+export function reloadStored(state: ServerState): void {
+  state.prefs.reload();
+  state.centre.reload();
+}
+
 /** One server's state, over `storage` — that server's own store. */
 export function createServerState(storage: Store): ServerState {
   return {

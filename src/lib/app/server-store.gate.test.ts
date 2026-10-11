@@ -114,7 +114,7 @@ test('an alias s pending writes land under its canonical entry, never in the ali
   assert.deepEqual([...s.m.keys()].filter((k) => k.endsWith('::alias')), [], 'nothing written back to the alias');
 });
 
-test('move hands one server s table to another, the later write of each key winning', () => {
+test('a flush moves an absorbed server s held writes onto its survivor by the slot rule: the later write wins a real conflict, the loser is recorded (#335 ③b)', () => {
   const s = mem();
   const gate = createWriteGate();
   const a = createServerStore(s, 'a', gate);
@@ -122,12 +122,27 @@ test('move hands one server s table to another, the later write of each key winn
   gate.close();
   c.setItem('tmux_state', 'c-first');
   a.setItem('tmux_state', 'a-second');
-  a.setItem('tmux_hub_seen', 'a-first');
-  c.setItem('tmux_hub_seen', 'c-second');
-  gate.move('a', 'c');
-  assert.equal(c.getItem('tmux_state'), 'a-second', 'a wrote it later');
-  assert.equal(c.getItem('tmux_hub_seen'), 'c-second', 'c wrote it later');
-  assert.equal(a.getItem('tmux_state'), null, 'a holds nothing pending now');
+  a.setItem('tmux_hub_seen', JSON.stringify({ work: { seq: 5 } }));
+  c.setItem('tmux_hub_seen', JSON.stringify({ work: { seq: 3 }, ops: { seq: 1 } }));
+  assert.equal(gate.flush(s, (id) => (id === 'a' ? 'c' : id)), true);
+  assert.equal(s.getItem('tmux_state::c'), 'a-second', 'a wrote it later: a real conflict, the later write wins');
+  assert.deepEqual(JSON.parse(s.getItem('tmux_slot_conflicts')!), [{ from: 'a', to: 'c', key: 'tmux_state', value: 'c-first' }], 'and c s value is recorded, not lost');
+  assert.deepEqual(JSON.parse(s.getItem('tmux_hub_seen::c')!), { work: { seq: 5 }, ops: { seq: 1 } }, 'read marks merge: the newer seq per room');
+  assert.equal(s.getItem('tmux_state::a'), null, 'nothing lands under the absorbed id');
+});
+
+test('a held write of an absorbed server merges with the survivor s value ON DISK: a held removal deletes nothing, drafts merge by room (#335 ③b)', () => {
+  const s = mem();
+  s.setItem('tmux_hub_drafts::c', JSON.stringify({ ops: 'TYPED on canonical' }));
+  s.setItem('tmux_hub_lead::c', 'canon-lead');
+  const gate = createWriteGate();
+  const a = createServerStore(s, 'a', gate);
+  gate.close();
+  a.setItem('tmux_hub_drafts', JSON.stringify({ work: 'typed on the alias' }));
+  a.removeItem('tmux_hub_lead');
+  assert.equal(gate.flush(s, (id) => (id === 'a' ? 'c' : id)), true);
+  assert.deepEqual(JSON.parse(s.getItem('tmux_hub_drafts::c')!), { ops: 'TYPED on canonical', work: 'typed on the alias' }, 'both drafts kept');
+  assert.equal(s.getItem('tmux_hub_lead::c'), 'canon-lead', 'the alias s removal of its own key deletes nothing of canonical s');
 });
 
 test('E4: an alert that arrives during a block is on disk after Retry, and a reload finds it (validator E4)', async () => {
@@ -154,7 +169,7 @@ test('E4: an alert that arrives during a block is on disk after Retry, and a rel
 
 test('an alert held under an alias names its canonical entry after a merge flush; a third server s alert is left alone (#335 ③a, reviewer P1-4)', async () => {
   (globalThis as { $state?: unknown }).$state = (v: unknown) => v;
-  const { createAlertLog, ALERTS_KEY, rebindAlerts } = await import('../hub/notify-centre.svelte.ts');
+  const { createAlertLog, ALERTS_KEY } = await import('../hub/notify-centre.svelte.ts');
   const s = mem();
   const gate = createWriteGate();
   const log = createAlertLog(createServerStore(s, 'alias', gate));
@@ -163,12 +178,10 @@ test('an alert held under an alias names its canonical entry after a merge flush
     ts: Number(id), from: 'dev', toHuman: true, kind: 'reply' as const, excerpt: 'x', viewed: false });
   log.record(alert('1', 'alias'));
   log.record(alert('2', 'third'));                 // a ref to a server nothing merged
-  assert.equal(gate.flush(s, (id) => (id === 'alias' ? 'canon' : id), rebindAlerts), true);
+  assert.equal(gate.flush(s, (id) => (id === 'alias' ? 'canon' : id)), true);
   assert.equal(s.m.has(`${ALERTS_KEY}::alias`), false, 'nothing written back to the alias');
   const landed = createAlertLog(createServerStore(s, 'canon', createWriteGate())).items;
   assert.deepEqual(landed.map((a) => [a.id, a.server]).sort(), [['1', 'canon'], ['2', 'third']], 'the alias s alert names canon; the third stays');
-  assert.equal(rebindAlerts('tmux_hub_drafts', '{"work":"alias"}', 'alias', 'canon'), '{"work":"alias"}', 'another key is not touched');
-  assert.equal(rebindAlerts(ALERTS_KEY, '{', 'alias', 'canon'), '{', 'junk is returned as it came');
 });
 
 test('a survivor nothing shows (\'\') keeps the entry where it is — never written to an empty slot', () => {

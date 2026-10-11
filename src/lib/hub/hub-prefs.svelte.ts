@@ -138,7 +138,7 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
     } catch { return {}; }
   };
 
-  const state = $state({
+  const stored = () => ({
     // Per project (tmux session): who the composer addresses by default. Survives
     // reloads because "who am I talking to" is part of where the user left off.
     leads: readMap<string>(LEAD_KEY),
@@ -152,6 +152,7 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
     drawers: readMap<string>(DRAWER_KEY),
     rosterExpanded: readMap<boolean>(ROSTER_EXPANDED_KEY),
   });
+  const state = $state(stored());
 
 
   return {
@@ -174,6 +175,11 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
     /** Follow a project onto its new tmux session name: the per-project prefs are
      * keyed by that name, so a rename would otherwise silently drop the room's
      * lead and its read marker. */
+    /** Read every per-project map again from storage: an identity merge just
+     * merged an absorbed server's slots into this server's (board #335 ③b).
+     * Every setter writes through, so nothing in memory is newer than the
+     * slots and nothing is lost by re-reading. */
+    reload() { Object.assign(state, stored()); },
     renameSession(from: string, to: string) {
       if (!from || !to || from === to) return;
       for (const map of [state.leads, state.seen, state.drafts, state.drawers, state.rosterExpanded] as Record<string, unknown>[]) {
