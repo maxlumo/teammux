@@ -839,7 +839,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
   assert.doesNotMatch(act, /void activate\(|void arrivedElsewhere\(/u, 'no link is fire-and-forget');
   assert.match(act, /if \(result\.reason === 'elsewhere'\) \{[\s\S]*?if \(elsewhere === 'arrive'\) return arrivedElsewhere\(result, owner, c\);/u, 'what the runtime s own dial found is the identity of record, and that arrival is the chain s next link');
-  assert.match(act, /const handle = \(done\) => \(\{ done, cancel: c\.cancel, current: c\.current, committed: c\.committed \}\);/u, 'and the caller can wait on the whole chain, cancel it, ask whether it is still the latest, and learn when it can no longer be cancelled');
+  assert.match(act, /const handle = \(done\) => \(\{ done, cancel: \(\) => \{ c\.cancel\(\); release\(\); \}, current: c\.current, committed: c\.committed \}\);/u, 'and the caller can wait on the whole chain, cancel it (which frees the window at once: a cancelled socket may never settle), ask whether it is still the latest, and learn when it can no longer be cancelled');
 });
 
 test('the boot auto-connect RECORDS the machine identity, never activates (board #55)', () => {
@@ -960,8 +960,10 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ holdStorage\(\); fold = 'blocked'; \}/u);
   assert.match(source, /if \(minted\.runtime\.connection\.isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline\) reconnect\(\)\.start\(\);/u,
     'a block mid-session resumes the bound runtime s own loop');
-  assert.match(source, /const owed = owedActivation && !heldOffline;\s*owedActivation = false;[\s\S]{0,600}?if \(!owed\) return;\s*autoConnectAttempted = true;[\s\S]{0,300}?void activate\(\{ minted, replace: !minted\.keep,/u,
+  assert.match(source, /const owed = owedActivation && !heldOffline;\s*owedActivation = false;[\s\S]{0,600}?if \(!owed\) return;\s*autoConnectAttempted = true;\s*arriveOn\(minted\);/u,
     'an owed activation dials the runtime it minted, through the one road');
+  assert.match(source, /function arriveOn\(minted\) \{\s*const arrive = \(\) => void activate\(\{ minted, replace: !minted\.keep,/u,
+    'the one road: Retry s owed arrival and an owed handover with nobody to hand to share it');
   // Retry re-dials whatever the block or an absorption interrupted, members
   // included, never by whether a handle is alive (orchestrator 16:12); a
   // re-dial that lands elsewhere asks in `arrivedElsewhere`.
@@ -1408,18 +1410,35 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   // not by a later sync an effect runs. P1-A: the BOUND runtime too — its
   // identity ends at the same boundary (`focusAbsorbed`), never kept callable
   // because its tree is kept.
-  assert.match(source, /end: \(runtime\) => \{\s*if \(runtime === scopeSwap\.bound\(\)\) \{ focusAbsorbed\(runtime\); return undefined; \}\s*if \(aggregate\.absorbed\(runtime\) \|\| aggregate\.holds\(runtime\)\) return undefined;\s*return ends\.end\(runtime\);\s*\}/u);
+  assert.match(source, /end: \(runtime\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(runtime === scopeSwap\.bound\(\)\) \{\s*if \(!loadServers\(localStorage\)\.some\(\(s\) => s\.id === runtime\.id\)\) focusAbsorbed\(runtime\);\s*return undefined;\s*\}\s*if \(aggregate\.absorbed\(runtime\) \|\| aggregate\.holds\(runtime\)\) return undefined;\s*return ends\.end\(runtime\);\s*\}/u,
+    'the bound runtime s identity ends here only when its entry is GONE (absorbed); a swap or mint replacing it leaves its end to the swap');
   assert.match(source, /detach\(runtime\) \{\s*forgetReconnector\(runtime\);\s*runtime\.detach\(\);\s*runtime\.connection\.disconnect\(\);/u, 'detach: refuse, close, stop the loop');
   // P1-A: the focus hands over to the canonical a member holds EXPLICITLY —
   // refocus, mirror, supersede + claim, the canonical out of the set as the
   // focus, the absorbed tree in as an orphan — or, with nobody to hand to,
   // the handle is detached and the activation that absorbed it binds.
+  // P1-B on 4c7cd64c: the detach is the UNCONDITIONAL first step — before
+  // any fallible I/O, before asking whether anyone can take the focus.
   const absorbed = source.match(/function focusAbsorbed\(leaving\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(absorbed, /const next = aggregate\.runtimes\(\)\.find\(\(r\) => r\.id === currentServerId\(localStorage\) && !aggregate\.orphan\(r\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(!next \|\| windowBusy\(\) \|\| !scopeSwap\.refocus\(next\)\) \{ leaving\.detach\(\); return; \}/u,
-    'no handover beneath a window operation in flight (it binds or keeps its own tree) or a swap');
-  const steps = ['focusServer(localStorage, next.id)', 'serverSwitch.supersede()', 'activations.claim()', 'aggregate.handOver(next)', 'aggregate.adopt(leaving, false)', 'loadServerRegistry()', 'syncMembers()']
-    .map((n) => { const i = absorbed.indexOf(n); assert.ok(i >= 0, `focusAbsorbed has ${n}`); return i; });
-  assert.deepEqual([...steps].sort((a, b) => a - b), steps, 'bind, then hand over, then adopt, then follow the registry (whose sync orphans the adopted tree)');
+  assert.match(absorbed, /^function focusAbsorbed\(leaving\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(!leaving\.alive\(\)\) return;\s*leaving\.detach\(\);\s*leaving\.connection\.disconnect\(\);/u,
+    'detach, close: first, unconditional (its own dial s detach is left to that dial)');
+  const hand = source.match(/function handOverFocus\(leaving\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  // P1-A on 4c7cd64c: the handover is OWED work — done now when the window
+  // is free, else recorded and completed on the window s own turn.
+  assert.match(absorbed, /owedHandover = \{ leaving, to: absorbedInto\(localStorage, leaving\.id\) \};\s*(?:\/\/[^\n]*\n\s*)*if \(windowBusy\(\) \|\| migrationBlocked \|\| !handOverFocus\(leaving\)\) scheduleAsk\(\);\s*\}$/u,
+    'owed first, to the survivor named at absorption (the open journal s destination when the note has not landed); handed over now only with the window free, else scheduled');
+  assert.match(hand, /const to = owedHandover\?\.to \?\? currentServerId\(localStorage\);\s*if \(!to \|\| currentServerId\(localStorage\) !== to\) return false;/u, 'and only while CURRENT still names it: a newer operation that moved CURRENT owns the front');
+  assert.match(source, /\.filter\(\(id\) => \(id !== current \|\| owedHandover\?\.to === id\) && id !== held\)/u, 'the bound runtime is never joined as a member of its own set; the owed canonical stays one');
+  const settle = source.match(/function settleHandover\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(settle, /if \(scopeSwap\.bound\(\) !== leaving\) \{ owedHandover = null; return true; \}/u, 'void once something else was bound');
+  assert.match(settle, /if \(heldOffline\) \{ owedHandover = null; return true; \}/u, 'void once the person chose to stay');
+  assert.match(settle, /if \(windowBusy\(\) \|\| migrationBlocked\) return false;\s*if \(handOverFocus\(leaving\)\) return true;\s*owedHandover = null;[\s\S]*?const minted = mintCurrent\(\);\s*if \(migrationBlocked\) \{ owedActivation = true; return true; \}\s*if \(minted\.runtime\) arriveOn\(minted\);/u,
+    'a member takes it, or CURRENT is activated through the one road (which asks the kept tree first)');
+  assert.match(source, /function drainWindow\(\) \{\s*settleHandover\(\);\s*askOrphans\(\);\s*\}/u, 'the handover is settled before an orphan is asked');
+  const steps = ['scopeSwap.refocus(next)', 'owedHandover = null', 'focusServer(localStorage, next.id)', 'serverSwitch.supersede()', 'serverSwitch.dismiss()', 'activations.claim()', 'aggregate.handOver(next)', 'aggregate.adopt(leaving, false)', 'background = aggregate.runtimes()', 'loadServerRegistry()', 'syncMembers()']
+    .map((n) => { const i = hand.indexOf(n); assert.ok(i >= 0, `handOverFocus has ${n}`); return i; });
+  assert.deepEqual([...steps].sort((a, b) => a - b), steps, 'bind, settle the debt (so the sync does not join over the canonical s own dial), mirror, supersede, hand over, adopt, publish the set, then follow the registry (whose sync orphans the adopted tree)');
+
   // The member set never ends a late answer of an orphan's (its wanted test
   // would otherwise drop the handed-over canonical, or leave the orphan).
   assert.match(membersSource, /if \(!h \|\| h\.runtime !== runtime\) return;\s*(?:\/\/[^\n]*\n\s*)*if \(h\.orphan\) return;\s*if \(!deps\.wanted\(id\)\) \{ leave\(id\); return; \}/u);
@@ -1429,9 +1448,9 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   // never over a switch, a walk, an address connect (`serverSwitch.busy`), an
   // activation or a candidate (`windowLeases`), a membership change, a block.
   assert.match(source, /orphaned\(runtime\) \{ orphansToAsk\.add\(runtime\); scheduleAsk\(\); \}/u);
-  assert.match(source, /const windowBusy = \(\) => !!switching \|\| serverSwitch\.busy \|\| windowLeases > 0 \|\| membershipBusy;/u, 'ONE definition of the window being busy');
-  assert.match(source, /function askOrphans\(\) \{\s*if \(askingOrphan \|\| windowBusy\(\) \|\| migrationBlocked\) return;/u);
-  assert.match(source, /function scheduleAsk\(\) \{\s*if \(askTimer\) return;\s*askTimer = setTimeout\(\(\) => \{ askTimer = 0; askOrphans\(\); \}, 0\);\s*\}/u, 'the drain runs after the caller s own completion');
+  assert.match(source, /const windowBusy = \(\) => switching\?\.phase === 'connecting' \|\| serverSwitch\.busy \|\| windowLeases > 0 \|\| membershipBusy;/u, 'ONE definition of the window being busy (a FAILED switch s panel is a resting state, not an operation)');
+  assert.match(source, /function askOrphans\(\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(askingOrphan \|\| windowBusy\(\) \|\| switching \|\| migrationBlocked\) return;/u, 'but no question is asked under its panel either');
+  assert.match(source, /function scheduleAsk\(\) \{\s*if \(askTimer\) return;\s*askTimer = setTimeout\(\(\) => \{ askTimer = 0; drainWindow\(\); \}, 0\);\s*\}/u, 'the drain runs after the caller s own completion');
   // P2: every window operation's end schedules it — the switch module's
   // (walk, switch, address connect), a lease's release, a membership op's
   // end, Retry unblocking.

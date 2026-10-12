@@ -49,7 +49,7 @@
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
-  import { activateConnected, adoptHostname, focusServer, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
+  import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -228,7 +228,14 @@
     // a captured api still answered. Anything else the set holds (a join in
     // flight, an orphan already) is the set's; a stranger is ended here.
     end: (runtime) => {
-      if (runtime === scopeSwap.bound()) { focusAbsorbed(runtime); return undefined; }
+      // The bound runtime leaves the fleet for two reasons: the swap or a
+      // mint replacing it (its entry still saved; the swap ends it, after its
+      // replacement adopts its state), or identity repair ABSORBING its entry
+      // (gone from the registry): then its identity ends here.
+      if (runtime === scopeSwap.bound()) {
+        if (!loadServers(localStorage).some((s) => s.id === runtime.id)) focusAbsorbed(runtime);
+        return undefined;
+      }
       if (aggregate.absorbed(runtime) || aggregate.holds(runtime)) return undefined;
       return ends.end(runtime);
     },
@@ -245,54 +252,125 @@
   /** The identity layer declared the entry the tree is BOUND to gone — at
    * the fleet's synchronous boundary, like any member's (reviewer P1-A on
    * e0dafe3c). Keeping its tree, for the person to be asked, and keeping its
-   * identity callable are two different things: the vanishing current handle
-   * refuses from here on, whoever absorbed it. Who did decides the rest:
+   * identity callable are two different things, and the first step here is
+   * UNCONDITIONAL (reviewer P1-B on 4c7cd64c): the vanishing current handle
+   * is detached — api refusing, reconnect loop stopped, socket closed, as a
+   * member's is — before any fallible I/O, whoever absorbed it and whatever
+   * follows. Out of the fleet it is out of service: a block that follows
+   * cannot freeze what the fleet no longer lists, so it must already refuse.
    *
-   *   - a BACKGROUND MEMBER is the canonical CURRENT now names (its own
-   *     reconnect reached the focus's address and absorbed the focus into
-   *     its entry): nothing else will ever bring the focus there, so the
-   *     focus HANDS OVER to it explicitly, here — the mirror is written for
-   *     it (CURRENT already names it), the front moves, the window's
-   *     attempts aimed at the absorbed server go stale, the canonical leaves
-   *     the set as the focus and the absorbed tree joins it as a member —
-   *     which the sync that follows, finding its id unsaved, makes an
-   *     ORPHAN: detached (api refusing, socket closed, loop stopped),
-   *     mounted, held, drafts and all, asked when the window is free. The
-   *     member's own dial, still returning, then reports to the shell as the
-   *     focus's (`onReconnected`), block included.
-   *   - anyone else — the focus's OWN dial (which already detached it) or a
-   *     window activation (a form, a switch) whose record absorbed it: that
-   *     activation brings up the survivor and the swap ends this tree, as
-   *     before. It is only detached here, so that out of the fleet it is out
-   *     of service — a block that follows cannot freeze what the fleet no
-   *     longer lists. */
+   * What follows is the HANDOVER, owed work from this moment (reviewer P1-A
+   * on 4c7cd64c): completed now when the window is free, else recorded
+   * (`owedHandover`) and completed when the window operation in flight ends
+   * — unless that operation bound something else meanwhile (a switch or
+   * activation whose record absorbed this entry brings up the survivor and
+   * the swap ends this tree), which voids it. A handover beneath an
+   * operation in flight would supersede it (a switch whose confirm walk is
+   * asking this very tree) or have its swap end the member just bound. */
   function focusAbsorbed(leaving) {
-    const next = aggregate.runtimes().find((r) => r.id === currentServerId(localStorage) && !aggregate.orphan(r));
-    // A window operation in flight owns the front and CURRENT — a switch (its
-    // record moves CURRENT onto its target next, and binds it), a walk asking
-    // for one, an address connect, a form candidate or an activation out (a
-    // member's dial that was already out when they began can still answer
-    // under them): a member absorbing the source meanwhile hands nothing
-    // over — that operation replaces or keeps this tree, and a handover
-    // beneath it would have its swap end the member it had just bound. So
-    // too a swap in flight. The handle refuses either way.
-    if (!next || windowBusy() || !scopeSwap.refocus(next)) { leaving.detach(); return; }
-    // CURRENT already names the canonical (the record moved it); the mirror
-    // follows, best effort — a failure is the host gate's, and the focus
-    // still follows CURRENT, which is the commit point.
-    try { focusServer(localStorage, next.id); } catch { storageFailed(); }
+    // Its OWN dial found the entry gone and detached it (server-runtime.ts):
+    // that dial's continuation owns what follows — it arrives on the
+    // survivor through `arrivedElsewhere` (reviewer P1-B on cc45d7d1).
+    // Nothing is owed here, and nothing is cancelled under it.
+    if (!leaving.alive()) return;
+    leaving.detach();
+    leaving.connection.disconnect();
+    // Its reconnect loop: stopped now when idle. A loop with a dial IN FLIGHT
+    // is left to finish — its continuation may be the block's source (a
+    // record that committed and then failed reports `unrecorded` through it)
+    // — and is stopped when that answer lands (`memberReconnected`,
+    // `onReconnected`); every dial of a dead handle answers `gone` at once.
+    if (!reconnectors.get(leaving)?.isActive()) forgetReconnector(leaving);
+    // The canonical the record folded this entry into, named NOW: CURRENT
+    // may already name a window operation's target (a form connect moved
+    // it before the member absorbed the focus), and that is its, not ours.
+    owedHandover = { leaving, to: absorbedInto(localStorage, leaving.id) };
+    // Handed over NOW when the window is free and a member is there to take
+    // it — synchronous, no I/O that can fail but the mirror's; anything that
+    // would mint or dial waits for the window's own turn (`drainWindow`),
+    // never runs inside a dial's reconcile.
+    if (windowBusy() || migrationBlocked || !handOverFocus(leaving)) scheduleAsk();
+  }
+  /** The detached bound runtime whose focus handover is still owed, and the
+   * canonical it is owed to (the id CURRENT named when it was absorbed). */
+  let owedHandover = null;
+  /** Complete the owed handover if the window is free; true when nothing is
+   * owed any more (done, or void). Run before the orphan drain on every
+   * turn the window frees (`drainWindow`), and at once from
+   * `focusAbsorbed`. A failed switch's panel is a resting state, not an
+   * operation: a handover completes under it and dismisses it, with its
+   * reason kept as the notice — the server it would go Back to is gone. */
+  function settleHandover() {
+    const leaving = owedHandover?.leaving;
+    if (!leaving) return true;
+    // Something else was bound meanwhile: the swap ended this tree.
+    if (scopeSwap.bound() !== leaving) { owedHandover = null; return true; }
+    // The person chose to stay on the detached tree (an arrival's walk
+    // answered "keep editing"): the choice stands until they connect.
+    if (heldOffline) { owedHandover = null; return true; }
+    if (windowBusy() || migrationBlocked) return false;
+    if (handOverFocus(leaving)) return true;
+    owedHandover = null;
+    // Nobody to hand to — CURRENT names no published member (Single; the
+    // operation that absorbed the focus failed to bind its target): the one
+    // defined path is an activation of CURRENT, which asks this tree's
+    // guards first and replaces it through the swap, as Retry's owed
+    // arrival does — and IS Retry's owed arrival when its gate blocks.
+    const minted = mintCurrent();
+    if (migrationBlocked) { owedActivation = true; return true; }
+    if (minted.runtime) arriveOn(minted);
+    return true;
+  }
+  /** The focus hands over to the connected member CURRENT names — the
+   * canonical whose own reconnect reached the focus's address and absorbed
+   * the focus into its entry, so nothing else will ever bring the focus there.
+   * The mirror is written for it (CURRENT already names it: the commit point;
+   * a mirror failure is the host gate's and the focus still follows
+   * CURRENT), the front moves, the window's attempts aimed at the absorbed
+   * server go stale, the canonical leaves the set as the focus and the
+   * absorbed tree joins it as a member — which the sync that follows,
+   * finding its id unsaved, makes an ORPHAN: mounted, held, drafts and all,
+   * asked when the window is free. False when no such member is up. */
+  function handOverFocus(leaving) {
+    // The canonical it is owed to — and CURRENT must still name it: a newer
+    // operation that moved CURRENT elsewhere and failed has been put back
+    // onto the server left (`restoreCurrent` follows the merge); one that
+    // moved it and SUCCEEDED bound its target, and this is void above.
+    const to = owedHandover?.to ?? currentServerId(localStorage);
+    if (!to || currentServerId(localStorage) !== to) return false;
+    const next = aggregate.runtimes().find((r) => r.id === to && !aggregate.orphan(r));
+    if (!next || !scopeSwap.refocus(next)) return false;
+    // Settled: from here the set no longer wants `next` as a member (its own
+    // dial, still returning, is the focus's and must not be joined over).
+    owedHandover = null;
+    // The mirror write failing blocks the app on the server just handed to:
+    // the block's own path (`enterBlocked`) stands it down, and Retry owes
+    // it its dial like any interrupted activation (ruling K).
+    try { focusServer(localStorage, next.id); } catch { storageFailed(); if (migrationBlocked) owedActivation = true; }
+    const failed = switching?.phase === 'failed' ? switching.error : '';
     serverSwitch.supersede();
+    serverSwitch.dismiss();
     activations.claim();
     aggregate.handOver(next);
     aggregate.adopt(leaving, false);
+    // The set changed hands NOW, sync or no sync (a block skips it): the
+    // adopted tree stays mounted as a member, held.
+    background = aggregate.runtimes();
     serverMenuOpen = false;
     membershipError = '';
-    reconnectError = '';
-    heldOffline = false;
+    reconnectError = failed;
+    // Up, or its own loop (a member's) is dialling it and reports to the
+    // shell from here (`onStateChange`, `onSuccess` by `bound()`).
+    connected = next.connection.isConnected();
+    reconnecting = !connected && !!reconnectors.get(next)?.isActive();
+    // The connect card was up (the person had disconnected the absorbed
+    // server to connect the form): the app is on a server again.
+    if (connected && page === 'settings') page = defaultPage();
     serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
     activeAddress = next.entry().address;
     loadServerRegistry();
     syncMembers();
+    return true;
   }
   /** The bound runtime's connection and api: what App itself talks to the
    * server it is on through — never a module-level socket. */
@@ -1236,9 +1314,11 @@
    * a membership change? Then the window is not free: no owed question is
    * asked (it would claim the window and end the operation), and no focus
    * hands over beneath it (`focusAbsorbed`). */
-  const windowBusy = () => !!switching || serverSwitch.busy || windowLeases > 0 || membershipBusy;
+  const windowBusy = () => switching?.phase === 'connecting' || serverSwitch.busy || windowLeases > 0 || membershipBusy;
   function askOrphans() {
-    if (askingOrphan || windowBusy() || migrationBlocked) return;
+    // A failed switch's panel is not an operation, but it COVERS the trees
+    // (they are held under it): a question asked there could not be answered.
+    if (askingOrphan || windowBusy() || switching || migrationBlocked) return;
     const next = [...orphansToAsk].find((r) => aggregate.orphan(r));
     for (const r of orphansToAsk) if (!aggregate.orphan(r)) orphansToAsk.delete(r);
     if (!next) return;
@@ -1257,7 +1337,13 @@
   let askTimer = 0;
   function scheduleAsk() {
     if (askTimer) return;
-    askTimer = setTimeout(() => { askTimer = 0; askOrphans(); }, 0);
+    askTimer = setTimeout(() => { askTimer = 0; drainWindow(); }, 0);
+  }
+  /** What the window owes, in order: a focus handover first (it decides
+   * which tree is in front), then an orphan's ask. */
+  function drainWindow() {
+    settleHandover();
+    askOrphans();
   }
   /** Window operations in flight outside the switch module: an activation
    * from its mint to its `done`, a candidate from open to close. */
@@ -1291,7 +1377,16 @@
     if (readMode(localStorage) !== 'aggregate') return [];
     const saved = loadServers(localStorage);
     const current = currentServerId(localStorage);
-    return includedServers(saved, readExcluded(localStorage, saved)).map((s) => s.id).filter((id) => id !== current);
+    // Nor the server the tree is BOUND to while CURRENT already names
+    // another (an activation in flight moved CURRENT; its target binds when
+    // it is up): the bound runtime is never joined as a member of its own
+    // set — a join would dial it over its live socket and, its entry gone
+    // meanwhile, detach it from under the focus (M1 F5).
+    const held = scopeSwap.bound()?.id;
+    // The member an owed handover will take as the focus stays a member
+    // until it does (reviewer P1-A on 4c7cd64c): its own dial, returning,
+    // must not find it unwanted and leave it.
+    return includedServers(saved, readExcluded(localStorage, saved)).map((s) => s.id).filter((id) => (id !== current || owedHandover?.to === id) && id !== held);
   }
   /** Bring the member set in line with the registry, the mode and the
    * exclusions. Never while blocked: a block ends no member (ruling K), and
@@ -1487,6 +1582,8 @@
   /** A background member's own loop answered (③b-1). An identity that could
    * not be recorded is the host gate's, as for the focused server. */
   function memberReconnected(runtime, result) {
+    // A dead handle's loop is over with this answer (see `focusAbsorbed`).
+    if (!runtime.alive()) forgetReconnector(runtime);
     if (!aggregate.holds(runtime)) return;
     // An attempt out when the app blocked brings nothing back.
     if (migrationBlocked) { runtime.connection.disconnect(); aggregate.blocked(runtime); return; }
@@ -1503,7 +1600,7 @@
     // (Still bound, if possibly detached: an alias identity repair just
     // absorbed is detached by its own dial, and the arrival below is what
     // brings its survivor up.)
-    if (bound() !== runtime) return;
+    if (bound() !== runtime) { if (!runtime.alive()) forgetReconnector(runtime); return; }
     // An attempt already out when the migration blocked brings nothing up;
     // the block interrupted it, so Retry owes it its dial (orchestrator 16:12).
     if (migrationBlocked) { runtime.connection.disconnect(); connected = false; owedActivation = true; return; }
@@ -1672,7 +1769,7 @@
     // Back to the server left, which is still the one bound — unless the
     // migration froze CURRENT, or something else has been bound since.
     const back = () => {
-      if (!left || migrationBlocked || bound()?.id !== left || currentServerId(localStorage) === left) return;
+      if (!left || migrationBlocked || bound()?.id !== left || currentServerId(localStorage) === mergedInto(localStorage, left)) return;
       try { restoreCurrent(localStorage, left); } catch { storageFailed(); return; }
       loadServerRegistry();
     };
@@ -1824,7 +1921,9 @@
     // It acts on the server bound now: that one's reconnect ends with it.
     const owner = activations.claim(scopeSwap.bound());
     c.link(owner, runtime);
-    const handle = (done) => ({ done, cancel: c.cancel, current: c.current, committed: c.committed });
+    // A cancelled activation owns the window no more, whenever its dial
+    // settles (a cancelled socket may never answer).
+    const handle = (done) => ({ done, cancel: () => { c.cancel(); release(); }, current: c.current, committed: c.committed });
     if (!runtime) {
       // Nothing to bind. Blocked: the gate's one blocked state, which keeps
       // the source (`enterBlocked`; ruling K, reviewer on 027d1a92), and
@@ -2678,15 +2777,20 @@
     }
     if (!owed) return;
     autoConnectAttempted = true;
-    // A NEW runtime replaces whatever the app showed before the block (a
-    // switch's source): its navigation resets once this one is up.
+    arriveOn(minted);
+  }
+  /** Bring CURRENT up on the runtime minted for it, replacing whatever tree
+   * is bound: Retry's owed arrival, and an owed focus handover with no
+   * member to hand to. A NEW runtime replaces what the app showed (a
+   * switch's source, a detached alias): its navigation resets once this one
+   * is up. It replaces a tree kept mounted, drafts and all — an alias's
+   * whose absorption already moved CURRENT to the canonical, say (reviewer
+   * P1 on 97824925): that tree's pages are asked first, as every automatic
+   * arrival asks. The minted runtime waits, owned by this arrival. */
+  function arriveOn(minted) {
     const arrive = () => void activate({ minted, replace: !minted.keep, up: () => { bringUp(); resubscribeAll(); } }).done;
     const leaving = scopeSwap.bound();
     if (minted.keep || !leaving || leaving === minted.runtime) { arrive(); return; }
-    // It replaces a tree the block kept mounted, drafts and all — an alias's
-    // whose absorption already moved CURRENT to the canonical, say (reviewer
-    // P1 on 97824925): that tree's pages are asked first, as every automatic
-    // arrival asks. The minted runtime waits, owned by this Retry.
     const owner = activations.claim();
     provisional.set(minted.runtime, owner);
     void askToReplace(() => owner.current()).then((leave) => {

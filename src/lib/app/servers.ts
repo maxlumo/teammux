@@ -372,6 +372,18 @@ function noteMerges(storage: Store, dropped: string[], survivorId: string): void
  * this client never saved, and re-pointing it at whichever server is current
  * would open that server's same-named pane — a stranger's terminal.
  */
+/** The survivor an absorbed `id` is being folded into, even while the
+ * absorption is still OPEN — its registry committed but its merge note not
+ * yet written (board #335 ③b, reviewer P1-B on 4c7cd64c): the move journal
+ * names the destination from the moment the move began. `mergedInto` for a
+ * finished merge; '' when `id` is neither saved nor being absorbed. */
+export function absorbedInto(storage: Store, id: string): string {
+  const done = mergedInto(storage, id);
+  if (done) return done;
+  const open = loadMoves(storage).find((m) => m.from === id);
+  return open ? mergedInto(storage, open.to) : '';
+}
+
 export function mergedInto(storage: Store, id: string): string {
   if (!id) return '';
   const saved = new Set(loadServers(storage).map((s) => s.id));
@@ -746,9 +758,12 @@ export function focusServer(storage: Store, id: string): boolean {
 
 /** Point CURRENT back at `id` — a switch whose target did not come up
  * returns to the server it left (board #335 ②b-4, ruling (a)). Only to an
- * entry that still exists. */
+ * entry that still exists — or to the entry identity repair folded it into
+ * meanwhile (board #335 ③b, M1 F2/F4): the server left IS that survivor
+ * now, and a focus handover owed to it must find CURRENT naming it. */
 export function restoreCurrent(storage: Store, id: string): void {
-  if (loadServers(storage).some((s) => s.id === id)) storage.setItem(CURRENT_KEY, id);
+  const to = mergedInto(storage, id);
+  if (to) storage.setItem(CURRENT_KEY, to);
 }
 
 export function renameServer(storage: Store, id: string, name: string): ServerEntry[] {

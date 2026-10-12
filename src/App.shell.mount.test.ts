@@ -5663,10 +5663,11 @@ test('P1-A (mid-switch): a member absorbing the focus WHILE a switch to N is in 
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
   assert.ok(!JSON.parse(ls.getItem('tmux_servers')!).some((e: any) => e.id === 'a'), 'the alias was absorbed');
   assert.ok(h.app.document.querySelector('.switch-panel'), 'the switch is still in flight: not pre-empted');
-  // A s socket stays open under the panel (a switch closes nothing of the
-  // source s); its runtime refuses (the fleet s `end` detached it), so its
-  // hidden Hub s list poll never reaches the wire.
-  assert.equal(a.isConnected(), true, 'A s socket is still open');
+  // A is detached at the boundary — socket closed, api refusing — though a
+  // switch closes nothing of its source s otherwise (P1-B on 4c7cd64c: the
+  // detach is unconditional); its hidden Hub s list poll never reaches the
+  // wire.
+  assert.equal(a.isConnected(), false, 'A s socket is closed');
   const mark = events.length;
   for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
   assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('rpc@a:')), [], 'a minute on: A s Hub poll never reaches the wire — the runtime refuses');
@@ -5731,6 +5732,749 @@ test('P1-A (beneath a walk): the canonical absorbs the focus WHILE a switch s co
   assert.ok(a.disposed(), 'the swap ended A');
   assert.ok(c.isConnected() && !c.disposed(), 'C, a member, never bound and never ended');
   assert.equal(trees(h.app).length, 2, 'N s tree and C s');
+});
+
+test('P1-A (owed): the canonical absorbs the focus beneath a switch s confirm walk; Keep editing ends the switch — the OWED handover then completes: A s draft kept, old api refusing, CURRENT, mirror and front on the canonical, A asked as an orphan', async (context) => {
+  // reviewer P1-A on 4c7cd64c: a handover deferred under a window operation
+  // is owed work, not dropped. The operation here ends with nothing bound
+  // (Keep editing refuses the switch), so the handover completes on the
+  // window s own turn — no third server, no reload.
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const aApi = a.api;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(cLet.let, 'C s dial is out');
+  await switchByAddress(h, 'ws://n:9899', 'tokN');
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftA.closest('.scope-tree'), 'the switch s walk asks A s tree');
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'the alias was absorbed');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses at the boundary, walk or no walk');
+  assert.ok(!draftA.closest('.scope-tree.held'), 'A s tree still in front under its question: nothing handed over beneath the walk');
+  // Keep editing: the switch ends with nothing bound. The owed handover
+  // completes on the next turn.
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(events.filter((e) => e === 'connect:ws://n:9899').length, 0, 'N was never dialled');
+  assert.equal(h.app.document.querySelector('.switch-panel'), null, 'no switch panel');
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT is the canonical');
+  assert.equal(ls.getItem('tmux_address'), 'ws://alias:9899', 'the mirror is C s');
+  assert.ok(c.isConnected(), 'C is up');
+  assert.equal(a.disposed(), false, 'A is kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft is mounted');
+  // The handover done, A is an orphan: asked, in its own tree.
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A is asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind');
+  const front = h.app.document.querySelector('.scope-tree:not(.held)');
+  assert.ok(front && front !== draftA.closest('.scope-tree'), 'C s tree in front');
+  assert.equal(trees(h.app).length, 2);
+  // C is the focus: picking it is a no-op, A is listed with Dismiss.
+  await toConnection(h);
+  assert.ok(h.app.document.querySelector('.preferences button[aria-label^="Dismiss"]'), 'A listed as an orphan');
+  const mark = events.length;
+  await pickServer(h, 'canon');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('dial@')), [], 'nothing dialled');
+});
+
+test('P1-A (owed, cancelled form): the canonical absorbs the focus beneath the form s candidate to N; Cancel ends the attempt with nothing bound — the owed handover completes to the canonical', async (context) => {
+  // The other exit the ruling names: the window operation is a form attempt
+  // whose candidate is cancelled. Nothing bound; the handover is still owed.
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const nLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; })
+      : url.includes('//n') && !nLet.let ? new Promise<void>((r) => { nLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(cLet.let, 'C s dial is out');
+  await toConnection(h);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://n:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  // The form s walk asks A: discard (the candidate then dials and hangs).
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6 && !nLet.let; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(nLet.let, 'the candidate s dial to N is out');
+  // C answers beneath it: A absorbed, CURRENT = C, A detached, handover owed.
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c']);
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  await assert.rejects(() => a.api.fsList!('/home'), 'A refuses');
+  assert.ok(h.app.document.querySelector('.card .fields input[type="text"]'), 'the form is still at it');
+  assert.equal(a.disposed(), false);
+  // Cancel: nothing bound. The owed handover completes.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((x) => /^cancel$/iu.test((x.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT is the canonical');
+  assert.equal(ls.getItem('tmux_address'), 'ws://alias:9899', 'the mirror is C s');
+  assert.ok(c.isConnected(), 'C is up');
+  assert.equal(trees(h.app).length, 2, 'C s tree and A s');
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft mounted');
+  // A, an orphan, is asked in its tree (revealed for the walk; the discard
+  // above was the FORM s walk — the handover owes its own).
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(a.disposed(), 'discarded: A ends');
+  assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'the connect card is gone: the app is on C');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)'), 'C s tree in front');
+  assert.ok(c.isConnected() && ls.getItem('tmux_server_current') === 'c', 'C untouched');
+});
+
+test('P1-B (mirror fails → block): the canonical absorbs the focus and the mirror write then fails — A s pre-captured api refuses at once with zero wire calls, its draft is kept, and Retry completes the handover', async (context) => {
+  // reviewer P1-B on 4c7cd64c. The merge note and every write after it are
+  // refused: recordServer commits CURRENT=C and the registry, the note
+  // fails (reconcile → focusAbsorbed), refocus succeeds, the mirror write
+  // (`focusServer`) throws → storageFailed → block. A was dropped from the
+  // fleet, so holdStorage freezes nothing of it: it must already refuse.
+  const store = refusing(['tmux_server_merges', 'tmux_address']);
+  store.state.failing = false;
+  let aliasProves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, fsWrite: async () => ({}), findBestAddress: async () => 'ws://alias:9899' },
+    setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  const a = conn(h, 'a')!;
+  const aApi = a.api;
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  store.state.failing = true;
+  conn(h, 'c')!.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'the alias was absorbed');
+  assert.ok(movesOpen(ls), 'the merge could not be finished: blocked');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.equal(ls.getItem('tmux_address'), 'ws://alias:9899', 'the mirror never moved (A s entry address: the alias s)');
+  // Blocked. A s captured api: immediate refusal, zero wire calls.
+  const mark = events.length;
+  await assert.rejects(() => aApi.fsWrite!('/home/notes.md', 'x'), 'a captured write refuses');
+  await assert.rejects(() => aApi.fsList!('/home'), 'a captured read refuses');
+  for (let i = 0; i < 6; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('rpc@a:')), [], 'zero wire calls of A s during the block');
+  assert.equal(a.isConnected(), false, 'A s socket closed');
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'draft kept');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing asked while blocked');
+  // Retry: the merge finishes, the handover completes to C, A is asked.
+  store.state.failing = false;
+  const prefs = h.app.document.querySelector('.preferences');
+  if (prefs && !prefs.closest('.page-layer.hidden')) {
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+  }
+  const retry = retryButton(h.app);
+  assert.ok(retry, `Retry offered: ${[...h.app.document.querySelectorAll('button')].map((b: any) => (b.textContent ?? '').trim()).filter(Boolean).slice(0, 16).join('|')}`);
+  retry.click();
+  for (let i = 0; i < 8; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(!movesOpen(ls), 'the merge finished');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.ok(conn(h, 'c')!.isConnected(), 'C is up, the focus');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'A asked as an orphan after Retry');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind, kept');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') !== draftA.closest('.scope-tree'), 'C s tree in front');
+});
+
+test('P2 (NC shape): C s address-row redial HANGS while B s earlier reconnect answers as another machine — B is not asked until C s addressUp completes', async (context) => {
+  // reviewer P2 on 4c7cd64c: an address connect is held by the switch
+  // module s count alone (no activation, no candidate). The orphan must wait
+  // for its completion — `busy`, not `guarding`.
+  let bAnswersAs = 'm-b';
+  let bHangs = false, cHangs = false;
+  const bLet = { let: null as (() => void) | null };
+  const cLet = { let: null as (() => void) | null };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+  }, ['d']), (url) => (url.includes('//b') ? bAnswersAs : url.includes('//d') ? 'm-d' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async (addrs: string[]) => addrs[0] ?? null },
+    gate: (url) => (url.includes('//b') && bHangs ? new Promise<void>((r) => { bLet.let = r; })
+      : url.includes('//a-lan') && cHangs ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  // B s reconnect goes out and hangs.
+  bHangs = true; bAnswersAs = 'm-d';
+  conn(h, 'b')!.drop();
+  for (let i = 0; i < 6 && !bLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(bLet.let, 'B s dial is out');
+  // A s address row: a second address of m-a, whose dial hangs.
+  cHangs = true;
+  await toConnection(h);
+  for (let i = 0; i < 3; i++) await h.settle();
+  const row = h.app.document.querySelector<HTMLButtonElement>('[data-addr-row="ws://a-lan:9899"] .address-choice');
+  assert.ok(row, `the LAN address is a row: ${[...h.app.document.querySelectorAll('[data-addr-row]')].map((r: any) => r.dataset.addrRow).join(',')}`);
+  row.click();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(cLet.let, 'A s redial is out and hanging');
+  // B answers as D: orphaned beneath the hanging redial. Time passes; the
+  // redial is NOT released.
+  bLet.let!();
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(conn(h, 'b')!.isConnected(), false, 'B detached at the boundary');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'B is NOT asked while the address connect is in flight');
+  // Release the redial: it completes (addressUp), then B is asked.
+  cLet.let!();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'a').address, 'ws://a-lan:9899', 'A s address moved: the redial completed');
+  assert.ok(conn(h, 'a')!.isConnected(), 'A is up on it');
+  assert.ok(h.app.document.querySelector('[data-addr-row="ws://a-lan:9899"] .address-choice.active'), 'addressUp ran');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), `then B is asked: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(conn(h, 'a')!.isConnected() && ls.getItem('tmux_server_current') === 'a', 'A untouched');
+});
+
+// ─── M1: the F fixture, parameterised by the in-flight operation s EXIT ──
+//
+// A (alias) is the focus with a draft; C (canonical) is a background member
+// whose reconnect to A s address is OUT and hanging. A window operation
+// towards N begins; C answers beneath it and absorbs A (CURRENT = C). The
+// operation then ends by the named exit WITHOUT binding N. The owed handover
+// must complete: CURRENT/mirror/front on C, A kept and refusing, A asked
+// once as an orphan, C never ended.
+type FExit = 'switch-walk-keep' | 'switch-dial-fail' | 'form-candidate-fail' | 'form-candidate-cancel' | 'form-owned-fail' | 'form-owned-cancel' | 'form-newer-target';
+async function fAbsorbUnder(context: TestContext, exit: FExit) {
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const n = { let: null as (() => void) | null, fail: null as ((e: Error) => void) | null, dials: 0 };
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : url.includes('//p') ? 'm-p' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => {
+      if (url.includes('//alias') && cHangs && !cLet.let) return new Promise<void>((r) => { cLet.let = r; });
+      if (url.includes('//n')) {
+        n.dials++;
+        // Held: the FIRST N dial of each kind (the candidate s, then N s own);
+        // a held dial is released or failed by the exit. Later dials (a
+        // reconnect loop s) are refused.
+        if (n.dials > 2) return Promise.reject(new Error('N down'));
+        return new Promise<void>((r, rej) => { n.let = r; n.fail = rej; });
+      }
+      return null;
+    },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const aApi = a.api;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(cLet.let, 'C s dial is out');
+  const form = exit.startsWith('form');
+  const buttons = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')];
+  if (form) {
+    await toConnection(h);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+    const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+    field.value = 'ws://n:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await h.settle();
+    buttons().find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  } else {
+    await switchByAddress(h, 'ws://n:9899', 'tokN');
+  }
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftA.closest('.scope-tree'), 'the operation s walk asks A s tree');
+  // Where the absorption lands: under the walk, or after D-W under the
+  // candidate / owned dial.
+  if (exit === 'switch-walk-keep') {
+    cLet.let!();
+    for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  } else {
+    answerDialog(h.app, /^discard$/iu);
+    for (let i = 0; i < 6 && !n.let; i++) { await h.app.advance(200); await h.settle(); }
+    assert.ok(n.let, `N s ${form ? 'candidate' : 'candidate'} dial is out (${n.dials})`);
+    if (exit === 'form-owned-fail' || exit === 'form-owned-cancel') {
+      // The candidate answers; N is recorded (CURRENT = N briefly) and N s
+      // OWN dial goes out and hangs.
+      const first = n.let; n.let = null; first();
+      for (let i = 0; i < 6 && !n.let; i++) { await h.app.advance(200); await h.settle(); }
+      assert.ok(n.let, 'N s own dial is out');
+    }
+    cLet.let!();
+    for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id).filter((id: string) => id === 'a' || id === 'c'), ['c'], 'the alias was absorbed');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses at the boundary');
+  assert.equal(a.disposed(), false, 'A still bound under the operation');
+  assert.ok(c.isConnected(), 'C is up');
+  // The EXIT.
+  const markN = events.filter((e) => e.startsWith(`rpc@`) && !e.startsWith('rpc@a:') && !e.startsWith('rpc@c:')).length;
+  switch (exit) {
+    case 'switch-walk-keep': answerDialog(h.app, /keep editing/iu); break;
+    case 'switch-dial-fail': case 'form-candidate-fail': case 'form-owned-fail': { const fail = n.fail!; n.let = null; n.fail = null; fail(new Error('N refused')); break; }
+    case 'form-candidate-cancel': case 'form-owned-cancel': buttons().find((x) => /^cancel$/iu.test((x.textContent ?? '').trim()))!.click(); break;
+    case 'form-newer-target': {
+      // A NEWER user operation replaces the pending one while N s candidate
+      // still hangs: Add-a-server to P, which answers at once. Its candidate
+      // claims the window; N s attempt is nobody s from here.
+      await switchByAddress(h, 'ws://p:9899', 'tokP');
+      break;
+    }
+  }
+  for (let i = 0; i < 10; i++) { await h.app.advance(300); await h.settle(); }
+  return { h, ls, a, c, aApi, draftA, events, markN };
+}
+
+const fExits: FExit[] = ['switch-walk-keep', 'switch-dial-fail', 'form-candidate-fail', 'form-candidate-cancel', 'form-owned-fail', 'form-owned-cancel'];
+for (const exit of fExits) test(`M1 F (owed handover, exit=${exit}): the operation ends with nothing bound — the handover completes to C once: CURRENT/mirror/front on C, A kept and refusing, A asked once as an orphan, C never ended`, async (context) => {
+  const { h, ls, a, c, draftA, aApi } = await fAbsorbUnder(context, exit);
+  if (exit === 'switch-dial-fail') {
+    // The switch s failed panel is a resting state: the handover completes
+    // under it and puts it away, its reason kept as the notice.
+    assert.equal(h.app.document.querySelector('.switch-panel'), null, 'the failed panel is put away: the focus is bound by another path');
+  }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT is the canonical');
+  assert.equal(ls.getItem('tmux_address'), 'ws://alias:9899', 'the mirror is C s entry s');
+  assert.ok(c.isConnected() && !c.disposed(), 'C is up, never ended');
+  assert.equal(a.disposed(), false, 'A is kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft is mounted');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A still refuses');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A is asked as an orphan in its tree: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'once');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'and not again: the debt was consumed once');
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') !== draftA.closest('.scope-tree'), 'C s tree in front');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.equal(trees(h.app).length, 2);
+  // The connect card (if the exit was the form s) is gone: the app is on C.
+  assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'no connect card');
+});
+
+test('M1 F5/X2 (newer target): the pending target N is replaced by a NEWER user target P that succeeds — P binds, A ends by the swap as answered, C stays a member, the owed handover is void (never writes C back over P)', async (context) => {
+  const { h, ls, a, c, draftA } = await fAbsorbUnder(context, 'form-newer-target');
+  const pId = JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.address === 'ws://p:9899')?.id;
+  assert.ok(pId && ls.getItem('tmux_server_current') === pId, `P is CURRENT: ${ls.getItem('tmux_server_current')}`);
+  assert.ok(h.net.conns().find((x) => x.key === pId)?.isConnected(), 'P is up');
+  assert.ok(a.disposed(), 'A ended by the swap (the person discarded its draft for the form)');
+  assert.equal(draftA.isConnected, false);
+  assert.ok(c.isConnected() && !c.disposed(), 'C is a member of P s set, never ended');
+  assert.equal(trees(h.app).length, 2, 'P s tree and C s');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing owed');
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), pId, 'the stale debt never wrote C back');
+});
+
+test('M1 F7/X1 (Retry fails again): mirror + note fail → block; Retry fails again (still blocked, the debt is NOT consumed, A still refuses, nothing asked); the next Retry completes the handover', async (context) => {
+  const store = refusing(['tmux_server_merges', 'tmux_address']);
+  store.state.failing = false;
+  let aliasProves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  const a = conn(h, 'a')!;
+  const aApi = a.api;
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  store.state.failing = true;
+  conn(h, 'c')!.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.ok(movesOpen(ls), 'blocked');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses');
+  const retry = async () => {
+    const prefs = h.app.document.querySelector('.preferences');
+    if (prefs && !prefs.closest('.page-layer.hidden')) {
+      [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+        .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+      for (let i = 0; i < 3; i++) await h.settle();
+    }
+    const b = retryButton(h.app);
+    assert.ok(b, 'Retry offered');
+    b.click();
+    for (let i = 0; i < 8; i++) { await h.app.advance(1000); await h.settle(); }
+  };
+  // Retry while storage still fails: still blocked, nothing consumed.
+  await retry();
+  assert.ok(movesOpen(ls), 'still blocked');
+  const mark = events.length;
+  await assert.rejects(() => aApi.fsList!('/home'), 'A still refuses');
+  assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('rpc@a:')), [], 'zero wire calls of A s');
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'draft kept');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing asked while blocked');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  // Storage works: Retry completes the merge and the handover, A is asked.
+  store.state.failing = false;
+  await retry();
+  assert.ok(!movesOpen(ls), 'the merge finished');
+  assert.ok(conn(h, 'c')!.isConnected(), 'C up, the focus');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'A asked once, after');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 0, 'once');
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind, kept');
+});
+
+test('M1 F6 (membership op): the canonical absorbs the focus while the mode change s walk asks C s tree — the op s commit is refused (registry changed, nothing written or left), the owed handover completes to C, A asked once; a fresh op then commits', async (context) => {
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  // C s tree gets a draft too: Aggregate → Single asks C s tree (the member).
+  await pickServer(h, 'canon');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftC = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alias');
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(cLet.let, 'C s dial is out');
+  await toConnection(h);
+  modeButton(h, /one server|single/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftC.closest('.scope-tree'), 'the mode change asks C s tree (the member)');
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'A absorbed beneath the walk');
+  // C s answer is C s own reconnect landing: its Files page refreshes, which
+  // ends its open leave question as a stay. The mode change s walk is over
+  // with no answer from the person — its commit is refused anyway (the
+  // registry changed since it was asked): nothing written, nothing left.
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'the stale op wrote nothing');
+  assert.ok(c.isConnected() && !c.disposed(), 'C was not left (the op s leave never ran)');
+  assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s draft intact');
+  // The window free again, the owed handover completed: C is the focus; A
+  // is an orphan, asked in its own tree, once.
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  assert.equal(a.disposed(), false, 'A kept, refusing');
+  await assert.rejects(() => a.api.fsList!('/home'));
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'one question');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'once');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A kept');
+  assert.ok(!draftC.closest('.scope-tree.held'), 'C s tree in front');
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind');
+  // A fresh mode change now asks C s tree and commits: the stale op left no
+  // half-state behind.
+  await toConnection(h);
+  modeButton(h, /one server|single/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftA.closest('.scope-tree'), 'Aggregate → Single asks the member tree (the orphan A s)');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(ls.getItem('tmux_connection_mode'), 'single', 'committed');
+  assert.ok(a.disposed(), 'A let go');
+  assert.ok(c.isConnected() && ls.getItem('tmux_server_current') === 'c', 'C the one server');
+});
+
+test('M1 F3 (constraint): an alias focus has no address rows to redial — its machine is unknown until a dial proves it, and a focus whose machine IS known never coexists with a twin to be absorbed into (repairServers merges them at boot)', async (context) => {
+  // F × address redial cannot be reached through the UI: the F shape needs
+  // the focus to be an ALIAS (machine unknown) of a saved canonical, and the
+  // Connection page lists addresses only for a known machine. The moment a
+  // dial proves the alias s machine, recordServer absorbs it (F0/F1…), so
+  // there is never a focus with rows AND a canonical twin. Pinned here so
+  // the gap is a constraint, not an omission.
+  let aliasProves = false;
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the alias is the focus');
+  // Even with the canonical s failover set naming the alias address, the
+  // alias entry itself knows no machine: the Connection page reads the
+  // FOCUS s machine, which is none.
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  assert.ok(conn(h, 'c')?.isConnected(), 'the canonical is a member');
+  await toConnection(h);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.deepEqual([...h.app.document.querySelectorAll<HTMLElement>('[data-addr-row]')].map((r) => r.dataset.addrRow), ['ws://alias:9899'],
+    'the alias focus shows only its active address: no row to redial');
+});
+
+test('M1 F3 (constraint, other half): two saved entries of ONE known machine never boot as two — the registry repair folds them, the focus surviving', async (context) => {
+  const twins = { ...canonAndAlias('a'), tmux_servers: JSON.stringify([
+    { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+    { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', machineId: 'm-a', named: true },
+  ]) };
+  const h = await bootApp(context, aggregateOn(twins), () => 'm-a', { rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.deepEqual(JSON.parse(h.app.window.localStorage.getItem('tmux_servers')!).map((e: any) => e.id), ['a'], 'one entry: the focus survived, the twin was folded at boot');
+  assert.equal(trees(h.app).length, 1, 'one tree');
+});
+
+test('M1 B3b (failure exit): C s address redial HANGS while B loses identity; the redial then FAILS — the window frees, the loop restarts, and B is asked once', async (context) => {
+  let bAnswersAs = 'm-b';
+  let bHangs = false, cHangs = false;
+  const bLet = { let: null as (() => void) | null };
+  const cFail = { fail: null as ((e: Error) => void) | null };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-lan:9899'] }),
+  }, ['d']), (url) => (url.includes('//b') ? bAnswersAs : url.includes('//d') ? 'm-d' : 'm-a'), {
+    rpc: { ...editorRpc, findBestAddress: async (addrs: string[]) => addrs[0] ?? null },
+    gate: (url) => (url.includes('//b') && bHangs ? new Promise<void>((r) => { bLet.let = r; })
+      : url.includes('//a-lan') && cHangs ? new Promise<void>((_r, rej) => { cFail.fail = rej; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  bHangs = true; bAnswersAs = 'm-d';
+  conn(h, 'b')!.drop();
+  for (let i = 0; i < 6 && !bLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(bLet.let, 'B s dial is out');
+  cHangs = true;
+  await toConnection(h);
+  for (let i = 0; i < 3; i++) await h.settle();
+  h.app.document.querySelector<HTMLButtonElement>('[data-addr-row="ws://a-lan:9899"] .address-choice')!.click();
+  for (let i = 0; i < 6 && !cFail.fail; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(cFail.fail, 'A s redial is out');
+  bLet.let!();
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(conn(h, 'b')!.isConnected(), false, 'B detached');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'B not asked under the hanging redial');
+  // The redial FAILS: the window frees; A s loop restarts (it dials A back).
+  cHangs = false;
+  cFail.fail!(new Error('lan down'));
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.id === 'a').address, 'ws://a:9899', 'A s address did not move');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), `B asked once the redial concluded: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1);
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'once');
+  assert.ok(conn(h, 'a')!.isConnected(), 'A is back up on its own address');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+});
+
+test('M1 X4 (two orphans): B and E lose identity together — asked one at a time, in each s own tree; Keep on the first does not re-ask it, Discard on the second ends only the second; the list keeps the kept one with Dismiss', async (context) => {
+  let bAs = 'm-b', eAs = 'm-e';
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'e', name: 'echo', address: 'ws://e:9899', token: 'tokE', machineId: 'm-e', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), 'tmux_state::e': JSON.stringify({ page: 'files' }), tmux_layout_mode: 'desktop',
+  }, ['d']), (url) => (url.includes('//b') ? bAs : url.includes('//e') ? eAs : url.includes('//d') ? 'm-d' : 'm-a'), {
+    rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'echo');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftE = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  // Both reach D on their reconnects.
+  bAs = 'm-d'; eAs = 'm-d';
+  conn(h, 'b')!.drop(); conn(h, 'e')!.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(conn(h, 'b')!.isConnected(), false); assert.equal(conn(h, 'e')!.isConnected(), false);
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'one question at a time');
+  const first = h.app.document.querySelector('[role=alertdialog]')!.closest('.scope-tree');
+  const firstIsB = first === draftB.closest('.scope-tree');
+  assert.ok(firstIsB || first === draftE.closest('.scope-tree'), 'asked in an orphan s tree');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'then the other');
+  const second = h.app.document.querySelector('[role=alertdialog]')!.closest('.scope-tree');
+  assert.ok(second !== first && (second === draftB.closest('.scope-tree') || second === draftE.closest('.scope-tree')), 'the OTHER orphan, not the kept one again');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'no third question: the kept one is not re-asked');
+  const kept = firstIsB ? draftB : draftE, gone = firstIsB ? draftE : draftB;
+  assert.equal(kept.isConnected && kept.value, '# notes\n\nunsaved', 'the kept draft is mounted');
+  assert.equal(gone.isConnected, false, 'the discarded tree is gone');
+  assert.ok(conn(h, firstIsB ? 'e' : 'b')!.disposed(), 'and its runtime ended');
+  assert.equal(conn(h, firstIsB ? 'b' : 'e')!.disposed(), false, 'the kept one not');
+  await toConnection(h);
+  assert.equal(h.app.document.querySelectorAll('.preferences button[aria-label^="Dismiss"]').length, 1, 'one orphan listed with Dismiss');
+  for (let i = 0; i < 6; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'the kept orphan is never re-asked on its own');
+});
+
+test('M1 X5 (lifecycle): the App is destroyed while an orphan s ask is scheduled and a handover is owed — nothing drains, nothing is asked, no RPC goes out after the end', async (context) => {
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  await switchByAddress(h, 'ws://n:9899', 'tokN');
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'the walk asks A');
+  cLet.let!();
+  // The absorption lands synchronously; the owed handover is pending behind
+  // the walk. Destroy the App now, before any turn drains it.
+  await h.app.flush();
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'absorbed');
+  await h.app.unmount();
+  const mark = events.length;
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('rpc@') || e.startsWith('dial@')), [], 'nothing dialled or called after the end');
+  assert.ok(a.disposed() && c.disposed(), 'every runtime ended with the shell');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing asked');
+  assert.equal(draftA.isConnected, false, 'the tree went with the shell');
+});
+
+test('M1 F4/F5 (Single, nobody to hand to): the form s candidate absorbs the focus alias into C, then the owned handshake is CANCELLED — no member to hand to: the owed handover activates CURRENT through the one road, asking A s tree first; Discard → C up, A ends', async (context) => {
+  // X3: no connected member named by CURRENT (Single has none). The debt is
+  // still owed and settles by the one defined path — Retry s own road
+  // (`arriveOn`): ask the kept tree s guards, then bind through the swap.
+  let aliasProves = false;
+  let aliasDials = 0;
+  const cLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const h = await bootApp(context, { ...canonAndAlias('a'), tmux_connection_mode: 'single' }, (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events, rpc: editorRpc,
+    // Alias dials: 1 the boot, 2 the form s candidate, 3 C s own — held;
+    // later ones (the owed arrival s) answer.
+    gate: (url) => (url.includes('//alias') && ++aliasDials === 3 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!;
+  const aApi = a.api;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  aliasProves = true;
+  await toConnection(h);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://alias:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  // The form s own walk: keep editing would stay; this case needs the dial.
+  // Discard here is the FORM s answer (D-W); the owed handover asks again.
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'the form asks A s tree before dialling');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 8 && !cLet.let; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(cLet.let, 'C s own (owned) dial is out');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'the candidate s record absorbed A');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses at the boundary');
+  assert.equal(a.disposed(), false, 'A still bound under the form');
+  // Cancel the owned handshake: nothing bound, no member to hand to.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((x) => /^cancel$/iu.test((x.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 8; i++) { await h.app.advance(300); await h.settle(); }
+  // The owed handover: CURRENT (C) is activated through the one road, which
+  // asks A s kept tree first — the person is asked again, in A s tree.
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT stays the canonical');
+  assert.equal(a.disposed(), false, 'A kept until asked');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `the arrival asks A s tree: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  assert.equal(conn(h, 'c')?.isConnected() ?? false, false, 'nothing dialled past the question');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(conn(h, 'c')?.isConnected(), 'C came up on its own runtime');
+  assert.ok(a.disposed(), 'A ended by the swap');
+  assert.equal(draftA.isConnected, false);
+  assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'the app is on C');
+  assert.equal(trees(h.app).length, 1);
 });
 
 test('P1-A (beneath an activation): the canonical absorbs the focus WHILE the form s second handshake to N is out — no handover; A refuses and stays bound under the form; N binds and replaces A; C stays a member', async (context) => {

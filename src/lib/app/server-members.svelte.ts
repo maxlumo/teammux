@@ -287,7 +287,7 @@ export function createMembers(deps: MemberDeps): Members {
     },
     dismiss(runtime) { if (mine(runtime) && held.get(runtime.id)?.orphan) forget(runtime.id); },
     answered,
-    gaveUp(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
+    gaveUp(runtime) { if (mine(runtime) && !held.get(runtime.id)?.orphan) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
     blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
     handOver(runtime) {
       const h = held.get(runtime.id);

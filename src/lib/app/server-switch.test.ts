@@ -409,3 +409,28 @@ test('the window is BUSY for the length of every operation, and goes idle once a
   await walk2;
   assert.deepEqual(t.idles, ['idle after 1 published, state off'], 'one idle, when the real walk ends');
 });
+
+test('a failed switch s panel is dismissed by the host without a new intent; a switch in flight is not (#335 ③b, an owed focus handover)', async () => {
+  const t = app();
+  t.onBringUp(async () => 'B refused');
+  await t.sw.switchTo(t.b);
+  assert.equal(t.sw.state?.phase, 'failed');
+  assert.equal(currentServerId(t.storage), t.a.id, 'CURRENT back on A');
+  const seq = t.sw.intent;
+  const phase = () => (t.sw.state as SwitchState | null)?.phase ?? null;
+  t.sw.dismiss();
+  assert.equal(phase(), null, 'the panel is put away');
+  assert.equal(t.sw.intent, seq, 'no new intent');
+  assert.equal(t.states.at(-1), null, 'the host saw it go');
+  // In flight: untouched.
+  let up!: () => void;
+  t.onBringUp(() => new Promise<string | null>((r) => { up = () => r(null); }));
+  const sw = t.sw.switchTo(t.b);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(phase(), 'connecting');
+  t.sw.dismiss();
+  assert.equal(phase(), 'connecting', 'a switch in flight is not dismissed');
+  up();
+  await sw;
+  assert.equal(currentServerId(t.storage), t.b.id);
+});

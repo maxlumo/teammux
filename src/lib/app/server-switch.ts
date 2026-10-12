@@ -233,6 +233,11 @@ export function createServerSwitch(d: SwitchDeps) {
     /** Another path (the connect page) took the socket: older asyncs lose it. */
     supersede() { seq++; },
     retry() { if (state?.phase === 'failed') return switchTo(state.target); },
+    /** A failed switch's panel is put away without a new intent: the host
+     * bound the focus by another path (an owed handover, #335 ③b) while the
+     * server the panel would go Back to is gone. A switch in flight is not
+     * dismissed. */
+    dismiss() { if (state?.phase === 'failed') set(null); },
     /** Back to the server the switch left, from its frozen identity. */
     back(entries: readonly ServerEntry[]) {
       const id = state?.phase === 'failed' ? state.from?.id : '';
