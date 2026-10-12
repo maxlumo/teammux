@@ -38,6 +38,12 @@ export interface LeaveGuard {
   runtime: object | null;
   /** The page whose layer holds this instance ('' = always visible). */
   page: string;
+  /** Inside that page, bring THIS instance on screen — a guest editor on its
+   * own section of a host page (#335 ③b, reviewer P1-2 on 99566068) — and
+   * return what puts the host back. Run after `page` is revealed, before
+   * `ask`; the walk restores every reveal when it ends, either way. Absent:
+   * the page is all there is to reveal. */
+  reveal?(): Promise<() => void>;
   /** Something would be lost, or a mutation is still in flight. */
   dirty(): boolean;
   /** Ask in the component's own dialog. Resolves true to leave (a pending
@@ -72,14 +78,17 @@ export async function confirmLeave(walk: LeaveWalk): Promise<boolean> {
   const order = [...guards].filter(asked).sort((a, b) => Number(b.page === walk.current) - Number(a.page === walk.current));
   if (!order.some((g) => g.dirty())) return true;
   walk.hold(true);
+  const restores: (() => void)[] = [];
   try {
     for (const guard of order) {
       if (!guards.has(guard) || !guard.dirty()) continue;
       if (guard.page && guard.page !== walk.current) await walk.reveal(guard.page);
+      if (guard.reveal) restores.push(await guard.reveal());
       if (!(await guard.ask())) return false;
     }
     return true;
   } finally {
+    for (const restore of restores.reverse()) restore();
     await walk.reveal(walk.current);
     walk.hold(false);
   }

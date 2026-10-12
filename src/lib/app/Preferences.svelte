@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
@@ -590,6 +590,19 @@
     });
   });
 
+  /** A leave walk asks guest `runtime`'s editor (#335 ③b, reviewer P1-2 on
+   * 99566068): show it on ITS OWN section — the page follows the guest, the
+   * guest's section is never moved to show a dialog — and give back what
+   * puts the page where the person had it. The host (App) has already made
+   * this guest the one shown. */
+  async function revealGuest(runtime: object): Promise<() => void> {
+    const back = { tab, catOpen };
+    tab = sectionOf(runtime);
+    catOpen = true;
+    await tick();
+    return () => { tab = back.tab; catOpen = back.catOpen; };
+  }
+
   function selectTab(value: string, applied = () => {}, current = () => true, drill = true) {
     const intent = ++navigation;
     // The guest the choice was made for: a confirmation that answers after
@@ -745,6 +758,7 @@
         editRequest={acceptedAgentRequest?.serverId === g.runtime.id && sectionOf(g.runtime) === (acceptedAgentRequest.kind === 'team' ? 'teams' : 'agents') ? acceptedAgentRequest : null}
         onGuardExit={(guard: Guard) => registerAgentsGuard(g.runtime, guard)}
         guardPage="prefs"
+        guardReveal={() => revealGuest(g.runtime)}
         onGoBack={(fn: () => boolean) => { reg(g.runtime).back = fn; }}
         onDrilled={(d: boolean) => setDrilled(g.runtime, d)}
       />

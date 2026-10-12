@@ -315,9 +315,12 @@ test('Settings only offers the category when there is a bus and no Agents page',
   // While the migration is blocked the guest stays the bound runtime's and is
   // HELD, not unmounted (③a; orchestrator 08:17, one mechanism): inert, with
   // the reason, its writes refused by the frozen runtime and held by the gate.
-  assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
+  // ③b: the Hub capability is the server IN FRONT's — the member a walk
+  // reveals, else the focus (reviewer P1-2 on 99566068).
+  assert.match(source, /const frontHub = \$derived\(revealed \? viewOf\(revealed\)\.hubState\.available : hubEligible\);/u);
+  assert.match(source, /showAgents=\{frontHub && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
   // ③a: one guest per member, the focused one shown (reviewer P1-C).
-  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs'\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
+  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs' && !switching\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   // ③a (reviewer P1-1(b)): the request names its server; Preferences hands
@@ -491,9 +494,11 @@ test('every App socket owner goes through the switch module and loses ownership 
 });
 
 test('the leave walk holds Settings mounted while guards are asked (board 315 review P1)', () => {
-  assert.match(source, /\{#if page === 'prefs' \|\| holdPages \|\| prefsKept\}\s*<div class="page-layer" class:hidden=\{page !== 'prefs'\}>/u,
+  // ③b: and it stays, hidden and inert, under a switch panel while it keeps
+  // a guest (reviewer P1-1 on 99566068).
+  assert.match(source, /\{#if \(page === 'prefs' \|\| holdPages \|\| prefsKept\) && \(!switching \|\| prefsKept\)\}\s*<div class="page-layer" class:hidden=\{page !== 'prefs' \|\| !!switching\} inert=\{!!switching\}>/u,
     'revealing another page never unmounts an Agents editor that has not answered (LeaveHost.test.svelte mirrors this)');
-  assert.match(source, /\{#if page === 'settings' \|\| holdPages\}\s*<div class="page-layer connect-layer" class:hidden=\{page !== 'settings'\}>\s*<Settings /u,
+  assert.match(source, /\{#if \(page === 'settings' \|\| holdPages\) && !switching\}\s*<div class="page-layer connect-layer" class:hidden=\{page !== 'settings'\}>\s*<Settings /u,
     'and the connect form: a walk it started must come back to it (reviewer P1-b on 48b40082)');
   assert.match(source, /confirmLeave: \(\) => walkLeave\(scopeSwap\.bound\(\)\),/u);
   // ③b-2: the ONE walk, per (runtime, view) — a background member is
@@ -509,8 +514,12 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
-    'the panel replaces the content tree; a different server rebuilds it, bound to that server');
+  // ③b (reviewer P1-1 on 99566068): the panel sits OVER the kept trees —
+  // nothing a switch does not replace goes with it. Every tree is held while
+  // a switch runs; the swap lets go of the one it replaces.
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{\/if\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
+    'the panel sits over the kept trees; a different server rebuilds only its own, bound to that server');
+  assert.doesNotMatch(source, /\{:else\}\s*(?:<!--[\s\S]*?-->\s*)*\{#if \(page === 'settings'/u, 'the trees are not the switch panel s else branch');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
     'FAILED: page buttons stay disabled, only the server control works');
@@ -816,7 +825,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.doesNotMatch(blocked, /scopeSwap\.swap|ends\.end|fleet\.drop/u, 'the runtime the tree is bound to is not ended by the block');
   // ③a (orchestrator 08:17): the tree stays mounted while blocked, held —
   // inert and hidden — so nothing typed is lost; this was "no tree renders".
-  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
+  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked or switching, as is every tree out of focus');
   // A link a redirect or a re-mint starts is part of the SAME chain: awaited,
   // and cancelled with it (reviewer P1-4 on 341554b3).
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
@@ -1340,11 +1349,18 @@ test('Aggregate focus moves between connected members without a teardown (#335 �
   const fn = source.match(/function focusMember\(id\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.match(fn, /if \(readMode\(localStorage\) !== 'aggregate' \|\| migrationBlocked \|\| switching \|\| serverSwitch\.guarding\) return false;/u);
   assert.match(fn, /!next\.connection\.isConnected\(\)/u, 'a member that is not connected is not a focus change (orchestrator 02:28)');
-  assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?scopeSwap\.refocus\(next\)[\s\S]*?aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
-    'CURRENT, then the front, then the set: the old focus becomes a member, still up');
+  // One commit (reviewer P1-3 on 99566068): storage (CURRENT last) or
+  // nothing; then the window's old attempts go stale; then the front.
+  assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?catch \{[\s\S]*?return 'failed';\s*\}\s*serverSwitch\.supersede\(\);\s*activations\.claim\(\);\s*scopeSwap\.refocus\(next\);\s*aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
+    'commit, then make the old focus s window work stale, then the front and the set');
+  assert.doesNotMatch(fn, /activations\.endAll\(\)/u, 'members keep their own reconnects');
   assert.doesNotMatch(fn, /swap\(|dial\(|confirmLeave|ends\.end|fleet\.drop/u, 'nothing is torn down, dialled or asked');
   // ③b-3: an excluded server the person picks is included as the switch begins.
-  assert.match(source, /if \(focusMember\(id\)\) return;[\s\S]{0,500}?if \(connMode === 'aggregate' && excludedIds\.has\(id\) && !migrationBlocked\) \{[^\n]*\n[^\n]*\n\s*\}\s*void switchTo\(target\);/u, 'else the ordinary switch');
+  // ③b (orchestrator 03:23; reviewer P1-1 on 99566068): Aggregate never
+  // falls back to the replacing switch for a saved server.
+  assert.match(source, /if \(connMode === 'aggregate' && scopeSwap\.bound\(\)\) \{ pickMember\(target\); return; \}\s*void switchTo\(target\);/u, 'Single: the ordinary switch');
+  const pick = source.match(/function pickMember\(target\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  assert.doesNotMatch(pick, /switchTo\(|walkLeave\(|swap\(/u, 'a pick that is not a focus move replaces nothing');
 });
 
 test('the mode and the include switches go through App s two changes, each walking what it destroys (#335 ③b-3)', () => {

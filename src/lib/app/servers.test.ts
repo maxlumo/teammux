@@ -737,3 +737,22 @@ for (const [label, journal] of [['unparsable', '{not json'], ['not a list', '{"f
     assert.equal(s.getItem(MOVES_KEY), null, 'and closes its own move');
   });
 }
+
+for (const fails of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_disconnected', 'tmux_server_current']) {
+  test(`focusServer commits CURRENT last: a failing ${fails} write throws and leaves CURRENT and the mirror as they were (reviewer P1-3 on 99566068)`, () => {
+    const s = mem({
+      tmux_servers: JSON.stringify([
+        { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+        { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', socket: 'work', machineId: 'm-b', named: true },
+      ]),
+      tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_disconnected: '1',
+    });
+    const before = new Map(s.m);
+    const set = s.setItem, remove = s.removeItem;
+    let armed = true;
+    s.setItem = (k: string, v: string) => { if (armed && k === fails) { armed = false; throw new Error('QuotaExceededError'); } set(k, v); };
+    s.removeItem = (k: string) => { if (armed && k === fails) { armed = false; throw new Error('SecurityError'); } remove(k); };
+    assert.throws(() => focusServer(s, 'b'));
+    assert.deepEqual(new Map(s.m), before, 'nothing of B landed');
+  });
+}

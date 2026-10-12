@@ -716,17 +716,31 @@ export function activateSwitched(
 
 /** Make the saved entry `id` CURRENT, with its active mirror, and record
  * nothing else (#335 D2): an Aggregate focus change between members that are
- * already connected and recorded. Throws when a write fails; false when no
- * such entry is saved. */
+ * already connected and recorded. False when no such entry is saved.
+ *
+ * ATOMIC as far as storage allows (reviewer P1-3 on 99566068): the mirror is
+ * written first and CURRENT LAST — CURRENT is the commit point every reader
+ * of "which server is focused" asks. A write that throws before it restores
+ * what it had already changed (best effort) and rethrows, so CURRENT never
+ * names a server whose mirror half-landed, and the caller moves nothing. */
 export function focusServer(storage: Store, id: string): boolean {
   const entry = loadServers(storage).find((s) => s.id === id);
   if (!entry) return false;
-  storage.setItem(CURRENT_KEY, entry.id);
-  storage.setItem('tmux_address', entry.address);
-  storage.setItem('tmux_token', entry.token);
-  if (entry.socket) storage.setItem('tmux_socket', entry.socket);
-  else storage.removeItem('tmux_socket');
-  storage.removeItem('tmux_disconnected');
+  const keys = ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_disconnected'];
+  const before = keys.map((k) => [k, storage.getItem(k)] as const);
+  try {
+    storage.setItem('tmux_address', entry.address);
+    storage.setItem('tmux_token', entry.token);
+    if (entry.socket) storage.setItem('tmux_socket', entry.socket);
+    else storage.removeItem('tmux_socket');
+    storage.removeItem('tmux_disconnected');
+    storage.setItem(CURRENT_KEY, entry.id);
+  } catch (error) {
+    for (const [k, v] of before) {
+      try { if (v == null) storage.removeItem(k); else storage.setItem(k, v); } catch { /* best effort */ }
+    }
+    throw error;
+  }
   return true;
 }
 

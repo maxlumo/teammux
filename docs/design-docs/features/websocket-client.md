@@ -1050,9 +1050,27 @@ nothing is unbound or ended, so no leave walk runs and every draft stays
 where it was — which is also what makes a background tree something a person
 can have edited, and so something a leave walk has to ask (below). A refocus
 is refused while a swap is in flight, while blocked, mid-switch or mid-walk.
-A member that is not connected is not a focus change: the ordinary switch
-decides, and it asks the focused tree's guards because it replaces it. Single
-switches as before.
+The move is ONE commit (reviewer P1-3 on 99566068): everything that could
+refuse is checked first; storage then commits with CURRENT LAST
+(`focusServer` restores the mirror and rethrows when a write fails, so
+CURRENT never names a server whose mirror half-landed, nothing moves, and the
+list says so); then the window's attempts aimed at the server left go stale —
+the switch's intent, so a late optimizer probe of A's addresses cannot redial
+over B, and the window activation — while every member's own reconnect is
+untouched; only then do the front and the set move. A member that is not
+connected is NOT a focus change (orchestrator 02:28 and 03:23): the app stays
+where it is, nothing is asked or replaced, and the row shows that server's
+own state — an excluded one is included and joins; one still connecting or
+failing keeps its own loop, and the person focuses it once it is up.
+Aggregate never falls back to the replacing switch for a saved server.
+Single switches as before.
+
+**A switch replaces only its own tree** (reviewer P1-1 on 99566068). The
+switch panel sits OVER the kept trees rather than in place of them: every
+member's tree, and Preferences while it keeps a guest, stay mounted under
+it, held and inert, with their drafts; the swap lets go only of the tree it
+replaces, after that tree's walk. The connect form is the one surface that
+still steps aside while a switch runs.
 
 **The mode and the include switches** (③b-3). Settings › Connection carries
 the device's mode (`Connect to: One server / All included`, the shared
@@ -1081,8 +1099,13 @@ guards are not the new one's). When `runtime` is a background member, the
 walk brings ITS tree in front (`revealed`; `front = revealed ?? focus`, the one
 definition every tree's `held`, the guest Preferences shows and the window's
 Back chain read) and reveals each guard's page there, so its dialog is seen
-and answerable where its draft lives — without making it CURRENT (D2). When
-the walk ends, either way, the page, the front and the focus are as they
+and answerable where its draft lives — without making it CURRENT (D2). A
+guard can also say where it lives INSIDE its page (`LeaveGuard.reveal`):
+Preferences' guest editors do, so a walk shows the guest on its own section
+(the page follows the guest; the guest's section never moves to show a
+dialog) and puts the category back afterwards (reviewer P1-2 on 99566068).
+Whether the guest takes input is judged by the server in front's Hub, not
+CURRENT's. When the walk ends, either way, the page, the front and the focus are as they
 were; "keep editing" loses no tree's navigation or draft. On a phone, Back
 during the walk asks the tree in front, so it answers that member's dialog
 as "keep editing". Removing a member from the server list runs its walk

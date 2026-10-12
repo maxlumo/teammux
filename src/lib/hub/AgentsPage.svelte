@@ -49,7 +49,7 @@
   // chosen one's rows, then its editor (owner, 2026-09-04: "左边侧边栏先写配置
   // 条目 右边展示详细内容 不要全堆在一起了").
   let { visible = false, onGoBack = null, editRequest = null, onDrilled = null,
-    onGuardExit = null, guardPage = '', section: requestedSection = null } = $props();
+    onGuardExit = null, guardPage = '', guardReveal = null, section: requestedSection = null } = $props();
   let section = $state(untrack(() => requestedSection));
   const SECTION_META = {
     agents: ['agentsTitle', 'agentsHint'],
@@ -186,6 +186,9 @@
   $effect(() => registerLeaveGuard({
     runtime: guardOwner,
     page: guardPage,
+    // Where this editor lives inside its page, when the host has more than
+    // one place (Preferences' guest sections; #335 ③b).
+    ...(guardReveal ? { reveal: guardReveal } : {}),
     dirty: () => untrack(() => dirty || saving || removing),
     ask: () => new Promise((resolve) => {
       // A dialog of its own is already open: the user is answering that one.

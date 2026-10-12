@@ -134,6 +134,13 @@
    * definition of "in front": every tree's `held`, the guest Preferences
    * shows and the Back chain the window asks all follow it. */
   const front = $derived(revealed ?? scopeRuntime);
+  /** Does the server IN FRONT host the Hub — the one whose guest editor a
+   * walk may be showing (reviewer P1-2 on 99566068: the capability is the
+   * revealed runtime's, not CURRENT's). */
+  // `revealed` is a mounted member, so its view already exists: a view
+  // CREATED inside this derived would not be tracked by it (Svelte does not
+  // track state a reaction creates), and the flag would never follow.
+  const frontHub = $derived(revealed ? viewOf(revealed).hubState.available : hubEligible);
   /** The trees the app holds mounted: the focused server's, and in
    * Aggregate every background member that passed its gates (③b-1). */
   let background = $state.raw([]);
@@ -1187,7 +1194,7 @@
         // Nowhere to move the focus: refused, with the reason.
         if (!next || !leaving) { membershipError = t('serverOnlyConnected'); return; }
         if (!(await serverSwitch.guard(() => walkLeave(leaving)))) return;
-        if (!focusMember(next.id)) return;
+        if (focusMember(next.id) !== true) return;
       } else if (!on) {
         const member = aggregate.runtimes().find((r) => r.id === id);
         if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return;
@@ -1896,38 +1903,67 @@
   function doServerSwitch(id) {
     const target = loadServers(localStorage).find((s) => s.id === id);
     if (!target) { loadServerRegistry(); return; } // stale row (entry vanished)
-    if (focusMember(id)) return;
-    // Aggregate: the server the person picks is one they want — an excluded
-    // one is included as the switch begins (③b-3).
-    if (connMode === 'aggregate' && excludedIds.has(id) && !migrationBlocked) {
-      try { excludedIds = setExcluded(localStorage, loadServers(localStorage), id, false); } catch { /* the switch still runs */ }
-    }
+    // Aggregate never falls back to the Single switch for a saved server
+    // (orchestrator 02:28 and 03:23; reviewer P1-1 on 99566068): that switch
+    // REPLACES the focused tree, so a pick is a focus move or nothing.
+    if (connMode === 'aggregate' && scopeSwap.bound()) { pickMember(target); return; }
     void switchTo(target);
+  }
+  /** Aggregate: a row was picked. A connected member becomes the focus (D2).
+   * Any other server is not a focus change: the app STAYS where it is and
+   * the row shows that server's own state — an excluded one is included,
+   * and joins as a member through its own dial; one still connecting or
+   * failing keeps its own loop. The person focuses it once it is up. */
+  function pickMember(target) {
+    if (target.id === currentServerId(localStorage)) { serverMenuOpen = false; return; }
+    const moved = focusMember(target.id);
+    if (moved === true) return;
+    if (moved === 'failed') return;
+    if (excludedIds.has(target.id) && !migrationBlocked) {
+      try { excludedIds = setExcluded(localStorage, loadServers(localStorage), target.id, false); } catch { membershipError = t('migrationBlockedNote'); return; }
+      syncMembers();
+    }
+    membershipError = t('memberNotConnected').replace('{name}', target.name || hostLabel(target.address));
   }
   /** Aggregate: move the focus onto member `id`, which is already up with
    * its own tree (#335 D2). CURRENT and the active mirror name it, its tree
    * comes to the front and the one that was focused stays mounted, up, as a
    * member — nothing dials, nothing is torn down, so no leave walk runs and
-   * no draft is at stake. False when this is not such a move (Single, a
-   * member not up yet, a switch or a walk in progress, blocked): the
-   * ordinary switch then decides. */
+   * no draft is at stake. Returns true when the focus moved; 'failed' when
+   * its storage commit failed and NOTHING moved (CURRENT, the mirror and the
+   * front all as they were; the host gate is told); false when this is not
+   * such a move (Single, a member not connected, a switch or a walk in
+   * progress, blocked).
+   *
+   * One commit (reviewer P1-3 on 99566068): everything that could refuse is
+   * checked before anything is written; storage commits with CURRENT last
+   * (`focusServer`); then every window attempt still aimed at the server
+   * left goes stale — the switch's intent (a late optimizer probe of A's
+   * addresses must not redial over B) and the window activation — while
+   * each member's OWN reconnect is untouched; only then does the front move. */
   function focusMember(id) {
     if (readMode(localStorage) !== 'aggregate' || migrationBlocked || switching || serverSwitch.guarding) return false;
     const next = aggregate.runtimes().find((r) => r.id === id);
     const left = scopeSwap.bound();
-    if (!next || !left || next === left || !next.connection.isConnected() || !connected) return false;
+    if (!next || !left || next === left || !next.connection.isConnected() || scopeSwap.shown() !== left) return false;
     try {
       if (!focusServer(localStorage, id)) return false;
-    } catch { storageFailed(); return true; }
-    if (!scopeSwap.refocus(next)) {
-      try { focusServer(localStorage, left.id); } catch { storageFailed(); }
-      return false;
+    } catch {
+      membershipError = t('serverFocusFailed');
+      storageFailed();
+      loadServerRegistry();
+      return 'failed';
     }
+    serverSwitch.supersede();
+    activations.claim();
+    scopeSwap.refocus(next);
     aggregate.handOver(next);
     aggregate.adopt(left, left.connection.isConnected());
     serverMenuOpen = false;
+    membershipError = '';
     reconnectError = '';
     reconnecting = false;
+    heldOffline = false;
     serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
     activeAddress = next.entry().address;
     loadServerRegistry();
@@ -3316,7 +3352,13 @@
           </div>
         {/if}
       </div>
-    {:else}
+    {/if}
+    <!-- Nothing a switch is not replacing goes with it (#335 ③b; reviewer
+         P1-1 on 99566068): every member's tree, and Preferences while it
+         keeps a guest, stay MOUNTED under the switch panel — hidden, inert,
+         their drafts with them. Only the tree the switch replaces is let go
+         of, by the swap, after its own walk. The connect form is the one
+         surface that still steps aside, as before. -->
     <!-- The person-level surface. The Connection card needs no server — a
          fresh client has none to give it, and a dangling CURRENT leaves none
          either — so it lives OUTSIDE the server-bound subtree. That is also
@@ -3325,7 +3367,7 @@
     <!-- Held, like Preferences below, while a leave walk shows another page:
          the walk may have been started BY this form, and its accept has to
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
-    {#if page === 'settings' || holdPages}
+    {#if (page === 'settings' || holdPages) && !switching}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
       <Settings {onConnected} {openCandidate} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
@@ -3340,8 +3382,8 @@
          live server through `showAgents`, and bound to that server by a GUEST
          scope (board #335 ②b-3): the bound runtime and its state, keyed on the
          handle like the subtree, so a switch rebuilds the guest too. -->
-    {#if page === 'prefs' || holdPages || prefsKept}
-    <div class="page-layer" class:hidden={page !== 'prefs'}>
+    {#if (page === 'prefs' || holdPages || prefsKept) && (!switching || prefsKept)}
+    <div class="page-layer" class:hidden={page !== 'prefs' || !!switching} inert={!!switching}>
     <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
       connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
@@ -3355,10 +3397,10 @@
       onShare={shareConnectionLink}
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
-      showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
+      showAgents={frontHub && agentsLivesInSettings(layout.isTouchDevice)}
       guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={front}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
-      visible={page === 'prefs'}
+      visible={page === 'prefs' && !switching}
       agentsEditRequest={view.agentsEditReq}
       openRequest={prefsOpenReq}
       onAddress={(address) => {
@@ -3392,7 +3434,7 @@
          without one; the order (teardown, release, mount) is
          server-scope.ts's, because `{#key}` creates the new branch before
          destroying the old one. -->
-    {#if migrationBlocked && page !== 'settings' && page !== 'prefs'}
+    {#if !switching && migrationBlocked && page !== 'settings' && page !== 'prefs'}
       <!-- The fold could not be recorded (board #335 ②b-4): no server page,
            the switch panel's own form, and Retry. -->
       <div class="switch-panel appear" role="alert">
@@ -3406,7 +3448,7 @@
     {/if}
     {#each members as runtime (runtime)}
     {@const v = viewOf(runtime)}
-    {@const held = storageHeld || runtime !== front}
+    {@const held = storageHeld || !!switching || runtime !== front}
     {@const shown = !held}
     <!-- While the app is blocked on its storage the tree stays MOUNTED, inert
          and hidden (board #335 ③a; orchestrator 08:17: one mechanism, Single
@@ -3523,7 +3565,7 @@
     </ServerScope>
     </div>
     {/each}
-    {/if}
+    <!-- (the switch panel above sits over the kept trees) -->
   </div>
 
   <InstallPrompt />
