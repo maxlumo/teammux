@@ -14,6 +14,8 @@
   import { activeModal } from '../ui/modal.ts';
   import { t } from '../core/i18n.svelte.ts';
   import type { ServerEntry } from './servers.ts';
+  import type { MemberStatus } from './server-members.svelte.ts';
+  import Switch from '../ui/Switch.svelte';
   import { stateDotColor } from '../hub/hub.ts';
 
   interface Props {
@@ -39,10 +41,21 @@
      * is shown, and rename and remove are disabled — a refusal with its
      * reason, never a silent no-op. */
     frozen?: string;
+    /** Aggregate (board #335 ③b-3): every row carries its include switch and
+     * its member status; picking a name moves the focus. Null in Single. */
+    members?: {
+      included: (id: string) => boolean;
+      status: (id: string) => MemberStatus | null;
+      /** A refusal comes back as `notice`, with its reason. */
+      ontoggle: (id: string, included: boolean) => void;
+    } | null;
+    /** A refusal to show on the list (an include/exclude that failed). */
+    notice?: string;
   }
   let {
     servers, currentId, link = { connected: true }, variant = 'menu',
     onpick, onrename, onremove, onadd, onclose = () => {}, container = null, frozen = '',
+    members = null, notice = '',
   }: Props = $props();
 
   /** The one status-dot language (stateDotColor / .live-dot): the server
@@ -52,7 +65,19 @@
   function dotOf(id: string): Dot {
     if (link.target?.id === id) return link.target.failed ? 'failed' : 'pending';
     if (id === currentId && link.connected && !link.target) return 'live';
+    // A background member wears its own derived status (③b-3).
+    const st = id !== currentId ? members?.status(id) : null;
+    if (st?.kind === 'connected') return 'live';
+    if (st?.kind === 'connecting' || st?.kind === 'reconnecting') return 'pending';
+    if (st?.kind === 'failed') return 'failed';
     return 'rest';
+  }
+  /** Why a member is failing, where the address line can say it. */
+  function failure(id: string): string {
+    const st = id !== currentId ? members?.status(id) : null;
+    if (st?.kind !== 'failed') return '';
+    if (st.reason === 'elsewhere') return t('memberElsewhere').replace('{name}', st.detail ?? '');
+    return t(st.reason === 'storage' ? 'memberStorage' : 'memberUnreachable');
   }
   const DOT_COLOR: Record<Dot, string> = {
     live: 'var(--accent)', pending: stateDotColor('running'), failed: stateDotColor('failed'), rest: stateDotColor('idle'),
@@ -169,6 +194,7 @@
 
 <div class="server-list" class:page={variant === 'page'}>
   {#if frozen}<small class="config-error appear" role="alert">{frozen}</small>{/if}
+  {#if notice && !frozen}<small class="config-error appear" role="alert">{notice}</small>{/if}
   {#each servers as s (s.id)}
     {@const cur = s.id === currentId}
     <div class="sm-row" class:cur>
@@ -187,8 +213,14 @@
             <span class="sm-dot" class:live-dot={dotOf(s.id) === 'pending'} style:background={DOT_COLOR[dotOf(s.id)]} aria-hidden="true"></span>
             <span class="sm-name">{s.name}</span>
           </span>
-          <span class="sm-addr">{s.address}</span>
+          <span class="sm-addr">{s.address}{#if failure(s.id)} · {failure(s.id)}{/if}</span>
         </button>
+      {/if}
+      {#if members}
+        {@const on = members.included(s.id)}
+        <Switch hideLabel checked={on} label={t('serverInclude').replace('{name}', s.name)}
+          disabled={!!frozen}
+          onchange={(next) => members?.ontoggle(s.id, next)} />
       {/if}
       <CommandButton variant="icon" icon="edit" label={`${t('serverRename')} ${s.name}`}
         disabled={renaming === s.id || !!frozen} onclick={(e: MouseEvent) => { e.stopPropagation(); start(s, e.currentTarget as HTMLElement); }} />

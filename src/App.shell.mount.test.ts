@@ -4222,3 +4222,170 @@ test('Retry before a blocked member s stale join answers: the member joins again
   assert.ok(conn(h, 'b')?.isConnected() && !conn(h, 'b')!.disposed(), 'and undid nothing');
   assert.ok(trees(h.app).some((x) => x.target === 'work:2.0'), 'B s tree is still there');
 });
+
+// ─── #335 ③b-3: the mode and the include switches ─────────────────────
+
+async function toConnection(h: Awaited<ReturnType<typeof bootApp>>) {
+  // Already on it (the gear toggles Preferences, so it is not pressed twice).
+  const shown = h.app.document.querySelector('.preferences .server-list');
+  if (shown && !shown.closest('.page-layer.hidden')) return;
+  const gear = [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+}
+const modeButton = (h: Awaited<ReturnType<typeof bootApp>>, name: RegExp) =>
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .segmented button')].find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
+const includeSwitch = (h: Awaited<ReturnType<typeof bootApp>>, name: string) =>
+  h.app.document.querySelector<HTMLButtonElement>(`.preferences .server-list [role=switch][aria-label="Include ${name}"]`);
+const sandbox = { setup(window: any) { window.Element.prototype.getAnimations = () => []; } };
+
+test('③b-3: Single → Aggregate keeps A s connection and joins B; Single shows no include switches', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { calls: events, ...sandbox });
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  assert.equal(includeSwitch(h, 'beta'), null, 'Single: no include switches');
+  const a = conn(h, 'a')!;
+  const dialsA = dialsOf(events, 'a').length;
+  modeButton(h, /^all included$/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate');
+  assert.equal(conn(h, 'a'), a, 'A s connection is the one it had');
+  assert.equal(dialsOf(events, 'a').length, dialsA, 'and A was not dialled again');
+  assert.ok(conn(h, 'b')?.isConnected(), 'B joined');
+  assert.equal(trees(h.app).length, 2);
+  assert.equal(includeSwitch(h, 'beta')?.getAttribute('aria-checked'), 'true', 'B s row: an include switch, on');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+});
+
+for (const keep of [true, false]) test(`③b-3: Aggregate → Single asks each member s tree first — ${keep ? 'Keep editing changes neither the mode nor a connection' : 'Discard lets B go, A untouched'}`, async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { rpc: editorRpc, ...sandbox });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  await toConnection(h);
+  modeButton(h, /^one server$/iu)!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), 'B s editor asks, in B s tree');
+  assert.ok(!asked.closest('.scope-tree.held, [inert]'), 'answerable');
+  answerDialog(h.app, keep ? /keep editing/iu : /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  if (keep) {
+    assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'still Aggregate');
+    assert.ok(conn(h, 'b')!.isConnected(), 'B still up');
+    assert.equal(draftB.isConnected && draftB.value, '# notes\n\nunsaved', 'with its draft');
+  } else {
+    assert.equal(ls.getItem('tmux_connection_mode'), 'single');
+    assert.ok(conn(h, 'b')!.disposed(), 'B let go of');
+    assert.equal(trees(h.app).length, 1, 'one tree');
+  }
+  assert.ok(conn(h, 'a')!.isConnected(), 'A untouched');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+});
+
+test('③b-3: excluding a member asks only its tree; including it again joins it', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { rpc: editorRpc, ...sandbox });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  const draftA = await dirtyEditor(h.app, h.settle);
+  await toConnection(h);
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), 'B s editor asks, in B s tree');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'A s editor is not asked');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), ['b']);
+  const b = conn(h, 'b')!;
+  assert.ok(b.disposed(), 'B let go of');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft untouched');
+  assert.equal(includeSwitch(h, 'beta')?.getAttribute('aria-checked'), 'false');
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), [], 'included again');
+  assert.ok(conn(h, 'b') !== b && conn(h, 'b')!.isConnected(), 'B joins on a fresh connection');
+  assert.equal(trees(h.app).length, 2);
+});
+
+test('③b-3: excluding the focus moves the focus to the next connected member first, after asking the focus s tree', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { rpc: editorRpc, ...sandbox });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  await toConnection(h);
+  includeSwitch(h, 'alpha')!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'A s editor asks');
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), ['a'], 'and A is excluded');
+  assert.ok(conn(h, 'a')!.disposed(), 'A let go of');
+  assert.ok(conn(h, 'b')!.isConnected());
+  assert.equal(trees(h.app).length, 1);
+  // B is the only connected server now: excluding it is refused, with why.
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing is asked');
+  assert.equal(includeSwitch(h, 'beta')?.getAttribute('aria-checked'), 'true', 'B stays included');
+  assert.match(h.app.document.querySelector('.preferences .server-list [role=alert]')?.textContent ?? '', /only connected server/iu, 'and the list says why');
+});
+
+test('③b-3: picking an excluded server includes it and switches to it', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }, ['b']), undefined, sandbox);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await h.switchTo('beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'b');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), [], 'B is included now');
+  assert.ok(conn(h, 'b')?.isConnected());
+  assert.ok(conn(h, 'a')?.isConnected(), 'and A, left, is a member again');
+  assert.equal(trees(h.app).length, 2);
+});
+
+test('③b-3: while blocked the mode and the include switches are frozen', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  const h = await bootApp(context, aggregateOn({ ...danglingSeed() }), undefined, { setup(window) { store.setup(window); sandbox.setup(window); } });
+  await h.app.advance(6000);
+  await toConnection(h);
+  const seg = modeButton(h, /^one server$/iu);
+  assert.ok(seg?.disabled, 'the mode is frozen');
+  const switches = [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .server-list [role=switch]')];
+  assert.ok(switches.length > 0, 'the rows carry their switches');
+  for (const sw of switches) assert.ok(sw.disabled, 'every include switch is frozen');
+});
+
+test('③b-3: a member s row wears its own status: B reaching A s machine says so, with the failed dot', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), () => 'm-a', sandbox);
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  const row = [...h.app.document.querySelectorAll<HTMLElement>('.preferences .server-list .sm-row')].find((r) => /beta/u.test(r.textContent ?? ''))!;
+  assert.match(row.querySelector('.sm-addr')?.textContent ?? '', /reaches alpha/iu, `the reason is on the row: ${row.textContent}`);
+  assert.ok(conn(h, 'a')?.isConnected(), 'A is untouched by it');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a');
+});

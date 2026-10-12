@@ -36,7 +36,7 @@
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createMembers } from './lib/app/server-members.svelte.ts';
-  import { readMode, readExcluded, includedServers } from './lib/app/connection-mode.ts';
+  import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -1141,6 +1141,76 @@
     untrack(syncMembers);
   });
 
+  /** The device's mode and exclusions as the UI shows them (③b-3): read from
+   * storage, never declared beside it — refreshed whenever the registry is,
+   * and by the two changes below. */
+  let connMode = $state(readMode(localStorage));
+  let excludedIds = $state.raw(new Set());
+  $effect(() => { void serverList; untrack(() => { connMode = readMode(localStorage); excludedIds = readExcluded(localStorage, serverList); }); });
+  /** One mode or membership change at a time; each holds the walk. */
+  let membershipBusy = false;
+  let membershipError = $state('');
+  const membershipFrozen = () => migrationBlocked || !!switching || serverSwitch.guarding || membershipBusy;
+
+  /** Settings › Connection's mode (③b-3). Single→Aggregate keeps the
+   * connection the app is on and joins the rest. Aggregate→Single keeps the
+   * focus and lets every member go — after asking each member's tree, one at
+   * a time, in that tree (`walkLeave`); a "keep editing" anywhere changes
+   * neither the mode nor any connection. */
+  async function setConnectionMode(next) {
+    if (membershipFrozen() || next === readMode(localStorage)) return;
+    membershipBusy = true;
+    membershipError = '';
+    try {
+      if (next === 'single') {
+        for (const member of aggregate.runtimes()) {
+          if (!(await serverSwitch.guard(() => walkLeave(member)))) return;
+        }
+      }
+      try { writeMode(localStorage, next); } catch { storageFailed(); return; }
+      connMode = next;
+      syncMembers();
+    } finally { membershipBusy = false; }
+  }
+  /** Include or exclude one saved server (Aggregate, ③b-3). Including joins
+   * it. Excluding destroys its tree, so that tree is asked first, alone; the
+   * focus is excluded only by moving the focus first, to the next connected
+   * member in saved order. */
+  async function setIncluded(id, on) {
+    if (membershipFrozen() || connMode !== 'aggregate') return;
+    membershipBusy = true;
+    membershipError = '';
+    try {
+      if (!on && id === currentServerId(localStorage)) {
+        const next = aggregate.runtimes().find((r) => r.connection.isConnected());
+        const leaving = scopeSwap.bound();
+        // Nowhere to move the focus: refused, with the reason.
+        if (!next || !leaving) { membershipError = t('serverOnlyConnected'); return; }
+        if (!(await serverSwitch.guard(() => walkLeave(leaving)))) return;
+        if (!focusMember(next.id)) return;
+      } else if (!on) {
+        const member = aggregate.runtimes().find((r) => r.id === id);
+        if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return;
+      }
+      try {
+        excludedIds = setExcluded(localStorage, loadServers(localStorage), id, !on);
+      } catch {
+        // The stored set could not be READ: writing over it would include
+        // every server again (D5). Said, not done.
+        membershipError = t('migrationBlockedNote');
+        storageFailed();
+        return;
+      }
+      syncMembers();
+    } finally { membershipBusy = false; }
+  }
+  /** What a server list row needs in Aggregate; null in Single. */
+  const memberRows = $derived(connMode === 'aggregate' ? {
+    included: (id) => !excludedIds.has(id),
+    status: (id) => aggregate.status(id),
+    ontoggle: (id, on) => { void setIncluded(id, on); },
+  } : null);
+
   /** The bound runtime's socket closed under it. */
   function onDrop() {
     if (switching) return; // the switch is bringing another server up
@@ -1827,6 +1897,11 @@
     const target = loadServers(localStorage).find((s) => s.id === id);
     if (!target) { loadServerRegistry(); return; } // stale row (entry vanished)
     if (focusMember(id)) return;
+    // Aggregate: the server the person picks is one they want — an excluded
+    // one is included as the switch begins (③b-3).
+    if (connMode === 'aggregate' && excludedIds.has(id) && !migrationBlocked) {
+      try { excludedIds = setExcluded(localStorage, loadServers(localStorage), id, false); } catch { /* the switch still runs */ }
+    }
     void switchTo(target);
   }
   /** Aggregate: move the focus onto member `id`, which is already up with
@@ -3180,7 +3255,8 @@
       <ServerList bind:this={serverListEl} servers={serverList} currentId={serverCurId} link={serverLink} container={serverMenuEl}
         onpick={(id) => { serverMenuOpen = false; doServerSwitch(id); }}
         onrename={serverRename} onremove={serverRemove}
-        onadd={serverAddRow} onclose={() => (serverMenuOpen = false)} frozen={migrationBlocked ? t('migrationBlockedNote') : ''} />
+        onadd={serverAddRow} onclose={() => (serverMenuOpen = false)} frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
+        members={memberRows} notice={membershipError} />
     </div>
   {/if}
 
@@ -3198,7 +3274,8 @@
   {#snippet savedServers()}
     <!-- Settings › Connection: the same ServerList as the popover (board 315). -->
     <ServerList variant="page" servers={serverList} currentId={serverCurId} link={serverLink}
-      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} frozen={migrationBlocked ? t('migrationBlockedNote') : ''} />
+      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
+      members={memberRows} notice={membershipError} />
   {/snippet}
 
   {#if addServer}
@@ -3267,6 +3344,7 @@
     <div class="page-layer" class:hidden={page !== 'prefs'}>
     <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
+      connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
       {serverName} onServers={connected && layout.isTouchDevice ? toggleServerMenu : null} serversOpen={serverMenuOpen} serversControls={serverPickerId}
       {optimizing} {linkCopied}
       onClose={togglePrefs}

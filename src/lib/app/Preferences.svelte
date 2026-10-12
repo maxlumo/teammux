@@ -63,6 +63,9 @@
     serversOpen = false,
     serversControls = undefined,
     savedServers = null,
+    connectionMode = 'single',
+    onConnectionMode = null,
+    connectionModeFrozen = false,
   }: {
     connected?: boolean;
     theme?: string;
@@ -138,6 +141,13 @@
     /** Every saved server (board 315): App's ONE ServerList, rendered here in
      *  page layout — same rows and actions as the switcher popover. */
     savedServers?: import('svelte').Snippet | null;
+    /** How many saved servers this device connects to (board #335 ③):
+     *  'single' or 'aggregate'. App owns the change — it asks the trees a
+     *  switch to Single would destroy — so this only reports the choice. */
+    connectionMode?: 'single' | 'aggregate';
+    onConnectionMode?: ((mode: 'single' | 'aggregate') => void) | null;
+    /** The registry is frozen (blocked): the mode cannot change either. */
+    connectionModeFrozen?: boolean;
   } = $props();
 
   const TAB_KEY = 'tmux_settings_tab';
@@ -923,6 +933,16 @@
         </div>
       {:else}
         <div class="config-section">
+          {#if onConnectionMode}
+            <div class="preference-row">
+              <div class="pref-label"><strong class="config-field-label">{t('connectionMode')}</strong></div>
+              <div class="pref-control">
+              <Segmented value={connectionMode} onchange={(m) => onConnectionMode?.(m)} ariaLabel={t('connectionMode')}
+                disabled={connectionModeFrozen}
+                options={[{ value: 'single', label: t('connectionModeSingle') }, { value: 'aggregate', label: t('connectionModeAggregate') }]} />
+              </div>
+            </div>
+          {/if}
           {#if savedServers}
             <div class="saved-servers" role="group" aria-label={t('serversSaved')}>
               <strong class="config-field-label">{t('serversSaved')}</strong>

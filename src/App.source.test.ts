@@ -1343,5 +1343,19 @@ test('Aggregate focus moves between connected members without a teardown (#335 �
   assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?scopeSwap\.refocus\(next\)[\s\S]*?aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
     'CURRENT, then the front, then the set: the old focus becomes a member, still up');
   assert.doesNotMatch(fn, /swap\(|dial\(|confirmLeave|ends\.end|fleet\.drop/u, 'nothing is torn down, dialled or asked');
-  assert.match(source, /if \(focusMember\(id\)\) return;\s*void switchTo\(target\);/u, 'else the ordinary switch');
+  // ③b-3: an excluded server the person picks is included as the switch begins.
+  assert.match(source, /if \(focusMember\(id\)\) return;[\s\S]{0,500}?if \(connMode === 'aggregate' && excludedIds\.has\(id\) && !migrationBlocked\) \{[^\n]*\n[^\n]*\n\s*\}\s*void switchTo\(target\);/u, 'else the ordinary switch');
+});
+
+test('the mode and the include switches go through App s two changes, each walking what it destroys (#335 ③b-3)', () => {
+  const mode = source.match(/async function setConnectionMode\(next\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  assert.match(mode, /if \(next === 'single'\) \{\s*for \(const member of aggregate\.runtimes\(\)\) \{\s*if \(!\(await serverSwitch\.guard\(\(\) => walkLeave\(member\)\)\)\) return;/u,
+    'to Single: every member s tree is asked, and any keep-editing changes nothing');
+  assert.ok(mode.indexOf('walkLeave(') < mode.indexOf('writeMode('), 'ask, then write');
+  const inc = source.match(/async function setIncluded\(id, on\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  assert.match(inc, /walkLeave\(member\)/u, 'a member s exclusion asks its tree');
+  assert.match(inc, /walkLeave\(leaving\)[\s\S]*?focusMember\(next\.id\)/u, 'the focus is asked, then moved, before it is excluded');
+  assert.ok(inc.indexOf('walkLeave(') < inc.indexOf('setExcluded('), 'ask, then write');
+  assert.equal([...source.matchAll(/writeMode\(/gu)].length, 1, 'one writer of the mode');
+  assert.equal([...source.matchAll(/\bsetExcluded\(/gu)].length, 2, 'the switch and a pick of an excluded row');
 });

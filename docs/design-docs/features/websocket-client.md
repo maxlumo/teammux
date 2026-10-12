@@ -1054,6 +1054,24 @@ A member that is not connected is not a focus change: the ordinary switch
 decides, and it asks the focused tree's guards because it replaces it. Single
 switches as before.
 
+**The mode and the include switches** (③b-3). Settings › Connection carries
+the device's mode (`Connect to: One server / All included`, the shared
+`Segmented`); in Aggregate every row of the ONE server list (popover and page
+alike) carries its include switch (the shared `Switch`) and its member's
+derived status — the dot in the one status language, and a failure's reason
+after the address (not answering, paused on storage, reaches another known
+server). Each change is App's and walks what it destroys before it writes:
+Single→Aggregate keeps the connection the app is on and joins the rest;
+Aggregate→Single asks every member's tree, one at a time, in that tree, and
+any "keep editing" changes neither the mode nor a connection; excluding a
+member asks only its tree; excluding the focus asks the focus's tree, moves
+the focus to the next connected member in saved order (D2), then excludes it
+— with no other member connected it is refused, the list saying why.
+Including joins. Picking an excluded row includes it as the switch begins. A
+new saved server is included (nothing excluded it) and a rename changes
+nothing (the set holds ids). While blocked the mode and every switch are
+frozen with the registry. One change at a time: each holds the walk.
+
 **A leave walk asks the tree it destroys, in that tree** (③b-2; the (runtime,
 view) contract ②b deferred). Every walk goes through `walkLeave(runtime)`,
 the one caller of `confirmLeave`: only the guards registered under that
