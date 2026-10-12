@@ -1,0 +1,23 @@
+# The docker build context is the repo root (docker/validator/Dockerfile
+# builds this checkout's web UI, tmm and server inside the image). Everything
+# a build does not read stays out, so the context is megabytes, not the
+# gigabytes of node_modules + target, and a host binary can never sneak in.
+.git
+node_modules
+dist
+target
+src-tauri/target
+src-tauri/gen
+temp
+worktree
+build
+.tmm
+.kiro
+.claude
+.playwright-mcp
+agent-team-page
+docs
+*.apk
+*.db
+*.db-wal
+*.db-shm

@@ -2,8 +2,9 @@
 
 Frontend tests and repository development-script tests run with `npm test`
 (`node --test`, no framework, no tmux needed). Rust tests: `npm run test:rust`
-(`cargo test -- --test-threads=1`, needs a running tmux). This file governs the
-frontend side, and the one Rust rule below.
+(`cargo test -- --test-threads=1`, needs a running tmux). Multi-server work has a
+third, final gate, `npm run test:e2e:docker` (below). This file governs the
+frontend side, the one Rust rule below, and that gate.
 
 ## The Rust suite runs SEQUENTIALLY and ISOLATED, and never kills a server it did not make (board #349)
 
@@ -110,6 +111,56 @@ locks did NOT revive the kill (the `-S` alone prevents it) — that was recorded
 as such, and is why the lock's own contract is now tested as state
 restoration, not as a prevented kill. `CARGO_TARGET_DIR` and worktrees are
 fine.
+
+## Multi-server work ends in the Docker environment (board #352)
+
+Owner, 2026-10-12: "像你测试整体效果的时候，比如模拟多个连接，可以用 docker 做环境隔离来最终测试".
+The multi-server feature (#335 ③, several gateways in one app) was verified
+against ONE real gateway plus fakes, and its two-member browser check against
+scratch gateways built on this host — their own ports and config dirs, but the
+host's kernel, users, `/tmp` and the owner's tmux server. Every incident above
+came from test infrastructure sharing the host with the owner's sessions.
+
+`npm run test:e2e:docker` (`scripts/e2e-docker.mjs`) is the FINAL gate for any
+change that touches more than one server. It brings up
+`docker/validator/compose.yaml`: three containers (`gw-a`, `gw-b`, `gw-c`),
+each a real `tmm gateway` with its own tmux server, config root (a token
+generated in the container, its own `machine_id`, `state.db`), a managed
+project `demo` with one MANAGED agent `kiro` (isolated home, launch recipe;
+the `kiro-cli` inside is a stand-in that echoes, so no hook fires and nothing
+calls a service), and its own address on the compose network. The image builds
+THIS checkout's web UI, `tmm` and `server` inside the container (`embed-ui`);
+no host binary, host path or host socket is ever mounted, and the script runs
+no tmux, no systemctl and not the host's `tmm`. The smoke then logs in from the
+host through each published `127.0.0.1` port, which answers with that
+machine's id; checks `demo` is up, `/` serves the web UI and the agent is
+managed and running; checks the three ids and tokens differ and each id is the
+one in that container's file; asks a `tmm` inside `gw-a` for the host's
+gateway (the network's gateway address, read from docker, never from the
+owner's config) and requires it to fail (the issue's negative control: a test
+that depends on the host gateway must fail inside the network); restarts
+`gw-b` and requires the same identity, project and agent back — the mechanism
+the browser matrix will use for "server dies" and "reconnect reaches another
+machine". It tears down with `down -v --remove-orphans` on every path;
+`--keep` leaves the machines up and prints each `ws://` address and token for
+a browser session by hand, and the next run tears that environment down
+first, so every verdict starts from fresh machines. The first run compiles
+tmm + server in release inside the image (minutes; the cargo registry and
+target are BuildKit cache mounts, so later builds are incremental); a warm
+run is ≈ 45 s. Measured on Docker 25.0.14 / Compose v5.5.0, host
+tmux session count unchanged across every run.
+
+One limit, written down so it is not mistaken for a guarantee: the compose
+network is not `internal` — on Docker 25 published ports do not forward from
+an internal network (measured: the host could not connect at all), and a
+browser on the host must reach the gateways. A container can therefore route
+to the host's bridge address; the host gateway stays out of reach because it
+binds `127.0.0.1` (as on this host) and because no container holds its token.
+The smoke asserts the outcome, not the route.
+
+The browser matrix itself (alias/canonical absorb, address redial, block and
+Retry, orphan ask — reviewer M1 + validator E1–E3) is the follow-up on #352;
+until it lands, the validator uses `--keep` and runs those cells by hand.
 
 ## Three Test Tiers
 

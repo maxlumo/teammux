@@ -1,0 +1,41 @@
+# Three isolated gateways for the multi-server e2e pass (board #352). Each
+# service is one simulated machine: its own filesystem (config.toml, token,
+# machine_id, state.db, isolated agent homes), its own tmux server, its own
+# address on the `tmm` network. Nothing from the host is mounted — not the
+# tmux socket, not ~/.config, not the repo — so `down` leaves nothing and no
+# test can reach the operator's gateway or sessions.
+#
+#   docker compose -f docker/validator/compose.yaml up -d --build --wait
+#   docker compose -f docker/validator/compose.yaml exec -T gw-a \
+#       cat /home/tmm/.config/tmux-mobile/config.toml     # its token
+#   docker compose -f docker/validator/compose.yaml down -v --remove-orphans
+#
+# `npm run test:e2e:docker` (scripts/e2e-docker.mjs) does all of that and the
+# smoke in between. Host ports are bound to 127.0.0.1 only; override with
+# TMM_E2E_PORT_A/B/C when one is taken.
+name: tmm-e2e
+
+x-gateway: &gateway
+  build:
+    context: ../..
+    dockerfile: docker/validator/Dockerfile
+  image: tmm-e2e-gateway
+  init: true
+  networks: [tmm]
+
+services:
+  gw-a:
+    <<: *gateway
+    hostname: gw-a
+    ports: ["127.0.0.1:${TMM_E2E_PORT_A:-19901}:9899"]
+  gw-b:
+    <<: *gateway
+    hostname: gw-b
+    ports: ["127.0.0.1:${TMM_E2E_PORT_B:-19902}:9899"]
+  gw-c:
+    <<: *gateway
+    hostname: gw-c
+    ports: ["127.0.0.1:${TMM_E2E_PORT_C:-19903}:9899"]
+
+networks:
+  tmm: {}

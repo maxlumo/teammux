@@ -1,0 +1,22 @@
+#!/bin/sh
+# A stand-in for kiro-cli inside the e2e machines (board #352). It is NOT a
+# model: it exists so the kiro backend has something to launch into the
+# agent window, so the pane, the isolated home and the recipe are real while
+# nothing calls a service. Lines typed into the pane are echoed back; none of
+# kiro's status-line vocabulary is painted, so no sniffer mistakes it for a
+# working agent.
+case "${1:-} ${2:-}" in
+  "chat --list-models")
+    echo '{"models":[{"model_id":"fake-model"}]}'
+    exit 0
+    ;;
+esac
+if [ "${1:-}" != chat ]; then
+  echo "fake kiro-cli: only 'chat' is understood (got: $*)" >&2
+  exit 2
+fi
+echo "fake kiro-cli (tmux-mobile e2e) — args: $*"
+echo "type a line and it comes back; Ctrl-D ends the session"
+while IFS= read -r line; do
+  printf '> %s\n' "$line"
+done

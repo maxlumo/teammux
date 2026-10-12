@@ -66,6 +66,7 @@ npm run build:android    # APK (aarch64) — ends with the build-dir postflight
 npm test                 # frontend + script tests (node --test, no tmux)
 npm run check            # svelte-check (the ONLY type check)
 npm run test:rust        # Rust tests, sequential, needs a running tmux
+npm run test:e2e:docker  # 3 isolated gateways in Docker — the final gate for multi-server work
 ```
 
 Everything else about running and building — the supervised units on this host
