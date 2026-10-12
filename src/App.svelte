@@ -40,6 +40,7 @@
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag } from './lib/app/server-tag.ts';
   import { createHubUnion } from './lib/app/hub-union.svelte.ts';
+  import { createSessionsUnion } from './lib/app/sessions-union.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -1323,6 +1324,23 @@
     source: hubUnion, included: tagScope.included,
     runtimeOf: (id) => { const r = scopeSwap.bound()?.id === id ? scopeSwap.bound() : background.find((x) => x.id === id); return r && r.alive() ? r : null; },
   } : null);
+  /** The Terminal sidebar's sessions union (③c-3, `sessions-union.svelte.ts`):
+   * the same shape as the Hub's; a foreign session is a SELECTOR (D3). */
+  const sessionsUnion = createSessionsUnion();
+  const sessionsUnionFor = $derived(connMode === 'aggregate' ? { source: sessionsUnion, included: tagScope.included } : null);
+  /** Another server's session picked in the Terminal sidebar (③c-3): focus
+   * that server (D2) and open the pane THERE — `openTerminal` writes into
+   * the focused tree's view, which the focus move just made that server's.
+   * A server that is not a connected member is not a focus change. */
+  function pickServerPane(ref) {
+    const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
+    if (!target) return;
+    const moved = focusMember(ref.serverId);
+    if (moved !== true) { pickMember(target); return; }
+    if (ref.target && ref.target !== `${ref.session}:`) openTerminal(ref.session, ref.target);
+    else page = 'terminal';
+    sessListOpen = false;
+  }
   /** A union row of ANOTHER server picked (③c-2): focus that server (D2:
    * no teardown) and hand its Hub the session as a landing it alone reads.
    * A server that is not a connected member is not a focus change — the
@@ -3642,6 +3660,7 @@
           onGoBack={(fn) => v.sessionsGoBack = fn}
           visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
+          union={sessionsUnionFor} onPickServer={pickServerPane}
           chips={false} />
       </aside>
       {#if layout.isTouchDevice && sessListOpen}

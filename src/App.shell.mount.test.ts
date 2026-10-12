@@ -5273,3 +5273,68 @@ test('R2(b): a block between the orphan s confirmation and its dismissal keeps t
   assert.equal(draftB.isConnected, false, 'now it goes');
   assert.ok(conn(h, 'b')!.disposed());
 });
+
+// ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────
+
+/** Per-server session lists: A has `work`; B has `work` and `deploy`. */
+const twoSessionLists = () => {
+  const byServer: Record<string, { sessions: unknown[]; panes: unknown[] }> = {
+    a: { sessions: [{ name: 'work', windows: 1 }], panes: [{ session: 'work', window: 1, pane: 0 }] },
+    b: { sessions: [{ name: 'work', windows: 1 }, { name: 'deploy', windows: 2 }], panes: [{ session: 'work', window: 1, pane: 0 }, { session: 'deploy', window: 1, pane: 0 }, { session: 'deploy', window: 2, pane: 0 }] },
+  };
+  const mine = () => byServer[asking()] ?? { sessions: [], panes: [] };
+  return {
+    listSessionsWithPanes: async () => mine(),
+    listSessions: async () => mine().sessions,
+    listPanes: async (session: string) => (mine().panes as any[]).filter((p) => p.session === session),
+    projectList: async () => ({ projects: [] }),
+  };
+};
+const foreignRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .session.foreign:not(.missing)')]
+  .map((r) => `${r.querySelector('.server-tag')?.textContent ?? '-'}:${r.querySelector('.name')?.textContent}`);
+const ownRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .session:not(.foreign) .session-row .name')].map((n) => n.textContent);
+
+test('③c-3: the focused Terminal sidebar lists the other included servers sessions as a tagged selector under its own; a hidden member loads its list once and never polls', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: twoSessionLists() });
+  for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(ownRows(h), ['work'], 'A s own list, untagged, as before');
+  assert.deepEqual(foreignRows(h), ['beta:work', 'beta:deploy'], 'B s sessions, tagged, below');
+  const before = events.filter((e) => e === 'rpc@b:listSessionsWithPanes').length;
+  assert.equal(before, 1, 'B s hidden Sessions loaded its list once');
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.equal(events.filter((e) => e === 'rpc@b:listSessionsWithPanes').length, before, 'and never polls (D4: this page has no poll, hidden or shown)');
+});
+
+test('③c-3: picking another server s session focuses that server and opens the pane THERE — A s terminal is untouched', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoSessionLists() });
+  for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!;
+  const row = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .session.foreign')].find((r) => r.querySelector('.name')?.textContent === 'deploy')!;
+  row.querySelector<HTMLElement>('.session-row')!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
+  const front = trees(h.app).find((x) => !x.held)!;
+  assert.equal(h.restored(), 'b:deploy:1.0', 'B s record: deploy, as B s own ref');
+  assert.ok(a.isConnected() && !a.disposed(), 'A untouched');
+  const parkedA = JSON.parse(ls.getItem('tmux_state::a')!);
+  assert.equal(parkedA.pane?.target, 'work:1.0', 'A s own terminal still on work');
+  assert.ok(front, 'B in front');
+  // B s sidebar now lists A s sessions as the foreign section.
+  for (let i = 0; i < 20 && foreignRows(h).length < 1; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(foreignRows(h), ['alpha:work']);
+});
+
+test('③c-3: Single lists no other servers', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, calls: events, rpc: twoSessionLists() });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(foreignRows(h), []);
+  assert.equal(h.app.document.querySelector('.term-side .group-label .server-tag'), null);
+});

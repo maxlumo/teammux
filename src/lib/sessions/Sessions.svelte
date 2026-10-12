@@ -1,6 +1,9 @@
 <script lang="ts">
   import { useServerRuntime } from '../app/server-context.ts';
   import type { TmuxSession, TmuxPane } from '../core/ws.ts';
+  import type { SessionsUnion, SessionPick } from '../app/sessions-union.svelte.ts';
+  import type { PaneRef } from '../app/refs.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
   import AgentChip from '../ui/AgentChip.svelte';
@@ -22,13 +25,21 @@
   // Terminal's sidebar — the terminal already has a window bar, and the rows
   // are right below (owner: "左侧侧边栏不要显示" that bar). Search moves to
   // the bottom bar in that mode rather than being lost with the row.
-  let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true }: {
+  /** `union` (board #335 ③c-3): App's one sessions union source and the
+   * included servers. This page publishes its own list there and lists every
+   * OTHER included server's sessions below its own, tagged, as a selector:
+   * picking one is the host's (`onPickServer`: focus that server, open the
+   * pane there). Null: this server's list alone (Single). */
+  let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true,
+    union = null, onPickServer = null }: {
     openTerminal: (session: string, target: string, command?: string) => void;
     activeTarget?: string;
     visible?: boolean;
     onPick?: (() => void) | null;
     onGoBack?: ((fn: () => boolean) => void) | null;
     chips?: boolean;
+    union?: { source: SessionsUnion; included: readonly { id: string; name: string }[] } | null;
+    onPickServer?: ((ref: PaneRef) => void) | null;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
@@ -188,8 +199,11 @@
   }
 
   // ─── Data loading ──────────────────────────────────────
+  // ③c-3: a hidden member in a union loads its list ONCE so the selector can
+  // show it (D4: list only; this page never had a poll, and gains none). Its
+  // list refreshes as before when it is shown or its server reconnects.
   $effect(() => {
-    if (visible) void refresh();
+    if (visible || union) void refresh();
     return () => {
       viewEpoch++;
       pendingKill = null; killing = false; killError = '';
@@ -230,10 +244,24 @@
       panes = grouped;
       error = '';
       listReady = true;
+      publish();
     } catch (e) {
       if (generation === viewEpoch) error = (e as Error).message;
     }
   }
+
+  /** What the union selector needs of this server's sessions (③c-3). */
+  function publish() {
+    if (!union) return;
+    const picks: SessionPick[] = sessions.map((s) => {
+      const p = (panes[s.name] || [])[0];
+      return { name: s.name, windows: s.windows, attached: !!s.attached, target: p ? `${p.session}:${p.window}.${p.pane}` : '' };
+    });
+    union.source.publish(runtime!, serverId, picks);
+  }
+  $effect(() => () => { union?.source.withdraw(runtime!); });
+  /** The other included servers' sessions, tagged, and who has not answered. */
+  const foreign = $derived(union ? union.source.rows(union.included, serverId) : null);
 
   async function doRefresh() {
     refreshing = true;
@@ -660,6 +688,33 @@
           {t('noSessions')}
         {/if}
       </div>
+    {/if}
+    <!-- ③c-3: every OTHER included server's sessions, a SELECTOR (D3): a
+         row focuses that server and opens the pane there; the panes, kill
+         and search above stay this server's. Not searched: the query is a
+         question about this server's list. -->
+    {#if foreign && !isSearching && (foreign.rows.length || foreign.missing.length)}
+      <div class="group-label" class:side-h={!chips}>
+        <Icon name="swap-h" size={12} />
+        {t('groupOtherServers')}
+      </div>
+      {#each foreign.rows as r (r.key)}
+        <div class="session foreign" data-server={r.serverId}>
+          <div class="session-row" role="button" tabindex="0"
+            onclick={() => { onPickServer?.(r.ref); onPick?.(); }}
+            onkeydown={(e) => { if (e.key === 'Enter') { onPickServer?.(r.ref); onPick?.(); } }}>
+            <span class="dot" class:attached={r.item.attached}></span>
+            <span class="name">{r.item.name}</span>
+            <ServerTag name={r.tag} />
+            <span class="trailing">{#if r.item.windows > 1}<span class="w-badge">{r.item.windows}w</span>{/if}</span>
+          </div>
+        </div>
+      {/each}
+      {#each (union?.included ?? []).filter((s) => foreign.missing.includes(s.id)) as m (m.id)}
+        <div class="session foreign missing" role="note">
+          <div class="session-row"><span class="dot"></span><span class="name">{m.name}</span><span class="trailing"><span class="ago">{t('hubUnionMissing')}</span></span></div>
+        </div>
+      {/each}
     {/if}
     </div>
     {/if}

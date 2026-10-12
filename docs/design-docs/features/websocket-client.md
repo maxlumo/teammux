@@ -1135,6 +1135,21 @@ is held here: a hidden member's Hub runs only its list refresh (the 20 s
 `reload`), opens no room and polls nothing of one; its room opens when it is
 first shown. Single hands no union: the Hub is as before.
 
+**The Terminal sidebar's other servers are a selector** (③c-3;
+`app/sessions-union.svelte.ts`). The same shape as the Hub's union, with
+tmux's order as each server's rule, so the slices concatenate in saved order
+with no comparator. Each tree's Sessions page publishes the list its server
+answered (name, window count, attached, first pane as the target) and the
+focused page lists every OTHER included server's sessions under its own,
+tagged, with a server that has not published named as missing. Picking one
+is not a terminal here (D3: a split stays within one tree): it focuses that
+server (D2) and opens the pane there — `openTerminal` writes into the focused
+tree's view, which the focus move just made that server's. A server that is
+not a connected member is not a focus change. Panes, kill, search and the
+pane picker stay this server's; the foreign section is not searched. D4: a
+hidden member's Sessions loads its list once so the selector can show it; the
+page never had a poll and gains none.
+
 **Identity ends now; an editor is destroyed only when asked** (reviewer P1-5
 on 3a0b4feb; orchestrator 03:40). A published member can lose its identity
 without anyone asking for it: identity repair absorbs its entry into the

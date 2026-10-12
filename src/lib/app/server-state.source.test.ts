@@ -98,7 +98,11 @@ test('the identity modules have exactly the production consumers this commit giv
       // serverId (App's); and the Hub reads `refKey(sessionRef(own id, …))`
       // for its own open row and lands a foreign pick through its ref — a
       // ref it was handed, never one it named for another server.
-      'src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte'],
+      'src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte',
+      // ③c-3: the sessions union mints each foreign row's PaneRef from the
+      // slice's serverId (App's); Sessions only hands the ref it was given
+      // back to the host (a type import).
+      'src/lib/app/sessions-union.svelte.ts', 'src/lib/sessions/Sessions.svelte'],
     'nav-saved.ts': ['src/App.svelte'],
     // ③b-1: the member set names the runtime and dial-result TYPES only.
     'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],
@@ -130,7 +134,9 @@ test('the identity modules have exactly the production consumers this commit giv
     // ③c-2: the first production union — App's Hub union source merges the
     // slices; the Hub renders the merge and runs a foreign row's action
     // through `onRow`.
-    'server-union.ts': ['src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte'],
+    'server-union.ts': ['src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte',
+      // ③c-3: the sessions union merges by server order; Sessions renders it.
+      'src/lib/app/sessions-union.svelte.ts'],
   };
   const found: Record<string, string[]> = {};
   for await (const file of glob('src/**/*.{ts,svelte}')) {
