@@ -251,9 +251,13 @@ export async function runE2E({
   // on a signal, so the signal does the down itself (synchronously) and exits
   // non-zero. `--keep` keeps even then.
   let up = false;
+  let passed = false;
   onSignal((sig) => {
     log(`[e2e:docker] ${sig}`);
-    if (up && !keep) down(sig);
+    if (up && !keep) {
+      const left = down(sig);
+      if (left) log(`[e2e:docker] ${left}`);
+    }
     process.exit(130);
   });
 
@@ -330,6 +334,7 @@ export async function runE2E({
       log('[e2e:docker] --keep: the machines stay up. Connect a browser to each (token per machine):');
       for (const m of machines) log(`  ${m.name}  ${m.url}  token ${m.token}`);
       log(`  down: docker compose -p ${COMPOSE_PROJECT} -f ${composeFile} down -v --remove-orphans`);
+      passed = true;
       return 0;
     }
     // PASS is said only once the machines are gone: "every path leaves
@@ -349,7 +354,7 @@ export async function runE2E({
     if (up && !keep) {
       const left = down('after failure');
       if (left) log(`[e2e:docker] ${left}`);
-    } else if (up && keep) {
+    } else if (up && keep && !passed) {
       log(`[e2e:docker] --keep: the machines stay up after this failure; end them with docker compose -p ${COMPOSE_PROJECT} -f ${composeFile} down -v --remove-orphans`);
     }
   }

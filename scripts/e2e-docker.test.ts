@@ -312,6 +312,14 @@ test('--keep leaves the machines up and prints how to reach them', async () => {
   assert.ok(f.logs.some((l) => /gw-a\s+ws:\/\/127\.0\.0\.1:19901\s+token tok-gw-a/.test(l)), f.logs.join('\n'));
   assert.ok(f.logs.some((l) => /docker compose -p tmm-e2e -f .* down -v --remove-orphans/.test(l)), 'how to end it');
   assert.ok(f.logs.some((l) => /restarting gw-b/.test(l)));
+  assert.ok(!f.logs.some((l) => /after this failure/.test(l)), 'a pass is not a failure');
+});
+
+test('--keep after a FAILURE says the machines are still up and how to end them', async () => {
+  const f = fakeDocker({ hostProbe: { status: 124, stderr: '' } });
+  assert.equal(await f.run(['--keep']), 1);
+  assert.ok(f.logs.some((l) => /--keep: the machines stay up after this failure; end them with docker compose -p tmm-e2e/.test(l)), f.logs.join('\n'));
+  assert.ok(f.isUp());
 });
 
 test('a signal mid-run tears down (unless --keep) and exits 130', async () => {
@@ -332,4 +340,17 @@ test('a signal mid-run tears down (unless --keep) and exits 130', async () => {
     const downsAfterUp = f.calls.slice(f.calls.findIndex((c) => c.includes('up'))).filter((c) => c.includes('down') && c.includes('-v'));
     assert.equal(downsAfterUp.length > 0, expectDown, `${JSON.stringify(argv)}: ${f.logs.join('\n')}`);
   }
+  // A down that fails on the signal path names the error and the clean-up command.
+  const f = fakeDocker({ postDown: 1 });
+  let handler: ((sig: string) => void) | undefined;
+  const realExit = process.exit;
+  (process as unknown as { exit: (c: number) => void }).exit = () => {};
+  try {
+    const login = async (url: string) => { if (url.endsWith('19901') && handler) handler('SIGTERM'); return { machineId: `m-${url.slice(-1)}`, sessions: ['demo'] }; };
+    await f.run([], { onSignal: (h: (sig: string) => void) => { handler = h; }, loginAndList: login });
+  } finally {
+    process.exit = realExit;
+  }
+  const at = f.logs.findIndex((l) => /\[e2e:docker\] SIGTERM/.test(l));
+  assert.ok(f.logs.slice(at).some((l) => /down exited 1; the environment may be left behind — docker compose -p tmm-e2e/.test(l)), f.logs.join('\n'));
 });
