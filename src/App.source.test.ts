@@ -1320,3 +1320,13 @@ test('a reconnect is announced for ONE server, named (board #335 ②b-4, reviewe
   assert.match(source, /function announceReconnected\(runtime = bound\(\)\) \{\s*const id = runtime\?\.id;\s*if \(id\) window\.dispatchEvent\(new CustomEvent\('ws-reconnected', \{ detail: \{ serverId: id \} \}\)\);/u,
     'naming the bound runtime, and never with no server');
 });
+
+test('Aggregate focus moves between connected members without a teardown (#335 ③b-2, D2)', () => {
+  const fn = source.match(/function focusMember\(id\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
+  assert.match(fn, /if \(readMode\(localStorage\) !== 'aggregate' \|\| migrationBlocked \|\| switching \|\| serverSwitch\.guarding\) return false;/u);
+  assert.match(fn, /!next\.connection\.isConnected\(\)/u, 'a member that is not connected is not a focus change (orchestrator 02:28)');
+  assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?scopeSwap\.refocus\(next\)[\s\S]*?aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
+    'CURRENT, then the front, then the set: the old focus becomes a member, still up');
+  assert.doesNotMatch(fn, /swap\(|dial\(|confirmLeave|ends\.end|fleet\.drop/u, 'nothing is torn down, dialled or asked');
+  assert.match(source, /if \(focusMember\(id\)\) return;\s*void switchTo\(target\);/u, 'else the ordinary switch');
+});

@@ -45,7 +45,7 @@
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
-  import { activateConnected, adoptHostname, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
+  import { activateConnected, adoptHostname, focusServer, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -1803,7 +1803,38 @@
   function doServerSwitch(id) {
     const target = loadServers(localStorage).find((s) => s.id === id);
     if (!target) { loadServerRegistry(); return; } // stale row (entry vanished)
+    if (focusMember(id)) return;
     void switchTo(target);
+  }
+  /** Aggregate: move the focus onto member `id`, which is already up with
+   * its own tree (#335 D2). CURRENT and the active mirror name it, its tree
+   * comes to the front and the one that was focused stays mounted, up, as a
+   * member — nothing dials, nothing is torn down, so no leave walk runs and
+   * no draft is at stake. False when this is not such a move (Single, a
+   * member not up yet, a switch or a walk in progress, blocked): the
+   * ordinary switch then decides. */
+  function focusMember(id) {
+    if (readMode(localStorage) !== 'aggregate' || migrationBlocked || switching || serverSwitch.guarding) return false;
+    const next = aggregate.runtimes().find((r) => r.id === id);
+    const left = scopeSwap.bound();
+    if (!next || !left || next === left || !next.connection.isConnected() || !connected) return false;
+    try {
+      if (!focusServer(localStorage, id)) return false;
+    } catch { storageFailed(); return true; }
+    if (!scopeSwap.refocus(next)) {
+      try { focusServer(localStorage, left.id); } catch { storageFailed(); }
+      return false;
+    }
+    aggregate.handOver(next);
+    aggregate.adopt(left, left.connection.isConnected());
+    serverMenuOpen = false;
+    reconnectError = '';
+    reconnecting = false;
+    serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
+    activeAddress = next.entry().address;
+    loadServerRegistry();
+    syncMembers();
+    return true;
   }
 
   // While the leave guards are asked, Settings stays mounted even when another

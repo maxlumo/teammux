@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CURRENT_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, residentKey,
   activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, RESIDENT_KEYS, hostLabel, loadServers,
-  migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, MOVES_KEY, resumeSlotMove,
+  focusServer, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, MOVES_KEY, resumeSlotMove,
 } from './servers.ts';
 
 function mem(init: Record<string, string> = {}) {
@@ -698,4 +698,21 @@ test('an unreadable conflict store keeps the move open and its slots untouched, 
   assert.equal(s.getItem('tmux_slot_conflicts'), '{not json', 'the store is not written over');
   assert.deepEqual(drafts(s, 'a1'), { work: 'typed on the alias' }, 'the alias s draft is still in its slot');
   assert.ok(s.getItem(MOVES_KEY), 'and the move is still open for Retry');
+});
+
+test('focusServer moves CURRENT and the active mirror to a saved entry and records nothing else (#335 D2)', () => {
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', socket: 'work', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_disconnected: '1',
+  });
+  const registry = s.getItem('tmux_servers');
+  assert.equal(focusServer(s, 'b'), true);
+  assert.equal(s.getItem('tmux_server_current'), 'b');
+  assert.deepEqual([s.getItem('tmux_address'), s.getItem('tmux_token'), s.getItem('tmux_socket'), s.getItem('tmux_disconnected')], ['ws://b:9899', 'tokB', 'work', null]);
+  assert.equal(s.getItem('tmux_servers'), registry, 'the registry is untouched');
+  assert.equal(focusServer(s, 'gone'), false, 'an entry that is not saved');
+  assert.equal(s.getItem('tmux_server_current'), 'b');
 });

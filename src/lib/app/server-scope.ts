@@ -68,6 +68,14 @@ export interface ScopeSwap {
    * is. What a caller awaits before doing anything that must see the subtree
    * actually bound, like restoring that server's navigation. */
   settled(): Promise<void>;
+  /**
+   * Move the FOCUS to `next`, a runtime whose tree is already mounted (an
+   * Aggregate member, #335 D2): nothing is unbound, settled or invalidated —
+   * the tree that was shown stays mounted and is the host's to keep as a
+   * member. Refused (false) while a swap is in flight, with nothing shown, or
+   * when `next` is already shown: a refocus never races a teardown.
+   */
+  refocus(next: ServerRuntime): boolean;
 }
 
 export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): ScopeSwap {
@@ -164,5 +172,14 @@ export function createScopeSwap({ show, settle, invalidate }: ScopeSwapDeps): Sc
     bound,
     swap,
     settled: () => inFlight ?? Promise.resolve(),
+    refocus(next) {
+      // A replacing swap shows NOTHING from its first step until it binds,
+      // so "nothing shown" is also "a swap is in flight": one test refuses
+      // both, and a refocus can never race a teardown.
+      if (!shown || shown === next) return false;
+      shown = next;
+      show(next);
+      return true;
+    },
   };
 }

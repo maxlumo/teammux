@@ -709,6 +709,22 @@ export function activateSwitched(
   return entry;
 }
 
+/** Make the saved entry `id` CURRENT, with its active mirror, and record
+ * nothing else (#335 D2): an Aggregate focus change between members that are
+ * already connected and recorded. Throws when a write fails; false when no
+ * such entry is saved. */
+export function focusServer(storage: Store, id: string): boolean {
+  const entry = loadServers(storage).find((s) => s.id === id);
+  if (!entry) return false;
+  storage.setItem(CURRENT_KEY, entry.id);
+  storage.setItem('tmux_address', entry.address);
+  storage.setItem('tmux_token', entry.token);
+  if (entry.socket) storage.setItem('tmux_socket', entry.socket);
+  else storage.removeItem('tmux_socket');
+  storage.removeItem('tmux_disconnected');
+  return true;
+}
+
 /** Point CURRENT back at `id` — a switch whose target did not come up
  * returns to the server it left (board #335 ②b-4, ruling (a)). Only to an
  * entry that still exists. */

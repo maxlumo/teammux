@@ -1018,6 +1018,19 @@ blocked or mid-switch; a member the focus takes over (a switch made it CURRENT)
 is the focus's from then on, and a failed switch that reused a member leaves it
 a member.
 
+**The focus moves between connected members without a teardown** (#335 D2,
+③b-2; orchestrator 02:28). In Aggregate, picking a member that is up moves
+CURRENT and the active mirror onto it (`focusServer`) and brings its tree to
+the front (`scopeSwap.refocus`); the tree that was focused stays mounted and
+up, and becomes a member (`aggregate.handOver` / `adopt`). Nothing dials,
+nothing is unbound or ended, so no leave walk runs and every draft stays
+where it was — which is also what makes a background tree something a person
+can have edited, and so something a leave walk has to ask (below). A refocus
+is refused while a swap is in flight, while blocked, mid-switch or mid-walk.
+A member that is not connected is not a focus change: the ordinary switch
+decides, and it asks the focused tree's guards because it replaces it. Single
+switches as before.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this

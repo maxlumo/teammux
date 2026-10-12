@@ -216,3 +216,30 @@ test('nothing is shown until the replaced runtime s release has finished (board 
   assert.equal(log.at(-1), 'show:c', 'shown only after every release finished');
   assert.ok(!log.includes('show:b'), 'and B, superseded, was never shown');
 });
+
+test('a refocus moves what is shown without tearing anything down (#335 D2)', async () => {
+  const h = host();
+  const a = handle('a');
+  const b = handle('b');
+  await h.swap.swap(a);
+  h.log.length = 0;
+  assert.equal(h.swap.refocus(b), true);
+  assert.deepEqual(h.log, ['show:b'], 'no unbind, no settle, no invalidate');
+  assert.equal(h.swap.shown(), b);
+  assert.equal(h.swap.bound(), b);
+  assert.equal(h.swap.refocus(b), false, 'already shown');
+});
+
+test('a refocus never races a swap: refused while one is in flight or nothing is shown', async () => {
+  const h = host({ hold: true });
+  const a = handle('a');
+  const b = handle('b');
+  const c = handle('c');
+  assert.equal(h.swap.refocus(a), false, 'nothing shown yet');
+  await h.swap.swap(a);
+  const going = h.swap.swap(b);                    // held at settle
+  assert.equal(h.swap.refocus(c), false, 'a swap is in flight');
+  h.release();
+  await going;
+  assert.equal(h.swap.shown(), b, 'and the swap finished as it would have');
+});

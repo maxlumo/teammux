@@ -3941,3 +3941,80 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
   assert.doesNotMatch(h.app.document.querySelector('.rail-bell')?.getAttribute('aria-label') ?? '', /· 1\b/u, 'and seen there, the alert counts no more');
   assert.ok(conn(h, 'c')!.isConnected() && !events.some((e) => e.startsWith('rpc@a:hubLog')), 'asked of C, never of the alias');
 });
+
+// ─── #335 ③b-2: the focus moves between members; a leave walk asks the
+// member being destroyed, on its own tree ──────────────────────────────
+
+/** Pick `name` from the server list in Settings → Connection, opening it
+ * first unless it is already on screen (a focus move leaves the page where
+ * it was). */
+async function pickServer(h: Awaited<ReturnType<typeof bootApp>>, name: string) {
+  const row = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')]
+    .find((b) => new RegExp(`^${name}\\b`, 'iu').test((b.textContent ?? '').trim()));
+  const r = row();
+  if (!r) { await h.switchTo(name); return; }
+  r.click();
+  for (let i = 0; i < 2; i++) await h.settle();
+}
+
+test('③b-2 (D2): in Aggregate, picking a connected member moves the focus — no dial, no teardown, A s tree and draft stay mounted', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { calls: events, rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  const area = await dirtyEditor(h.app, h.settle);              // A s unsaved edit
+  const a = conn(h, 'a')!, b = conn(h, 'b')!;
+  const dials = events.filter((e) => e.startsWith('dial@') || e.startsWith('candidate:')).length;
+  await pickServer(h, 'beta');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing is destroyed, so nothing asks');
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'CURRENT is B');
+  assert.equal(ls.getItem('tmux_address'), 'ws://b:9899', 'and so is the mirror');
+  assert.equal(events.filter((e) => e.startsWith('dial@') || e.startsWith('candidate:')).length, dials, 'nothing dialled');
+  assert.ok(a.isConnected() && !a.disposed() && b.isConnected(), 'both stay up');
+  const t = trees(h.app);
+  assert.equal(t.length, 2, 'both trees mounted');
+  assert.deepEqual(t.filter((x) => !x.held).length, 1, 'one in front');
+  assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'A s draft is still mounted, in A s tree');
+  assert.ok(area.closest('.scope-tree.held'), 'which is held behind B s now');
+  // And back: A comes to the front with its editor as it was.
+  await pickServer(h, 'alpha');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.ok(!area.closest('.scope-tree.held'), 'A in front again');
+  assert.equal(area.value, '# notes\n\nunsaved');
+  assert.equal(events.filter((e) => e.startsWith('dial@') || e.startsWith('candidate:')).length, dials, 'still nothing dialled');
+});
+
+test('③b-2 (D2): Single switches as before — the leave walk asks A s editor', async (context) => {
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }, undefined, { rpc: editorRpc });
+  for (let i = 0; i < 4; i++) await h.settle();
+  await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'beta');
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'A s editor is asked: Single destroys A s tree');
+});
+
+
+test('③b-2 (D2, orchestrator 02:28): picking a member that is not connected is not a focus change — the ordinary switch decides, asking A first', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, {
+    calls: events, rpc: editorRpc,
+    gate: (url, n) => (url.includes('//b') && n > 0 ? new Promise<void>(() => {}) : null),   // B never answers its own dial
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(conn(h, 'b')?.isConnected() ?? false, false, 'B is a member still dialling');
+  const area = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'beta');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the focus did not move');
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'the switch asks A s editor: it would replace A s tree');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.equal(area.isConnected && area.value, '# notes\n\nunsaved');
+});

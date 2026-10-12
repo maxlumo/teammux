@@ -202,3 +202,34 @@ test('resume redials only published members that are not answering (reviewer P1 
   assert.deepEqual(w.log.filter((l) => l.startsWith('retry:')), ['retry:b'], 'C was answering: left alone');
   assert.deepEqual(w.members.status('b'), { kind: 'reconnecting' });
 });
+
+test('a focus move hands a published member to the window and takes the old focus in, dialling nothing (#335 ③b-2, D2)', async () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  w.rt('b').answer(ok('b'));
+  await settle();
+  const b = w.rt('b');
+  const a = { id: 'a', alive: () => true } as unknown as ServerRuntime;
+  assert.equal(w.members.handOver(b), true, 'B leaves the set');
+  assert.equal(w.members.holds(b), false);
+  assert.deepEqual(w.members.runtimes(), []);
+  assert.equal(w.members.status('b'), null, 'with no row of its own: it is the focus');
+  w.members.adopt(a, true);
+  assert.equal(w.members.holds(a), true, 'A is a member now');
+  assert.deepEqual(w.members.runtimes(), [a], 'published');
+  assert.deepEqual(w.members.status('a'), { kind: 'connected' });
+  assert.ok(!w.log.some((e) => e.startsWith('release:')), 'nothing was let go of');
+  assert.equal(w.log.filter((e) => e.startsWith('dial:')).length, 1, 'and only B s join dialled');
+  // A sync that wants A keeps it as it is — no second dial.
+  w.members.sync([entry('a')]);
+  await settle();
+  assert.equal(w.log.filter((e) => e.startsWith('dial:')).length, 1);
+  assert.ok(w.log.includes('release:b') === false, 'B is not let go of: the window owns it');
+});
+
+test('a member not published yet is not handed over', () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  assert.equal(w.members.handOver(w.rt('b')), false, 'still joining: not a focus move');
+  assert.equal(w.members.holds(w.rt('b')), true);
+});

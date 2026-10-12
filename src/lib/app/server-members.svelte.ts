@@ -88,6 +88,14 @@ export interface Members {
   blocked(runtime: ServerRuntime): void;
   /** Retry: redial every published member that is not answering. */
   resume(): void;
+  /** The focus moved ONTO this published member (#335 D2): it leaves the
+   * set without being let go of — the window owns it now. False when the
+   * set does not hold it published. */
+  handOver(runtime: ServerRuntime): boolean;
+  /** The focus moved OFF this runtime, which stays up (`up`: answering now):
+   * the set holds it as a published member from here, without dialling it
+   * again. */
+  adopt(runtime: ServerRuntime, up: boolean): void;
   /** Stop one member: its attempts end, it is let go of, its status goes. */
   leave(id: ServerId): void;
   leaveAll(): void;
@@ -207,6 +215,19 @@ export function createMembers(deps: MemberDeps): Members {
     answered,
     gaveUp(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
     blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
+    handOver(runtime) {
+      const h = held.get(runtime.id);
+      if (!h || h.runtime !== runtime || !h.published) return false;
+      held.delete(runtime.id);
+      set(runtime.id, null);
+      order = order.filter((id) => id !== runtime.id);
+      return true;
+    },
+    adopt(runtime, up) {
+      held.set(runtime.id, { runtime, published: true });
+      set(runtime.id, { kind: up ? 'connected' : 'reconnecting' });
+      if (!order.includes(runtime.id)) order = [...order, runtime.id];
+    },
     resume() {
       for (const [id, h] of held) {
         if (!h.published || statuses[id]?.kind === 'connected') continue;
