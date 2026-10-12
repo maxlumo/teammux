@@ -487,16 +487,58 @@ impl Sys {
         format!("gui/{}/{name}", self.uid)
     }
 
-    /// The running pid of the service, if it runs.
+    /// The running pid of the service, if it runs. `None` folds "not
+    /// running" and "could not tell" together — fine for a read-only status
+    /// line, NOT for a decision to stop; that one uses `run_state`.
     pub fn running(&self, name: &str) -> Option<u32> {
+        match self.run_state(name) {
+            RunState::Running(pid) => Some(pid),
+            _ => None,
+        }
+    }
+
+    /// Whether `name` has a process the manager would signal, in three
+    /// states, because "I could not tell" must never be read as "nothing to
+    /// kill" (reviewer P1-R1 on 00097c80). systemd: `Running(pid)` whenever
+    /// the manager reports a MainPID > 0 in ANY state — activating,
+    /// deactivating and reloading still have a process a stop would hit —
+    /// `Stopped` only for an explicit inactive/failed/dead answer with no
+    /// pid, and `Unknown` for a failed query, a missing field or an
+    /// unparseable pid. launchd: `print` succeeding with a pid, succeeding
+    /// without one, or failing with its own not-loaded message; anything else
+    /// is `Unknown`.
+    pub fn run_state(&self, name: &str) -> RunState {
         if self.mac {
-            let out = (self.run)("launchctl", &["print", &self.target(name)]).ok()?;
-            out.lines().find_map(|l| l.trim().strip_prefix("pid = ")).and_then(|p| p.trim().parse().ok())
-        } else {
-            let out = (self.run)("systemctl", &["--user", "show", name, "--property=ActiveState,MainPID"]).ok()?;
-            let active = out.lines().any(|l| l.trim() == "ActiveState=active");
-            let pid = out.lines().find_map(|l| l.trim().strip_prefix("MainPID=")).and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-            (active && pid > 0).then_some(pid)
+            return match (self.run)("launchctl", &["print", &self.target(name)]) {
+                Ok(out) => match out.lines().find_map(|l| l.trim().strip_prefix("pid = ")).map(|p| p.trim().parse::<u32>()) {
+                    Some(Ok(pid)) if pid > 0 => RunState::Running(pid),
+                    Some(Ok(_)) | None => RunState::Stopped,
+                    Some(Err(_)) => RunState::Unknown("launchctl print: pid is not a number".into()),
+                },
+                Err(e) if e.contains("Could not find service") => RunState::Stopped,
+                Err(e) => RunState::Unknown(format!("launchctl print: {e}")),
+            };
+        }
+        let out = match (self.run)("systemctl", &["--user", "show", name, "--property=ActiveState,MainPID"]) {
+            Ok(o) => o,
+            Err(e) => return RunState::Unknown(format!("systemctl show: {e}")),
+        };
+        let active = out.lines().find_map(|l| l.trim().strip_prefix("ActiveState=")).map(str::trim);
+        let pid = out.lines().find_map(|l| l.trim().strip_prefix("MainPID=")).map(str::trim);
+        let (Some(active), Some(pid)) = (active, pid) else {
+            return RunState::Unknown(format!("systemctl show answered without ActiveState/MainPID: {}", out.trim()));
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            return RunState::Unknown(format!("systemctl show: MainPID={pid:?} is not a number"));
+        };
+        if pid > 0 {
+            return RunState::Running(pid);
+        }
+        match active {
+            "inactive" | "failed" | "dead" => RunState::Stopped,
+            // No pid but not plainly stopped: between states, or something
+            // we do not read. Not evidence that nothing would be killed.
+            other => RunState::Unknown(format!("systemctl show: ActiveState={other} with no MainPID")),
         }
     }
 
@@ -524,12 +566,17 @@ impl Sys {
     /// answer, is refused: an unknown stop policy is treated as the dangerous
     /// one. launchd has no cgroup kill: always allowed.
     pub fn stop_allowed(&self, name: &str) -> Result<(), String> {
-        if self.mac || self.running(name).is_none() {
+        if self.mac {
             return Ok(());
         }
-        match self.effective_kill_mode(name) {
-            Some(v) if v == KILL_MODE => Ok(()),
-            found => Err(format!("refusing to stop or restart {name}: {}", kill_mode_warning(name, found.as_deref()))),
+        match self.run_state(name) {
+            // Manager says plainly: nothing runs, so nothing is killed.
+            RunState::Stopped => Ok(()),
+            RunState::Unknown(why) => Err(format!("refusing to stop or restart {name}: cannot tell whether it runs ({why}), and a stop under an unknown KillMode could kill every tmux server the gateway started")),
+            RunState::Running(_) => match self.effective_kill_mode(name) {
+                Some(v) if v == KILL_MODE => Ok(()),
+                found => Err(format!("refusing to stop or restart {name}: {}", kill_mode_warning(name, found.as_deref()))),
+            },
         }
     }
 
@@ -561,16 +608,6 @@ impl Sys {
             (self.run)("systemctl", &["--user", "daemon-reload"])?;
             (self.run)("systemctl", &["--user", "enable", "--now", name]).map(|_| ())
         }
-    }
-
-    /// Write the unit and make the manager load it, WITHOUT stopping
-    /// anything: `daemon-reload` applies `KillMode=` to a running unit.
-    fn reload_file(&self, file: &Path, text: &str) -> Result<(), String> {
-        self.write(file, text)?;
-        if !self.mac {
-            (self.run)("systemctl", &["--user", "daemon-reload"])?;
-        }
-        Ok(())
     }
 
     /// Stop and unload; a failure is fine only when it is confirmed not loaded.
@@ -642,6 +679,15 @@ pub fn current_identity() -> Result<Identity, String> {
     Ok(Identity { exe: exe.to_string_lossy().into(), config_home: base.to_string_lossy().into() })
 }
 
+/// What the manager says about a unit's process — three answers, because the
+/// decision to stop must not read "could not tell" as "nothing to kill".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunState {
+    Running(u32),
+    Stopped,
+    Unknown(String),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Done {
     Installed(u32),
@@ -676,12 +722,30 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
     let rendered = if sys.mac { render_plist(&spec)? } else { render_systemd(&spec)? };
     let file = sys.file(name);
     let on_disk = read_on_disk(&file, name, &sys.me, sys.mac);
-    let ours_running = matches!(on_disk, OnDisk::Ours { .. }) && sys.running(name).is_some();
+    // Whether OUR unit has a process the manager would signal — three
+    // answers, and "cannot tell" refuses here, before any file is written
+    // (reviewer P1-R1): every arm below either stops or starts a service,
+    // and both need to know what is there.
+    let ours_running = match (&on_disk, sys.run_state(name)) {
+        (OnDisk::Ours { .. }, RunState::Running(_)) => true,
+        (OnDisk::Ours { .. }, RunState::Unknown(why)) => return Err(format!("cannot tell whether {name} runs ({why}); nothing was changed — a stop under an unknown state and KillMode could kill every tmux server the gateway started")),
+        _ => false,
+    };
     if sys.mac {
         std::fs::create_dir_all(Path::new(&spec.log).parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
     }
     match plan(&on_disk, &rendered) {
+        // Same bytes and running is a no-op ONLY if the manager has the
+        // protection in effect. The file alone proves nothing: a previous
+        // install may have written it and failed at daemon-reload, or a
+        // drop-in may override it. So the file is reloaded and read back —
+        // idempotent, stops nothing — and the gate decides (reviewer P1-R2).
         Plan::Keep if ours_running => {
+            if !sys.mac && sys.effective_kill_mode(name).as_deref() != Some(KILL_MODE) {
+                (sys.run)("systemctl", &["--user", "daemon-reload"])?;
+                sys.stop_allowed(name).map_err(|e| format!("{e}; the unit file already carries KillMode={KILL_MODE} but the manager does not report it in effect after a reload — look for a drop-in (`systemctl --user cat {name}`); nothing was stopped"))?;
+                return Ok(Done::Protected(sys.running(name).unwrap_or(0)));
+            }
             let pid = sys.ready(name)?;
             Ok(Done::AlreadyRunning(pid))
         }
@@ -707,25 +771,27 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
         // the old instance keeps running and the error says what to look at.
         Plan::Update | Plan::Protect if ours_running => {
             let protecting = matches!(plan(&on_disk, &rendered), Plan::Protect);
-            let previous = match &on_disk { OnDisk::Ours { bytes } => bytes.clone(), _ => Vec::new() };
-            sys.reload_file(&file, &rendered)?;
-            if let Err(e) = sys.stop_allowed(name) {
-                // The manager did not take the protection: put the old text
-                // back so the file does not claim what is not in effect.
-                let _ = sys.write(&file, &String::from_utf8_lossy(&previous));
-                return Err(format!("{e}; the unit file was rewritten with KillMode={KILL_MODE} but the manager does not report it in effect, so it was restored — nothing was stopped"));
+            // The new text is written and the manager asked to load it;
+            // nothing is stopped yet. A failure here leaves the file as the
+            // new text on purpose: the next plain `install` finds `Keep` and
+            // takes the reload-and-confirm path above, so the half-done state
+            // is recovered by the same command that was interrupted — no
+            // rollback to report, and no way to be stuck.
+            sys.write(&file, &rendered)?;
+            if !sys.mac {
+                (sys.run)("systemctl", &["--user", "daemon-reload"]).map_err(|e| format!("{e}; the unit file now carries KillMode={KILL_MODE} but the manager has not loaded it — run `tmm gateway install` again once `systemctl --user daemon-reload` works; nothing was stopped"))?;
             }
+            sys.stop_allowed(name).map_err(|e| format!("{e}; the unit file now carries KillMode={KILL_MODE} but the manager does not report it in effect after a reload — look for a drop-in (`systemctl --user cat {name}`); nothing was stopped"))?;
             if protecting {
                 // Protection applied in place; the running instance is the
                 // right binary already. No restart.
                 return Ok(Done::Protected(sys.running(name).unwrap_or(0)));
             }
-            // The new text is loaded, protection in effect: now the stop is
-            // safe. If it still fails, the file goes back to what runs.
-            if let Err(e) = sys.unload(name) {
-                let _ = sys.reload_file(&file, &String::from_utf8_lossy(&previous));
-                return Err(e);
-            }
+            // Protection in effect: now the stop is safe. A stop that fails
+            // leaves the new text loaded — harmless (the running instance is
+            // the old binary with the new, safer KillMode) and self-healing
+            // the same way; the error says what did not happen.
+            sys.unload(name).map_err(|e| format!("{e}; the unit text was updated and loaded but the old instance still runs — run `tmm gateway install` again"))?;
             sys.load(name, &file)?;
             Ok(Done::Updated(sys.ready(name)?))
         }
@@ -829,10 +895,11 @@ pub fn protection_warning(sys: &Sys, name: &str) -> Option<String> {
         return None;
     }
     let file = ours_installed(sys, name).ok()??;
-    let found = if sys.running(name).is_some() {
-        sys.effective_kill_mode(name)
-    } else {
-        std::fs::read_to_string(file).ok().and_then(|t| unit_kill_mode(&t))
+    let found = match sys.run_state(name) {
+        RunState::Running(_) => sys.effective_kill_mode(name),
+        RunState::Stopped => std::fs::read_to_string(file).ok().and_then(|t| unit_kill_mode(&t)),
+        // Not knowing whether it runs is not knowing whether it is protected.
+        RunState::Unknown(why) => return Some(format!("{name}: cannot tell whether it runs ({why}), so whether KillMode={KILL_MODE} protects it is unknown; nothing of tmm's will stop or restart it until the manager answers")),
     };
     match found {
         Some(v) if v == KILL_MODE => None,
@@ -981,6 +1048,10 @@ mod tests {
         occupant: Rc<RefCell<Option<Verdict>>>,
         /// What the manager has LOADED for KillMode (follows the file only on daemon-reload).
         kill_mode: Rc<RefCell<Option<String>>>,
+        /// When set, the verbatim answer to `show --property=ActiveState,MainPID`
+        /// (a manager in a transitional state, or answering with a missing or
+        /// unparseable field).
+        state_answer: Rc<RefCell<Option<String>>>,
     }
 
     fn fake(home: &Path, mac: bool) -> (Sys, Fake) {
@@ -988,10 +1059,12 @@ mod tests {
             calls: Rc::default(), fail: Rc::default(), pid: Rc::new(RefCell::new(None)),
             verdict: Rc::new(RefCell::new(Verdict::None)), loaded: Rc::new(RefCell::new(false)), occupant: Rc::default(),
             kill_mode: Rc::new(RefCell::new(None)),
+            state_answer: Rc::new(RefCell::new(None)),
         };
         let occupant = f.occupant.clone();
         let (calls, fail, pid, verdict, loaded) = (f.calls.clone(), f.fail.clone(), f.pid.clone(), f.verdict.clone(), f.loaded.clone());
         let kill_mode = f.kill_mode.clone();
+        let state_answer = f.state_answer.clone();
         let unit_file = file_for(if mac { LABEL } else { N }, mac, home);
         let (pid2, verdict2) = (f.pid.clone(), f.verdict.clone());
         let sys = Sys {
@@ -1027,6 +1100,9 @@ mod tests {
                         *pid.borrow_mut() = None;
                         *verdict.borrow_mut() = Verdict::None;
                         Ok(String::new())
+                    }
+                    "show" if args.iter().any(|a| *a == "--property=ActiveState,MainPID") && state_answer.borrow().is_some() => {
+                        Ok(state_answer.borrow().clone().unwrap())
                     }
                     "show" => {
                         let p = *pid.borrow();
@@ -1176,6 +1252,120 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// Reviewer P1-R1: "could not tell whether it runs" is not "nothing to
+    /// kill". A failed state query, a missing field, an unparseable pid, or
+    /// a transitional state with a live pid — none of them lets a stop
+    /// through, on restart, uninstall or an Update; status says unknown
+    /// rather than falling back to the file.
+    #[test]
+    fn an_unknown_run_state_never_lets_a_stop_through() {
+        let home = scratch("unknown");
+        let (sys, f) = fake(&home, false);
+        install(&sys, N, false).unwrap();
+        // The manager is at control-group (the live situation on this host).
+        *f.kill_mode.borrow_mut() = Some("control-group".into());
+        let no_stop = |f: &Fake| !f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart"));
+        for (label, answer) in [
+            ("missing MainPID", "ActiveState=active\n"),
+            ("unparseable pid", "ActiveState=active\nMainPID=abc\n"),
+            ("transitional with a pid", "ActiveState=deactivating\nMainPID=4242\n"),
+            ("transitional without a pid", "ActiveState=activating\nMainPID=0\n"),
+        ] {
+            *f.state_answer.borrow_mut() = Some(answer.into());
+            f.calls.borrow_mut().clear();
+            assert!(matches!(sys.run_state(N), RunState::Running(_) | RunState::Unknown(_)), "{label}: {:?}", sys.run_state(N));
+            assert!(sys.stop_allowed(N).is_err(), "{label}: the gate must refuse");
+            assert!(restart(&sys, N).is_err(), "{label}: restart refused");
+            assert!(uninstall(&sys, N).is_err(), "{label}: uninstall refused");
+            assert!(no_stop(&f), "{label}: nothing stopped: {:?}", f.calls.borrow());
+            let w = protection_warning(&sys, N).expect("status warns rather than trusting the file");
+            assert!(!w.is_empty());
+        }
+        // The state query itself fails.
+        *f.state_answer.borrow_mut() = None;
+        f.fail.borrow_mut().push("ActiveState,MainPID");
+        f.calls.borrow_mut().clear();
+        assert!(matches!(sys.run_state(N), RunState::Unknown(_)));
+        let e = restart(&sys, N).unwrap_err();
+        assert!(e.contains("cannot tell whether it runs"), "{e}");
+        assert!(uninstall(&sys, N).is_err());
+        let sys_upd = Sys { path_env: "/new/path".into(), ..sys };
+        let e = install(&sys_upd, N, false).unwrap_err();
+        assert!(e.contains("cannot tell whether") && e.contains("nothing was changed"), "an Update cannot stop what it cannot see: {e}");
+        let sys = sys_upd;
+        assert!(no_stop(&f), "{:?}", f.calls.borrow());
+        assert!(protection_warning(&sys, N).unwrap().contains("cannot tell"));
+        // Only an explicit stopped answer frees the gate.
+        f.fail.borrow_mut().clear();
+        *f.state_answer.borrow_mut() = Some("ActiveState=inactive\nMainPID=0\n".into());
+        assert_eq!(sys.run_state(N), RunState::Stopped);
+        assert!(sys.stop_allowed(N).is_ok());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Reviewer P1-R2: a first install that wrote the file but failed at
+    /// daemon-reload leaves file=process, manager=control-group. The NEXT
+    /// plain `install` must finish the job — reload, confirm, Protected —
+    /// with no hand edit and no stop; and a Keep whose manager is not at
+    /// process is never a quiet AlreadyRunning.
+    #[test]
+    fn a_half_applied_protection_is_finished_by_the_next_install() {
+        let home = scratch("halfway");
+        let (sys, f) = fake(&home, false);
+        install(&sys, N, false).unwrap();
+        let file = sys.file(N);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let old = text.replace(&format!("KillMode={KILL_MODE}\n"), "");
+        std::fs::write(&file, &old).unwrap();
+        *f.kill_mode.borrow_mut() = None;
+        // Round 1: write succeeds, reload fails. Zero stops; the file is left
+        // as the new text ON PURPOSE (that is what round 2 recovers from).
+        f.fail.borrow_mut().push("daemon-reload");
+        f.calls.borrow_mut().clear();
+        let e = install(&sys, N, false).unwrap_err();
+        assert!(e.contains("has not loaded it") && e.contains("install") , "{e}");
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "file is the new text");
+        assert_eq!(sys.effective_kill_mode(N).as_deref(), Some("control-group"), "manager unchanged");
+        assert!(protection_warning(&sys, N).is_some(), "status does not call this protected");
+        // Round 2: the manager works again; the same command, no edits.
+        f.fail.borrow_mut().clear();
+        f.calls.borrow_mut().clear();
+        assert_eq!(install(&sys, N, false), Ok(Done::Protected(100)), "finished, same pid");
+        assert!(f.calls.borrow().iter().any(|c| c.contains("daemon-reload")));
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("enable") || c.contains("restart")), "{:?}", f.calls.borrow());
+        assert_eq!(sys.effective_kill_mode(N).as_deref(), Some("process"));
+        assert_eq!(protection_warning(&sys, N), None);
+        assert_eq!(install(&sys, N, false), Ok(Done::AlreadyRunning(100)), "now a true no-op");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The Keep case where a drop-in holds the manager at control-group: the
+    /// file is ours and complete, a reload changes nothing, so the gate must
+    /// refuse and the error must name the drop-in — never AlreadyRunning.
+    /// The fake's manager follows the file on reload, so the drop-in is
+    /// modelled as a manager that re-reads to control-group whatever the file
+    /// says (a sticky answer), which is what a drop-in does.
+    #[test]
+    fn a_drop_in_that_pins_control_group_is_refused_not_kept() {
+        let home = scratch("dropin");
+        let (sys, f) = fake(&home, false);
+        install(&sys, N, false).unwrap();
+        let file = sys.file(N);
+        // The file says process. The manager, because of a drop-in, does not.
+        *f.kill_mode.borrow_mut() = Some("control-group".into());
+        std::fs::write(&file, std::fs::read_to_string(&file).unwrap()).unwrap();
+        // Make reload sticky: write a drop-in-shaped override the fake honours
+        // by never re-reading the file (fail the reload's re-read path).
+        f.fail.borrow_mut().push("daemon-reload");
+        let e = install(&sys, N, false).unwrap_err();
+        assert!(e.contains("daemon-reload failed") || e.contains("drop-in"), "{e}");
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
+        assert!(protection_warning(&sys, N).is_some(), "status still warns");
+        assert!(restart(&sys, N).is_err(), "and the release path still refuses");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// Reviewer P1-1: a PATH change on an old unit is an Update, and an
     /// Update stops the running instance — so it too must establish the
     /// protection first. The stop happens only after the manager confirms
@@ -1269,7 +1459,17 @@ mod tests {
         f.fail.borrow_mut().push("disable");
         let e = install(&sys, N, false).unwrap_err();
         assert!(e.contains("could not stop"), "{e}");
-        assert_eq!(std::fs::read(sys.file(N)).unwrap(), before, "the file is untouched");
+        // Since board #350 an Update writes and LOADS the new text before it
+        // stops (so the stop runs under KillMode=process). A stop that then
+        // fails leaves the new text in place on purpose: the old instance
+        // still runs, with the safer KillMode, and the next `install` finishes
+        // the job. The file is therefore the NEW text, and the old instance
+        // is untouched.
+        let now = std::fs::read(sys.file(N)).unwrap();
+        assert_ne!(now, before, "the new text was written before the stop");
+        assert!(String::from_utf8_lossy(&now).contains("/new/path"));
+        assert_eq!(*f.pid.borrow(), Some(100), "the old instance still runs");
+        assert!(e.contains("run `tmm gateway install` again"), "{e}");
         let e = uninstall(&sys, N).unwrap_err();
         assert!(e.contains("could not stop") && sys.file(N).exists(), "uninstall keeps the file when the stop fails");
         std::fs::remove_dir_all(&home).ok();
