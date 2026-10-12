@@ -561,6 +561,11 @@ lost to it. In that commit:
   unresolved and none is dropped for room — and a store that cannot be read
   (or is not a list) throws instead of starting over, so the move stays
   open and the app blocks until Retry (orchestrator 16:32 on 0f668e4f).
+  The move journal (`tmux_slot_moves`) is read the same way: unparsable, not
+  a list, or a row without its pair throws, so the absorption does not run
+  and the app blocks; it never reads as "no move open", which would let the
+  next absorption merge over an unfinished handoff (reviewer P1 on
+  97824925).
   A survivor that is alive re-reads its slots once the fleet has dropped the
   twins (`onReconciled` → `reloadStored`), and so does every live state
   after Retry's preparation finished an open move;
@@ -1002,7 +1007,11 @@ takes the screen. Each member's socket drop is its own reconnect loop; the
 window's reconnect banner is the focused server's only. A block publishes
 nothing: `holdStorage`'s `endAll()` ends a member's dial in flight, so an
 authentication that lands during the block records no identity, and Retry's
-sync joins it again. The block is the whole app's until Retry (reviewer P1 on
+sync joins it again. A member counts as in hand only while it is published or
+its own join is still current: a join the block made stale is joined again on
+the same live handle, and the stale dial's late answer — before or after the
+new join — concludes nothing and lets go of nothing (reviewer P1 on
+97824925). The block is the whole app's until Retry (reviewer P1 on
 453f02b8): a later gate — the next member's join in the same sync — never
 prepares it open (`foldFor` only answers `blocked`; the preparations are the
 boot, the host gate while NOT blocked, and Retry). A published member's
@@ -1017,6 +1026,20 @@ registry, CURRENT, the mode and the exclusions (`syncMembers`), never while
 blocked or mid-switch; a member the focus takes over (a switch made it CURRENT)
 is the focus's from then on, and a failed switch that reused a member leaves it
 a member.
+
+**Retry re-dials what a block or an absorption interrupted** (orchestrator
+16:12; reviewer P1 on 97824925). The criterion is what was interrupted, never
+whether a handle is alive, in Single and Aggregate alike: a stopped switch, a
+connect that had recorded its server, a reconnect whose identity could not be
+recorded because the app blocked, a reconnect answer that landed while
+blocked, and a drop while blocked are all owed one dial (`owedActivation`);
+the member set is synced again, so an interrupted join joins again. Every
+automatic arrival that replaces the bound tree — a reconnect that landed on
+another machine, an absorbed alias's survivor, and Retry's owed dial,
+including when the absorption already moved CURRENT to the canonical — asks
+that tree's pages first through ONE helper, `askToReplace(mine)`, which
+checks its owner before it changes anything: a stale "keep editing" leaves
+nothing offline, and a current one stays on the source with the draft.
 
 **The focus moves between connected members without a teardown** (#335 D2,
 ③b-2; orchestrator 02:28). In Aggregate, picking a member that is up moves

@@ -1282,7 +1282,7 @@
    * that landed on another machine and an absorption's survivor, Retry's
    * owed re-dial included (it lands here). A switch Retry resumes asked in
    * its own walk, before the block. */
-  async function askToReplace() {
+  async function askToReplace(mine) {
     const leaving = scopeSwap.bound();
     if (!leaving) return true;
     if (serverSwitch.guarding) { connected = false; return null; }
@@ -1290,6 +1290,10 @@
     try {
       leave = await serverSwitch.guard(() => walkLeave(leaving));
     } catch { leave = false; }
+    // An answer that came after someone else took over is nobody's: it
+    // changes nothing here (reviewer P1 on 97824925) — the owner is checked
+    // BEFORE a "keep editing" stays anything offline.
+    if (!mine()) return null;
     if (!leave) {
       connected = false;
       heldOffline = true;
@@ -1309,8 +1313,8 @@
     // first (#335 ③b-2) — the survivor of an absorption is a runtime of its
     // own, and an unsaved editor of the alias's would otherwise go with the
     // old tree in silence.
-    const leave = await askToReplace();
-    if (leave === null || !attempt.current()) return null;
+    const leave = await askToReplace(() => attempt.current());
+    if (leave === null) return null;
     if (!leave) {
       reconnectError = same ? '' : t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
       return reconnectError || null;
@@ -2307,7 +2311,19 @@
     autoConnectAttempted = true;
     // A NEW runtime replaces whatever the app showed before the block (a
     // switch's source): its navigation resets once this one is up.
-    void activate({ minted, replace: !minted.keep, up: () => { bringUp(); resubscribeAll(); } }).done;
+    const arrive = () => void activate({ minted, replace: !minted.keep, up: () => { bringUp(); resubscribeAll(); } }).done;
+    const leaving = scopeSwap.bound();
+    if (minted.keep || !leaving || leaving === minted.runtime) { arrive(); return; }
+    // It replaces a tree the block kept mounted, drafts and all — an alias's
+    // whose absorption already moved CURRENT to the canonical, say (reviewer
+    // P1 on 97824925): that tree's pages are asked first, as every automatic
+    // arrival asks. The minted runtime waits, owned by this Retry.
+    const owner = activations.claim();
+    provisional.set(minted.runtime, owner);
+    void askToReplace(() => owner.current()).then((leave) => {
+      if (leave) { arrive(); return; }
+      releaseMinted(minted.runtime, owner);
+    });
   }
   /** The boot (board #335 ②b-4): the registry and the inputs' attribution
    * FIRST, then the deep link — a link to B makes B current, and attributing

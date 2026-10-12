@@ -7,7 +7,7 @@ const { createMembers } = await import('./server-members.svelte.ts');
 const { createActivations } = await import('./activation.ts');
 import type { DialResult, ServerRuntime } from './server-runtime.ts';
 
-type Fake = ServerRuntime & { answer(r: DialResult): void; throws(): void; dials: number; owns: (() => boolean)[] };
+type Fake = ServerRuntime & { answer(r: DialResult): void; answerFirst(r: DialResult): void; throws(): void; dials: number; owns: (() => boolean)[] };
 const entry = (id: string) => ({ id, name: id, address: `ws://${id}:9899`, token: 't' });
 
 function world(ids: string[]) {
@@ -20,22 +20,27 @@ function world(ids: string[]) {
   const make = (id: string): Fake => {
     let resolve: (r: DialResult) => void = () => {};
     let reject: (e: Error) => void = () => {};
+    const pending: ((r: DialResult) => void)[] = [];
     let alive = true;
     const rt = {
       id, dials: 0, owns: [] as (() => boolean)[],
       alive: () => alive,
-      dial(owns?: () => boolean) { rt.dials++; rt.owns.push(owns ?? (() => true)); log.push(`dial:${id}`); return new Promise<DialResult>((r, j) => { resolve = r; reject = j; }); },
+      dial(owns?: () => boolean) { rt.dials++; rt.owns.push(owns ?? (() => true)); log.push(`dial:${id}`); return new Promise<DialResult>((r, j) => { resolve = r; reject = j; pending.push(r); }); },
+      /** The LATEST dial answers. */
       answer(r: DialResult) { resolve(r); },
+      /** The OLDEST dial still out answers (a stale one, late). */
+      answerFirst(r: DialResult) { pending.shift()?.(r); },
       /** The dial's identity record throws. */
       throws() { reject(new Error('QuotaExceededError')); },
       detach() { alive = false; },
     } as unknown as Fake;
     return rt;
   };
+  const activations = createActivations();
   const members = createMembers({
     include: (e) => { if (!saved.has(e.id)) return undefined; let rt = runtimes.get(e.id); if (!rt || !rt.alive()) { rt = make(e.id); runtimes.set(e.id, rt); } return rt; },
     gate: (id) => gate(id),
-    activations: createActivations(),
+    activations,
     wanted: (id) => wanted.has(id),
     onUp: (rt) => log.push(`up:${rt.id}`),
     onBack: (rt) => log.push(`back:${rt.id}`),
@@ -45,7 +50,7 @@ function world(ids: string[]) {
     unrecorded: (rt) => { log.push(`unrecorded:${rt.id}`); return blocks; },
     hold: (rt) => log.push(`hold:${rt.id}`),
   });
-  return { members, runtimes, log, wanted, saved, setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)!,
+  return { members, runtimes, log, wanted, saved, endAll: () => activations.endAll(), setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)!,
     /** What the host gate answers for a failed identity record. */
     blocking: (b: boolean) => { blocks = b; } };
 }
@@ -232,4 +237,30 @@ test('a member not published yet is not handed over', () => {
   w.members.sync([entry('b')]);
   assert.equal(w.members.handOver(w.rt('b')), false, 'still joining: not a focus move');
   assert.equal(w.members.holds(w.rt('b')), true);
+});
+
+test('Retry joins again a member whose join a block made stale, even with its handle alive; the stale answer undoes nothing (reviewer P1 on 97824925)', async () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  const b = w.rt('b');
+  assert.equal(b.dials, 1, 'B s join is out');
+  // The block: every attempt in flight ends (holdStorage's endAll).
+  assert.equal(b.owns[0]!(), true);
+  w.endAll();
+  assert.equal(b.owns[0]!(), false, 'the join is nobody s now');
+  // Retry's sync, BEFORE the stale answer arrives: B is alive and not
+  // published, and it is joined again on the same handle.
+  w.members.sync([entry('b')]);
+  assert.equal(w.rt('b'), b, 'the same handle');
+  assert.equal(b.dials, 2, 'dialled again');
+  // The OLD dial answers now, late: it concludes nothing and lets go of
+  // nothing — the new join owns B.
+  b.answerFirst(ok('b'));
+  await settle();
+  assert.ok(!w.log.includes('release:b'), 'the stale answer did not let B go');
+  assert.equal(w.members.holds(b), true);
+  b.answer(ok('b'));
+  await settle();
+  assert.deepEqual(w.members.runtimes(), [b], 'the new join publishes B');
+  assert.equal(w.log.filter((e) => e === 'up:b').length, 1, 'once');
 });

@@ -493,17 +493,22 @@ export const LAYOUT_KEY = 'tmux_state_layout';
 export const MOVES_KEY = 'tmux_slot_moves';
 type Move = { from: string; to: string; wins: 'source' | 'target'; base?: Record<string, string | null>; clear?: string[] };
 
+/** The open moves. A journal that cannot be read — unparsable, not a list,
+ * or a row that does not name its pair — THROWS rather than reading as "no
+ * move open" (reviewer P1 on 97824925, orchestrator 02:21): an unfinished
+ * handoff skipped that way lets the next absorption merge destructively over
+ * it. The throw reaches the caller's host gate, which blocks until Retry. */
 function loadMoves(storage: Pick<Storage, 'getItem'>): Move[] {
-  try {
-    const raw: unknown = JSON.parse(storage.getItem(MOVES_KEY) || '[]');
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((m) => !!m && typeof m.from === 'string' && typeof m.to === 'string' && !!m.from && !!m.to)
-      .map((m) => ({
-        from: m.from, to: m.to, wins: m.wins === 'source' ? 'source' as const : 'target' as const,
-        ...(m.base && typeof m.base === 'object' ? { base: m.base as Record<string, string | null> } : {}),
-        ...(Array.isArray(m.clear) ? { clear: (m.clear as unknown[]).filter((k): k is string => typeof k === 'string') } : {}),
-      }));
-  } catch { return []; }
+  const raw: unknown = JSON.parse(storage.getItem(MOVES_KEY) || '[]');
+  if (!Array.isArray(raw)) throw new Error(`${MOVES_KEY} is not a list`);
+  return raw.map((m) => {
+    if (!m || typeof m.from !== 'string' || typeof m.to !== 'string' || !m.from || !m.to) throw new Error(`${MOVES_KEY} holds a row without its pair`);
+    return {
+      from: m.from, to: m.to, wins: m.wins === 'source' ? 'source' as const : 'target' as const,
+      ...(m.base && typeof m.base === 'object' ? { base: m.base as Record<string, string | null> } : {}),
+      ...(Array.isArray(m.clear) ? { clear: (m.clear as unknown[]).filter((k): k is string => typeof k === 'string') } : {}),
+    };
+  });
 }
 function saveMoves(storage: Store, moves: Move[]): void {
   if (moves.length) storage.setItem(MOVES_KEY, JSON.stringify(moves)); else storage.removeItem(MOVES_KEY);

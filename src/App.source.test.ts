@@ -875,11 +875,17 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   const elsewhere = source.match(/async function arrivedElsewhere\(result, attempt, chain = null\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   // #335 ③b-2: the absorbed alias's survivor is a NEW tree too, so both
   // arrivals ask the bound tree's pages first, through ONE helper.
-  assert.match(elsewhere, /^async function arrivedElsewhere\(result, attempt, chain = null\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*(?:\/\/[^\n]*\n\s*)*if \(!attempt\.current\(\)\) return null;\s*(?:\/\/[^\n]*\n\s*)*const same = currentServerId\(localStorage\) === result\.entry\.id;\s*(?:\/\/[^\n]*\n\s*)*const leave = await askToReplace\(\);\s*if \(leave === null \|\| !attempt\.current\(\)\) return null;\s*if \(!leave\) \{[\s\S]*?\n    \}\s*(?:\/\/[^\n]*\n\s*)*if \(same\) return activate\(\{ replace: false, up: \(\) => \{ bringUp\(\); resubscribeAll\(\); \}, chain \}\)\.done;/u,
+  assert.match(elsewhere, /^async function arrivedElsewhere\(result, attempt, chain = null\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*(?:\/\/[^\n]*\n\s*)*if \(!attempt\.current\(\)\) return null;\s*(?:\/\/[^\n]*\n\s*)*const same = currentServerId\(localStorage\) === result\.entry\.id;\s*(?:\/\/[^\n]*\n\s*)*const leave = await askToReplace\(\(\) => attempt\.current\(\)\);\s*if \(leave === null\) return null;\s*if \(!leave\) \{[\s\S]*?\n    \}\s*(?:\/\/[^\n]*\n\s*)*if \(same\) return activate\(\{ replace: false, up: \(\) => \{ bringUp\(\); resubscribeAll\(\); \}, chain \}\)\.done;/u,
     'a stale arrival does nothing; every arrival asks first; an absorbed alias comes up on the canonical runtime s own dial');
-  const ask = source.match(/async function askToReplace\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  const ask = source.match(/async function askToReplace\(mine\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  // The owner is checked BEFORE a "keep editing" changes anything (reviewer
+  // P1 on 97824925): a stale answer leaves nothing offline.
+  assert.match(ask, /leave = await serverSwitch\.guard\(\(\) => walkLeave\(leaving\)\);\s*\} catch \{ leave = false; \}\s*(?:\/\/[^\n]*\n\s*)*if \(!mine\(\)\) return null;\s*if \(!leave\) \{/u);
   assert.match(ask, /leave = await serverSwitch\.guard\(\(\) => walkLeave\(leaving\)\);[\s\S]*?if \(!leave\) \{\s*connected = false;\s*heldOffline = true;/u);
-  assert.equal([...source.matchAll(/askToReplace\(\)/gu)].length, 2, 'defined once, used once: every automatic arrival goes through arrivedElsewhere');
+  assert.equal([...source.matchAll(/askToReplace\(/gu)].length, 3, 'defined once; the reconnect s arrival and Retry s owed replacing one');
+  // Retry's owed dial that replaces the bound tree asks it first, even when
+  // CURRENT already names the canonical (reviewer P1 on 97824925).
+  assert.match(source, /if \(minted\.keep \|\| !leaving \|\| leaving === minted\.runtime\) \{ arrive\(\); return; \}[\s\S]{0,500}?void askToReplace\(\(\) => owner\.current\(\)\)\.then\(\(leave\) => \{\s*if \(leave\) \{ arrive\(\); return; \}\s*releaseMinted\(minted\.runtime, owner\);/u);
   assert.ok(elsewhere.indexOf('askToReplace(') < elsewhere.indexOf('activateConnected('), 'ask, then write');
   assert.match(elsewhere, /const run = act\.reload \? arriveAt\(left, 'arrive', chain\) : activate\([\s\S]*?chain \}\);\s*return await run\.done;/u,
     'both kept: arrive at B through the connect page s different-server path');

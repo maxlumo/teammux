@@ -34,7 +34,7 @@
 import type { ServerId } from './refs.ts';
 import type { ServerEntry } from './servers.ts';
 import type { ServerRuntime, DialResult } from './server-runtime.ts';
-import type { Activations } from './activation.ts';
+import type { Activation, Activations } from './activation.ts';
 
 export type MemberStatus =
   | { kind: 'connecting' }
@@ -101,7 +101,11 @@ export interface Members {
   leaveAll(): void;
 }
 
-type Held = { runtime: ServerRuntime; published: boolean };
+/** `join`: the owner of the join in flight for an unpublished member. A
+ * join a block (or any `endAll`) made stale is no longer anybody's, and a
+ * sync starts it again — it is never skipped because the handle is alive
+ * (orchestrator 16:12; reviewer P1 on 97824925). */
+type Held = { runtime: ServerRuntime; published: boolean; join?: Activation };
 
 export function createMembers(deps: MemberDeps): Members {
   const held = new Map<ServerId, Held>();
@@ -118,9 +122,10 @@ export function createMembers(deps: MemberDeps): Members {
     if (deps.gate(id) === 'blocked') { set(id, { kind: 'failed', reason: 'storage' }); return; }
     const runtime = deps.include(entry);
     if (!runtime) { set(id, null); return; }
-    held.set(id, { runtime, published: false });
-    set(id, { kind: 'connecting' });
     const owner = deps.activations.member(runtime).claim();
+    const slot: Held = { runtime, published: false, join: owner };
+    held.set(id, slot);
+    set(id, { kind: 'connecting' });
     let result: DialResult;
     try {
       result = await runtime.dial(() => owner.current() && mine(runtime) && deps.wanted(id));
@@ -134,7 +139,12 @@ export function createMembers(deps: MemberDeps): Members {
       deps.retry(runtime);
       return;
     }
-    if (!owner.current()) { if (mine(runtime) && !held.get(id)!.published) forget(id); return; }
+    // A stale join (a block's endAll, a leave) concludes nothing. It lets go
+    // of the member only while the member is still THIS join's — a newer
+    // join Retry started on the same handle is not undone by the older one's
+    // late answer (reviewer P1 on 97824925).
+    if (!owner.current()) { if (held.get(id) === slot) forget(id); return; }
+    slot.join = undefined;
     answered(runtime, result);
   }
 
@@ -199,8 +209,13 @@ export function createMembers(deps: MemberDeps): Members {
       for (const id of known()) if (!want.has(id)) leave(id);
       for (const entry of entries) {
         const h = held.get(entry.id);
-        if (h && h.runtime.alive()) continue;
-        if (h) forget(entry.id);
+        // Alive and published, or alive with its own join still current: in
+        // hand. A join nobody owns any more (a block ended it) is not — it
+        // is joined again, on the same handle.
+        if (h && h.runtime.alive() && (h.published || h.join?.current())) continue;
+        // A dead handle is let go of and replaced; a live one whose join went
+        // stale is kept and joins again (the fleet hands the same handle back).
+        if (h && !h.runtime.alive()) forget(entry.id);
         const st = statuses[entry.id];
         // `elsewhere` waits for the person (it names another known server);
         // everything else, a storage stop included, joins again.

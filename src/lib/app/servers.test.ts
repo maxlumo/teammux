@@ -9,6 +9,7 @@ import {
 function mem(init: Record<string, string> = {}) {
   const m = new Map(Object.entries(init));
   return {
+    m,
     getItem: (k: string) => (m.has(k) ? m.get(k)! : null),
     setItem: (k: string, v: string) => { m.set(k, String(v)); },
     removeItem: (k: string) => { m.delete(k); },
@@ -716,3 +717,23 @@ test('focusServer moves CURRENT and the active mirror to a saved entry and recor
   assert.equal(focusServer(s, 'gone'), false, 'an entry that is not saved');
   assert.equal(s.getItem('tmux_server_current'), 'b');
 });
+
+for (const [label, journal] of [['unparsable', '{not json'], ['not a list', '{"from":"a1"}'], ['a row without its pair', '[{"from":"a1"}]']] as const) {
+  test(`a move journal that is ${label} blocks the absorption instead of reading as "no move open" (reviewer P1 on 97824925)`, () => {
+    const s = twins(['a1'], {
+      [MOVES_KEY]: journal,
+      [residentKey('tmux_hub_drafts', 'c')]: JSON.stringify({ work: 'TYPED on canonical' }),
+      [residentKey('tmux_hub_drafts', 'a1')]: JSON.stringify({ work: 'typed on the alias' }),
+    });
+    const before = [...s.m.entries()];
+    assert.throws(() => migrateServers(s), 'the absorption does not run over a journal it cannot read');
+    assert.deepEqual([...s.m.entries()], before, 'and nothing was written: no merge, no registry change, the journal as it was');
+    assert.throws(() => resumeSlotMove(s), 'a resume refuses it too');
+    // Once the journal reads again (a person or a tool repaired it), the
+    // same boot finishes the absorption.
+    s.m.set(MOVES_KEY, '[]');
+    migrateServers(s);
+    assert.deepEqual(drafts(s, 'c'), { work: 'TYPED on canonical' });
+    assert.equal(s.getItem(MOVES_KEY), null, 'and closes its own move');
+  });
+}

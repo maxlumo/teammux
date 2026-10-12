@@ -4104,3 +4104,121 @@ test('③b-2: on a phone, Back answers the dialog of the member being removed �
   assert.ok(draftB.closest('.scope-tree.held'));
   assert.equal(ls.getItem('tmux_server_current'), 'a', 'and the focus never moved');
 });
+
+test('an unreadable move journal blocks the boot s absorption; once it reads again, Retry finishes it (reviewer P1 on 97824925; validator 02:26)', async (context) => {
+  const h = await bootApp(context, {
+    tmux_servers: JSON.stringify([
+      { id: 'c', name: 'canon', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'a', name: 'alias', address: 'ws://a:9899', token: 'tokA', named: true },
+    ]),
+    tmux_server_current: 'c', tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_machine_id: 'm-a',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'c' }),
+    'tmux_hub_drafts::c': JSON.stringify({ work: 'TYPED on canonical' }),
+    'tmux_hub_drafts::a': JSON.stringify({ ops: 'typed on the alias' }),
+    tmux_slot_moves: '{not json',
+    tmux_layout_mode: 'desktop',
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry(), 'blocked, Retry offered');
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).length, 2, 'the absorption did not run');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ ops: 'typed on the alias' }), 'and the alias s slot is untouched');
+  assert.equal(ls.getItem('tmux_slot_moves'), '{not json', 'nor was the journal written over');
+  retry()!.click();
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(retry(), 'Retry on the same journal blocks again');
+  ls.setItem('tmux_slot_moves', '[]');                          // repaired
+  retry()!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(retry(), undefined, 'unblocked');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'the absorption finished');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_hub_drafts::c')!), { work: 'TYPED on canonical', ops: 'typed on the alias' }, 'merged by room');
+  assert.equal(ls.getItem('tmux_slot_moves'), null, 'its move closed');
+  assert.ok(conn(h, 'c')?.isConnected(), 'and C is up');
+});
+
+for (const keep of [true, false]) test(`Retry whose CURRENT already names the canonical asks the alias tree s editor before replacing it — ${keep ? 'Keep editing' : 'Discard'} (reviewer P1 on 97824925)`, async (context) => {
+  // The reconnect absorbs the alias: the registry and CURRENT are committed
+  // (CURRENT = c), and then the merge note cannot be written. Blocked with
+  // the alias s tree still bound and an unsaved editor in it.
+  const store = refusing(['tmux_server_merges']);
+  store.state.failing = false;
+  const events: string[] = [];
+  let proves = false;
+  const h = await bootApp(context, {
+    tmux_servers: aliasRegistry, tmux_server_current: 'a', tmux_machine_id: 'm-a',
+    tmux_address: 'ws://alias:9899', tmux_token: 'tok',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'a' }),
+    tmux_state: JSON.stringify({ page: 'files' }), tmux_layout_mode: 'desktop',
+  }, () => (proves ? 'm-a' : ''), { calls: events, rpc: { ...editorRpc, fsWrite: async () => ({}) }, setup: store.setup });
+  const area = await dirtyEditor(h.app, h.settle);
+  store.state.failing = true;
+  proves = true;
+  h.net.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry(), 'blocked');
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT already names the canonical');
+  assert.equal(area.isConnected, true, 'the alias s editor is held, mounted');
+  store.state.failing = false;
+  retry()!.click();
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked, 'Retry asks before the canonical s tree replaces the alias s');
+  assert.ok(!asked.closest('.scope-tree.held, [inert], .hidden'), 'where it can be answered');
+  assert.equal(conn(h, 'c')?.isConnected() ?? false, false, 'and nothing is dialled past it while it asks');
+  answerDialog(h.app, keep ? /keep editing/iu : /^discard$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  if (keep) {
+    assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'Keep editing: the editor and its text stay');
+    assert.equal(conn(h, 'c')?.isConnected() ?? false, false, 'nothing came up over it');
+  } else {
+    assert.equal(area.isConnected, false, 'Discard: the alias s tree is replaced');
+    assert.ok(conn(h, 'c')?.isConnected(), 'by the canonical, on its own connection');
+  }
+});
+
+test('Retry before a blocked member s stale join answers: the member joins again and comes up; the late answer undoes nothing (reviewer P1 on 97824925)', async (context) => {
+  // As the owed P1-3 case: B s dial is held while C s claim blocks the app.
+  // This time Retry comes FIRST, and only then does B s old dial answer.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+  ];
+  const lets: (() => void)[] = [];
+  let holdB = true;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }, ['c']), (url, n) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? (n === 0 ? '' : 'm-x') : 'm-a'), {
+    calls: events,
+    gate: (url, n) => (url.includes('//b') && n > 0 && holdB ? new Promise<void>((r) => { lets.push(r); }) : null),
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(lets.length, 1, 'B s first join dial is out');
+  store.state.failing = true;
+  await h.switchTo('charlie');
+  for (let i = 0; i < 4; i++) await h.settle();
+  const retry = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retry(), 'blocked');
+  store.state.failing = false;
+  holdB = false;                                          // B answers its NEW dial at once
+  retry()!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'Retry finished the switch');
+  assert.ok(dialsOf(events, 'b').length >= 2, `B was dialled again: ${dialsOf(events, 'b').join(',')}`);
+  assert.ok(conn(h, 'b')?.isConnected(), 'B is up');
+  assert.ok(trees(h.app).some((x) => x.target === 'work:2.0'), 'with its tree');
+  lets[0]!();                                             // the OLD dial answers, late
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(conn(h, 'b')?.isConnected() && !conn(h, 'b')!.disposed(), 'and undid nothing');
+  assert.ok(trees(h.app).some((x) => x.target === 'work:2.0'), 'B s tree is still there');
+});
