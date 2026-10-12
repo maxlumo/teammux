@@ -1085,7 +1085,8 @@ any "keep editing" changes neither the mode nor a connection; excluding a
 member asks only its tree; excluding the focus asks the focus's tree, moves
 the focus to the next connected member in saved order (D2), then excludes it
 — with no other member connected it is refused, the list saying why.
-Including joins. Picking an excluded row includes it as the switch begins. A
+Including joins. Picking an excluded row is an include, with the include's
+checks and refusals; the app stays where it is until that server is up. A
 new saved server is included (nothing excluded it) and a rename changes
 nothing (the set holds ids). While blocked the mode and every switch are
 frozen with the registry. One change at a time: each holds the walk — and
@@ -1096,9 +1097,13 @@ blocked or switching, and the mode and registry it decided about are as they
 were (`membershipOp().valid()`). A walk can end for reasons other than the
 person answering — a Save in flight finishing resolves the Agents guard — so
 a block that began during the wait cancels the change: nothing is written,
-no member is ended, and Retry executes no stale decision. A member whose
-walk was answered leaves at once (`aggregate.leave`), before the write it
-answered for. The focus exclusion is one operation with its write: a focus
+no member is ended, and Retry executes no stale decision. Order of the
+commit, as it is: an exclusion or a removal ends the answered member
+(`aggregate.leave`) and then writes; the mode to Single writes and then
+ends every member (`leaveAll`). A write that fails after a leave therefore
+leaves the declaration unchanged with the member already gone — the member
+rejoins on the next sync, and the person answered Discard for that tree, so
+no draft is lost; this is said here rather than claimed away. The focus exclusion is one operation with its write: a focus
 that moved but could not be excluded is moved back. Picking an excluded row
 is an include through the same operation, never a bare write.
 
@@ -1137,18 +1142,32 @@ machine's survivor (the focus's handshake proved the same machine), or its
 own reconnect reaches another known server. Both used to drop the runtime
 and its tree at once — and with them a Files textarea, an unsaved agent
 definition, anything that is component memory rather than a resident slot.
-Now the two halves are separate. IDENTITY is detached the moment the dial
-answers (`aggregate.detach`): the runtime's api refuses, its socket is
-closed, its loop stops, and the fleet's `end` leaves a runtime the set still
-holds alone. The TREE stays mounted, held and inert, drafts and all, as an
-ORPHAN (`MemberStatus.kind === 'orphan'`): it is asked at once, in its own
-tree (`walkLeave`); "discard" lets it go (`dismiss` → release → end); "keep
-editing" keeps it, detached, listed in the server list with where its
-identity went and one action, Dismiss, which asks again. An orphan is never
-joined over, never redialled, never made the focus; a sync that no longer
-wants it keeps it. An unpublished member that answers elsewhere has no tree
-and is let go of as before. Nothing calls a UI guard from the identity
-layer: the walk is the host's, after the record.
+Now the two halves are separate. IDENTITY is detached at the identity
+layer's own synchronous boundary (reviewer R1 on aed2f654): for an absorbed
+entry that is the fleet's `drop` inside `reconcile` — the host's `end` hook
+runs there, in the same turn, and for a published member it orphans it
+(`aggregate.absorbed` → `detach`: api refusing, socket closed, loop stopped)
+rather than deferring to a later sync a block could hold off; a record that
+commits the registry and then throws still reconciles (`server-runtime.ts`),
+so the block that follows finds the alias already detached and it sends no
+RPC during it. For a member whose own reconnect reached another known
+server, the boundary is its dial's answer. The TREE stays mounted, held and
+inert, drafts and all, as an ORPHAN (`MemberStatus.kind === 'orphan'`). Its
+ASK is owed, not forced (reviewer R2): queued (`orphansToAsk`) and run through
+the one guard/reveal mechanism only when the window can present it — never
+over a switch in flight (its guard would end the switch's intent), a walk
+already asking, or a block (the tree is held); busy, it stays pending and is
+asked when the window frees, no second modal. "Discard" lets it go
+(`dismiss` → release → end); "keep editing" keeps it, detached, listed in
+the server list with where its identity went and one action, Dismiss, which
+is the same ask. The dismissal is a deferred destruction like every
+membership change: it re-validates at commit (`membershipOp().valid()` —
+owner, block, switch, mode and registry unchanged), and a stale answer,
+whichever it was, keeps the tree and re-owes the question. An orphan is
+never joined over, never redialled, never made the focus; a sync that no
+longer wants it keeps it. An unpublished member that answers elsewhere has
+no tree and is let go of as before. Nothing calls a UI guard from the
+identity layer: the walk is the host's, after the record.
 
 **A leave walk asks the tree it destroys, in that tree** (③b-2; the (runtime,
 view) contract ②b deferred). Every walk goes through `walkLeave(runtime)`,

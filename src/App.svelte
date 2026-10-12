@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, tick, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { activeModal } from './lib/ui/modal.ts';
   import Settings from './lib/app/Settings.svelte';
   import Sessions from './lib/sessions/Sessions.svelte';
@@ -218,9 +219,18 @@
   const fleet = createServerFleet({
     storage: localStorage,
     registry: createConnectionRegistry(),
-    // Nor a member the set still holds: an absorbed member's tree is kept,
-    // detached, until the person is asked (P1-5); `release` ends it then.
-    end: (runtime) => (runtime === scopeSwap.bound() || aggregate.holds(runtime) ? undefined : ends.end(runtime)),
+    // A published member the set holds is ORPHANED here, at the fleet's own
+    // synchronous boundary (P1-5; reviewer R1 on aed2f654): its identity is
+    // detached now — api refusing, socket closed, loop stopped — and its tree
+    // is kept, drafts and all, until the person is asked; `release` ends it
+    // then. Not deferred to a later sync, which a block could hold off while
+    // a captured api still answered. Anything else the set holds (a join in
+    // flight, an orphan already) is the set's; a stranger is ended here.
+    end: (runtime) => {
+      if (runtime === scopeSwap.bound()) return undefined;
+      if (aggregate.absorbed(runtime) || aggregate.holds(runtime)) return undefined;
+      return ends.end(runtime);
+    },
     // An absorption merged the absorbed entries' slots into a survivor's
     // (servers.ts `forgetDropped`): a survivor that is alive re-reads them,
     // or its next write would put back what it held before the merge.
@@ -1140,13 +1150,43 @@
       runtime.connection.disconnect();
       background = aggregate.runtimes();
     },
-    orphaned(runtime) { void askOrphan(runtime); },
+    orphaned(runtime) { orphansToAsk.add(runtime); askOrphans(); },
   });
-  /** An orphan's tree is asked, in that tree, the moment it becomes one:
-   * "discard" lets it go; "keep editing" keeps the tree, detached, for the
-   * person to copy from or dismiss from the list later. */
+  /** Orphans whose ask is still owed (reviewer R2 on aed2f654): an orphan is
+   * retained and marked the moment it becomes one, but it is ASKED only when
+   * the window can present the question — not over a switch in flight (its
+   * guard would end the switch's intent), a walk already asking, or a block
+   * (its tree is held). Busy: it stays pending and is asked by this same
+   * mechanism when the window is free again; no second modal. */
+  const orphansToAsk = new SvelteSet();
+  let askingOrphan = false;
+  function askOrphans() {
+    if (askingOrphan || switching || serverSwitch.guarding || migrationBlocked) return;
+    const next = [...orphansToAsk].find((r) => aggregate.orphan(r));
+    for (const r of orphansToAsk) if (!aggregate.orphan(r)) orphansToAsk.delete(r);
+    if (!next) return;
+    orphansToAsk.delete(next);
+    askingOrphan = true;
+    void askOrphan(next).finally(() => { askingOrphan = false; askOrphans(); });
+  }
+  // The window freed (a switch ended, a walk answered, Retry unblocked):
+  // an orphan still owed its ask gets it.
+  $effect(() => { void switching; void migrationBlocked; untrack(askOrphans); });
+  /** An orphan's tree is asked, in that tree: "discard" lets it go; "keep
+   * editing" keeps the tree, detached, listed with Dismiss. The dismissal is a
+   * deferred destruction and re-validates at commit like every membership
+   * change (`membershipOp`): a block, a newer window intent or a replaced
+   * orphan since the ask cancels the stale answer and keeps the tree. */
   async function askOrphan(runtime) {
-    if (await serverSwitch.guard(() => walkLeave(runtime))) aggregate.dismiss(runtime);
+    if (!aggregate.orphan(runtime)) return;
+    const op = membershipOp();
+    const leave = await serverSwitch.guard(() => walkLeave(runtime));
+    if (!aggregate.orphan(runtime)) return;
+    // Stale (a block or a newer window intent since the ask), whatever the
+    // answer — a walk the block interrupted is no answer at all: the tree is
+    // kept, and the question is owed again when the window is free.
+    if (!op.valid()) { orphansToAsk.add(runtime); return; }
+    if (leave) aggregate.dismiss(runtime);
   }
   /** The ids Aggregate wants as background members: every saved, included
    * entry but the focused one, in saved order. Single wants none. */
@@ -1308,7 +1348,7 @@
       const st = aggregate.status(r.id);
       return { id: r.id, name: r.entry().name || hostLabel(r.entry().address), into: st?.kind === 'orphan' ? st.into : '' };
     }),
-    ondismiss: (id) => { const r = background.find((x) => x.id === id); if (r && aggregate.orphan(r)) void askOrphan(r); },
+    ondismiss: (id) => { const r = background.find((x) => x.id === id); if (r && aggregate.orphan(r) && !membershipFrozen()) void askOrphan(r); },
   } : null);
 
   /** The bound runtime's socket closed under it. */

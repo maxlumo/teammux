@@ -344,6 +344,12 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       }));
     } catch (error) {
       connection.disconnect();
+      // The record may have COMMITTED the registry before it threw (a merge
+      // note or slot move after the entry set changed): whoever follows the
+      // registry still has to learn that now (board #335 ③b, reviewer R1 on
+      // aed2f654) — an absorbed member's identity ends at this boundary,
+      // block or no block, not at some later sync.
+      onRegistryChanged?.();
       throw error;
     }
     if (canonical.id !== id) {

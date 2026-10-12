@@ -111,6 +111,11 @@ export interface Members {
   leave(id: ServerId): void;
   /** Is `runtime` an orphan — detached, tree kept, awaiting the person? */
   orphan(runtime: ServerRuntime): boolean;
+  /** The identity layer declared this published member's entry gone — at
+   * ITS synchronous boundary (the fleet's drop on absorption; reviewer R1 on
+   * aed2f654): detach now, keep the tree. False when the set does not hold
+   * it published (nothing to keep; the caller ends it). */
+  absorbed(runtime: ServerRuntime): boolean;
   /** The person answered about an orphan: let it go. */
   dismiss(runtime: ServerRuntime): void;
   leaveAll(): void;
@@ -269,6 +274,12 @@ export function createMembers(deps: MemberDeps): Members {
     holds: (runtime) => mine(runtime),
     reconnecting(runtime) { if (mine(runtime) && !held.get(runtime.id)?.orphan) set(runtime.id, { kind: 'reconnecting' }); },
     orphan: (runtime) => !!held.get(runtime.id)?.orphan && mine(runtime),
+    absorbed(runtime) {
+      const h = held.get(runtime.id);
+      if (!h || h.runtime !== runtime || !h.published) return false;
+      orphan(h, '');
+      return true;
+    },
     dismiss(runtime) { if (mine(runtime) && held.get(runtime.id)?.orphan) forget(runtime.id); },
     answered,
     gaveUp(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },

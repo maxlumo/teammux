@@ -1041,3 +1041,65 @@ test('a reconcile that dropped absorbed entries reports their ids, once they are
   assert.deepEqual(reported, [['b']], 'B is reported');
   assert.equal(fleet.get('b'), undefined, 'after it was dropped');
 });
+
+test('the host s `end` runs INSIDE reconcile, synchronously, for an entry the registry lost — before onReconciled and before any await (#335 ③b; reviewer R1 on aed2f654)', async () => {
+  // The fleet is the identity layer's boundary: when the registry no longer
+  // saves an entry, the host's `end` for its runtime is the one place that
+  // can detach it NOW. A host that defers from here (to a later sync, an
+  // effect) is what R1 forbids; this pins that the boundary itself is
+  // synchronous and ordered, so a host hooking it gets "now".
+  const { storage, a, b } = twoServers();
+  const order: string[] = [];
+  const fleet = createServerFleet({
+    storage,
+    end: (runtime) => { order.push(`end:${runtime.id}:alive=${runtime.alive()}`); runtime.detach(); },
+    onReconciled: (gone) => order.push(`reconciled:${gone.join(',')}`),
+  });
+  try {
+    const ra = got(fleet.include(a));
+    got(fleet.include(b));
+    await handshakePlain(ra.connection, 'ws://a:9899', 'tokA', 'm-a');
+    const captured = ra.api.listSessions;
+    // Identity absorbs A (its entry leaves the registry).
+    saveServers(storage, [b]);
+    const gone = fleet.reconcile();
+    assert.deepEqual(gone, ['a']);
+    assert.deepEqual(order, ['end:a:alive=true', 'reconciled:a'], 'end ran synchronously, first; the runtime was still alive when handed over, for the host to detach');
+    assert.equal(ra.alive(), false, 'and after the boundary the handle refuses');
+    await assert.rejects(captured(), /is not serving|disposed/u, 'a captured call refuses NOW, with nothing advanced');
+    assert.equal(fleet.get('a'), undefined, 'the id is free');
+  } finally {
+    fleet.dropAll();
+  }
+});
+
+test('a record that COMMITS the registry and then throws still reconciles the fleet: the absorbed runtime is ended at that boundary, not after Retry (reviewer R1 on aed2f654)', async () => {
+  // The guess entry's dial proves m-a: `recordServer` absorbs it into
+  // `known` and then the merge note's write fails. The registry has already
+  // changed, so the fleet must hear it NOW — the thrown record is the
+  // caller's to report, but the identity is gone regardless.
+  const known = entry({ id: 'known', name: 'n1', address: 'ws://n1:9899', token: 'tok', machineId: 'm-a' });
+  const guess = entry({ id: 'guess', name: 'n1', address: 'ws://g:9899', token: 'tok' });
+  const base = mem({ tmux_servers: JSON.stringify([known, guess]), tmux_server_current: 'known' });
+  let failing = false;
+  const storage = { ...base, setItem: (k: string, v: string) => { if (failing && k === 'tmux_server_merges') throw new Error('QuotaExceededError'); base.setItem(k, v); } };
+  const ended: string[] = [];
+  const fleet = createServerFleet({ storage, end: (runtime) => { ended.push(`${runtime.id}:alive=${runtime.alive()}`); runtime.detach(); } });
+  try {
+    const rg = got(fleet.include(guess));
+    const captured = rg.api.listSessions;
+    failing = true;
+    const dialing = rg.dial();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    socket.message({ result: { authenticated: true, machine_id: 'm-a', hostname: 'n1-host' } });
+    await assert.rejects(dialing, /QuotaExceeded/u, 'the record threw');
+    assert.deepEqual(loadServers(storage).map((s) => s.id), ['known'], 'but the registry had absorbed the guess');
+    assert.deepEqual(ended, ['guess:alive=true'], 'and the fleet ended it at once, by the host s hook');
+    assert.equal(fleet.get('guess'), undefined);
+    await assert.rejects(captured(), /is not serving|disposed/u, 'a captured call refuses now');
+  } finally {
+    fleet.dropAll();
+  }
+});

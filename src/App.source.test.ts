@@ -1392,3 +1392,22 @@ test('the Hub union s cross-server pick is a landing like the others: aimed at o
   assert.match(source, /view\.hubSelectReq = null;/u, 'cleared with the other landings');
   assert.match(source, /const hubUnionFor = \$derived\(connMode === 'aggregate' \? \{[\s\S]*?runtimeOf: \(id\) =>/u, 'Single hands no union');
 });
+
+test('an absorbed member is orphaned at the fleet s own boundary, and asked only when the window can present it; the dismissal re-validates at commit (#335 ③b; reviewer R1/R2 on aed2f654)', () => {
+  // R1: `end` is the fleet's synchronous hook on absorption; a published
+  // member is detached THERE (aggregate.absorbed → orphan → deps.detach),
+  // not by a later sync an effect runs.
+  assert.match(source, /end: \(runtime\) => \{\s*if \(runtime === scopeSwap\.bound\(\)\) return undefined;\s*if \(aggregate\.absorbed\(runtime\) \|\| aggregate\.holds\(runtime\)\) return undefined;\s*return ends\.end\(runtime\);\s*\}/u);
+  assert.match(source, /detach\(runtime\) \{\s*forgetReconnector\(runtime\);\s*runtime\.detach\(\);\s*runtime\.connection\.disconnect\(\);/u, 'detach: refuse, close, stop the loop');
+  // R2: the ask is queued and run only when the window is free — never over
+  // a switch (its guard would end the switch s intent), a walk, or a block.
+  assert.match(source, /orphaned\(runtime\) \{ orphansToAsk\.add\(runtime\); askOrphans\(\); \}/u);
+  assert.match(source, /function askOrphans\(\) \{\s*if \(askingOrphan \|\| switching \|\| serverSwitch\.guarding \|\| migrationBlocked\) return;/u);
+  assert.match(source, /\$effect\(\(\) => \{ void switching; void migrationBlocked; untrack\(askOrphans\); \}\);/u, 'a freed window asks what is owed');
+  // And the dismissal is a deferred destruction like every membership change.
+  const ask = source.match(/async function askOrphan\(runtime\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(ask, /const op = membershipOp\(\);\s*const leave = await serverSwitch\.guard\(\(\) => walkLeave\(runtime\)\);\s*if \(!aggregate\.orphan\(runtime\)\) return;[\s\S]*?if \(!op\.valid\(\)\) \{ orphansToAsk\.add\(runtime\); return; \}\s*if \(leave\) aggregate\.dismiss\(runtime\);/u,
+    'owner, block and set re-checked at commit; a stale answer keeps the tree and re-owes the question');
+  assert.equal([...source.matchAll(/aggregate\.dismiss\(/gu)].length, 1, 'one place lets an orphan go');
+  assert.match(source, /ondismiss: \(id\) => \{[^\n]*!membershipFrozen\(\)\) void askOrphan\(r\); \}/u, 'the list s Dismiss is the same ask');
+});
