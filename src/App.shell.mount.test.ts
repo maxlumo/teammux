@@ -1324,9 +1324,13 @@ async function dirtyEditor(app: Awaited<ReturnType<typeof bootApp>>['app'], sett
   const files = [...app.document.querySelectorAll<HTMLButtonElement>('.rail-btn, .tabbar button')]
     .find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()));
   files!.click(); await settle();
-  app.document.querySelector<HTMLButtonElement>('.file-main')!.click(); await settle();
-  app.document.querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click(); await settle();
-  const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+  // In the tree in FRONT: with Aggregate members, every tree has a Files page.
+  const tree = () => app.document.querySelector('.scope-tree:not(.held)') ?? app.document;
+  const row = tree().querySelector<HTMLButtonElement>('.file-main');
+  assert.ok(row, 'the Files page in front lists a file');
+  row.click(); await settle();
+  tree().querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click(); await settle();
+  const area = tree().querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
   area.value = '# notes\n\nunsaved'; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle();
   return area;
 }
@@ -4017,4 +4021,86 @@ test('③b-2 (D2, orchestrator 02:28): picking a member that is not connected is
   for (let i = 0; i < 3; i++) await h.settle();
   assert.equal(ls.getItem('tmux_server_current'), 'a');
   assert.equal(area.isConnected && area.value, '# notes\n\nunsaved');
+});
+
+for (const keep of [true, false]) test(`③b-2: removing a background member asks ITS editor, on its own tree in front, and only it — ${keep ? 'Keep editing keeps B and every draft' : 'Discard removes B, A s draft untouched'}`, async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { calls: events, rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  // Both trees hold an unsaved edit of the same file name: B s made while B
+  // had the focus, then the focus came back to A.
+  await pickServer(h, 'beta');
+  const draftB = await dirtyEditor(h.app, h.settle);
+  draftB.value = '# notes\n\nB unsaved'; draftB.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle();
+  await pickServer(h, 'alpha');
+  const draftA = await dirtyEditor(h.app, h.settle);
+  assert.notEqual(draftA, draftB, 'two editors, one per tree');
+  assert.ok(draftB.closest('.scope-tree.held'), 'B s is behind A s');
+  // Remove beta from the list: its own confirmation first.
+  await pickServer(h, 'alpha');                                    // opens Settings › Connection
+  const remove = h.app.document.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Remove beta"]');
+  assert.ok(remove, `the list offers to remove beta: ${[...h.app.document.querySelectorAll('.preferences .server-list button')].map((b: any) => b.getAttribute('aria-label') || b.textContent?.trim()).join(' | ')}`);
+  remove.click(); await h.settle();
+  answerDialog(h.app, /^remove$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  // B s editor asks — in B s tree, brought in front for the walk.
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked, 'B s editor is asked');
+  assert.ok(!asked.closest('.scope-tree.held, [inert], .hidden'), 'on screen, answerable');
+  assert.ok(draftB.closest('.scope-tree') === asked.closest('.scope-tree'), 'in B s own tree');
+  assert.ok(draftA.closest('.scope-tree.held'), 'while A s tree is held behind it');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'B was not made CURRENT to ask (D2)');
+  answerDialog(h.app, keep ? /keep editing/iu : /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'one dialog: A s editor is not asked');
+  assert.ok(!draftA.closest('.scope-tree.held'), 'A is in front again');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'with its draft');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.ok(h.app.document.querySelector('.preferences'), 'back on the page the person started from');
+  const saved = () => JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id);
+  if (keep) {
+    assert.deepEqual(saved(), ['a', 'b'], 'Keep editing: B is not removed');
+    assert.equal(draftB.isConnected && draftB.value, '# notes\n\nB unsaved', 'and its draft is there, behind A');
+    assert.ok(conn(h, 'b')!.isConnected(), 'still up');
+  } else {
+    assert.deepEqual(saved(), ['a'], 'Discard: B is removed');
+    assert.equal(draftB.isConnected, false, 'its tree is gone');
+    assert.ok(conn(h, 'b')!.disposed(), 'and its connection ended');
+    assert.ok(conn(h, 'a')!.isConnected(), 'A untouched');
+  }
+});
+
+test('③b-2: on a phone, Back answers the dialog of the member being removed — in ITS tree, as Keep editing — and nothing of A s moves', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'mobile',
+  }), undefined, { calls: events, rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(trees(h.app).length, 2, `B is a member: ${dialsOf(events, 'b').join(',')}`);
+  await pickServer(h, 'beta');
+  assert.equal(ls.getItem('tmux_server_current'), 'b', `the focus moved: ${events.filter((e) => /dial@|candidate/u.test(e)).join(',')}`);
+  assert.equal(trees(h.app).length, 2, 'without a teardown');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }   // B s page settles in front
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  await pickServer(h, 'alpha');                                    // Settings › Connection
+  h.app.document.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Remove beta"]')!.click(); await h.settle();
+  answerDialog(h.app, /^remove$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), 'B s editor asks, in B s tree');
+  assert.ok(!asked.closest('.scope-tree.held, [inert]'), 'answerable');
+  h.app.window.history.pushState({ app: true }, '');
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'Back answered it');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['a', 'b'], 'as Keep editing: B is kept');
+  assert.equal(draftB.isConnected && draftB.value, '# notes\n\nunsaved', 'with its draft, behind A again');
+  assert.ok(draftB.closest('.scope-tree.held'));
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'and the focus never moved');
 });

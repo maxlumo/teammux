@@ -124,6 +124,16 @@
    * it. Each tree's pages register into their own (`viewOf(runtime)` in the
    * template). */
   const view = $derived(scopeRuntime ? viewOf(scopeRuntime) : noServerView);
+  /** The tree a leave walk has brought IN FRONT to ask its guards (#335
+   * ③b-2): a background member about to be destroyed is asked on its own
+   * tree, seen and answerable, without becoming CURRENT (D2) — the focus,
+   * its view and CURRENT stay as they were, and the walk puts this back to
+   * null when it ends, either way (`walkLeave`). */
+  let revealed = $state.raw(null);
+  /** The tree on screen: the one a walk revealed, else the focused one. ONE
+   * definition of "in front": every tree's `held`, the guest Preferences
+   * shows and the Back chain the window asks all follow it. */
+  const front = $derived(revealed ?? scopeRuntime);
   /** The trees the app holds mounted: the focused server's, and in
    * Aggregate every background member that passed its gates (③b-1). */
   let background = $state.raw([]);
@@ -438,7 +448,7 @@
   function confirmFormLeave() {
     const held = scopeSwap.bound();
     if (!held?.alive()) return Promise.resolve(true);
-    return serverSwitch.guard(() => confirmLeave({ leaving: held, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
+    return serverSwitch.guard(() => walkLeave(held));
   }
   const shell = $derived(connected || !!switching);
   // WHAT the terminal is pointed at (board #335 ②b-2): a reference that names
@@ -1278,7 +1288,7 @@
     if (serverSwitch.guarding) { connected = false; return null; }
     let leave = false;
     try {
-      leave = await serverSwitch.guard(() => confirmLeave({ leaving, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
+      leave = await serverSwitch.guard(() => walkLeave(leaving));
     } catch { leave = false; }
     if (!leave) {
       connected = false;
@@ -1798,7 +1808,16 @@
 
   // Frozen with the rest of the registry while the migration is blocked.
   function serverRename(id, name) { if (!migrationBlocked) serverList = renameServer(localStorage, id, name); }
-  function serverRemove(id) { if (migrationBlocked) return; serverList = removeServer(localStorage, id); serverCurId = currentServerId(localStorage); }
+  async function serverRemove(id) {
+    if (migrationBlocked) return;
+    // Removing a member destroys its tree (#335 ③b-2): that tree's guards
+    // are asked first, on its own tree; "keep editing" keeps the server.
+    const member = aggregate.runtimes().find((r) => r.id === id);
+    if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return;
+    if (migrationBlocked) return;
+    serverList = removeServer(localStorage, id);
+    serverCurId = currentServerId(localStorage);
+  }
   /** A row of the server list was picked. */
   function doServerSwitch(id) {
     const target = loadServers(localStorage).find((s) => s.id === id);
@@ -1856,6 +1875,18 @@
   /** Bring a hidden guarded page into view so its own dialog asks there. */
   async function revealPage(next) {
     if (page !== next) { page = next; await tick(); }
+  }
+  /** The ONE leave walk (board 315; per (runtime, view) since #335 ③b-2):
+   * ask the guards of `leaving` — the tree about to be destroyed, and only
+   * it — where they live. A background member is brought in front for the
+   * walk (`revealed`), each guard's page is revealed in THAT tree, and when
+   * the walk ends, either way, the page, the front and the focus are back as
+   * they were: a cancel loses no other tree's navigation or drafts. */
+  function walkLeave(leaving) {
+    return confirmLeave({
+      leaving, current: page, reveal: revealPage,
+      hold: (on) => { holdPages = on; revealed = on && leaving && leaving !== scopeRuntime ? leaving : null; },
+    });
   }
 
   /** A landing is delivered only to the tree it NAMES (board #335 ②b-2).
@@ -1921,7 +1952,7 @@
     connected: () => connected,
     currentId: () => serverCurId,
     currentName: () => serverName,
-    confirmLeave: () => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }),
+    confirmLeave: () => walkLeave(scopeSwap.bound()),
     // An address change claims the app's activation (app/activation.ts),
     // acting on the bound server.
     claim: () => activations.claim(scopeSwap.bound()),
@@ -2558,8 +2589,11 @@
       // pages' Back chains are not asked while the app is blocked. The Retry
       // panel is the content area then; Back just stays (re-push).
       if (storageHeld && page !== 'prefs') { navPush(); return; }
-      if (page === 'files' && view.filesGoBack && view.filesGoBack()) return;
-      if (page === 'files' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
+      // The tree IN FRONT is asked (#335 ③b-2): during a leave walk that is
+      // the member whose guard is asking, so Back answers its dialog.
+      const fv = front ? viewOf(front) : view;
+      if (page === 'files' && fv.filesGoBack && fv.filesGoBack()) return;
+      if (page === 'files' && view.jumpedFrom && !revealed) { switchTab(view.jumpedFrom); return; }
       // Files with nothing to peel has climbed to /: fall through to the
       // re-push — the terminal is not below it (board #47).
       // Chat and Agents peel their own layers (menus, dialogs, drawer,
@@ -2568,17 +2602,17 @@
       // navigating away (owner, 2026-08-24: "像是网页刷新了。像文件管理页面
       // 就很好"). The consumed pop re-pushes so the NEXT back has an entry
       // to spend no matter how many layers were peeled.
-      if (page === 'hub' && view.hubGoBack && view.hubGoBack()) { navPush(); return; }
-      if (page === 'agents' && view.agentsGoBack && view.agentsGoBack()) { navPush(); return; }
-      if (page === 'board' && view.boardGoBack && view.boardGoBack()) { navPush(); return; }
-      if (page === 'board' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
+      if (page === 'hub' && fv.hubGoBack && fv.hubGoBack()) { navPush(); return; }
+      if (page === 'agents' && fv.agentsGoBack && fv.agentsGoBack()) { navPush(); return; }
+      if (page === 'board' && fv.boardGoBack && fv.boardGoBack()) { navPush(); return; }
+      if (page === 'board' && view.jumpedFrom && !revealed) { switchTab(view.jumpedFrom); return; }
       // Board with nothing to peel is like Hub: the drawer is its compact
       // floor (lifted by its own chain above), so a fall-through just
       // re-pushes — it never dumps the reader on the terminal (board #47).
       // A terminal JUMPED INTO from Chat returns there before the ordinary
       // terminal floor gets a chance to lift its drawer.
-      if (page === 'terminal' && view.sessionsGoBack?.()) { navPush(); return; }
-      if (page === 'terminal' && view.jumpedFrom) { switchTab(view.jumpedFrom); return; }
+      if (page === 'terminal' && fv.sessionsGoBack?.()) { navPush(); return; }
+      if (page === 'terminal' && view.jumpedFrom && !revealed) { switchTab(view.jumpedFrom); return; }
       // Compact Terminal has the same FLOOR semantics as Chat/Board (board
       // #58): a bare page lifts the session drawer. Once open, Back falls
       // through to the final re-push — it must never peel closed and then
@@ -3228,7 +3262,7 @@
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={hubEligible && agentsLivesInSettings(layout.isTouchDevice)}
-      guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={scopeRuntime}
+      guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={front}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
       visible={page === 'prefs'}
       agentsEditRequest={view.agentsEditReq}
@@ -3278,7 +3312,7 @@
     {/if}
     {#each members as runtime (runtime)}
     {@const v = viewOf(runtime)}
-    {@const held = storageHeld || runtime !== scopeRuntime}
+    {@const held = storageHeld || runtime !== front}
     {@const shown = !held}
     <!-- While the app is blocked on its storage the tree stays MOUNTED, inert
          and hidden (board #335 ③a; orchestrator 08:17: one mechanism, Single

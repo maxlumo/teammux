@@ -125,7 +125,7 @@ test('the session list lives inside the Terminal page, sheeted on a phone', () =
   // matching Chat/Board: a bare Terminal lifts it; once open it falls through
   // and stays open, so Back can never close→open cycle. A Chat jump returns
   // to Chat before the ordinary floor lift.
-  const jumpAt = source.indexOf("if (page === 'terminal' && view.jumpedFrom)");
+  const jumpAt = source.indexOf("if (page === 'terminal' && view.jumpedFrom && !revealed)");
   const liftAt = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
   assert.ok(jumpAt >= 0 && liftAt > jumpAt, 'a Chat return slot outranks the Terminal floor');
   assert.match(source, /if \(page === 'terminal' && layout\.isTouchDevice && narrowVp && !sessListOpen\) \{\s*sessListOpen = true;\s*navPush\(\);\s*return;\s*\}/u,
@@ -317,7 +317,7 @@ test('Settings only offers the category when there is a bus and no Agents page',
   // the reason, its writes refused by the frozen runtime and held by the gate.
   assert.match(source, /showAgents=\{hubEligible && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
   // ③a: one guest per member, the focused one shown (reviewer P1-C).
-  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{scopeRuntime\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs'\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
+  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs'\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   // ③a (reviewer P1-1(b)): the request names its server; Preferences hands
@@ -336,13 +336,14 @@ test('a jump from the chat returns THERE on back, and deliberate navigation clea
   assert.match(source, /switchTab\('files'\); v\.jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
   assert.match(source, /switchTab\('board'\); v\.jumpedFrom = 'hub';/u, 'the board jump too');
   for (const p of ['files', 'board', 'terminal']) {
-    assert.match(source, new RegExp(`if \\(page === '${p}' && view\\.jumpedFrom\\) \\{ switchTab\\(view\\.jumpedFrom\\); return; \\}`, 'u'),
+    // ③b-2: not while a walk has another tree in front — its pages answer.
+    assert.match(source, new RegExp(`if \\(page === '${p}' && view\\.jumpedFrom && !revealed\\) \\{ switchTab\\(view\\.jumpedFrom\\); return; \\}`, 'u'),
       `${p}'s floor prefers the return slot`);
   }
   // Order matters: the slot fires only at the FLOOR — after the page's own
   // onGoBack chain (and the terminal's session sheet) had their turn.
-  const idxGoBack = source.indexOf("if (page === 'board' && view.boardGoBack && view.boardGoBack())");
-  const idxSlot = source.indexOf("if (page === 'board' && view.jumpedFrom)");
+  const idxGoBack = source.indexOf("if (page === 'board' && fv.boardGoBack && fv.boardGoBack())");
+  const idxSlot = source.indexOf("if (page === 'board' && view.jumpedFrom && !revealed)");
   assert.ok(idxGoBack >= 0 && idxGoBack < idxSlot, 'peel first, return second');
 });
 
@@ -365,11 +366,13 @@ test('board back on a phone lifts the project drawer, never the terminal (board 
 test('Terminal confirmations delegate before jump-back or drawer floor without another history listener (#167)', () => {
   // Actual pending/idle behavior is exercised by Sessions/Projects mount
   // tests; this pins App's wiring and preserves its touch-only history owner.
-  const delegate = source.indexOf("if (page === 'terminal' && view.sessionsGoBack?.())");
-  const jump = source.indexOf("if (page === 'terminal' && view.jumpedFrom)");
+  // ③b-2: the chains of the tree IN FRONT (`fv`), which a walk may move.
+  assert.match(source, /const fv = front \? viewOf\(front\) : view;/u);
+  const delegate = source.indexOf("if (page === 'terminal' && fv.sessionsGoBack?.())");
+  const jump = source.indexOf("if (page === 'terminal' && view.jumpedFrom && !revealed)");
   const floor = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
   assert.ok(delegate >= 0 && delegate < jump && delegate < floor);
-  assert.match(source, /if \(page === 'terminal' && view\.sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
+  assert.match(source, /if \(page === 'terminal' && fv\.sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
   assert.match(source, /onGoBack=\{\(fn\) => v\.sessionsGoBack = fn\}/u, 'registered in its tree s view (③a-4)');
   assert.equal([...source.matchAll(/addEventListener\('popstate'/gu)].length, 1);
 });
@@ -434,7 +437,8 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   assert.match(source, /target: \(\) => targetOf\(localStorage, runtime\.id\),/u);
   assert.match(source, /function reconnect\(\) \{\s*const runtime = bound\(\);\s*return runtime \? reconnectorOf\(runtime\) : noReconnector;\s*\}/u,
     'the shell s reconnect is the bound runtime s loop');
-  assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,/u);
+  // ③b-2: every walk goes through the ONE walkLeave(runtime).
+  assert.match(source, /confirmLeave: \(\) => walkLeave\(scopeSwap\.bound\(\)\),/u);
   // Every way a handle ends goes through ONE end (app/handle-end.ts; reviewer
   // P1-a on 0b8b9038 and on 48b40082): stopped now, its state RELEASED —
   // unless the handle replacing it ADOPTED that very state (a same-machine
@@ -491,7 +495,11 @@ test('the leave walk holds Settings mounted while guards are asked (board 315 re
     'revealing another page never unmounts an Agents editor that has not answered (LeaveHost.test.svelte mirrors this)');
   assert.match(source, /\{#if page === 'settings' \|\| holdPages\}\s*<div class="page-layer connect-layer" class:hidden=\{page !== 'settings'\}>\s*<Settings /u,
     'and the connect form: a walk it started must come back to it (reviewer P1-b on 48b40082)');
-  assert.match(source, /confirmLeave: \(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page, reveal: revealPage, hold: \(on\) => \{ holdPages = on; \} \}\),/u);
+  assert.match(source, /confirmLeave: \(\) => walkLeave\(scopeSwap\.bound\(\)\),/u);
+  // ③b-2: the ONE walk, per (runtime, view) — a background member is
+  // brought in front for it, never made CURRENT, and put back either way.
+  assert.match(source, /function walkLeave\(leaving\) \{\s*return confirmLeave\(\{\s*leaving, current: page, reveal: revealPage,\s*hold: \(on\) => \{ holdPages = on; revealed = on && leaving && leaving !== scopeRuntime \? leaving : null; \},\s*\}\);\s*\}/u);
+  assert.equal([...source.matchAll(/confirmLeave\(\{/gu)].length, 1, 'walkLeave is the only caller of confirmLeave');
   // Both server lists read one connection-state input.
   assert.equal([...source.matchAll(/<ServerList [^>]*link=\{serverLink\}/gu)].length, 2);
 });
@@ -501,7 +509,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // Since #335 ②b-1 the key is the runtime HANDLE, and the tree is inside the
   // provider bound to it: a different server is a different handle, and every
   // page below reads that server's api at init.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== scopeRuntime\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{:else\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
     'the panel replaces the content tree; a different server rebuilds it, bound to that server');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,
@@ -581,7 +589,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // destroy, before anything is dialled (reviewer P1-c on 0b8b9038).
   // With NO address exemption (reviewer P1-b on 48b40082): an address is not
   // an identity, and which machine answers is known only after the dial.
-  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: held, current: page,/u);
+  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => walkLeave\(held\)\);/u);
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
   assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
@@ -808,7 +816,7 @@ test('a Settings connect to a DIFFERENT server comes up in place before onConnec
   assert.doesNotMatch(blocked, /scopeSwap\.swap|ends\.end|fleet\.drop/u, 'the runtime the tree is bound to is not ended by the block');
   // ③a (orchestrator 08:17): the tree stays mounted while blocked, held —
   // inert and hidden — so nothing typed is lost; this was "no tree renders".
-  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== scopeRuntime\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
+  assert.match(source, /\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope /u, 'and the server tree is held while blocked, as is every tree out of focus');
   // A link a redirect or a re-mint starts is part of the SAME chain: awaited,
   // and cancelled with it (reviewer P1-4 on 341554b3).
   assert.match(act, /return activate\(\{ replace, elsewhere, up, minted: mintFrom\(gate\), chain: c \}\)\.done;/u, 'a re-mint is the next link, awaited');
@@ -870,7 +878,7 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   assert.match(elsewhere, /^async function arrivedElsewhere\(result, attempt, chain = null\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*(?:\/\/[^\n]*\n\s*)*if \(!attempt\.current\(\)\) return null;\s*(?:\/\/[^\n]*\n\s*)*const same = currentServerId\(localStorage\) === result\.entry\.id;\s*(?:\/\/[^\n]*\n\s*)*const leave = await askToReplace\(\);\s*if \(leave === null \|\| !attempt\.current\(\)\) return null;\s*if \(!leave\) \{[\s\S]*?\n    \}\s*(?:\/\/[^\n]*\n\s*)*if \(same\) return activate\(\{ replace: false, up: \(\) => \{ bringUp\(\); resubscribeAll\(\); \}, chain \}\)\.done;/u,
     'a stale arrival does nothing; every arrival asks first; an absorbed alias comes up on the canonical runtime s own dial');
   const ask = source.match(/async function askToReplace\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(ask, /leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving, current: page,[\s\S]*?if \(!leave\) \{\s*connected = false;\s*heldOffline = true;/u);
+  assert.match(ask, /leave = await serverSwitch\.guard\(\(\) => walkLeave\(leaving\)\);[\s\S]*?if \(!leave\) \{\s*connected = false;\s*heldOffline = true;/u);
   assert.equal([...source.matchAll(/askToReplace\(\)/gu)].length, 2, 'defined once, used once: every automatic arrival goes through arrivedElsewhere');
   assert.ok(elsewhere.indexOf('askToReplace(') < elsewhere.indexOf('activateConnected('), 'ask, then write');
   assert.match(elsewhere, /const run = act\.reload \? arriveAt\(left, 'arrive', chain\) : activate\([\s\S]*?chain \}\);\s*return await run\.done;/u,
@@ -908,7 +916,7 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   // And every other registry writer (reviewer P2-b on 08fdb6ba).
   assert.match(source, /if \(!hostname \|\| migrationBlocked\) return;/u, 'the hostname adoption');
   assert.match(source, /function serverRename\(id, name\) \{ if \(!migrationBlocked\)/u);
-  assert.match(source, /function serverRemove\(id\) \{ if \(migrationBlocked\) return;/u);
+  assert.match(source, /async function serverRemove\(id\) \{\s*if \(migrationBlocked\) return;/u);
   assert.match(source, /onAddressesChange=\{\(next\) => \{\s*if \(migrationBlocked\) return;/u);
   // No runtime is minted while blocked, so nothing dials and the dial's
   // record never runs; Retry owes the activation the block stopped.
@@ -972,7 +980,8 @@ test('removing a saved server goes through the shared ConfirmDialog (board #55)'
   assert.match(fn, /onremove\(v\.id\)/u, 'and removes by that id alone');
   assert.match(list, /<ConfirmDialog open=\{!!victim\}[\s\S]*?onconfirm=\{confirmRemove\} oncancel=\{\(\) => \(victim = null\)\}/u,
     'the shared dialog, cancel drops the capture');
-  assert.match(source, /function serverRemove\(id\) \{ if \(migrationBlocked\) return; serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed');
+  // ③b-2: a member's tree is destroyed with it, so its guards ask first.
+  assert.match(source, /async function serverRemove\(id\) \{\s*if \(migrationBlocked\) return;[\s\S]*?if \(member && !\(await serverSwitch\.guard\(\(\) => walkLeave\(member\)\)\)\) return;\s*if \(migrationBlocked\) return;\s*serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed, after the member s walk');
 });
 
 test('one system-vitals strip serves desktop sidebar and an open phone drawer (board #85)', () => {

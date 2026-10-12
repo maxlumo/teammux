@@ -1031,6 +1031,22 @@ A member that is not connected is not a focus change: the ordinary switch
 decides, and it asks the focused tree's guards because it replaces it. Single
 switches as before.
 
+**A leave walk asks the tree it destroys, in that tree** (③b-2; the (runtime,
+view) contract ②b deferred). Every walk goes through `walkLeave(runtime)`,
+the one caller of `confirmLeave`: only the guards registered under that
+runtime handle are asked (`leave-guards.ts` filters by owner, never by page
+name, so two trees' same-named pages are told apart and a replaced handle's
+guards are not the new one's). When `runtime` is a background member, the
+walk brings ITS tree in front (`revealed`; `front = revealed ?? focus`, the one
+definition every tree's `held`, the guest Preferences shows and the window's
+Back chain read) and reveals each guard's page there, so its dialog is seen
+and answerable where its draft lives — without making it CURRENT (D2). When
+the walk ends, either way, the page, the front and the focus are as they
+were; "keep editing" loses no tree's navigation or draft. On a phone, Back
+during the walk asks the tree in front, so it answers that member's dialog
+as "keep editing". Removing a member from the server list runs its walk
+first; a cancel keeps the server.
+
 ## Multi-Server (board #55)
 
 `src/lib/app/servers.ts` is the named-server registry over the same keys this
