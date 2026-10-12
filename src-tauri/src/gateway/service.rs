@@ -1199,10 +1199,19 @@ mod tests {
         let stop = calls.iter().position(|c| c.contains("disable")).expect("then the stop");
         assert!(reload < stop, "protection was loaded BEFORE the stop: {calls:?}");
         assert!(std::fs::read_to_string(&file).unwrap().contains("/new/path"));
-        // Explicit control-group written by hand: ours? no — not our grammar
-        // value — but the manager's effective value is what the boundary reads.
+        // The manager's effective value is what the boundary reads, whatever
+        // the file says: mixed kills the cgroup on SIGKILL and is refused;
+        // none spares the children but can never end a wedged gateway and is
+        // refused too, with its own reason; an unknown value is unsafe.
         *f.kill_mode.borrow_mut() = Some("mixed".into());
         assert!(restart(&sys2, N).unwrap_err().contains("KillMode=mixed"));
+        *f.kill_mode.borrow_mut() = Some("none".into());
+        let e = restart(&sys2, N).unwrap_err();
+        assert!(e.contains("KillMode=none") && e.contains("wedged"), "{e}");
+        *f.kill_mode.borrow_mut() = Some("future-mode".into());
+        assert!(restart(&sys2, N).unwrap_err().contains("does not know"));
+        *f.kill_mode.borrow_mut() = Some("process".into());
+        assert!(restart(&sys2, N).is_ok(), "only process passes");
         std::fs::remove_dir_all(&home).ok();
     }
 
