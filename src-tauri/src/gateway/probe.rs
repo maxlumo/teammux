@@ -441,8 +441,9 @@ mod tests {
     /// second instance runs.
     #[tokio::test]
     async fn ready_fires_only_for_a_bound_listener() {
-        // Starting a server sets the process-global tmux socket (board #349).
-        let _tmux = crate::tmux::test_support::global_socket();
+        // Starting a server sets the process-global tmux socket (board #349):
+        // one scope for the test — serial check, lock, snapshot, restore on drop.
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
         let (l, port) = listener().await;
         drop(l);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -471,8 +472,9 @@ mod tests {
     /// token or another machine id.
     #[tokio::test]
     async fn the_real_server_is_ours_only_with_our_token_and_machine() {
-        // Starting a server sets the process-global tmux socket (board #349).
-        let _tmux = crate::tmux::test_support::global_socket();
+        // Starting a server sets the process-global tmux socket (board #349):
+        // one scope for the test — serial check, lock, snapshot, restore on drop.
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
         let (l, port) = listener().await;
         drop(l);
         tokio::spawn(async move {
@@ -533,8 +535,9 @@ mod tests {
     /// configured one; every other case is Occupied — never None.
     #[tokio::test]
     async fn a_tls_gateway_is_ours_only_for_the_configured_valid_leaf_naming_the_address() {
-        // Starting a server sets the process-global tmux socket (board #349).
-        let _tmux = crate::tmux::test_support::global_socket();
+        // Starting a server sets the process-global tmux socket (board #349):
+        // one scope for the test — serial check, lock, snapshot, restore on drop.
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
         const LEAF: &str = "basicConstraints=critical,CA:FALSE";
         let guard = crate::tmux::Scratch::new("tlsprobe");
         let cases: &[(&str, &[&str], bool, bool, &str)] = &[
@@ -620,8 +623,9 @@ mod tests {
     /// #323): against the real server it is answered, and only for ours.
     #[tokio::test]
     async fn ui_info_is_asked_on_the_authenticated_session_and_only_of_ours() {
-        // Starting a server sets the process-global tmux socket (board #349).
-        let _tmux = crate::tmux::test_support::global_socket();
+        // Starting a server sets the process-global tmux socket (board #349):
+        // one scope for the test — serial check, lock, snapshot, restore on drop.
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
         let (l, port) = listener().await;
         drop(l);
         tokio::spawn(async move {

@@ -1391,84 +1391,183 @@ impl Drop for Scratch {
 /// with the gateway probe tests, which start a server and so set the global
 /// to `None`; a private server's `kill-server`, issued THROUGH the global,
 /// went to the socket tmux resolves on its own — the developer's default
-/// server — and every session on the host died. Two rules follow, both here:
+/// server — and every session on the host died. Three rules follow, all
+/// here:
 /// - a destructive command names its server itself (`destroy_private_server`
 ///   → `run_tmux_on(Some(socket), …)`), never through the global;
-/// - a test that reads or writes the global holds `global_socket()` for its
-///   whole body, so no other such test is in flight. Under `--test-threads=1`
-///   the lock is never contended; in a parallel run the second taker does NOT
-///   wait while a server a developer is sitting in exists — it fails at once
-///   with the rule, because waiting would hide the mistake until the next
-///   helper forgets to name its socket.
+/// - a test that reads or writes the global does so inside ONE
+///   `GlobalSocket` scope: taking it locks the global and snapshots its value,
+///   dropping it restores the snapshot and only then unlocks — on a normal
+///   exit and on a panic alike — so the next test finds what it would have
+///   found, and no write happens outside a held scope;
+/// - that scope REFUSES to open unless the test run is serial: before any
+///   tmux command or global write it checks the test binary's own argv for
+///   `--test-threads=1` (or `RUST_TEST_THREADS=1`), and panics with the
+///   incident and the two allowed commands otherwise. A mistake fails at
+///   once, with no contention needed and before a side effect; `npm run
+///   test:rust` passes the flag and is never affected.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn lock() -> &'static Mutex<()> {
         static L: OnceLock<Mutex<()>> = OnceLock::new();
         L.get_or_init(|| Mutex::new(()))
     }
 
-    pub const PARALLEL_MESSAGE: &str = "tmux-touching tests are running in PARALLEL while a tmux server this process can reach exists (incident 2026-10-12 05:51: the default server and every session on the host were killed this way). Run them sequentially: `npm run test:rust`, or `cargo test … -- --test-threads=1`.";
+    pub const PARALLEL_MESSAGE: &str = "tmux-touching tests must run SEQUENTIALLY (incident 2026-10-12 05:51: a bare `cargo test --lib` killed the developer's default tmux server and every session on the host). Run `npm run test:rust`, or `cargo test … -- --test-threads=1`.";
 
-    /// Hold the process-global tmux socket for this test's lifetime.
-    pub fn global_socket() -> MutexGuard<'static, ()> {
-        match lock().try_lock() {
-            Ok(g) => g,
-            Err(TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                if super::implicit_socket().exists() {
-                    panic!("{}", PARALLEL_MESSAGE);
-                }
-                lock().lock().unwrap_or_else(|p| p.into_inner())
+    /// Is this test run serial, by what libtest itself reads: the binary's
+    /// argv (`--test-threads=N` / `--test-threads N`; last one wins, as in
+    /// libtest), else `RUST_TEST_THREADS`, else libtest's default — the
+    /// machine's parallelism. Pure, so the shapes are tested on fake inputs.
+    pub fn serial_run(args: impl IntoIterator<Item = String>, env_threads: Option<&str>, parallelism: usize) -> bool {
+        let mut from_args: Option<String> = None;
+        let mut args = args.into_iter();
+        while let Some(a) = args.next() {
+            if let Some(v) = a.strip_prefix("--test-threads=") {
+                from_args = Some(v.to_string());
+            } else if a == "--test-threads" {
+                from_args = args.next();
             }
+        }
+        let threads = from_args.as_deref().or(env_threads).and_then(|v| v.trim().parse::<usize>().ok());
+        match threads {
+            Some(n) => n == 1,
+            None => parallelism == 1,
+        }
+    }
+
+    fn this_run_is_serial() -> bool {
+        serial_run(
+            std::env::args(),
+            std::env::var("RUST_TEST_THREADS").ok().as_deref(),
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(usize::MAX),
+        )
+    }
+
+    /// The one scope a test holds while it touches the process-global tmux
+    /// socket: lock + snapshot on open, restore then unlock on close.
+    pub struct GlobalSocket {
+        snapshot: Option<String>,
+        _hold: MutexGuard<'static, ()>,
+    }
+
+    impl GlobalSocket {
+        /// Refuses a parallel run BEFORE taking the lock or reading anything.
+        pub fn hold() -> Self {
+            assert!(this_run_is_serial(), "{}", PARALLEL_MESSAGE);
+            // Serial by contract; a second taker can only be a bug in a
+            // test holding two scopes, and that would deadlock here rather
+            // than pass. The message names the rule for that case too.
+            let hold = match lock().try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => panic!("a GlobalSocket scope is already open on another thread — {}", PARALLEL_MESSAGE),
+            };
+            Self { snapshot: super::get_socket(), _hold: hold }
+        }
+
+        /// The only sanctioned write to the global from a test.
+        pub fn set(&self, socket: Option<String>) {
+            super::set_socket(socket);
+        }
+
+        pub fn get(&self) -> Option<String> {
+            super::get_socket()
+        }
+    }
+
+    impl Drop for GlobalSocket {
+        fn drop(&mut self) {
+            // Restore first; the lock (`_hold`) is released after this body.
+            super::set_socket(self.snapshot.take());
         }
     }
 
     /// The prefix every private test server's socket carries.
     pub const PRIVATE_PREFIX: &str = "tmm-test-";
 
-    /// `kill-server` on exactly `socket`, named on the command line. Refuses a
-    /// socket that is not a private test server's: the type already rules out
-    /// "no socket" (that is the incident), and this rules out the server a
-    /// developer may be sitting in.
+    /// What `destroy_private_server` checks, as a pure predicate: the socket
+    /// is an absolute path INSIDE `temp` whose file name starts with
+    /// `PRIVATE_PREFIX`, and is not `implicit` (the server a bare `tmux` would
+    /// reach from this process). That is "a private test server's" — the
+    /// temp dir and the prefix are where and how `PrivateServer` creates them;
+    /// it does not prove THIS test created it, and does not claim to.
+    pub fn is_private_socket(socket: &Path, temp: &Path, implicit: &Path) -> bool {
+        let name = socket.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        socket.is_absolute() && socket.starts_with(temp) && name.starts_with(PRIVATE_PREFIX) && socket != implicit
+    }
+
+    /// `kill-server` on exactly `socket`, named on the command line. Refuses,
+    /// with a panic a test cannot shrug off, anything `is_private_socket`
+    /// does not accept.
     pub fn destroy_private_server(socket: &str) -> Result<String, String> {
-        let name = std::path::Path::new(socket).file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert!(
-            std::path::Path::new(socket).is_absolute() && name.starts_with(PRIVATE_PREFIX) && std::path::Path::new(socket) != super::implicit_socket(),
-            "refusing to kill-server on {socket:?}: not a private test server (expected {PRIVATE_PREFIX}* under the temp dir)"
+            is_private_socket(Path::new(socket), &std::env::temp_dir(), &super::implicit_socket()),
+            "refusing to kill-server on {socket:?}: not a private test server (an absolute {PRIVATE_PREFIX}* path under {}, and never the implicit socket)",
+            std::env::temp_dir().display()
         );
         super::run_tmux_on(Some(socket), &["kill-server"])
     }
 
-    /// A private tmux server for a test that sweeps or kills: its own socket,
-    /// set as the global for the test's body (production code reads the
-    /// global) and restored after; the lock held throughout.
-    pub struct PrivateTmux {
-        _hold: MutexGuard<'static, ()>,
-        previous: Option<String>,
+    /// A tmux server on its own socket under the temp dir, destroyed when
+    /// dropped — on a passing test and on an assertion failure alike, so no
+    /// test leaves a server behind. It never touches the global.
+    pub struct PrivateServer {
         pub socket: String,
     }
 
-    impl PrivateTmux {
-        pub fn start(tag: &str) -> Self {
-            let hold = global_socket();
-            let socket = std::env::temp_dir().join(format!("{PRIVATE_PREFIX}{tag}-{}.sock", std::process::id()));
+    impl PrivateServer {
+        pub fn new(tag: &str) -> Self {
+            let socket: PathBuf = std::env::temp_dir().join(format!("{PRIVATE_PREFIX}{tag}-{}.sock", std::process::id()));
             let socket = socket.to_string_lossy().to_string();
-            let previous = super::get_socket();
-            super::set_socket(Some(socket.clone()));
             let _ = destroy_private_server(&socket);
-            Self { _hold: hold, previous, socket }
+            Self { socket }
+        }
+
+        pub fn run(&self, args: &[&str]) -> Result<String, String> {
+            super::run_tmux_on(Some(&self.socket), args)
         }
     }
 
-    impl Drop for PrivateTmux {
+    impl Drop for PrivateServer {
         fn drop(&mut self) {
-            // The socket is OURS by construction; the global may say anything
-            // by now and is not consulted.
             let _ = destroy_private_server(&self.socket);
             let _ = std::fs::remove_file(&self.socket);
-            super::set_socket(self.previous.clone());
+        }
+    }
+
+    /// A private server that production code under test will reach: its
+    /// socket is set as the global for the test's body, through the scope
+    /// the test holds. `Drop` destroys the server by ITS socket — the global
+    /// is not consulted — and puts the global back to what it was when this
+    /// started; the scope's own drop restores the test's entry value after.
+    pub struct PrivateTmux<'g> {
+        pub server: PrivateServer,
+        guard: &'g GlobalSocket,
+        previous: Option<String>,
+    }
+
+    impl<'g> PrivateTmux<'g> {
+        pub fn start(guard: &'g GlobalSocket, tag: &str) -> Self {
+            let server = PrivateServer::new(tag);
+            let previous = guard.get();
+            guard.set(Some(server.socket.clone()));
+            Self { server, guard, previous }
+        }
+
+        pub fn socket(&self) -> &str {
+            &self.server.socket
+        }
+    }
+
+    impl Drop for PrivateTmux<'_> {
+        fn drop(&mut self) {
+            // `server` drops after this body and destroys itself by its own
+            // socket; here only the global goes back.
+            self.guard.set(self.previous.take());
         }
     }
 }
@@ -1478,40 +1577,153 @@ mod tests {
     use super::*;
 
     /// Board #349: the destructive helper names its server on the command
-    /// line, so another thread moving the global cannot redirect it — proven
-    /// with a SECOND private server standing in for "the server the global
-    /// now points at": it must survive the first one's Drop.
+    /// line, so a global pointed elsewhere cannot redirect it — proven with a
+    /// SECOND private server standing in for "the server the global now
+    /// points at" (at 05:51: None, the developer's default): it must survive
+    /// the first one's Drop. Every write to the global is through the one
+    /// held scope, and both servers are RAII — an assertion failure leaves
+    /// nothing behind.
     #[test]
     fn a_private_servers_kill_goes_to_its_own_socket_whatever_the_global_says() {
-        let a = test_support::PrivateTmux::start("own-a");
-        let a_socket = a.socket.clone();
-        let b_socket = std::env::temp_dir().join(format!("{}own-b-{}.sock", test_support::PRIVATE_PREFIX, std::process::id()));
-        let b_socket = b_socket.to_string_lossy().to_string();
-        let _ = test_support::destroy_private_server(&b_socket);
-        run_tmux_on(Some(&a_socket), &["new-session", "-d", "-s", "a-lives-here"]).unwrap();
-        run_tmux_on(Some(&b_socket), &["new-session", "-d", "-s", "b-lives-here"]).unwrap();
-        // What the incident did: a thread elsewhere points the global at
-        // another server (here B; at 05:51, None = the developer's default).
-        set_socket(Some(b_socket.clone()));
+        let scope = test_support::GlobalSocket::hold();
+        let b = test_support::PrivateServer::new("own-b");
+        b.run(&["new-session", "-d", "-s", "b-lives-here"]).unwrap();
+        let a = test_support::PrivateTmux::start(&scope, "own-a");
+        let a_socket = a.socket().to_string();
+        a.server.run(&["new-session", "-d", "-s", "a-lives-here"]).unwrap();
+        assert_eq!(scope.get().as_deref(), Some(a_socket.as_str()), "production code would reach A");
+        // The incident's move: the global now names another server.
+        scope.set(Some(b.socket.clone()));
         drop(a);
-        assert!(run_tmux_on(Some(&b_socket), &["has-session", "-t", "=b-lives-here:"]).is_ok(), "B is untouched by A's Drop");
+        assert!(b.run(&["has-session", "-t", "=b-lives-here:"]).is_ok(), "B is untouched by A's Drop");
         assert!(run_tmux_on(Some(&a_socket), &["has-session", "-t", "=a-lives-here:"]).is_err(), "A's own server is gone");
-        let _ = test_support::destroy_private_server(&b_socket);
-        let _ = std::fs::remove_file(&b_socket);
-        set_socket(None);
+        assert!(!std::path::Path::new(&a_socket).exists(), "and its socket file with it");
+    }
+
+    /// P1-1: one scope = lock + snapshot; restore then unlock on drop, on a
+    /// normal exit and on a panic. Whatever a scope did — moved the global to
+    /// None as starting a real server does, to a private socket as a
+    /// PrivateTmux does, or died half-way — the value after it is the value
+    /// before it, so the previous test's tail cannot change the next test's
+    /// choice. Two controlled private paths; never the default.
+    #[test]
+    fn a_scope_restores_the_global_it_found_on_every_exit() {
+        let entry = get_socket();
+        let p1 = std::env::temp_dir().join("tmm-test-restore-1.sock").to_string_lossy().to_string();
+        let p2 = std::env::temp_dir().join("tmm-test-restore-2.sock").to_string_lossy().to_string();
+        // Normal exit after writing None (a probe test's shape).
+        {
+            let scope = test_support::GlobalSocket::hold();
+            assert_eq!(scope.get(), entry, "a scope opens on the live value");
+            scope.set(None);
+        }
+        assert_eq!(get_socket(), entry, "a normal exit put it back");
+        // Normal exit after writing a private socket.
+        {
+            let scope = test_support::GlobalSocket::hold();
+            scope.set(Some(p1.clone()));
+            assert_eq!(get_socket().as_deref(), Some(p1.as_str()), "production code inside the scope sees the write");
+        }
+        assert_eq!(get_socket(), entry);
+        // A panic while the global is moved.
+        let r = std::panic::catch_unwind(|| {
+            let scope = test_support::GlobalSocket::hold();
+            scope.set(Some(p2.clone()));
+            panic!("a failing test, mid-scope");
+        });
+        assert!(r.is_err());
+        assert_eq!(get_socket(), entry, "a panic exit put it back too");
+        // A PrivateTmux inside a scope: its Drop returns the global to what
+        // the scope had at its start; the scope's drop returns the entry value.
+        {
+            let scope = test_support::GlobalSocket::hold();
+            scope.set(Some(p1.clone()));
+            {
+                let p = test_support::PrivateTmux::start(&scope, "restore-inner");
+                assert_eq!(scope.get().as_deref(), Some(p.socket()));
+            }
+            assert_eq!(scope.get().as_deref(), Some(p1.as_str()), "PrivateTmux's Drop restored the scope's value");
+        }
+        assert_eq!(get_socket(), entry);
+        // Two scopes in sequence, the second seeing the restored value and
+        // not the first's write — the "tail changes the next test" hole.
+        {
+            let first = test_support::GlobalSocket::hold();
+            first.set(Some(p2.clone()));
+        }
+        {
+            let second = test_support::GlobalSocket::hold();
+            assert_eq!(second.get(), entry, "the second scope opens on the entry value, not on the first's write");
+        }
+    }
+
+    /// P1-2: the serial check reads what libtest reads, on fake inputs — the
+    /// two argv spellings (last one wins), the env var, and libtest's default
+    /// of the machine's parallelism when neither is given.
+    #[test]
+    fn the_serial_check_reads_what_libtest_reads() {
+        use test_support::serial_run;
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(serial_run(args(&["bin", "--test-threads=1"]), None, 64));
+        assert!(serial_run(args(&["bin", "--test-threads", "1"]), None, 64));
+        assert!(!serial_run(args(&["bin", "--test-threads=4"]), None, 1), "explicit 4 is parallel even on one core");
+        assert!(!serial_run(args(&["bin", "--test-threads", "8"]), Some("1"), 1), "argv wins over the env, as in libtest");
+        assert!(serial_run(args(&["bin", "--test-threads=4", "--test-threads=1"]), None, 64), "the last argv value wins");
+        assert!(serial_run(args(&["bin", "tmux::tests"]), Some("1"), 64), "RUST_TEST_THREADS=1 is a serial run");
+        assert!(!serial_run(args(&["bin", "tmux::tests"]), Some("3"), 64));
+        assert!(!serial_run(args(&["bin"]), None, 64), "nothing said on a 64-way machine: libtest runs 64 threads");
+        assert!(serial_run(args(&["bin"]), None, 1), "nothing said on a 1-way machine: libtest runs 1");
+        assert!(!serial_run(args(&["bin", "--test-threads=garbage"]), None, 64), "unparseable is not a promise");
+    }
+
+    /// P1-2, end to end on THIS test binary in a subprocess: one protected
+    /// test selected alone — no contention possible — is refused when the
+    /// run is not declared serial, and runs under either declaration.
+    #[test]
+    fn a_protected_test_refuses_to_run_in_an_undeclared_parallel_run() {
+        let exe = std::env::current_exe().unwrap();
+        // The lightest protected test: it opens a scope and touches no tmux.
+        let target = "tmux::tests::a_scope_restores_the_global_it_found_on_every_exit";
+        let run = |args: &[&str], env_threads: Option<&str>| {
+            let mut c = std::process::Command::new(&exe);
+            c.arg("--exact").arg(target).args(args).env_remove("RUST_TEST_THREADS");
+            if let Some(n) = env_threads {
+                c.env("RUST_TEST_THREADS", n);
+            }
+            let out = c.output().expect("the test binary runs");
+            (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+        };
+        let (ok, text) = run(&["--test-threads=4"], None);
+        assert!(!ok, "an explicit parallel run must be refused:\n{text}");
+        assert!(text.contains("2026-10-12 05:51") && text.contains("npm run test:rust"), "the refusal names the incident and the command:\n{text}");
+        let (ok, text) = run(&[], Some("2"));
+        assert!(!ok, "RUST_TEST_THREADS=2 must be refused:\n{text}");
+        let (ok, text) = run(&["--test-threads=1"], None);
+        assert!(ok, "--test-threads=1 runs:\n{text}");
+        let (ok, text) = run(&["--test-threads", "1"], None);
+        assert!(ok, "--test-threads 1 runs:\n{text}");
+        let (ok, text) = run(&[], Some("1"));
+        assert!(ok, "RUST_TEST_THREADS=1 runs:\n{text}");
     }
 
     /// The destroy path cannot be aimed at the server a developer sits in,
-    /// nor at anything that is not a private test server.
+    /// nor at anything that is not a private test server — checked on the
+    /// pure predicate with controlled paths, never a real user socket.
     #[test]
     fn destroy_refuses_anything_but_a_private_test_server() {
-        let implicit = implicit_socket().to_string_lossy().to_string();
-        for bad in ["", "relative.sock", "/tmp/default", implicit.as_str()] {
-            let r = std::panic::catch_unwind(|| test_support::destroy_private_server(bad));
-            assert!(r.is_err(), "{bad:?} must be refused");
-        }
+        use std::path::Path;
+        use test_support::is_private_socket;
+        let temp = Path::new("/tmp");
+        let implicit = Path::new("/tmp/tmux-1000/default");
+        assert!(is_private_socket(Path::new("/tmp/tmm-test-x-1.sock"), temp, implicit));
+        assert!(!is_private_socket(Path::new(""), temp, implicit));
+        assert!(!is_private_socket(Path::new("tmm-test-x.sock"), temp, implicit), "relative");
+        assert!(!is_private_socket(Path::new("/tmp/default"), temp, implicit), "not our prefix");
+        assert!(!is_private_socket(Path::new("/tmp/tmux-1000/default"), temp, implicit), "the implicit socket");
+        assert!(!is_private_socket(Path::new("/home/x/tmm-test-x.sock"), temp, implicit), "outside the temp dir");
+        assert!(!is_private_socket(Path::new("/tmp/tmux-1000/tmm-test-x"), temp, Path::new("/tmp/tmux-1000/tmm-test-x")), "implicit, even with our prefix");
         // And the refusal is a panic, not a quiet Err — a test cannot shrug it off.
-        let msg = std::panic::catch_unwind(|| test_support::destroy_private_server("/tmp/default")).unwrap_err();
+        let msg = std::panic::catch_unwind(|| test_support::destroy_private_server("/nowhere/default")).unwrap_err();
         let text = msg.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(text.contains("refusing to kill-server"), "{text}");
     }
@@ -1520,7 +1732,7 @@ mod tests {
     /// tmux (which would start a server): `$TMUX` first, then the default.
     #[test]
     fn the_implicit_socket_is_read_from_the_environment_only() {
-        let _hold = test_support::global_socket();
+        let _scope = test_support::GlobalSocket::hold();
         let saved = (std::env::var_os("TMUX"), std::env::var_os("TMUX_TMPDIR"));
         std::env::set_var("TMUX", "/tmp/tmux-7/default,123,0");
         assert_eq!(implicit_socket(), std::path::PathBuf::from("/tmp/tmux-7/default"));

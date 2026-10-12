@@ -16,39 +16,53 @@ start a server and so set that global to `None`, had just reset it, and the
 kill landed on whatever `tmux` resolves on its own — the default server.
 The only protection was a sentence in a comment saying "sequential tests".
 
-Two mechanical rules replaced it, both in `tmux::test_support`:
+Three mechanical rules replaced it, all in `tmux::test_support`:
 
 - **A destructive command names its server on the command line.**
   `destroy_private_server(socket)` runs `tmux -S <socket> kill-server` through
   `run_tmux_on`, never through the global — the type cannot express "no
-  socket" — and refuses a socket that is not a private test server's
-  (`tmm-test-*` under the temp dir, never the implicit one) with a panic, not
-  an `Err` a test could shrug off. `PrivateTmux` uses it in both `start` and
-  `Drop`, and its `Drop` does not consult the global at all. A test proves it
-  with a second private server standing in for "the server the global now
-  points at": it survives the first one's `Drop`.
-- **A test that touches the global holds `global_socket()` for its body.**
-  Under `--test-threads=1` the lock is never contended. In a parallel run the
-  second taker does NOT wait while a server this process can reach exists
-  (`tmux::implicit_socket()`: `$TMUX`, else `$TMUX_TMPDIR`/`/tmp`
-  `tmux-<uid>/default`) — it panics at once with the incident and the two
-  commands that are allowed, because waiting would only hide the mistake until
-  the next helper forgets to name its socket. Every `PrivateTmux` test and
-  every probe test that starts a server takes it.
+  socket" — and refuses, with a panic a test cannot shrug off, anything
+  `is_private_socket` rejects: not absolute, not under the temp dir, not a
+  `tmm-test-*` file name, or the implicit socket (`tmux::implicit_socket()`:
+  `$TMUX`'s path, else `$TMUX_TMPDIR`-or-`/tmp` `tmux-<uid>/default`, read
+  from the environment without asking tmux). That is "a private test server's";
+  it does not prove this test created it and does not claim to. Every private
+  server is a `PrivateServer` (RAII: destroyed by its own socket on drop, on a
+  passing test and on an assertion failure alike); `PrivateTmux` wraps one and
+  its `Drop` does not consult the global at all.
+- **A test touches the global inside ONE `GlobalSocket` scope.** Opening it
+  locks the global and snapshots its value; dropping it restores the snapshot
+  and only then unlocks — on a normal exit and on a panic — so the next test
+  finds what it would have found, and no test writes the global outside a held
+  scope (`GlobalSocket::set` is the only sanctioned write). Every `PrivateTmux`
+  is started inside a scope the test holds; every probe test that starts a
+  real server opens one first.
+- **That scope refuses to open unless the run is serial.** Before any tmux
+  command or global write it reads what libtest reads — the test binary's
+  argv for `--test-threads=1` / `--test-threads 1` (last one wins), else
+  `RUST_TEST_THREADS=1`, else libtest's default of the machine's parallelism —
+  and panics with the incident date and the two allowed commands otherwise. A
+  mistake fails at once, needs no contention, and happens before a side
+  effect. Pure-function and `Scratch` tests that never touch the global are
+  not gated.
 
 So `npm run test:rust` is the command; a bare parallel `cargo test --lib`
 fails fast with the rule and kills nothing. Reproduced on an isolated
 `TMUX_TMPDIR` standing in for the default: before the fix one parallel run of
-`tasks::tests gateway::probe::tests` killed it; after, five runs left it alive
-and each failed on the guard. Verified controls: dropping the `-S` fails the
-own-socket test; dropping the probe tests' lock lets the parallel run through
-to the kill (on the isolated victim); dropping the refusal fails the
-refuses-anything-else test. `CARGO_TARGET_DIR` and worktrees are fine.
-
-Client-mount tests require Node `^22.22.2 || ^24.15.0 || >=26.0.0`
-(jsdom 30's engine requirement; board #115, 2026-09-09). `node --test`
-remains the only runner. Install with real npm from `package-lock.json`;
-see [development.md](development.md#node-and-package-installation).
+`tasks::tests gateway::probe::tests` killed it; after, every protected test
+(12 of them) refused at the gate on each of three runs, no tmux command ran,
+and the victim stayed alive. Controls, each on the committed code: dropping
+the `-S` from the destroy path fails the own-socket test (a second private
+server stands in for "the server the global now points at" and must survive
+the first one's `Drop`); dropping a scope's restore fails the restore test
+(two scopes in sequence, the second must open on the entry value); dropping
+the serial check lets a protected test run under `--test-threads=4` in a
+subprocess, which the gate test refuses to allow; dropping the refusal fails
+the predicate test. An earlier control that removed only the probe tests'
+locks did NOT revive the kill (the `-S` alone prevents it) — that was recorded
+as such, and is why the lock's own contract is now tested as state
+restoration, not as a prevented kill. `CARGO_TARGET_DIR` and worktrees are
+fine.
 
 ## Three Test Tiers
 

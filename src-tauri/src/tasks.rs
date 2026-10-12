@@ -801,18 +801,20 @@ mod tests {
 
     /// A PRIVATE tmux server for tests that sweep: a TTL-0 reap on the shared
     /// default server would close every dead task window the developer has —
-    /// the production effect, not a test's. The helper lives with the socket
-    /// global it guards (`tmux::test_support`, board #349): its kills name
-    /// their socket on the command line, and it holds the global's lock for
-    /// the test's body.
-    use crate::tmux::test_support::PrivateTmux;
+    /// the production effect, not a test's. The helpers live with the socket
+    /// global they guard (`tmux::test_support`, board #349): a test opens ONE
+    /// `GlobalSocket` scope (serial check, lock, snapshot; restore on drop)
+    /// and starts its private server inside it; the kill names its own socket
+    /// on the command line.
+    use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
 
     /// Board #206: a finished task's window is closed by the next `tmm task`
     /// verb once its death is older than the TTL — never a running task, never
     /// a plain dead window, never the verb's own target. Real tmux, TTL 0.
     #[test]
     fn expired_finished_tasks_are_reaped_and_nothing_else_is() {
-        let _server = PrivateTmux::start("reap");
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "reap");
         let session = "tmm-test-reap";
         let pid = std::process::id();
         let done = format!("tmm-test-done-{pid}");
@@ -859,7 +861,8 @@ mod tests {
     /// closes the window; `--keep` leaves the window (and its log) in place.
     #[test]
     fn stop_closes_the_window_with_its_tail_unless_kept() {
-        let _server = PrivateTmux::start("stopclose");
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "stopclose");
         let session = "tmm-test-stopclose";
         let pid = std::process::id();
         let closing = format!("tmm-test-close-{pid}");
@@ -891,7 +894,8 @@ mod tests {
     /// `--wake` on the same window clears the hook, and `stop` never wakes.
     #[test]
     fn a_wake_task_runs_its_command_once_at_its_own_end() {
-        let _server = PrivateTmux::start("wake");
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "wake");
         let session = "tmm-test-wake";
         let pid = std::process::id();
         let log = std::env::temp_dir().join(format!("tmm-test-wake-{pid}.log"));
@@ -917,7 +921,8 @@ mod tests {
     /// a restart of the task clears it.
     #[test]
     fn a_wake_failure_is_recorded_on_the_task_until_it_restarts() {
-        let _server = PrivateTmux::start("wakefail");
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "wakefail");
         let session = "tmm-test-wakefail";
         let name = format!("tmm-test-wf-{}", std::process::id());
         let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
@@ -941,7 +946,8 @@ mod tests {
     /// human starts has an empty `TMM_AGENT`, never a stale one.
     #[test]
     fn a_task_runs_with_its_starters_identity() {
-        let _server = PrivateTmux::start("starter");
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "starter");
         let session = "tmm-test-starter";
         let name = format!("tmm-test-id-{}", std::process::id());
         let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
