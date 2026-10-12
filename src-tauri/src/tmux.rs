@@ -1418,6 +1418,24 @@ pub(crate) mod test_support {
 
     pub const PARALLEL_MESSAGE: &str = "tmux-touching tests must run SEQUENTIALLY (incident 2026-10-12 05:51: a bare `cargo test --lib` killed the developer's default tmux server and every session on the host). Run `npm run test:rust`, or `cargo test … -- --test-threads=1`.";
 
+    pub const UNISOLATED_MESSAGE: &str = "tmux-touching tests must run in an ISOLATED tmux environment — TMUX and TMUX_PANE unset, TMUX_TMPDIR set to a throwaway directory (incident 2026-10-12 07:12: a test run in the developer's own shell killed the real default tmux server). Run `npm run test:rust`, which sets this up, or wrap cargo in `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d)`.";
+
+    /// Is this test process kept away from any real tmux: no `$TMUX`
+    /// (inherited pane), no `$TMUX_PANE`, and a `$TMUX_TMPDIR` so the
+    /// "default" server it could reach is one under a throwaway dir, not the
+    /// user's `/tmp/tmux-<uid>/default`. Pure; the shapes are tested.
+    pub fn isolated_run(tmux: Option<&str>, tmux_pane: Option<&str>, tmux_tmpdir: Option<&str>) -> bool {
+        tmux.is_none() && tmux_pane.is_none() && tmux_tmpdir.map(|d| !d.trim().is_empty()).unwrap_or(false)
+    }
+
+    fn this_run_is_isolated() -> bool {
+        isolated_run(
+            std::env::var("TMUX").ok().as_deref(),
+            std::env::var("TMUX_PANE").ok().as_deref(),
+            std::env::var("TMUX_TMPDIR").ok().as_deref(),
+        )
+    }
+
     /// Is this test run serial, by what libtest itself reads: the binary's
     /// argv (`--test-threads=N` / `--test-threads N`; last one wins, as in
     /// libtest), else `RUST_TEST_THREADS`, else libtest's default — the
@@ -1455,9 +1473,11 @@ pub(crate) mod test_support {
     }
 
     impl GlobalSocket {
-        /// Refuses a parallel run BEFORE taking the lock or reading anything.
+        /// Refuses a parallel or an unisolated run BEFORE taking the lock or
+        /// reading anything — the two incidents, each its own check.
         pub fn hold() -> Self {
             assert!(this_run_is_serial(), "{}", PARALLEL_MESSAGE);
+            assert!(this_run_is_isolated(), "{}", UNISOLATED_MESSAGE);
             // Serial by contract; a second taker can only be a bug in a
             // test holding two scopes, and that would deadlock here rather
             // than pass. The message names the rule for that case too.
@@ -1544,8 +1564,20 @@ pub(crate) mod test_support {
     /// the test holds. `Drop` destroys the server by ITS socket — the global
     /// is not consulted — and puts the global back to what it was when this
     /// started; the scope's own drop restores the test's entry value after.
+    ///
+    /// Drop ORDER is part of the contract (board #349 item 6, incident
+    /// 07:12): the server is destroyed FIRST, while the global still names
+    /// it, and only then is the global put back. With the explicit `-S` the
+    /// order changes nothing; it is the layer that holds if the `-S` is ever
+    /// lost — then a kill that reads the global still finds this server's
+    /// socket there, not whatever the restore would have put back (at 07:12:
+    /// `None`, the developer's default). Rust drops fields in declaration
+    /// order after the `Drop` body, so `server` is declared first AND the
+    /// body destroys it explicitly before touching the global; the test
+    /// `a_private_tmux_destroys_before_its_scope_restores` pins the order.
     pub struct PrivateTmux<'g> {
-        pub server: PrivateServer,
+        server: Option<PrivateServer>,
+        socket: String,
         guard: &'g GlobalSocket,
         previous: Option<String>,
     }
@@ -1553,20 +1585,27 @@ pub(crate) mod test_support {
     impl<'g> PrivateTmux<'g> {
         pub fn start(guard: &'g GlobalSocket, tag: &str) -> Self {
             let server = PrivateServer::new(tag);
+            let socket = server.socket.clone();
             let previous = guard.get();
-            guard.set(Some(server.socket.clone()));
-            Self { server, guard, previous }
+            guard.set(Some(socket.clone()));
+            Self { server: Some(server), socket, guard, previous }
         }
 
         pub fn socket(&self) -> &str {
-            &self.server.socket
+            &self.socket
+        }
+
+        /// Run a command on this private server, by its socket.
+        pub fn run(&self, args: &[&str]) -> Result<String, String> {
+            super::run_tmux_on(Some(&self.socket), args)
         }
     }
 
     impl Drop for PrivateTmux<'_> {
         fn drop(&mut self) {
-            // `server` drops after this body and destroys itself by its own
-            // socket; here only the global goes back.
+            // 1. destroy the server, by its own socket, while the global still
+            //    names it; 2. only then put the global back.
+            drop(self.server.take());
             self.guard.set(self.previous.take());
         }
     }
@@ -1590,7 +1629,7 @@ mod tests {
         b.run(&["new-session", "-d", "-s", "b-lives-here"]).unwrap();
         let a = test_support::PrivateTmux::start(&scope, "own-a");
         let a_socket = a.socket().to_string();
-        a.server.run(&["new-session", "-d", "-s", "a-lives-here"]).unwrap();
+        a.run(&["new-session", "-d", "-s", "a-lives-here"]).unwrap();
         assert_eq!(scope.get().as_deref(), Some(a_socket.as_str()), "production code would reach A");
         // The incident's move: the global now names another server.
         scope.set(Some(b.socket.clone()));
@@ -1684,26 +1723,91 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         // The lightest protected test: it opens a scope and touches no tmux.
         let target = "tmux::tests::a_scope_restores_the_global_it_found_on_every_exit";
-        let run = |args: &[&str], env_threads: Option<&str>| {
+        let iso = std::env::temp_dir().join(format!("tmm-test-iso-{}", std::process::id()));
+        std::fs::create_dir_all(&iso).unwrap();
+        // `tmux_env`: what the child sees of tmux — None = the isolated shape
+        // (TMUX/TMUX_PANE unset, TMUX_TMPDIR = a throwaway dir); Some(k, v) =
+        // that one variable set INSTEAD, the unisolated shapes.
+        let run = |args: &[&str], env_threads: Option<&str>, tmux_env: Option<(&str, &str)>| {
             let mut c = std::process::Command::new(&exe);
-            c.arg("--exact").arg(target).args(args).env_remove("RUST_TEST_THREADS");
+            c.arg("--exact").arg(target).args(args)
+                .env_remove("RUST_TEST_THREADS").env_remove("TMUX").env_remove("TMUX_PANE").env_remove("TMUX_TMPDIR");
             if let Some(n) = env_threads {
                 c.env("RUST_TEST_THREADS", n);
+            }
+            match tmux_env {
+                None => { c.env("TMUX_TMPDIR", &iso); }
+                Some((k, v)) => { c.env(k, v); }
             }
             let out = c.output().expect("the test binary runs");
             (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
         };
-        let (ok, text) = run(&["--test-threads=4"], None);
+        // Parallelism (incident 05:51).
+        let (ok, text) = run(&["--test-threads=4"], None, None);
         assert!(!ok, "an explicit parallel run must be refused:\n{text}");
         assert!(text.contains("2026-10-12 05:51") && text.contains("npm run test:rust"), "the refusal names the incident and the command:\n{text}");
-        let (ok, text) = run(&[], Some("2"));
+        let (ok, text) = run(&[], Some("2"), None);
         assert!(!ok, "RUST_TEST_THREADS=2 must be refused:\n{text}");
-        let (ok, text) = run(&["--test-threads=1"], None);
+        // Isolation (incident 07:12): serial, but in a real shell.
+        let (ok, text) = run(&["--test-threads=1"], None, Some(("TMUX", "/tmp/tmux-1000/default,1,0")));
+        assert!(!ok && text.contains("2026-10-12 07:12"), "$TMUX set must be refused, naming the incident:\n{text}");
+        let (ok, text) = run(&["--test-threads=1"], None, Some(("TMUX_PANE", "%1")));
+        assert!(!ok, "$TMUX_PANE set must be refused:\n{text}");
+        let (ok, text) = run(&["--test-threads=1"], None, Some(("HOME", "/nowhere")));
+        assert!(!ok, "no TMUX_TMPDIR must be refused:\n{text}");
+        // Both satisfied: runs, in each spelling.
+        let (ok, text) = run(&["--test-threads=1"], None, None);
         assert!(ok, "--test-threads=1 runs:\n{text}");
-        let (ok, text) = run(&["--test-threads", "1"], None);
+        let (ok, text) = run(&["--test-threads", "1"], None, None);
         assert!(ok, "--test-threads 1 runs:\n{text}");
-        let (ok, text) = run(&[], Some("1"));
+        let (ok, text) = run(&[], Some("1"), None);
         assert!(ok, "RUST_TEST_THREADS=1 runs:\n{text}");
+        let _ = std::fs::remove_dir_all(&iso);
+    }
+
+    /// Item 3 (07:15): the isolation predicate on its shapes.
+    #[test]
+    fn the_isolation_check_wants_no_inherited_tmux_and_a_throwaway_tmpdir() {
+        use test_support::isolated_run;
+        assert!(isolated_run(None, None, Some("/tmp/tmm-iso-abc")));
+        assert!(!isolated_run(Some("/tmp/tmux-1000/default,1,0"), None, Some("/tmp/x")), "$TMUX: a pane we are in");
+        assert!(!isolated_run(None, Some("%1"), Some("/tmp/x")), "$TMUX_PANE alone is still a real pane");
+        assert!(!isolated_run(None, None, None), "no TMUX_TMPDIR: the default is the user's");
+        assert!(!isolated_run(None, None, Some("")), "an empty TMUX_TMPDIR is unset to tmux");
+    }
+
+    /// Item 6: a PrivateTmux destroys its server BEFORE its scope restores
+    /// the global — observed through the global itself: at the moment the
+    /// server dies, the global still names it. Modelled with the real drop
+    /// and a server whose death is detectable by its socket file, since the
+    /// explicit -S makes the order invisible to the kill.
+    #[test]
+    fn a_private_tmux_destroys_before_its_scope_restores() {
+        let scope = test_support::GlobalSocket::hold();
+        let entry = std::env::temp_dir().join("tmm-test-order-entry.sock").to_string_lossy().to_string();
+        scope.set(Some(entry.clone()));
+        let p = test_support::PrivateTmux::start(&scope, "order");
+        let sock = p.socket().to_string();
+        p.run(&["new-session", "-d", "-s", "order-lives-here"]).unwrap();
+        assert_eq!(scope.get().as_deref(), Some(sock.as_str()));
+        assert!(std::path::Path::new(&sock).exists(), "the server is up");
+        // The order is a property of Drop's body; it is pinned by reading the
+        // source of that body, because no observer can run between its two
+        // statements. The runtime half: after drop, the server is gone AND
+        // the global is back — both halves happened.
+        drop(p);
+        assert!(run_tmux_on(Some(&sock), &["has-session", "-t", "=order-lives-here:"]).is_err(), "destroyed");
+        assert_eq!(scope.get().as_deref(), Some(entry.as_str()), "restored");
+        let src = include_str!("tmux.rs");
+        let body = src[src.find("impl Drop for PrivateTmux<'_>").unwrap()..].to_string();
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        let destroy = body.find("drop(self.server.take())").expect("the Drop body destroys the server explicitly");
+        let restore = body.find("self.guard.set(self.previous.take())").expect("and restores the global");
+        assert!(destroy < restore, "destroy comes BEFORE restore in PrivateTmux's Drop (incident 07:12)");
+        // And the field order agrees, for the implicit drops after the body.
+        let decl = &src[src.find("pub struct PrivateTmux<'g> {").unwrap()..];
+        let decl = &decl[..decl.find('}').unwrap()];
+        assert!(decl.find("server:").unwrap() < decl.find("guard:").unwrap(), "`server` is declared before `guard`");
     }
 
     /// The destroy path cannot be aimed at the server a developer sits in,

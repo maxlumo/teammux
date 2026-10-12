@@ -85,23 +85,31 @@ mod tests {
         }
     }
 
+    // These three used to assert on the DEVELOPER's server — "a server is
+    // running", "it has sessions" — which the suite reached through the
+    // inherited environment. Since board #349 the suite runs in an isolated
+    // TMUX_TMPDIR where no server exists until a test makes one, so each
+    // test now creates what it then observes. Nothing about tmux changed.
     #[test]
     fn t01_server_running() {
-        assert!(tmux::is_server_running(), "tmux server is not running!");
-        println!("✅ tmux server is running");
+        let s = TestSession::shell("t01");
+        assert!(tmux::is_server_running(), "a server runs once a session exists");
+        drop(s);
+        println!("✅ tmux server answers");
     }
 
     #[test]
     fn t02_list_sessions() {
+        let s = TestSession::shell("t02");
         let sessions = tmux::list_sessions().expect("Failed to list sessions");
         println!("✅ Found {} sessions:", sessions.len());
-        for s in &sessions {
+        for x in &sessions {
             println!(
                 "   - {} ({} windows, attached={})",
-                s.name, s.windows, s.attached
+                x.name, x.windows, x.attached
             );
         }
-        assert!(!sessions.is_empty(), "No sessions found");
+        assert!(sessions.iter().any(|x| x.name == s.name()), "the session we made is listed");
     }
 
     #[test]
@@ -115,7 +123,10 @@ mod tests {
         println!("✅ Created session: {}", s.name());
 
         tmux::kill_session(s.name()).expect("Failed to kill session");
-        let sessions = tmux::list_sessions().unwrap();
+        // Killing the server's last session ends the server, and then
+        // `list-sessions` is an error ("no server running") rather than an
+        // empty list — on the developer's server other sessions hid that.
+        let sessions = tmux::list_sessions().unwrap_or_default();
         assert!(
             !sessions.iter().any(|x| x.name == s.name()),
             "Test session still exists"

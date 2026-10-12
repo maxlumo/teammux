@@ -21,7 +21,7 @@
     "tauri:android:build": "tauri android build",
     "build:server": "vite build && cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features embed-ui --release --bins",
     "dev:server": "node scripts/preflight.mjs server && cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --release --bin server",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features -- --test-threads=1",
+    "test:rust": "node scripts/test-rust.mjs",
     "build:all": "npm run build && npm run tauri:build && npx tauri android build --target aarch64 --apk",
     "build:mac": "tauri build --features embed-ui",
     "build:android": "npx tauri android build --target aarch64 --apk && node scripts/preflight.mjs android-apk"

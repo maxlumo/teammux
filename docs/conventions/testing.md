@@ -5,7 +5,7 @@ Frontend tests and repository development-script tests run with `npm test`
 (`cargo test -- --test-threads=1`, needs a running tmux). This file governs the
 frontend side, and the one Rust rule below.
 
-## The Rust suite runs SEQUENTIALLY, and never kills a server it did not make (board #349)
+## The Rust suite runs SEQUENTIALLY and ISOLATED, and never kills a server it did not make (board #349)
 
 Incident 2026-10-12 05:51: a bare `cargo test … --lib` — no `--test-threads=1`
 — killed the developer's DEFAULT tmux server; every session on this host
@@ -16,7 +16,29 @@ start a server and so set that global to `None`, had just reset it, and the
 kill landed on whatever `tmux` resolves on its own — the default server.
 The only protection was a sentence in a comment saying "sequential tests".
 
-Three mechanical rules replaced it, all in `tmux::test_support`:
+Incident #2, the same day, 07:12:21: the fix for 05:51 was under review, and a
+negative control on it — a mutation that deliberately put the 05:51 bug back
+(`kill-server` through the global) to prove a test would notice — was run in
+the developer's own shell: `$TMUX` set, no `TMUX_TMPDIR`, no throwaway victim.
+The new scope had restored the global to `None` before the mutated kill ran,
+so the deliberately broken kill went to the real default server. Every session
+on the host was lost a second time. Two lessons that are now mechanism, not
+rules of conduct: a test process must never be able to SEE a real tmux, and a
+helper must destroy its server before anything restores the global.
+
+Four mechanical rules replaced the comment, the first in `scripts/test-rust.mjs`
+and the rest in `tmux::test_support`:
+
+- **`npm run test:rust` isolates the test process from every real tmux.** It
+  runs cargo with `TMUX` and `TMUX_PANE` unset and `TMUX_TMPDIR` set to a fresh
+  `mkdtemp` directory, always with `--test-threads=1` last (so nothing a caller
+  adds can raise it), and afterwards kills — each by its own `-S` path — any
+  server a test left under that directory, then removes it. The "default"
+  server a test could reach is an empty throwaway that did not exist before
+  the run. The real server's socket is simply not where the process will look.
+  Any other cargo test invocation on this host wraps itself the same way:
+  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo
+  test … -- --test-threads=1`.
 
 - **A destructive command names its server on the command line.**
   `destroy_private_server(socket)` runs `tmux -S <socket> kill-server` through
@@ -37,17 +59,29 @@ Three mechanical rules replaced it, all in `tmux::test_support`:
   scope (`GlobalSocket::set` is the only sanctioned write). Every `PrivateTmux`
   is started inside a scope the test holds; every probe test that starts a
   real server opens one first.
-- **That scope refuses to open unless the run is serial.** Before any tmux
-  command or global write it reads what libtest reads — the test binary's
-  argv for `--test-threads=1` / `--test-threads 1` (last one wins), else
-  `RUST_TEST_THREADS=1`, else libtest's default of the machine's parallelism —
-  and panics with the incident date and the two allowed commands otherwise. A
-  mistake fails at once, needs no contention, and happens before a side
-  effect. Pure-function and `Scratch` tests that never touch the global are
-  not gated.
+- **That scope refuses to open unless the run is serial AND isolated.** Before
+  any tmux command or global write it reads what libtest reads — the test
+  binary's argv for `--test-threads=1` / `--test-threads 1` (last one wins),
+  else `RUST_TEST_THREADS=1`, else libtest's default of the machine's
+  parallelism — and separately that `TMUX` and `TMUX_PANE` are unset and
+  `TMUX_TMPDIR` is set; each failure panics with its incident's date and the
+  commands that satisfy it. A mistake fails at once, needs no contention, and
+  happens before a side effect. Pure-function and `Scratch` tests that never
+  touch the global are not gated.
+- **A `PrivateTmux` destroys its server BEFORE its scope restores the global.**
+  Its `Drop` body kills the server by its own socket first and only then puts
+  the global back, and `server` is declared before `guard` so the implicit
+  drops agree. With the explicit `-S` the order changes nothing; it is the
+  layer that holds if the `-S` is ever lost — the 07:12 kill found `None` in
+  the global because the restore had already happened. A test pins both the
+  body's statement order and the field order.
 
-So `npm run test:rust` is the command; a bare parallel `cargo test --lib`
-fails fast with the rule and kills nothing. Reproduced on an isolated
+So `npm run test:rust` is the command, and the only one: a bare `cargo test`
+fails fast at the first tmux-touching test — on parallelism, or on seeing a
+real tmux — and kills nothing. Negative controls that touch a destroy path
+(`kill-server`, socket removal, a sweep) are run only by the validator, on an
+isolated victim, never in a developer's shell; a builder's evidence for such a
+control is "left to validator". Reproduced on an isolated
 `TMUX_TMPDIR` standing in for the default: before the fix one parallel run of
 `tasks::tests gateway::probe::tests` killed it; after, every protected test
 (12 of them) refused at the gate on each of three runs, no tmux command ran,

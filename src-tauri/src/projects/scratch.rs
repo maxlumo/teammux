@@ -589,8 +589,13 @@ mod tests {
         typed(target, "exit", || pane_pid(target) != before || tmux::pane_live(target) == Some(false));
     }
 
+    /// The server's global `pane-died` hook, `None` when none is set — which
+    /// is also the answer when no server exists yet (board #349: under the
+    /// isolated `TMUX_TMPDIR` the suite now runs in, this test is the first
+    /// to start one, and `show-options` on no server answered `None` while
+    /// the same unset option on the server it had created answered `""`).
     fn global_hook() -> Option<String> {
-        tmux::run_tmux(&["show-options", "-g", "-v", "pane-died"]).ok().map(|s| s.trim().to_string())
+        tmux::run_tmux(&["show-options", "-g", "-v", "pane-died"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
 
     /// The hidden session stays alive across an exit, and `ensure` repairs a
