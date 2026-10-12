@@ -128,7 +128,11 @@ each a real `tmm gateway` with its own tmux server, config root (a token
 generated in the container, its own `machine_id`, `state.db`), a managed
 project `demo` with one MANAGED agent `kiro` (isolated home, launch recipe;
 the `kiro-cli` inside is a stand-in that echoes, so no hook fires and nothing
-calls a service), and its own address on the compose network. The image builds
+calls a service), and its own address on the compose network. The agent is
+made by `tmm spawn`, not `project create --with-agent`: measured in `gw-a`
+on 2026-10-12, `--with-agent kiro` seeds a plain shell slot (`tmm agent list`
+shows `kiro (shell)`, `managed: false`, no `/work/.tmm/agents/` home), which
+is not what the multi-server pass reads. The image builds
 THIS checkout's web UI, `tmm` and `server` inside the container (`embed-ui`);
 no host binary, host path or host socket is ever mounted, and the script runs
 no tmux, no systemctl and not the host's `tmm`. The smoke then logs in from the
