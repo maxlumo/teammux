@@ -3435,7 +3435,7 @@ test('K, the HOST-GATE entry: the form s candidate identity write fails mid-hand
   assert.ok(!events.includes('aborted'), 'the same machine adopted its download');
 });
 
-test('a block keeps an unsaved editor: held mounted with its text, it saves nothing, and is there after Retry (#335 ③a; orchestrator 08:17)', async (context) => {
+for (const keep of [false, true]) test(`a block keeps an unsaved editor: held mounted with its text, it saves nothing, is there after Retry, and is asked before Retry s re-dial replaces it — ${keep ? 'Keep editing' : 'Discard'} (#335 ③a; orchestrator 08:17, 16:12)`, async (context) => {
   // The alias is current with an unsaved Files editor; its boot dial did not
   // learn a machine. The socket drops, the reconnect proves m-a, the identity
   // layer absorbs the alias into canonical, the slot copy fails, and the host
@@ -3473,6 +3473,23 @@ test('a block keeps an unsaved editor: held mounted with its text, it saves noth
   assert.equal(movesOpen(ls), false, 'Retry closed the handoff');
   assert.equal(area.isConnected, true, 'after Retry the same editor is there');
   assert.equal(area.value, '# notes\n\nunsaved', 'and so is the text');
+  // Retry owes the reconnect the absorption interrupted (orchestrator 16:12),
+  // and arriving at the survivor replaces this tree: the editor is asked
+  // first, on screen, and nothing is dialled past it until it answers.
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked, 'Retry s re-dial asks the editor before the survivor s tree replaces it');
+  assert.ok(!asked.closest('.scope-tree.held, .hidden, [inert]'), 'where the person can answer it');
+  if (keep) {
+    answerDialog(h.app, /keep editing/iu);
+    for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+    assert.equal(area.isConnected && area.value, '# notes\n\nunsaved', 'Keep editing: the same editor, with its text');
+    assert.equal(conn(h, 'c')?.isConnected() ?? false, false, 'and nothing came up over it');
+    return;
+  }
+  answerDialog(h.app, /^discard$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'Discard: the app arrives at the survivor');
+  assert.ok(conn(h, 'c')?.isConnected(), 'on its own connection, with nobody touching the card');
 });
 
 /** A Hub with one project, `work`, whose room holds message 1. */
@@ -3851,7 +3868,7 @@ test('③b-1 (reviewer P1 on 453f02b8): a published member whose socket closed d
   assert.ok(conn(h, 'b')?.isConnected(), 'which is back');
 });
 
-test('P1-4 (reviewer 15:06): an alert on a live background alias, absorbed into the canonical while the merge write fails, opens from canonical s centre after Retry', async (context) => {
+test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background alias, absorbed into the canonical while the merge write fails — Retry re-dials C, and the alert opens from C s centre onto its message', async (context) => {
   // C (m-a) is the focus. The alias A is a background member: its server
   // answered without a machine id, so it stayed an entry of its own, and it
   // holds an alert. Later C's machine reports A's address as one of its own,
@@ -3873,7 +3890,7 @@ test('P1-4 (reviewer 15:06): an alert on a live background alias, absorbed into 
     tmux_layout_mode: 'desktop',
   }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
     calls: events,
-    rpc: { ...oneRoomHub(), findBestAddress: async () => 'ws://alias:9899' },
+    rpc: { ...oneRoomHub({}, [{ id: '7', seq: 7, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'from the alias', room: 'proj:work' }]), findBestAddress: async () => 'ws://alias:9899' },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -3900,18 +3917,27 @@ test('P1-4 (reviewer 15:06): an alert on a live background alias, absorbed into 
   // (servers.ts `resumeSlotMove`). What matters is where the alert is.
   const onDisk = (JSON.parse(ls.getItem('tmux_hub_alerts::c') ?? '[]') as { key: string; server: string }[]).find((x) => x.key === 'proj:work|7');
   assert.equal(onDisk?.server, 'c', `the alert is C s, naming C: ${ls.getItem('tmux_hub_alerts::c')}`);
-  // The person connects to C again (Retry does not redial a reconnect that
-  // an absorption ended: a gap reported on #335, the same on d05806e6).
-  await connectCard(h.app, h.settle, 'ws://canonical:9899');
-  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  // Retry owes C the reconnect the absorption interrupted (orchestrator
+  // 16:12): C comes back on its own, nobody touches the card.
   assert.equal(ls.getItem('tmux_server_current'), 'c', 'on C');
+  assert.ok(conn(h, 'c')?.isConnected(), `Retry re-dialled C: ${dialsOf(events, 'c').slice(-3).join(',')}`);
   // C's centre shows it, from C's own slot.
   const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell');
   assert.ok(bell, 'C has the Hub');
   assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, `C s bell counts it: ${bell.getAttribute('aria-label')}`);
   bell.click();
   for (let i = 0; i < 3; i++) await h.settle();
-  const item = [...h.app.document.querySelectorAll<HTMLElement>('.nc-list li button, .nc-list .nc-item, .nc-list li')]
+  const item = [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-list .nc-row')]
     .find((el) => /from the alias/u.test(el.textContent ?? ''));
   assert.ok(item, `C s centre lists it: ${h.app.document.querySelector('.nc-list')?.textContent ?? 'no list'}`);
+  // And picking it LANDS: C's Hub opens the room on that message — not the
+  // "another server" refusal an alert still naming the alias would get.
+  item.click();
+  // The highlight is brief (Feed's 1.6 s): look for it as the jump lands.
+  let hit: Element | null = null;
+  for (let i = 0; i < 12 && !hit; i++) { await h.app.advance(100); await h.settle(); hit = h.app.document.querySelector('.jump-hit[data-msg="7"]'); }
+  assert.ok(hit, `the jump landed on message 7: ${h.app.document.querySelector('.nc-fail')?.textContent ?? 'no failure shown'}`);
+  assert.ok(!hit.closest('.scope-tree.held'), 'in C s own, shown tree');
+  assert.doesNotMatch(h.app.document.querySelector('.rail-bell')?.getAttribute('aria-label') ?? '', /· 1\b/u, 'and seen there, the alert counts no more');
+  assert.ok(conn(h, 'c')!.isConnected() && !events.some((e) => e.startsWith('rpc@a:hubLog')), 'asked of C, never of the alias');
 });

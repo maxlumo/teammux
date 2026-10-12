@@ -1135,8 +1135,10 @@
   function onDrop() {
     if (switching) return; // the switch is bringing another server up
     // The person chose to stay offline, or the migration is blocked:
-    // nothing automatic dials.
-    if (heldOffline || migrationBlocked) return;
+    // nothing automatic dials. A drop while blocked is an interrupted
+    // activation, which Retry owes its dial (orchestrator 16:12).
+    if (heldOffline) return;
+    if (migrationBlocked) { owedActivation = true; return; }
     // Keep connected=true during reconnect to avoid UI flicker
     reconnect().start();
   }
@@ -1168,14 +1170,19 @@
     // absorbed is detached by its own dial, and the arrival below is what
     // brings its survivor up.)
     if (bound() !== runtime) return;
-    // An attempt already out when the migration blocked brings nothing up.
-    if (migrationBlocked) { runtime.connection.disconnect(); connected = false; return; }
+    // An attempt already out when the migration blocked brings nothing up;
+    // the block interrupted it, so Retry owes it its dial (orchestrator 16:12).
+    if (migrationBlocked) { runtime.connection.disconnect(); connected = false; owedActivation = true; return; }
     if (!result?.ok && result?.reason === 'unrecorded') {
       // A peer authenticated and we could not establish which server it is.
       // That is never "the same server": its socket is closed, and the
       // person is told, exactly as the connect form does.
       reconnectError = t('configIdentityFailed');
       storageFailed();
+      // An identity that could not be recorded because the app blocked — an
+      // absorption whose merge failed, say — interrupted this reconnect:
+      // Retry dials it again. An ordinary failure is the person's.
+      if (migrationBlocked) owedActivation = true;
       connected = false;
       page = 'settings';
       return;
@@ -1257,35 +1264,51 @@
    * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
    * was taken under: if someone else took it anyway, this arrival is not
    * the app's any more and does nothing. */
+  /** Before an arrival replaces the tree that is bound, ask its pages (the
+   * leave guards): true to go on, false when the person keeps editing — the
+   * app then stays on the source, offline, with what was typed — and null
+   * when another question is already open (a form's walk), whose answer
+   * decides instead. ONE place for every automatic arrival — a reconnect
+   * that landed on another machine and an absorption's survivor, Retry's
+   * owed re-dial included (it lands here). A switch Retry resumes asked in
+   * its own walk, before the block. */
+  async function askToReplace() {
+    const leaving = scopeSwap.bound();
+    if (!leaving) return true;
+    if (serverSwitch.guarding) { connected = false; return null; }
+    let leave = false;
+    try {
+      leave = await serverSwitch.guard(() => confirmLeave({ leaving, current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
+    } catch { leave = false; }
+    if (!leave) {
+      connected = false;
+      heldOffline = true;
+      page = 'settings';
+    }
+    return leave;
+  }
   async function arrivedElsewhere(result, attempt, chain = null) {
     if (migrationBlocked) { connected = false; return t('migrationBlockedNote'); }
     // Someone took over since the dial (a newer connect, a switch): this
     // arrival is not the app's any more, the alias case included.
     if (!attempt.current()) return null;
     // Identity repair absorbed the entry we were on into the machine's
-    // survivor, and CURRENT already names it: the SAME machine. Its own
-    // runtime dials before anything comes up on it (reviewer P1-B on
-    // cc45d7d1), keeping the tree until it is up — the survivor adopts the
-    // replaced handle's Files record.
-    if (currentServerId(localStorage) === result.entry.id) {
-      return activate({ replace: false, up: () => { bringUp(); resubscribeAll(); }, chain }).done;
-    }
-    // Another question is already open (a form's walk): this arrival asks
-    // nothing on top of it and changes nothing — the person's answer there
-    // decides what happens next.
-    if (serverSwitch.guarding) { connected = false; return null; }
-    let leave = false;
-    try {
-      leave = await serverSwitch.guard(() => confirmLeave({ leaving: scopeSwap.bound(), current: page, reveal: revealPage, hold: (on) => { holdPages = on; } }));
-    } catch { leave = false; }
-    if (!attempt.current()) return null;
+    // survivor, and CURRENT already names it: the SAME machine.
+    const same = currentServerId(localStorage) === result.entry.id;
+    // Either way a NEW tree replaces the one bound, so its pages are asked
+    // first (#335 ③b-2) — the survivor of an absorption is a runtime of its
+    // own, and an unsaved editor of the alias's would otherwise go with the
+    // old tree in silence.
+    const leave = await askToReplace();
+    if (leave === null || !attempt.current()) return null;
     if (!leave) {
-      connected = false;
-      heldOffline = true;
-      reconnectError = t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
-      page = 'settings';
-      return reconnectError;
+      reconnectError = same ? '' : t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
+      return reconnectError || null;
     }
+    // The same machine: its own runtime dials before anything comes up on
+    // it (reviewer P1-B on cc45d7d1), keeping the tree until it is up — the
+    // survivor adopts the replaced handle's Files record.
+    if (same) return activate({ replace: false, up: () => { bringUp(); resubscribeAll(); }, chain }).done;
     // What a failure returns to: the server the tree is bound to — CURRENT
     // may already name the server the dial was meant for.
     const left = bound()?.id ?? '';
@@ -2193,24 +2216,32 @@
     // dials before anything is bound to it (reviewer P1-B on cc45d7d1).
     const minted = mintCurrent();
     if (migrationBlocked) return;
-    // Every published member the block left without a socket dials again;
-    // the ones it stopped mid-join join again through the set's sync.
+    // Every member the block or an absorption interrupted dials again
+    // (orchestrator 16:12): a handle that is no longer alive is replaced and
+    // joins afresh through the set's sync, and a published member that is
+    // not answering is redialled by its own loop.
+    syncMembers();
     aggregate.resume();
     if (deferredSwitch) { const target = deferredSwitch; deferredSwitch = null; void switchTo(target); return; }
     if (!minted.runtime) return;
+    // The focus. What it is owed follows from what the block interrupted,
+    // never from whether its handle happens to be alive: a session that was
+    // up stays up, and an activation the block or an absorption stopped —
+    // a switch, a connect that had recorded its server, a reconnect, a drop
+    // while blocked — is owed one dial. A form whose own identity write
+    // failed is the person's to connect again, and the boot dial, re-armed
+    // by the gate, does its own.
+    const owed = owedActivation && !heldOffline;
+    owedActivation = false;
     if (minted.keep && connected) {
-      // The block came mid-session on the server the tree is bound to.
+      // The block came mid-session on the server the tree is bound to: up
+      // still, or its own loop dials it (a drop while blocked).
       void restoreNavFor(minted.runtime);
       if (minted.runtime.connection.isConnected()) serverReady();
       else if (!heldOffline) reconnect().start();
       return;
     }
-    // Not up yet. Only an ACTIVATION the block stopped before its runtime's
-    // own dial is owed one now (a switch, a connect that had recorded its
-    // server); a form whose own identity write failed is the person's to
-    // connect again, and the boot dial, re-armed by the gate, does its own.
-    if (heldOffline || !owedActivation) return;
-    owedActivation = false;
+    if (!owed) return;
     autoConnectAttempted = true;
     // A NEW runtime replaces whatever the app showed before the block (a
     // switch's source): its navigation resets once this one is up.

@@ -687,3 +687,15 @@ test('an intent written before ③b, on the pending record, is still resumed: as
   assert.deepEqual(JSON.parse(s.getItem(residentKey('tmux_hub_drafts', 'c'))!), { work: 'TYPED' });
   assert.equal(JSON.parse(s.getItem('tmux_state_layout')!).moving, undefined, 'and the old intent is closed');
 });
+
+test('an unreadable conflict store keeps the move open and its slots untouched, instead of erasing earlier losers (orchestrator 16:32 on 0f668e4f)', () => {
+  const s = twins(['a1'], {
+    tmux_slot_conflicts: '{not json',
+    [residentKey('tmux_hub_drafts', 'c')]: JSON.stringify({ work: 'TYPED on canonical' }),
+    [residentKey('tmux_hub_drafts', 'a1')]: JSON.stringify({ work: 'typed on the alias' }),
+  });
+  assert.throws(() => migrateServers(s), 'the merge cannot record its loser: it does not land');
+  assert.equal(s.getItem('tmux_slot_conflicts'), '{not json', 'the store is not written over');
+  assert.deepEqual(drafts(s, 'a1'), { work: 'typed on the alias' }, 'the alias s draft is still in its slot');
+  assert.ok(s.getItem(MOVES_KEY), 'and the move is still open for Retry');
+});

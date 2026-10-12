@@ -29,7 +29,6 @@ const DRAFTS_KEY = 'tmux_hub_drafts';
 const SEEN_KEY = 'tmux_hub_seen';
 /** Where a losing value is kept (device-wide, not a server's slot). */
 export const LOST_KEY = 'tmux_slot_conflicts';
-const LOST_CAP = 40;
 
 /** A value's fingerprint: FNV-1a over its UTF-16 units, with its length.
  * Synchronous, because the fold runs before the first render. It decides
@@ -96,12 +95,16 @@ export function mergeSlot(key: string, target: string | null, source: string | n
   return wins === 'source' ? { value: source, lost: target } : { value: target, lost: source };
 }
 
-/** Keep a losing value where a person (or a later tool) can find it: the
- * newest `LOST_CAP`, one row per (from, to, key, value). */
+/** Keep a losing value where a person (or a later tool) can find it, one
+ * row per (from, to, key, value). Nothing resolves a row yet, so every row is
+ * unresolved and none is ever dropped to make room (orchestrator 16:32 on
+ * 0f668e4f: a cap would lose the oldest loser in silence). A store that
+ * cannot be read — or holds something other than a list — THROWS rather than
+ * starting over: writing `[row]` over it would erase every earlier loser, so
+ * the caller's merge does not land and the app blocks until Retry. */
 export function recordLost(storage: Pick<Storage, 'getItem' | 'setItem'>, row: { from: string; to: string; key: string; value: string }): void {
-  let rows: unknown = [];
-  try { rows = JSON.parse(storage.getItem(LOST_KEY) || '[]'); } catch { rows = []; }
-  const list = (Array.isArray(rows) ? rows : []).filter((r) => !(isMap(r) && r.from === row.from && r.to === row.to && r.key === row.key && r.value === row.value));
-  list.push(row);
-  storage.setItem(LOST_KEY, JSON.stringify(list.slice(-LOST_CAP)));
+  const rows: unknown = JSON.parse(storage.getItem(LOST_KEY) || '[]');
+  if (!Array.isArray(rows)) throw new Error(`${LOST_KEY} is not a list`);
+  if (rows.some((r) => isMap(r) && r.from === row.from && r.to === row.to && r.key === row.key && r.value === row.value)) return;
+  storage.setItem(LOST_KEY, JSON.stringify([...rows, row]));
 }

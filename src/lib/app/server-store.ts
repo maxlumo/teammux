@@ -119,13 +119,17 @@ export function createWriteGate(): WriteGate {
     if (!from || !to || from === to) return;
     for (const [k, e] of [...table].sort(([, x], [, y]) => x.seq - y.seq)) {
       if (e.id !== from) continue;
-      table.delete(k);
       const held = table.get(slot(to, e.key));
       const target = held ? held.value : storage.getItem(residentKey(e.key, to));
       const wins = held && held.seq > e.seq ? 'target' : 'source';
       const { value, lost } = mergeSlot(e.key, target, e.value, from, to, wins);
+      // The loser is recorded, then the survivor's entry is written, and only
+      // THEN is the absorbed one's entry let go of (orchestrator 16:32 on
+      // 0f668e4f): a read or record that throws leaves the table as it was,
+      // and the next flush runs this same, idempotent merge again.
       if (lost != null) recordLost(storage, { from, to, key: e.key, value: lost });
       table.set(slot(to, e.key), { id: to, key: e.key, value, seq: Math.max(e.seq, held?.seq ?? 0) });
+      table.delete(k);
     }
   };
   return {
@@ -134,7 +138,11 @@ export function createWriteGate(): WriteGate {
     peek: (id, key) => table.get(slot(id, key))?.value,
     record(id, key, value) { put(id, key, value, ++seq); },
     flush(storage, survivorOf = (id) => id) {
-      for (const id of new Set([...table.values()].map((e) => e.id))) move(storage, id, survivorOf(id));
+      // A move that cannot read or record is a flush that did not land: the
+      // gate stays closed, which keeps the app blocked until the next Retry.
+      try {
+        for (const id of new Set([...table.values()].map((e) => e.id))) move(storage, id, survivorOf(id));
+      } catch { return false; }
       for (const e of [...table.values()].sort((a, b) => a.seq - b.seq)) {
         const key = residentKey(e.key, e.id);
         try {

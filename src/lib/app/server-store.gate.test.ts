@@ -194,3 +194,34 @@ test('a survivor nothing shows (\'\') keeps the entry where it is — never writ
   assert.equal(s.m.get('tmux_state::gone'), 'x');
   assert.equal([...s.m.keys()].some((k) => k.endsWith('::')), false);
 });
+
+test('a move whose loser cannot be recorded keeps the absorbed entry pending: the flush does not land, and the next one merges it (orchestrator 16:32 on 0f668e4f)', () => {
+  const s = mem();
+  const gate = createWriteGate();
+  const a = createServerStore(s, 'a', gate);
+  const c = createServerStore(s, 'c', gate);
+  gate.close();
+  c.setItem('tmux_state', 'c-first');
+  a.setItem('tmux_state', 'a-second');
+  s.failNext('tmux_slot_conflicts');
+  assert.equal(gate.flush(s, (id) => (id === 'a' ? 'c' : id)), false, 'the loser could not be recorded: the flush did not land');
+  assert.equal(gate.closed, true, 'the gate stays closed');
+  assert.equal(gate.peek('a', 'tmux_state'), 'a-second', 'and the absorbed entry is still pending, not dropped');
+  assert.equal(s.getItem('tmux_state::c'), null, 'nothing was written');
+  assert.equal(gate.flush(s, (id) => (id === 'a' ? 'c' : id)), true, 'the next flush lands');
+  assert.equal(s.getItem('tmux_state::c'), 'a-second');
+  assert.deepEqual(JSON.parse(s.getItem('tmux_slot_conflicts')!), [{ from: 'a', to: 'c', key: 'tmux_state', value: 'c-first' }], 'with the loser recorded once');
+});
+
+test('an unreadable conflict store blocks the move instead of being written over (orchestrator 16:32 on 0f668e4f)', () => {
+  const s = mem({ tmux_slot_conflicts: '{not json' });
+  const gate = createWriteGate();
+  const a = createServerStore(s, 'a', gate);
+  const c = createServerStore(s, 'c', gate);
+  gate.close();
+  c.setItem('tmux_state', 'c-first');
+  a.setItem('tmux_state', 'a-second');
+  assert.equal(gate.flush(s, (id) => (id === 'a' ? 'c' : id)), false);
+  assert.equal(s.getItem('tmux_slot_conflicts'), '{not json', 'the earlier losers are not erased');
+  assert.equal(gate.peek('a', 'tmux_state'), 'a-second', 'and nothing pending was lost');
+});

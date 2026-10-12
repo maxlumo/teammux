@@ -865,13 +865,18 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // (reviewer, 18:54 on 5ca0e79e). An absorbed alias already moved CURRENT:
   // the survivor's own runtime dials (reviewer P1-B on cc45d7d1).
   const elsewhere = source.match(/async function arrivedElsewhere\(result, attempt, chain = null\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(elsewhere, /^async function arrivedElsewhere\(result, attempt, chain = null\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*(?:\/\/[^\n]*\n\s*)*if \(!attempt\.current\(\)\) return null;\s*(?:\/\/[^\n]*\n\s*)*if \(currentServerId\(localStorage\) === result\.entry\.id\) \{\s*return activate\(\{ replace: false, up: \(\) => \{ bringUp\(\); resubscribeAll\(\); \}, chain \}\)\.done;/u,
-    'a stale arrival does nothing; an absorbed alias comes up on the canonical runtime s own dial');
-  assert.match(elsewhere, /leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving: scopeSwap\.bound\(\), current: page,[\s\S]*?if \(!attempt\.current\(\)\) return null;\s*if \(!leave\) \{\s*connected = false;\s*heldOffline = true;/u);
-  assert.ok(elsewhere.indexOf('confirmLeave(') < elsewhere.indexOf('activateConnected('), 'ask, then write');
+  // #335 ③b-2: the absorbed alias's survivor is a NEW tree too, so both
+  // arrivals ask the bound tree's pages first, through ONE helper.
+  assert.match(elsewhere, /^async function arrivedElsewhere\(result, attempt, chain = null\) \{\s*if \(migrationBlocked\) \{[^\n]*\}\s*(?:\/\/[^\n]*\n\s*)*if \(!attempt\.current\(\)\) return null;\s*(?:\/\/[^\n]*\n\s*)*const same = currentServerId\(localStorage\) === result\.entry\.id;\s*(?:\/\/[^\n]*\n\s*)*const leave = await askToReplace\(\);\s*if \(leave === null \|\| !attempt\.current\(\)\) return null;\s*if \(!leave\) \{[\s\S]*?\n    \}\s*(?:\/\/[^\n]*\n\s*)*if \(same\) return activate\(\{ replace: false, up: \(\) => \{ bringUp\(\); resubscribeAll\(\); \}, chain \}\)\.done;/u,
+    'a stale arrival does nothing; every arrival asks first; an absorbed alias comes up on the canonical runtime s own dial');
+  const ask = source.match(/async function askToReplace\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(ask, /leave = await serverSwitch\.guard\(\(\) => confirmLeave\(\{ leaving, current: page,[\s\S]*?if \(!leave\) \{\s*connected = false;\s*heldOffline = true;/u);
+  assert.equal([...source.matchAll(/askToReplace\(\)/gu)].length, 2, 'defined once, used once: every automatic arrival goes through arrivedElsewhere');
+  assert.ok(elsewhere.indexOf('askToReplace(') < elsewhere.indexOf('activateConnected('), 'ask, then write');
   assert.match(elsewhere, /const run = act\.reload \? arriveAt\(left, 'arrive', chain\) : activate\([\s\S]*?chain \}\);\s*return await run\.done;/u,
     'both kept: arrive at B through the connect page s different-server path');
-  assert.match(source, /function onDrop\(\) \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(heldOffline \|\| migrationBlocked\) return;/u);
+  // A drop while blocked dials nothing, and is owed to Retry (orchestrator 16:12).
+  assert.match(source, /function onDrop\(\) \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(heldOffline\) return;\s*if \(migrationBlocked\) \{ owedActivation = true; return; \}/u);
   assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing');
 });
@@ -896,7 +901,7 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /if \(autoConnectAttempted \|\| connected \|\| switching \|\| migrationBlocked\) return;/u, 'no boot dial');
   assert.match(source, /frozen: \(\) => migrationBlocked,/u, 'no switch, no address connect');
   assert.match(source, /async function optimizeConnection\(\) \{\s*if \(migrationBlocked\) return;/u, 'no optimizer');
-  assert.match(source, /function onReconnected\(runtime, result, attempt\) \{(?:(?!\n  \}\n)[\s\S])*?if \(migrationBlocked\) \{ runtime\.connection\.disconnect\(\); connected = false; return; \}/u, 'no late reconnect');
+  assert.match(source, /function onReconnected\(runtime, result, attempt\) \{(?:(?!\n  \}\n)[\s\S])*?if \(migrationBlocked\) \{ runtime\.connection\.disconnect\(\); connected = false; owedActivation = true; return; \}/u, 'no late reconnect; Retry owes it its dial');
   assert.match(source, /frozen=\{migrationBlocked \? t\('migrationBlockedNote'\) : ''\} onRetry=\{retryMigration\}/u, 'and the form offers only Retry');
   const settings = await readFile(new URL('./lib/app/Settings.svelte', import.meta.url), 'utf8');
   assert.match(settings, /async function doConnect\(\) \{\s*if \(frozen\) return;/u, 'not only its button');
@@ -924,8 +929,12 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /if \(fold !== 'blocked' && !followMerges\(\)\) \{ holdStorage\(\); fold = 'blocked'; \}/u);
   assert.match(source, /if \(minted\.runtime\.connection\.isConnected\(\)\) serverReady\(\);\s*else if \(!heldOffline\) reconnect\(\)\.start\(\);/u,
     'a block mid-session resumes the bound runtime s own loop');
-  assert.match(source, /if \(heldOffline \|\| !owedActivation\) return;\s*owedActivation = false;[\s\S]{0,300}?void activate\(\{ minted, replace: !minted\.keep,/u,
+  assert.match(source, /const owed = owedActivation && !heldOffline;\s*owedActivation = false;[\s\S]{0,600}?if \(!owed\) return;\s*autoConnectAttempted = true;[\s\S]{0,300}?void activate\(\{ minted, replace: !minted\.keep,/u,
     'an owed activation dials the runtime it minted, through the one road');
+  // Retry re-dials whatever the block or an absorption interrupted, members
+  // included, never by whether a handle is alive (orchestrator 16:12); a
+  // re-dial that lands elsewhere asks in `arrivedElsewhere`.
+  assert.match(source, /syncMembers\(\);\s*aggregate\.resume\(\);/u);
   // Every per-server read and write goes through the server's store.
   assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\),/u);
   assert.match(source, /readNav\(createServerStore\(localStorage, target\.id, writeGate\)\)/u);

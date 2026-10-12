@@ -557,6 +557,10 @@ lost to it. In that commit:
   twin's renamed to the survivor; a real conflict keeps the CURRENT twin's
   value (what the person was just using), else the survivor's, and the
   loser is recorded in `tmux_slot_conflicts`, never overwritten in silence.
+  That store has no cap — nothing resolves a row yet, so every row is
+  unresolved and none is dropped for room — and a store that cannot be read
+  (or is not a list) throws instead of starting over, so the move stays
+  open and the app blocks until Retry (orchestrator 16:32 on 0f668e4f).
   A survivor that is alive re-reads its slots once the fleet has dropped the
   twins (`onReconciled` → `reloadStored`), and so does every live state
   after Retry's preparation finished an open move;
@@ -963,7 +967,11 @@ an alias's pending writes land under its canonical entry by the same slot
 rule as a merge on disk (`slot-merge.ts`, ③b): merged with the survivor's
 pending value or, failing that, its value on disk — so a held removal of the
 alias's key deletes nothing of the canonical's — and a real conflict is won
-by the later write, the loser recorded; never in the alias's deleted slot. It
+by the later write, the loser recorded; never in the alias's deleted slot.
+The alias's pending entry is let go of LAST, after the loser is recorded and
+the survivor's entry written: a read or record that throws leaves the table
+as it was, the flush reports it did not land, and the next Retry runs the
+same idempotent merge again (orchestrator 16:32 on 0f668e4f). It
 is memory only: closing the page before a Retry has flushed loses what was
 pending. An alert that named the alias names the canonical after the move, so
 the canonical centre can open it; alerts naming any other server are left
