@@ -21,45 +21,104 @@ pub(crate) const LIVE_INPUT_TOGGLE: Option<&str> = Some("C-s");
 /// The mode this pane RUNS now, read off its screen (board #271) — `None`
 /// when the screen does not say, and the caller falls back to the launch
 /// recipe's start mode. kiro paints it in two measured shapes, both matched
-/// whole so a quoted copy (a chat delivery under its `›` stamp, tool output
-/// under a `●` head) never counts:
-/// - the confirmation of a Ctrl+S, a column-zero line EXACTLY
-///   `● Switched to Steer mode` / `● Switched to Queue mode`; kiro keeps only
-///   the newest one, so the bottom-most is the current mode;
-/// - while a turn runs, the prompt line `›  Kiro is working · Type to queue ·
-///   Ctrl+S to steer` (older builds without the `›`). Idle, kiro paints no
-///   mode at all.
+/// by the shape of the LINE so a quoted copy (a chat delivery under its `›`
+/// stamp, tool output under a `●` head) never counts:
+/// - the confirmation of a Ctrl+S, a column-zero line that is only
+///   `<bullet> Switched to Steer mode` / `… Queue mode`; kiro keeps only the
+///   newest one, so the bottom-most is the current mode;
+/// - while a turn runs, the prompt line `›  Kiro is working · 19m 10s · Type
+///   to steer · Ctrl+S to queue`. Idle, kiro paints no mode at all.
 /// The confirmation outranks the footer (orchestrator, #271): both follow the
 /// latest toggle, and the confirmation is also there while idle.
+///
+/// Board #346: BOTH shapes had drifted and the toggle could no longer be
+/// confirmed in either state — the bullet became `•` (U+2022) where 2.22.1
+/// painted `●` (U+25CF), and the footer gained an elapsed segment between
+/// the label and the hints. Measured on kiro-cli 2.28.0 on this host
+/// (`capture-pane -p -J -S -0 | cat -A`): `• Switched to Steer mode`,
+/// `›  Kiro is working · 1m 27s · Type to steer · Ctrl+S to queue`,
+/// `›  Kiro is working · 19s · Type to queue · Ctrl+S to steer`. So neither
+/// shape is matched by one fixed prefix any more: the toast's bullet is one
+/// of a NAMED set of glyphs (`TOAST_BULLETS`) and the footer's hints are read
+/// as segments. The 2.22.1 forms still match. A bullet outside the set is a
+/// miss we can see and name — add the glyph there with the version that
+/// painted it; "any glyph" would instead accept a line a person or a delivery
+/// can write.
 pub(crate) fn live_input_mode(pane: &str) -> Option<&'static str> {
-    let mode = |word: &str| match word {
-        "queue" | "Queue" => Some("queue"),
-        "steer" | "Steer" => Some("steer"),
-        _ => None,
-    };
     let lines: Vec<&str> = pane.lines().collect();
     for line in lines.iter().rev() {
-        let Some(rest) = line.trim_end().strip_prefix("● Switched to ") else { continue };
-        if let Some(m) = rest.strip_suffix(" mode").and_then(mode) {
+        if let Some(m) = toast_mode(line.trim_end()) {
             return Some(m);
         }
     }
     for line in lines.iter().rev() {
-        let l = line.trim_end();
-        let body = match l.strip_prefix('›') {
-            Some(after) if after.starts_with(' ') => after.trim_start(),
-            Some(_) => continue,
-            None => l.strip_prefix(' ').unwrap_or(l),
-        };
-        let Some(rest) = body.strip_prefix("Kiro is working · Type to ") else { continue };
-        let Some((now, other)) = rest.split_once(" · Ctrl+S to ") else { continue };
-        if let (Some(now), Some(other)) = (mode(now), mode(other)) {
-            if now != other {
-                return Some(now);
-            }
+        if let Some(m) = footer_mode(line.trim_end()) {
+            return Some(m);
         }
     }
     None
+}
+
+/// The one word kiro uses for each mode, in either case.
+fn mode_word(word: &str) -> Option<&'static str> {
+    match word {
+        "queue" | "Queue" => Some("queue"),
+        "steer" | "Steer" => Some("steer"),
+        _ => None,
+    }
+}
+
+/// The glyphs kiro has been seen to paint a toast with: `●` on kiro-cli
+/// 2.22.1 and `•` on 2.28.0 are MEASURED on this host; the other four are
+/// the same bullet family kiro uses elsewhere in its chrome, listed so a
+/// minor repaint is not another outage (#346). Deliberately a closed set and
+/// not "any glyph": a toast is otherwise an ordinary sentence, and anything
+/// a person or a delivery can put at the start of a line — kiro's own input
+/// stamp `›`, a quote marker, a dash — would become a mode switch.
+const TOAST_BULLETS: [char; 6] = ['●', '•', '○', '◦', '◆', '◇'];
+
+/// kiro's own confirmation of a Ctrl+S: at column zero, one bullet from
+/// `TOAST_BULLETS`, a space, and EXACTLY `Switched to <Mode> mode`. The
+/// bullet is read as a glyph rather than as part of a fixed prefix because it
+/// changed between builds and broke the toggle (#346); a leading space (tool
+/// output, the queued-count line) and anything outside the set are not
+/// confirmations.
+fn toast_mode(line: &str) -> Option<&'static str> {
+    let bullet = line.chars().next()?;
+    if !TOAST_BULLETS.contains(&bullet) {
+        return None;
+    }
+    let rest = line[bullet.len_utf8()..].strip_prefix(' ')?.trim_start();
+    let rest = rest.strip_prefix("Switched to ")?;
+    rest.strip_suffix(" mode").and_then(mode_word)
+}
+
+/// The footer kiro paints while a turn runs. The line must BE that footer —
+/// the label at column zero, after kiro's stamp and its two spaces or (older
+/// builds) one optional space — and the two hints are then read as SEGMENTS
+/// of it: the word after `· Type to ` is the mode it is in, the word after
+/// `· Ctrl+S to ` the other one. Reading segments instead of one fixed
+/// prefix is what survives 2.28.0's elapsed time (`· 19m 10s ·`) between
+/// them, and reading them as whole words is what keeps "the line mentions
+/// steer" from being an answer.
+fn footer_mode(line: &str) -> Option<&'static str> {
+    let body = match line.strip_prefix('›') {
+        Some(after) if after.starts_with(' ') => after.trim_start(),
+        Some(_) => return None,
+        None => line.strip_prefix(' ').unwrap_or(line),
+    };
+    let rest = body.strip_prefix("Kiro is working")?;
+    let now = mode_word(segment_after(rest, " · Type to ")?)?;
+    let other = mode_word(segment_after(rest, " · Ctrl+S to ")?)?;
+    // A footer that offers the mode it is already in says nothing.
+    (now != other).then_some(now)
+}
+
+/// What follows `marker` up to the next ` · ` — one segment of the footer.
+fn segment_after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let at = line.find(marker)? + marker.len();
+    let tail = &line[at..];
+    Some(tail.split(" · ").next().unwrap_or(tail).trim_end())
 }
 
 /// Reasoning-effort levels kiro-cli accepts (`kiro-cli chat --effort`,
@@ -1001,6 +1060,39 @@ mod tests {
         assert_eq!(live_input_mode("● Switched to Steer mode\nx\n● Switched to Queue mode\n"), Some("queue"));
     }
 
+    /// Board #346: the same screens on kiro-cli 2.28.0, captured on this host
+    /// with `tmux capture-pane -p -J -S -0 | cat -A` (builder, 2026-10-12).
+    /// The toast's bullet is U+2022 where 2.22.1 painted U+25CF, and the
+    /// footer carries an elapsed segment the old prefix never allowed for —
+    /// each one alone was enough to make `switch_input_mode` time out with
+    /// "the pane did not confirm <mode> mode" while the pane had switched.
+    #[test]
+    fn kiro_2_28_toast_and_footer_are_read() {
+        // Idle, the toast is the only evidence there is.
+        let idle = "Default · claude-opus-5 · thinking · high · ◔ 2% · Midway: 6h 10m    /tmp\n\n›  ask a question or describe a task ↵\n                       /sessions to resume · /copy to clipboard\n";
+        assert_eq!(live_input_mode(idle), None, "idle kiro still paints no mode");
+        assert_eq!(live_input_mode(&format!("• Switched to Steer mode\n{idle}")), Some("steer"));
+        assert_eq!(live_input_mode(&format!("• Switched to Queue mode\n{idle}")), Some("queue"));
+        // Busy, the footer is — with the elapsed time between label and hints.
+        assert_eq!(live_input_mode("›  Kiro is working · 1m 27s · Type to steer · Ctrl+S to queue\n"), Some("steer"));
+        assert_eq!(live_input_mode("›  Kiro is working · 19s · Type to queue · Ctrl+S to steer\n"), Some("queue"));
+        // The queued-count line kiro paints above that footer in queue mode
+        // is not a mode: it counts messages, and its own word is "queued".
+        assert_eq!(live_input_mode(" ◇ 1 message queued · ctrl+x expand\n"), None);
+        assert_eq!(live_input_mode("◇ 2 messages queued · ctrl+x expand\n"), None);
+        let queued = " ◇ 1 message queued · ctrl+x expand\n›  Kiro is working · 32s · Type to queue · Ctrl+S to steer\n";
+        assert_eq!(live_input_mode(queued), Some("queue"), "the footer still answers");
+        // The bullet set is closed (reviewer's P1 on the first tip): the two
+        // measured glyphs and the four of kiro's own family, nothing else.
+        assert_eq!(TOAST_BULLETS, ['●', '•', '○', '◦', '◆', '◇']);
+        for bullet in TOAST_BULLETS {
+            assert_eq!(live_input_mode(&format!("{bullet} Switched to Steer mode\n")), Some("steer"), "{bullet}");
+        }
+        for other in ['*', '-', '+', '#', '>', '›', '|', '"'] {
+            assert_eq!(live_input_mode(&format!("{other} Switched to Queue mode\n")), None, "{other} is not a kiro bullet");
+        }
+    }
+
     #[test]
     fn a_quoted_mode_line_is_not_the_pane_mode() {
         // The owner's own words, delivered as chat, and tool output reading a pane.
@@ -1012,6 +1104,15 @@ mod tests {
         assert_eq!(live_input_mode("›  Kiro is working · Type to queue · Ctrl+S to queue\n"), None, "a self-contradiction");
         assert_eq!(live_input_mode("›Kiro is working · Type to steer · Ctrl+S to queue\n"), None);
         assert_eq!(live_input_mode(""), None);
+        // Board #346: a bullet is matched by shape, so the two glyphs that
+        // carry what was TYPED must stay out — otherwise a person or a
+        // delivery saying the sentence would switch the mode by saying it.
+        assert_eq!(live_input_mode("›  Switched to Steer mode\n"), None, "kiro's input stamp");
+        assert_eq!(live_input_mode("> Switched to Queue mode\n"), None);
+        assert_eq!(live_input_mode("  • Switched to Steer mode\n"), None, "indented: not column zero");
+        // And the footer is still the footer, not any line that says the word.
+        assert_eq!(live_input_mode("›  Type to steer · Ctrl+S to queue\n"), None, "no label");
+        assert_eq!(live_input_mode("›  Kiro is working · 19s · press Ctrl+S to steer\n"), None, "one hint only");
     }
 
     /// v3's post-turn `memory` auto-capture is the housekeeping tool (board

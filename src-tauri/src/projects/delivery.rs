@@ -529,6 +529,50 @@ mod tests {
         assert_eq!(results, vec![Ok(false), Ok(true)], "one switched, the other found it switched");
     }
 
+    /// Board #346: the switch is confirmed by reading the pane through the
+    /// backend's own matcher, so these two tell the two drifts apart — one
+    /// pane answers only through the 2.28.0 footer (elapsed segment, no
+    /// toast), the other only through the 2.28.0 toast (idle, where kiro
+    /// paints no footer at all). Before the fix each timed out with "the
+    /// pane did not confirm steer mode" while the pane had switched.
+    #[test]
+    fn a_switch_is_confirmed_by_the_live_footer_alone() {
+        let target = format!("switch-test-{}", uuid::Uuid::new_v4());
+        let screen = Arc::new(Mutex::new("›  Kiro is working · 2m 3s · Type to queue · Ctrl+S to steer\n".to_string()));
+        let read = {
+            let screen = screen.clone();
+            move || crate::backends::Backend::Kiro.live_input_mode(&screen.lock().unwrap())
+        };
+        let press = {
+            let screen = screen.clone();
+            move || {
+                *screen.lock().unwrap() = "›  Kiro is working · 2m 4s · Type to steer · Ctrl+S to queue\n".to_string();
+                Ok(())
+            }
+        };
+        assert_eq!(switch_with("switch-s", &target, &target, "steer", read, press, std::time::Duration::from_millis(500)), Ok(true));
+    }
+
+    #[test]
+    fn a_switch_is_confirmed_by_the_live_toast_on_an_idle_pane() {
+        let target = format!("switch-test-{}", uuid::Uuid::new_v4());
+        let idle = "Default · claude-opus-5 · thinking · high · ◔ 2%    /tmp\n\n›  ask a question or describe a task ↵\n";
+        let screen = Arc::new(Mutex::new(idle.to_string()));
+        let read = {
+            let screen = screen.clone();
+            move || crate::backends::Backend::Kiro.live_input_mode(&screen.lock().unwrap())
+        };
+        assert_eq!(read(), None, "an idle pane says nothing until the toast");
+        let press = {
+            let screen = screen.clone();
+            move || {
+                *screen.lock().unwrap() = format!("• Switched to Steer mode\n{idle}");
+                Ok(())
+            }
+        };
+        assert_eq!(switch_with("switch-s", &target, &target, "steer", read, press, std::time::Duration::from_millis(500)), Ok(true));
+    }
+
     #[test]
     fn a_switch_the_pane_never_confirms_is_an_error_after_one_key() {
         let target = format!("switch-test-{}", uuid::Uuid::new_v4());
