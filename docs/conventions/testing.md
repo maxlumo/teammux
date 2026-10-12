@@ -31,8 +31,12 @@ and the rest in `tmux::test_support`:
 
 - **`npm run test:rust` isolates the test process from every real tmux.** It
   runs cargo with `TMUX` and `TMUX_PANE` unset and `TMUX_TMPDIR` set to a fresh
-  `mkdtemp` directory, always with `--test-threads=1` last (so nothing a caller
-  adds can raise it), and afterwards kills — each by its own `-S` path — any
+  `mkdtemp` directory, with `--test-threads=1` FIRST in libtest's option region
+  (right after the cargo/harness `--`, before any second `--` the caller
+  passes — libtest stops reading options there and treats the rest as test
+  filters, measured 2026-10-12) and any `--test-threads` the caller wrote in
+  that region dropped, so there is exactly one and it is ours; afterwards it
+  kills — each by its own `-S` path — any
   server a test left under that directory, then removes it. The "default"
   server a test could reach is an empty throwaway that did not exist before
   the run. The real server's socket is simply not where the process will look.
@@ -68,8 +72,10 @@ and the rest in `tmux::test_support`:
   real server opens one first.
 - **That scope refuses to open unless the run is serial AND isolated.** Before
   any tmux command or global write it reads what libtest reads — the test
-  binary's argv for `--test-threads=1` / `--test-threads 1` (last one wins),
-  else `RUST_TEST_THREADS=1`, else libtest's default of the machine's
+  binary's argv for `--test-threads=1` / `--test-threads 1` (last one wins,
+  and only up to the first bare `--`: libtest stops reading options there, so a
+  `=1` in the filter zone is a filter, not a promise), else
+  `RUST_TEST_THREADS=1`, else libtest's default of the machine's
   parallelism — and separately that `TMUX` and `TMUX_PANE` are unset and
   `TMUX_TMPDIR` is set; each failure panics with its incident's date and the
   commands that satisfy it. A mistake fails at once, needs no contention, and
