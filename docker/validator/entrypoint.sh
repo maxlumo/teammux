@@ -5,8 +5,10 @@
 # the container holds a real tmux session with a real agent window.
 #
 #   tmm-e2e          run the machine (the image's ENTRYPOINT)
-#   tmm-e2e health   exit 0 when this container's gateway answers an
-#                    authenticated RPC (the image's HEALTHCHECK)
+#   tmm-e2e health   exit 0 when this machine is READY: the gateway answers
+#                    an authenticated RPC AND the project + agent below are
+#                    in place (the image's HEALTHCHECK, so `compose --wait`
+#                    returns a usable machine, not just a listening port)
 #
 # Knobs (environment): TMM_PORT (9899), TMM_TOKEN (generated), TMM_PROJECT
 # (demo), TMM_AGENT (kiro — the stand-in kiro-cli answers for it).
@@ -17,9 +19,15 @@ port="${TMM_PORT:-9899}"
 project="${TMM_PROJECT:-demo}"
 agent="${TMM_AGENT:-kiro}"
 
+ready="$cfg_dir/e2e-ready"
 if [ "${1:-}" = health ]; then
-  exec tmm project list >/dev/null
+  [ -f "$ready" ] && exec tmm project list >/dev/null
+  exit 1
 fi
+# A restart re-runs this script on the same filesystem: the marker from the
+# previous life is dropped first, so health is red until THIS life's project
+# and agent are back.
+rm -f "$ready"
 
 if [ ! -f "$cfg_dir/config.toml" ]; then
   mkdir -p "$cfg_dir"
@@ -55,5 +63,6 @@ tmm project up "$project"
 if ! tmm agent list --project "$project" --output json | grep -q "\"name\":\"$agent\""; then
   tmm spawn "$agent" --project "$project"
 fi
+touch "$ready"
 
 wait "$gw"

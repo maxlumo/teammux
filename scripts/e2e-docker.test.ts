@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
-  AGENT, PORT, PROJECT, SERVICES, composeArgs, composeFile, composeProject, fetchUi, hostPortOf,
+  AGENT, PORT, PROJECT, SERVICES, composeArgs, composeFile, fetchUi, hostPortOf,
   judgeDistinct, judgeHostOutOfReach, judgeMachine, loginAndList, runE2E, tokenOf,
+  COMPOSE_PROJECT, NETWORK, dockerEnv,
 } from './e2e-docker.mjs';
 
 const read = (rel: string) => readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
@@ -16,14 +17,19 @@ test('npm run test:e2e:docker is the harness', async () => {
   assert.equal(pkg.scripts['test:e2e:docker'], 'node scripts/e2e-docker.mjs');
 });
 
-test('every compose call names the one compose file', () => {
-  assert.deepEqual(composeArgs(['up', '-d']), ['compose', '-f', 'docker/validator/compose.yaml', 'up', '-d']);
+test('every compose call names the one compose file AND the one project, whatever the shell says', () => {
+  assert.deepEqual(composeArgs(['up', '-d']), ['compose', '-p', 'tmm-e2e', '-f', 'docker/validator/compose.yaml', 'up', '-d']);
   assert.equal(composeFile, 'docker/validator/compose.yaml');
+  assert.equal(COMPOSE_PROJECT, 'tmm-e2e');
+  assert.equal(NETWORK, 'tmm-e2e_tmm');
+  // Belt and braces: the compose variables that re-aim a project never reach docker.
+  const env = dockerEnv({ COMPOSE_PROJECT_NAME: 'owner-stack', COMPOSE_FILE: 'x.yml', COMPOSE_PROFILES: 'p', PATH: '/bin', HOME: '/h' });
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/h' });
 });
 
 test('the compose file declares the services the harness smokes, host-loopback ports, nothing mounted', async () => {
   const yaml = await read(composeFile);
-  assert.match(yaml, new RegExp(`^name: ${composeProject()}$`, 'm'), 'the network/container prefix the harness reads');
+  assert.match(yaml, new RegExp(`^name: ${COMPOSE_PROJECT}$`, 'm'), 'the same project name for a human running compose by hand');
   for (const svc of SERVICES) assert.match(yaml, new RegExp(`^  ${svc}:$`, 'm'));
   // Every published port binds 127.0.0.1 — a browser on this host, nobody on the LAN.
   const ports = [...yaml.matchAll(/ports: \["([^"]+)"\]/g)].map((m) => m[1]);
@@ -38,7 +44,7 @@ test('the compose file declares the services the harness smokes, host-loopback p
 
 test('the image builds this checkout inside the container and copies no host binary', async () => {
   const df = await read('docker/validator/Dockerfile');
-  assert.match(df, /cargo build --manifest-path src-tauri\/Cargo\.toml[\s\\]+--no-default-features --features embed-ui --release --bins/);
+  assert.match(df, /cargo build --locked --manifest-path src-tauri\/Cargo\.toml[\s\\]+--no-default-features --features embed-ui --release --bins/);
   assert.match(df, /^RUN npx vite build$/m, 'the web UI is built in the image, then embedded');
   // The only COPY from outside the build context's sources is from the build stages.
   for (const line of df.split('\n').filter((l) => /^COPY /.test(l))) {
@@ -61,6 +67,11 @@ test('the entrypoint writes its own token, starts the gateway as the service doe
   assert.match(sh, /tmm spawn "\$agent" --project "\$project"/, 'a registry agent: isolated home + recipe + hooks');
   assert.match(sh, new RegExp(`TMM_PROJECT:-${PROJECT}`));
   assert.match(sh, new RegExp(`TMM_AGENT:-${AGENT}`));
+  // Health = READY (reviewer P2-1): the marker is dropped at start, written
+  // after spawn, and required by `health`, in that order.
+  const rm = sh.indexOf('rm -f "$ready"'); const touch = sh.indexOf('touch "$ready"'); const spawnAt = sh.indexOf('tmm spawn');
+  assert.ok(rm > 0 && spawnAt > rm && touch > spawnAt, 'drop marker → create/up/spawn → write marker');
+  assert.match(sh, /\[ -f "\$ready" \] && exec tmm project list/, 'health needs the marker AND an answering gateway');
 });
 
 test('config.toml and port lines are read, not guessed', () => {
@@ -121,6 +132,11 @@ test('fetchUi reports the web UI, and nothing when nothing answers', async () =>
   assert.deepEqual(await fetchUi('http://x/', { fetchImpl: notFound as unknown as typeof fetch }), { status: 404, html: false });
   const down = async () => { throw new Error('ECONNREFUSED'); };
   assert.deepEqual(await fetchUi('http://x/', { fetchImpl: down as unknown as typeof fetch }), { status: 0, html: false });
+  // A hung socket cannot hold the run open: the fetch carries an abort signal.
+  let signal: AbortSignal | undefined;
+  const hang = (_u: string, init: { signal: AbortSignal }) => new Promise<never>((_, rej) => { signal = init.signal; init.signal.addEventListener('abort', () => rej(init.signal.reason)); });
+  assert.deepEqual(await fetchUi('http://x/', { fetchImpl: hang as unknown as typeof fetch, timeoutMs: 5 }), { status: 0, html: false });
+  assert.ok(signal?.aborted);
 });
 
 const good = {
@@ -146,67 +162,174 @@ test('two machines may not share an id or a token', () => {
   const b = { name: 'gw-b', machineId: 'm-2', token: 't-2' };
   assert.deepEqual(judgeDistinct([a, b]), []);
   assert.deepEqual(judgeDistinct([a, { ...b, machineId: 'm-1' }]), ['gw-b and gw-a share a machineId (m-1)']);
-  assert.deepEqual(judgeDistinct([a, { ...b, token: 't-1' }]), ['gw-b and gw-a share a token (t-1)']);
+  assert.deepEqual(judgeDistinct([a, { ...b, token: 't-1' }]), ['gw-b and gw-a share a token'], 'the value is a secret; the log names the machines');
 });
 
-test('the negative control: a tmm inside the network must not list the host gateway', () => {
-  assert.deepEqual(judgeHostOutOfReach({ status: 2, stdout: '' }), [], 'not reachable');
-  assert.deepEqual(judgeHostOutOfReach({ status: 3, stdout: '' }), [], 'auth rejected');
-  assert.deepEqual(judgeHostOutOfReach({ status: 124, stdout: '' }), [], 'timed out');
-  assert.equal(judgeHostOutOfReach({ status: 0, stdout: '{"projects":[]}' }).length, 1);
-  assert.equal(judgeHostOutOfReach({ status: 1, stdout: '{"projects":[]}' }).length, 1);
+test('the negative control: only a probe that RAN and got tmm\'s refusal is evidence', () => {
+  const own = { status: 0, stdout: '{"projects":[]}', stderr: '' };
+  const unreachable = { status: 2, stdout: '', stderr: 'tmm: server not reachable at ws://240.11.0.1:9899: Connection refused' };
+  const rejected = { status: 3, stdout: '', stderr: 'tmm: auth rejected — check token' };
+  assert.deepEqual(judgeHostOutOfReach({ control: own, host: unreachable }), []);
+  assert.deepEqual(judgeHostOutOfReach({ control: own, host: rejected }), []);
+  // The host answered: a failure whatever the exit.
+  assert.equal(judgeHostOutOfReach({ control: own, host: { status: 0, stdout: '{"projects":[]}', stderr: '' } }).length, 1);
+  assert.equal(judgeHostOutOfReach({ control: own, host: { status: 1, stdout: '{"projects":[]}', stderr: '' } }).length, 1);
+  // "Did not run" is NOT "out of reach" (reviewer P1-C): each of these fails.
+  for (const host of [
+    { status: 124, stdout: '', stderr: '' },                         // timeout killed it
+    { status: 127, stdout: '', stderr: 'sh: tmm: not found' },        // no tmm
+    { status: 126, stdout: '', stderr: 'permission denied' },
+    { status: 5, stdout: '', stderr: 'tmm: usage' },
+    { status: null, signal: 'SIGKILL', stdout: '', stderr: '' },
+    { status: 2, stdout: '', stderr: '' },                           // exit 2 without tmm's message
+    { status: 3, stdout: '', stderr: 'something else' },
+    { error: new Error('spawn docker ENOENT'), status: null, stdout: '', stderr: '' },
+  ]) {
+    const v = judgeHostOutOfReach({ control: own, host });
+    assert.equal(v.length, 1, JSON.stringify(host));
+    assert.match(v[0], /did not run|did not reach a verdict/);
+  }
+  // A probe that cannot even list its own gateway proves nothing about the host.
+  for (const control of [{ status: 2, stdout: '', stderr: 'not reachable' }, { status: 127, stdout: '', stderr: '' }, { error: new Error('x'), status: null, stdout: '' }]) {
+    const v = judgeHostOutOfReach({ control, host: unreachable });
+    assert.equal(v.length, 1);
+    assert.match(v[0], /OWN gateway/);
+  }
 });
 
-test('runE2E tears down after a failed up, and refuses without compose', async () => {
+/** A fake docker: a healthy three-machine environment, with knobs for the
+ * failures the harness must report. Records every argv and the env it got. */
+function fakeDocker(opts: { preDown?: number; postDown?: number; up?: number; hostProbe?: { status: number; stderr: string } } = {}) {
   const calls: string[][] = [];
-  const spawn = (cmd: string, args: string[]) => {
+  const envs: Array<Record<string, string> | undefined> = [];
+  const machineIds: Record<string, string> = { 'gw-a': 'm-a', 'gw-b': 'm-b', 'gw-c': 'm-c' };
+  let current = '';
+  let downs = 0;
+  let isUp = false;
+  const spawn = (cmd: string, args: string[], o?: { env?: Record<string, string> }) => {
     calls.push([cmd, ...args]);
-    if (args[1] === 'version') return { status: 0, stdout: 'v5' };
-    if (args.includes('up')) return { status: 1, stdout: '', stderr: 'boom' };
-    return { status: 0, stdout: '' };
+    envs.push(o?.env);
+    if (cmd === 'docker' && args[0] === 'network') return { status: 0, stdout: '240.11.0.1\n', stderr: '' };
+    if (args[1] === 'version') return { status: 0, stdout: 'v5', stderr: '' };
+    if (args.includes('down')) {
+      downs += 1;
+      const code = downs === 1 ? (opts.preDown ?? 0) : (opts.postDown ?? 0);
+      if (code === 0) isUp = false;
+      return { status: code, stdout: '', stderr: code ? 'down failed' : '' };
+    }
+    if (args.includes('up')) { isUp = true; return { status: opts.up ?? 0, stdout: '', stderr: '' }; }
+    if (args.includes('port')) { current = args[args.indexOf('port') + 1]; return { status: 0, stdout: `127.0.0.1:1990${current.charCodeAt(3) - 96}\n`, stderr: '' }; }
+    if (args.includes('exec')) {
+      const cmdline = args[args.length - 1];
+      if (/config\.toml/.test(cmdline)) return { status: 0, stdout: `token = "tok-${current}"\n`, stderr: '' };
+      if (/machine_id/.test(cmdline)) return { status: 0, stdout: `${machineIds[current]}\n`, stderr: '' };
+      if (/agent list/.test(cmdline)) return { status: 0, stdout: JSON.stringify({ agents: [{ name: 'kiro', managed: true, state: 'running' }] }), stderr: '' };
+      if (/--server ws:\/\/127\.0\.0\.1/.test(cmdline)) return { status: 0, stdout: '{"projects":[]}', stderr: '' };
+      if (/--server ws:/.test(cmdline)) return { status: opts.hostProbe?.status ?? 2, stdout: '', stderr: opts.hostProbe?.stderr ?? 'tmm: server not reachable at ws://240.11.0.1:9899' };
+    }
+    return { status: 0, stdout: '', stderr: '' };
   };
+  const login = async (url: string) => ({ machineId: machineIds[`gw-${String.fromCharCode(96 + Number(url.slice(-1)))}`], sessions: ['demo'] });
+  const ui = async () => ({ status: 200, html: true });
   const logs: string[] = [];
-  const code = await runE2E({ argv: [], spawn: spawn as never, log: (s: string) => logs.push(s) });
-  assert.equal(code, 1);
-  assert.ok(calls.some((c) => c.includes('logs')), 'the failing machines\' logs are shown');
-  const downs = calls.filter((c) => c.includes('down') && c.includes('-v') && c.includes('--remove-orphans'));
-  const upAt = calls.findIndex((c) => c.includes('up'));
-  assert.equal(downs.length, 2, 'down before up (fresh machines) and down after the failure');
-  assert.ok(calls.indexOf(downs[0]) < upAt && calls.indexOf(downs[1]) > upAt);
-  assert.ok(logs.some((l) => /compose up exited 1/.test(l)));
+  const run = (argv: string[] = [], extra: Record<string, unknown> = {}) =>
+    runE2E({ argv, spawn: spawn as never, log: (s: string) => logs.push(s), loginAndList: login, fetchUi: ui, env: { PATH: '/bin' }, onSignal: () => {}, ...extra });
+  return { calls, envs, logs, run, isUp: () => isUp };
+}
 
+const composeCalls = (calls: string[][]) => calls.filter((c) => c[0] === 'docker' && c[1] === 'compose' && c[2] !== 'version');
+
+test('a passing run: down before up, PASS only after the final down, every compose call pinned to tmm-e2e', async () => {
+  const f = fakeDocker();
+  assert.equal(await f.run(), 0, f.logs.join('\n'));
+  const downs = f.calls.filter((c) => c.includes('down'));
+  const upAt = f.calls.findIndex((c) => c.includes('up'));
+  assert.equal(downs.length, 2);
+  assert.ok(f.calls.indexOf(downs[0]) < upAt && f.calls.indexOf(downs[1]) > upAt);
+  for (const d of downs) assert.ok(d.includes('-v') && d.includes('--remove-orphans'));
+  const passAt = f.logs.findIndex((l) => /PASS/.test(l));
+  const lastDownAt = f.logs.findIndex((l) => /compose down .*\(done\)/.test(l));
+  assert.ok(lastDownAt >= 0 && passAt > lastDownAt, 'PASS is said after the machines are gone');
+  assert.ok(!f.isUp());
+  // P1-A: every compose verb — down, up, port, exec, restart, logs — carries -p tmm-e2e -f <file>.
+  for (const c of composeCalls(f.calls)) assert.deepEqual(c.slice(1, 6), ['compose', '-p', 'tmm-e2e', '-f', 'docker/validator/compose.yaml'], c.join(' '));
+  assert.ok(f.calls.some((c) => c[0] === 'docker' && c[1] === 'network' && c.includes('tmm-e2e_tmm')));
+});
+
+test('a hostile COMPOSE_PROJECT_NAME in the shell never reaches docker, and -p still pins every call', async () => {
+  const f = fakeDocker();
+  assert.equal(await f.run([], { env: { PATH: '/bin', COMPOSE_PROJECT_NAME: 'owner-stack', COMPOSE_FILE: 'owner.yml' } }), 0, f.logs.join('\n'));
+  for (const e of f.envs) { assert.equal(e?.COMPOSE_PROJECT_NAME, undefined); assert.equal(e?.COMPOSE_FILE, undefined); }
+  for (const c of composeCalls(f.calls)) assert.ok(c.includes('-p') && c[c.indexOf('-p') + 1] === 'tmm-e2e', c.join(' '));
+});
+
+test('a failed fresh-start down refuses to start anything', async () => {
+  const f = fakeDocker({ preDown: 1 });
+  assert.equal(await f.run(), 1);
+  assert.ok(!f.calls.some((c) => c.includes('up')), 'no up after a failed down');
+  assert.ok(f.logs.some((l) => /down exited 1/.test(l)), f.logs.join('\n'));
+  assert.ok(!f.logs.some((l) => /PASS/.test(l)));
+});
+
+test('a smoke that passed but whose down failed is a FAIL that names both', async () => {
+  const f = fakeDocker({ postDown: 1 });
+  assert.equal(await f.run(), 1);
+  assert.ok(f.logs.some((l) => /FAIL: the smoke passed but down exited 1/.test(l)), f.logs.join('\n'));
+  assert.ok(f.logs.some((l) => /docker compose -p tmm-e2e -f docker\/validator\/compose\.yaml down -v --remove-orphans/.test(l)), 'the clean-up command is printed');
+  assert.ok(!f.logs.some((l) => /PASS/.test(l)));
+});
+
+test('up failed and the down after it failed too: non-zero, logs shown, both errors kept', async () => {
+  const f = fakeDocker({ up: 1, postDown: 1 });
+  assert.equal(await f.run(), 1);
+  assert.ok(f.calls.some((c) => c.includes('logs')), 'the failing machines\' logs are shown');
+  assert.ok(f.logs.some((l) => /compose up exited 1/.test(l)));
+  assert.ok(f.logs.some((l) => /down exited 1/.test(l)));
+});
+
+test('a host probe that did not run fails the run (P1-C end to end)', async () => {
+  const f = fakeDocker({ hostProbe: { status: 124, stderr: '' } });
+  assert.equal(await f.run(), 1);
+  assert.ok(f.logs.some((l) => /did not reach a verdict/.test(l)), f.logs.join('\n'));
+  assert.ok(f.calls.some((c) => c.includes('down')), 'still torn down');
+});
+
+test('runE2E refuses without compose', async () => {
   const none = (cmd: string, args: string[]) => (args[1] === 'version' ? { status: 1, stdout: '', stderr: 'no plugin' } : { status: 0, stdout: '' });
-  const logs2: string[] = [];
-  assert.equal(await runE2E({ argv: [], spawn: none as never, log: (s: string) => logs2.push(s) }), 1);
-  assert.match(logs2[0], /docker compose is not available/);
+  const logs: string[] = [];
+  assert.equal(await runE2E({ argv: [], spawn: none as never, log: (s: string) => logs.push(s), env: {}, onSignal: () => {} }), 1);
+  assert.match(logs[0], /docker compose is not available/);
 });
 
 test('--keep leaves the machines up and prints how to reach them', async () => {
-  const calls: string[][] = [];
-  const machineIds: Record<string, string> = { 'gw-a': 'm-a', 'gw-b': 'm-b', 'gw-c': 'm-c' };
-  let current = '';
-  const spawn = (cmd: string, args: string[]) => {
-    calls.push([cmd, ...args]);
-    if (cmd === 'docker' && args[0] === 'network') return { status: 0, stdout: '240.11.0.1\n' };
-    if (args[1] === 'version') return { status: 0, stdout: 'v5' };
-    if (args.includes('port')) { current = args[args.indexOf('port') + 1]; return { status: 0, stdout: `127.0.0.1:1990${current.charCodeAt(3) - 96}\n` }; }
-    if (args.includes('exec')) {
-      const cmdline = args[args.length - 1];
-      if (/config\.toml/.test(cmdline)) return { status: 0, stdout: `token = "tok-${current}"\n` };
-      if (/machine_id/.test(cmdline)) return { status: 0, stdout: `${machineIds[current]}\n` };
-      if (/agent list/.test(cmdline)) return { status: 0, stdout: JSON.stringify({ agents: [{ name: 'kiro', managed: true, state: 'running' }] }) };
-      if (/--server ws:/.test(cmdline)) return { status: 2, stdout: '', stderr: 'tmm: server not reachable' };
-    }
-    return { status: 0, stdout: '' };
-  };
-  const login = async (url: string) => ({ machineId: machineIds[`gw-${String.fromCharCode(96 + Number(url.slice(-1)))}`], sessions: ['demo'] });
-  const logs: string[] = [];
-  const code = await runE2E({ argv: ['--keep'], spawn: spawn as never, log: (s: string) => logs.push(s), loginAndList: login, fetchUi: async () => ({ status: 200, html: true }) });
-  assert.equal(code, 0, logs.join('\n'));
-  const downs = calls.filter((c) => c.includes('down'));
-  const upAt = calls.findIndex((c) => c.includes('up'));
+  const f = fakeDocker();
+  assert.equal(await f.run(['--keep']), 0, f.logs.join('\n'));
+  const downs = f.calls.filter((c) => c.includes('down'));
+  const upAt = f.calls.findIndex((c) => c.includes('up'));
   assert.equal(downs.length, 1, '--keep: the only down is the one BEFORE up (fresh machines), none after');
-  assert.ok(calls.indexOf(downs[0]) < upAt);
-  assert.ok(logs.some((l) => /gw-a\s+ws:\/\/127\.0\.0\.1:19901\s+token tok-gw-a/.test(l)), logs.join('\n'));
-  assert.ok(logs.some((l) => /restarting gw-b/.test(l)));
+  assert.ok(f.calls.indexOf(downs[0]) < upAt);
+  assert.ok(f.isUp());
+  assert.ok(f.logs.some((l) => /gw-a\s+ws:\/\/127\.0\.0\.1:19901\s+token tok-gw-a/.test(l)), f.logs.join('\n'));
+  assert.ok(f.logs.some((l) => /docker compose -p tmm-e2e -f .* down -v --remove-orphans/.test(l)), 'how to end it');
+  assert.ok(f.logs.some((l) => /restarting gw-b/.test(l)));
+});
+
+test('a signal mid-run tears down (unless --keep) and exits 130', async () => {
+  for (const [argv, expectDown] of [[[], true], [['--keep'], false]] as Array<[string[], boolean]>) {
+    const f = fakeDocker();
+    let handler: ((sig: string) => void) | undefined;
+    const exits: number[] = [];
+    const realExit = process.exit;
+    (process as unknown as { exit: (c: number) => void }).exit = (c: number) => { exits.push(c); };
+    try {
+      // Fire the signal right after up, from inside the login the harness awaits.
+      const login = async (url: string) => { if (url.endsWith('19901') && handler) handler('SIGINT'); return { machineId: `m-${url.slice(-1)}`, sessions: ['demo'] }; };
+      await f.run(argv, { onSignal: (h: (sig: string) => void) => { handler = h; }, loginAndList: login });
+    } finally {
+      process.exit = realExit;
+    }
+    assert.deepEqual(exits, [130], JSON.stringify(argv));
+    const downsAfterUp = f.calls.slice(f.calls.findIndex((c) => c.includes('up'))).filter((c) => c.includes('down') && c.includes('-v'));
+    assert.equal(downsAfterUp.length > 0, expectDown, `${JSON.stringify(argv)}: ${f.logs.join('\n')}`);
+  }
 });

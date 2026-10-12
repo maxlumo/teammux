@@ -3,8 +3,9 @@
 Frontend tests and repository development-script tests run with `npm test`
 (`node --test`, no framework, no tmux needed). Rust tests: `npm run test:rust`
 (`cargo test -- --test-threads=1`, needs a running tmux). Multi-server work has a
-third, final gate, `npm run test:e2e:docker` (below). This file governs the
-frontend side, the one Rust rule below, and that gate.
+third environment, Docker, with its own smoke `npm run test:e2e:docker`
+(below). This file governs the frontend side, the one Rust rule below, and
+that environment.
 
 ## The Rust suite runs SEQUENTIALLY and ISOLATED, and never kills a server it did not make (board #349)
 
@@ -121,8 +122,15 @@ scratch gateways built on this host — their own ports and config dirs, but the
 host's kernel, users, `/tmp` and the owner's tmux server. Every incident above
 came from test infrastructure sharing the host with the owner's sessions.
 
-`npm run test:e2e:docker` (`scripts/e2e-docker.mjs`) is the FINAL gate for any
-change that touches more than one server. It brings up
+Every change that touches more than one server is verified in this
+environment, and in two parts: `npm run test:e2e:docker`
+(`scripts/e2e-docker.mjs`) is the ENVIRONMENT SMOKE — it proves the machines
+are real, distinct and isolated, nothing more — and the validator's browser
+pass against the kept machines is the functional verdict (the ③ matrix:
+reviewer M1 + validator E1–E3). Running the smoke alone does not pass a
+multi-server change; the stand-in `kiro-cli` produces no real hook or turn
+edge, so "managed, running" is a fixture check, not an agent-workflow check.
+The smoke brings up
 `docker/validator/compose.yaml`: three containers (`gw-a`, `gw-b`, `gw-c`),
 each a real `tmm gateway` with its own tmux server, config root (a token
 generated in the container, its own `machine_id`, `state.db`), a managed
@@ -139,16 +147,31 @@ no tmux, no systemctl and not the host's `tmm`. The smoke then logs in from the
 host through each published `127.0.0.1` port, which answers with that
 machine's id; checks `demo` is up, `/` serves the web UI and the agent is
 managed and running; checks the three ids and tokens differ and each id is the
-one in that container's file; asks a `tmm` inside `gw-a` for the host's
-gateway (the network's gateway address, read from docker, never from the
-owner's config) and requires it to fail (the issue's negative control: a test
-that depends on the host gateway must fail inside the network); restarts
+one in that container's file; runs one probe command twice inside `gw-a` —
+`tmm --server … project list` against its OWN gateway, which must list (the
+probe works), and against the host (the network's gateway address, read from
+docker, never from the owner's config), which must end with tmm's own "server
+not reachable" (exit 2) or "auth rejected" (exit 3) and nothing else: a probe
+that did not run (spawn error, signal, `timeout`'s 124, exec codes) is a
+failed run, not evidence (the issue's negative control: a test that depends
+on the host gateway must fail inside the network); restarts
 `gw-b` and requires the same identity, project and agent back — the mechanism
 the browser matrix will use for "server dies" and "reconnect reaches another
-machine". It tears down with `down -v --remove-orphans` on every path;
-`--keep` leaves the machines up and prints each `ws://` address and token for
-a browser session by hand, and the next run tears that environment down
-first, so every verdict starts from fresh machines. The first run compiles
+machine". Teardown is part of the verdict: `down -v --remove-orphans` runs
+before `up` (fresh machines — a kept environment from an earlier `--keep` has
+stopped agents and written rooms), after a pass and after a failure; a `down`
+that fails fails the run, PASS is printed only once the machines are gone,
+and SIGINT/SIGTERM run the down themselves (JS `finally` does not run on a
+signal). Every compose call carries `-p tmm-e2e`, which outranks a
+`COMPOSE_PROJECT_NAME` in the caller's shell, so the down can never be aimed
+at another local project; one fixed name also means one environment per
+host — two checkouts running it at once would tear each other down. A
+container's health is "ready", not "listening": the entrypoint drops a marker
+at start and writes it after the project and agent are in place, and the
+health check needs the marker, so `compose --wait` returns usable machines on
+a slow cold start or restart. `--keep` leaves the machines up and prints
+each `ws://` address and token for a browser session by hand. The first run
+compiles
 tmm + server in release inside the image (minutes; the cargo registry and
 target are BuildKit cache mounts, so later builds are incremental); a warm
 run is ≈ 45 s. Measured on Docker 25.0.14 / Compose v5.5.0, host

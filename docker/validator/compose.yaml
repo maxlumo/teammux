@@ -3,12 +3,18 @@
 # machine_id, state.db, isolated agent homes), its own tmux server, its own
 # address on the `tmm` network. Nothing from the host is mounted — not the
 # tmux socket, not ~/.config, not the repo — so `down` leaves nothing and no
-# test can reach the operator's gateway or sessions.
+# container has a path to the operator's tmux. The network is an ordinary
+# bridge (published ports need one), so a container CAN route to the host;
+# what keeps the operator's gateway out is its 127.0.0.1 bind and that no
+# container holds its token — scripts/e2e-docker.mjs checks that outcome.
 #
-#   docker compose -f docker/validator/compose.yaml up -d --build --wait
-#   docker compose -f docker/validator/compose.yaml exec -T gw-a \
+#   docker compose -p tmm-e2e -f docker/validator/compose.yaml up -d --build --wait
+#   docker compose -p tmm-e2e -f docker/validator/compose.yaml exec -T gw-a \
 #       cat /home/tmm/.config/tmux-mobile/config.toml     # its token
-#   docker compose -f docker/validator/compose.yaml down -v --remove-orphans
+#   docker compose -p tmm-e2e -f docker/validator/compose.yaml down -v --remove-orphans
+#
+# `-p tmm-e2e` on every call: it outranks a COMPOSE_PROJECT_NAME in your
+# shell, so a `down --remove-orphans` can never be aimed at another project.
 #
 # `npm run test:e2e:docker` (scripts/e2e-docker.mjs) does all of that and the
 # smoke in between. Host ports are bound to 127.0.0.1 only; override with

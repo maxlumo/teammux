@@ -19,6 +19,9 @@ COPY src ./src
 RUN npx vite build
 
 # --- 2. tmm + server, release, no webview, UI embedded -----------------------
+# `rust:1` floats to the current stable; the crate pins no toolchain, so this
+# is the same contract as a developer's `rustup update`. `--locked` keeps the
+# dependency graph the one in Cargo.lock.
 FROM rust:1-trixie AS rust
 WORKDIR /src
 COPY src-tauri ./src-tauri
@@ -27,7 +30,7 @@ COPY assets/skills ./assets/skills
 COPY --from=ui /src/dist ./dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/src-tauri/target \
-    cargo build --manifest-path src-tauri/Cargo.toml \
+    cargo build --locked --manifest-path src-tauri/Cargo.toml \
       --no-default-features --features embed-ui --release --bins \
     && install -D -t /out src-tauri/target/release/tmm src-tauri/target/release/server
 

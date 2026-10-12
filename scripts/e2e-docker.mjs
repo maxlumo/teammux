@@ -27,13 +27,22 @@
 //      MANAGED agent (isolated home, launch recipe) running;
 //   3. the ids and tokens differ across gateways, and each id is the one in
 //      that container's machine_id file;
-//   4. the host's gateway is OUT OF REACH from inside the network: a tmm in
-//      gw-a asked for the network's gateway address (the host) on the default
-//      port either cannot connect or is refused auth (the issue's negative
-//      control — a test that depends on the host gateway must fail here);
+//   4. the host's gateway is OUT OF REACH from inside the network: the same
+//      `tmm --server … project list` first lists gw-a's OWN gateway (the
+//      probe works), then, aimed at the network's gateway address (the host)
+//      on the default port, ends with tmm's own "server not reachable" or
+//      "auth rejected" — anything else, including a probe that did not run,
+//      fails (the issue's negative control — a test that depends on the host
+//      gateway must fail here);
 //   5. a container restart keeps the machine's identity and brings its project
 //      and agent back — the mechanism the ③ matrix uses for "server dies" and
 //      "reconnect reaches another machine".
+//
+// Teardown is part of the verdict: a failed `down` (before up, after a pass,
+// after a failure) makes the run fail, PASS is said only once the machines
+// are gone, and SIGINT/SIGTERM run the down themselves. Every compose call
+// carries `-p tmm-e2e`, so no COMPOSE_PROJECT_NAME in the caller's shell can
+// aim the down at another project.
 //
 // Known limit, on purpose: the compose network is NOT `internal` — Docker does
 // not forward published ports on an internal network (measured here on Docker
@@ -54,10 +63,29 @@ export const PROJECT = 'demo';
 export const AGENT = 'kiro';
 /** The gateway's port INSIDE every container (compose.yaml publishes it). */
 export const PORT = 9899;
+/** The compose project: the prefix of every container and network this script
+ * may touch. Passed as `-p` on EVERY compose call (reviewer P1-A): `-p`
+ * outranks `COMPOSE_PROJECT_NAME`, so a shell whose environment names some
+ * other local project cannot turn our `down --remove-orphans` into that
+ * project's. compose.yaml's `name:` is the same value for a human running
+ * compose by hand. One fixed name = one environment per host; two checkouts
+ * running this at once would tear each other down, and that is on purpose
+ * (the validator's kept environment is THE environment). */
+export const COMPOSE_PROJECT = 'tmm-e2e';
+export const NETWORK = `${COMPOSE_PROJECT}_tmm`;
 
-/** `docker compose -f <file> <args>`, the one spelling every call uses. */
+/** `docker compose -p tmm-e2e -f <file> <args>`, the one spelling every call uses. */
 export function composeArgs(args) {
-  return ['compose', '-f', composeFile, ...args];
+  return ['compose', '-p', COMPOSE_PROJECT, '-f', composeFile, ...args];
+}
+
+/** The environment a docker child gets: the caller's, minus the compose
+ * variables that re-aim a project or a file. `-p`/`-f` already win, but a
+ * value that cannot be there cannot be argued about. */
+export function dockerEnv(base) {
+  const env = { ...base };
+  for (const k of ['COMPOSE_PROJECT_NAME', 'COMPOSE_FILE', 'COMPOSE_PATH_SEPARATOR', 'COMPOSE_PROFILES']) delete env[k];
+  return env;
 }
 
 /** The token in a config.toml the entrypoint wrote (`token = "…"`). */
@@ -104,14 +132,20 @@ export async function loginAndList(url, token, { WebSocketImpl = globalThis.WebS
 }
 
 /** The web UI the gateway serves on the same port (embed-ui): what a browser
- * gets for `/`. `{ status, html }`, or `{ status: 0 }` when nothing answered. */
-export async function fetchUi(url, { fetchImpl = globalThis.fetch } = {}) {
+ * gets for `/`. `{ status, html }`, or `{ status: 0 }` when nothing answered
+ * within `timeoutMs` — a hung HTTP socket must not hold the run (and its
+ * teardown) open. */
+export async function fetchUi(url, { fetchImpl = globalThis.fetch, timeoutMs = 5000 } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new Error(`GET ${url}: no answer within ${timeoutMs} ms`)), timeoutMs);
   try {
-    const r = await fetchImpl(url);
+    const r = await fetchImpl(url, { signal: ctl.signal });
     const body = await r.text();
     return { status: r.status, html: /<html/i.test(body) };
   } catch {
     return { status: 0, html: false };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -130,39 +164,62 @@ export function judgeMachine(name, { machineId, sessions, fileId, agents, ui }) 
   return problems.map((p) => `${name}: ${p}`);
 }
 
-/** Across machines: no two share an id or a token. */
+/** Across machines: no two share an id or a token. A shared token is named
+ * by the machines, never by its value — the default run's output is a log. */
 export function judgeDistinct(machines) {
   const problems = [];
   for (const key of ['machineId', 'token']) {
     const seen = new Map();
     for (const m of machines) {
       const v = m[key];
-      if (seen.has(v)) problems.push(`${m.name} and ${seen.get(v)} share a ${key} (${v})`);
+      if (seen.has(v)) problems.push(`${m.name} and ${seen.get(v)} share a ${key}${key === 'token' ? '' : ` (${v})`}`);
       seen.set(v, m.name);
     }
   }
   return problems;
 }
 
-/** The negative control's verdict: tmm inside a container, pointed at the
- * host, must NOT get a listing. Exit 2 is "server not reachable", 3 "auth
- * rejected" (tmm's own codes); any non-zero exit with no JSON on stdout is a
- * failed dependency on the host gateway. */
-export function judgeHostOutOfReach({ status, stdout }) {
-  if (status === 0) return ['a tmm inside gw-a LISTED the host gateway\'s projects — the host is reachable with a working token'];
-  if (/"projects"/.test(stdout)) return ['a tmm inside gw-a printed a project listing from the host'];
-  return [];
+/** tmm's own exit codes (src-tauri/src/bin/tmm.rs). */
+const TMM_UNREACHABLE = 2;
+const TMM_AUTH_REJECTED = 3;
+
+/** The negative control's verdict (reviewer P1-C on 8a0f17e2: "did not run"
+ * is not "out of reach"). `control` is the SAME probe command aimed at the
+ * container's own gateway, run first: it must list, which proves tmm, the
+ * `--server` flag and the exec path all work in that container. Only then
+ * does `host` count, and only two outcomes are evidence: tmm's own
+ * "server not reachable" (exit 2) or "auth rejected" (exit 3), each with its
+ * message on stderr. A spawn error, a signal, exec/usage codes (5, 126, 127),
+ * `timeout`'s 124 or any other exit is the probe failing to run, and fails
+ * the run. */
+export function judgeHostOutOfReach({ control, host }) {
+  const problems = [];
+  if (control.error || control.status !== 0 || !/"projects"/.test(control.stdout ?? '')) {
+    problems.push(`the probe did not list ${SERVICES[0]}'s OWN gateway (exit ${control.status ?? control.error?.message}); the host check cannot be trusted`);
+    return problems;
+  }
+  if (host.error) return [`the host probe did not run: ${host.error.message}`];
+  const err = (host.stderr ?? '').trim();
+  if (host.status === 0 || /"projects"/.test(host.stdout ?? '')) {
+    return [`a tmm inside ${SERVICES[0]} LISTED the host gateway's projects — the host is reachable with a working token`];
+  }
+  if (host.status === TMM_UNREACHABLE && /not reachable/.test(err)) return [];
+  if (host.status === TMM_AUTH_REJECTED && /auth rejected/.test(err)) return [];
+  return [`the host probe ended with exit ${host.status ?? `signal ${host.signal}`} (${err || 'no error text'}) — neither tmm's "not reachable" nor "auth rejected"; the probe did not reach a verdict`];
 }
 
 export async function runE2E({
   argv = process.argv.slice(2),
   spawn = spawnSync,
   log = console.log,
+  env = process.env,
+  onSignal = (handler) => { for (const s of ['SIGINT', 'SIGTERM']) process.once(s, handler); },
   loginAndList: login = loginAndList,
   fetchUi: getUi = fetchUi,
 } = {}) {
   const keep = argv.includes('--keep');
-  const sh = (args, opts = {}) => spawn('docker', composeArgs(args), { cwd: repoRoot, encoding: 'utf8', ...opts });
+  const denv = dockerEnv(env);
+  const sh = (args, opts = {}) => spawn('docker', composeArgs(args), { cwd: repoRoot, encoding: 'utf8', env: denv, ...opts });
   const must = (args, what) => {
     const r = sh(args);
     if (r.error) throw new Error(`${what}: docker: ${r.error.message}`);
@@ -175,22 +232,42 @@ export async function runE2E({
     if (r.status !== 0) throw new Error(`${svc}: ${cmd}: exit ${r.status}\n${r.stderr ?? ''}`);
     return (r.stdout ?? '').trim();
   };
+  /** `down -v --remove-orphans` on OUR project; its exit is the verdict. */
+  const down = (why) => {
+    log(`[e2e:docker] compose down -v --remove-orphans (${why})`);
+    const r = sh(['down', '-v', '--remove-orphans'], { stdio: ['ignore', 'inherit', 'inherit'] });
+    if (r.error) return `down: docker: ${r.error.message}`;
+    if (r.status !== 0) return `down exited ${r.status}; the environment may be left behind — docker compose -p ${COMPOSE_PROJECT} -f ${composeFile} down -v --remove-orphans`;
+    return null;
+  };
 
-  const version = spawn('docker', ['compose', 'version'], { encoding: 'utf8' });
+  const version = spawn('docker', ['compose', 'version'], { encoding: 'utf8', env: denv });
   if (version.error || version.status !== 0) {
     log('[e2e:docker] docker compose is not available here; this suite needs Docker with the compose plugin');
     return 1;
   }
 
-  const problems = [];
+  // A Ctrl-C mid-run must not leave three machines up: `finally` does not run
+  // on a signal, so the signal does the down itself (synchronously) and exits
+  // non-zero. `--keep` keeps even then.
   let up = false;
+  onSignal((sig) => {
+    log(`[e2e:docker] ${sig}`);
+    if (up && !keep) down(sig);
+    process.exit(130);
+  });
+
+  const problems = [];
   try {
+    // Fresh machines every run (reviewer P1-B: a failed clean-up is a
+    // failure, not a warning): a kept environment from an earlier `--keep`,
+    // its agents stopped and its rooms written on, is torn down first, and
+    // if that down fails nothing is started — a verdict on machines whose
+    // state.db an earlier session wrote is not a verdict.
+    const stale = down('fresh machines');
+    if (stale) throw new Error(stale);
     log('[e2e:docker] compose up --build --wait (the first build compiles tmm + server inside the image; minutes)');
     const t0 = Date.now();
-    // Fresh machines every run: a kept environment from an earlier `--keep`
-    // (its agents stopped, its rooms written on) is torn down first, so a
-    // verdict never depends on what the previous session left behind.
-    sh(['down', '-v', '--remove-orphans'], { stdio: 'ignore' });
     const upRun = sh(['up', '-d', '--build', '--wait'], { stdio: ['ignore', 'inherit', 'inherit'] });
     up = true;
     if (upRun.status !== 0) {
@@ -220,14 +297,17 @@ export async function runE2E({
     problems.push(...judgeDistinct(machines));
 
     // 4. The host gateway, from inside: the network's gateway address IS the
-    // host. Read from docker, never from the owner's config.
-    const net = spawn('docker', ['network', 'inspect', '-f', '{{(index .IPAM.Config 0).Gateway}}', `${composeProject()}_tmm`], { encoding: 'utf8' });
+    // host. Read from docker, never from the owner's config. The control run
+    // (same command, the container's own gateway) proves the probe works.
+    const net = spawn('docker', ['network', 'inspect', '-f', '{{(index .IPAM.Config 0).Gateway}}', NETWORK], { encoding: 'utf8', env: denv });
     const hostAddr = (net.stdout ?? '').trim();
-    if (net.status !== 0 || !hostAddr) problems.push(`could not read the compose network's gateway address: ${net.stderr ?? ''}`);
+    if (net.status !== 0 || !hostAddr) problems.push(`could not read ${NETWORK}'s gateway address: ${net.stderr ?? ''}`);
     else {
-      const probe = exec(SERVICES[0], `timeout 5 tmm --server ws://${hostAddr}:${PORT} project list --output json`);
-      problems.push(...judgeHostOutOfReach({ status: probe.status, stdout: probe.stdout ?? '' }));
-      log(`[e2e:docker] host gateway from ${SERVICES[0]} (ws://${hostAddr}:${PORT}): exit ${probe.status} — ${(probe.stderr ?? '').trim() || 'no error text'}`);
+      const probeCmd = (addr) => `timeout 5 tmm --server ws://${addr}:${PORT} project list --output json`;
+      const control = exec(SERVICES[0], probeCmd('127.0.0.1'));
+      const host = exec(SERVICES[0], probeCmd(hostAddr));
+      problems.push(...judgeHostOutOfReach({ control, host }));
+      log(`[e2e:docker] host gateway from ${SERVICES[0]} (ws://${hostAddr}:${PORT}): exit ${host.status} — ${(host.stderr ?? '').trim() || 'no error text'} (own gateway: exit ${control.status})`);
     }
 
     // 5. A restart keeps identity and brings the project back.
@@ -245,28 +325,34 @@ export async function runE2E({
       for (const p of problems) log(`  - ${p}`);
       return 1;
     }
-    log('[e2e:docker] PASS: 3 gateways answer with 3 machine ids and serve the UI, 3 managed agents, host out of reach, restart keeps identity');
     if (keep) {
+      log('[e2e:docker] PASS: 3 gateways answer with 3 machine ids and serve the UI, 3 managed agents, host out of reach, restart keeps identity');
       log('[e2e:docker] --keep: the machines stay up. Connect a browser to each (token per machine):');
       for (const m of machines) log(`  ${m.name}  ${m.url}  token ${m.token}`);
-      log(`  down: docker compose -f ${composeFile} down -v --remove-orphans`);
+      log(`  down: docker compose -p ${COMPOSE_PROJECT} -f ${composeFile} down -v --remove-orphans`);
+      return 0;
     }
+    // PASS is said only once the machines are gone: "every path leaves
+    // nothing" is part of what passes.
+    const left = down('done');
+    up = false;
+    if (left) {
+      log(`[e2e:docker] FAIL: the smoke passed but ${left}`);
+      return 1;
+    }
+    log('[e2e:docker] PASS: 3 gateways answer with 3 machine ids and serve the UI, 3 managed agents, host out of reach, restart keeps identity, nothing left');
     return 0;
   } catch (e) {
     log(`[e2e:docker] ${e.message}`);
     return 1;
   } finally {
     if (up && !keep) {
-      log('[e2e:docker] compose down -v --remove-orphans');
-      sh(['down', '-v', '--remove-orphans'], { stdio: ['ignore', 'inherit', 'inherit'] });
+      const left = down('after failure');
+      if (left) log(`[e2e:docker] ${left}`);
+    } else if (up && keep) {
+      log(`[e2e:docker] --keep: the machines stay up after this failure; end them with docker compose -p ${COMPOSE_PROJECT} -f ${composeFile} down -v --remove-orphans`);
     }
   }
-}
-
-/** The compose project name (`name:` in compose.yaml), which prefixes the
- * network and container names. */
-export function composeProject() {
-  return 'tmm-e2e';
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
