@@ -228,7 +228,7 @@
     // a captured api still answered. Anything else the set holds (a join in
     // flight, an orphan already) is the set's; a stranger is ended here.
     end: (runtime) => {
-      if (runtime === scopeSwap.bound()) return undefined;
+      if (runtime === scopeSwap.bound()) { focusAbsorbed(runtime); return undefined; }
       if (aggregate.absorbed(runtime) || aggregate.holds(runtime)) return undefined;
       return ends.end(runtime);
     },
@@ -241,6 +241,58 @@
     const runtime = id ? fleet.get(id) : undefined;
     const state = runtime && serverStates.get(runtime);
     if (state) reloadStored(state);
+  }
+  /** The identity layer declared the entry the tree is BOUND to gone — at
+   * the fleet's synchronous boundary, like any member's (reviewer P1-A on
+   * e0dafe3c). Keeping its tree, for the person to be asked, and keeping its
+   * identity callable are two different things: the vanishing current handle
+   * refuses from here on, whoever absorbed it. Who did decides the rest:
+   *
+   *   - a BACKGROUND MEMBER is the canonical CURRENT now names (its own
+   *     reconnect reached the focus's address and absorbed the focus into
+   *     its entry): nothing else will ever bring the focus there, so the
+   *     focus HANDS OVER to it explicitly, here — the mirror is written for
+   *     it (CURRENT already names it), the front moves, the window's
+   *     attempts aimed at the absorbed server go stale, the canonical leaves
+   *     the set as the focus and the absorbed tree joins it as a member —
+   *     which the sync that follows, finding its id unsaved, makes an
+   *     ORPHAN: detached (api refusing, socket closed, loop stopped),
+   *     mounted, held, drafts and all, asked when the window is free. The
+   *     member's own dial, still returning, then reports to the shell as the
+   *     focus's (`onReconnected`), block included.
+   *   - anyone else — the focus's OWN dial (which already detached it) or a
+   *     window activation (a form, a switch) whose record absorbed it: that
+   *     activation brings up the survivor and the swap ends this tree, as
+   *     before. It is only detached here, so that out of the fleet it is out
+   *     of service — a block that follows cannot freeze what the fleet no
+   *     longer lists. */
+  function focusAbsorbed(leaving) {
+    const next = aggregate.runtimes().find((r) => r.id === currentServerId(localStorage) && !aggregate.orphan(r));
+    // A window operation in flight owns the front and CURRENT — a switch (its
+    // record moves CURRENT onto its target next, and binds it), a walk asking
+    // for one, an address connect, a form candidate or an activation out (a
+    // member's dial that was already out when they began can still answer
+    // under them): a member absorbing the source meanwhile hands nothing
+    // over — that operation replaces or keeps this tree, and a handover
+    // beneath it would have its swap end the member it had just bound. So
+    // too a swap in flight. The handle refuses either way.
+    if (!next || windowBusy() || !scopeSwap.refocus(next)) { leaving.detach(); return; }
+    // CURRENT already names the canonical (the record moved it); the mirror
+    // follows, best effort — a failure is the host gate's, and the focus
+    // still follows CURRENT, which is the commit point.
+    try { focusServer(localStorage, next.id); } catch { storageFailed(); }
+    serverSwitch.supersede();
+    activations.claim();
+    aggregate.handOver(next);
+    aggregate.adopt(leaving, false);
+    serverMenuOpen = false;
+    membershipError = '';
+    reconnectError = '';
+    heldOffline = false;
+    serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
+    activeAddress = next.entry().address;
+    loadServerRegistry();
+    syncMembers();
   }
   /** The bound runtime's connection and api: what App itself talks to the
    * server it is on through — never a module-level socket. */
@@ -438,6 +490,9 @@
     candidateOpen?.close();
     // The form acts on the bound server: its reconnect in flight is stale too.
     const owner = activations.claim(scopeSwap.bound());
+    // And holds the window while it is out (P1-B): no owed question is
+    // asked over it — asking would claim the window and end this attempt.
+    const release = leaseWindow();
     const connection = createConnection();
     const api = createWsApi(connection);
     let closed = false;
@@ -451,6 +506,7 @@
         closed = true;
         connection.dispose();
         if (candidateOpen === candidate) candidateOpen = null;
+        release();
       },
     };
     candidateOpen = candidate;
@@ -469,7 +525,9 @@
    * socket is held: nothing automatic takes it (`serverSwitch.guard`). */
   function confirmFormLeave() {
     const held = scopeSwap.bound();
-    if (!held?.alive()) return Promise.resolve(true);
+    // A bound tree whose handle is already detached (its entry absorbed, a
+    // failed switch's Back) still holds its drafts: it is asked like any.
+    if (!held) return Promise.resolve(true);
     return serverSwitch.guard(() => walkLeave(held));
   }
   const shell = $derived(connected || !!switching);
@@ -1127,7 +1185,12 @@
     },
     release(runtime) {
       background = aggregate.runtimes().filter((r) => r !== runtime);
-      // Handed to the focus (a switch made it CURRENT): the focus owns it now.
+      // Handed to the focus: bound already, or CURRENT names it and the
+      // window activation that moved CURRENT (a form connect, a switch
+      // reusing this handle) is binding it. Never a member CURRENT moved
+      // onto with no activation — an absorption's canonical — which the
+      // fleet's boundary hands over explicitly (`focusAbsorbed`) before
+      // this can run (reviewer P1-A on e0dafe3c).
       if (runtime === bound() || (runtime.alive() && runtime.id === currentServerId(localStorage))) return;
       forgetReconnector(runtime);
       // `release` is called with the set no longer holding it, so the
@@ -1151,28 +1214,61 @@
       runtime.connection.disconnect();
       background = aggregate.runtimes();
     },
-    orphaned(runtime) { orphansToAsk.add(runtime); askOrphans(); },
+    // The identity callback REGISTERS the owed ask and nothing more (reviewer
+    // P1-B on e0dafe3c): it runs inside the reconcile of whatever dial
+    // absorbed the member — a Settings connect's second handshake, an
+    // address row's redial — and asking here would claim the window and
+    // expire that very dial.
+    orphaned(runtime) { orphansToAsk.add(runtime); scheduleAsk(); },
   });
   /** Orphans whose ask is still owed (reviewer R2 on aed2f654): an orphan is
    * retained and marked the moment it becomes one, but it is ASKED only when
    * the window can present the question — not over a switch in flight (its
-   * guard would end the switch's intent), a walk already asking, or a block
-   * (its tree is held). Busy: it stays pending and is asked by this same
+   * guard would end the switch's intent), a walk already asking, an address
+   * connect, a window activation or the connect form's candidate (its claim
+   * would end theirs: `windowLeases`), a membership change, or a block (its
+   * tree is held). Busy: it stays pending and is asked by this same
    * mechanism when the window is free again; no second modal. */
   const orphansToAsk = new SvelteSet();
   let askingOrphan = false;
+  /** Is a window operation in flight — a switch, a walk, an address connect
+   * (`serverSwitch.busy`), an activation or a form candidate (`windowLeases`),
+   * a membership change? Then the window is not free: no owed question is
+   * asked (it would claim the window and end the operation), and no focus
+   * hands over beneath it (`focusAbsorbed`). */
+  const windowBusy = () => !!switching || serverSwitch.busy || windowLeases > 0 || membershipBusy;
   function askOrphans() {
-    if (askingOrphan || switching || serverSwitch.guarding || migrationBlocked) return;
+    if (askingOrphan || windowBusy() || migrationBlocked) return;
     const next = [...orphansToAsk].find((r) => aggregate.orphan(r));
     for (const r of orphansToAsk) if (!aggregate.orphan(r)) orphansToAsk.delete(r);
     if (!next) return;
     orphansToAsk.delete(next);
     askingOrphan = true;
-    void askOrphan(next).finally(() => { askingOrphan = false; askOrphans(); });
+    void askOrphan(next).finally(() => { askingOrphan = false; scheduleAsk(); });
   }
-  // The window freed (a switch ended, a walk answered, Retry unblocked):
-  // an orphan still owed its ask gets it.
-  $effect(() => { void switching; void migrationBlocked; untrack(askOrphans); });
+  /** The drain, scheduled on the window going quiet — a walk, switch or
+   * address connect ending (`serverSwitch.onidle`), a lease released, Retry
+   * unblocking — and run on its own turn (P2 on e0dafe3c): the operation
+   * whose end freed the window finishes its own continuation first — the
+   * walk's answer reaches the caller that asked and that caller commits
+   * (writes its mode, opens its candidate, mints its activation) — before
+   * the queue is looked at; the queue never grabs the window's generation
+   * the moment a guard resolves. One timer, whoever asked. */
+  let askTimer = 0;
+  function scheduleAsk() {
+    if (askTimer) return;
+    askTimer = setTimeout(() => { askTimer = 0; askOrphans(); }, 0);
+  }
+  /** Window operations in flight outside the switch module: an activation
+   * from its mint to its `done`, a candidate from open to close. */
+  let windowLeases = 0;
+  function leaseWindow() {
+    windowLeases++;
+    let released = false;
+    return () => { if (released) return; released = true; windowLeases--; scheduleAsk(); };
+  }
+  // Retry unblocked: an orphan still owed its ask gets it.
+  $effect(() => { void migrationBlocked; untrack(scheduleAsk); });
   /** An orphan's tree is asked, in that tree: "discard" lets it go; "keep
    * editing" keeps the tree, detached, listed with Dismiss. The dismissal is a
    * deferred destruction and re-validates at commit like every membership
@@ -1266,7 +1362,7 @@
       if (next === 'single') aggregate.leaveAll();
       connMode = next;
       syncMembers();
-    } finally { membershipBusy = false; }
+    } finally { membershipBusy = false; scheduleAsk(); }
   }
   /** Include or exclude one saved server (Aggregate, ③b-3). Including joins
    * it. Excluding destroys its tree, so that tree is asked first, alone; the
@@ -1311,7 +1407,7 @@
       }
       syncMembers();
       return true;
-    } finally { membershipBusy = false; }
+    } finally { membershipBusy = false; scheduleAsk(); }
   }
   /** Half of a focus-exclusion that cannot finish: put the focus back. */
   function undoFocus(id) { if (id && !migrationBlocked) focusMember(id); }
@@ -1717,6 +1813,9 @@
    * superseded chain resolves null and changes nothing.
    */
   function activate({ replace = false, elsewhere = 'arrive', up, minted = null, chain = null }) {
+    // Holds the window until this link is done (P1-B): a question owed
+    // meanwhile waits, since asking would claim the window and end this.
+    const release = leaseWindow();
     const c = chain ?? newChain();
     const m = minted ?? mintCurrent();
     const runtime = m.runtime;
@@ -1733,6 +1832,7 @@
       // saved server: there is nothing to keep showing.
       if (migrationBlocked) { enterBlocked(); owedActivation = true; }
       else if (!m.keep) void scopeSwap.swap(null);
+      release();
       return handle(Promise.resolve(migrationBlocked ? t('migrationBlockedNote') : t('configIdentityFailed')));
     }
     if (!m.keep) provisional.set(runtime, owner);
@@ -1791,6 +1891,7 @@
       storageFailed();
       return t('configIdentityFailed');
     });
+    void done.finally(release);
     return handle(done);
   }
   /** The dial authenticated, and the storage gate for what it learned could
@@ -2231,6 +2332,8 @@
     // 21:45): no switch, no address connect.
     frozen: () => migrationBlocked,
     identityFailed: storageFailed,
+    // The window went quiet: an orphan owed its ask is asked (P2 on e0dafe3c).
+    onidle: scheduleAsk,
     addressUp: () => {
       // The dial recorded the address on the entry; the shell follows it.
       const runtime = bound();
@@ -2294,6 +2397,7 @@
   // the bound one included (the fleet skips it on purpose, because the swap
   // that replaces it normally ends it; there is no next swap now).
   onDestroy(() => {
+    clearTimeout(askTimer);
     candidateOpen?.close();
     switchCandidate?.close();
     activations.endAll();

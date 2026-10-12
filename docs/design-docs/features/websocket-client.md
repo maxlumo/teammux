@@ -1172,7 +1172,60 @@ ASK is owed, not forced (reviewer R2): queued (`orphansToAsk`) and run through
 the one guard/reveal mechanism only when the window can present it — never
 over a switch in flight (its guard would end the switch's intent), a walk
 already asking, or a block (the tree is held); busy, it stays pending and is
-asked when the window frees, no second modal. "Discard" lets it go
+asked when the window frees, no second modal.
+
+The identity callback REGISTERS the owed ask and nothing more (reviewer P1-B
+on e0dafe3c). It runs inside the reconcile of whatever dial absorbed the
+member — a Settings connect's owned second handshake, a Connection address
+row's redial — and asking there would claim the window's activation and
+expire that very dial. So `orphaned` queues and schedules; the drain runs on
+its own turn (`scheduleAsk`, a zero timer) and only when the window is FREE
+by ONE definition, `windowBusy()`: no switch, no walk, no address connect in
+flight (`serverSwitch.busy` — the module counts every operation of its own
+from start to completion, the switch from its confirm walk to its
+conclusion), no activation from its mint to its `done` and no form candidate
+from open to close (`windowLeases`), no membership change. `switching` was
+never a proxy for "a window operation is in flight": the owned handshake has
+no panel. P2, same commit: the drain is scheduled when ANY of those ends —
+the switch module's `onidle` (after the walk's answer has reached its
+caller, after `onstate(null)`, after `addressUp`), a lease's release, a
+membership operation's `finally`, Retry unblocking — and because it runs on
+the next turn the caller whose end freed the window has committed (written
+its mode, opened its candidate, minted its activation) before the queue is
+looked at: the queue never grabs the generation the moment a guard resolves.
+
+Whose absorption it is decides who hands over (reviewer P1-A on e0dafe3c).
+"The tree is kept for the person to be asked" and "the identity stays
+callable" are two different things, and the BOUND runtime's identity ends at
+the same boundary as any member's: the fleet's `end` hook, finding the bound
+runtime's id gone, runs `focusAbsorbed`. When CURRENT now names a connected
+BACKGROUND MEMBER — the canonical whose own reconnect reached the focus's
+address and absorbed it — nothing else will ever bring the focus there, so
+the focus hands over EXPLICITLY, in that same turn: `refocus` to the
+canonical (the front moves), the mirror written for it (`focusServer`;
+CURRENT already names it, so a mirror failure is the gate's and the focus
+still follows CURRENT), the window's attempts aimed at the absorbed server
+made stale (`supersede`, `claim`), the canonical out of the set as the focus
+(`handOver`) and the absorbed tree into it as a member (`adopt`), which the
+sync that follows, finding its id unsaved, makes an orphan — detached,
+mounted, held, asked when the window is free. The member's own dial, still
+returning, then reports to the shell as the focus's (`onReconnected`), block
+included, and the member set never lets an orphan's late answer leave it
+(`answered` returns on `h.orphan` before the `wanted` test, which would
+otherwise drop the handed-over canonical or end the kept tree unasked).
+With nobody to hand to — the focus's own dial (which already detached it), a
+window activation whose record absorbed it, or a window operation in flight
+(`windowBusy()`: a switch's confirm walk asking A while C absorbs it; a
+handover beneath it would supersede the switch and leave its panel up for
+good) — the handle is only DETACHED, and the operation that absorbed it
+binds the survivor and ends this tree through the swap, as before; out of
+the fleet, the handle is out of service, so a block that follows cannot
+freeze what the fleet no longer lists. Either way the vanishing current
+handle refuses calls from the boundary on. The connect form's walk asks a
+bound tree whether or not its handle is alive (`confirmFormLeave`): a
+detached handle still has its drafts.
+
+"Discard" lets it go
 (`dismiss` → release → end); "keep editing" keeps it, detached, listed in
 the server list with where its identity went and one action, Dismiss, which
 is the same ask. The dismissal is a deferred destruction like every
@@ -1582,7 +1635,23 @@ a socket that a server's pages are using.
   itself, which would skip the release of that server's state. The fleet's
   `drop` and `reconcile` hand a runtime to the host's end. The one runtime
   still bound is the exception: the swap that replaces it ends it, after its
-  replacement has had the chance to adopt its state.
+  replacement has had the chance to adopt its state — but its IDENTITY ends
+  at the fleet's boundary like any other's (`focusAbsorbed`; reviewer P1-A on
+  e0dafe3c): the vanishing current handle refuses from that turn on, and
+  when CURRENT now names a connected member the focus hands over to it
+  explicitly there (bind, mirror, supersede, handOver/adopt) — never beneath
+  a window operation in flight (`windowBusy()`), whose own binding replaces
+  the tree.
+- **An owed question is asked on the window's own turn, when it is free.**
+  The identity layer registers an orphan's ask (`orphaned` → queue +
+  `scheduleAsk`) and never claims the window from inside a dial's reconcile
+  (reviewer P1-B on e0dafe3c): the drain runs on a zero timer and only when
+  `windowBusy()` is false — ONE definition: no switch, no walk, no address
+  connect (`serverSwitch.busy`), no activation or form candidate out
+  (`windowLeases`), no membership change — and is scheduled when any of those
+  ends (`onidle`, a lease's release, a membership op's `finally`, Retry), so
+  the caller whose end freed the window has committed before the queue is
+  looked at (P2 on e0dafe3c). `switching` is not that definition.
 - **A reconnect names its server.** `ws-reconnected` carries `serverId`, and a
   page acts only on its own server's. Each runtime has its own reconnect
   loop, told where by its own entry (reviewer P1-A on cc45d7d1).

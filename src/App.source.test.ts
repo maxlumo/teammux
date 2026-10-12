@@ -9,6 +9,9 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('./App.svelte', import.meta.url), 'utf8');
 // The bound tree's navigation and back chains live in its view (#335 ③a).
 const viewSource = await readFile(new URL('./lib/app/server-view.svelte.ts', import.meta.url), 'utf8');
+// The member set and the switch module, whose boundaries the orphan rules pin (③b).
+const membersSource = await readFile(new URL('./lib/app/server-members.svelte.ts', import.meta.url), 'utf8');
+const switchSource = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
 
 test('sharing a connection reports only a current successful copy; failure uses Preferences (#167)', () => {
   // Preferences.mount executes the existing error/retry channel. This source
@@ -412,7 +415,10 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   // reset on the way: it is ended only once the target is bound, and a
   // failure puts CURRENT back on it.
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
-  const fn = mod.match(/async function switchTo\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  // The switch is `switchTo` (its refusals and its window lease, P1-B/P2 on
+  // e0dafe3c) around `run` (the steps): the order is read across both.
+  const fn = mod.match(/async function switchTo\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}\n  async function run\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(fn, /begin\(\);\s*try \{ await run\(target\); \} finally \{ end\(\); \}/u, 'the whole switch, confirm walk included, holds the window');
   const at = (needle: string) => { const i = fn.indexOf(needle); assert.ok(i >= 0, `switchTo has ${needle}`); return i; };
   const order = [
     'await guard(() => d.confirmLeave())',
@@ -592,13 +598,15 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // dials its own CANDIDATE, so the handle's socket never moves under it, and
   // the candidate is the app's latest activation (`claim`) — a revoke closes
   // it, a newer attempt makes it stale.
-  assert.match(source, /function openCandidate\(\) \{\s*heldOffline = false;[^\n]*\n\s*candidateOpen\?\.close\(\);\s*(?:\/\/[^\n]*\n\s*)*const owner = activations\.claim\(scopeSwap\.bound\(\)\);\s*const connection = createConnection\(\);/u);
+  assert.match(source, /function openCandidate\(\) \{\s*heldOffline = false;[^\n]*\n\s*candidateOpen\?\.close\(\);\s*(?:\/\/[^\n]*\n\s*)*const owner = activations\.claim\(scopeSwap\.bound\(\)\);\s*(?:\/\/[^\n]*\n\s*)*const release = leaseWindow\(\);\s*const connection = createConnection\(\);/u);
   assert.match(source, /current: \(\) => !closed && owner\.current\(\),/u);
   // And asks the leave walk of the handle a connect to ANOTHER server would
   // destroy, before anything is dialled (reviewer P1-c on 0b8b9038).
   // With NO address exemption (reviewer P1-b on 48b40082): an address is not
   // an identity, and which machine answers is known only after the dial.
-  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*if \(!held\?\.alive\(\)\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => walkLeave\(held\)\);/u);
+  // A bound handle already DETACHED (its entry absorbed under the focus,
+  // P1-A on e0dafe3c) still has its tree and drafts: it is asked like any.
+  assert.match(source, /function confirmFormLeave\(\) \{\s*const held = scopeSwap\.bound\(\);\s*(?:\/\/[^\n]*\n\s*)*if \(!held\) return Promise\.resolve\(true\);\s*return serverSwitch\.guard\(\(\) => walkLeave\(held\)\);/u);
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
   assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
@@ -1093,8 +1101,9 @@ test('a typed address ends the running reconnect loop before it connects (review
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
   // Since reviewer P1-A on cc45d7d1 the CURRENT runtime redials it itself:
   // no shared socket to disconnect first, and no token passed in.
-  assert.match(mod, /function connectAddress\(address: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*return d\.redial\(address, mine, owner\)\.then\(/u,
-    'claim → cancel → redial, handing the dial THIS attempt s ownership (reviewer P1-2 on 341554b3)');
+  assert.match(mod, /function connectAddress\(address: string\)[\s\S]*?const intent = \+\+seq;[\s\S]*?const owner = d\.claim\(\);[\s\S]*?d\.stopReconnect\(\);\s*begin\(\);\s*return d\.redial\(address, mine, owner\)\.then\(/u,
+    'claim → cancel → redial, handing the dial THIS attempt s ownership (reviewer P1-2 on 341554b3); the window held for the dial (P1-B on e0dafe3c)');
+  assert.match(mod, /\(\) => \{\s*if \(mine\(\)\) d\.startReconnect\(\);\s*return false;\s*\},\s*\)\.finally\(end\);/u, 'and released after addressUp or the loop restart — the caller s completion');
   assert.doesNotMatch(mod.match(/function connectAddress\(address: string\)[\s\S]*?\n  \}/u)?.[0] ?? '', /d\.disconnect\(\)|d\.connect\(/u,
     'an address change never touches the switch s candidate');
 });
@@ -1393,17 +1402,47 @@ test('the Hub union s cross-server pick is a landing like the others: aimed at o
   assert.match(source, /const hubUnionFor = \$derived\(connMode === 'aggregate' \? \{[\s\S]*?runtimeOf: \(id\) =>/u, 'Single hands no union');
 });
 
-test('an absorbed member is orphaned at the fleet s own boundary, and asked only when the window can present it; the dismissal re-validates at commit (#335 ③b; reviewer R1/R2 on aed2f654)', () => {
+test('an absorbed member is orphaned at the fleet s own boundary, and asked only when the window can present it; the dismissal re-validates at commit (#335 ③b; reviewer R1/R2 on aed2f654, P1-A/P1-B/P2 on e0dafe3c)', () => {
   // R1: `end` is the fleet's synchronous hook on absorption; a published
   // member is detached THERE (aggregate.absorbed → orphan → deps.detach),
-  // not by a later sync an effect runs.
-  assert.match(source, /end: \(runtime\) => \{\s*if \(runtime === scopeSwap\.bound\(\)\) return undefined;\s*if \(aggregate\.absorbed\(runtime\) \|\| aggregate\.holds\(runtime\)\) return undefined;\s*return ends\.end\(runtime\);\s*\}/u);
+  // not by a later sync an effect runs. P1-A: the BOUND runtime too — its
+  // identity ends at the same boundary (`focusAbsorbed`), never kept callable
+  // because its tree is kept.
+  assert.match(source, /end: \(runtime\) => \{\s*if \(runtime === scopeSwap\.bound\(\)\) \{ focusAbsorbed\(runtime\); return undefined; \}\s*if \(aggregate\.absorbed\(runtime\) \|\| aggregate\.holds\(runtime\)\) return undefined;\s*return ends\.end\(runtime\);\s*\}/u);
   assert.match(source, /detach\(runtime\) \{\s*forgetReconnector\(runtime\);\s*runtime\.detach\(\);\s*runtime\.connection\.disconnect\(\);/u, 'detach: refuse, close, stop the loop');
-  // R2: the ask is queued and run only when the window is free — never over
-  // a switch (its guard would end the switch s intent), a walk, or a block.
-  assert.match(source, /orphaned\(runtime\) \{ orphansToAsk\.add\(runtime\); askOrphans\(\); \}/u);
-  assert.match(source, /function askOrphans\(\) \{\s*if \(askingOrphan \|\| switching \|\| serverSwitch\.guarding \|\| migrationBlocked\) return;/u);
-  assert.match(source, /\$effect\(\(\) => \{ void switching; void migrationBlocked; untrack\(askOrphans\); \}\);/u, 'a freed window asks what is owed');
+  // P1-A: the focus hands over to the canonical a member holds EXPLICITLY —
+  // refocus, mirror, supersede + claim, the canonical out of the set as the
+  // focus, the absorbed tree in as an orphan — or, with nobody to hand to,
+  // the handle is detached and the activation that absorbed it binds.
+  const absorbed = source.match(/function focusAbsorbed\(leaving\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(absorbed, /const next = aggregate\.runtimes\(\)\.find\(\(r\) => r\.id === currentServerId\(localStorage\) && !aggregate\.orphan\(r\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(!next \|\| windowBusy\(\) \|\| !scopeSwap\.refocus\(next\)\) \{ leaving\.detach\(\); return; \}/u,
+    'no handover beneath a window operation in flight (it binds or keeps its own tree) or a swap');
+  const steps = ['focusServer(localStorage, next.id)', 'serverSwitch.supersede()', 'activations.claim()', 'aggregate.handOver(next)', 'aggregate.adopt(leaving, false)', 'loadServerRegistry()', 'syncMembers()']
+    .map((n) => { const i = absorbed.indexOf(n); assert.ok(i >= 0, `focusAbsorbed has ${n}`); return i; });
+  assert.deepEqual([...steps].sort((a, b) => a - b), steps, 'bind, then hand over, then adopt, then follow the registry (whose sync orphans the adopted tree)');
+  // The member set never ends a late answer of an orphan's (its wanted test
+  // would otherwise drop the handed-over canonical, or leave the orphan).
+  assert.match(membersSource, /if \(!h \|\| h\.runtime !== runtime\) return;\s*(?:\/\/[^\n]*\n\s*)*if \(h\.orphan\) return;\s*if \(!deps\.wanted\(id\)\) \{ leave\(id\); return; \}/u);
+  // R2 / P1-B: the identity callback only REGISTERS the owed ask — the drain
+  // is scheduled on its own turn, never inside the reconcile stack of the
+  // dial that absorbed the member, and runs only when the window is free:
+  // never over a switch, a walk, an address connect (`serverSwitch.busy`), an
+  // activation or a candidate (`windowLeases`), a membership change, a block.
+  assert.match(source, /orphaned\(runtime\) \{ orphansToAsk\.add\(runtime\); scheduleAsk\(\); \}/u);
+  assert.match(source, /const windowBusy = \(\) => !!switching \|\| serverSwitch\.busy \|\| windowLeases > 0 \|\| membershipBusy;/u, 'ONE definition of the window being busy');
+  assert.match(source, /function askOrphans\(\) \{\s*if \(askingOrphan \|\| windowBusy\(\) \|\| migrationBlocked\) return;/u);
+  assert.match(source, /function scheduleAsk\(\) \{\s*if \(askTimer\) return;\s*askTimer = setTimeout\(\(\) => \{ askTimer = 0; askOrphans\(\); \}, 0\);\s*\}/u, 'the drain runs after the caller s own completion');
+  // P2: every window operation's end schedules it — the switch module's
+  // (walk, switch, address connect), a lease's release, a membership op's
+  // end, Retry unblocking.
+  assert.match(source, /onidle: scheduleAsk,/u, 'a guard, switch or address connect ending asks what is owed');
+  assert.match(source, /return \(\) => \{ if \(released\) return; released = true; windowLeases--; scheduleAsk\(\); \};/u);
+  assert.equal([...source.matchAll(/finally \{ membershipBusy = false; scheduleAsk\(\); \}/gu)].length, 2, 'the mode change and the include switch');
+  assert.match(source, /\$effect\(\(\) => \{ void migrationBlocked; untrack\(scheduleAsk\); \}\);/u, 'Retry unblocking asks what is owed');
+  assert.match(source, /const release = leaseWindow\(\);\s*const c = chain \?\? newChain\(\);/u, 'an activation holds the window from its mint');
+  assert.match(source, /void done\.finally\(release\);\s*return handle\(done\);/u, 'to its done');
+  assert.match(switchSource, /const end = \(\) => \{ if \(--inflight === 0\) d\.onidle\?\.\(\); \};/u);
+  assert.match(switchSource, /try \{ return await walk\(\); \} finally \{\s*guarding = false;\s*const waiting = idleWaiters;\s*idleWaiters = \[\];\s*for \(const go of waiting\) go\(\);\s*end\(\);\s*\}/u, 'a walk s end releases the window after its waiters');
   // And the dismissal is a deferred destruction like every membership change.
   const ask = source.match(/async function askOrphan\(runtime\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.match(ask, /const op = membershipOp\(\);\s*const leave = await serverSwitch\.guard\(\(\) => walkLeave\(runtime\)\);\s*if \(!aggregate\.orphan\(runtime\)\) return;[\s\S]*?if \(!op\.valid\(\)\) \{ orphansToAsk\.add\(runtime\); return; \}\s*if \(leave\) aggregate\.dismiss\(runtime\);/u,

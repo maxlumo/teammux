@@ -93,6 +93,7 @@ function app(storage = mem({
   const resets: string[] = [];
   const reconnects: string[] = [];
   const published: string[] = [];
+  const idles: string[] = [];
   const handovers = createActivations();
   let frozen = false;
   /** What the TARGET's own runtime bring-up answers (App's `activate`):
@@ -111,6 +112,7 @@ function app(storage = mem({
     stopReconnect: () => { reconnects.push('stop'); },
     startReconnect: () => { reconnects.push(`start ${currentServerId(storage)}`); },
     addressUp: (addr) => { published.push(addr); },
+    onidle: () => { idles.push(`idle after ${published.length} published, state ${states.at(-1) ? 'on' : 'off'}`); },
     onstate: (st) => { states.push(st); if (st) { connected = false; mounted = false; } },
     // The candidate: in this world one socket stands for "what the switch
     // dialled", the server's own runtimes are App's (App.shell covers them).
@@ -130,7 +132,7 @@ function app(storage = mem({
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published, idles,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -364,4 +366,46 @@ test('the switch gives nothing of A up before B is up: no reset step runs ahead 
   await t.sw.switchTo(t.b);
   assert.equal(current, t.b.id, 'B is CURRENT when its own runtime comes up');
   assert.deepEqual(t.resets, [`come-up ${t.b.id}`], 'and that is the first thing the switch asks the host to do');
+});
+
+test('the window is BUSY for the length of every operation, and goes idle once after the last one has completed — the walk s answer returned, the switch concluded, the address published (#335 ③b; reviewer P1-B/P2 on e0dafe3c)', async () => {
+  const t = app();
+  // A walk: busy from the guard to its answer, idle AFTER the answer is out.
+  let answer!: (v: boolean) => void;
+  const walk = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  assert.equal(t.sw.busy, true, 'a walk holds the window');
+  assert.deepEqual(t.idles, []);
+  answer(true);
+  assert.equal(await walk, true);
+  assert.equal(t.sw.busy, false);
+  assert.deepEqual(t.idles, ['idle after 0 published, state off'], 'idle once, after the walk');
+  // An address connect: busy until addressUp has run (the caller's completion).
+  t.idles.length = 0;
+  const addr = t.sw.connectAddress('ws://a:1');
+  assert.equal(t.sw.busy, true, 'an address connect holds the window');
+  assert.equal(await addr, true);
+  assert.deepEqual(t.idles, ['idle after 1 published, state off'], 'idle after addressUp, not before');
+  // A switch: busy from its confirm walk to its conclusion; idle after
+  // `onstate(null)` — the switch has committed and the tree is shown.
+  t.idles.length = 0;
+  let up!: () => void;
+  t.onBringUp(() => new Promise<string | null>((r) => { up = () => r(null); }));
+  const sw = t.sw.switchTo(t.b);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(t.sw.busy, true, 'a switch in flight holds the window');
+  assert.deepEqual(t.idles, [], 'and the confirm walk ending inside it did NOT free it');
+  up();
+  await sw;
+  assert.equal(t.sw.busy, false);
+  assert.deepEqual(t.idles, ['idle after 1 published, state off'], 'idle once, after the switch concluded');
+  assert.equal(currentServerId(t.storage), t.b.id);
+  // A refused operation (over a walk) never counts.
+  t.idles.length = 0;
+  const walk2 = t.sw.guard(() => new Promise<boolean>((r) => { answer = r; }));
+  assert.equal(await t.sw.connectAddress('ws://b:2'), false, 'refused over the walk');
+  assert.equal(await t.sw.guard(async () => true), false, 'a second walk is refused');
+  assert.deepEqual(t.idles, [], 'refusals free nothing');
+  answer(false);
+  await walk2;
+  assert.deepEqual(t.idles, ['idle after 1 published, state off'], 'one idle, when the real walk ends');
 });

@@ -317,3 +317,28 @@ test('an UNPUBLISHED member that answers elsewhere or gone has no tree to keep: 
   assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'elsewhere', detail: 'd' });
   assert.equal(w.members.orphan(b), false);
 });
+
+test('an orphan s late answer concludes nothing — not a leave, whoever is wanted now (reviewer P1-A on e0dafe3c)', async () => {
+  // B is published and orphaned (absorbed). Its reconnect, out when it was,
+  // answers late: `answered` used to test `wanted` first — false for an
+  // orphan — and LEAVE it, ending the kept tree unasked. And when the
+  // absorption moved CURRENT onto B itself (the canonical the focus handed
+  // over to), the same test dropped the new focus from the set.
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  w.rt('b').answer(ok('b'));
+  await settle();
+  const b = w.rt('b');
+  assert.equal(w.members.absorbed(b), true);
+  assert.deepEqual(w.log.filter((e) => /detach|orphaned|release/u.test(e)), ['detach:b', 'orphaned:b:']);
+  w.wanted.delete('b');
+  w.members.answered(b, ok('b'));
+  assert.equal(w.members.orphan(b), true, 'still an orphan');
+  assert.ok(!w.log.includes('release:b'), 'not released by the late answer');
+  assert.deepEqual(w.members.runtimes(), [b], 'its tree is still held');
+  w.members.answered(b, { ok: false, reason: 'elsewhere', entry: entry('d') as never, machineId: 'm-d', hostname: 'd' });
+  assert.equal(w.members.orphan(b), true);
+  assert.ok(!w.log.includes('release:b'));
+  w.members.dismiss(b);
+  assert.ok(w.log.includes('release:b'), 'only the person s answer lets it go');
+});

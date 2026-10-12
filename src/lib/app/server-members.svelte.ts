@@ -173,6 +173,11 @@ export function createMembers(deps: MemberDeps): Members {
     const id = runtime.id;
     const h = held.get(id);
     if (!h || h.runtime !== runtime) return;
+    // An orphan's identity is over: a dial of its that answers late — the
+    // reconnect whose own arrival elsewhere made it one, say — concludes
+    // nothing, least of all a leave that would end its kept tree unasked
+    // (reviewer P1-A on e0dafe3c).
+    if (h.orphan) return;
     if (!deps.wanted(id)) { leave(id); return; }
     if (result.ok) {
       // Step 3, for a join and a reconnect alike: the dial may have taught

@@ -84,6 +84,14 @@ export interface SwitchDeps {
   comeUp(target: SwitchTarget, entry: ServerEntry): Promise<string | null>;
   /** Another address of the CURRENT server answered (connectAddress). */
   addressUp(address: string): void;
+  /** The WINDOW went quiet (board #335 ③b; reviewer P1-B and P2 on
+   * e0dafe3c): a walk ended, a switch concluded or an address connect
+   * settled, and nothing of this module's is in flight any more. Called
+   * AFTER the caller's own completion — the walk's answer has been returned
+   * to whoever asked, the switch has bound or failed, the address change has
+   * published — so a host that owes a question (an orphan's) asks it from
+   * here, never over an operation that is still committing. */
+  onidle?(): void;
 }
 
 export function createServerSwitch(d: SwitchDeps) {
@@ -98,9 +106,23 @@ export function createServerSwitch(d: SwitchDeps) {
   let idleWaiters: (() => void)[] = [];
   let state: SwitchState | null = null;
   const set = (next: SwitchState | null) => { state = next; d.onstate(next); };
+  /** The window operations this module has in flight — a switch from its
+   * confirm walk to its conclusion, an address connect until it has
+   * published or failed, a walk until it has answered. The host owes a
+   * question only when this is zero (board #335 ③b; reviewer P1-B and P2 on
+   * e0dafe3c): `onidle` fires when the LAST one ends, after its own
+   * completion, so a switch that ended on `onstate(null)` and an address
+   * change that ended on `addressUp` have committed before anyone is asked. */
+  let inflight = 0;
+  const begin = () => { inflight++; };
+  const end = () => { if (--inflight === 0) d.onidle?.(); };
 
   async function switchTo(target: SwitchTarget): Promise<void> {
     if (state?.phase === 'connecting' || guarding || d.frozen()) return; // one intent at a time
+    begin();
+    try { await run(target); } finally { end(); }
+  }
+  async function run(target: SwitchTarget): Promise<void> {
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected && !(await guard(() => d.confirmLeave()))) return;
@@ -160,6 +182,7 @@ export function createServerSwitch(d: SwitchDeps) {
     const owner = d.claim();
     const mine = () => intent === seq && !state && owner.current();
     d.stopReconnect();
+    begin();
     return d.redial(address, mine, owner).then(
       (how) => {
         if (!mine() || how === 'handled') return false;
@@ -170,7 +193,7 @@ export function createServerSwitch(d: SwitchDeps) {
         if (mine()) d.startReconnect();
         return false;
       },
-    );
+    ).finally(end);
   }
 
   /** Run a leave walk: one at a time, and a refused one is a stay — its
@@ -179,11 +202,13 @@ export function createServerSwitch(d: SwitchDeps) {
     if (guarding) return false;
     guarding = true;
     seq++;
+    begin();
     try { return await walk(); } finally {
       guarding = false;
       const waiting = idleWaiters;
       idleWaiters = [];
       for (const go of waiting) go();
+      end();
     }
   }
   /** Resolves once no walk is asking. */
@@ -198,6 +223,9 @@ export function createServerSwitch(d: SwitchDeps) {
     idle,
     /** Is a leave walk asking right now? */
     get guarding() { return guarding; },
+    /** Is any window operation of this module's in flight — a walk, a
+     * switch (from its confirm walk on), an address connect? */
+    get busy() { return inflight > 0; },
     get state() { return state; },
     /** The current intent: an async begun under it compares on resolve. */
     get intent() { return seq; },
