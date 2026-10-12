@@ -93,9 +93,12 @@ hide that.
    same loss by other hands). So **do NOT remove the drop-in** while tmux
    shows in that cgroup: `KillMode=none` is the only thing standing between
    `systemctl --user stop` and your sessions. Keep it until the tmux server
-   has been restarted outside the unit — the clean exits are a reboot, or a
-   deliberate `tmux kill-server` followed by `tmm project up` once the GATEWAY
-   unit carries `KillMode=process` (step 5 below installs one that does).
+   has been restarted outside the unit. That restart is YOUR maintenance
+   window, not a step of this runbook: a reboot, or a deliberate
+   `tmux kill-server` — which ends every session and every shell in them,
+   and `tmm project up` afterwards recreates only the declared project
+   windows and agents, not arbitrary shells or their state — once the GATEWAY
+   unit carries `KillMode=process` (step 5 installs one that does).
    Stop the unit and then terminate `dev-stack.mjs` yourself — it handles
    `SIGTERM` by stopping each service's process group, escalating to `SIGKILL`
    after 5 s; it never signals tmux:
@@ -174,10 +177,14 @@ hide that.
    The unit carries `KillMode=process` (board #350): a restart of the gateway
    — which `npm run gateway:update` does after every merge — signals the
    gateway alone, and the tmux servers it forked live on. A unit installed
-   before #350 lacks the line; `tmm gateway status` says so, and
-   `tmm gateway install --restart` rewrites it, restarting the gateway ONCE to
-   apply it (plain `install` refuses that restart, since on an unprotected
-   unit the restart is the hazard). Do it when no agent is mid-turn.
+   before #350 lacks the line; `tmm gateway status` says so (reading the
+   manager's EFFECTIVE value, drop-ins included), and a plain
+   `tmm gateway install` protects it in place — write, `daemon-reload`, read
+   back — with nothing stopped or restarted (measured: systemd applies a
+   changed `KillMode=` to a running unit on reload). Until the manager
+   reports `KillMode=process`, every `tmm` path that would stop the running
+   gateway — `gateway restart`, so `gateway:update` too, and `uninstall` —
+   refuses and names this step.
 
 6. **Start the frontend again.** The dev unit needs no edit — `dev-stack.mjs`
    is vite alone by default since #343:

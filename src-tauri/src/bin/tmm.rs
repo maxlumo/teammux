@@ -93,9 +93,9 @@ USAGE (human or agent — self-management):
                                       running (launchd agent / systemd user unit)
   tmm gateway start                   run the gateway in the foreground (what the service runs)
   tmm gateway install [--replace]     install the user service for THIS tmm + config root;
-                                      a same-name service that is not ours is refused
-                     [--restart]      …and restart it once if it must be rewritten to gain
-                                      KillMode=process (a unit from before board #350)
+                                      a same-name service that is not ours is refused;
+                                      a unit from before board #350 gains KillMode=process
+                                      in place (daemon-reload), nothing restarted
   tmm gateway status [--show-token]   service state, the local probe's verdict, address
   tmm gateway restart|uninstall       restart / remove our service (only ours)
   tmm gateway logs [-f]               the service's log
@@ -1489,11 +1489,10 @@ async fn cmd_gateway(rest: &[String], flags: &Flags) {
     match sub {
         "" | "install" => {
             let replace = flags.contains_key("replace");
-            let restart = flags.contains_key("restart");
             let n = name.clone();
             let r = tokio::task::spawn_blocking(move || {
                 let sys = service::Sys::real()?;
-                let done = service::install(&sys, &n, replace, restart)?;
+                let done = service::install(&sys, &n, replace)?;
                 println!("✓ {n}: {}", done_words(&done));
                 Ok::<bool, String>(print_status(&sys, &n, false))
             }).await.unwrap_or_else(|e| Err(e.to_string()));
@@ -1550,7 +1549,7 @@ fn done_words(done: &tmux_mobile::gateway::service::Done) -> String {
         Done::AlreadyRunning(pid) => format!("already installed and answering (pid {pid})"),
         Done::Started(pid) => format!("installed; started and answering (pid {pid})"),
         Done::Updated(pid) => format!("updated, restarted and answering (pid {pid})"),
-        Done::Protected(pid) => format!("now KillMode={}; restarted once to apply it, answering (pid {pid})", tmux_mobile::gateway::service::KILL_MODE),
+        Done::Protected(pid) => format!("now KillMode={} in effect, applied in place — nothing was restarted (pid {pid})", tmux_mobile::gateway::service::KILL_MODE),
         Done::Replaced { pid, backup } => format!("replaced and answering (pid {pid}); the previous file is kept at {}", backup.display()),
     }
 }

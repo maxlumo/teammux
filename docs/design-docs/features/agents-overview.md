@@ -108,15 +108,15 @@ settled nothing (a person typing, a pasted context block) is stored raw. An inte
 disagree with the `line` it splits; an offset that does not split it shows
 the line as typed.
 
-### Every agent lives in a tmux server somebody forked — three ways to kill them all in one day (2026-10-12)
+### Every agent lives in a tmux server somebody forked — two incidents and one near miss in a day (2026-10-12)
 
-A managed agent is a pane in a tmux server, and that server belongs to whatever forked it: the user's shell, or our gateway running `tmm project up`. Three incidents on one day lost every session on the dev host, each by a different hand, each because something was allowed to act on a tmux server it did not create:
+A managed agent is a pane in a tmux server, and that server belongs to whatever forked it: the user's shell, or our gateway running `tmm project up`. Twice in one day every session on the dev host was lost, and a third way was found before it fired — each by a different hand, each because something was allowed to act on a tmux server it did not create:
 
 1. **05:51** — the Rust test suite, run in parallel, issued `kill-server` through a process-global socket another test had reset, and hit the default server (board #349).
 2. **07:12** — a negative control on that fix put the bug back on purpose and ran in a developer's real shell, where `$TMUX` pointed at the real server (board #349).
 3. **08:02, found before it fired** — the owner's tmux server sat INSIDE `tmux-mobile-dev.service`'s cgroup, forked there by the gateway, and only a hand-made `KillMode=none` drop-in kept `systemctl --user stop` from killing it; the gateway unit that replaced the dev unit forks tmux the same way and is restarted after every merge, with systemd's default `KillMode=control-group` (board #350).
 
-The rules that came out of them, each in its own doc: tests reach tmux only through a socket they named, inside an isolated `TMUX_TMPDIR`, serially (testing.md); the gateway unit renders `KillMode=process` so a restart signals the gateway alone, an unprotected unit is reported by `status`, and the one rewrite that would restart an unprotected unit needs `install --restart` (tmm-cli.md § The gateway). The common shape, for the next mechanism that touches tmux: name the server you mean, and never let a restart or a stop of OUR process be a stop of the servers it happened to fork.
+The rules that came out of them, each in its own doc: tests reach tmux only through a socket they named, inside an isolated `TMUX_TMPDIR`, serially (testing.md); the gateway unit renders `KillMode=process` so a restart signals the gateway alone, the protection is applied to a running unit in place by `daemon-reload` and read back from the manager before any stop, and every stop or restart of a running unit of ours is refused until the manager reports it (tmm-cli.md § The gateway). The common shape, for the next mechanism that touches tmux: name the server you mean, and never let a restart or a stop of OUR process be a stop of the servers it happened to fork.
 
 ### Registry defaults are exactly the six backend-native agents
 
