@@ -52,22 +52,20 @@ test('a run creates the dir, hands it to cargo, kills only servers under it, and
 
 test('serverSocketsUnder finds tmux-<uid>/<name> sockets only', async () => {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
-  const { createServer } = await import('node:net');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
   const dir = mkdtempSync(join(tmpdir(), 'tmm-sockets-'));
   try {
     mkdirSync(join(dir, 'tmux-1000'));
     mkdirSync(join(dir, 'other'));
     writeFileSync(join(dir, 'tmux-1000', 'not-a-socket'), '');
     const sock = join(dir, 'tmux-1000', 'default');
-    const srv = createServer().listen(sock);
-    await new Promise((r) => srv.once('listening', r));
-    try {
-      assert.deepEqual(serverSocketsUnder(dir), [sock]);
-    } finally {
-      srv.close();
-    }
+    // A real socket inode without a listener: python's socket.bind creates
+    // one and the process exits; the file stays. No server is started here.
+    const made = spawnSync('python3', ['-c', `import socket; s=socket.socket(socket.AF_UNIX); s.bind(${JSON.stringify(sock)})`]);
+    assert.equal(made.status, 0, String(made.stderr));
+    assert.deepEqual(serverSocketsUnder(dir), [sock]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
