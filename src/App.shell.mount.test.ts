@@ -178,6 +178,10 @@ type FakeConnection = {
  * dispose, and the connect form's candidates are fakes of their own. A case
  * can therefore see an idle connection, a destroyed one, and which one an
  * RPC went over (`rpc@<key>:<name>`). */
+/** The registry key of the connection whose api is being called right now
+ * (set around each mocked RPC): a mock that answers PER SERVER reads it. */
+let askingKey = '';
+const asking = () => askingKey;
 function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: string) => Promise<string> | string): M {
   const m = module as Record<string, any>;
   const calls: string[] | undefined = m.__calls;
@@ -244,7 +248,9 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
         if (disposed) return Promise.reject(new Error('connection disposed'));
         if (!connected) return Promise.reject(new Error('not connected'));
         calls?.push(`rpc@${key}:${name}`);
-        return fn(...args);
+        // Which connection is asking (③c: a mock answering per server).
+        askingKey = key;
+        try { return fn(...args); } finally { askingKey = ''; }
       };
     }
     conns.push({
@@ -4956,4 +4962,132 @@ test('③c-1: Single names nothing', async (context) => {
   for (let i = 0; i < 20 && !h.app.document.querySelector('.scope-tree .page-head'); i++) { await h.app.advance(500); await h.settle(); }
   assert.ok(h.app.document.querySelector('.scope-tree .page-head'), 'a head is on screen');
   assert.equal(h.app.document.querySelector('.server-tag'), null);
+});
+
+// ─── #335 ③c-2: the Hub sidebar union ─────────────────────────────────
+
+/** Two Hubs with different projects: A has `app` and `old`; B has `app` (a
+ * different, more recent project of the same name) and `other`. */
+const twoHubs = (extra: Record<string, unknown> = {}) => {
+  const proj = (id: string, name: string, live: boolean, at: number) => ({ project: { id, name, session: name, path: `/${name}`, room: `proj:${name}`, updated_at: at }, live, slots: [] });
+  const byServer: Record<string, { projects: unknown[]; rooms: Record<string, number> }> = {
+    a: { projects: [proj('a-app', 'app', true, 1000), proj('a-old', 'old', false, 10)], rooms: { 'proj:app': 1000 } },
+    b: { projects: [proj('b-app', 'app', true, 9000), proj('b-other', 'other', true, 50)], rooms: { 'proj:app': 9000, 'proj:other': 50 } },
+  };
+  const mine = () => byServer[asking()] ?? { projects: [], rooms: {} };
+  return {
+    ...oneRoomHub(),
+    projectList: async () => ({ projects: mine().projects }),
+    hubRooms: async () => ({ rooms: mine().rooms, states: {} }),
+    listSessionsWithPanes: async () => ({ sessions: mine().projects.map((p: any) => ({ name: p.project.session, windows: 1 })), panes: [] }),
+    projectDown: async () => ({}), projectUp: async () => ({}), projectDelete: async () => ({}),
+    ...extra,
+  };
+};
+const sideRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row:not(.missing)')]
+  .filter((r) => r.querySelector('.p-name'))
+  .map((r) => `${r.querySelector('.server-tag')?.textContent ?? '-'}:${r.querySelector('.p-name')?.textContent}${r.classList.contains('open') ? '*' : ''}`);
+
+test('③c-2: the focused Hub s sidebar is the UNION of every included server s projects — merged by the one rule on each server s clock, tagged, keyed by ref', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: twoHubs() });
+  // Both lists AND both clocks (hub_rooms answers on its own): the merge is
+  // final once every slice has published with its talk map.
+  const settledUnion = () => sideRows(h).length === 4 && sideRows(h)[0] === 'beta:app';
+  for (let i = 0; i < 40 && !settledUnion(); i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(sideRows(h), ['beta:app', 'alpha:app*', 'beta:other', 'alpha:old'],
+    'live first; B s app ahead of A s by B s own clock; A s open; every row tagged');
+  assert.equal(h.app.document.querySelectorAll('.scope-tree:not(.held) .hub-root .sidebar .proj-row.missing').length, 0, 'both lists arrived');
+  // No second poller: B s list came from B s own Hub (D4).
+  assert.ok(events.some((e) => e === 'rpc@b:projectList'), 'B s Hub asked B');
+});
+
+test('③c-2: picking another server s row moves the focus there (D2) and selects THAT project in its Hub; nothing is torn down', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 40 && !(sideRows(h).length === 4 && sideRows(h)[0] === 'beta:app'); i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, b = conn(h, 'b')!;
+  const rowB = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row')].find((r) => r.dataset.server === 'b' && r.querySelector('.p-name')?.textContent === 'other')!;
+  rowB.querySelector<HTMLButtonElement>('.proj-pick')!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
+  for (let i = 0; i < 10 && !sideRows(h).includes('beta:other*'); i++) { await h.app.advance(200); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
+  assert.ok(sideRows(h).includes('beta:other*'), `B s Hub selected other: ${sideRows(h).join(',')}`);
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .chat-head .h1-text')?.textContent, 'other', 'B s head names it');
+  assert.ok(a.isConnected() && b.isConnected() && !a.disposed(), 'both up, nothing torn down');
+  assert.deepEqual(sideRows(h), ['beta:app', 'alpha:app', 'beta:other*', 'alpha:old'], 'the same union, now from B s Hub, with B s row open');
+  // The landing was B s alone: A s Hub, behind, still has its own room open.
+  assert.equal(h.app.document.querySelector('.scope-tree.held .hub-root .chat-head .h1-text')?.textContent, 'app', 'A s Hub did not read a landing aimed at B');
+  // And back on A, A s Hub is as it was — no landing replays.
+  await pickServer(h, 'alpha');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .hub-root .chat-head .h1-text')?.textContent, 'app');
+});
+
+test('③c-2: another server s row menu acts on THAT server s api; a server with no live runtime offers nothing; a server whose list has not come is listed as missing', async (context) => {
+  const events: string[] = [];
+  const cLet = { let: null as (() => void) | null };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+  }), (url) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? 'm-c' : 'm-a'), {
+    ...sandbox, calls: events, rpc: twoHubs(),
+    gate: (url, n) => (url.includes('//c') && n > 0 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+  });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const missing = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row.missing .p-name')].map((n) => n.textContent);
+  assert.deepEqual(missing, ['charlie'], 'C, included but not answering, is listed as missing — not silently absent');
+  // B s row: Close goes to B.
+  const rowB = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row')].find((r) => r.dataset.server === 'b' && r.querySelector('.p-name')?.textContent === 'other')!;
+  rowB.querySelector<HTMLButtonElement>('.row-menu')!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const item = [...h.app.document.querySelectorAll<HTMLButtonElement>('[role=menu] button, .ctx-menu button, .menu-item')].find((b) => /close/iu.test(b.textContent ?? ''));
+  assert.ok(item, `B s row offers Close: ${[...h.app.document.querySelectorAll('[role=menu] button, .ctx-menu button, .menu-item')].map((b: any) => b.textContent?.trim()).join('|')}`);
+  const before = events.length;
+  item.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  // A destructive Close asks first in the Hub's own flow; a cross-server one runs on B directly through onRow.
+  assert.ok(events.slice(before).includes('rpc@b:projectDown'), `the action went to B: ${events.slice(before).filter((e) => e.startsWith('rpc@')).join(',')}`);
+  assert.ok(!events.slice(before).includes('rpc@a:projectDown'), 'never to A');
+});
+
+test('③c-2 (D4): a hidden member s Hub refreshes only its list — no room is opened, no feed/roster/activity polled — until it is shown', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: twoHubs() });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  // A minute hidden: B s list refreshed (20 s cadence) and nothing else.
+  const before = events.length;
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  const b = events.slice(before).filter((e) => e.startsWith('rpc@b:')).map((e) => e.slice('rpc@b:'.length));
+  const room = b.filter((n) => /^hub(Log|Agents|Activity|Read)$/u.test(n));
+  assert.deepEqual(room, [], `hidden B opened no room and polled nothing of one: ${b.join(',')}`);
+  const lists = b.filter((n) => n === 'projectList').length;
+  assert.ok(lists >= 2 && lists <= 4, `B s list refreshed on its cadence (~3 in a minute): ${lists}`);
+  // Shown (focus B, back on the Hub page): B s room opens.
+  await pickServer(h, 'beta');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^chat$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 10; i++) { await h.app.advance(300); await h.settle(); }
+  const after = events.filter((e) => e.startsWith('rpc@b:')).map((e) => e.slice('rpc@b:'.length));
+  assert.ok(after.includes('hubLog') && after.includes('hubAgents'), 'shown: B s room is open');
+  // Back to A: B, with a room OPEN, is hidden again — its room polls stop,
+  // its list refresh goes on.
+  await pickServer(h, 'alpha');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^chat$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const mark = events.length;
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  const hidden = events.slice(mark).filter((e) => e.startsWith('rpc@b:')).map((e) => e.slice('rpc@b:'.length));
+  assert.deepEqual(hidden.filter((n) => /^hub(Log|Agents|Activity)$/u.test(n)), [], `hidden again, room open: no room poll of B: ${hidden.join(',')}`);
+  assert.ok(hidden.filter((n) => n === 'projectList').length >= 2, 'but its list still refreshes');
 });

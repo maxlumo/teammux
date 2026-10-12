@@ -665,7 +665,7 @@ test('the title caret expands the NAME — left-aligned on its real rect (board 
   const opens = [...source.matchAll(/openCtx\((?!at, who)/g)].length; // call sites, not the definition
   const leftAligned = [...source.matchAll(/openCtx\(\{ anchor:[^}]*align: 'left'/g)].length;
   assert.equal(leftAligned, 1, 'ONE explicitly left-aligned entry');
-  assert.equal(opens - leftAligned, 4, '#180 the captured All trigger, #258 the team menu, beside Sidebar and Roster context entries');
+  assert.equal(opens - leftAligned, 5, '#180 the captured All trigger, #258 the team menu, beside Sidebar (own row, and a union entry s row — #335 ③c-2) and Roster context entries');
   assert.ok(!/getBoundingClientRect\(\)[^]{0,80}openCtx/u.test(source),
     'no raw client rect reaches openCtx — anchorOf owns the zoom correction');
   // #166 replaces the 20px private caret with the shared command's centered

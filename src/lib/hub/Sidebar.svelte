@@ -14,6 +14,8 @@
   import { flip } from 'svelte/animate';
   import { slideIndicator } from '../ui/indicator.ts';
   import { moveMs } from '../ui/motion.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
+  import type { HubUnionRow } from '../app/hub-union.svelte.ts';
 
   type MenuPosition = { x: number; y: number }
     | { anchor: ReturnType<typeof anchorOf>; trigger: Element };
@@ -21,9 +23,21 @@
     compact?: boolean;
     open?: boolean;
     rows?: ProjectRow[];
+    /** The list as a UNION over servers (board #335 ③c-2): the Hub builds it
+     * from App's union source, one entry per project per server, each with
+     * the clock, unread, states and panes of ITS server. Rendered instead of
+     * `rows` (which stays the one-server form the entries are built from);
+     * the row's `key` (its ref) is the `{#each}` key and what `selectedKey`
+     * names, so two servers' same-named projects never collide. */
+    entries?: HubUnionRow[] | null;
+    /** Servers included in the union whose list has not arrived. */
+    missing?: { id: string; name: string }[];
     trash?: ProjectRow[];
     rowsBase?: ReadonlySet<string> | null;
     selected?: string;
+    /** The open row as a ref key (`refKey(sessionRef)`), when `entries` is
+     * given; `selected` alone cannot tell two servers' `work` apart. */
+    selectedKey?: string;
     panes?: SidebarPane[];
     agentStates?: Record<string, string>;
     talkMap?: Record<string, number>;
@@ -31,36 +45,51 @@
     /** Unread news per project (board #322): `hub_unread`'s summary, by session. */
     roomUnread?: Record<string, { count: number }>;
     onselect?: (session: string) => void;
+    /** A union entry picked: its server and session (③c-2). */
+    onselectEntry?: (entry: HubUnionRow) => void;
     oncreate?: () => void;
     onclose?: () => void;
     onmenu?: (row: ProjectRow, at: MenuPosition) => void;
+    onmenuEntry?: (entry: HubUnionRow, at: MenuPosition) => void;
     onrestore?: (row: ProjectRow) => void;
     onpurge?: (row: ProjectRow) => void;
   }
   let {
-    compact = false, open = false, rows = [], trash = [], rowsBase = null,
-    selected = '', panes = [], agentStates = {}, talkMap = {}, tick = Date.now(),
-    roomUnread = {}, onselect = () => {}, oncreate = () => {}, onclose = () => {},
-    onmenu = () => {}, onrestore = () => {}, onpurge = () => {},
+    compact = false, open = false, rows = [], entries = null, missing = [], trash = [], rowsBase = null,
+    selected = '', selectedKey = '', panes = [], agentStates = {}, talkMap = {}, tick = Date.now(),
+    roomUnread = {}, onselect = () => {}, onselectEntry = () => {}, oncreate = () => {}, onclose = () => {},
+    onmenu = () => {}, onmenuEntry = () => {}, onrestore = () => {}, onpurge = () => {},
   }: Props = $props();
+  /** ONE list shape for the template: the union's entries, or this server's
+   * rows as single-server entries (no tag, this Hub's own clock and maps). */
+  const list = $derived<HubUnionRow[]>(entries ?? rows.map((row) => ({
+    serverId: '', item: row, ref: { kind: 'session', serverId: '', session: row.project.session }, key: row.project.id, tag: null,
+    slice: { rows, talk: talkMap, unread: roomUnread, agentStates, panes },
+  })));
+  const isOpen = (e: HubUnionRow) => (entries ? e.key === selectedKey : e.item.project.session === selected);
+  const pick = (e: HubUnionRow) => { if (entries) onselectEntry(e); else onselect(e.item.project.session); };
+  const menu = (e: HubUnionRow, at: MenuPosition) => { if (entries) onmenuEntry(e, at); else onmenu(e.item, at); };
   // This server's backend catalog (board #335 ②b-3), for the rows' agent
   // faces. From the Hub's scope, read once at init.
   const catalog = useServerScope()!.state.backends;
   let trashOpen = $state(false);
   /* The open row's wash is ONE marker that glides (motion principle 14); it
      re-measures when the choice or the order changes. */
-  const rowKey = $derived([selected, rows.map((r) => r.project.id).join(',')].join('|'));
-  const rowLit = $derived(rows.some((r) => r.project.session === selected));
+  const rowKey = $derived([entries ? selectedKey : selected, list.map((e) => e.key).join(',')].join('|'));
+  const rowLit = $derived(list.some(isOpen));
 
-  function rowInfo(row: ProjectRow): HoverInfo {
-    const n = rowAgentCounts(row, panes);
+  function rowInfo(e: HubUnionRow): HoverInfo {
+    const row = e.item;
+    const n = rowAgentCounts(row, e.slice.panes as SidebarPane[]);
     const lines: NonNullable<HoverInfo['lines']> = [{ label: t('hubHoverPath'), value: row.project.path }];
+    // The hover carries only what the row hides (owner): the server's name is
+    // on the row's tag already; its path is not.
     if (n.live || n.stopped) {
       lines.push({ label: t('hubHoverAgents'), value: t('hubHoverAgentsCount').replace('{live}', String(n.live)).replace('{stopped}', String(n.stopped)), tone: n.live ? 'accent' : undefined });
     }
-    const age = projectAgeLabel(row, talkMap, tick);
+    const age = projectAgeLabel(row, e.slice.talk, tick);
     if (age) lines.push({ label: t('hoverActivity'), value: age });
-    const unread = roomUnread[row.project.session]?.count ?? 0;
+    const unread = e.slice.unread[row.project.session]?.count ?? 0;
     if (unread) lines.push({ label: t('hubHoverUnread'), value: String(unread), tone: 'accent' });
     return { title: row.project.name, lines };
   }
@@ -85,25 +114,29 @@
         <Icon name="plus" size={13} />
       </button>
     </div>
-    {#each rows as row (row.project.id)}
-      {@const unread = roomUnread[row.project.session]?.count ?? 0}
-      <div class="side-row proj-row" role="group" aria-label={unread ? `${row.project.name} · ${t('hubUnreadCount').replace('{n}', String(unread))}` : row.project.name} class:open={row.project.session === selected} class:unread={unread > 0}
+    {#each list as e (e.key)}
+      {@const row = e.item}
+      {@const unread = e.slice.unread[row.project.session]?.count ?? 0}
+      {@const agents = rowAgents(row, e.slice.panes as SidebarPane[], e.slice.agentStates as Record<string, string>, catalog)}
+      <div class="side-row proj-row" role="group" aria-label={unread ? `${row.project.name} · ${t('hubUnreadCount').replace('{n}', String(unread))}` : row.project.name} class:open={isOpen(e)} class:unread={unread > 0}
         class:appear={!!rowsBase && !rowsBase.has(row.project.id)}
+        data-server={e.serverId || undefined}
         animate:flip={{ duration: moveMs() }}
-        oncontextmenu={(e) => { e.preventDefault(); onmenu(row, { x: e.clientX ?? 0, y: e.clientY ?? 0 }); }}
-        use:longpress={{ onlongpress: (pt) => onmenu(row, pt) }}
-        use:hoverInfo={() => rowInfo(row)}>
-        <button class="proj-pick" onclick={() => onselect(row.project.session)}>
+        oncontextmenu={(ev) => { ev.preventDefault(); menu(e, { x: ev.clientX ?? 0, y: ev.clientY ?? 0 }); }}
+        use:longpress={{ onlongpress: (pt) => menu(e, pt) }}
+        use:hoverInfo={() => rowInfo(e)}>
+        <button class="proj-pick" onclick={() => pick(e)}>
           <span class="dot" class:off={!row.live}></span>
           <span class="p-main">
             <span class="p-top">
               <span class="p-name">{row.project.name}</span>
+              <ServerTag name={e.tag} />
               {#if unread}<span class="side-unread appear-pop"><span class="unread-dot"></span>{unread}</span>{/if}
-              <span class="side-age">{projectAgeLabel(row, talkMap, tick)}</span>
+              <span class="side-age">{projectAgeLabel(row, e.slice.talk, tick)}</span>
             </span>
-            {#if rowAgents(row, panes, agentStates, catalog).length}
+            {#if agents.length}
               <span class="side-wins" class:dim={!row.live}>
-                {#each rowAgents(row, panes, agentStates, catalog) as a (a.name)}
+                {#each agents as a (a.name)}
                   <span class="side-win">
                     {#if a.icon}<img src={a.icon} alt="" width="11" height="11" />{/if}
                     <span class="side-win-name">{a.name}</span>
@@ -115,12 +148,20 @@
           </span>
         </button>
         <button class="icon-btn row-menu" aria-label={t('hubProjectMenu')}
-          onclick={(e) => {
-            e.stopPropagation();
-            onmenu(row, { anchor: anchorOf(e.currentTarget), trigger: e.currentTarget });
+          onclick={(ev) => {
+            ev.stopPropagation();
+            menu(e, { anchor: anchorOf(ev.currentTarget), trigger: ev.currentTarget });
           }}>
           <Icon name="dots" size={13} />
         </button>
+      </div>
+    {/each}
+    {#each missing as m (m.id)}
+      <!-- A server in the union whose list has not arrived (no Hub answer
+           yet, or no Hub): said, never a shorter list in silence (②a-5). -->
+      <div class="side-row proj-row missing" role="note">
+        <span class="dot off"></span>
+        <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
       </div>
     {/each}
     {#if trash.length}

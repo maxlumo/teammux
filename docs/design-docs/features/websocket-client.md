@@ -1110,6 +1110,26 @@ the tag follows include and exclude); the Hub, Board and Terminal heads render
 it with `ui/ServerTag.svelte`. No page names a server itself; the identity
 modules' consumer pin keeps it so.
 
+**The Hub sidebar is a union, projected, not polled** (③c-2;
+`app/hub-union.svelte.ts`). Each tree's Hub keeps its own project list,
+ordered by its own server's rule and clock, and PUBLISHES that slice to App's
+one union source, keyed by its runtime (a replaced runtime inherits nothing);
+it withdraws the slice with its tree. The focused Hub's sidebar renders the
+k-way merge over the included set (`server-union.ts`: the domain's own
+comparator, each row measured by its SOURCE server's talk map, saved order
+breaking ties; every row carries its ref, so two servers' `app` never collide
+and the open row is named by ref). Rows wear the one tag by the one rule; a
+server whose list has not arrived is listed as missing, never dropped in
+silence. Picking another server's row moves the focus there (D2, no teardown)
+and hands that Hub the session as a landing it alone reads
+(`view.hubSelectReq` through `landingFor`); a row of a server that is not a
+connected member is not a focus change (`pickMember`). A foreign row's menu
+offers only what `onRow` can run on THAT server's runtime — Open, Close,
+Delete, named with the server — and nothing when it has no live runtime. D4
+is held here: a hidden member's Hub runs only its list refresh (the 20 s
+`reload`), opens no room and polls nothing of one; its room opens when it is
+first shown. Single hands no union: the Hub is as before.
+
 **Identity ends now; an editor is destroyed only when asked** (reviewer P1-5
 on 3a0b4feb; orchestrator 03:40). A published member can lose its identity
 without anyone asking for it: identity repair absorbs its entry into the

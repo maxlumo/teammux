@@ -8,27 +8,33 @@ test('sidebar rows share Terminal time and route all menu doors with the clicked
   // Moved from Hub.source.test.ts with its owner (#121); only the callback
   // boundary changed. The host still builds the shared project action list.
   assert.match(source, /import \{ projectAgeLabel, type ProjectRow \} from '\.\.\/projects\/projects\.ts';/u);
-  const start = source.indexOf('{#each rows as row (row.project.id)}');
-  const row = source.slice(start, source.indexOf('{#if trash.length}', start));
+  // ③c-2 (#335): ONE list shape — the union's entries, or this server's rows
+  // as single-server entries — rendered by ONE row template, keyed by ref.
+  // Each row's clock, unread, states and panes are ITS server's (`e.slice`).
+  const start = source.indexOf('{#each list as e (e.key)}');
+  const row = source.slice(start, source.indexOf('{#each missing as m (m.id)}', start));
   assert.match(row, /<div class="side-row proj-row"/u);
-  assert.match(row, /<button class="proj-pick" onclick=\{\(\) => onselect\(row\.project\.session\)\}/u);
-  assert.match(row, /projectAgeLabel\(row, talkMap, tick\)/u);
+  assert.match(row, /<button class="proj-pick" onclick=\{\(\) => pick\(e\)\}/u);
+  assert.match(row, /projectAgeLabel\(row, e\.slice\.talk, tick\)/u, 'the age by the row s own server s clock');
+  assert.match(row, /<ServerTag name=\{e\.tag\} \/>/u, 'the one tag atom, shown by the union s rule');
   assert.match(row, /<button class="icon-btn row-menu" aria-label=\{t\('hubProjectMenu'\)\}/u);
   assert.match(row, /<Icon name="dots" size=\{13\} \/>/u);
-  assert.match(row, /e\.preventDefault\(\); onmenu\(row, \{ x: e\.clientX \?\? 0, y: e\.clientY \?\? 0 \}\)/u);
-  assert.match(row, /onlongpress: \(pt\) => onmenu\(row, pt\)/u);
-  assert.match(row, /onmenu\(row, \{ anchor: anchorOf\(e\.currentTarget\), trigger: e\.currentTarget \}\)/u);
-  assert.equal([...row.matchAll(/onmenu\(/g)].length, 3, 'three doors, one host action source');
+  assert.match(row, /ev\.preventDefault\(\); menu\(e, \{ x: ev\.clientX \?\? 0, y: ev\.clientY \?\? 0 \}\)/u);
+  assert.match(row, /onlongpress: \(pt\) => menu\(e, pt\)/u);
+  assert.match(row, /menu\(e, \{ anchor: anchorOf\(ev\.currentTarget\), trigger: ev\.currentTarget \}\)/u);
+  assert.equal([...row.matchAll(/\bmenu\(e,/g)].length, 3, 'three doors, one host action source');
+  assert.match(source, /const menu = \(e: HubUnionRow, at: MenuPosition\) => \{ if \(entries\) onmenuEntry\(e, at\); else onmenu\(e\.item, at\); \};/u, 'a union entry s menu is the host s entry menu; this server s row is as before');
+  assert.match(source, /const list = \$derived<HubUnionRow\[\]>\(entries \?\? rows\.map\(/u, 'no entries: this server s rows wear its own clock and maps, untagged');
   const menuStyle = /\.row-menu \{([^}]*)\}/u.exec(source)?.[1] ?? '';
   assert.doesNotMatch(menuStyle, /border/u, 'private CSS places the shared borderless icon button');
 });
 
 test('hover reads the full live count and the same clock at open time', () => {
-  assert.match(source, /use:hoverInfo=\{\(\) => rowInfo\(row\)\}/u);
-  assert.match(source, /const n = rowAgentCounts\(row, panes\)/u);
-  assert.match(source, /const age = projectAgeLabel\(row, talkMap, tick\)/u);
+  assert.match(source, /use:hoverInfo=\{\(\) => rowInfo\(e\)\}/u);
+  assert.match(source, /const n = rowAgentCounts\(row, e\.slice\.panes as SidebarPane\[\]\)/u);
+  assert.match(source, /const age = projectAgeLabel\(row, e\.slice\.talk, tick\)/u, 'the hover s clock is the row s server s too');
   // Board #322: every row's unread count comes from the per-room summary.
-  assert.match(source, /const unread = roomUnread\[row\.project\.session\]\?\.count \?\? 0;\n\s*if \(unread\) lines\.push\(\{ label: t\('hubHoverUnread'\)/u);
+  assert.match(source, /const unread = e\.slice\.unread\[row\.project\.session\]\?\.count \?\? 0;\n\s*if \(unread\) lines\.push\(\{ label: t\('hubHoverUnread'\)/u);
   assert.doesNotMatch(source, /getBoundingClientRect|setInterval/u,
     'the sidebar adds neither its own geometry calculation nor a clock');
 });
@@ -63,7 +69,7 @@ test('the sidebar owns no collapse control — the shell\'s single toggle stands
 });
 
 test('every project row shows its unread count in the accent ink, never a state colour (#322)', async () => {
-  assert.match(source, /\{@const unread = roomUnread\[row\.project\.session\]\?\.count \?\? 0\}/u);
+  assert.match(source, /\{@const unread = e\.slice\.unread\[row\.project\.session\]\?\.count \?\? 0\}/u);
   assert.match(source, /class:unread=\{unread > 0\}/u);
   assert.match(source, /\{#if unread\}<span class="side-unread appear-pop"><span class="unread-dot"><\/span>\{unread\}<\/span>\{\/if\}/u);
   const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');

@@ -1384,3 +1384,11 @@ test('the mode and the include switches go through App s two changes, each walki
   assert.match(inc, /if \(member\) aggregate\.leave\(member\.id\);\s*\}\s*(?:\/\/[^\n]*\n\s*)*try \{\s*excludedIds = setExcluded\(/u, 'no await between the last check and the write');
   assert.match(inc, /catch \{[\s\S]*?undoFocus\(movedFrom\);[^\n]*\n\s*membershipError = t\('migrationBlockedNote'\);[\s\S]*?return false;/u, 'a moved focus goes back when the write fails, and the refusal is said after');
 });
+
+test('the Hub union s cross-server pick is a landing like the others: aimed at one tree, delivered through landingFor (#335 ③c-2)', () => {
+  assert.match(source, /selectRequest=\{landingFor\(v\.hubSelectReq, runtime\)\}/u);
+  assert.match(source, /function pickServerProject\(ref\) \{[\s\S]*?const moved = focusMember\(ref\.serverId\);\s*if \(moved !== true\) \{ pickMember\(target\); return; \}[\s\S]*?v\.hubSelectReq = \{ serverId: ref\.serverId, session: ref\.session, n:/u,
+    'focus first (D2, or stay with the row s state), then the landing on THAT tree s view');
+  assert.match(source, /view\.hubSelectReq = null;/u, 'cleared with the other landings');
+  assert.match(source, /const hubUnionFor = \$derived\(connMode === 'aggregate' \? \{[\s\S]*?runtimeOf: \(id\) =>/u, 'Single hands no union');
+});

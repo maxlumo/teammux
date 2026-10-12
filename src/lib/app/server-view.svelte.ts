@@ -34,6 +34,9 @@ export class ServerView {
   filesNavReq = $state<Landing>(null);
   boardIssueReq = $state<Landing>(null);
   agentsEditReq = $state<Landing>(null);
+  /** A project this tree's Hub should select (③c-2: a union row of this
+   * server picked while another was focused). */
+  hubSelectReq = $state<Landing>(null);
   /** Where a cross-page jump from the chat came from: Back at the target's
    * floor returns there. */
   jumpedFrom = $state<string | null>(null);

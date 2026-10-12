@@ -93,7 +93,12 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/app/server-members.svelte.ts',
       // ③c-1: the one rule for naming a server beside what it owns (a type
       // import); App reads it for every tag, and no page names a server.
-      'src/lib/app/server-tag.ts'],
+      'src/lib/app/server-tag.ts',
+      // ③c-2: the Hub union source mints each row's SessionRef from the slice's
+      // serverId (App's); and the Hub reads `refKey(sessionRef(own id, …))`
+      // for its own open row and lands a foreign pick through its ref — a
+      // ref it was handed, never one it named for another server.
+      'src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte'],
     'nav-saved.ts': ['src/App.svelte'],
     // ③b-1: the member set names the runtime and dial-result TYPES only.
     'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],
@@ -122,7 +127,10 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/hub/Roster.svelte', 'src/lib/hub/Sidebar.svelte'],
     // ②b-2-1: App builds each runtime's state bundle; pages never do.
     'server-state.ts': ['src/App.svelte'],
-    'server-union.ts': [],
+    // ③c-2: the first production union — App's Hub union source merges the
+    // slices; the Hub renders the merge and runs a foreign row's action
+    // through `onRow`.
+    'server-union.ts': ['src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte'],
   };
   const found: Record<string, string[]> = {};
   for await (const file of glob('src/**/*.{ts,svelte}')) {
@@ -196,7 +204,15 @@ test('a union list takes each action s runtime from its row, never from its cont
     if (/\.test\.[a-z]+\.svelte$/u.test(path)) continue;
     const text = code(await readFile(file, 'utf8'));
     if (!importsModule(text, 'server-union')) continue;
-    assert.doesNotMatch(text, /\buseServer(Api|Runtime|Scope)\(/u, `${path} projects a union and reads one api for it`);
+    // ③c-2: the Hub both OWNS one server's slice (its scope, read once) and
+    // projects the union. The rule holds where it matters: a foreign row's
+    // actions come from `onRow` with the row's own runtime, and the function
+    // that builds them never touches this server's api.
+    const foreign = text.match(/function entryItems\(entry\) \{[\s\S]*?\n  \}/u)?.[0];
+    assert.ok(foreign, `${path} projects a union: its foreign-row actions are one function, entryItems`);
+    assert.match(foreign, /onRow\(entry, union\?\.runtimeOf/u, 'every foreign action runs on the row s own runtime');
+    assert.doesNotMatch(foreign, /(?<!api\.)\b(projectUp|projectDown|projectDelete|projectArchive|projectRename|hubPost|hubCommand)\(/u, `${path}: a foreign row never calls this server s api (only the row s, through onRow s api)`);
+    assert.doesNotMatch(foreign, /useServer(Api|Runtime|Scope)\(/u);
   }
 });
 

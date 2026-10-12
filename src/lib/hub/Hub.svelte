@@ -46,6 +46,8 @@
   import { revealMs } from '../ui/motion.ts';
   import { useServerScope } from '../app/server-context.ts';
   import ServerTag from '../ui/ServerTag.svelte';
+  import { onRow } from '../app/server-union.ts';
+  import { refKey, sessionRef } from '../app/refs.ts';
   import { pinTrack, moveTrack } from './reveal.ts';
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
@@ -70,7 +72,15 @@
   const { icon: backendIcon, togglesInputMode: backendTogglesInputMode } = catalog;
   const backendColor = (backend) => colorOf(backend, catalog);
 
-  let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null } = $props();
+  /** `union` (board #335 ③c-2): App's one Hub union source and the servers
+   * included in it. This Hub PUBLISHES its own ordered list there, and the
+   * sidebar it renders is the merged list over every included server. A
+   * foreign row picked is the host's to land (`onPickServer`: focus that
+   * server, select there); a foreign row's menu acts on THAT server's api
+   * (`onRow`) or does nothing when it has no live runtime. Null: this Hub's
+   * own list, as before (Single, or a host without the notion). */
+  let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null,
+    union = null, selectRequest = null, onPickServer = null } = $props();
   const drawerId = $props.id();
 
   // Layout follows the viewport, not the device class (a squeezed desktop
@@ -259,15 +269,55 @@
       if (!rowsBase && rows.length) rowsBase = new Set(rows.map((r) => r.project.id));
       panes = sp.panes ?? [];
       // First load: go back to the conversation that was open, and only fall
-      // back to the top row when that project is gone.
-      if (!selected && rows.length) {
-        const remembered = rows.some((r) => r.project.session === hubPrefs.project)
-          ? hubPrefs.project
-          : rows[0].project.session;
-        selectProject(remembered);
-      }
+      // back to the top row when that project is gone. Not while HIDDEN (D4):
+      // opening a room is room work (its log, roster, read mark); a hidden
+      // member publishes its list and waits — the room opens when it is shown.
+      if (!selected && rows.length && visible) openFirst();
     } catch (e) { if (report && alive && request === projectReadSequence) throw e; }
   }
+
+  // ③c-2: publish this server's ordered list, by this runtime; withdraw it
+  // with the tree. The union is read-only to this Hub beyond its own slice.
+  $effect(() => {
+    if (!union) return;
+    union.source.publish(scope.runtime, serverId(), { rows, talk: talkMap, unread: roomUnread, agentStates, panes });
+  });
+  $effect(() => () => { union?.source.withdraw(scope.runtime); });
+  /** The sidebar's list in Aggregate: every included server's rows merged
+   * by the one rule, each row with its own server's clock and maps. */
+  const unionList = $derived(union ? union.source.rows(union.included) : null);
+  const selectedKey = $derived(refKey(sessionRef(serverId(), selected)));
+  /** A union row picked: this server's is selected here; another server's
+   * is the host's to land — focus that server and select there. */
+  function pickEntry(entry) {
+    if (entry.serverId === serverId()) { selectProject(entry.item.project.session); sideOpen = false; return; }
+    onPickServer?.(entry.ref);
+    sideOpen = false;
+  }
+  /** A union row's menu: this server's as before; another server's offers
+   * only what `onRow` can run on THAT server — nothing when it has no live
+   * runtime (a view that lied here would act on the wrong machine). */
+  function entryItems(entry) {
+    if (entry.serverId === serverId()) return projectItems(entry.item);
+    const run = (act) => onRow(entry, union?.runtimeOf ?? (() => null), act);
+    if (!run((api) => api) ) return [{ label: t('hubUnionUnavailable'), icon: 'info', onselect: () => {} }];
+    const name = entry.item.project.name, session = entry.item.project.session;
+    return [
+      ...(entry.item.live ? [] : [{ label: t('projectUp'), icon: 'zap', onselect: () => { void run((api) => api.projectUp(session)); } }]),
+      ...(entry.item.live ? [{ label: t('projectDown'), icon: 'stop', danger: true, onselect: () => { void run((api) => api.projectDown(session)); } }] : []),
+      { label: `${t('projectDelete')} · ${entry.tag ?? name}`, icon: 'trash', danger: true, onselect: () => { void run((api) => api.projectDelete(session)); } },
+    ];
+  }
+  // A landing from another tree (③c-2): the person picked this server's
+  // project in a union list while another server was focused; the host
+  // moved the focus here and hands the session over.
+  let selectDone = 0;
+  $effect(() => {
+    const req = selectRequest;
+    if (!req || req.n === selectDone || req.serverId !== serverId()) return;
+    selectDone = req.n;
+    untrack(() => { if (req.session && req.session !== selected) selectProject(req.session); });
+  });
 
   // A room you have visited before renders INSTANTLY from memory when you
   // return; a room you have not shows nothing until its first load answers.
@@ -1560,15 +1610,31 @@
     addTeamMessageListener(onPush);
     return () => { removeTeamMessageListener(onPush); clearTimeout(agentsRefresh); agentsRefresh = 0; clearTimeout(unreadPushTimer); };
   });
+  /** The conversation that was open, or the top row. */
+  function openFirst() {
+    const remembered = rows.some((r) => r.project.session === hubPrefs.project) ? hubPrefs.project : rows[0].project.session;
+    selectProject(remembered);
+  }
+  // A member shown for the first time with its list already published (D4
+  // deferred its room): open it now.
+  $effect(() => { if (visible && !selected && rows.length) untrack(openFirst); });
+  // D4 (board #335 ③c-2): a HIDDEN member keeps only its list refresh — the
+  // project list it publishes to the union, on the same 20 s cadence — and
+  // nothing of the room: feed, roster, activity poll only while visible. In
+  // Single a hidden Hub polls nothing, as before (`union` is null).
+  $effect(() => {
+    if (!visible && !union) return;
+    reload();
+    const pi = setInterval(reload, 20000);
+    return () => clearInterval(pi);
+  });
   $effect(() => {
     if (!visible) return;
-    reload();
     registryList().then((r) => { registry = r.agents ?? []; }).catch(() => {});
     teamsList().then((r) => { teams = r.teams ?? []; }).catch(() => {});
     const ai = setInterval(() => { loadAgents(); loadActivity(); }, 5000);
     const fi = setInterval(loadFeed, 10000);
-    const pi = setInterval(reload, 20000);
-    return () => { clearInterval(ai); clearInterval(fi); clearInterval(pi); };
+    return () => { clearInterval(ai); clearInterval(fi); };
   });
 
   // Esc closes the drawer — but ONLY when it is pressed OUTSIDE the terminal.
@@ -1955,8 +2021,11 @@
          changes size while the track moves (board #174). -->
     <div class="track side" bind:this={sideTrackEl}>
     <Sidebar {compact} open={sideOpen} {rows} {trash} {rowsBase} {selected}
+      entries={unionList?.rows ?? null} missing={unionList ? union.included.filter((s) => unionList.missing.includes(s.id)) : []} {selectedKey}
       {panes} {agentStates} {talkMap} {tick} {roomUnread}
       onselect={(session) => { selectProject(session); sideOpen = false; }}
+      onselectEntry={pickEntry}
+      onmenuEntry={(entry, at) => openCtx(at, entry.item.project.name, entryItems(entry))}
       oncreate={() => { createOpen = true; sideOpen = false; }}
       onclose={() => { sideOpen = false; }}
       onmenu={(row, at) => openCtx(at, row.project.name, projectItems(row))}

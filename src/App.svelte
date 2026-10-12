@@ -38,6 +38,7 @@
   import { createMembers } from './lib/app/server-members.svelte.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag } from './lib/app/server-tag.ts';
+  import { createHubUnion } from './lib/app/hub-union.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -1273,6 +1274,27 @@
   }
   /** Half of a focus-exclusion that cannot finish: put the focus back. */
   function undoFocus(id) { if (id && !migrationBlocked) focusMember(id); }
+  /** The Hub sidebar's union source (③c-2, `hub-union.svelte.ts`): every
+   * tree's Hub publishes its ordered list here; the focused Hub renders the
+   * merge over the included set. ONE source for the app, read-only to the
+   * Hubs beyond their own slice; Single hands no union at all. */
+  const hubUnion = createHubUnion();
+  const hubUnionFor = $derived(connMode === 'aggregate' ? {
+    source: hubUnion, included: tagScope.included,
+    runtimeOf: (id) => { const r = scopeSwap.bound()?.id === id ? scopeSwap.bound() : background.find((x) => x.id === id); return r && r.alive() ? r : null; },
+  } : null);
+  /** A union row of ANOTHER server picked (③c-2): focus that server (D2:
+   * no teardown) and hand its Hub the session as a landing it alone reads.
+   * A server that is not a connected member is not a focus change — the
+   * row's own state says why (pickMember). */
+  function pickServerProject(ref) {
+    const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
+    if (!target) return;
+    const moved = focusMember(ref.serverId);
+    if (moved !== true) { pickMember(target); return; }
+    const v = viewOf(scopeSwap.bound());
+    v.hubSelectReq = { serverId: ref.serverId, session: ref.session, n: (v.hubSelectReq?.n ?? 0) + 1 };
+  }
   /** Which servers are NAMED beside what they own (③c-1, `server-tag.ts`):
    * the included set — Aggregate's included entries, Single's one — read
    * once here for every tag in the app. */
@@ -2095,7 +2117,7 @@
    * mount (board #335 ②b-1). `resetServerMemory` calls this rather than
    * repeating it, so "what a landing is" has one definition. */
   function clearLandings() {
-    view.filesNavReq = null; view.boardIssueReq = null; view.agentsEditReq = null;
+    view.filesNavReq = null; view.boardIssueReq = null; view.agentsEditReq = null; view.hubSelectReq = null;
     view.jumpedFrom = null;
   }
 
@@ -3548,7 +3570,8 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
-        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }} />
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
+          union={hubUnionFor} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
