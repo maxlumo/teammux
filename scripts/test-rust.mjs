@@ -28,14 +28,22 @@ import { fileURLToPath } from 'node:url';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The cargo command this wrapper runs, with the caller's extra args after
- * `--`. `--test-threads=1` is always last so nothing the caller passes can
- * raise it (libtest: the last occurrence wins). */
+/** The cargo command this wrapper runs. `extra` is what the caller added
+ * after `npm run test:rust`, in cargo's own grammar: everything before the
+ * caller's first `--` goes to cargo (a filter, `--lib`, `-p`), everything
+ * after it to the test harness (`--nocapture`, `--exact`, …). So
+ * `npm run test:rust -- tmux::tests -- --nocapture` reaches cargo as
+ * `test … tmux::tests -- --nocapture --test-threads=1`. The one thing that is
+ * ours and not the caller's: `--test-threads=1` is always LAST on the harness
+ * side, so a caller's value cannot win (libtest: the last occurrence does). */
 export function cargoArgs(extra = []) {
+  const at = extra.indexOf('--');
+  const forCargo = at === -1 ? extra : extra.slice(0, at);
+  const forHarness = at === -1 ? [] : extra.slice(at + 1);
   return [
     'test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features',
-    ...extra.filter((a) => a !== '--'),
-    '--', '--test-threads=1',
+    ...forCargo,
+    '--', ...forHarness, '--test-threads=1',
   ];
 }
 

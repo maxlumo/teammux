@@ -1721,8 +1721,12 @@ mod tests {
     #[test]
     fn a_protected_test_refuses_to_run_in_an_undeclared_parallel_run() {
         let exe = std::env::current_exe().unwrap();
-        // The lightest protected test: it opens a scope and touches no tmux.
-        let target = "tmux::tests::a_scope_restores_the_global_it_found_on_every_exit";
+        // The fixture is a test that opens a scope and does NOTHING else — no
+        // tmux, no private server, no destroy path — so the subprocess under
+        // the unisolated shapes exercises only the gate (reviewer P2-C on
+        // a7b7a5cd: a fixture that builds a PrivateTmux would, with a broken
+        // gate, run a destroy inside an unisolated child).
+        let target = "tmux::tests::opening_a_scope_is_the_gate";
         let iso = std::env::temp_dir().join(format!("tmm-test-iso-{}", std::process::id()));
         std::fs::create_dir_all(&iso).unwrap();
         // `tmux_env`: what the child sees of tmux — None = the isolated shape
@@ -1763,6 +1767,14 @@ mod tests {
         let (ok, text) = run(&[], Some("1"), None);
         assert!(ok, "RUST_TEST_THREADS=1 runs:\n{text}");
         let _ = std::fs::remove_dir_all(&iso);
+    }
+
+    /// The gate and nothing else: the fixture the subprocess test selects.
+    /// Opens a scope (which runs both checks) and closes it. No tmux.
+    #[test]
+    fn opening_a_scope_is_the_gate() {
+        let scope = test_support::GlobalSocket::hold();
+        let _ = scope.get();
     }
 
     /// Item 3 (07:15): the isolation predicate on its shapes.

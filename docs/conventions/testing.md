@@ -38,7 +38,14 @@ and the rest in `tmux::test_support`:
   the run. The real server's socket is simply not where the process will look.
   Any other cargo test invocation on this host wraps itself the same way:
   `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo
-  test … -- --test-threads=1`.
+  test … -- --test-threads=1`. The split of guarantees: the wrapper guarantees
+  the directory is FRESH; the Rust gate guarantees only that the process is
+  NOT looking at the real tmux (`$TMUX`/`$TMUX_PANE` unset, some
+  `TMUX_TMPDIR` set) — it cannot tell a fresh dir from a reused one, and the
+  private servers' own sockets live under `std::env::temp_dir()`, not under
+  `TMUX_TMPDIR`. The cleanup claim is for the wrapper's normal and error exit
+  (its `finally`); a wrapper killed with SIGKILL leaves the dir, which the
+  next run does not reuse.
 
 - **A destructive command names its server on the command line.**
   `destroy_private_server(socket)` runs `tmux -S <socket> kill-server` through
