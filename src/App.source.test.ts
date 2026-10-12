@@ -517,8 +517,8 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // ③b (reviewer P1-1 on 99566068): the panel sits OVER the kept trees —
   // nothing a switch does not replace goes with it. Every tree is held while
   // a switch runs; the swap lets go of the one it replaces.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{\/if\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\}>/u,
-    'the panel sits over the kept trees; a different server rebuilds only its own, bound to that server');
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{\/if\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\} tag=\{serverTag\(tagScope, runtime\.id\)\}>/u,
+    'the panel sits over the kept trees; a different server rebuilds only its own, bound to that server, named by the one tag rule (③c-1)');
   assert.doesNotMatch(source, /\{:else\}\s*(?:<!--[\s\S]*?-->\s*)*\{#if \(page === 'settings'/u, 'the trees are not the switch panel s else branch');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
   assert.match(source, /disabled=\{!!switching\}\s*onpointerdown=\{\(e\) => railPointerDown/u,

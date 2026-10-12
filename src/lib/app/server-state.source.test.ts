@@ -90,7 +90,10 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/app/server-view.svelte.ts',
       // ③b-1: the background member set keys its members by ServerId (a type
       // import); App owns it, and it is not a page.
-      'src/lib/app/server-members.svelte.ts'],
+      'src/lib/app/server-members.svelte.ts',
+      // ③c-1: the one rule for naming a server beside what it owns (a type
+      // import); App reads it for every tag, and no page names a server.
+      'src/lib/app/server-tag.ts'],
     'nav-saved.ts': ['src/App.svelte'],
     // ③b-1: the member set names the runtime and dial-result TYPES only.
     'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],

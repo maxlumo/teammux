@@ -19,6 +19,7 @@
   import { onDestroy, untrack, tick } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
   import { useServerScope } from '../app/server-context.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import Icon from '../ui/Icon.svelte';
   import Select from '../ui/Select.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
@@ -886,7 +887,7 @@
     </button>
     <!-- The page names the PROJECT, not itself (board #15): the tab already
          says "Board", so the title says WHOSE board this is. -->
-    <h1>{boardTitle(allProjects, cur) ?? (cur || t('board'))}</h1>
+    <h1>{boardTitle(allProjects, cur) ?? (cur || t('board'))}</h1><ServerTag name={scope?.tag} />
     <span class="spacer"></span>
     {#if !sel && !creating}
       <!-- New issue lives in the page head's top-right (reopened #11:

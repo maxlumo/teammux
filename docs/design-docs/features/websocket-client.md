@@ -1102,6 +1102,14 @@ answered for. The focus exclusion is one operation with its write: a focus
 that moved but could not be excluded is moved back. Picking an excluded row
 is an include through the same operation, never a bare write.
 
+**A server is named by one rule, through one atom** (③c-1). `app/server-tag.ts`
+decides WHEN: more than one server included (Aggregate's included entries;
+Single's one), whatever their health. App reads it once (`tagScope`) and hands
+every tree its name through its `ServerScope` (`scope.tag`, a live getter, so
+the tag follows include and exclude); the Hub, Board and Terminal heads render
+it with `ui/ServerTag.svelte`. No page names a server itself; the identity
+modules' consumer pin keeps it so.
+
 **Identity ends now; an editor is destroyed only when asked** (reviewer P1-5
 on 3a0b4feb; orchestrator 03:40). A published member can lose its identity
 without anyone asking for it: identity repair absorbs its entry into the

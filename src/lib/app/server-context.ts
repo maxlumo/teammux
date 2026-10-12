@@ -44,6 +44,13 @@ const KEY = Symbol('tmm.server-scope');
 export interface ServerScope {
   runtime: ServerRuntime;
   state: ServerState;
+  /** This server's name beside what it owns, or null while nothing need be
+   * named (board #335 ③c-1; `app/server-tag.ts` is the one rule). A LIVE
+   * read: the host hands a getter over its reactive scope, so the tag
+   * appears and goes as servers are included and excluded. Pages read it in
+   * their template (`scope.tag`), never once at init. Absent in a host that
+   * has no notion of several servers (tests of one page). */
+  readonly tag?: string | null;
 }
 
 /**

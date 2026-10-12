@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte';
-  import { useServerRuntime } from '../app/server-context.ts';
+  import { useServerScope } from '../app/server-context.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import { Terminal } from '@xterm/xterm';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import Icon from '../ui/Icon.svelte';
@@ -63,7 +64,8 @@
   // purpose: teardown has to unsubscribe even after the handle is detached,
   // and the provider tears the old tree down before the next one mounts.
   // No fallback: a Terminal outside a provider has no server to show.
-  const runtime = useServerRuntime();
+  const scope = useServerScope();
+  const runtime = scope?.runtime ?? null;
   if (!runtime) throw new Error('Terminal needs a server scope');
   const { subscribe, unsubscribe, addPaneOutputListener, removePaneOutputListener, addPaneClosedListener, removePaneClosedListener } = runtime.connection;
   const { sendKeys, pasteText, listPanes, capturePane, resizePane, newWindow } = runtime.api;
@@ -1741,9 +1743,9 @@
             onclick={(e) => { e.stopPropagation(); onOpenSessions(); }}>
             <Icon name="menu" size={16} />
           </button>
-          <h1 class="win-title" title={session}>{session}</h1>
+          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
         {:else}
-          <h1 class="win-title" title={session}>{session}</h1>
+          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
         {/if}
         {#if showPanePicker}
           <PanePicker
@@ -1860,7 +1862,7 @@
         </div>
       {:else}
         <div class="win-bar page-head">
-          <h1 class="win-title" title={session}>{session}</h1>
+          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
           <span class="win-bar-spacer"></span>
           <AgentChip
             agent={curAgent}

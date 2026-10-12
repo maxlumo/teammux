@@ -37,6 +37,7 @@
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createMembers } from './lib/app/server-members.svelte.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
+  import { serverTag } from './lib/app/server-tag.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -1272,6 +1273,10 @@
   }
   /** Half of a focus-exclusion that cannot finish: put the focus back. */
   function undoFocus(id) { if (id && !migrationBlocked) focusMember(id); }
+  /** Which servers are NAMED beside what they own (③c-1, `server-tag.ts`):
+   * the included set — Aggregate's included entries, Single's one — read
+   * once here for every tag in the app. */
+  const tagScope = $derived({ included: connMode === 'aggregate' ? includedServers(serverList, excludedIds) : serverList.filter((s) => s.id === serverCurId) });
   /** What a server list row needs in Aggregate; null in Single. */
   const memberRows = $derived(connMode === 'aggregate' ? {
     included: (id) => !excludedIds.has(id),
@@ -3535,7 +3540,7 @@
          register their Back chains and requests into ITS view `v`; the
          window dispatches only through the focused one. -->
     <div class="scope-tree" class:held inert={held}>
-    <ServerScope {runtime} state={serverStates.get(runtime)}>
+    <ServerScope {runtime} state={serverStates.get(runtime)} tag={serverTag(tagScope, runtime.id)}>
     {#if v.hubState.available}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
            Files/Terminal below) and merely hidden when inactive, so the

@@ -25,11 +25,12 @@
   // page can see one server's runtime with another server's memory.
   import { setServerScope } from './server-context.ts';
 
-  let { runtime, state, children } = $props();
+  let { runtime, state, tag = null, children } = $props();
 
   // svelte-ignore state_referenced_locally
-  // One runtime, and its state, for this instance's whole life.
-  if (runtime) setServerScope({ runtime, state });
+  // One runtime, and its state, for this instance's whole life. The tag is
+  // read LIVE through the getter (③c-1): it follows the included set.
+  if (runtime) setServerScope({ runtime, state, get tag() { return tag; } });
 </script>
 
 {#if runtime}{@render children?.()}{/if}

@@ -45,6 +45,7 @@
   import { groupActions, groupScope, runGroup } from './group-actions.ts';
   import { revealMs } from '../ui/motion.ts';
   import { useServerScope } from '../app/server-context.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import { pinTrack, moveTrack } from './reveal.ts';
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
@@ -1993,6 +1994,7 @@
               <!-- Rename remains an explicit project-menu action. -->
               <span class="h1-text" bind:this={titleNameEl}>{selectedRow?.project.name ?? ''}</span>
             </h1>
+            <ServerTag name={scope?.tag} />
           {/if}
           {#if selected}
             <!-- The project's own verbs — Open/Rename/Close/Delete — as ONE

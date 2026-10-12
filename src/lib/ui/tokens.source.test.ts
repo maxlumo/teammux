@@ -88,6 +88,7 @@ const ROUND_ALLOWED: { file: string; match: string; why: string }[] = [
   { file: 'lib/hub/Roster.svelte', match: '.ctx-ring', why: 'the context ring around an avatar' },
   { file: 'lib/hub/hub-atoms.css', match: '.st', why: 'the status dot' },
   { file: 'lib/sessions/Sessions.svelte', match: '.search-bar', why: 'an input capsule' },
+  { file: 'lib/ui/ServerTag.svelte', match: '.server-tag', why: 'a micro tag naming a row s server (#335 ③c-1)' },
   { file: 'lib/sessions/Sessions.svelte', match: '.dot', why: 'a dot' },
   { file: 'lib/system/SystemStatus.svelte', match: '.sv::before', why: 'a dot' },
   { file: 'lib/files/Files.svelte', match: '.file-icon.is-link::after', why: 'a badge on an icon' },

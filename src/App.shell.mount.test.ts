@@ -4918,3 +4918,42 @@ test('P1-4: a focus exclusion whose exclusion write fails moves the focus BACK �
   assert.ok(!trees(h.app).find((x) => x.target === 'work:1.0')!.held, 'A in front');
   assert.match(h.app.document.querySelector('.preferences .server-list [role=alert]')?.textContent ?? '', /storage|retry/iu, `the refusal is said: ${h.app.document.querySelector('.preferences .server-list')?.textContent}`);
 });
+
+// ─── #335 ③c-1: the server tag ────────────────────────────────────────
+
+test('③c-1: with two included members every tree s page head names its server; excluding one takes every tag away', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: oneRoomHub() });
+  // Both members up, both Hubs probed: a head per tree.
+  for (let i = 0; i < 20 && h.app.document.querySelectorAll('.scope-tree .page-head').length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  // Every head in a tree (Hub's, Board's) wears the SAME name: its tree's.
+  const tags = () => [...new Set([...h.app.document.querySelectorAll<HTMLElement>('.scope-tree .page-head .server-tag')].map((el) => `${el.closest('.scope-tree.held') ? 'held' : 'front'}:${el.textContent}`))];
+  assert.ok(h.app.document.querySelectorAll('.scope-tree .page-head .server-tag').length >= 2, 'tags are on the heads');
+  assert.deepEqual(tags().sort(), ['front:alpha', 'held:beta'], `each tree names ITS server: ${tags().join(',')}`);
+  // One included server: nothing is named — health is not the criterion, the set is.
+  await toConnection(h);
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 10 && tags().length; i++) await h.settle();
+  assert.deepEqual(tags(), [], 'one included: no tag anywhere');
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 20 && tags().length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(tags().sort(), ['front:alpha', 'held:beta'], 'included again: named again');
+});
+
+test('③c-1: a member that is offline is still included, so the tags stay (the source set, not health)', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: oneRoomHub(), gate: (url, n) => (url.includes('//b') && n > 0 ? new Promise<void>(() => {}) : null) });
+  for (let i = 0; i < 20 && !h.app.document.querySelector('.scope-tree .page-head .server-tag'); i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(conn(h, 'b')?.isConnected() ?? false, false, 'B never answers');
+  const tags = [...new Set([...h.app.document.querySelectorAll<HTMLElement>('.scope-tree .page-head .server-tag')].map((el) => el.textContent))];
+  assert.deepEqual(tags, ['alpha'], 'A s tree names A: two servers are included even though one is down');
+});
+
+test('③c-1: Single names nothing', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: oneRoomHub() });
+  for (let i = 0; i < 20 && !h.app.document.querySelector('.scope-tree .page-head'); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.scope-tree .page-head'), 'a head is on screen');
+  assert.equal(h.app.document.querySelector('.server-tag'), null);
+});

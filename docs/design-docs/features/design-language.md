@@ -1270,6 +1270,24 @@ Owner, 2026-10-09: "现在的状态显示经常有红色的小点。比如网络
 
 Unread never wears `--status-*` (it is not a state; `--status-ok` already means "ended well") and never the halo or breathe (those say a turn is open). Two labelled red uses stay outside the dot language: the Board sidebar's categorical `todo` count chip (with its word) and the context bar's >85% band. `Sidebar.source.test.ts` and `totail.source.test.ts` pin the tokens and the absence of `--status-`/`--danger`/animation on the unread atoms.
 
+### One server tag, shown by the source set (2026-10-12, board #335 ③c-1)
+
+Where several servers can show in one place — a page head, a union row, the
+Hub head, a notification — the row's SOURCE is named by ONE atom,
+`ui/ServerTag.svelte`: a micro tag in the existing vocabulary (the pill radius
+that tags already keep, `--fs-micro`, `--text2` on `--surface2`). A server is
+identity, not a state, so it never wears a status colour or an agent ink; and
+it is not a button, so it is on the capsule allowlist of
+`tokens.source.test.ts`, not an exception to it. WHEN it shows is one rule,
+`app/server-tag.ts` (`serverTag(scope, id)`): more than one server INCLUDED —
+the source set, not how many answered, so a member that is offline keeps the
+others named — and never otherwise, which makes Single tag-free by
+construction. The atom decides nothing itself (`ServerTag.source.test.ts`
+pins it to its tokens and to the absence of any mode logic); App computes the
+scope once and hands each tree its name through its scope (`ServerScope`
+`tag`, a live read). A page that computed its own "should I name the server"
+would drift from the others, which is the one thing a tag must not do.
+
 ### One back-to-tail control across scrolling records
 
 (board #49): Chat and Terminal both wear global `.to-tail` from app.css — 38px token-surface circle, quiet ink/accent hover, scale press, 44px `::before`, and the unread-ink (`--accent-ink`, board #322) `.news::after`; component-scoped `.to-bottom`/`.scroll-btn` rules may POSITION only (right/bottom/z), never redraw the box. The old Terminal glass square/span dot is retired.
