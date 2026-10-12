@@ -31,19 +31,34 @@ export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** The cargo command this wrapper runs. `extra` is what the caller added
  * after `npm run test:rust`, in cargo's own grammar: everything before the
  * caller's first `--` goes to cargo (a filter, `--lib`, `-p`), everything
- * after it to the test harness (`--nocapture`, `--exact`, …). So
- * `npm run test:rust -- tmux::tests -- --nocapture` reaches cargo as
- * `test … tmux::tests -- --nocapture --test-threads=1`. The one thing that is
- * ours and not the caller's: `--test-threads=1` is always LAST on the harness
- * side, so a caller's value cannot win (libtest: the last occurrence does). */
+ * after it to the test harness (`--nocapture`, `--exact`, …).
+ *
+ * The harness has a grammar of its own that decides WHERE our forced flag
+ * must go (measured on libtest, 2026-10-12): a bare `--` on the harness side
+ * ends option parsing, and everything after it is a test-name FILTER — so
+ * `--test-threads=4 -- --test-threads=1` runs 4 threads and filters on the
+ * string "--test-threads=1" (reviewer P1 on 6e166901, which had put ours
+ * last). Ours therefore goes FIRST among the harness args, where libtest
+ * reads options, and any `--test-threads` the caller wrote in the option zone
+ * is dropped; the caller's own `--` and what follows it stay as filters. */
 export function cargoArgs(extra = []) {
   const at = extra.indexOf('--');
   const forCargo = at === -1 ? extra : extra.slice(0, at);
   const forHarness = at === -1 ? [] : extra.slice(at + 1);
+  const stop = forHarness.indexOf('--');
+  const options = stop === -1 ? forHarness : forHarness.slice(0, stop);
+  const filters = stop === -1 ? [] : forHarness.slice(stop);
+  const kept = [];
+  for (let i = 0; i < options.length; i += 1) {
+    const a = options[i];
+    if (a === '--test-threads') { i += 1; continue; }
+    if (a.startsWith('--test-threads=')) continue;
+    kept.push(a);
+  }
   return [
     'test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features',
     ...forCargo,
-    '--', ...forHarness, '--test-threads=1',
+    '--', '--test-threads=1', ...kept, ...filters,
   ];
 }
 

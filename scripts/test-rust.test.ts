@@ -13,15 +13,32 @@ test('npm run test:rust is the isolating wrapper', async () => {
 test('the cargo run is always sequential, whatever the caller adds, and forwards harness args', () => {
   const base = ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features'];
   assert.deepEqual(cargoArgs(), [...base, '--', '--test-threads=1']);
-  // Before the caller's `--`: cargo's side. After it: the harness's side.
+  // Before the caller's `--`: cargo's side. After it: the harness's side,
+  // with our flag FIRST (libtest reads options until a bare `--`).
   assert.deepEqual(cargoArgs(['tmux::tests']), [...base, 'tmux::tests', '--', '--test-threads=1']);
-  assert.deepEqual(cargoArgs(['--', '--nocapture']), [...base, '--', '--nocapture', '--test-threads=1']);
+  assert.deepEqual(cargoArgs(['--', '--nocapture']), [...base, '--', '--test-threads=1', '--nocapture']);
   assert.deepEqual(cargoArgs(['--lib', 'tmux::tests', '--', '--exact', '--nocapture']),
-    [...base, '--lib', 'tmux::tests', '--', '--exact', '--nocapture', '--test-threads=1']);
-  // A caller's --test-threads cannot win: ours is last (libtest: last one wins).
-  assert.deepEqual(cargoArgs(['tmux::tests', '--', '--test-threads=8']).slice(-3), ['--', '--test-threads=8', '--test-threads=1']);
-  // A second `--` from the caller stays where the caller put it (harness side).
-  assert.deepEqual(cargoArgs(['--', 'x', '--', 'y']), [...base, '--', 'x', '--', 'y', '--test-threads=1']);
+    [...base, '--lib', 'tmux::tests', '--', '--test-threads=1', '--exact', '--nocapture']);
+  // A caller's --test-threads in the option zone is DROPPED, in both spellings,
+  // so there is exactly one and it is ours.
+  assert.deepEqual(cargoArgs(['tmux::tests', '--', '--test-threads=8']), [...base, 'tmux::tests', '--', '--test-threads=1']);
+  assert.deepEqual(cargoArgs(['--', '--test-threads', '8', '--nocapture']), [...base, '--', '--test-threads=1', '--nocapture']);
+  // The reviewer's case: a second `--` on the harness side ends libtest's
+  // option parsing, and what follows is filters. Ours must be BEFORE it;
+  // the caller's filters stay after it untouched (even one that looks like a flag).
+  assert.deepEqual(cargoArgs(['--', '--test-threads=4', '--', 'tmux::tests']),
+    [...base, '--', '--test-threads=1', '--', 'tmux::tests']);
+  assert.deepEqual(cargoArgs(['--', '--', '--test-threads=4']),
+    [...base, '--', '--test-threads=1', '--', '--test-threads=4'], 'after the bare -- it is a filter string, and libtest will treat it as one');
+  // Invariant over every shape: exactly one --test-threads before any bare --
+  // on the harness side, and it is =1.
+  for (const extra of [[], ['x'], ['--', '--nocapture'], ['--', '--test-threads=9'], ['--', '--test-threads', '9', '--', 'f'], ['--', '--', '--test-threads=9']]) {
+    const argv = cargoArgs(extra);
+    const harness = argv.slice(argv.indexOf('--') + 1);
+    const stop = harness.indexOf('--');
+    const optionZone = stop === -1 ? harness : harness.slice(0, stop);
+    assert.deepEqual(optionZone.filter((a) => a.startsWith('--test-threads')), ['--test-threads=1'], JSON.stringify(extra));
+  }
 });
 
 test('the test process cannot see the real tmux: TMUX/TMUX_PANE gone, TMUX_TMPDIR fresh', () => {

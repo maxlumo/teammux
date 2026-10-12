@@ -1439,11 +1439,18 @@ pub(crate) mod test_support {
     /// Is this test run serial, by what libtest itself reads: the binary's
     /// argv (`--test-threads=N` / `--test-threads N`; last one wins, as in
     /// libtest), else `RUST_TEST_THREADS`, else libtest's default — the
-    /// machine's parallelism. Pure, so the shapes are tested on fake inputs.
+    /// machine's parallelism. A bare `--` ENDS libtest's option parsing and
+    /// everything after it is a test-name filter (measured 2026-10-12:
+    /// `--test-threads=4 -- --test-threads=1` runs 4 threads), so the scan
+    /// stops there too — a `--test-threads=1` in the filter zone is a filter,
+    /// not a promise (reviewer P1 on 6e166901). Pure; the shapes are tested.
     pub fn serial_run(args: impl IntoIterator<Item = String>, env_threads: Option<&str>, parallelism: usize) -> bool {
         let mut from_args: Option<String> = None;
         let mut args = args.into_iter();
         while let Some(a) = args.next() {
+            if a == "--" {
+                break;
+            }
             if let Some(v) = a.strip_prefix("--test-threads=") {
                 from_args = Some(v.to_string());
             } else if a == "--test-threads" {
@@ -1713,6 +1720,11 @@ mod tests {
         assert!(!serial_run(args(&["bin"]), None, 64), "nothing said on a 64-way machine: libtest runs 64 threads");
         assert!(serial_run(args(&["bin"]), None, 1), "nothing said on a 1-way machine: libtest runs 1");
         assert!(!serial_run(args(&["bin", "--test-threads=garbage"]), None, 64), "unparseable is not a promise");
+        // A bare `--` ends libtest's option parsing: what follows is filters.
+        assert!(!serial_run(args(&["bin", "--test-threads=4", "--", "--test-threads=1"]), None, 64), "the =1 after -- is a filter string; libtest runs 4");
+        assert!(!serial_run(args(&["bin", "--", "--test-threads=1"]), None, 64), "only a filter; libtest runs the default");
+        assert!(serial_run(args(&["bin", "--test-threads=1", "--", "--test-threads=4"]), None, 64), "the =4 after -- is a filter; libtest runs 1");
+        assert!(serial_run(args(&["bin", "--", "anything"]), Some("1"), 64), "the env still decides when argv says nothing before --");
     }
 
     /// P1-2, end to end on THIS test binary in a subprocess: one protected
