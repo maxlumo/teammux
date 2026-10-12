@@ -49,6 +49,8 @@ function world(ids: string[]) {
     saved: (id) => saved.has(id),
     unrecorded: (rt) => { log.push(`unrecorded:${rt.id}`); return blocks; },
     hold: (rt) => log.push(`hold:${rt.id}`),
+    detach: (rt) => { log.push(`detach:${rt.id}`); (rt as Fake).detach(); },
+    orphaned: (rt, into) => log.push(`orphaned:${rt.id}:${into}`),
   });
   return { members, runtimes, log, wanted, saved, endAll: () => activations.endAll(), setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)!,
     /** What the host gate answers for a failed identity record. */
@@ -263,4 +265,55 @@ test('Retry joins again a member whose join a block made stale, even with its ha
   await settle();
   assert.deepEqual(w.members.runtimes(), [b], 'the new join publishes B');
   assert.equal(w.log.filter((e) => e === 'up:b').length, 1, 'once');
+});
+
+test('a published member whose reconnect reaches another known machine becomes an ORPHAN: detached now, kept until dismissed (reviewer P1-5 on 3a0b4feb)', async () => {
+  const w = world(['b', 'd']);
+  w.members.sync([entry('b')]);
+  w.rt('b').answer(ok('b'));
+  await settle();
+  const b = w.rt('b');
+  w.members.answered(b, { ok: false, reason: 'elsewhere', entry: entry('d') as never, machineId: 'm-d', hostname: 'd.host' });
+  assert.deepEqual(w.log.filter((e) => /detach|orphaned|release/u.test(e)), ['detach:b', 'orphaned:b:d'], 'detached and reported, not released');
+  assert.equal(w.members.orphan(b), true);
+  assert.deepEqual(w.members.status('b'), { kind: 'orphan', into: 'd' });
+  assert.deepEqual(w.members.runtimes(), [b], 'still a published tree');
+  // A sync that still wants B (its entry is saved) does not join over the
+  // orphan; a sync that no longer wants it does not leave it either.
+  w.members.sync([entry('b')]);
+  assert.equal(b.dials, 1, 'no new dial over the orphan');
+  w.members.sync([]);
+  assert.equal(w.members.orphan(b), true, 'kept');
+  assert.ok(!w.log.some((e) => e === 'release:b'));
+  assert.equal(w.members.handOver(b), false, 'an orphan cannot become the focus');
+  w.members.dismiss(b);
+  assert.ok(w.log.includes('release:b'), 'dismissed: let go of');
+  assert.deepEqual(w.members.runtimes(), []);
+  assert.equal(w.members.status('b'), null);
+});
+
+test('a published member whose entry was absorbed (no longer saved) becomes an orphan on sync, not a leave', async () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  w.rt('b').answer(ok('b'));
+  await settle();
+  const b = w.rt('b');
+  w.saved.delete('b');
+  w.members.sync([]);
+  assert.equal(w.members.orphan(b), true);
+  assert.deepEqual(w.members.status('b'), { kind: 'orphan', into: '' });
+  assert.ok(w.log.includes('detach:b') && !w.log.includes('release:b'), 'detached, not released');
+  w.members.dismiss(b);
+  assert.ok(w.log.includes('release:b'));
+});
+
+test('an UNPUBLISHED member that answers elsewhere or gone has no tree to keep: let go as before', async () => {
+  const w = world(['b', 'd']);
+  w.members.sync([entry('b')]);
+  const b = w.rt('b');
+  b.answer({ ok: false, reason: 'elsewhere', entry: entry('d') as never, machineId: 'm-d', hostname: 'd.host' });
+  await settle();
+  assert.ok(w.log.includes('release:b'));
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'elsewhere', detail: 'd' });
+  assert.equal(w.members.orphan(b), false);
 });

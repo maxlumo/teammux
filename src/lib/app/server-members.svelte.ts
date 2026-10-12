@@ -42,7 +42,13 @@ export type MemberStatus =
   | { kind: 'reconnecting' }
   /** `unreachable`: no answer yet; `elsewhere`: another known machine
    * answered (`detail` names it); `storage`: the app is blocked on it. */
-  | { kind: 'failed'; reason: 'unreachable' | 'elsewhere' | 'storage'; detail?: string };
+  | { kind: 'failed'; reason: 'unreachable' | 'elsewhere' | 'storage'; detail?: string }
+  /** A published member whose IDENTITY is gone — its entry absorbed into
+   * another, or its own reconnect reached another known machine — while its
+   * tree, drafts and all, is still mounted: detached at once (its api
+   * refuses, its socket is closed), kept until the person is asked
+   * (reviewer P1-5 on 3a0b4feb; orchestrator 03:40). `into` names where. */
+  | { kind: 'orphan'; into: string };
 
 export interface MemberDeps {
   /** The fleet's idle runtime for this entry, or undefined when it is no
@@ -69,6 +75,11 @@ export interface MemberDeps {
   unrecorded(runtime: ServerRuntime): boolean;
   /** Close a published member's socket the gate refused; keep its runtime. */
   hold(runtime: ServerRuntime): void;
+  /** A published member lost its identity: stop it serving NOW (detach the
+   * runtime, close its socket) and keep its tree for the person to be asked
+   * (`orphaned`). The host asks and then `dismiss`es. */
+  detach(runtime: ServerRuntime): void;
+  orphaned?(runtime: ServerRuntime, into: string): void;
 }
 
 export interface Members {
@@ -98,6 +109,10 @@ export interface Members {
   adopt(runtime: ServerRuntime, up: boolean): void;
   /** Stop one member: its attempts end, it is let go of, its status goes. */
   leave(id: ServerId): void;
+  /** Is `runtime` an orphan — detached, tree kept, awaiting the person? */
+  orphan(runtime: ServerRuntime): boolean;
+  /** The person answered about an orphan: let it go. */
+  dismiss(runtime: ServerRuntime): void;
   leaveAll(): void;
 }
 
@@ -105,7 +120,7 @@ export interface Members {
  * join a block (or any `endAll`) made stale is no longer anybody's, and a
  * sync starts it again — it is never skipped because the handle is alive
  * (orchestrator 16:12; reviewer P1 on 97824925). */
-type Held = { runtime: ServerRuntime; published: boolean; join?: Activation };
+type Held = { runtime: ServerRuntime; published: boolean; join?: Activation; orphan?: boolean };
 
 export function createMembers(deps: MemberDeps): Members {
   const held = new Map<ServerId, Held>();
@@ -171,19 +186,32 @@ export function createMembers(deps: MemberDeps): Members {
       set(id, { kind: 'connected' });
       return;
     }
-    if (result.reason === 'elsewhere') {
+    if (result.reason === 'elsewhere' || result.reason === 'gone') {
+      const into = result.reason === 'elsewhere' ? (result.entry.name || result.entry.address) : '';
+      // A PUBLISHED member has a tree, and maybe drafts in it: its identity
+      // ends now, its editors do not (P1-5) — it is an orphan until asked.
+      if (h.published) { orphan(h, into); return; }
       forget(id);
       // An alias absorbed into its machine's canonical entry is gone, and the
       // canonical is a member of its own (D2): no row left for it. Two known
       // entries where this one reached the other's machine: failed.
-      if (deps.saved(id)) set(id, { kind: 'failed', reason: 'elsewhere', detail: result.entry.name || result.entry.address });
+      if (result.reason === 'elsewhere' && deps.saved(id)) set(id, { kind: 'failed', reason: 'elsewhere', detail: into });
       return;
     }
-    if (result.reason === 'gone') { forget(id); return; }
     if (result.reason === 'superseded') return;
     // No answer: the member keeps its runtime and its own loop retries it.
     set(id, { kind: 'failed', reason: 'unreachable' });
     deps.retry(runtime);
+  }
+
+  /** A published member's identity is gone: detach it, keep its tree. */
+  function orphan(h: Held, into: string) {
+    if (h.orphan) return;
+    h.orphan = true;
+    deps.activations.member(h.runtime).endAll();
+    deps.detach(h.runtime);
+    set(h.runtime.id, { kind: 'orphan', into });
+    deps.orphaned?.(h.runtime, into);
   }
 
   /** Let go of the member's runtime and its status. */
@@ -206,9 +234,20 @@ export function createMembers(deps: MemberDeps): Members {
     sync(entries) {
       order = entries.map((e) => e.id);
       const want = new Set(order);
-      for (const id of known()) if (!want.has(id)) leave(id);
+      for (const id of known()) {
+        if (want.has(id)) continue;
+        const h = held.get(id);
+        // Its id is no longer saved (absorbed) while its tree is up: an
+        // orphan, kept for the person; a plain unwanted member leaves.
+        if (h?.published && !h.orphan && !deps.saved(id)) { orphan(h, ''); continue; }
+        if (h?.orphan) continue;
+        leave(id);
+      }
       for (const entry of entries) {
         const h = held.get(entry.id);
+        // An orphan under a saved id (elsewhere, both entries kept) is not
+        // re-joined over: the person decides first.
+        if (h?.orphan) continue;
         // Alive and published, or alive with its own join still current: in
         // hand. A join nobody owns any more (a block ended it) is not — it
         // is joined again, on the same handle.
@@ -223,16 +262,20 @@ export function createMembers(deps: MemberDeps): Members {
         void join(entry);
       }
     },
-    runtimes: () => order.map((id) => held.get(id)).filter((h): h is Held => !!h?.published).map((h) => h.runtime),
+    // Orphans are published trees too — mounted, held — and come last.
+    runtimes: () => [...order.map((id) => held.get(id)).filter((h): h is Held => !!h?.published && !h.orphan).map((h) => h.runtime),
+      ...[...held.values()].filter((h) => h.orphan).map((h) => h.runtime)],
     status: (id) => statuses[id] ?? null,
     holds: (runtime) => mine(runtime),
-    reconnecting(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'reconnecting' }); },
+    reconnecting(runtime) { if (mine(runtime) && !held.get(runtime.id)?.orphan) set(runtime.id, { kind: 'reconnecting' }); },
+    orphan: (runtime) => !!held.get(runtime.id)?.orphan && mine(runtime),
+    dismiss(runtime) { if (mine(runtime) && held.get(runtime.id)?.orphan) forget(runtime.id); },
     answered,
     gaveUp(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
     blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
     handOver(runtime) {
       const h = held.get(runtime.id);
-      if (!h || h.runtime !== runtime || !h.published) return false;
+      if (!h || h.runtime !== runtime || !h.published || h.orphan) return false;
       held.delete(runtime.id);
       set(runtime.id, null);
       order = order.filter((id) => id !== runtime.id);
@@ -245,7 +288,7 @@ export function createMembers(deps: MemberDeps): Members {
     },
     resume() {
       for (const [id, h] of held) {
-        if (!h.published || statuses[id]?.kind === 'connected') continue;
+        if (!h.published || h.orphan || statuses[id]?.kind === 'connected') continue;
         set(id, { kind: 'reconnecting' });
         deps.retry(h.runtime);
       }

@@ -48,6 +48,11 @@
       status: (id: string) => MemberStatus | null;
       /** A refusal comes back as `notice`, with its reason. */
       ontoggle: (id: string, included: boolean) => void;
+      /** Trees kept after their server's identity went (absorbed into
+       * `into`, or reaching it): detached, drafts still in them. Dismiss asks
+       * that tree, then lets it go. */
+      orphans: { id: string; name: string; into: string }[];
+      ondismiss: (id: string) => void;
     } | null;
     /** A refusal to show on the list (an include/exclude that failed). */
     notice?: string;
@@ -69,7 +74,7 @@
     const st = id !== currentId ? members?.status(id) : null;
     if (st?.kind === 'connected') return 'live';
     if (st?.kind === 'connecting' || st?.kind === 'reconnecting') return 'pending';
-    if (st?.kind === 'failed') return 'failed';
+    if (st?.kind === 'failed' || st?.kind === 'orphan') return 'failed';
     return 'rest';
   }
   /** Why a member is failing, where the address line can say it. */
@@ -232,6 +237,21 @@
       {/if}
     </div>
   {/each}
+  {#each members?.orphans ?? [] as o (o.id)}
+    <!-- A tree whose server is gone (③b, P1-5): named, with where its
+         identity went, and the one way on — Dismiss, which asks it first. -->
+    <div class="sm-row orphan">
+      <div class="sm-pick menu-item sm-static" aria-disabled="true">
+        <span class="sm-line">
+          <span class="sm-dot" style:background={DOT_COLOR.failed} aria-hidden="true"></span>
+          <span class="sm-name">{o.name}</span>
+        </span>
+        <span class="sm-addr">{o.into ? t('memberElsewhere').replace('{name}', o.into) : t('memberAbsorbed')}</span>
+      </div>
+      <CommandButton variant="danger" iconOnly icon="x" label={`${t('memberDismiss')} ${o.name}`} disabled={!!frozen}
+        onclick={(e: MouseEvent) => { e.stopPropagation(); members?.ondismiss(o.id); }} />
+    </div>
+  {/each}
   <button class="sm-add menu-item" type="button" onclick={onadd}><Icon name="plus" size={13} /><span>{t('serverAdd')}</span></button>
 </div>
 
@@ -264,5 +284,6 @@
   .sm-row.cur .sm-name { color: var(--accent-ink); }
   .sm-check { color: var(--accent-ink); display: grid; place-items: center; width: var(--control-height); flex: none; }
   .sm-rename { flex: 1; min-width: 0; }
+  .sm-static { cursor: default; }
   .sm-add { border-top: 1px solid var(--border); margin-top: var(--menu-gap); }
 </style>

@@ -4616,3 +4616,305 @@ test('P1-3(b): a probe A s optimizer started before a focus move to B answers la
   assert.equal(ls.getItem('tmux_server_current'), 'b');
   assert.ok(conn(h, 'a')!.isConnected(), 'A, a member now, untouched');
 });
+
+// ─── reviewer P1-4 / P1-5 on 3a0b4feb ─────────────────────────────────
+
+for (const answer of ['keep', 'discard'] as const) test(`P1-5: a background alias with a dirty Files draft is absorbed by the focus s handshake — detached now, tree kept, asked in its tree; ${answer}`, async (context) => {
+  // C (m-a) and the alias A, which answers without a machine id. Aggregate:
+  // both up. D2: focus A, type in Files, focus C again. Then C's reconnect
+  // lands on A's address and proves it is m-a too: identity absorbs A.
+  let aliasProves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    tmux_servers: JSON.stringify([
+      { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+      { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+    ]),
+    tmux_server_current: 'c', tmux_address: 'ws://canonical:9899', tmux_token: 'tok', tmux_machine_id: 'm-a',
+    tmux_state_layout: JSON.stringify({ v: '335', state: 'folded', into: 'c' }),
+    'tmux_state::c': JSON.stringify({ page: 'files' }), 'tmux_state::a': JSON.stringify({ page: 'files' }),
+    tmux_layout_mode: 'desktop',
+  }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.ok(conn(h, 'a')?.isConnected(), 'the alias is a live member');
+  await pickServer(h, 'alias');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftA = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'canon');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  const a = conn(h, 'a')!;
+  const capturedA = a.api.listSessions!;
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  conn(h, 'c')!.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'identity absorbed the alias');
+  // Identity gone NOW: the alias s api refuses, its socket is closed.
+  await assert.rejects(capturedA(), /not connected|disposed|detached/u, 'the alias s captured call reaches nobody');
+  assert.equal(a.isConnected(), false, 'its socket is closed');
+  assert.equal(a.disposed(), false, 'but the runtime is not ENDED yet: its state is not released, its tree is still its own, until the person answers');
+  // Its editor is not: held, mounted, with the draft — and asked, in its tree.
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'the alias s draft is kept');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'asked, in the alias s own tree');
+  assert.ok(!asked.closest('.scope-tree.held, [inert]'), 'answerable');
+  assert.ok(conn(h, 'c')?.isConnected(), 'C, the focus, is up and untouched');
+  answerDialog(h.app, answer === 'keep' ? /keep editing/iu : /^discard$/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT is C throughout');
+  if (answer === 'discard') {
+    assert.equal(draftA.isConnected, false, 'Discard: the tree goes');
+    assert.ok(a.disposed(), 'and the runtime is ended');
+  } else {
+    assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'Keep editing: the tree stays, detached');
+    assert.ok(draftA.closest('.scope-tree.held'), 'behind C');
+    // The list offers the one way on: Dismiss, which asks again.
+    await toConnection(h);
+    const dismiss = h.app.document.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label^="Dismiss"]');
+    assert.ok(dismiss, `the orphan is listed with Dismiss: ${[...h.app.document.querySelectorAll('.preferences .server-list button')].map((b: any) => b.getAttribute('aria-label') || b.textContent?.trim()).join('|')}`);
+    dismiss.click();
+    for (let i = 0; i < 4; i++) await h.settle();
+    assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'asked again');
+    answerDialog(h.app, /^discard$/iu);
+    for (let i = 0; i < 4; i++) await h.settle();
+    assert.equal(draftA.isConnected, false, 'now it goes');
+    assert.ok(a.disposed());
+  }
+});
+
+test('P1-5: a background member whose own reconnect reaches another KNOWN server keeps its tree and draft; both entries stay; asked in its tree', async (context) => {
+  let bAnswersAs = 'm-b';
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+  }, ['d']), (url) => (url.includes('//b') ? bAnswersAs : url.includes('//d') ? 'm-d' : 'm-a'), {
+    rpc: editorRpc, setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftB = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alpha');
+  const b = conn(h, 'b')!;
+  bAnswersAs = 'm-d';                                          // B's address now reaches D
+  b.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['a', 'b', 'd'], 'both entries stay');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'A untouched');
+  assert.equal(draftB.isConnected && draftB.value, '# notes\n\nunsaved', 'B s draft kept');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftB.closest('.scope-tree'), 'asked in B s tree');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(draftB.isConnected && draftB.value, '# notes\n\nunsaved', 'kept');
+  assert.ok(!conn(h, 'b')!.isConnected(), 'B s socket to D is closed');
+  await toConnection(h);
+  assert.match(h.app.document.querySelector('.preferences .server-list')?.textContent ?? '', /reaches delta/iu, 'the row says where it went');
+});
+
+for (const change of ['mode', 'exclude'] as const) test(`P1-4 (${change}): a change waiting on B s guard while a block begins writes nothing when B s in-flight Save ends the guard — the declaration is frozen until Retry`, async (context) => {
+  // Desktop, Aggregate, Hub on every server. B's Agents editor has a Save
+  // in flight (hanging). The person switches to Single / excludes B: the walk
+  // waits on B's guard, which waits for the Save. Meanwhile C's own join
+  // records its machine and the claim's marker write FAILS: blocked. Then
+  // B's Save answers, the guard resolves true — and the change must NOT be
+  // written: the mode and the exclusions are frozen with the registry.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const saves: ((v: unknown) => void)[] = [];
+  const cLet = { let: null as (() => void) | null };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }), (url, n) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? (n === 0 ? '' : 'm-x') : 'm-a'), {
+    rpc: guestRpc({ registrySave: () => new Promise((r) => { saves.push(r); }) }),
+    gate: (url, n) => (url.includes('//c') && n > 0 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the inputs wait for m-x (C)');
+  assert.ok(cLet.let, 'C s join dial is held');
+  // B focused: open its Agents page, edit alpha, Save (hangs).
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^agents$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const inB = (sel: string) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) ' + sel)];
+  inB('.side-row').find((b) => /^agents/iu.test((b.textContent ?? '').trim()))?.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  inB('.side-row, button').find((b) => /alpha/u.test(b.textContent ?? '') && !/^agents/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const prompt = inB('.editor textarea')[0] as HTMLTextAreaElement;
+  assert.ok(prompt, 'B s editor is open');
+  prompt.value = 'Changed on B'; prompt.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  for (let i = 0; i < 2; i++) await h.settle();
+  inB('button[aria-label="Save"]')[0]!.click();
+  for (let i = 0; i < 6 && saves.length === 0; i++) await h.settle();
+  assert.equal(saves.length, 1, 'B s Save is in flight');
+  // Back to A; start the change: it waits on B s guard.
+  await pickServer(h, 'alpha');
+  await toConnection(h);
+  if (change === 'mode') modeButton(h, /^one server$/iu)!.click();
+  else includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 8 && prompt.closest('.scope-tree.held'); i++) await h.settle();
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'nothing written while the guard waits');
+  assert.equal(ls.getItem('tmux_excluded_servers'), null);
+  for (let i = 0; i < 8 && prompt.closest('.scope-tree.held'); i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(prompt.closest('.scope-tree') && !prompt.closest('.scope-tree.held'), 'the walk revealed B s tree: its guard is the one waiting (on the Save)');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'no dialog yet: the guard waits for the Save first');
+  // C s join answers: its claim cannot be recorded — the app blocks.
+  store.state.failing = true;
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'C s claim could not be recorded');
+  assert.match(h.app.document.querySelector('.preferences .server-list')?.textContent ?? '', /paused: storage/iu, 'blocked: C s row says so');
+  // B s Save finishes (an in-flight write may complete): the guard resolves.
+  saves[0]!({});
+  // The walk is over once B s tree is back behind A s.
+  for (let i = 0; i < 12 && !prompt.closest('.scope-tree.held') && prompt.isConnected; i++) { await h.app.advance(500); await h.settle(); }
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'the mode was NOT written under the block');
+  assert.equal(ls.getItem('tmux_excluded_servers'), null, 'nor the exclusions');
+  assert.ok(conn(h, 'b')?.isConnected() && !conn(h, 'b')!.disposed(), 'B is not ended');
+  assert.equal(trees(h.app).length, 2, 'both trees still mounted');
+  // After Retry nothing happens on its own: the person decides again.
+  store.state.failing = false;
+  // (Retry sits on the content area, behind Preferences: leave the page.)
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 2; i++) await h.settle();
+  const retryBtn = [...h.app.document.querySelectorAll<HTMLButtonElement>('.switch-panel button, .card button')].find((b) => /retry/iu.test(b.textContent ?? ''));
+  assert.ok(retryBtn, 'still blocked, Retry offered');
+  retryBtn.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'Retry executes no stale decision');
+  assert.equal(ls.getItem('tmux_excluded_servers'), null);
+});
+
+test('P1-4: a focus exclusion whose walk ends after a block moves nothing and writes nothing', async (context) => {
+  // A focused with an Agents Save in flight; the person excludes A. The walk
+  // waits on A's guard; C's claim blocks the app; A's Save finishes and the
+  // guard resolves — and neither the focus nor the exclusion may move.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const saves: ((v: unknown) => void)[] = [];
+  const cLet = { let: null as (() => void) | null };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }), (url, n) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? (n === 0 ? '' : 'm-x') : 'm-a'), {
+    rpc: guestRpc({ registrySave: () => new Promise((r) => { saves.push(r); }) }),
+    gate: (url, n) => (url.includes('//c') && n > 0 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(conn(h, 'b')?.isConnected(), 'B is a connected member: somewhere the focus could go');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^agents$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  const inA = (sel: string) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) ' + sel)];
+  inA('.side-row').find((b) => /^agents/iu.test((b.textContent ?? '').trim()))?.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  inA('.side-row, button').find((b) => /alpha/u.test(b.textContent ?? '') && !/^agents/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const prompt = inA('.editor textarea')[0] as HTMLTextAreaElement;
+  prompt.value = 'Changed on A'; prompt.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  for (let i = 0; i < 2; i++) await h.settle();
+  inA('button[aria-label="Save"]')[0]!.click();
+  for (let i = 0; i < 6 && saves.length === 0; i++) await h.settle();
+  assert.equal(saves.length, 1, 'A s Save is in flight');
+  await toConnection(h);
+  includeSwitch(h, 'alpha')!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the focus has not moved: the walk waits');
+  store.state.failing = true;
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'blocked');
+  saves[0]!({});
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the focus did not move under the block');
+  assert.equal(ls.getItem('tmux_excluded_servers'), null, 'nothing excluded');
+  assert.equal(trees(h.app).length, 2, 'nothing ended');
+});
+
+test('P1-1: picking an excluded row while blocked (a tree bound) writes nothing — it is an include, with the include s own refusal', async (context) => {
+  // A bound and up; C's join blocks the app; D is excluded. Picking D's row
+  // is an include, and an include is frozen with the registry.
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const cLet = { let: null as (() => void) | null };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify(servers), tmux_machine_id: 'm-x', tmux_server_current: 'gone', tmux_layout_mode: 'desktop',
+  }, ['d']), (url, n) => (url.includes('//c') ? (n === 0 ? '' : 'm-x') : url.includes('//d') ? 'm-d' : 'm-a'), {
+    gate: (url, n) => (url.includes('//c') && n > 0 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { store.setup(window); window.history.replaceState(null, '', '/?addr=ws://a:9899&token=tokA'); window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  store.state.failing = true;
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'blocked, with A s tree bound');
+  await toConnection(h);
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), ['d']);
+  const row = [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .server-list .sm-pick')].find((b) => /^delta\b/iu.test((b.textContent ?? '').trim()));
+  assert.ok(row, 'D s row');
+  row.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_excluded_servers')!), ['d'], 'blocked: the exclusions are not written');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'and nothing switched');
+  assert.equal(h.app.document.querySelector('.switch-panel'), null);
+});
+
+test('P1-4: a focus exclusion whose exclusion write fails moves the focus BACK — never half done', async (context) => {
+  const store = refusing(['tmux_excluded_servers']);
+  store.state.failing = false;
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  await toConnection(h);
+  // The stored set cannot be READ now (setExcluded refuses rather than
+  // writing over it): the exclusion fails after the focus moved.
+  const get = h.app.window.Storage.prototype.getItem;
+  h.app.window.Storage.prototype.getItem = function (this: Storage, k: string) { if (k === 'tmux_excluded_servers') throw new Error('SecurityError'); return get.call(this, k); };
+  includeSwitch(h, 'alpha')!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  h.app.window.Storage.prototype.getItem = get;
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the focus is back on A');
+  assert.equal(ls.getItem('tmux_excluded_servers'), null, 'nothing excluded');
+  assert.equal(trees(h.app).length, 2, 'both trees up');
+  assert.ok(!trees(h.app).find((x) => x.target === 'work:1.0')!.held, 'A in front');
+  assert.match(h.app.document.querySelector('.preferences .server-list [role=alert]')?.textContent ?? '', /storage|retry/iu, `the refusal is said: ${h.app.document.querySelector('.preferences .server-list')?.textContent}`);
+});

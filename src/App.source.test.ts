@@ -996,7 +996,7 @@ test('removing a saved server goes through the shared ConfirmDialog (board #55)'
   assert.match(list, /<ConfirmDialog open=\{!!victim\}[\s\S]*?onconfirm=\{confirmRemove\} oncancel=\{\(\) => \(victim = null\)\}/u,
     'the shared dialog, cancel drops the capture');
   // ③b-2: a member's tree is destroyed with it, so its guards ask first.
-  assert.match(source, /async function serverRemove\(id\) \{\s*if \(migrationBlocked\) return;[\s\S]*?if \(member && !\(await serverSwitch\.guard\(\(\) => walkLeave\(member\)\)\)\) return;\s*if \(migrationBlocked\) return;\s*serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed, after the member s walk');
+  assert.match(source, /async function serverRemove\(id\) \{\s*if \(migrationBlocked\) return;[\s\S]*?if \(member && !\(await serverSwitch\.guard\(\(\) => walkLeave\(member\)\)\)\) return;\s*if \(migrationBlocked\) return;\s*(?:\/\/[^\n]*\n\s*)*if \(member\) aggregate\.leave\(member\.id\);\s*serverList = removeServer\(localStorage, id\);/u, 'App removes by the id it is handed, after the member s walk; the answered member leaves first');
 });
 
 test('one system-vitals strip serves desktop sidebar and an open phone drawer (board #85)', () => {
@@ -1373,5 +1373,14 @@ test('the mode and the include switches go through App s two changes, each walki
   assert.match(inc, /walkLeave\(leaving\)[\s\S]*?focusMember\(next\.id\)/u, 'the focus is asked, then moved, before it is excluded');
   assert.ok(inc.indexOf('walkLeave(') < inc.indexOf('setExcluded('), 'ask, then write');
   assert.equal([...source.matchAll(/writeMode\(/gu)].length, 1, 'one writer of the mode');
-  assert.equal([...source.matchAll(/\bsetExcluded\(/gu)].length, 2, 'the switch and a pick of an excluded row');
+  assert.equal([...source.matchAll(/\bsetExcluded\(/gu)].length, 1, 'ONE writer of the exclusions: a pick of an excluded row is an include through it (reviewer P1-1 on 3a0b4feb)');
+  assert.match(source, /if \(excludedIds\.has\(target\.id\)\) \{ void setIncluded\(target\.id, true\)/u);
+  // Deferred writes re-validate at commit (reviewer P1-4 on 3a0b4feb;
+  // orchestrator 03:40): after EVERY await, before any write.
+  assert.match(source, /function membershipOp\(\) \{\s*const owner = activations\.claim\(\);[\s\S]*?const valid = \(\) => owner\.current\(\) && !migrationBlocked && !switching\s*&& readMode\(localStorage\) === mode && loadServers\(localStorage\)[\s\S]*?=== saved;/u);
+  assert.match(mode, /if \(!\(await serverSwitch\.guard\(\(\) => walkLeave\(member\)\)\)\) return;\s*if \(!op\.valid\(\)\) return;\s*\}\s*\}\s*if \(!op\.valid\(\)\) return;\s*try \{ writeMode\(/u, 'the mode: valid after each walk and right before the write');
+  assert.match(inc, /walkLeave\(leaving\)\)\)\) return false;\s*if \(!op\.valid\(\)\) return false;\s*if \(focusMember\(next\.id\) !== true\) return false;/u, 'the focus exclusion: valid before the focus moves');
+  assert.match(inc, /walkLeave\(member\)\)\)\) return false;\s*if \(!op\.valid\(\)\) return false;/u, 'a member exclusion: valid after its walk');
+  assert.match(inc, /if \(member\) aggregate\.leave\(member\.id\);\s*\}\s*(?:\/\/[^\n]*\n\s*)*try \{\s*excludedIds = setExcluded\(/u, 'no await between the last check and the write');
+  assert.match(inc, /catch \{[\s\S]*?undoFocus\(movedFrom\);[^\n]*\n\s*membershipError = t\('migrationBlockedNote'\);[\s\S]*?return false;/u, 'a moved focus goes back when the write fails, and the refusal is said after');
 });

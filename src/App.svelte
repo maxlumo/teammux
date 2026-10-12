@@ -216,7 +216,9 @@
   const fleet = createServerFleet({
     storage: localStorage,
     registry: createConnectionRegistry(),
-    end: (runtime) => (runtime === scopeSwap.bound() ? undefined : ends.end(runtime)),
+    // Nor a member the set still holds: an absorbed member's tree is kept,
+    // detached, until the person is asked (P1-5); `release` ends it then.
+    end: (runtime) => (runtime === scopeSwap.bound() || aggregate.holds(runtime) ? undefined : ends.end(runtime)),
     // An absorption merged the absorbed entries' slots into a survivor's
     // (servers.ts `forgetDropped`): a survivor that is alive re-reads them,
     // or its next write would put back what it held before the merge.
@@ -1113,8 +1115,10 @@
     release(runtime) {
       background = aggregate.runtimes().filter((r) => r !== runtime);
       // Handed to the focus (a switch made it CURRENT): the focus owns it now.
-      if (runtime === bound() || runtime.id === currentServerId(localStorage)) return;
+      if (runtime === bound() || (runtime.alive() && runtime.id === currentServerId(localStorage))) return;
       forgetReconnector(runtime);
+      // `release` is called with the set no longer holding it, so the
+      // fleet's `end` ends it (or, already dropped there, this does).
       if (fleet.get(runtime.id) === runtime) fleet.drop(runtime.id);
       else void ends.end(runtime);
     },
@@ -1124,7 +1128,24 @@
     // does the focused server's (reviewer P1 on 453f02b8).
     unrecorded() { storageFailed(); return migrationBlocked; },
     hold(runtime) { runtime.connection.disconnect(); },
+    // Identity gone, editors kept (reviewer P1-5 on 3a0b4feb; orchestrator
+    // 03:40): the runtime stops serving NOW — its api refuses, its socket is
+    // closed, its loop stops — and its tree stays mounted, held, drafts and
+    // all, until the person answers.
+    detach(runtime) {
+      forgetReconnector(runtime);
+      runtime.detach();
+      runtime.connection.disconnect();
+      background = aggregate.runtimes();
+    },
+    orphaned(runtime) { void askOrphan(runtime); },
   });
+  /** An orphan's tree is asked, in that tree, the moment it becomes one:
+   * "discard" lets it go; "keep editing" keeps the tree, detached, for the
+   * person to copy from or dismiss from the list later. */
+  async function askOrphan(runtime) {
+    if (await serverSwitch.guard(() => walkLeave(runtime))) aggregate.dismiss(runtime);
+  }
   /** The ids Aggregate wants as background members: every saved, included
    * entry but the focused one, in saved order. Single wants none. */
   function memberIds() {
@@ -1159,6 +1180,26 @@
   let membershipError = $state('');
   const membershipFrozen = () => migrationBlocked || !!switching || serverSwitch.guarding || membershipBusy;
 
+  /** A membership change — the mode, an include switch — is ONE deferred
+   * operation (reviewer P1-4 on 3a0b4feb; orchestrator 03:40): asked at the
+   * start, COMMITTED only after it is checked again. Between the ask and the
+   * write it awaits a walk, and a walk can end for reasons other than the
+   * person answering — a Save in flight finishing resolves the Agents guard —
+   * while the app has meanwhile blocked (holdStorage ends every attempt,
+   * this one included) or something newer has taken the window over. So the
+   * operation claims the window's activation and, after EVERY await and
+   * before any write, asks `valid()`: still its own, not blocked, the set it
+   * decided about unchanged (the mode and the registry as they were). A
+   * change that is not valid writes nothing and ends nothing; the frozen
+   * controls are the visible half, this is the half that holds. */
+  function membershipOp() {
+    const owner = activations.claim();
+    const mode = readMode(localStorage);
+    const saved = loadServers(localStorage).map((s) => s.id).join('\u0000');
+    const valid = () => owner.current() && !migrationBlocked && !switching
+      && readMode(localStorage) === mode && loadServers(localStorage).map((s) => s.id).join('\u0000') === saved;
+    return { valid };
+  }
   /** Settings › Connection's mode (③b-3). Single→Aggregate keeps the
    * connection the app is on and joins the rest. Aggregate→Single keeps the
    * focus and lets every member go — after asking each member's tree, one at
@@ -1168,13 +1209,18 @@
     if (membershipFrozen() || next === readMode(localStorage)) return;
     membershipBusy = true;
     membershipError = '';
+    const op = membershipOp();
     try {
       if (next === 'single') {
         for (const member of aggregate.runtimes()) {
           if (!(await serverSwitch.guard(() => walkLeave(member)))) return;
+          if (!op.valid()) return;
         }
       }
+      if (!op.valid()) return;
       try { writeMode(localStorage, next); } catch { storageFailed(); return; }
+      // Every member was asked: they leave now, as answered.
+      if (next === 'single') aggregate.leaveAll();
       connMode = next;
       syncMembers();
     } finally { membershipBusy = false; }
@@ -1182,40 +1228,60 @@
   /** Include or exclude one saved server (Aggregate, ③b-3). Including joins
    * it. Excluding destroys its tree, so that tree is asked first, alone; the
    * focus is excluded only by moving the focus first, to the next connected
-   * member in saved order. */
+   * member in saved order — ONE operation with the write: a focus that moved
+   * but could not be excluded is moved back. */
   async function setIncluded(id, on) {
-    if (membershipFrozen() || connMode !== 'aggregate') return;
+    if (membershipFrozen() || connMode !== 'aggregate') return false;
     membershipBusy = true;
     membershipError = '';
+    const op = membershipOp();
+    let movedFrom = null;
     try {
       if (!on && id === currentServerId(localStorage)) {
         const next = aggregate.runtimes().find((r) => r.connection.isConnected());
         const leaving = scopeSwap.bound();
         // Nowhere to move the focus: refused, with the reason.
-        if (!next || !leaving) { membershipError = t('serverOnlyConnected'); return; }
-        if (!(await serverSwitch.guard(() => walkLeave(leaving)))) return;
-        if (focusMember(next.id) !== true) return;
+        if (!next || !leaving) { membershipError = t('serverOnlyConnected'); return false; }
+        if (!(await serverSwitch.guard(() => walkLeave(leaving)))) return false;
+        if (!op.valid()) return false;
+        if (focusMember(next.id) !== true) return false;
+        movedFrom = leaving.id;
       } else if (!on) {
         const member = aggregate.runtimes().find((r) => r.id === id);
-        if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return;
+        if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return false;
+        if (!op.valid()) return false;
+        // Asked and answered: it leaves now (the sync below would otherwise
+        // only unwant it, and an orphan is never made of an answered tree).
+        if (member) aggregate.leave(member.id);
       }
+      // Nothing awaits between the last check and this write: a focus move
+      // and the exclusion commit together, synchronously.
       try {
         excludedIds = setExcluded(localStorage, loadServers(localStorage), id, !on);
       } catch {
         // The stored set could not be READ: writing over it would include
-        // every server again (D5). Said, not done.
+        // every server again (D5). Said, not done — and the focus goes back.
+        undoFocus(movedFrom);                 // (a focus move clears the notice)
         membershipError = t('migrationBlockedNote');
         storageFailed();
-        return;
+        return false;
       }
       syncMembers();
+      return true;
     } finally { membershipBusy = false; }
   }
+  /** Half of a focus-exclusion that cannot finish: put the focus back. */
+  function undoFocus(id) { if (id && !migrationBlocked) focusMember(id); }
   /** What a server list row needs in Aggregate; null in Single. */
   const memberRows = $derived(connMode === 'aggregate' ? {
     included: (id) => !excludedIds.has(id),
     status: (id) => aggregate.status(id),
     ontoggle: (id, on) => { void setIncluded(id, on); },
+    orphans: background.filter((r) => aggregate.orphan(r)).map((r) => {
+      const st = aggregate.status(r.id);
+      return { id: r.id, name: r.entry().name || hostLabel(r.entry().address), into: st?.kind === 'orphan' ? st.into : '' };
+    }),
+    ondismiss: (id) => { const r = background.find((x) => x.id === id); if (r && aggregate.orphan(r)) void askOrphan(r); },
   } : null);
 
   /** The bound runtime's socket closed under it. */
@@ -1896,6 +1962,9 @@
     const member = aggregate.runtimes().find((r) => r.id === id);
     if (member && !(await serverSwitch.guard(() => walkLeave(member)))) return;
     if (migrationBlocked) return;
+    // Asked and answered: the member leaves NOW, before its entry goes, so
+    // the sync that follows finds nothing to orphan.
+    if (member) aggregate.leave(member.id);
     serverList = removeServer(localStorage, id);
     serverCurId = currentServerId(localStorage);
   }
@@ -1919,11 +1988,11 @@
     const moved = focusMember(target.id);
     if (moved === true) return;
     if (moved === 'failed') return;
-    if (excludedIds.has(target.id) && !migrationBlocked) {
-      try { excludedIds = setExcluded(localStorage, loadServers(localStorage), target.id, false); } catch { membershipError = t('migrationBlockedNote'); return; }
-      syncMembers();
-    }
-    membershipError = t('memberNotConnected').replace('{name}', target.name || hostLabel(target.address));
+    // An excluded pick is an INCLUDE, with the include's own checks and
+    // failure handling (reviewer P1-1 on 3a0b4feb): never a bare write.
+    const notConnected = () => { membershipError = t('memberNotConnected').replace('{name}', target.name || hostLabel(target.address)); };
+    if (excludedIds.has(target.id)) { void setIncluded(target.id, true).then((ok) => { if (ok) notConnected(); }); return; }
+    notConnected();
   }
   /** Aggregate: move the focus onto member `id`, which is already up with
    * its own tree (#335 D2). CURRENT and the active mirror name it, its tree
