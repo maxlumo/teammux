@@ -1,8 +1,49 @@
 # Testing Conventions
 
 Frontend tests and repository development-script tests run with `npm test`
-(`node --test`, no framework, no tmux needed). Rust tests: `cd src-tauri && cargo test -- --test-threads=1`
-(needs a running tmux). This file governs the frontend side.
+(`node --test`, no framework, no tmux needed). Rust tests: `npm run test:rust`
+(`cargo test -- --test-threads=1`, needs a running tmux). This file governs the
+frontend side, and the one Rust rule below.
+
+## The Rust suite runs SEQUENTIALLY, and never kills a server it did not make (board #349)
+
+Incident 2026-10-12 05:51: a bare `cargo test … --lib` — no `--test-threads=1`
+— killed the developer's DEFAULT tmux server; every session on this host
+(four projects' agents, the owner's shells) was lost. Mechanism: the tasks
+tests' private-server helper issued `kill-server` through the process-global
+socket (`tmux::set_socket`); run in parallel, the gateway probe tests, which
+start a server and so set that global to `None`, had just reset it, and the
+kill landed on whatever `tmux` resolves on its own — the default server.
+The only protection was a sentence in a comment saying "sequential tests".
+
+Two mechanical rules replaced it, both in `tmux::test_support`:
+
+- **A destructive command names its server on the command line.**
+  `destroy_private_server(socket)` runs `tmux -S <socket> kill-server` through
+  `run_tmux_on`, never through the global — the type cannot express "no
+  socket" — and refuses a socket that is not a private test server's
+  (`tmm-test-*` under the temp dir, never the implicit one) with a panic, not
+  an `Err` a test could shrug off. `PrivateTmux` uses it in both `start` and
+  `Drop`, and its `Drop` does not consult the global at all. A test proves it
+  with a second private server standing in for "the server the global now
+  points at": it survives the first one's `Drop`.
+- **A test that touches the global holds `global_socket()` for its body.**
+  Under `--test-threads=1` the lock is never contended. In a parallel run the
+  second taker does NOT wait while a server this process can reach exists
+  (`tmux::implicit_socket()`: `$TMUX`, else `$TMUX_TMPDIR`/`/tmp`
+  `tmux-<uid>/default`) — it panics at once with the incident and the two
+  commands that are allowed, because waiting would only hide the mistake until
+  the next helper forgets to name its socket. Every `PrivateTmux` test and
+  every probe test that starts a server takes it.
+
+So `npm run test:rust` is the command; a bare parallel `cargo test --lib`
+fails fast with the rule and kills nothing. Reproduced on an isolated
+`TMUX_TMPDIR` standing in for the default: before the fix one parallel run of
+`tasks::tests gateway::probe::tests` killed it; after, five runs left it alive
+and each failed on the guard. Verified controls: dropping the `-S` fails the
+own-socket test; dropping the probe tests' lock lets the parallel run through
+to the kill (on the isolated victim); dropping the refusal fails the
+refuses-anything-else test. `CARGO_TARGET_DIR` and worktrees are fine.
 
 Client-mount tests require Node `^22.22.2 || ^24.15.0 || >=26.0.0`
 (jsdom 30's engine requirement; board #115, 2026-09-09). `node --test`

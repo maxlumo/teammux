@@ -801,26 +801,11 @@ mod tests {
 
     /// A PRIVATE tmux server for tests that sweep: a TTL-0 reap on the shared
     /// default server would close every dead task window the developer has —
-    /// the production effect, not a test's. Sequential tests (`--test-threads=1`)
-    /// share the socket global, so it is set and restored around the body.
-    struct PrivateTmux { previous: Option<String>, socket: String }
-    impl PrivateTmux {
-        fn start(tag: &str) -> Self {
-            let socket = std::env::temp_dir().join(format!("tmm-test-{tag}-{}.sock", std::process::id()));
-            let socket = socket.to_string_lossy().to_string();
-            let previous = tmux::get_socket();
-            tmux::set_socket(Some(socket.clone()));
-            let _ = tmux::run_tmux(&["kill-server"]);
-            Self { previous, socket }
-        }
-    }
-    impl Drop for PrivateTmux {
-        fn drop(&mut self) {
-            let _ = tmux::run_tmux(&["kill-server"]);
-            let _ = std::fs::remove_file(&self.socket);
-            tmux::set_socket(self.previous.clone());
-        }
-    }
+    /// the production effect, not a test's. The helper lives with the socket
+    /// global it guards (`tmux::test_support`, board #349): its kills name
+    /// their socket on the command line, and it holds the global's lock for
+    /// the test's body.
+    use crate::tmux::test_support::PrivateTmux;
 
     /// Board #206: a finished task's window is closed by the next `tmm task`
     /// verb once its death is older than the TTL — never a running task, never

@@ -101,9 +101,22 @@ fn find_tmux() -> String {
 }
 
 pub(crate) fn run_tmux(args: &[&str]) -> Result<String, String> {
+    run_tmux_on(get_socket().as_deref(), args)
+}
+
+/// `run_tmux` with the server named by the CALLER, not by the process global:
+/// `-S socket` when given, else whatever tmux resolves on its own (`$TMUX`
+/// inside a pane, the default socket outside). A command that must land on
+/// one particular server — above all a destructive one — passes its socket
+/// here, so what it hits is decided where it is written and cannot be moved
+/// by another thread between a read of the global and the spawn (board #349:
+/// a test helper's `kill-server` read the global, another test had just set
+/// it to `None`, and the developer's default server died with every session
+/// on the host).
+pub(crate) fn run_tmux_on(socket: Option<&str>, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(find_tmux());
-    if let Some(socket) = get_socket() {
-        cmd.args(["-S", &socket]);
+    if let Some(socket) = socket {
+        cmd.args(["-S", socket]);
     }
     let output = cmd
         .args(args)
@@ -116,6 +129,20 @@ pub(crate) fn run_tmux(args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("tmux error: {}", stderr))
     }
+}
+
+/// Where a bare `tmux` (no `-S`, no `-L`) would go from this process: the
+/// server of the pane we are in (`$TMUX` = `path,pid,index`), else the
+/// per-user default socket under `$TMUX_TMPDIR` or `/tmp`. Read-only — it
+/// never asks tmux, which would start a server to answer.
+pub(crate) fn implicit_socket() -> std::path::PathBuf {
+    if let Some(path) = std::env::var("TMUX").ok().and_then(|t| t.split(',').next().map(str::to_string)).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(path);
+    }
+    let dir = std::env::var_os("TMUX_TMPDIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    dir.join(format!("tmux-{uid}")).join("default")
 }
 
 /// A session NAME as an exact `-t` target: `=name:`. tmux resolves a bare
@@ -1358,9 +1385,153 @@ impl Drop for Scratch {
     }
 }
 
+/// Test support for anything that touches the process-global tmux socket
+/// (board #349). Incident 2026-10-12 05:51: a bare `cargo test --lib` (no
+/// `--test-threads=1`) ran the `tasks.rs` private-server tests in parallel
+/// with the gateway probe tests, which start a server and so set the global
+/// to `None`; a private server's `kill-server`, issued THROUGH the global,
+/// went to the socket tmux resolves on its own — the developer's default
+/// server — and every session on the host died. Two rules follow, both here:
+/// - a destructive command names its server itself (`destroy_private_server`
+///   → `run_tmux_on(Some(socket), …)`), never through the global;
+/// - a test that reads or writes the global holds `global_socket()` for its
+///   whole body, so no other such test is in flight. Under `--test-threads=1`
+///   the lock is never contended; in a parallel run the second taker does NOT
+///   wait while a server a developer is sitting in exists — it fails at once
+///   with the rule, because waiting would hide the mistake until the next
+///   helper forgets to name its socket.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+
+    fn lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
+
+    pub const PARALLEL_MESSAGE: &str = "tmux-touching tests are running in PARALLEL while a tmux server this process can reach exists (incident 2026-10-12 05:51: the default server and every session on the host were killed this way). Run them sequentially: `npm run test:rust`, or `cargo test … -- --test-threads=1`.";
+
+    /// Hold the process-global tmux socket for this test's lifetime.
+    pub fn global_socket() -> MutexGuard<'static, ()> {
+        match lock().try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                if super::implicit_socket().exists() {
+                    panic!("{}", PARALLEL_MESSAGE);
+                }
+                lock().lock().unwrap_or_else(|p| p.into_inner())
+            }
+        }
+    }
+
+    /// The prefix every private test server's socket carries.
+    pub const PRIVATE_PREFIX: &str = "tmm-test-";
+
+    /// `kill-server` on exactly `socket`, named on the command line. Refuses a
+    /// socket that is not a private test server's: the type already rules out
+    /// "no socket" (that is the incident), and this rules out the server a
+    /// developer may be sitting in.
+    pub fn destroy_private_server(socket: &str) -> Result<String, String> {
+        let name = std::path::Path::new(socket).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            std::path::Path::new(socket).is_absolute() && name.starts_with(PRIVATE_PREFIX) && std::path::Path::new(socket) != super::implicit_socket(),
+            "refusing to kill-server on {socket:?}: not a private test server (expected {PRIVATE_PREFIX}* under the temp dir)"
+        );
+        super::run_tmux_on(Some(socket), &["kill-server"])
+    }
+
+    /// A private tmux server for a test that sweeps or kills: its own socket,
+    /// set as the global for the test's body (production code reads the
+    /// global) and restored after; the lock held throughout.
+    pub struct PrivateTmux {
+        _hold: MutexGuard<'static, ()>,
+        previous: Option<String>,
+        pub socket: String,
+    }
+
+    impl PrivateTmux {
+        pub fn start(tag: &str) -> Self {
+            let hold = global_socket();
+            let socket = std::env::temp_dir().join(format!("{PRIVATE_PREFIX}{tag}-{}.sock", std::process::id()));
+            let socket = socket.to_string_lossy().to_string();
+            let previous = super::get_socket();
+            super::set_socket(Some(socket.clone()));
+            let _ = destroy_private_server(&socket);
+            Self { _hold: hold, previous, socket }
+        }
+    }
+
+    impl Drop for PrivateTmux {
+        fn drop(&mut self) {
+            // The socket is OURS by construction; the global may say anything
+            // by now and is not consulted.
+            let _ = destroy_private_server(&self.socket);
+            let _ = std::fs::remove_file(&self.socket);
+            super::set_socket(self.previous.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #349: the destructive helper names its server on the command
+    /// line, so another thread moving the global cannot redirect it — proven
+    /// with a SECOND private server standing in for "the server the global
+    /// now points at": it must survive the first one's Drop.
+    #[test]
+    fn a_private_servers_kill_goes_to_its_own_socket_whatever_the_global_says() {
+        let a = test_support::PrivateTmux::start("own-a");
+        let a_socket = a.socket.clone();
+        let b_socket = std::env::temp_dir().join(format!("{}own-b-{}.sock", test_support::PRIVATE_PREFIX, std::process::id()));
+        let b_socket = b_socket.to_string_lossy().to_string();
+        let _ = test_support::destroy_private_server(&b_socket);
+        run_tmux_on(Some(&a_socket), &["new-session", "-d", "-s", "a-lives-here"]).unwrap();
+        run_tmux_on(Some(&b_socket), &["new-session", "-d", "-s", "b-lives-here"]).unwrap();
+        // What the incident did: a thread elsewhere points the global at
+        // another server (here B; at 05:51, None = the developer's default).
+        set_socket(Some(b_socket.clone()));
+        drop(a);
+        assert!(run_tmux_on(Some(&b_socket), &["has-session", "-t", "=b-lives-here:"]).is_ok(), "B is untouched by A's Drop");
+        assert!(run_tmux_on(Some(&a_socket), &["has-session", "-t", "=a-lives-here:"]).is_err(), "A's own server is gone");
+        let _ = test_support::destroy_private_server(&b_socket);
+        let _ = std::fs::remove_file(&b_socket);
+        set_socket(None);
+    }
+
+    /// The destroy path cannot be aimed at the server a developer sits in,
+    /// nor at anything that is not a private test server.
+    #[test]
+    fn destroy_refuses_anything_but_a_private_test_server() {
+        let implicit = implicit_socket().to_string_lossy().to_string();
+        for bad in ["", "relative.sock", "/tmp/default", implicit.as_str()] {
+            let r = std::panic::catch_unwind(|| test_support::destroy_private_server(bad));
+            assert!(r.is_err(), "{bad:?} must be refused");
+        }
+        // And the refusal is a panic, not a quiet Err — a test cannot shrug it off.
+        let msg = std::panic::catch_unwind(|| test_support::destroy_private_server("/tmp/default")).unwrap_err();
+        let text = msg.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(text.contains("refusing to kill-server"), "{text}");
+    }
+
+    /// Where a bare `tmux` would land from this process, read without asking
+    /// tmux (which would start a server): `$TMUX` first, then the default.
+    #[test]
+    fn the_implicit_socket_is_read_from_the_environment_only() {
+        let _hold = test_support::global_socket();
+        let saved = (std::env::var_os("TMUX"), std::env::var_os("TMUX_TMPDIR"));
+        std::env::set_var("TMUX", "/tmp/tmux-7/default,123,0");
+        assert_eq!(implicit_socket(), std::path::PathBuf::from("/tmp/tmux-7/default"));
+        std::env::remove_var("TMUX");
+        std::env::set_var("TMUX_TMPDIR", "/x");
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(implicit_socket(), std::path::PathBuf::from(format!("/x/tmux-{uid}/default")));
+        match saved.0 { Some(v) => std::env::set_var("TMUX", v), None => std::env::remove_var("TMUX") }
+        match saved.1 { Some(v) => std::env::set_var("TMUX_TMPDIR", v), None => std::env::remove_var("TMUX_TMPDIR") }
+    }
 
     #[test]
     fn a_scratch_guard_owns_unique_names_and_cleans_up_on_drop() {
