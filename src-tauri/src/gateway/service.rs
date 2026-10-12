@@ -791,7 +791,13 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
             // leaves the new text loaded — harmless (the running instance is
             // the old binary with the new, safer KillMode) and self-healing
             // the same way; the error says what did not happen.
-            sys.unload(name).map_err(|e| format!("{e}; the unit text was updated and loaded but the old instance still runs — run `tmm gateway install` again"))?;
+            // A stop that fails here leaves the NEW text loaded and the OLD
+            // instance running — safe (KillMode=process is in effect), but
+            // the running process still has its start-time Environment/PATH,
+            // and the next `install` will see Keep + protected and change
+            // nothing. Applying the new text is then an explicit restart,
+            // once the stop failure is fixed; the message says exactly that.
+            sys.unload(name).map_err(|e| format!("{e}; the unit text and KillMode={KILL_MODE} are loaded, but the old instance still runs with its start-time environment — fix the stop failure, then `tmm gateway restart` to apply the new text (a plain `install` will now find nothing to change)"))?;
             sys.load(name, &file)?;
             Ok(Done::Updated(sys.ready(name)?))
         }
@@ -1052,6 +1058,9 @@ mod tests {
         /// (a manager in a transitional state, or answering with a missing or
         /// unparseable field).
         state_answer: Rc<RefCell<Option<String>>>,
+        /// A drop-in: when set, the manager reports THIS KillMode whatever the
+        /// unit file says, reload or not — the way a drop-in overrides.
+        drop_in_kill_mode: Rc<RefCell<Option<String>>>,
     }
 
     fn fake(home: &Path, mac: bool) -> (Sys, Fake) {
@@ -1060,11 +1069,13 @@ mod tests {
             verdict: Rc::new(RefCell::new(Verdict::None)), loaded: Rc::new(RefCell::new(false)), occupant: Rc::default(),
             kill_mode: Rc::new(RefCell::new(None)),
             state_answer: Rc::new(RefCell::new(None)),
+            drop_in_kill_mode: Rc::new(RefCell::new(None)),
         };
         let occupant = f.occupant.clone();
         let (calls, fail, pid, verdict, loaded) = (f.calls.clone(), f.fail.clone(), f.pid.clone(), f.verdict.clone(), f.loaded.clone());
         let kill_mode = f.kill_mode.clone();
         let state_answer = f.state_answer.clone();
+        let drop_in = f.drop_in_kill_mode.clone();
         let unit_file = file_for(if mac { LABEL } else { N }, mac, home);
         let (pid2, verdict2) = (f.pid.clone(), f.verdict.clone());
         let sys = Sys {
@@ -1107,8 +1118,9 @@ mod tests {
                     "show" => {
                         let p = *pid.borrow();
                         let l = *loaded.borrow();
-                        // The manager's KillMode: what it loaded, else systemd's default.
-                        let km = kill_mode.borrow().clone().unwrap_or_else(|| "control-group".to_string());
+                        // The manager's KillMode: a drop-in wins, else what it
+                        // loaded, else systemd's default.
+                        let km = drop_in.borrow().clone().or_else(|| kill_mode.borrow().clone()).unwrap_or_else(|| "control-group".to_string());
                         Ok(format!("ActiveState={}\nMainPID={}\nLoadState={}\nUnitFileState={}\nKillMode={km}\n",
                             if p.is_some() { "active" } else { "inactive" }, p.unwrap_or(0),
                             if l { "loaded" } else { "not-found" }, if l { "enabled" } else { "" }))
@@ -1341,28 +1353,34 @@ mod tests {
     }
 
     /// The Keep case where a drop-in holds the manager at control-group: the
-    /// file is ours and complete, a reload changes nothing, so the gate must
-    /// refuse and the error must name the drop-in — never AlreadyRunning.
-    /// The fake's manager follows the file on reload, so the drop-in is
-    /// modelled as a manager that re-reads to control-group whatever the file
-    /// says (a sticky answer), which is what a drop-in does.
+    /// file is ours and complete, `daemon-reload` SUCCEEDS, and the manager
+    /// still reports control-group. The gate must refuse and the error must
+    /// name the drop-in — never AlreadyRunning. The fake's drop-in is a
+    /// sticky effective value that survives a reload, which is what a drop-in
+    /// does. (The reload-ERROR shape is the separate half-applied test.)
     #[test]
     fn a_drop_in_that_pins_control_group_is_refused_not_kept() {
         let home = scratch("dropin");
         let (sys, f) = fake(&home, false);
         install(&sys, N, false).unwrap();
-        let file = sys.file(N);
-        // The file says process. The manager, because of a drop-in, does not.
-        *f.kill_mode.borrow_mut() = Some("control-group".into());
-        std::fs::write(&file, std::fs::read_to_string(&file).unwrap()).unwrap();
-        // Make reload sticky: write a drop-in-shaped override the fake honours
-        // by never re-reading the file (fail the reload's re-read path).
-        f.fail.borrow_mut().push("daemon-reload");
+        *f.drop_in_kill_mode.borrow_mut() = Some("control-group".into());
+        assert_eq!(sys.effective_kill_mode(N).as_deref(), Some("control-group"), "the drop-in wins over the file");
+        f.calls.borrow_mut().clear();
         let e = install(&sys, N, false).unwrap_err();
-        assert!(e.contains("daemon-reload failed") || e.contains("drop-in"), "{e}");
+        assert!(f.calls.borrow().iter().any(|c| c.contains("daemon-reload")), "a reload was tried: {:?}", f.calls.borrow());
+        assert!(e.contains("drop-in") && e.contains("nothing was stopped"), "{e}");
         assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
-        assert!(protection_warning(&sys, N).is_some(), "status still warns");
+        assert!(protection_warning(&sys, N).unwrap().contains("control-group"), "status still warns");
         assert!(restart(&sys, N).is_err(), "and the release path still refuses");
+        assert!(uninstall(&sys, N).is_err());
+        // Removing the drop-in (the documented fix): the manager's loaded
+        // value is process again, so the next install is a true no-op and the
+        // release path opens — with no stop anywhere.
+        *f.drop_in_kill_mode.borrow_mut() = None;
+        f.calls.borrow_mut().clear();
+        assert_eq!(install(&sys, N, false), Ok(Done::AlreadyRunning(100)));
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")));
+        assert!(restart(&sys, N).is_ok());
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1469,9 +1487,15 @@ mod tests {
         assert_ne!(now, before, "the new text was written before the stop");
         assert!(String::from_utf8_lossy(&now).contains("/new/path"));
         assert_eq!(*f.pid.borrow(), Some(100), "the old instance still runs");
-        assert!(e.contains("run `tmm gateway install` again"), "{e}");
+        assert!(e.contains("tmm gateway restart") && e.contains("start-time environment"), "the message names the real way to apply the text: {e}");
         let e = uninstall(&sys, N).unwrap_err();
         assert!(e.contains("could not stop") && sys.file(N).exists(), "uninstall keeps the file when the stop fails");
+        // And once the stop works again, a second install IS a no-op — which
+        // is why the message must not promise that `install` finishes an
+        // Update; `restart` is what applies the loaded text.
+        f.fail.borrow_mut().clear();
+        assert!(matches!(install(&sys, N, false), Ok(Done::AlreadyRunning(_))));
+        assert!(restart(&sys, N).is_ok());
         std::fs::remove_dir_all(&home).ok();
     }
 
