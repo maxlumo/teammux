@@ -74,14 +74,31 @@ hide that.
    systemctl --user cat tmux-mobile-dev.service
    ```
 
+   **Your tmux server is probably INSIDE this unit's cgroup.** The gateway
+   that ran `tmm project up` was the watcher's child, and a tmux server
+   inherits the cgroup of whoever forked it — so the server holding every
+   agent pane you have may be a member of `tmux-mobile-dev.service`. See for
+   yourself before touching anything:
+
+   ```bash
+   systemd-cgls --user-unit tmux-mobile-dev.service   # is `tmux` listed under it?
+   ```
+
    This host carries a `cutover.conf` drop-in with `KillMode=none` and
    `Restart=no`. Per `systemd.kill(5)`, `none` kills NOTHING on stop (it only
-   runs `ExecStop`), and `process` signals the main process alone; only the
-   default, `control-group`, stops the whole chain. So either remove that
-   drop-in and `systemctl --user daemon-reload` so the default applies again,
-   or stop the unit and then terminate `dev-stack.mjs` yourself — it handles
+   runs `ExecStop`), `process` signals the main process alone, and the
+   default, `control-group`, kills every process in the cgroup — which, if
+   tmux is in there, is your tmux server and every agent in it (incident
+   risk #3, board #350; the 05:51 and 07:12 incidents of 2026-10-12 were the
+   same loss by other hands). So **do NOT remove the drop-in** while tmux
+   shows in that cgroup: `KillMode=none` is the only thing standing between
+   `systemctl --user stop` and your sessions. Keep it until the tmux server
+   has been restarted outside the unit — the clean exits are a reboot, or a
+   deliberate `tmux kill-server` followed by `tmm project up` once the GATEWAY
+   unit carries `KillMode=process` (step 5 below installs one that does).
+   Stop the unit and then terminate `dev-stack.mjs` yourself — it handles
    `SIGTERM` by stopping each service's process group, escalating to `SIGKILL`
-   after 5 s:
+   after 5 s; it never signals tmux:
 
    ```bash
    systemctl --user stop tmux-mobile-dev.service
@@ -153,6 +170,14 @@ hide that.
    runs `daemon-reload` and `enable --now`, and returns only once OUR gateway
    answers. `~/.local/bin/tmm` is a symlink to that same file, so the identity
    the unit records (this `tmm`, this config root) survives every rebuild.
+
+   The unit carries `KillMode=process` (board #350): a restart of the gateway
+   — which `npm run gateway:update` does after every merge — signals the
+   gateway alone, and the tmux servers it forked live on. A unit installed
+   before #350 lacks the line; `tmm gateway status` says so, and
+   `tmm gateway install --restart` rewrites it, restarting the gateway ONCE to
+   apply it (plain `install` refuses that restart, since on an unprotected
+   unit the restart is the hazard). Do it when no agent is mid-turn.
 
 6. **Start the frontend again.** The dev unit needs no edit — `dev-stack.mjs`
    is vite alone by default since #343:

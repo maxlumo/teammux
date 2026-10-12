@@ -149,6 +149,22 @@ fn unquote_env(s: &str) -> Option<(String, String)> {
     Some((k.to_string(), v.to_string()))
 }
 
+/// `KillMode=process` (board #350): the gateway forks tmux servers (`tmm
+/// project up`, the scratch session), and a child inherits its parent's
+/// cgroup — so with systemd's default `control-group`, a `systemctl --user
+/// restart` of this unit (every `npm run gateway:update`) would kill every
+/// tmux server the gateway ever started and every agent pane in them.
+/// `process` signals the main process only; children live on. Measured on
+/// this host 2026-10-12 08:02: the owner's default tmux server sat inside
+/// the DEV unit's cgroup for the same reason, and only a `KillMode=none`
+/// drop-in had kept `stop` from taking it down. `none` is rejected here:
+/// it kills nothing on stop, so a wedged gateway would never be ended.
+/// `systemd-run --scope` for the fork was evaluated and rejected: it is a
+/// second place that knows about systemd, it is Linux-only while the
+/// forking code is shared with macOS, and it needs the bus from inside the
+/// service — `KillMode=` is one line that says the same thing to systemd.
+pub const KILL_MODE: &str = "process";
+
 pub fn render_systemd(spec: &Spec) -> Result<String, String> {
     for (w, v) in [("executable", &spec.id.exe), ("config root", &spec.id.config_home), ("PATH", &spec.path_env), ("HOME", &spec.home)] {
         no_newline(w, v)?;
@@ -167,6 +183,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
          {}\n\
          Restart=on-failure\n\
          RestartSec=3s\n\
+         KillMode={}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -174,6 +191,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
         systemd_env("XDG_CONFIG_HOME", &spec.id.config_home),
         systemd_env("HOME", &spec.home),
         systemd_env("PATH", &spec.path_env),
+        KILL_MODE,
     ))
 }
 
@@ -183,7 +201,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
 /// not ours (a stricter reader can only refuse more, never adopt more).
 const UNIT_KEYS: &[(&str, &[&str])] = &[
     ("Unit", &["Description", "After"]),
-    ("Service", &["Type", "ExecStart", "Environment", "Restart", "RestartSec"]),
+    ("Service", &["Type", "ExecStart", "Environment", "Restart", "RestartSec", "KillMode"]),
     ("Install", &["WantedBy"]),
 ];
 /// The environment tmm gives the service; any other variable (LD_PRELOAD,
@@ -246,6 +264,33 @@ pub fn unit_identity(text: &str) -> Result<Identity, String> {
     let exe = unquote_arg(quoted).ok_or("ExecStart's executable is not in tmm's quoting")?;
     let config_home = env.into_iter().find(|(k, _)| k == "XDG_CONFIG_HOME").map(|(_, v)| v).ok_or("no XDG_CONFIG_HOME in [Service]")?;
     Ok(Identity { exe, config_home })
+}
+
+/// Does this unit text (already known to be ours) carry the one line that
+/// keeps a restart from killing the tmux servers the gateway forked? `None`
+/// when the key is absent (a unit from before #350), else its value — only
+/// `KILL_MODE` protects; `none` would, but is not what we write.
+pub fn unit_kill_mode(text: &str) -> Option<String> {
+    let mut in_service = false;
+    for line in text.split('\n') {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_service = name == "Service";
+            continue;
+        }
+        if in_service {
+            if let Some(v) = line.strip_prefix("KillMode=") {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The warning `status` and `install` print for an installed unit of ours
+/// that lacks the protection — the exact hazard, and the way out.
+pub fn kill_mode_warning(name: &str, found: Option<&str>) -> String {
+    let have = match found { Some(v) => format!("KillMode={v}"), None => "no KillMode= (systemd's default, control-group)".to_string() };
+    format!("{name} has {have}: a restart of this service (every `npm run gateway:update`) would kill every tmux server the gateway started and every agent in them. Fix: `tmm gateway install --restart` rewrites the unit with KillMode={KILL_MODE} — it RESTARTS the gateway once to apply it, so run it when no agent is mid-turn.")
 }
 
 // ─── launchd ────────────────────────────────────────────────────────────────
@@ -351,6 +396,11 @@ pub enum Plan {
     Create,
     Keep,
     Update,
+    /// Ours, and the ONLY difference from what we would write now is the
+    /// missing `KillMode=` (board #350) — a unit from before the fix. Writing
+    /// the fix means a restart, and a restart of THIS unit is exactly what
+    /// may kill the owner's tmux, so it needs the owner's say-so.
+    Protect,
     Refuse(String),
 }
 
@@ -358,9 +408,18 @@ pub fn plan(on_disk: &OnDisk, rendered: &str) -> Plan {
     match on_disk {
         OnDisk::Absent => Plan::Create,
         OnDisk::Ours { bytes } if bytes.as_slice() == rendered.as_bytes() => Plan::Keep,
+        OnDisk::Ours { bytes } if only_kill_mode_differs(bytes, rendered) => Plan::Protect,
         OnDisk::Ours { .. } => Plan::Update,
         OnDisk::NotOurs(why) => Plan::Refuse(format!("{why}; use --replace to back it up and take over")),
     }
+}
+
+/// Is `rendered` exactly `on_disk` plus our `KillMode=` line? (Only a
+/// systemd unit can differ this way; a plist is never `Protect`.)
+fn only_kill_mode_differs(on_disk: &[u8], rendered: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(on_disk) else { return false };
+    let line = format!("KillMode={KILL_MODE}\n");
+    rendered.contains(&line) && rendered.replacen(&line, "", 1) == text
 }
 
 // ─── Effects, through an injectable system ──────────────────────────────────
@@ -535,6 +594,8 @@ pub enum Done {
     AlreadyRunning(u32),
     Started(u32),
     Updated(u32),
+    /// The unit gained `KillMode=` and was restarted once to apply it.
+    Protected(u32),
     Replaced { pid: u32, backup: PathBuf },
 }
 
@@ -554,7 +615,11 @@ fn backup_for(file: &Path) -> Result<PathBuf, String> {
 }
 
 /// Install (or keep) the service `name` for this tmm and config root.
-pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
+/// `restart` is the owner's say-so for the one rewrite that would otherwise
+/// be silent and dangerous: a unit of ours that lacks `KillMode=` (board
+/// #350). Without it, such a unit is left as it is, running, and the error
+/// names the hazard and the command.
+pub fn install(sys: &Sys, name: &str, replace: bool, restart: bool) -> Result<Done, String> {
     valid_name(name, sys.mac)?;
     let spec = sys.spec(name);
     let rendered = if sys.mac { render_plist(&spec)? } else { render_systemd(&spec)? };
@@ -589,6 +654,22 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
             sys.write(&file, &rendered)?;
             sys.load(name, &file)?;
             Ok(Done::Updated(sys.ready(name)?))
+        }
+        // The one rewrite that is refused without the owner's word: the
+        // restart that applies the protection is itself the kind of restart
+        // the protection exists for. Not running → nothing to kill; apply.
+        Plan::Protect if !restart && ours_running => {
+            let found = std::str::from_utf8(&std::fs::read(&file).unwrap_or_default()).ok().and_then(unit_kill_mode);
+            Err(format!("{}; nothing was changed", kill_mode_warning(name, found.as_deref())))
+        }
+        Plan::Protect => {
+            if !ours_running {
+                port_free(sys)?;
+            }
+            sys.unload(name)?;
+            sys.write(&file, &rendered)?;
+            sys.load(name, &file)?;
+            Ok(Done::Protected(sys.ready(name)?))
         }
         Plan::Refuse(why) if !replace => Err(why),
         // The migration: the old service of THIS name may be the one
@@ -668,6 +749,21 @@ pub fn restart(sys: &Sys, name: &str) -> Result<u32, String> {
 /// Installed (ours?) and the running pid — read-only.
 pub fn state(sys: &Sys, name: &str) -> (Result<bool, String>, Option<u32>) {
     (ours_installed(sys, name).map(|f| f.is_some()), sys.running(name))
+}
+
+/// For an installed unit of ours on systemd: the warning to print when it
+/// lacks the `KillMode=` protection (board #350), else `None`. Read-only;
+/// `None` too for launchd, an absent unit, or one that is not ours.
+pub fn protection_warning(sys: &Sys, name: &str) -> Option<String> {
+    if sys.mac {
+        return None;
+    }
+    let file = ours_installed(sys, name).ok()??;
+    let text = std::fs::read_to_string(file).ok()?;
+    match unit_kill_mode(&text) {
+        Some(v) if v == KILL_MODE => None,
+        found => Some(kill_mode_warning(name, found.as_deref())),
+    }
 }
 
 /// The command that shows the service's log — for OUR service only.
@@ -879,15 +975,101 @@ mod tests {
     fn install_creates_waits_for_our_instance_and_is_a_no_op_the_second_time() {
         let home = scratch("create");
         let (sys, f) = fake(&home, false);
-        assert_eq!(install(&sys, N, false), Ok(Done::Installed(100)));
+        assert_eq!(install(&sys, N, false, false), Ok(Done::Installed(100)));
         assert!(sys.file(N).exists());
         f.calls.borrow_mut().clear();
-        assert_eq!(install(&sys, N, false), Ok(Done::AlreadyRunning(100)), "same bytes and running");
+        assert_eq!(install(&sys, N, false, false), Ok(Done::AlreadyRunning(100)), "same bytes and running");
         assert!(!f.calls.borrow().iter().any(|c| c.contains("enable") || c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
         assert_eq!(restart(&sys, N), Ok(101), "restart is the forced one");
         assert_eq!(uninstall(&sys, N), Ok(true));
         assert!(!sys.file(N).exists());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Board #350: the unit we write must not take down the tmux servers
+    /// the gateway forked when it is restarted. Pinned on the rendered text,
+    /// since the live effect (a cgroup kill) cannot be measured in a test.
+    #[test]
+    fn the_rendered_unit_keeps_children_alive_across_a_restart() {
+        let text = render_systemd(&spec_with("/t/tmm", "/h/.config")).unwrap();
+        let service = text.split("[Service]").nth(1).unwrap().split("[Install]").next().unwrap();
+        assert!(service.contains("\nKillMode=process\n"), "KillMode=process, in [Service]:\n{text}");
+        assert_eq!(service.matches("KillMode=").count(), 1);
+        assert!(service.contains("\nRestart=on-failure\n"), "the restart policy stays");
+        assert_eq!(unit_kill_mode(&text).as_deref(), Some(KILL_MODE));
+        // And it is still OURS by the strict grammar — a key we write.
+        assert_eq!(unit_identity(&text).unwrap(), Identity { exe: "/t/tmm".into(), config_home: "/h/.config".into() });
+        // `none` would also keep children alive, but would never end a wedged
+        // gateway: it is not what we write, and reads as a gap.
+        let none = text.replace("KillMode=process", "KillMode=none");
+        assert_eq!(unit_kill_mode(&none).as_deref(), Some("none"));
+        assert!(kill_mode_warning(N, Some("none")).contains("KillMode=none"));
+        assert!(kill_mode_warning(N, None).contains("control-group"), "the default is named when the key is absent");
+        assert!(kill_mode_warning(N, None).contains("--restart"), "and so is the way out");
+    }
+
+    /// A unit of ours from before #350 (no KillMode=) is OURS, is reported
+    /// as unprotected by `status`, and `install` will not silently restart it
+    /// to fix it: the restart is exactly the hazard. `--restart` applies it.
+    #[test]
+    fn a_pre_350_unit_is_warned_about_and_protected_only_on_request() {
+        let home = scratch("protect");
+        let (sys, f) = fake(&home, false);
+        assert_eq!(install(&sys, N, false, false), Ok(Done::Installed(100)));
+        assert_eq!(protection_warning(&sys, N), None, "a fresh unit is protected");
+        // Rewrite the file as the pre-#350 renderer would have.
+        let file = sys.file(N);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let old = text.replace(&format!("KillMode={KILL_MODE}\n"), "");
+        assert_ne!(old, text);
+        std::fs::write(&file, &old).unwrap();
+        assert!(matches!(read_on_disk(&file, N, &sys.me, false), OnDisk::Ours { .. }), "still ours: same identity");
+        assert_eq!(plan(&read_on_disk(&file, N, &sys.me, false), &render_systemd(&sys.spec(N)).unwrap()), Plan::Protect);
+        let w = protection_warning(&sys, N).expect("status warns");
+        assert!(w.contains("control-group") && w.contains("--restart"), "{w}");
+
+        // Running, no say-so: refused, nothing changed, no systemctl call.
+        f.calls.borrow_mut().clear();
+        let e = install(&sys, N, false, false).unwrap_err();
+        assert!(e.contains("would kill every tmux server") && e.contains("nothing was changed"), "{e}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), old, "the file is untouched");
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("enable") || c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
+
+        // With the owner's word: rewritten, stopped and started once (the
+        // fake hands a stopped-then-started unit a fresh pid), answering.
+        f.calls.borrow_mut().clear();
+        let Ok(Done::Protected(pid)) = install(&sys, N, false, true) else { panic!("protected") };
+        assert!(f.calls.borrow().iter().any(|c| c.contains("disable")) && f.calls.borrow().iter().any(|c| c.contains("enable")), "one stop, one start: {:?}", f.calls.borrow());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "the protected text is back");
+        assert_eq!(protection_warning(&sys, N), None);
+        assert_eq!(install(&sys, N, false, false), Ok(Done::AlreadyRunning(pid)), "and then it is a no-op again");
+
+        // Not running: nothing to kill, so the protection is applied without
+        // the flag — the restart cannot take anything down.
+        std::fs::write(&file, &old).unwrap();
+        *f.pid.borrow_mut() = None; *f.loaded.borrow_mut() = false; *f.verdict.borrow_mut() = Verdict::None;
+        assert_eq!(install(&sys, N, false, false), Ok(Done::Protected(100)));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `Protect` is only the missing-KillMode difference. Any other change
+    /// (a new PATH, a moved tmm) is the ordinary `Update` — whose restart
+    /// was always part of changing the unit — even when KillMode is missing
+    /// too, so an old unit that also needs updating takes the Update path.
+    #[test]
+    fn protect_is_exactly_the_missing_kill_mode_and_nothing_else() {
+        let spec = spec_with("/t/tmm", "/h/.config");
+        let rendered = render_systemd(&spec).unwrap();
+        let line = format!("KillMode={KILL_MODE}\n");
+        let me = spec.id.clone();
+        let ours = |text: &str| OnDisk::Ours { bytes: text.as_bytes().to_vec() };
+        assert_eq!(plan(&ours(&rendered), &rendered), Plan::Keep);
+        assert_eq!(plan(&ours(&rendered.replacen(&line, "", 1)), &rendered), Plan::Protect);
+        let other_path = render_systemd(&Spec { path_env: "/other".into(), ..spec.clone() }).unwrap();
+        assert_eq!(plan(&ours(&other_path), &rendered), Plan::Update, "a different PATH is an update");
+        assert_eq!(plan(&ours(&other_path.replacen(&line, "", 1)), &rendered), Plan::Update, "old AND different: an update");
+        assert_eq!(plan(&ours(&rendered.replace("KillMode=process", "KillMode=none")), &rendered), Plan::Update, "a wrong value is an update, not a protect");
+        let _ = me;
     }
 
     #[test]
@@ -897,7 +1079,7 @@ mod tests {
         // It starts, but the probe never says Ours (e.g. it exited on a held port).
         f.fail.borrow_mut().push("never");
         let sys = Sys { probe: Box::new(|| Verdict::None), ..sys };
-        let e = install(&sys, N, false).unwrap_err();
+        let e = install(&sys, N, false, false).unwrap_err();
         assert!(e.contains("not answering"), "{e}");
         std::fs::remove_dir_all(&home).ok();
     }
@@ -907,10 +1089,10 @@ mod tests {
         let home = scratch("held");
         let (sys, f) = fake(&home, false);
         *f.verdict.borrow_mut() = Verdict::Occupied("another gateway".into());
-        assert!(install(&sys, N, false).unwrap_err().contains("held"));
+        assert!(install(&sys, N, false, false).unwrap_err().contains("held"));
         assert!(!sys.file(N).exists(), "nothing written");
         *f.verdict.borrow_mut() = Verdict::Ours { machine_id: "m".into(), url: "ws://x".into() };
-        assert!(install(&sys, N, false).unwrap_err().contains("outside this service"), "a foreground gateway would mask a dead service");
+        assert!(install(&sys, N, false, false).unwrap_err().contains("outside this service"), "a foreground gateway would mask a dead service");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -918,11 +1100,11 @@ mod tests {
     fn a_failed_stop_aborts_before_the_file_changes() {
         let home = scratch("stopfail");
         let (sys, f) = fake(&home, false);
-        install(&sys, N, false).unwrap();
+        install(&sys, N, false, false).unwrap();
         let before = std::fs::read(sys.file(N)).unwrap();
         let sys = Sys { path_env: "/new/path".into(), ..sys }; // an Update
         f.fail.borrow_mut().push("disable");
-        let e = install(&sys, N, false).unwrap_err();
+        let e = install(&sys, N, false, false).unwrap_err();
         assert!(e.contains("could not stop"), "{e}");
         assert_eq!(std::fs::read(sys.file(N)).unwrap(), before, "the file is untouched");
         let e = uninstall(&sys, N).unwrap_err();
@@ -935,7 +1117,7 @@ mod tests {
         let home = scratch("loadfail");
         let (sys, f) = fake(&home, false);
         f.fail.borrow_mut().push("enable");
-        assert!(install(&sys, N, false).unwrap_err().contains("enable failed"));
+        assert!(install(&sys, N, false, false).unwrap_err().contains("enable failed"));
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -947,21 +1129,21 @@ mod tests {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let old = "<plist><dict><key>Label</key><string>cc.voka.tmux-mobile</string><key>ProgramArguments</key><array><string>/old/server</string></array></dict></plist>";
         std::fs::write(&file, old).unwrap();
-        assert!(install(&sys, LABEL, false).unwrap_err().contains("--replace"), "not ours: refused without --replace");
+        assert!(install(&sys, LABEL, false, false).unwrap_err().contains("--replace"), "not ours: refused without --replace");
         // Success: ours runs, the old file is backed up.
-        let done = install(&sys, LABEL, true).unwrap();
+        let done = install(&sys, LABEL, true, false).unwrap();
         let Done::Replaced { backup, .. } = &done else { panic!("{done:?}") };
         assert_eq!(std::fs::read_to_string(backup).unwrap(), old);
         // Two backups in one second do not collide.
         std::fs::write(&file, old).unwrap();
         *f.pid.borrow_mut() = None; *f.loaded.borrow_mut() = false; *f.verdict.borrow_mut() = Verdict::None;
-        let Done::Replaced { backup: b2, .. } = install(&sys, LABEL, true).unwrap() else { panic!() };
+        let Done::Replaced { backup: b2, .. } = install(&sys, LABEL, true, false).unwrap() else { panic!() };
         assert_ne!(&b2, backup);
         // Failure: ours never answers → the old file is put back and loaded.
         std::fs::write(&file, old).unwrap();
         *f.pid.borrow_mut() = None; *f.loaded.borrow_mut() = false; *f.verdict.borrow_mut() = Verdict::None;
         let never = Sys { probe: Box::new(|| Verdict::None), ..fake(&home, true).0 };
-        let e = install(&never, LABEL, true).unwrap_err();
+        let e = install(&never, LABEL, true, false).unwrap_err();
         // The old one was not running, so only its file is put back.
         assert!(e.contains("previous file was restored"), "{e}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), old, "the old file is back");
@@ -970,7 +1152,7 @@ mod tests {
         let bad = Sys { probe: Box::new(|| Verdict::None), ..bad };
         std::fs::write(&file, old).unwrap();
         bf.fail.borrow_mut().push("bootstrap");
-        let e = install(&bad, LABEL, true).unwrap_err();
+        let e = install(&bad, LABEL, true, false).unwrap_err();
         assert!(e.contains("ALSO failed") && e.contains("kept at"), "{e}");
         std::fs::remove_dir_all(&home).ok();
     }
@@ -988,9 +1170,9 @@ mod tests {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, OLD_PLIST).unwrap();
         *f.loaded.borrow_mut() = true; *f.pid.borrow_mut() = Some(50); *f.verdict.borrow_mut() = ours_answering();
-        assert!(install(&sys, LABEL, false).unwrap_err().contains("--replace"), "without --replace: refused, untouched");
+        assert!(install(&sys, LABEL, false, false).unwrap_err().contains("--replace"), "without --replace: refused, untouched");
         assert_eq!(*f.pid.borrow(), Some(50), "the legacy service still runs");
-        let Done::Replaced { pid, backup } = install(&sys, LABEL, true).unwrap() else { panic!() };
+        let Done::Replaced { pid, backup } = install(&sys, LABEL, true, false).unwrap() else { panic!() };
         assert_eq!(pid, 100, "ours runs (a fresh start after the old one stopped)");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), OLD_PLIST);
         let calls = f.calls.borrow();
@@ -1012,14 +1194,14 @@ mod tests {
         std::fs::write(&file, OLD_PLIST).unwrap();
         *f.loaded.borrow_mut() = true; *f.pid.borrow_mut() = Some(50);
         *f.occupant.borrow_mut() = Some(Verdict::Occupied("another program".into()));
-        let e = install(&sys, LABEL, true).unwrap_err();
+        let e = install(&sys, LABEL, true, false).unwrap_err();
         assert!(e.contains("port is held") && e.contains("after stopping") && e.contains("runs again"), "{e}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), OLD_PLIST, "the old file is back");
         assert!(f.pid.borrow().is_some(), "the old service runs again");
         // A held port with nothing of this name: refused before anything is written.
         let (sys2, f2) = fake(&scratch("occupant2"), true);
         *f2.occupant.borrow_mut() = Some(Verdict::Occupied("another program".into()));
-        assert!(install(&sys2, LABEL, false).unwrap_err().contains("held") && !sys2.file(LABEL).exists());
+        assert!(install(&sys2, LABEL, false, false).unwrap_err().contains("held") && !sys2.file(LABEL).exists());
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1029,7 +1211,7 @@ mod tests {
     fn mac_an_unqueryable_stop_fails_closed() {
         let home = scratch("macprint");
         let (sys, f) = fake(&home, true);
-        install(&sys, LABEL, false).unwrap();
+        install(&sys, LABEL, false, false).unwrap();
         let before = std::fs::read(sys.file(LABEL)).unwrap();
         f.fail.borrow_mut().extend(["bootout", "print"]);
         let e = uninstall(&sys, LABEL).unwrap_err();
@@ -1045,7 +1227,7 @@ mod tests {
         let file = sys.file(N);
         std::fs::create_dir_all(&file).unwrap(); // a directory where the file should be: read fails, not NotFound
         assert!(matches!(read_on_disk(&file, N, &sys.me, false), OnDisk::NotOurs(_)));
-        assert!(install(&sys, N, false).is_err(), "never Create over something unreadable");
+        assert!(install(&sys, N, false, false).is_err(), "never Create over something unreadable");
         std::fs::remove_dir_all(&file).unwrap();
         std::fs::write(&file, "[Service]\nExecStart=/usr/bin/node server.js\n").unwrap();
         assert!(uninstall(&sys, N).is_err() && file.exists(), "a hand-written unit is never removed");
@@ -1061,7 +1243,7 @@ mod tests {
             assert!(uninstall(&sys, N).is_err() && file.exists(), "{what}: refused, kept");
             assert!(!_f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("stop")), "{what}: no stop: {:?}", _f.calls.borrow());
         }
-        assert!(install(&sys, "../../evil.service", false).is_err(), "a name cannot leave the service directory");
+        assert!(install(&sys, "../../evil.service", false, false).is_err(), "a name cannot leave the service directory");
         std::fs::remove_dir_all(&home).ok();
     }
 }
