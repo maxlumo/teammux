@@ -31,7 +31,7 @@
    * picking one is the host's (`onPickServer`: focus that server, open the
    * pane there). Null: this server's list alone (Single). */
   let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true,
-    union = null, onPickServer = null }: {
+    union = null, onPickServer = null, foreignInline = false }: {
     openTerminal: (session: string, target: string, command?: string) => void;
     activeTarget?: string;
     visible?: boolean;
@@ -40,6 +40,15 @@
     chips?: boolean;
     union?: { source: SessionsUnion; included: readonly { id: string; name: string }[] } | null;
     onPickServer?: ((ref: PaneRef) => void) | null;
+    /** Where the foreign rows go (#357, owner 2026-10-13: "在 Terminal 页面…都
+     * 没有整合…所有项目"). The host says when this list is the PHONE's picker
+     * sheet (the same condition as `.side-sheet`): a sheet the person rarely
+     * scrolls to the bottom of, so the other servers' sessions are IN the main
+     * list — right under this server's projects, tagged — one union list, no
+     * separate section. The desktop sidebar keeps its "Other servers" group:
+     * there the column is tall enough to read whole, and the grouping tells
+     * the two apart at a glance (③c-3). */
+    foreignInline?: boolean;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
@@ -272,6 +281,7 @@
   $effect(() => () => { union?.source.withdraw(runtime!); });
   /** The other included servers' sessions, tagged, and who has not answered. */
   const foreign = $derived(union ? union.source.rows(union.included, serverId) : null);
+
 
   async function doRefresh() {
     refreshing = true;
@@ -636,6 +646,31 @@
       onGoBack={(fn) => projectsGoBack = fn}
       onTracked={(names) => { trackedSessions = names; trackedReady = true; }}
       onReady={(reload) => reloadProjects = reload} />
+    <!-- #357 (phone): every OTHER included server's sessions, IN the main
+         list under this server's projects — the sidebar row dress, the tag on
+         its own second line (#360). The same selector rows as the desktop's
+         group below: pick = focus that server + open the pane there (③c-3);
+         a server that has not published is named missing. Not searched. -->
+    {#if foreignInline && foreign && !isSearching}
+      {#each foreign.rows as r (r.key)}
+        <button class="side-row proj-row foreign" data-server={r.serverId} onclick={() => { onPickServer?.(r.ref); onPick?.(); }}>
+          <span class="dot" class:off={!r.item.attached}></span>
+          <span class="p-main">
+            <span class="p-top">
+              <span class="p-name">{r.item.name}</span>
+              {#if r.item.windows > 1}<span class="side-age">{r.item.windows}w</span>{/if}
+            </span>
+            {#if r.tag}<span class="p-source"><ServerTag name={r.tag} /></span>{/if}
+          </span>
+        </button>
+      {/each}
+      {#each (union?.included ?? []).filter((s) => foreign.missing.includes(s.id)) as m (m.id)}
+        <div class="side-row proj-row missing" role="note">
+          <span class="dot off"></span>
+          <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
+        </div>
+      {/each}
+    {/if}
     <!-- Creating a project is the same ROW in every sidebar (Chat's projects,
          Agents' definitions/skills/MCP): `.side-row.add`, quiet until hovered.
          It used to be a full-width bordered button in a bottom bar here, which
@@ -707,7 +742,7 @@
          question about this server's list. OUTSIDE this server's first-answer
          gate (P1-C4): another server's published list does not wait for this
          server's Projects to report. -->
-    {#if foreign && !isSearching && (foreign.rows.length || foreign.missing.length)}
+    {#if !foreignInline && foreign && !isSearching && (foreign.rows.length || foreign.missing.length)}
     <div class="rows foreign-rows">
       <div class="group-label" class:side-h={!chips}>
         <Icon name="swap-h" size={12} />

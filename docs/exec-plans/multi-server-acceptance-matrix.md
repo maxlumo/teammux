@@ -34,6 +34,7 @@ recorded evidence gap, not claimed.
 | B drops / reconnects while A types (editor draft) | T | `§F isolation: a background member drops and reconnects while the focus is typing in an editor…` (the focus's draft, connection and dial count; nobody asked); `③b-1: each member reconnects on its own loop — B dropping never touches A…` (connections and dials) |
 | … while A downloads or saves | P2 | not held by an App test: the isolation test starts no download and performs no Save. A download's independence from another server's socket follows from every runtime owning its connection (`file-handling.md`, `websocket-client.md` ②b-4: a download's signed URL is its connection's), and the switch-time download tests (`a switch while A s reconnect dial hangs…`, `K, the PRE-dial entry…`) cover a download surviving another server's dial — but not a member's drop. Browser row or a later test |
 | Hidden member does only list work (D4), on a tick and on a push | T | `③c-2 (D4): a hidden member s Hub refreshes only its list…` (per-method counts incl. the push path); `③c-3/P1-C4: … hidden member keeps its list CURRENT on the 20 s list cadence and stops when excluded` |
+| The Board's union: tagged, per-server counts, D3 body (#357) | T | `#357 (Board): the sidebar is the UNION of every included server s boards…`; Single: `#357 (Board, Single)…`; the desktop Terminal keeps its group: `#357 (Terminal, desktop)…` |
 | Only the focus is polled for vitals | T | `③c-5: the system status is the FOCUSED server s reading…` (`rpc@b:systemStatus` never) |
 
 ## 3. Cross-server jumps land exactly
@@ -43,6 +44,8 @@ recorded evidence gap, not claimed.
 | From a notification | T | `③c-4: picking ANOTHER server s alert focuses that server (D2) and lands in ITS Hub on the message…`; touch: `③c-4/P1-C3 (a, touch)…` |
 | From a Hub union row | T | `③c-2: picking another server s row moves the focus there (D2) and selects THAT project…` |
 | From a Sessions union row | T | `③c-3: picking another server s session focuses that server and opens the pane THERE — A s terminal is untouched` |
+| From a Board union row (#357) | T | `#357 (Board): picking another server s board focuses that server (D2, no dial) and lands on THAT project s board; the body is then B s` |
+| From the phone's Terminal list (#357) | T | `#357 (Terminal, phone): the other servers sessions are IN the main list … pick = focus + open there` |
 | From an image / file reference in chat | R | the chat's image/file references open in the focused tree's Files (one server by construction, ②b); a cross-server reference carries its `serverId` in the ref and is a landing like the others — browser row |
 
 ## 4. One server unhealthy does not block the rest

@@ -99,6 +99,11 @@ test('the identity modules have exactly the production consumers this commit giv
       // for its own open row and lands a foreign pick through its ref — a
       // ref it was handed, never one it named for another server.
       'src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte',
+      // #357: the Board is the second consumer of the same projects union —
+      // it keys its open row by `refKey(sessionRef(own id, …))` exactly as the
+      // Hub does, and lands a foreign pick through the ref it was handed
+      // (`onPickServer(r.ref)`), never one it named for another server.
+      'src/lib/hub/Board.svelte',
       // ③c-3: the sessions union mints each foreign row's PaneRef from the
       // slice's serverId (App's); Sessions only hands the ref it was given
       // back to the host (a type import).

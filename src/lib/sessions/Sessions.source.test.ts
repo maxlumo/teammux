@@ -49,3 +49,22 @@ test('sidebar section headers speak the shared .side-h dialect', () => {
   // A flat list gets a header too, so no group of rows is unlabelled.
   assert.match(source, /\{#if !chips && filtered\.length > 0\}\s*<div class="group-label"/u);
 });
+
+test('the phone s session sheet is ONE list: foreign rows inline, the grouped section desktop-only; "phone" is the host s (#357)', async () => {
+  // The component never decides what a phone is: the host passes the sheet s
+  // own condition (App: isTouchDevice && narrowVp, the same as `.side-sheet`).
+  assert.match(source, /onPickServer = null, foreignInline = false/u);
+  assert.doesNotMatch(source, /foreignInline = \$derived|const foreignInline/u, 'no second definition of "phone" in the component');
+  const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
+  assert.match(app, /union=\{sessionsUnionFor\} onPickServer=\{pickServerPane\} foreignInline=\{layout\.isTouchDevice && narrowVp\}/u);
+  assert.match(app, /class:side-sheet=\{layout\.isTouchDevice && narrowVp\}/u, 'the same condition as the sheet itself');
+  // Inline rows: the sidebar row dress, the tag on the second line, under the
+  // Projects section; the grouped section is the other branch of the same flag.
+  const inline = source.slice(source.indexOf('{#if foreignInline && foreign && !isSearching}'), source.indexOf('Creating a project is the same ROW'));
+  assert.ok(inline.length > 0, 'the inline branch exists');
+  assert.match(inline, /class="side-row proj-row foreign"/u);
+  assert.match(inline, /\{#if r\.tag\}<span class="p-source"><ServerTag name=\{r\.tag\} \/><\/span>\{\/if\}/u);
+  assert.match(inline, /onPickServer\?\.\(r\.ref\); onPick\?\.\(\);/u, 'the same pick as the grouped rows: focus + open there, close the sheet');
+  assert.ok(source.indexOf('<Projects') < source.indexOf('{#if foreignInline && foreign && !isSearching}'), 'the inline rows follow this server s Projects section');
+  assert.match(source, /\{#if !foreignInline && foreign && !isSearching && \(foreign\.rows\.length \|\| foreign\.missing\.length\)\}/u, 'phone: the section is gone, desktop: unchanged');
+});

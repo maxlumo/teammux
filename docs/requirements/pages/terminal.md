@@ -34,6 +34,11 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   with the server (`ui/ServerTag`), as a SELECTOR — picking one moves the
   focus to that server and opens the pane there; the panes, kill, search and
   the pane picker above stay this server's, and the section is not searched.
+  **On the phone** (board #357, owner 2026-10-13: "在 Terminal 页面…都没有
+  整合…所有项目") the session sheet is ONE list: the other servers' sessions
+  are rows of the main list, right under this server's projects, each with its
+  tag on its own second line — the bottom section the phone rarely scrolls to
+  is gone there. The desktop sidebar keeps the grouped section.
   A server whose list has not arrived is listed as "no list yet". The section
   never waits for this server's own first Projects answer. A hidden member's
   page keeps its list current on the same 20 s list cadence the Hub uses

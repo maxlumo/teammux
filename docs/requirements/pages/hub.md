@@ -293,6 +293,19 @@ completion).
 - Every drawer toggle re-anchors the reading position (`withReadingAnchor`).
 
 ## Board page (task management — its own tab)
+- **Several servers** (board #357, owner 2026-10-13: "在 Terminal 页面和 Board
+  页面，都没有整合两种或几种不同连接里的所有项目"): in Aggregate the focused
+  Board's project list is the UNION of every included server's boards — the
+  same projection the Hub sidebar is (each server's slice in its own order and
+  on its own clock, merged by the one rule), each row wearing its server's tag
+  (`ui/ServerTag`, on its own second line) when more than one server is
+  included, and counted by ITS server's per-board totals (an empty board is
+  hidden by its own server's counts). Picking another server's row moves the
+  focus there (no dial, no teardown) and lands on THAT project's board, with
+  no issue opened; the board body is always one server's. A server whose list
+  has not answered is "no list yet", one whose latest refresh failed is "not
+  connected" with its last good rows kept; a hidden member's Board does list
+  refresh only (the 20 s cadence). Single: this server's boards, untagged.
 - Four fixed columns: **todo / doing / review / done**. Issues carry title,
   body, assignee, opened-by, and their own **note thread** (progress and
   decisions live ON the issue, not only in chat). The **title is OPTIONAL**

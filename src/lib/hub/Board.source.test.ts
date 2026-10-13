@@ -95,10 +95,13 @@ test('the sidebar orders by conversation, and rows are summaries (reopened #11)'
   // into the FULL list; the shown rows are the derived filter (board #39).
   assert.match(source, /allProjects = sortRows\(\(r\.projects \?\? \[\]\)\.filter\([\s\S]*?archived\), talkMap\);/u,
     'sortRows over the talk map, archived rows dropped');
-  assert.match(source, /hubRooms\(\)\.catch/u, 'the talk map comes from hub_rooms, fail-soft');
+  assert.match(source, /ask\(\(\) => hubRooms\(\)\)\.catch/u, 'the talk map comes from hub_rooms, fail-soft (started in the #357 thunk)');
   const row = source.slice(source.indexOf('class="side-row proj-row"'), source.indexOf('</aside>'));
-  assert.match(row, /class="side-age">\{projectAgeLabel\(p, talkMap, projectTick\)\}/u,
-    'rows carry the same updated age as Chat and Terminal');
+  // #357: the row's clock is ITS server's (`r.slice.talk` — this server's
+  // talkMap in Single, the source server's in a union), the rule every union
+  // row follows since ③c-2 (reviewer P1, 2026-10-10).
+  assert.match(row, /class="side-age">\{projectAgeLabel\(p, r\.slice\.talk, projectTick\)\}/u,
+    'rows carry the same updated age as Chat and Terminal, by the row s own server s clock');
   // The second line is COLUMN COUNTS in the shared chip dress — never the
   // Chat row's agent chips (board #39 kept the summary rule: no roster here).
   assert.ok(!row.includes('a.icon'), 'no agent chips — the Board row summarises the BOARD, not the roster');
@@ -502,7 +505,7 @@ test('the create form submits from the keyboard: title Enter, body Cmd/Ctrl+Ente
 test('the sidebar consumes ONE bulk counts read and reacts to local writes at once (board #39)', () => {
   // The bulk read rides loadProjects' parallel batch — never a per-project
   // boardList walk, which is the N+1 hub_board_counts exists to prevent.
-  assert.match(source, /boardCounts\(\)\.catch\(\(\) => null\)/u,
+  assert.match(source, /ask\(\(\) => boardCounts\(\)\)\.catch\(\(\) => null\)/u,
     'boardCounts joins the Promise.all batch, fail-soft');
   assert.equal([...source.matchAll(/boardList\(/g)].length, 1,
     'exactly ONE boardList call site — the current board\'s own load(), no sidebar walk');
@@ -954,4 +957,41 @@ test('the whole draft is locked while it is submitted, and a saved draft adopts 
   assert.match(source, /for \(const f of Object\.keys\(patch\) as \(keyof typeof saved\)\[\]\) \{ draft\[f\] = saved\[f\]; draftBase\[f\] = saved\[f\]; \}\s*bodyStage\.clear\(\);/u,
     'the snapshot is adopted BEFORE the map is cleared and the refetch rebases');
   assert.match(source, /onviewstart=\{claimView\} onview=\{acceptView\}/u, 'each tap claims for itself');
+});
+
+test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026-10-13)', () => {
+  // ONE merge: the Board publishes to the generalised projects union, never a
+  // second comparator or poller (tenet 9).
+  assert.match(source, /import type \{ BoardUnion, BoardUnionRow \} from '\.\.\/app\/hub-union\.svelte\.ts';/u);
+  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime');
+  assert.match(source, /\$effect\(\(\) => \(\) => \{ union\?\.source\.withdraw\(guardOwner\); \}\);/u, 'and withdraws it with the tree');
+  // The row list: the union filtered by EACH SERVER'S counts, else this server's
+  // own boards as single-server entries — never one shape for Aggregate and
+  // another for Single.
+  assert.match(source, /unionList\.rows\.filter\(\(r\) => \(r\.slice\.counts\[r\.item\.project\.session\]\?\.total \?\? 0\) > 0\)/u, 'an empty board is hidden by ITS server s counts (board #39)');
+  assert.match(source, /: projects\.map\(\(p\) => \(\{ serverId, item: p, ref: sessionRef\(serverId, p\.project\.session\)/u, 'Single: this server s rows, same shape');
+  assert.equal(source.match(/\{#each sideRows as r \(r\.key\)\}/gu)?.length, 1, 'ONE row template');
+  assert.doesNotMatch(source, /\{#each projects as /u, 'the old per-server loop is gone');
+  const row = source.slice(source.indexOf('{#each sideRows as r (r.key)}'), source.indexOf('{#each missingRows'));
+  assert.match(row, /\{#if r\.tag\}<span class="p-source"><ServerTag name=\{r\.tag\} \/><\/span>\{\/if\}/u, 'the tag on its own second line, the tag rule (#360)');
+  assert.match(row, /r\.slice\.counts\[p\.project\.session\]/u, 'the counts are the row s own server s');
+  assert.match(row, /onclick=\{\(\) => pickRow\(r\)\}/u);
+  // A foreign pick is the host s: focus + landing; the body stays one server s.
+  assert.match(source, /if \(r\.serverId === serverId\) \{ pick\(r\.item\.project\.session\); return; \}\s*sideOpen = false;\s*onPickServer\?\.\(r\.ref\);/u);
+  // D4: a hidden member keeps ONLY its list refresh; the age tick is shown-only.
+  assert.match(source, /if \(!visible && !union\) return;\s*loadProjects\(\);\s*const iv = setInterval\(loadProjects, 20000\);/u);
+  assert.match(source, /\$effect\(\(\) => \{\s*if \(!visible\) return;\s*const ageIv = setInterval\(\(\) => \{ projectTick = Date\.now\(\); \}, 1000\);/u);
+  // A landing with no issue opens nothing.
+  assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);/u);
+});
+
+test('the Board s list reads start inside a thunk: a call that throws must not strand a read already started (#357)', () => {
+  // A detached runtime s gate refuses SYNCHRONOUSLY. In an array literal the
+  // first read had already been issued, so a throw at the second left its
+  // rejection with no handler (an unhandled rejection, seen as leaked
+  // "not connected" / "B list failed" across the App suite once a HIDDEN
+  // member began refreshing its list).
+  assert.match(source, /const ask = <T,>\(f: \(\) => Promise<T>\): Promise<T> => \(async \(\) => f\(\)\)\(\);/u);
+  assert.match(source, /ask\(\(\) => projectList\(\)\),\s*ask\(\(\) => hubRooms\(\)\)\.catch\(\(\) => \(\{ rooms: \{\} \}\)\),\s*ask\(\(\) => boardCounts\(\)\)\.catch\(\(\) => null\),/u);
+  assert.doesNotMatch(source, /Promise\.all\(\[\s*projectList\(\),/u, 'no bare call in the array literal');
 });

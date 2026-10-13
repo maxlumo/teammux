@@ -1248,6 +1248,26 @@ per tick, nothing of a pane), and on its server's reconnect; the refresh
 stops when it is shown (the show path owns it), excluded or its tree goes.
 The shown page still has no poll of its own.
 
+**The Board and the phone's Terminal list are the union too** (#357, owner
+2026-10-13: "在 Terminal 页面和 Board 页面，都没有整合两种或几种不同连接里的所有
+项目"). Still no second mechanism. The Board publishes its slice to the Hub's
+merge, generalised to `createProjectsUnion<S>` (`BoardSlice` adds the server's
+per-board counts); its sidebar renders the union with one row template for
+Aggregate and Single, each row filtered, clocked and counted by its own
+server, tagged on the second line. A foreign Board row is the same landing the
+Hub's is: `pickServerBoard` → `focusMember` → `boardIssueReq` with `id: 0`
+(the board, no issue), delivered by `landingFor` to the tree it names; the
+body stays one server's (D3), a hidden member's Board does the 20 s list
+refresh only (D4), and answered/failed are the slice states of P1-C4. The
+Terminal's union source is unchanged; what changes is WHERE its foreign rows
+are drawn. On the phone the session sheet is a union LIST: the foreign
+sessions are rows of the main list right under this server's projects
+(`foreignInline`, a host prop App derives from the sheet's own condition,
+`isTouchDevice && narrowVp` — the component never re-decides what a phone
+is), each with the tag on its own line and the same pick (focus + open
+there); the desktop sidebar keeps its grouped "Other servers" section, where
+a tall column reads whole.
+
 **The system status and the "current server" actions are the focus's**
 (③c-5). The sidebar's vitals are ONE server's reading — the focused one's —
 never several machines' summed or averaged: App hands the one `SystemStatus`

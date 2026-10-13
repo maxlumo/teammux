@@ -20,6 +20,8 @@
   import { registerLeaveGuard } from '../app/leave-guards.ts';
   import { useServerScope } from '../app/server-context.ts';
   import ServerTag from '../ui/ServerTag.svelte';
+  import type { BoardUnion, BoardUnionRow } from '../app/hub-union.svelte.ts';
+  import { sessionRef, refKey, type SessionRef } from '../app/refs.ts';
   import Icon from '../ui/Icon.svelte';
   import Select from '../ui/Select.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
@@ -45,10 +47,20 @@
   // A board always lives in a server's subtree (the page, the Hub drawer).
   if (!scope) throw new Error('Board needs a server scope');
   const guardOwner = scope.runtime;
+  const serverId = guardOwner.id;
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
   const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubPost, hubRooms } = guardOwner.api;
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '' }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean } = $props();
+  /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
+   * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
+   * for the Board family (`hub-union.svelte.ts` createBoardUnion) and the
+   * included set. This Board PUBLISHES its server's slice (rows, clock,
+   * counts, answered/failed) and the VISIBLE one renders the merged list in
+   * its sidebar, each row tagged by the ③c-1 rule. A foreign row's pick is
+   * the host's (`onPickServer`: focus that server, land on that board — D2);
+   * the board body stays this server's (D3). Null in Single: this server's
+   * list, untagged, as before. */
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, onPickServer = null }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
   // Hub's reveal: pinned at its width, the track's factor moving (reveal.ts).
@@ -108,7 +120,9 @@
   // A jump from the feed's board line (board #13 follow-up): the request names
   // its OWN session — a manual pick may have parked this page on another
   // project, and the issue id is session-gated. The dirty-draft guard still
-  // stands between the jump and an open edit.
+  // stands between the jump and an open edit. With no issue (`id` 0) it is a
+  // LANDING on that project's board alone — a union row of this server picked
+  // from another server's Board (#357, D2) — and opens nothing.
   let issueReqSeen = $state(0);
   $effect(() => {
     const req = issueRequest;
@@ -117,7 +131,7 @@
     guard(() => {
       if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
       creating = false; sideOpen = false;
-      void openIssue(req.id);
+      if (req.id) void openIssue(req.id);
     });
   });
   // Embedded, the new-issue button lives in the DRAWER head (board #23: the
@@ -141,7 +155,12 @@
   let allProjects = $state<ProjectRow[]>([]);
   let countsMap = $state<Record<string, BoardCountRow>>({});
   const projects = $derived(visibleBoards(allProjects, countsMap));
+  /** The list's own state for the union (P1-C4): has it ever answered, and
+   * did the latest refresh fail. A failure keeps the rows (last good list). */
+  let listAnswered = $state(false), listFailed = $state(false);
+  let projectReadSequence = 0;
   async function loadProjects() {
+    const request = ++projectReadSequence;
     try {
       // The SAME order as the Hub/Chat sidebar (reopened #11): newest
       // conversation first — one hub_rooms read feeds sortRows, exactly the
@@ -149,11 +168,20 @@
       // ONE grouped RPC for every project's four column counts — a
       // per-project boardList walk here is the N+1 the server call exists
       // to prevent.
+      // Each read starts inside an async thunk: a call that THROWS (a
+      // detached runtime's gate refuses synchronously) becomes that read's
+      // own rejection, so the reads already started are still handled. Without
+      // it a throw at the second call left the first call's rejection with no
+      // handler — an unhandled rejection from a member that now refreshes
+      // while hidden (#357).
+      const ask = <T,>(f: () => Promise<T>): Promise<T> => (async () => f())();
       const [r, rooms, bc] = await Promise.all([
-        projectList(),
-        hubRooms().catch(() => ({ rooms: {} })),
-        boardCounts().catch(() => null),
+        ask(() => projectList()),
+        ask(() => hubRooms()).catch(() => ({ rooms: {} })),
+        ask(() => boardCounts()).catch(() => null),
       ]);
+      if (request !== projectReadSequence) return;
+      listAnswered = true; listFailed = false;
       talkMap = rooms.rooms ?? {};
       allProjects = sortRows((r.projects ?? []).filter((row) => !row.project.archived), talkMap);
       // A failed counts read keeps the last map — "could not ask" is not
@@ -162,21 +190,58 @@
       // No session to follow: land on the first NON-EMPTY board — the ones
       // the sidebar actually shows (board #39).
       if (!cur) cur = visibleBoards(allProjects, countsMap)[0]?.project.session ?? '';
-    } catch { /* keep the last list — "could not ask" is not "there is nobody" */ }
+    } catch {
+      /* keep the last list — "could not ask" is not "there is nobody" */
+      if (request === projectReadSequence) listFailed = true;
+    }
   }
+  // D4 (#357, as the Hub's ③c-2): a HIDDEN member in a union keeps only its
+  // list refresh — the slice it publishes, on the same 20 s cadence — and
+  // nothing else; in Single a hidden Board polls nothing, as before.
   $effect(() => {
-    if (!visible) return;
+    if (!visible && !union) return;
     loadProjects();
     const iv = setInterval(loadProjects, 20000);
-    const ageIv = setInterval(() => { projectTick = Date.now(); }, 1000);
-    return () => { clearInterval(iv); clearInterval(ageIv); };
+    return () => clearInterval(iv);
   });
+  $effect(() => {
+    if (!visible) return;
+    const ageIv = setInterval(() => { projectTick = Date.now(); }, 1000);
+    return () => clearInterval(ageIv);
+  });
+  // #357: publish this server's slice, by this runtime; withdraw it with the
+  // tree. The union is read-only to this Board beyond its own slice.
+  $effect(() => {
+    if (!union) return;
+    union.source.publish(guardOwner, serverId, { rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed });
+  });
+  $effect(() => () => { union?.source.withdraw(guardOwner); });
+  /** The sidebar's list: in Aggregate every included server's boards merged
+   * by the one rule, each row filtered by ITS server's counts (an empty
+   * board is hidden, board #39) and labelled by its server's clock; in
+   * Single this server's rows as untagged single-server entries. ONE row
+   * template either way. */
+  const unionList = $derived(union ? union.source.rows(union.included) : null);
+  const sideRows = $derived<BoardUnionRow[]>(unionList
+    ? unionList.rows.filter((r) => (r.slice.counts[r.item.project.session]?.total ?? 0) > 0)
+    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed } })));
+  const curKey = $derived(refKey(sessionRef(serverId, cur)));
+  const missingRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.missing.includes(s.id)) : []);
+  const unavailableRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.unavailable.includes(s.id)) : []);
   function pick(s: string) {
     guard(() => {
       if (s !== cur) { cur = s; }
       picked = true;
       sideOpen = false; // choosing closes the drawer
     });
+  }
+  /** A sidebar row picked: this server's is the ordinary pick; another
+   * server's is the host's focus move + landing (D2), the drawer closing
+   * here as for any choice. */
+  function pickRow(r: BoardUnionRow) {
+    if (r.serverId === serverId) { pick(r.item.project.session); return; }
+    sideOpen = false;
+    onPickServer?.(r.ref);
   }
 
   // The back gesture peels detail/form → list before leaving the page —
@@ -808,7 +873,7 @@
   <aside class="sidebar" class:side-sheet={narrowVp} class:open={narrowVp && sideOpen} bind:this={sideEl}>
     <SideHandle />
     <div class="side-scroll subtle-scroll" use:scrollFade
-      use:slideIndicator={{ key: `${cur}|${projects.map((p) => p.project.session).join(',')}`, active: '.proj-row.open', hidden: !projects.some((p) => p.project.session === cur) }}>
+      use:slideIndicator={{ key: `${curKey}|${sideRows.map((r) => r.key).join(',')}`, active: '.proj-row.open', hidden: !sideRows.some((r) => r.key === curKey) }}>
       <!-- The chosen project's wash glides (motion principle 14), as in the
            Chat and Terminal sidebars. -->
       <span class="slide-pill soft" aria-hidden="true"></span>
@@ -839,15 +904,22 @@
           </span>
         </span>
       </div>
-      {#each projects as p (p.project.session)}
-        {@const c = countsMap[p.project.session]}
-        <button class="side-row proj-row" class:open={cur === p.project.session} onclick={() => pick(p.project.session)}>
+      <!-- #357: ONE row template over the union (Aggregate) or this
+           server's list (Single). A row's counts, clock and age are ITS
+           server's (`r.slice`); its tag follows the ③c-1 rule; a foreign
+           row is a SELECTOR — pick = focus that server + land on its board.
+           The tag takes the second line, under the name (#360's grammar). -->
+      {#each sideRows as r (r.key)}
+        {@const p = r.item}
+        {@const c = r.slice.counts[p.project.session]}
+        <button class="side-row proj-row" class:open={r.key === curKey} class:foreign={r.serverId !== serverId} data-server={r.serverId} onclick={() => pickRow(r)}>
           <span class="dot" class:off={!p.live}></span>
           <span class="p-main">
             <span class="p-top">
               <span class="p-name">{p.project.name}</span>
-              <span class="side-age">{projectAgeLabel(p, talkMap, projectTick)}</span>
+              <span class="side-age">{projectAgeLabel(p, r.slice.talk, projectTick)}</span>
             </span>
+            {#if r.tag}<span class="p-source"><ServerTag name={r.tag} /></span>{/if}
             <span class="side-wins grid" style:grid-template-columns={`repeat(${cols}, minmax(0, 1fr))`}>
               {#each STATUSES as st (st)}
                 <span class="side-win">
@@ -859,6 +931,20 @@
             </span>
           </span>
         </button>
+      {/each}
+      <!-- A server in the union whose list has not arrived, or fails now
+           (P1-C4): said, never a shorter list in silence. -->
+      {#each missingRows as m (m.id)}
+        <div class="side-row proj-row missing" role="note">
+          <span class="dot off"></span>
+          <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
+        </div>
+      {/each}
+      {#each unavailableRows as u (u.id)}
+        <div class="side-row proj-row missing" role="note">
+          <span class="dot off"></span>
+          <span class="p-main"><span class="p-top"><span class="p-name">{u.name}</span><span class="side-age">{t('hubUnionUnavailable')}</span></span></span>
+        </div>
       {/each}
     </div>
   </aside>

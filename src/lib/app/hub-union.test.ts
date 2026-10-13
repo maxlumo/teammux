@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 (globalThis as { $state?: unknown }).$state = (v: unknown) => v;
-const { createHubUnion } = await import('./hub-union.svelte.ts');
+const { createHubUnion, createBoardUnion } = await import('./hub-union.svelte.ts');
 import type { ProjectRow } from '../projects/projects.ts';
 
 const row = (name: string, live: boolean, updated = 0): ProjectRow =>
@@ -90,4 +90,27 @@ test('a row carries ITS server s catalog: the slice s icon, not the focus s (P2-
   const r = u.rows(two);
   assert.equal(r.rows.find((x) => x.serverId === 'b')!.slice.icon('codex'), '/b.svg');
   assert.equal(r.rows.find((x) => x.serverId === 'a')!.slice.icon('codex'), '/a.svg');
+});
+
+test('the Board s union is the SAME merge (#357): its rows ride each server s clock, its slice keeps ITS server s counts, and answered/failed behave as the Hub s', () => {
+  const u = createBoardUnion();
+  const cnt = (total: number) => ({ todo: total, doing: 0, review: 0, done: 0, total });
+  const board = (rows: ProjectRow[], counts: Record<string, ReturnType<typeof cnt>>, talk: Record<string, number> = {}, state: { answered?: boolean; failed?: boolean } = {}) =>
+    ({ rows, talk, counts, answered: state.answered ?? true, failed: state.failed ?? false });
+  const ra = { id: 'ra' }, rb = { id: 'rb' };
+  u.publish(ra, 'a', board([row('app', true)], { app: cnt(2) }, { 'proj:app': 100 }));
+  assert.deepEqual(u.rows([{ id: 'a', name: 'alpha' }]).rows.map((x) => x.tag), [null], 'one server: untagged, the server s own list');
+  u.publish(rb, 'b', board([row('ops', true), row('app', true)], { ops: cnt(3), app: cnt(1) }, { 'proj:ops': 900, 'proj:app': 5 }));
+  const r = u.rows(two);
+  assert.deepEqual(r.rows.map((x) => `${x.tag}:${x.item.project.name}`), ['beta:ops', 'alpha:app', 'beta:app'], 'merged by the one rule, each head on its own server s clock');
+  assert.equal(r.rows[1]!.slice.counts.app!.total, 2, 'a row reads ITS server s counts');
+  assert.equal(r.rows[2]!.slice.counts.app!.total, 1, 'the same-named board on B reads B s');
+  // B has not answered: missing, not an empty list.
+  u.publish(rb, 'b', board([], {}, {}, { answered: false }));
+  assert.deepEqual(u.rows(two).missing, ['b']);
+  // B answered, then fails: last good rows stay, named unavailable.
+  u.publish(rb, 'b', board([row('ops', true)], { ops: cnt(3) }, {}, { failed: true }));
+  const f = u.rows(two);
+  assert.deepEqual(f.unavailable, ['b']);
+  assert.ok(f.rows.some((x) => x.serverId === 'b'));
 });

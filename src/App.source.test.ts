@@ -729,6 +729,11 @@ test('the content tree is bound to one server, and only the swap binds it (board
   for (const req of ['filesNavReq', 'boardIssueReq']) {
     assert.match(source, new RegExp(`v\\.${req} = \\{ serverId: runtime\\.id,`, 'u'), `${req} names its tree`);
   }
+  // #357: the Board's cross-server pick is the SAME landing — the board, no
+  // issue (`id: 0`) — aimed at the tree it names, never a new request kind.
+  assert.match(source, /function pickServerBoard\(ref\) \{[\s\S]*?const moved = focusMember\(ref\.serverId\);[\s\S]*?v\.boardIssueReq = \{ serverId: ref\.serverId, session: ref\.session, id: 0, n: \(v\.boardIssueReq\?\.n \?\? 0\) \+ 1 \};/u);
+  assert.match(source, /union=\{boardUnionFor\} onPickServer=\{pickServerBoard\}/u);
+  assert.match(source, /const boardUnion = createBoardUnion\(\);\s*const boardUnionFor = \$derived\(connMode === 'aggregate' \? \{ source: boardUnion, included: tagScope\.included \} : null\);/u, 'Single hands no union');
   assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem\('tmux_state'\)/u,
     'nothing parses the saved state by hand any more');
   // One definition of what a landing is: the swap and the reset share it.

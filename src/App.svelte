@@ -41,7 +41,7 @@
   import { createMembers } from './lib/app/server-members.svelte.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag } from './lib/app/server-tag.ts';
-  import { createHubUnion } from './lib/app/hub-union.svelte.ts';
+  import { createBoardUnion, createHubUnion } from './lib/app/hub-union.svelte.ts';
   import { createSessionsUnion } from './lib/app/sessions-union.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
@@ -1579,6 +1579,11 @@
     source: hubUnion, included: tagScope.included,
     runtimeOf: (id) => { const r = scopeSwap.bound()?.id === id ? scopeSwap.bound() : background.find((x) => x.id === id); return r && r.alive() ? r : null; },
   } : null);
+  /** The Board sidebar's union source (#357, `hub-union.svelte.ts`
+   * createBoardUnion): the same projection as the Hub's, each Board
+   * publishing its server's rows, clock and column counts; Single hands none. */
+  const boardUnion = createBoardUnion();
+  const boardUnionFor = $derived(connMode === 'aggregate' ? { source: boardUnion, included: tagScope.included } : null);
   /** The Terminal sidebar's sessions union (③c-3, `sessions-union.svelte.ts`):
    * the same shape as the Hub's; a foreign session is a SELECTOR (D3). */
   const sessionsUnion = createSessionsUnion();
@@ -1607,6 +1612,18 @@
     if (moved !== true) { pickMember(target); return; }
     const v = viewOf(scopeSwap.bound());
     v.hubSelectReq = { serverId: ref.serverId, session: ref.session, n: (v.hubSelectReq?.n ?? 0) + 1 };
+  }
+  /** A Board union row of ANOTHER server picked (#357): focus that server
+   * (D2) and hand its Board the project as a landing with no issue — the
+   * same `boardIssueReq` a feed board-line jump uses, `id` 0 meaning "that
+   * board, nothing opened". The board body is one server's (D3). */
+  function pickServerBoard(ref) {
+    const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
+    if (!target) return;
+    const moved = focusMember(ref.serverId);
+    if (moved !== true) { pickMember(target); return; }
+    const v = viewOf(scopeSwap.bound());
+    v.boardIssueReq = { serverId: ref.serverId, session: ref.session, id: 0, n: (v.boardIssueReq?.n ?? 0) + 1 };
   }
   /** A bell row picked (③c-4): the jump lands in the ALERT'S server's Hub.
    * Another included server's row focuses that server first (D2, as a
@@ -3986,7 +4003,8 @@
     </div>
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}
-        <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom} />
+        <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom}
+          union={boardUnionFor} onPickServer={pickServerBoard} />
       {/if}
     </div>
     <div class="page-layer term-page" class:hidden={!shown || page !== 'terminal'} bind:this={v.termPageEl}>
@@ -4000,7 +4018,7 @@
           onGoBack={(fn) => v.sessionsGoBack = fn}
           visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
-          union={sessionsUnionFor} onPickServer={pickServerPane}
+          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp}
           chips={false} />
       </aside>
       {#if layout.isTouchDevice && sessListOpen}
