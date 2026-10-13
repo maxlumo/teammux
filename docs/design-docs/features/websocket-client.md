@@ -1884,9 +1884,19 @@ phone switching meant leaving the page. The door is App's one server popover
 toggle plus the open state and the popover's id; the page renders a row —
 swap glyph that quarter-turns while open, the server's tag — and owns no
 registry, no list, no focus logic. Shown by the ③c-1 tag rule (more than one
-server included), on both screens. A pick is the ordinary focus move (D2).
-A page-local server list, a door shown by mode rather than by the tag rule,
-or a door that merges trees are forbidden.
+server included), on both screens. A pick is the ordinary focus move (D2);
+each server's Files keeps its own parked cwd (a ServerState per server), so
+A in /dir-a, B in /dir-b, back to A is still /dir-a.
+
+The door is the PAGE's, one instance, above every view (orchestrator
+2026-10-13 23:17): "on the phone a preview/edit/info view IS the Files page
+the person is looking at, and switching servers from there is the very case
+(browsing a file on A, want B) — leaving to the list first is the friction the
+issue exists to remove." It is the first child of `.files`, before the
+split/single-pane chain; reading mode (a layer over the preview, #226) hides
+it with the preview header. A page-local server list, a door shown by mode
+rather than by the tag rule, a door inside one view's panel, or a door that
+merges trees are forbidden.
 
 ### The "current server" actions act on the focus, named, frozen at the click (#335 ③c-5)
 

@@ -8090,6 +8090,67 @@ test('#358: Files carries the one server door when more than one server is inclu
   assert.doesNotMatch([...front().querySelectorAll('.file-row')].map((r) => r.textContent).join('|'), /on-a\.txt/u);
 });
 
+test('#358: each server s Files keeps its OWN parked cwd across the door — A browsed into /dir-a, B into /dir-b, back to A: A is still in /dir-a, B still in /dir-b (D3: one ServerState, one Files memory per server)', async (context) => {
+  // Every list answer is stamped with the asking server and the asked path,
+  // so a row s text names its source AND its directory.
+  const tree = (path: string) => {
+    const who = asking();
+    if (path === '/') return [{ name: `dir-${who}`, path: `/dir-${who}`, type: 'dir', size: 0 }];
+    return [{ name: `leaf-${who}-in${path.replace(/\//gu, '-')}.txt`, path: `${path}/leaf.txt`, type: 'file', size: 1 }];
+  };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: { ...twoHubs(), fsCwd: async () => ({ path: '/' }), fsList: async (path: string) => ({ path, entries: tree(path) }) } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held)')!;
+  const rows = () => [...front().querySelectorAll('.file-row .file-name')].map((r) => r.textContent).join('|');
+  const descend = async (name: string) => {
+    [...front().querySelectorAll<HTMLButtonElement>('.file-row .file-main')].find((b) => (b.textContent ?? '').includes(name))!.click();
+    for (let i = 0; i < 8; i++) { await h.app.advance(200); await h.settle(); }
+  };
+  const pickServer358 = async (id: string, label: RegExp) => {
+    front().querySelector<HTMLButtonElement>('.server-door')!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.server-menu .sm-pick, .pop-layer .sm-pick')].find((b) => label.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== id; i++) { await h.app.advance(200); await h.settle(); }
+    for (let i = 0; i < 6; i++) { await h.app.advance(300); await h.settle(); }
+    assert.equal(ls.getItem('tmux_server_current'), id);
+  };
+  assert.match(rows(), /dir-a/u, `A at its root: ${rows()}`);
+  await descend('dir-a');
+  assert.match(rows(), /leaf-a-in-dir-a/u, `A now in /dir-a: ${rows()}`);
+  await pickServer358('b', /^beta\b/iu);
+  assert.match(rows(), /dir-b/u, `B at ITS root — A s navigation did not move B: ${rows()}`);
+  assert.doesNotMatch(rows(), /-a-/u, 'nothing of A s in B s list');
+  await descend('dir-b');
+  assert.match(rows(), /leaf-b-in-dir-b/u, `B now in /dir-b: ${rows()}`);
+  await pickServer358('a', /^alpha\b/iu);
+  assert.match(rows(), /leaf-a-in-dir-a/u, `back on A: still /dir-a, its own parked cwd: ${rows()}`);
+  assert.doesNotMatch(rows(), /-b-/u);
+  await pickServer358('b', /^beta\b/iu);
+  assert.match(rows(), /leaf-b-in-dir-b/u, `and B still /dir-b: ${rows()}`);
+  assert.equal(trees(h.app).length, 2, 'both trees alive throughout — the parked cwd is each instance s own state');
+});
+
+test('#358 (phone): the door is the PAGE s, above every view — still there while a file is previewed, so the person reading on A switches to B without walking back to the list (orchestrator 2026-10-13 23:17); reading mode alone hides it', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc }, setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held)')!;
+  const files = () => front().querySelector<HTMLElement>('.files')!;
+  assert.ok(front().querySelector('.file-row'), 'the list view');
+  assert.equal(files().querySelectorAll('.server-door').length, 1, 'one door');
+  assert.equal(files().firstElementChild?.classList.contains('server-door'), true, 'the page s first row, not the list panel s');
+  [...front().querySelectorAll<HTMLButtonElement>('.file-row .file-main')].find((b) => (b.textContent ?? '').includes('notes.md'))!.click();
+  for (let i = 0; i < 8; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(front().querySelector('.preview-header'), 'the phone shows the preview alone');
+  assert.equal(front().querySelector('.file-row'), null, 'the list panel is gone (single-pane chain)');
+  assert.equal(files().querySelectorAll('.server-door').length, 1, 'the SAME door is still on the page');
+  assert.equal(files().querySelector('.server-door .server-tag')?.textContent, 'alpha');
+});
+
 test('#358 (Single): no server door', async (context) => {
   const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc } });
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }

@@ -1727,19 +1727,6 @@
 <!-- View blocks live in snippets so both layouts (mobile single-pane + desktop
      two-pane) render the same markup. -->
 {#snippet listPanel()}
-    {#if onServers && scope.tag}
-      <!-- Whose files these are, and the door to another server's (board
-           #358): the server's name as the ③c-1 tag beside a swap glyph, the
-           grammar of Settings' phone server row; opens App's one server
-           popover (aria-controls names it). Shown only with more than one
-           server included (the tag rule), on both screens. -->
-      <button type="button" class="server-door" class:open={serversOpen} aria-haspopup="dialog" aria-expanded={serversOpen}
-        aria-controls={serversOpen ? serversControls : undefined} aria-label={t('serversTitle')}
-        onclick={(e) => onServers?.(e)}>
-        <span class="quarter-turn" class:on={serversOpen}><Icon name="swap-h" size={14} /></span>
-        <ServerTag name={scope.tag} />
-      </button>
-    {/if}
     <div class="toolbar compact-tools" role="group" aria-label={t('filesTools')} use:measureToolbar
       oncontextmenu={(event) => contextFile(event)}
       use:longpress={{ onlongpress: ({ x, y }) => openFileMenu({ x, y }, 'directory') }}>
@@ -2091,6 +2078,23 @@
   style:transform={swipeDX > 0 ? `translateX(${swipeDX}px)` : ''}
   style:--files-list-default={`${LIST_WIDTH.default}px`}
   ontouchstart={onTouchStart} ontouchmove={onTouchMove} ontouchend={onTouchEnd} ontouchcancel={onTouchCancel}>
+  {#if onServers && scope.tag}
+    <!-- Whose files these are, and the door to another server's (board #358):
+         the server's name as the ③c-1 tag beside a swap glyph, the grammar of
+         Settings' phone server row; opens App's one server popover
+         (aria-controls names it). Shown only with more than one server
+         included (the tag rule), on both screens. PAGE level, one instance,
+         above whichever view is showing — list, preview, edit, info, git,
+         downloads — so a person previewing a file on A who wants B does not
+         walk back to the list first (orchestrator 2026-10-13 23:17); reading
+         mode, a layer over the preview, keeps its immersion. -->
+    <button type="button" class="server-door" class:open={serversOpen} aria-haspopup="dialog" aria-expanded={serversOpen}
+      aria-controls={serversOpen ? serversControls : undefined} aria-label={t('serversTitle')}
+      onclick={(e) => onServers?.(e)}>
+      <span class="quarter-turn" class:on={serversOpen}><Icon name="swap-h" size={14} /></span>
+      <ServerTag name={scope.tag} />
+    </button>
+  {/if}
   {#if error}
     <div class="error appear">{error}</div>
   {/if}
@@ -2194,11 +2198,12 @@
     .preview-open .files-left { display: none; }
   }
 
-  /* The server door (#358): a row above the tools in the sidebar's row
-     grammar — swap glyph that quarter-turns while the popover is open, the
-     server's tag. The same hover/press washes the side rows use. */
+  /* The server door (#358): the page's first row, above every view, in the
+     sidebar's row grammar — swap glyph that quarter-turns while the popover
+     is open, the server's tag. The same hover/press washes the side rows use.
+     Reading mode hides it with the rest of the chrome. */
   .server-door {
-    display: flex; align-items: center; gap: 6px; width: 100%; min-height: var(--control-height);
+    display: flex; align-items: center; gap: 6px; width: 100%; min-height: var(--control-height); flex-shrink: 0;
     padding: 0 var(--tool-inset-inline); box-sizing: border-box; border: 0; border-bottom: 1px solid var(--border);
     background: transparent; color: var(--text2); font: inherit; text-align: left; cursor: pointer;
   }
@@ -2375,6 +2380,7 @@
      5: exits are cuts) — and the floating return sits above the safe area,
      one 44px target at the thumb. */
   .files.reading .preview-header { display: none; }
+  .files.reading .server-door { display: none; } /* the door steps away with the header (#358) */
   .reading-exit {
     position: fixed; right: 16px; bottom: calc(16px + var(--sab)); z-index: 12;
     display: flex; align-items: center; justify-content: center;

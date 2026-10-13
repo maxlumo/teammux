@@ -334,6 +334,17 @@ test('the door opens App s ONE server popover and is shown by the tag rule (#358
   assert.match(source, /onclick=\{\(e\) => onServers\?\.\(e\)\}/u, 'the host toggles; Files owns no server list');
   assert.match(source, /<span class="quarter-turn" class:on=\{serversOpen\}><Icon name="swap-h" size=\{14\} \/><\/span>\s*<ServerTag name=\{scope\.tag\} \/>/u, 'the swap glyph that turns while open, the one tag atom');
   assert.ok(!/ServerList|loadServers|focusServer|currentServerId/u.test(source), 'no second switcher: Files imports nothing of the registry');
+  // PAGE level, one instance (orchestrator 2026-10-13 23:17): the door is the
+  // first child of `.files`, before the split/single-pane chain, so every
+  // view — list, preview, edit, info, git, downloads — has it; no snippet
+  // renders a second one. Reading mode (a layer over the preview, #226) hides
+  // it with the preview header.
+  assert.equal(source.match(/class="server-door"/gu)?.length, 1, 'one door in the template');
+  assert.match(source, /<div class="files" bind:this=\{filesEl\}[\s\S]*?>\n\s*\{#if onServers && scope\.tag\}\n(?:\s*<!--[\s\S]*?-->\n)?\s*<button type="button" class="server-door"/u, 'the page s first row');
+  assert.ok(source.indexOf('class="server-door"') < source.indexOf('{#if error}'), 'before the error line and every panel');
+  const listPanel = source.slice(source.indexOf('{#snippet listPanel()}'), source.indexOf('{#snippet previewPanel()}'));
+  assert.doesNotMatch(listPanel, /server-door/u, 'the list panel carries no door of its own');
+  assert.match(source, /\.files\.reading \.server-door \{ display: none; \}/u, 'reading mode hides it');
   // App hands Files the SAME toggle and open state the rail and Settings use.
   assert.match(app, /<Files [\s\S]*?onServers=\{toggleServerMenu\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\} \/>/u);
   assert.match(app, /onServers=\{connected && layout\.isTouchDevice \? toggleServerMenu : null\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\}/u, '(Settings phone row: the same three)');
@@ -344,6 +355,7 @@ test('the door wears tokens and the side-row washes, no raw sizes or colours (#3
   const rule = css.match(/\.server-door \{([^}]*)\}/u)?.[1] ?? '';
   assert.ok(rule, 'the rule exists');
   assert.match(rule, /min-height: var\(--control-height\)/u);
+  assert.match(rule, /flex-shrink: 0/u, 'a row of the flex-column page: never squeezed by a tall view');
   assert.match(rule, /padding: 0 var\(--tool-inset-inline\)/u);
   assert.ok(!/font-size:\s*\d|#[0-9a-f]{3,8}\b/iu.test(rule), 'tokens only');
   assert.match(css, /\.server-door:hover, \.server-door\.open \{ background: var\(--surface2\); \}/u, 'the side rows hover wash');
