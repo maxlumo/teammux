@@ -26,6 +26,22 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   gesture cannot cycle close→open or leave the page. A Terminal reached through
   Chat's jump slot returns to Chat before this ordinary floor is considered.
   Terminal remains the connect/fallback landing everywhere.
+- **Several servers** (board #335 ③): every server's Terminal page is its own
+  tree over its own socket — a pane stream reaches only the tree whose server
+  sent it, and a split stays within one tree (no cross-server split). In
+  Aggregate the focused page's session list adds, under its own sessions, an
+  **Other servers** section: every other included server's sessions, tagged
+  with the server (`ui/ServerTag`), as a SELECTOR — picking one moves the
+  focus to that server and opens the pane there; the panes, kill, search and
+  the pane picker above stay this server's, and the section is not searched.
+  A server whose list has not arrived is listed as "no list yet". The section
+  never waits for this server's own first Projects answer. A hidden member's
+  page keeps its list current on the same 20 s list cadence the Hub uses
+  (one `list_sessions_with_panes` per tick, nothing of a pane) and on its
+  server's reconnect; the shown page has no poll of its own. The page head
+  wears the server tag when more than one server is included; the system
+  status strip beside the sidebar shows the FOCUSED server's reading only,
+  named in Aggregate.
 
 - The Terminal tab and its always-mounted page layer are available immediately
   after connecting, even before a pane has been selected. With no active target,
@@ -98,7 +114,7 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
 - `scratch_session()` / `scratch_kill()` — the scratch terminal's session (ensure + its pane target / kill ours only)
 
 ## State Management
-- Active pane target (session:window.pane)
+- Active pane target (session:window.pane) — a ref that names its server (`serverId`); saved in that server's own slot (`tmux_state::<id>`) and restored from it, never resolved by a same-named pane on another server
 - Terminal content (managed by xterm.js)
 - Window switcher collapsed/expanded (persisted)
 - `touchScrolling` flag — pauses content updates during touch

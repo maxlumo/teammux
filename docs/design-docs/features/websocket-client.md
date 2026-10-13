@@ -927,6 +927,44 @@ moves only on a definitive answer, and a failed backends probe keeps the list
 the runtime already had rather than wiping it to the fallback. A client with
 no saved entry has nothing to dial and opens the connect card.
 
+## Several servers at once (board #335 ③)
+
+Phase ③ is the user-facing half of #335: with ① (the connection is an
+object) and ② (every name is a server's, every store is a slot) in place,
+the app can HOLD several servers and show them as one room. The ruling that
+shaped it (orchestrator, 2026-10-11/12) and its six design points:
+
+- **D1 — a member is a tree.** Every included server gets its own runtime,
+  socket, state and mounted tree (held, inert, behind the focus); nothing is
+  rebuilt on a focus move. No second transport, no aggregation service.
+- **D2 — the focus moves in place.** Picking a connected member changes
+  CURRENT and the mirror and brings its tree forward; no dial, no walk, no
+  teardown. A server that is not up is the ordinary switch.
+- **D3 — one tree, one terminal.** A split stays within a server; another
+  server's session is a selector that moves the focus there.
+- **D4 — a hidden member does list work only.** Its Hub's 20 s project
+  refresh and its Sessions' 20 s list refresh, the unread badge and the
+  notification record on a push; no room, no pane, no vitals.
+- **D5 — projections, not pollers.** The Hub sidebar, the Sessions selector
+  and the bell are k-way merges of what each tree PUBLISHED, every row with
+  its server's tag by one rule (`server-tag.ts`: more than one included) and
+  its own clock and catalog; every action goes back to its source through
+  the same confirmed flow as a local one, on an api frozen at the ask.
+- **D6 — one scope for shown, counted and cleared.** The INCLUDED members;
+  an offline included member is listed unavailable, not counted, not
+  cleared; an excluded server is not in the view.
+
+The sections below are the mechanics, in the order they were built: ③a the
+window's view per tree and the blocked app; ③b the member set, the focus
+move, the leave walk per tree, the mode and include switches, identity
+changes of a member (absorbed, orphaned, the owed handover, the explicit
+end); ③c the tag, the three unions, the system status and the "current
+server" actions; ③d the acceptance matrix
+(`docs/exec-plans/multi-server-acceptance-matrix.md`), the discard of a
+pending pre-#335 input, and the requirements (settings.md, hub.md,
+terminal.md). Not done, on purpose: a cross-server feed, cross-server
+`@mention`, a cross-server split, any server/CLI/`tmm` change.
+
 ### The window's side of a tree: the view (board #335 ③a)
 
 A bound tree has two halves. What the SERVER remembers — drafts, read marks,

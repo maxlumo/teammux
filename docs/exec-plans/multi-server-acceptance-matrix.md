@@ -96,3 +96,30 @@ recorded evidence gap, not claimed.
 - Hidden Hub: an `agentsRefresh` scheduled while visible can still fire after a hide; no immediate `loadFeed` on show (reviewer P2-4).
 - X2 CURRENT-only branch of `settleHandover` is a source pin; no App path reaches it with the window free.
 - Real-browser rows above (image/file reference jump; the dirty F replay; screenshots) are the validator's on the containers.
+
+## Real-app smoke (validator's rows)
+
+The browser rows run on the `#352` Docker environment
+(`docs/conventions/testing.md § Multi-server work ends in the Docker
+environment`, on main), which this branch predates: build the image from a
+main+③ INTEGRATION worktree so the containers embed the ③ UI (validator
+04:44 did: `npm run test:e2e:docker -- --keep` from that worktree; the kept
+environment is exclusive until the pass ends). Never the owner's dev server,
+never a machine the owner did not authorise.
+
+Preset for the Aggregate shapes, loading `gw-a`'s embedded UI:
+`tmux_servers` with `gw-a` and `gw-b` (each its real address and token, no
+`machineId` — the handshake fills it), `tmux_server_current` = gw-a's id,
+`tmux_connection_mode` = `aggregate`. Expected on boot: two trees (`gw-b`
+held + inert); the Hub sidebar a union with both servers' rows tagged; the
+Sessions "Other servers" section listing `gw-b`'s; the status strip named
+`gw-a`; both machine ids from the handshakes. Picking `gw-b` in the switcher:
+CURRENT changes, both trees stay, roles swap, the Hub head tag and the strip
+read `gw-b`, no JS error.
+
+Preset for the absorb (dirty F) shape: start with the two trees as above,
+THEN add the alias address to `tmux_machines` under the canonical's machine
+(seeding it before boot makes the first alias dial absorb at once); the alias
+handshake first reports no `machine_id`, then the canonical's. The owed
+handover completes once the walk ends; a Board draft counts as dirty for the
+guard (the validator's 01:04 note).

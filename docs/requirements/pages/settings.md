@@ -45,7 +45,35 @@ where Agents is a page of its own, reads as one plain list):
   (the current one marked, its address list below it). Migration from the
   single-server keys is
   one-time, idempotent, and never loses the current user.
-- Server info: hostname, machine ID, address; the address list marks the
+- Connection mode (board #335 ③): **Connect to: One server / All
+  included** (`ui/Segmented`, persisted to `tmux_connection_mode`). In
+  Aggregate every saved server is a background member: connected on its own
+  socket, its tree kept mounted, held and inert behind the focused one. Every
+  row of the ONE server list (popover and this page) carries an include
+  switch (`ui/Switch`, the set in `tmux_excluded_servers`) and the member's
+  derived status — the one status-dot language, a failure's reason after the
+  address (not answering, paused on storage, reaches another known server),
+  and "Excluded" for a server left out. Picking a CONNECTED member moves the
+  focus (CURRENT and the mirror) with no dial and no teardown; picking an
+  excluded one includes it; picking a saved server that is not up is the
+  ordinary switch. Every mode or include change asks the trees it would
+  destroy first, one at a time, in that tree, and a "keep editing" changes
+  nothing; excluding the focus moves the focus to the next connected member
+  first and is refused when there is none. While the app is blocked on
+  storage, the mode and every switch are frozen with the registry. A new
+  server is included by default; a rename changes nothing.
+- The row's hover card (desktop) carries only what the row hides: the
+  machine id, the connecting/reconnecting word, Excluded — never the name,
+  address or reason already on the row. No native `title`.
+- Pending state from before #335: when drafts and views saved by an earlier
+  build are still waiting for the server whose machine they name, Connection
+  shows them as a row (named by that machine) with one action, **Discard**,
+  which asks first; confirming closes only that record (nothing else moves,
+  the earlier build's keys are left), and the row is frozen while blocked.
+- Server info: hostname, machine ID, address; in Aggregate with more than
+  one server included the title wears the focused server's tag
+  (`ui/ServerTag`); copy-link and the address optimizer act on the FOCUSED
+  server, resolved when the action starts. The address list marks the
   current address and shows a connecting cue on a tapped address until the
   switch settles. An alternate address is removable (the active one is not —
   it is the live connection), and a row's grip drag (or Arrow keys on it)
@@ -84,6 +112,8 @@ where Agents is a page of its own, reads as one plain list):
 - Choose or enter a font → validate it against the device font registry, then apply and remember it; the row is pending during validation, and failure restores the confirmed family with a visible error
 - Tap an alternate address' × → it leaves the machine's failover set; drag a row's grip (or focus it and press Arrow keys) → the set's order changes; both persist to localStorage `tmux_machines` through the one writer (`servers.ts` `saveMachineAddresses`)
 - Tap disconnect → `doDisconnect()`
+- Switch mode / flip an include switch → the leave walk for each tree it would destroy, then one write (`tmux_connection_mode` / `tmux_excluded_servers`); a connected member picked in the list → focus moves in place
+- Tap Discard on the pending row → confirm → the `tmux_state_layout` marker closes as `discarded`
 
 ## API Calls
 - `auth(token)` or encrypted auth (client_nonce + proof) — authenticate on connect (returns machine_id, hostname)
@@ -95,7 +125,8 @@ where Agents is a page of its own, reads as one plain list):
 - Locale / language preference (localStorage `tmux_locale`)
 - Interface scale, terminal font size, theme, terminal font name preference (localStorage)
 - Server info (hostname, machine_id)
-- State restore on reload (page, session, view mode)
+- State restore on reload (page, session, view mode) — per server, from that server's own slot (`tmux_state::<id>` and the other resident keys); in Aggregate the mode, the excluded set and the focus are restored too, and every member's tree from its own slot
+- Connection mode and excluded set (localStorage `tmux_connection_mode`, `tmux_excluded_servers`)
 
 ## Configuration Contract (#156, 2026-09-10)
 

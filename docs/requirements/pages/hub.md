@@ -89,6 +89,24 @@ completion).
   restore is free; the confirmed delete is the only irreversible step).
 - The open project persists (`tmux_hub_project`) and is re-verified against
   the list on load.
+- Several servers (board #335 ③): each server's Hub is its own tree (its own
+  socket, its own per-server prefs and alert list). In Aggregate the FOCUSED
+  Hub's sidebar is the UNION of every included server's projects — each
+  server's slice in its own order and on its own clock, merged by the one
+  rule, ties by saved order — and every row wears its server's tag
+  (`ui/ServerTag`) when more than one server is included. A row of another
+  server, picked, moves the focus to that server (no dial, no teardown) and
+  selects that project in ITS Hub. A row's Close/Delete is the same confirmed
+  flow as a local row's, on that server's api with the row's own project id,
+  the confirmation naming project · server; Delete is the recoverable
+  archive; Open opens there. A server whose list has not answered is listed
+  as "no list yet", never silently absent; one whose latest refresh failed
+  keeps its last good rows, muted, and is named "not connected"; an
+  included server with no live runtime offers nothing. Each row's agent faces
+  come from its own server's catalog. A hidden member's Hub does list work
+  only — its 20 s list refresh and, on a push, the unread badge and the
+  notification record — and opens its room when first shown. The Hub head
+  wears the server tag too.
 
 ## Roster (agent cards)
 - One card per live window; managed agents carry the hook-derived state dot
@@ -210,6 +228,18 @@ completion).
   backfill, and own/sys/ambient-status rows are filtered while agent replies
   and historical `[tmm done]` rows remain news. Unsupported notification/audio paths fail soft;
   this is not remote push after the app has closed.
+- The notification centre (bell) with several servers (board #335 ③c-4):
+  one bell per window over the INCLUDED servers' lists, newest first, each
+  row tagged with its server; picking a row focuses that server and lands in
+  its Hub on the message; `hub_read` reaches only the message's server. An
+  included member that is not connected is listed with its rows muted and
+  named in the foot, not counted in the badge, and Clear leaves its list; an
+  excluded server is not in this view. The bell is the window's: it is
+  reachable when the focus or any member has a Hub, or any list has entries —
+  on desktop the rail bell, on a phone the Hub header's bell, or, when the
+  focused server has no Hub, a bell in the Chat tab's slot. A system
+  notification's tag is the room ON ITS SERVER, and with several servers
+  included its title names the server.
 
 ## Composer
 - ONE capsule: recipient chip (`@name`, always prefixed on send), auto-grow
