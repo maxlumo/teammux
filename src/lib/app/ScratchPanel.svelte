@@ -28,7 +28,8 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { useServerApi } from './server-context.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
+  import { useServerScope } from './server-context.ts';
   // From rpc-codes, not ws.ts: the mount fixtures mock ws.ts, and a constant
   // read as `undefined` there would silently disable the action (#337).
   import { ERR_SCRATCH_HELD, ERR_SCRATCH_STALE } from '../core/rpc-codes.ts';
@@ -39,7 +40,9 @@
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
-  const api = useServerApi();
+  const scope = useServerScope();
+  if (!scope) throw new Error('ScratchPanel: no server scope — a server-bound page must be under a provider');
+  const api = scope.runtime.api;
 
   let phase = $state('idle');     // idle | opening | ready | ended | error
   let target = $state('');
@@ -192,6 +195,10 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <header class="scratch-head" onkeydown={onHeadKey} role="toolbar" aria-label={t('scratchTitle')} tabindex="-1">
     <span class="scratch-name">{t('scratchTitle')}</span>
+    <!-- Whose scratch this is (③c-5): the panel lives in its server's tree,
+         so its owner is frozen by construction; with several servers
+         included the head says which. -->
+    <ServerTag name={scope.tag} />
     <span class="spacer"></span>
     <Segmented options={[{ value: 'bottom', label: t('scratchBottom'), icon: 'panel-bottom' }, { value: 'right', label: t('scratchRight'), icon: 'panel-right' }]}
       value={edge} onchange={(v) => onedge(v)} ariaLabel={t('scratchEdge')} />

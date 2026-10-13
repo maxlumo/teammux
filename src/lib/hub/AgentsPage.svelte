@@ -8,6 +8,7 @@
   // (backend, model, persona, skills, MCP servers, hire permission) are
   // edited HERE and only here; the Hub consumes them.
   import Icon from '../ui/Icon.svelte';
+  import ServerTag from '../ui/ServerTag.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
   import { t } from '../core/i18n.svelte.ts';
@@ -798,7 +799,7 @@
         <div class="page-head config-page-head">
           <div class="config-head-inner">
             <CommandButton variant="icon" icon="chevron-left" label={t('back')} onclick={() => categoryOpen = false} />
-            <h1>{t(CAT_META[cat].label)}</h1>
+            <h1>{t(CAT_META[cat].label)}<ServerTag name={scope?.tag} /></h1>
           </div>
         </div>
       {/if}
@@ -823,7 +824,7 @@
             <CommandButton variant="icon" icon="chevron-left" label={t('back')} disabled={saving || removing}
               onclick={() => requestLeave(closeAll)} />
           {/if}
-          <h1>{editorTitle}</h1>
+          <h1>{editorTitle}<ServerTag name={scope?.tag} /></h1>
           <div class="config-actions">
             {#if !creating && draft.kind !== 'global' && editingSkill?.source !== 'builtin'}
               <CommandButton variant="danger" iconOnly icon="trash" label={t('delete')}
@@ -1149,7 +1150,7 @@
            its name, the "+", and the hint that used to sit above the rows. -->
       <div class="page-head config-page-head">
         <div class="config-head-inner">
-          <h1>{t(CAT_META[cat].label)}</h1>
+          <h1>{t(CAT_META[cat].label)}<ServerTag name={scope?.tag} /></h1>
           <div class="config-actions">
           {#if cat === 'global'}
             <CommandButton variant="icon" icon="edit" label={t('edit')} onclick={startGlobal} />
@@ -1164,7 +1165,7 @@
         <p class="hint">{t(CAT_META[cat].hint)}</p>
       </div>
     {:else}
-      <div class="page-head"><h1>{t(SECTION_META[section]?.[0] ?? 'agentsTitle')}</h1></div>
+      <div class="page-head"><h1>{t(SECTION_META[section]?.[0] ?? 'agentsTitle')}<ServerTag name={scope?.tag} /></h1></div>
       <div class="placeholder">
         <p class="hint">{t(SECTION_META[section]?.[1] ?? 'agentsHint')}</p>
       </div>
@@ -1267,6 +1268,9 @@
 
   .editor { flex: 1; min-height: 0; overflow-y: auto; }
   .members-head { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+  /* The owner tag beside a head title (③c-5): inside the h1 so it stays
+     with the title when the config head wraps, spaced by the head's gap. */
+  h1 > :global(.server-tag) { margin-left: 8px; }
   .members-count { margin-left: auto; color: var(--text3); font: 500 var(--fs-micro)/1 var(--font-mono); }
   /* Each member is a readable summary first. Clicking the broad summary
      opens one full-width editor and closes the previous member, so a long

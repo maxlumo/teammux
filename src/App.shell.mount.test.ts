@@ -7183,6 +7183,120 @@ test('③c-4: a system notification s tag names the room ON ITS SERVER, and the 
   assert.match(card.title, /beta/u, 'the title names the server');
 });
 
+// ─── #335 ③c-5: system status and the "current server" actions ───────────
+
+const hoverOn = async (h: Awaited<ReturnType<typeof bootApp>>, el: Element) => {
+  const event = new h.app.window.Event('pointerenter', { bubbles: false });
+  Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+  el.dispatchEvent(event);
+  for (let i = 0; i < 4; i++) { await h.app.advance(400); await h.settle(); }
+};
+const cardText = (h: Awaited<ReturnType<typeof bootApp>>) => h.app.document.querySelector('.hover-card')?.textContent ?? '';
+
+test('③c-5: the system status is the FOCUSED server s reading, named by the tag rule, and never a sum — a focus move drops the old reading and reads the new server at once', async (context) => {
+  const events: string[] = [];
+  // B's reading is held until released: the window between the focus move
+  // and B's answer is where a stale reading of A's would show.
+  let releaseB: (() => void) | null = null;
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: { ...twoHubs(), systemStatus: async () => {
+    if (asking() !== 'b') return { cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 };
+    await new Promise<void>((r) => { releaseB = r; });
+    return { cpu_pct: 90, mem_used: 9, mem_total: 10, disk_used: 1, disk_total: 10 };
+  } } });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const vitals = () => h.app.document.querySelector('.sysvitals')?.textContent ?? '';
+  assert.match(vitals(), /10\s*%|CPU10/u, `A s reading: ${vitals()}`);
+  assert.ok(!events.some((e) => e === 'rpc@b:systemStatus'), 'only the focus is polled (D4): B never asked');
+  await hoverOn(h, h.app.document.querySelector('.sysvitals')!);
+  assert.match(cardText(h), /alpha/u, `the card names the server: ${cardText(h)}`);
+  // Focus B: A s numbers go, B s come, read at once (not at the next tick).
+  const mark = events.length;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 4; i++) { await h.app.advance(100); await h.settle(); }
+  assert.ok(events.slice(mark).includes('rpc@b:systemStatus'), 'B read at once on focus');
+  assert.doesNotMatch(vitals(), /10\s*%|CPU10/u, `A s reading is gone before B answers: ${vitals()}`);
+  releaseB!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(100); await h.settle(); }
+  assert.match(vitals(), /90\s*%|CPU90/u, `B s reading, not A s or a sum: ${vitals()}`);
+  assert.doesNotMatch(vitals(), /100|50/u, 'not summed or averaged');
+});
+
+test('③c-5 (Single): the status card names no server', async (context) => {
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }, undefined, { ...sandbox, rpc: { ...twoHubs(), systemStatus: async () => ({ cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 }) } });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  await hoverOn(h, h.app.document.querySelector('.sysvitals')!);
+  assert.doesNotMatch(cardText(h), /alpha|beta/u, `no server in the card: ${cardText(h)}`);
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-head .server-tag'), null, 'nor on the scratch head');
+});
+
+test('③c-5: the switcher row s hover carries only what the row hides — the machine, a connecting/reconnecting word, Excluded — never the name or address again, and no other server s readings', async (context) => {
+  let bDown = false;
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+    ]),
+  }, ['d']), (url) => (url.includes('//b') ? 'm-b' : url.includes('//d') ? 'm-d' : 'm-a'), { ...sandbox, rpc: twoHubs(), gate: (url) => (url.includes('//b') && bDown ? new Promise<void>(() => {}) : null) });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const row = (name: string) => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .server-list .sm-pick')].find((b) => new RegExp(`^${name}\\b`, 'iu').test((b.textContent ?? '').trim()))!;
+  assert.equal(row('beta').getAttribute('title'), null, 'no native title beside the card');
+  await hoverOn(h, row('beta'));
+  let card = cardText(h);
+  assert.match(card, /m-b/u, `the machine, which the row hides: ${card}`);
+  assert.doesNotMatch(card, /beta|ws:\/\/b/u, 'not the name or address the row shows');
+  assert.doesNotMatch(card, /CPU|MEM/u, 'no readings of another server');
+  // Excluded D: the card says so.
+  await hoverOn(h, row('delta'));
+  card = cardText(h);
+  assert.match(card, /Excluded/u, `excluded: ${card}`);
+  // B reconnecting: the status word behind the breathing dot.
+  bDown = true;
+  conn(h, 'b')!.drop();
+  for (let i = 0; i < 3; i++) { await h.app.advance(1000); await h.settle(); }
+  await hoverOn(h, row('beta'));
+  card = cardText(h);
+  assert.match(card, /Reconnecting|Connecting/u, `the status word: ${card}`);
+});
+
+test('③c-5: the owner-bound surfaces say whose they are when several servers are included — the scratch head, the Agents page head, the Connection title — and the copy-link acts on the FOCUSED server, frozen at the click', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) { window.Element.prototype.getAnimations = () => []; window.navigator.clipboard = { writeText: async (t: string) => { (window as any).__copied = t; } }; } });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  // The scratch head, in the focused tree.
+  // (The held tree mounts no scratch panel — it is shown only in the connected, focused tree.)
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-head .server-tag')?.textContent, 'alpha', 'the scratch head names its owner');
+  // The Agents page head.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^agents$/iu.test((b.getAttribute('aria-label') ?? '').trim()))?.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  // The Agents page's own head (`.config-page-head`), not the Hub's chat
+  // head or the Board's, which are tagged since ③c-1/③c-2.
+  const agentsHead = h.app.document.querySelector('.scope-tree:not(.held) .config-page-head');
+  assert.match(agentsHead?.querySelector('h1')?.textContent ?? '', /agents/iu, 'the Agents page is open');
+  assert.equal(agentsHead?.querySelector('.server-tag')?.textContent, 'alpha', `the Agents head names its owner: ${agentsHead?.textContent}`);
+  // Connection: the title is tagged; copy-link copies A s link.
+  await toConnection(h);
+  assert.equal(h.app.document.querySelector('.preferences .connection-title .server-tag')?.textContent, 'alpha', 'the Connection title names the focus');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /share connection link/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.match((h.app.window as any).__copied ?? '', /addr=ws%3A%2F%2Fa%3A9899/u, `A s link: ${(h.app.window as any).__copied}`);
+  // Focus B: the title follows; the link is B s.
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  assert.equal(h.app.document.querySelector('.preferences .connection-title .server-tag')?.textContent, 'beta');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /share connection link/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.match((h.app.window as any).__copied ?? '', /addr=ws%3A%2F%2Fb%3A9899/u, `B s link: ${(h.app.window as any).__copied}`);
+});
+
 // ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────
 
 /** Per-server session lists: A has `work`; B has `work` and `deploy`. */

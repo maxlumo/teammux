@@ -123,6 +123,24 @@ full `--text` ink plus the mono data face. Metrics use natural width and flow
 from the left rather than stretching into three equal columns. Both themes
 therefore stay legible without making telemetry compete with the work.
 
+## Several servers: the reading is the focus's (board #335 ③c-5)
+
+With Aggregate mode (websocket-client.md ③) the app holds several servers at
+once, but a machine's CPU is not another machine's, so the strip never sums
+or averages. It shows ONE server's reading — the focused one's. App passes
+the singleton two more props: `server` (the focus's id) and `tag` (its name
+by the ③c-1 rule, null in Single mode or with one server included). The one
+effect that owns the timer depends on `server`: a focus move drops the last
+reading (it was the other server's) and reads the new server at once, rather
+than wearing a stranger's numbers for up to a whole interval — the test holds
+the new server's answer and checks the old reading is already gone. The
+hover card's title is `sysVitals · <tag>` when the tag is set, so in Aggregate
+the card says whose numbers these are; Single is tag-free by construction.
+`load` is still injected from the bound runtime, so the component imports
+nothing of servers. Only the focus is polled (D4): no member's vitals are
+fetched for a hover or a row, and the server switcher's card carries no
+readings at all (websocket-client.md ③c-5).
+
 ## Tests
 
 - Rust (`system_status.rs` module tests): first-call-null then bounded
@@ -133,6 +151,10 @@ therefore stay legible without making telemetry compete with the work.
 - `system.source.test.ts` pins the contracts refactors would silently break:
   no ws/App/hub imports, the interval clamp, hidden-stops-timer, the
   failed-load-keeps-reading shape, tokens-only type.
+- `App.shell.mount.test.ts` (③c-5): the reading is the focus's and named by
+  the tag rule; a focus move drops the old reading before the new server
+  answers and reads it at once; the other member is never polled; Single
+  names no server.
 
 ## Rules and their reasons
 
@@ -141,3 +163,14 @@ Each entry is a decision with the reason it was made; treat them as normative. T
 ### Server vitals occupy reserved sidebar space; they never enter the main column
 
 (board #56, refined by #85): desktop `system_status` samples CPU/MEM/root disk in-process through exact-pinned, desktop-gated `sysinfo`; the 20s client poll is the CPU delta window and first CPU is null. `SystemStatus` keeps the last good reading. App mounts one connected-client sampler: desktop places it at the primary sidebar's exact x/width and `.sidebar`, `.term-side`, `.files-left` reserve its named height; touch reveals that same instance only under the current visible page's open shared side drawer, whose bottom reservation includes the safe area. Metrics are natural-width and left-aligned. The main page remains full-height and receives no footer row. A fixed strip without matching sidebar reservation, duplicate per-page samplers, a full-width footer, pointer-through claims, and layer-only insets are forbidden.
+
+### The strip shows one server's reading, the focus's, never a sum (#335 ③c-5)
+
+A machine's CPU, memory and disk are its own; adding two machines' is a
+number that describes nothing. With several servers held, `SystemStatus`
+takes the focus's id and name (`server`, `tag`): a focus move drops the last
+reading and reads the new server at once, and the card names whose numbers
+these are when the ③c-1 rule says a name is needed. Only the focus is polled
+(D4); no other member's vitals are fetched for any surface. Summing or
+averaging across servers, keeping the old server's reading until the next
+tick after a focus move, and a per-member sampler are forbidden.

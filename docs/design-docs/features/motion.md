@@ -156,7 +156,14 @@ release. Tool-call detail or poll time does not reorder cards.
     a short dwell, instantly when hopping between neighbours, with the
     thing's live facts — never a second tooltip species and never a native
     `title` beside it. Touch has no hover: there the long-press menu is the
-    "more" gesture, and the card is not shown.
+    "more" gesture, and the card is not shown. The card carries only what
+    the element HIDES — an abbreviation spelled out, an id the row drops,
+    a status word behind a dot — never the name or text already on the row
+    (owner, 2026-10, on the server switcher: a card that repeats its
+    element is noise); when nothing is hidden the card does not open
+    (`hoverInfo` getter returns null). Board #335 ③c-5 applied this to the
+    server list: machine id, connecting/reconnecting, Excluded — not the
+    name, the address, or the failure reason the row already shows.
 
 ## Configuration Command States (#155, parent #154, 2026-09-10)
 

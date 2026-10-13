@@ -17,6 +17,8 @@
   import type { MemberStatus } from './server-members.svelte.ts';
   import Switch from '../ui/Switch.svelte';
   import { stateDotColor } from '../hub/hub.ts';
+  import { hoverInfo } from '../ui/hover.ts';
+  import type { HoverInfo, HoverLine } from '../ui/hover.svelte.ts';
 
   interface Props {
     servers: ServerEntry[];
@@ -83,6 +85,21 @@
     if (st?.kind !== 'failed') return '';
     if (st.reason === 'elsewhere') return t('memberElsewhere').replace('{name}', st.detail ?? '');
     return t(st.reason === 'storage' ? 'memberStorage' : 'memberUnreachable');
+  }
+  /** The row's hover card carries only what the row HIDES (owner,
+   * 2026-10: a card must not repeat the element): the machine id, the
+   * status WORD behind a breathing dot (connecting or reconnecting), and
+   * "excluded" — a server left out of Aggregate on purpose (③c-5). The
+   * name, the address and a failure's reason are on the row already. Not
+   * another server's readings: only the focused server is polled (D4). */
+  function detail(s: ServerEntry): HoverInfo | null {
+    const lines: HoverLine[] = [];
+    if (s.machineId) lines.push({ label: t('serverMachine'), value: s.machineId.slice(0, 8) });
+    const cur = s.id === currentId;
+    const st = !cur ? members?.status(s.id) : null;
+    if (members && !cur && !members.included(s.id)) lines.push({ label: t('status'), value: t('memberExcluded') });
+    else if (st?.kind === 'connecting' || st?.kind === 'reconnecting') lines.push({ label: t('status'), value: t(st.kind), tone: 'warn' });
+    return lines.length ? { lines } : null;
   }
   const DOT_COLOR: Record<Dot, string> = {
     live: 'var(--accent)', pending: stateDotColor('running'), failed: stateDotColor('failed'), rest: stateDotColor('idle'),
@@ -211,8 +228,9 @@
           oncompositionend={compositionEnd}
           onblur={commit} />
       {:else}
-        <button class="sm-pick menu-item" type="button" title={s.address} aria-current={cur ? 'true' : undefined}
+        <button class="sm-pick menu-item" type="button" aria-current={cur ? 'true' : undefined}
           aria-busy={dotOf(s.id) === 'pending' ? 'true' : undefined}
+          use:hoverInfo={() => detail(s)}
           onclick={() => onpick(s.id)}>
           <span class="sm-line">
             <span class="sm-dot" class:live-dot={dotOf(s.id) === 'pending'} style:background={DOT_COLOR[dotOf(s.id)]} aria-hidden="true"></span>

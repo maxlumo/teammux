@@ -1150,6 +1150,26 @@ pane picker stay this server's; the foreign section is not searched. D4: a
 hidden member's Sessions loads its list once so the selector can show it; the
 page never had a poll and gains none.
 
+**The system status and the "current server" actions are the focus's**
+(③c-5). The sidebar's vitals are ONE server's reading — the focused one's —
+never several machines' summed or averaged: App hands the one `SystemStatus`
+the focus's id and its name by the ③c-1 rule, so a focus move drops the old
+reading and reads the new server at once rather than showing a stranger's
+numbers for up to a whole interval, and in Aggregate the reading's card says
+whose it is. Only the focus is polled (D4): no other member's vitals are
+fetched for a hover or anything else. The server switcher's row carries the
+name, the address and a failure's reason; its hover card carries only what
+the row hides — the machine id, the status word behind the breathing dot,
+and "Excluded" for a server left out on purpose — because a card that
+repeats its element is noise (owner, 2026-10), and the native `title` that
+duplicated the address is gone (one popover mechanism). The surfaces bound
+to one server by construction — the scratch terminal, the Agents page
+(registry, skills, MCP, teams, the global prompt), the Connection section —
+live in their server's tree or act on the focus, so their owner is frozen
+when the action starts; in Aggregate each head names it with the one tag,
+and copy-link and the address optimizer act on the FOCUSED server, named.
+Details and the component contract: system-status.md.
+
 **Identity ends now; an editor is destroyed only when asked** (reviewer P1-5
 on 3a0b4feb; orchestrator 03:40). A published member can lose its identity
 without anyone asking for it: identity repair absorbs its entry into the
@@ -1695,6 +1715,23 @@ a socket that a server's pages are using.
   with its timers cleared at once (a stale claim alone would end a loop only
   at its next timer; reviewer P2 on 341554b3), and ends every runtime in the
   fleet, the bound one included (reviewer P2-1).
+
+### The "current server" actions act on the focus, named, frozen at the click (#335 ③c-5)
+
+The system status strip, the scratch terminal, the Agents page (registry,
+skills, MCP, teams, the global prompt) and the Connection section (copy-link,
+addresses, optimizer) are each ONE server's. In Aggregate they are the
+FOCUSED server's: the scratch panel and the Agents page live inside their
+server's tree, so their owner is fixed by construction; the strip and the
+Connection section take the focus's id and act on the runtime they resolved
+when the action started, not on whatever the focus is when it completes. In
+Aggregate each of these heads names its owner with the one tag
+(`ui/ServerTag`, ③c-1 rule); Single names none. The server switcher's row
+hover carries only what the row hides (motion.md §1.16): machine id, the
+connecting/reconnecting word, Excluded. A summed reading, a copy-link that
+reads CURRENT after an await, a native `title` beside the card, and a hover
+that repeats the row are forbidden. The strip's own contract is in
+system-status.md.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

@@ -20,16 +20,27 @@
   // flash of zeros).
   import { sysDetail, sysParts, SYS_POLL_MS, SYS_POLL_MIN_MS, type SystemStatus } from './system.ts';
   import { hoverInfo } from '../ui/hover.ts';
+  import { untrack } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
 
   let {
     load,
     interval = SYS_POLL_MS,
     visible = true,
+    tag = null,
+    server = null,
   }: {
     load: () => Promise<SystemStatus | null>;
     interval?: number;
     visible?: boolean;
+    /** The server's name by the ③c-1 tag rule (null = not shown): the
+     * reading is ONE server's — the focused one's — never a sum (board 335
+     * ③c-5), and when several servers are included the card says whose. */
+    tag?: string | null;
+    /** Whose reading this is: when the focus moves to another server the
+     * last reading is that server's no more — it is dropped and read again
+     * at once rather than shown for up to a whole interval. */
+    server?: string | null;
   } = $props();
 
   let status = $state<SystemStatus | null>(null);
@@ -39,7 +50,7 @@
   // title: exact fractions and the poll tempo, read at open time.
   const LABELS: Record<string, () => string> = { CPU: () => 'CPU', MEM: () => t('sysMemory'), DISK: () => t('sysDisk') };
   const detail = () => ({
-    title: t('sysVitals'),
+    title: tag ? `${t('sysVitals')} · ${tag}` : t('sysVitals'),
     lines: sysDetail(status).map((r) => ({ label: (LABELS[r.k] ?? (() => r.k))(), value: r.v })),
     note: t('sysRefresh').replace('{s}', String(Math.round(tempo / 1000))),
   });
@@ -57,7 +68,9 @@
   // is up to a whole interval stale) + the interval; hidden → cleanup stops
   // it. Re-runs when `visible` or the clamped tempo change.
   $effect(() => {
+    void server;   // another server's reading is not this one's
     if (!visible) return;
+    untrack(() => { status = null; });
     void tick();
     const timer = setInterval(tick, tempo);
     return () => clearInterval(timer);

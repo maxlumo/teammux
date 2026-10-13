@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../ui/Icon.svelte';
+  import ServerTag from '../ui/ServerTag.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import Switch from '../ui/Switch.svelte';
   import Stepper from '../ui/Stepper.svelte';
@@ -34,6 +35,7 @@
     showShortcuts = false,
     shortcutHost = null,
     serverInfo = { hostname: '', machineId: '' },
+    serverTag = null,
     activeAddress = '',
     pendingAddress = '',
     addresses = [],
@@ -76,6 +78,11 @@
     /** App's shortcut host: lets a row say it is unavailable here (board 316). */
     shortcutHost?: ShortcutHost | null;
     serverInfo?: { hostname: string; machineId: string };
+    /** The focused server's name by the ③c-1 tag rule (null = not shown):
+     * the Connection section — its copy-link, its addresses, its optimizer —
+     * acts on the FOCUSED server (③c-5), and with several included the
+     * title says which. */
+    serverTag?: string | null;
     activeAddress?: string;
     /** The address whose row was tapped and is still connecting — it wears the
      *  app-wide running cue (`.live-dot`) until App reports the outcome. */
@@ -965,7 +972,7 @@
           {/if}
           {#if connected}
             <div class="connection-title">
-              <div><strong class="config-field-label">{serverInfo.hostname || 'unknown'}</strong><small class="config-note connection-id">{serverInfo.machineId?.slice(0, 8) || '—'}</small></div>
+              <div><strong class="config-field-label">{serverInfo.hostname || 'unknown'}<ServerTag name={serverTag} /></strong><small class="config-note connection-id">{serverInfo.machineId?.slice(0, 8) || '—'}</small></div>
               <div class="conn-actions">
                 {#if addresses.length > 1}<CommandButton label={t('sniff')} icon="refresh"
                   pending={optimizing || commands.optimize.pending}

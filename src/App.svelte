@@ -3690,8 +3690,11 @@
          20px square IS one — which is the bug #337 reported. It sets only
          custom properties, and the bar's own geometry is declared on `main`,
          so nothing else moves. -->
+    <!-- The FOCUSED server's reading, named when the tag rule says so (③c-5):
+         one server's numbers, never several machines' summed. -->
     <aside class="sys-sidebar compact-tools" aria-label="Server system status">
-      <SystemStatus load={() => bound()?.api.systemStatus() ?? Promise.reject(new Error('not connected'))} visible={connected} />
+      <SystemStatus load={() => bound()?.api.systemStatus() ?? Promise.reject(new Error('not connected'))} visible={connected}
+        server={serverCurId} tag={serverTag(tagScope, serverCurId)} />
       {#if !layout.isTouchDevice}
         <button
           class="sys-scratch"
@@ -3810,7 +3813,7 @@
          handle like the subtree, so a switch rebuilds the guest too. -->
     {#if (page === 'prefs' || holdPages || prefsKept) && (!switching || prefsKept)}
     <div class="page-layer" class:hidden={page !== 'prefs' || !!switching} inert={!!switching}>
-    <Preferences {connected} {theme} {fontSize} {serverInfo} {activeAddress} {pendingAddress} addresses={prefAddresses}
+    <Preferences {connected} {theme} {fontSize} {serverInfo} serverTag={serverTag(tagScope, serverCurId)} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
       connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
       {serverName} onServers={connected && layout.isTouchDevice ? toggleServerMenu : null} serversOpen={serverMenuOpen} serversControls={serverPickerId}
