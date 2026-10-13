@@ -979,7 +979,7 @@ test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026
   // A foreign pick is the host s: focus + landing; the body stays one server s.
   assert.match(source, /if \(r\.serverId === serverId\) \{ pick\(r\.item\.project\.session\); return; \}\s*sideOpen = false;\s*onPickServer\?\.\(r\.ref\);/u);
   // D4: a hidden member keeps ONLY its list refresh; the age tick is shown-only.
-  assert.match(source, /if \(!visible && !union\) return;\s*loadProjects\(\);\s*const iv = setInterval\(loadProjects, 20000\);/u);
+  assert.match(source, /if \(!visible && !union\) return;\s*loadProjects\(\);\s*const iv = setInterval\(loadProjects, 20000\);\s*return \(\) => clearInterval\(iv\);/u, 'the one existing 20 s cadence, cleared when the tree goes or the member leaves (#357 rule b): no second timer, none that outlives its tree');
   assert.match(source, /\$effect\(\(\) => \{\s*if \(!visible\) return;\s*const ageIv = setInterval\(\(\) => \{ projectTick = Date\.now\(\); \}, 1000\);/u);
   // A landing with no issue opens nothing.
   assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);/u);

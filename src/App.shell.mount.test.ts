@@ -5350,6 +5350,29 @@ test('③c-2/P1-C1: another server s row Close/Delete is the ONE project-action 
   assert.deepEqual(args, ['b:down:b-app', 'b:down:b-app'], 'the retry runs the failed step on the same target');
 });
 
+// What this proves is the USER-visible half: once B is excluded, B is asked
+// nothing more by either page. It cannot see a leaked timer (a detached
+// runtime refuses the call before it is recorded), so the timer's clearing is
+// held by the Board.source pin, with its own negative control.
+test('#357 (D4, leave): once a hidden member is excluded, its server is asked no more list or count reads by the Hub or the Board', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: twoHubs({ boardCounts: async () => ({ counts: {} }), boardList: async () => ({ issues: [], statuses: [] }) }) });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const countOf = (n: string) => events.filter((e) => e === `rpc@b:${n}`).length;
+  const mark0 = countOf('boardCounts');
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.ok(countOf('boardCounts') - mark0 >= 2, `hidden B s Board refreshes its counts while included: ${countOf('boardCounts') - mark0}`);
+  await toConnection(h);
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  const mark = { counts: countOf('boardCounts'), lists: countOf('projectList') };
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.equal(countOf('boardCounts'), mark.counts, 'excluded: no more Board count refreshes of B');
+  assert.equal(countOf('projectList'), mark.lists, 'excluded: no more list refreshes of B at all (Hub or Board)');
+});
+
 test('③c-2 (D4): a hidden member s Hub refreshes only its list — no room is opened, no feed/roster/activity polled — until it is shown', async (context) => {
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn({
