@@ -917,7 +917,7 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   // step the boot needs before a bind inside one recoverable gate.
   // ③a: a block is decided through holdStorage, which closes the write gate
   // and freezes every runtime in the same turn.
-  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*if \(migrateServerState\(localStorage\)\.reason === 'unrecorded'\) holdStorage\(\);(?:\s*\/\/[^\n]*)*\s*else migrationBlocked = false;\s*\} catch \{ holdStorage\(\); \}/u,
+  assert.match(source, /function prepareStorage\(\) \{\s*try \{\s*migrateServers\(localStorage\);\s*if \(migrateServerState\(localStorage\)\.reason === 'unrecorded'\) holdStorage\(\);(?:\s*\/\/[^\n]*)*\s*else migrationBlocked = false;\s*pendingInputs = readPendingInputs\(localStorage\);\s*\} catch \{ holdStorage\(\); \}/u,
     'a registry or attribution write that fails is the same blocked state, never a throw out of App');
   // A block is the app's until Retry (reviewer P1 on 453f02b8): the gate
   // never re-prepares it open, and the only preparations are the boot, the
@@ -926,6 +926,10 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.equal([...source.matchAll(/\bprepareStorage\(\);/gu)].length, 3, 'boot, storageFailed, retryMigration');
   assert.match(source, /function storageFailed\(switchTarget = null\) \{\s*if \(migrationBlocked\) return;\s*prepareStorage\(\);/u);
   assert.match(source, /if \(reason === 'pending'\) \{\s*const claim = claimPending\(localStorage, id\)\.reason;/u, 'a pending input meets every server that is bound');
+  // ③d-3: the person may DISCARD a pending input from Settings — one marker
+  // write through the migration module, a failed write the same block.
+  assert.match(source, /function discardPendingInputs\(\) \{\s*let reason;\s*try \{ reason = discardPending\(localStorage\)\.reason; \} catch \{ reason = 'unrecorded'; \}\s*pendingInputs = readPendingInputs\(localStorage\);\s*if \(reason === 'unrecorded'\) holdStorage\(\);\s*\}/u);
+  assert.match(source, /\{pendingInputs\} onDiscardPending=\{discardPendingInputs\}/u, 'Settings shows it and asks App to discard');
   assert.doesNotMatch(source, /requireProof|foldNeedsProof|quarantineLegacyNav/u, 'nothing re-infers the attribution per App instance');
   // Frozen while blocked: every way CURRENT could move.
   assert.match(source, /if \(link && migrationBlocked\) deferredLink = link;/u, 'a deep link waits');

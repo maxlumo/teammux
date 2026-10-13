@@ -11,6 +11,7 @@
   import { scrollFade } from '../core/scrollFade.ts';
   import Select from '../ui/Select.svelte';
   import Segmented from '../ui/Segmented.svelte';
+  import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { hoverInfo } from '../ui/hover.ts';
   import { t, i18n, setLocale } from '../core/i18n.svelte.ts';
   import { layout } from './layout.svelte.ts';
@@ -36,6 +37,8 @@
     shortcutHost = null,
     serverInfo = { hostname: '', machineId: '' },
     serverTag = null,
+    pendingInputs = null,
+    onDiscardPending = null,
     activeAddress = '',
     pendingAddress = '',
     addresses = [],
@@ -83,6 +86,12 @@
      * acts on the FOCUSED server (③c-5), and with several included the
      * title says which. */
     serverTag?: string | null;
+    /** State a build from before #335 left behind, awaiting the server whose
+     * machine it names (③d-3): shown here with ONE action, Discard, which
+     * asks first and closes only that record. Null: nothing pending. */
+    pendingInputs?: { machineId: string } | null;
+    /** The person confirmed the discard; the host writes the marker. */
+    onDiscardPending?: (() => void) | null;
     activeAddress?: string;
     /** The address whose row was tapped and is still connecting — it wears the
      *  app-wide running cue (`.live-dot`) until App reports the outcome. */
@@ -160,6 +169,7 @@
     /** The registry is frozen (blocked): the mode cannot change either. */
     connectionModeFrozen?: boolean;
   } = $props();
+  let discardAsk = $state(false);
 
   const TAB_KEY = 'tmux_settings_tab';
   const storedTab = localStorage.getItem(TAB_KEY);
@@ -968,6 +978,20 @@
               </div>
             </div>
           {/if}
+          {#if pendingInputs}
+            <!-- Unattributed state from an earlier version (③d-3): named by
+                 the machine it came from, with the one action a person can
+                 take on it. Its server claims it the moment it connects. -->
+            <div class="preference-row pending-inputs" role="group" aria-label={t('pendingInputsTitle')}>
+              <div class="pref-label">
+                <strong class="config-field-label">{t('pendingInputsTitle')}</strong>
+                <small class="config-note">{t('pendingInputsNote').replace('{machine}', pendingInputs.machineId ? pendingInputs.machineId.slice(0, 8) : '—')}</small>
+              </div>
+              <div class="pref-control">
+                <CommandButton variant="danger" label={t('pendingInputsDiscard')} icon="trash" disabled={connectionModeFrozen} onclick={() => { discardAsk = true; }} />
+              </div>
+            </div>
+          {/if}
           {#if savedServers}
             <div class="saved-servers" role="group" aria-label={t('serversSaved')}>
               <strong class="config-field-label">{t('serversSaved')}</strong>
@@ -1063,6 +1087,13 @@
     {/if}
   </div>
 </section>
+
+<!-- The discard asks first (③d-3): it is the one irreversible thing on this
+     page besides removing a server, and like that one it names what goes. -->
+<ConfirmDialog open={discardAsk} compact={layout.isTouchDevice}
+  title={t('pendingInputsDiscardTitle')} note={t('pendingInputsDiscardNote')}
+  confirmLabel={t('pendingInputsDiscard')} confirmIcon="trash"
+  onconfirm={() => { discardAsk = false; onDiscardPending?.(); }} oncancel={() => { discardAsk = false; }} />
 
 <style>
   /* Page skeleton (ui-unification.md): shared sidebar + main column. */

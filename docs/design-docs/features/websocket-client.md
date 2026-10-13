@@ -510,7 +510,20 @@ preparation, and if that cannot be recorded the app is blocked in that same
 turn (the server tree is held — since ③a mounted, inert and hidden, its
 writes held by the write gate — CURRENT and the registry freeze, Retry is
 offered, and the boot dial is re-armed so Retry brings the connection back).
-An ordinary failure keeps the caller's own error (reviewer P1 on 23879812). When
+An ordinary failure keeps the caller's own error (reviewer P1 on 23879812).
+Pending ends two ways (board #335 ③d-3; the debt P1-b on cf7e7957 left as
+"discarded later by a user action"): a claim, or the PERSON discarding the
+inputs from Settings › Connection, where a pending record is shown as a row
+named by the machine the legacy mirror named, with the one action Discard.
+The discard asks first; Cancel writes nothing; confirming is ONE write — the
+marker becomes `discarded` (`discardPending`) — and touches nothing else: the
+unprefixed inputs stay (a build rolled back to before #335 finds exactly the
+state it left) and so does the quarantine copy. A `discarded` marker is
+closed: a later boot reads it as consumed and a server whose machine matches
+folds nothing (`already-done`). Nothing infers a discard, and the row is
+frozen with the registry while the app is blocked; a marker write that fails
+is the migration block like any other (`unrecorded` → Retry), the record
+still pending. When
 the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
 panel of its own (which would cover the migration's Retry with one the freeze
 refuses); the gate keeps the switch's target, and Retry, once storage is

@@ -46,7 +46,7 @@
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
-  import { claimPending, migrateServerState } from './lib/app/server-state-migration.ts';
+  import { claimPending, discardPending, migrateServerState, pendingInputs as readPendingInputs } from './lib/app/server-state-migration.ts';
   import { createActivations } from './lib/app/activation.ts';
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
@@ -2759,6 +2759,7 @@
       // Recorded is not yet released: the gate opens in `foldCurrent`, after
       // the claim, so what it held never lands before the fold it waited on.
       else migrationBlocked = false;
+      pendingInputs = readPendingInputs(localStorage);
     } catch { holdStorage(); }
     loadServerRegistry();
   }
@@ -2805,8 +2806,20 @@
         reason = claim === 'folded' ? 'claimed' : claim;
       }
     } catch { reason = 'unrecorded'; }
+    pendingInputs = readPendingInputs(localStorage);
     if (reason === 'unrecorded') { holdStorage(); return 'blocked'; }
     return reason === 'claimed' ? 'claimed' : 'ok';
+  }
+  /** The pre-#335 inputs still awaiting their server (③d-3), as Settings
+   * shows them; re-read after every fold or claim and after a discard. */
+  let pendingInputs = $state(readPendingInputs(localStorage));
+  /** The person discards them (confirmed in Settings): one marker write;
+   * a failed write is the storage block like any other migration write. */
+  function discardPendingInputs() {
+    let reason;
+    try { reason = discardPending(localStorage).reason; } catch { reason = 'unrecorded'; }
+    pendingInputs = readPendingInputs(localStorage);
+    if (reason === 'unrecorded') holdStorage();
   }
   /** A deep link that arrived while the migration was blocked: parsed and
    * stripped from the address bar at once, APPLIED only once the migration
@@ -3847,6 +3860,7 @@
     <Preferences {connected} {theme} {fontSize} {serverInfo} serverTag={serverTag(tagScope, serverCurId)} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
       connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
+      {pendingInputs} onDiscardPending={discardPendingInputs}
       {serverName} onServers={connected && layout.isTouchDevice ? toggleServerMenu : null} serversOpen={serverMenuOpen} serversControls={serverPickerId}
       {optimizing} {linkCopied}
       onClose={togglePrefs}

@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerStore, isResidentKey } from './server-store.ts';
-import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, layoutMark, migrateServerState } from './server-state-migration.ts';
+import { LAYOUT_KEY, LAYOUT_VERSION, claimPending, discardPending, layoutMark, migrateServerState, pendingInputs } from './server-state-migration.ts';
 import { MOVES_KEY, RESIDENT_KEYS, activateConnected, activateSwitched, recordServer, residentKey } from './servers.ts';
 
 /** The open slot moves (board #335 ③b: their own record, one per pair). */
@@ -780,4 +780,34 @@ test('an absorption that fails at the CURRENT write recovers on reload, and the 
   assert.equal(storage.getItem('tmux_server_current'), 'c');
   assert.equal(claimPending(storage, 'c').reason, 'folded');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
+});
+
+test('the person discards the pending inputs (③d-3): one marker write, nothing else touched; the owner arriving later folds nothing; not pending → nothing written', () => {
+  const storage = pending([{ id: 'a2', machineId: 'm-a' }, { id: 'n' }]);
+  assert.deepEqual(pendingInputs(storage), { machineId: 'm-a' }, 'Settings sees the machine the mirror named');
+  const inputs = RESIDENT_KEYS.map((k) => storage.getItem(k));
+  const quarantine = storage.getItem('tmux_state::unattributed');
+  const r = discardPending(storage);
+  assert.equal(r.reason, 'discarded');
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'discarded' }, 'the marker closes');
+  assert.equal(pendingInputs(storage), null, 'nothing pending any more');
+  assert.deepEqual(RESIDENT_KEYS.map((k) => storage.getItem(k)), inputs, 'the unprefixed inputs are left (a rolled-back build finds its state)');
+  assert.equal(storage.getItem('tmux_state::unattributed'), quarantine, 'and the quarantine copy');
+  assert.equal(storage.getItem('tmux_hub_drafts::a2'), null, 'nothing was filed anywhere');
+  // The owner shows up afterwards: the record is closed, nothing folds.
+  assert.equal(claimPending(storage, 'a2').reason, 'already-done');
+  assert.equal(storage.getItem('tmux_hub_drafts::a2'), null);
+  assert.equal(migrateServerState(storage).reason, 'already-done', 'a later boot reads it as consumed');
+  assert.equal(discardPending(storage).reason, 'already-done', 'a second discard writes nothing');
+  // Not pending: a folded marker is left alone.
+  const folded = pending([{ id: 'a2', machineId: 'm-a' }]);
+  assert.equal(claimPending(folded, 'a2').reason, 'folded');
+  assert.equal(discardPending(folded).reason, 'already-done');
+  assert.deepEqual(layoutMark(folded), { v: LAYOUT_VERSION, state: 'folded', into: 'a2' });
+  // A failed write is `unrecorded` (the caller's block).
+  const failing = pending([{ id: 'a2', machineId: 'm-a' }]);
+  const set = failing.setItem.bind(failing);
+  failing.setItem = (k: string, v: string) => { if (k === LAYOUT_KEY) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.equal(discardPending(failing).reason, 'unrecorded');
+  assert.equal(layoutMark(failing)?.state, 'pending', 'still pending');
 });

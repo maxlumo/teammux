@@ -2316,6 +2316,78 @@ test('a pending marker that cannot be written at boot blocks before any server c
   assert.equal(JSON.parse(second.app.window.localStorage.getItem('tmux_state_layout')!).state, 'pending', 'the next boot records it');
 });
 
+test('③d-3: Settings › Connection shows the pending inputs with ONE action, Discard — it asks first, Cancel changes nothing, confirming closes only that record; the owner arriving later folds nothing; the row is gone', async (context) => {
+  // B is connected and current; the inputs (m-a's) are pending, nobody's.
+  const first = await bootApp(context, danglingSeed(), undefined, { setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  await connectCard(first.app, first.settle, 'ws://b:9899');
+  const ls = first.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  const h = { app: first.app, settle: first.settle } as any;
+  await toConnection(h);
+  const row = () => first.app.document.querySelector<HTMLElement>('.preferences .pending-inputs');
+  assert.ok(row(), 'the pending state is shown in Connection');
+  assert.match(row()!.textContent ?? '', /m-a/u, 'named by the machine the legacy mirror named');
+  const discard = () => [...row()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!;
+  const before = { layout: ls.getItem('tmux_state_layout'), drafts: ls.getItem('tmux_hub_drafts'), quarantine: ls.getItem('tmux_state::unattributed'), b: ls.getItem('tmux_hub_drafts::b') };
+  // Asks first; Cancel: nothing written.
+  discard().click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  assert.ok(first.app.document.querySelector('[role=alertdialog]'), 'a discard asks first');
+  answerDialog(first.app, /^cancel$/iu);
+  for (let i = 0; i < 3; i++) await first.settle();
+  assert.equal(first.app.document.querySelector('[role=alertdialog]'), null);
+  assert.equal(ls.getItem('tmux_state_layout'), before.layout, 'Cancel: the marker is as it was');
+  assert.ok(row(), 'and the row stays');
+  // Confirm: one write — the marker — and nothing else moves.
+  discard().click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  answerDialog(first.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'discarded' }, 'the record is closed');
+  assert.equal(ls.getItem('tmux_hub_drafts'), before.drafts, 'the unprefixed inputs are left (a rolled-back build finds its state)');
+  assert.equal(ls.getItem('tmux_state::unattributed'), before.quarantine, 'and the quarantine copy');
+  assert.equal(ls.getItem('tmux_hub_drafts::b'), before.b, 'B s own slot untouched');
+  assert.equal(row(), null, 'the row is gone: nothing is pending');
+  assert.equal(cardButton(first.app, /retry/iu), undefined, 'not a block');
+  const after = dumpStorage(first.app);
+  await first.app.close();
+  // The owner (m-a) connects later: nothing folds — the person decided.
+  const second = await bootApp(context, after, undefined, { setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  const ls2 = second.app.window.localStorage;
+  await second.app.advance(1000);
+  const h2 = { app: second.app, settle: second.settle, switchTo: second.switchTo } as any;
+  await toConnection(h2);
+  await pickServer(h2, 'alpha');
+  for (let i = 0; i < 10 && ls2.getItem('tmux_server_current') !== 'a'; i++) { await second.app.advance(300); await second.settle(); }
+  await second.app.advance(1000);
+  assert.equal(ls2.getItem('tmux_server_current'), 'a');
+  assert.deepEqual(JSON.parse(ls2.getItem('tmux_state_layout')!), { v: '335', state: 'discarded' }, 'still closed');
+  assert.equal(ls2.getItem('tmux_hub_drafts::a'), null, 'the owner got nothing of the discarded inputs');
+  assert.equal(second.app.document.querySelector('.preferences .pending-inputs'), null);
+});
+
+test('③d-3: a discard whose marker write fails blocks like any migration write — Retry; the record stays pending', async (context) => {
+  const store = refusing(['tmux_state_layout']);
+  store.state.failing = false;
+  const first = await bootApp(context, danglingSeed(), undefined, { setup(window: any) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  await connectCard(first.app, first.settle, 'ws://b:9899');
+  const ls = first.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  await toConnection({ app: first.app, settle: first.settle } as any);
+  store.state.failing = true;
+  [...first.app.document.querySelectorAll<HTMLButtonElement>('.preferences .pending-inputs button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  answerDialog(first.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'still pending: the write failed');
+  assert.ok(first.app.document.querySelector('.preferences .pending-inputs'), 'the row stays (frozen with the registry)');
+  assert.ok(first.app.document.querySelector('.preferences .pending-inputs button[disabled]'), 'and its Discard is frozen like the registry');
+  // Back out of Settings: the content area's Retry panel is the block's.
+  [...first.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')].find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  assert.ok(retryButton(first.app), 'blocked, Retry offered');
+});
+
 test('a saved entry boots even when an unanswered form left the mirror empty (reviewer P2 on cf7e7957)', async (context) => {
   const events: string[] = [];
   const { onScreen, app } = await bootApp(context, {
@@ -6191,17 +6263,23 @@ for (const exit of fExits) test(`M1 F (owed handover, exit=${exit}): the operati
 });
 
 /** The handed-to tree adopts the MOVED record whole (reviewer P1-NAV on
- * 7e0f69de; orchestrator 03:58): C's pre-merge navigation (its own slot's,
- * superseded by the merge) never survives A's explicit choice — empty or a
- * single pane — and an A with navigation lands it on an empty C. */
-const navCases: Array<[string, string, string, (slot: any, v: Element | null) => void]> = [
+ * 7e0f69de; orchestrator 04:17: the full-snapshot rule is the contract): C's
+ * pre-merge navigation (its own slot's, superseded by the merge) never
+ * survives A's explicit choice — empty or a single pane — and an A with
+ * navigation lands it on an empty C. C's old panes name the session `work`,
+ * the one the fixture's `list_sessions` answers (reviewer P2 on a036a84a):
+ * a pane whose session is gone is dropped by the restore's existence check
+ * at JOIN, before the handover, which would make the "cleared" case pass for
+ * the wrong reason. `work:9.0` ≠ A's `work:1.0`, so the two are told apart. */
+const cPane = (target: string) => ({ kind: 'pane', serverId: 'c', session: 'work', target });
+const navCases: Array<[string, string, string, (slot: any) => void]> = [
   ['A cleared → stays cleared (C had a pane)',
     JSON.stringify({ v: 2, page: 'files', pane: null, splitLayout: 1, splitCells: [] }),
-    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' }, splitLayout: 1, splitCells: [] }),
+    JSON.stringify({ v: 2, page: 'files', pane: cPane('work:9.0'), splitLayout: 1, splitCells: [] }),
     (slot) => { assert.equal(slot.pane, null, `C s old pane did not come back: ${JSON.stringify(slot)}`); assert.deepEqual(slot.splitCells, []); }],
   ['A single pane → stays single (C had a 2-cell split)',
     JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }),
-    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' }, splitLayout: 2, splitCells: [{ id: 1, pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' } }, { id: 2, pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:2.0' } }] }),
+    JSON.stringify({ v: 2, page: 'files', pane: cPane('work:9.0'), splitLayout: 2, splitCells: [{ id: 1, pane: cPane('work:9.0') }, { id: 2, pane: cPane('work:8.0') }] }),
     (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c', 're-owned'); assert.equal(slot.splitLayout, 1); assert.deepEqual(slot.splitCells, [], 'C s split is gone'); }],
   ['A unset → takes nothing, C stays empty (no invented pane)',
     JSON.stringify({ page: 'files' }),
@@ -6219,11 +6297,14 @@ for (const [name, aNav, cNav, check] of navCases) test(`P1-NAV (handover refill)
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
   const slot = JSON.parse(ls.getItem('tmux_state::c') ?? 'null');
   assert.ok(slot, 'C s slot exists');
-  check(slot, h.app.document.querySelector('.scope-tree:not(.held)'));
-  // The front tree agrees with the slot.
+  check(slot);
+  // The front tree agrees with the slot: SplitView's cells (`.cell`) are
+  // mounted only for a split (reviewer P2 on a036a84a: the former selector
+  // matched nothing and passed vacuously).
   const front = h.app.document.querySelector('.scope-tree:not(.held)');
-  const cells = front?.querySelectorAll('.split-cell, .term-cell').length ?? 0;
-  if (slot.splitLayout === 1) assert.ok(cells <= 1, `no split in front: ${cells}`);
+  const cells = front?.querySelectorAll('.terminal-body .cell').length ?? 0;
+  if (slot.splitLayout === 1) assert.equal(cells, 0, `no split in front: ${cells}`);
+  else assert.equal(cells, slot.splitCells.length, 'the split in front is the slot s');
 });
 
 test('M1 F5/X2 (newer target): the pending target N is replaced by a NEWER user target P that succeeds — P binds, A ends by the swap as answered, C stays a member, the owed handover is void (never writes C back over P)', async (context) => {

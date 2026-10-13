@@ -43,8 +43,14 @@
 // says by then: a server a connect made current in the meantime is NOT the
 // owner. Only a server whose machine IS that machine claims the inputs
 // (`claimPending`), whenever it shows up; any other runs on its own empty
-// slots and the inputs stay pending. There is no terminal "consumed,
-// nobody's" state: only a fold ends pending.
+// slots and the inputs stay pending. Pending ends two ways only: a fold, or
+// the PERSON discarding the inputs from Settings › Connection (board #335
+// ③d-3; the debt P1-b on cf7e7957 left: "discarded later by a user action").
+// A discard is one write — the marker becomes `discarded` — and touches
+// nothing else: the unprefixed inputs stay (a build rolled back to before
+// #335 finds exactly the state it left) and so does the quarantine copy.
+// Nothing infers a discard; a server whose machine matches later finds the
+// marker closed and folds nothing.
 //
 // A CLAIM FOLDS BY THE FOLD'S RULE, except where the owner has written since
 // (reviewer P1-1 on 08fdb6ba). A non-empty slot is not evidence of a newer
@@ -150,6 +156,8 @@ export const LAYOUT_VERSION = '335';
  * machine. */
 export type LayoutMark =
   | { v: string; state: 'folded'; into: ServerId }
+  /** The person discarded the pending inputs (③d-3): closed, nobody's. */
+  | { v: string; state: 'discarded' }
   | {
     v: string; state: 'pending'; machineId: string;
     /** The inputs' fingerprint when that machine was read. */
@@ -172,6 +180,7 @@ export function layoutMark(storage: Pick<Storage, 'getItem'>): LayoutMark | null
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
       const v = String(parsed.v ?? '');
+      if (parsed.state === 'discarded') return { v, state: 'discarded' };
       if (parsed.state === 'pending' || (parsed.state === undefined && !parsed.into)) {
         return {
           v, state: 'pending', machineId: String(parsed.machineId ?? storage.getItem('tmux_machine_id') ?? ''),
@@ -200,9 +209,12 @@ export interface MigrationReport {
    * `pending`: the inputs have no proven owner yet; recorded, nothing moved.
    * `no-current`: no inputs and no server to mark them done for; no writes.
    * `already-done`: folded by an earlier run, and reading them again would
-   *   overwrite newer resident values.
+   *   overwrite newer resident values — or discarded by the person (then
+   *   `serverId` is empty).
+   * `discarded`: this call closed the pending inputs by the person's choice
+   *   (`discardPending` only).
    */
-  reason: 'folded' | 'unrecorded' | 'pending' | 'no-current' | 'already-done';
+  reason: 'folded' | 'unrecorded' | 'pending' | 'no-current' | 'already-done' | 'discarded';
   /** The server the live values were filed under — or, for `already-done`,
    * the one an earlier run filed them under. */
   serverId: ServerId;
@@ -225,6 +237,7 @@ export function migrateServerState(storage: Store): MigrationReport {
 
   const done = layoutMark(storage);
   if (done?.state === 'folded') return none('already-done', done.into);
+  if (done?.state === 'discarded') return none('already-done');
   if (done?.state === 'pending') {
     // A slot move a failure left open is finished at boot, before anything
     // reads a baseline; if it cannot be, the migration is not complete.
@@ -265,7 +278,7 @@ export function claimPending(storage: Store, id: ServerId): MigrationReport {
     try { resumeSlotMove(storage); } catch { return none('unrecorded', id); }
   }
   const done = layoutMark(storage);
-  if (done?.state !== 'pending') return done ? none('already-done', done.into) : none('no-current');
+  if (done?.state !== 'pending') return done ? none('already-done', done.state === 'folded' ? done.into : '') : none('no-current');
   let evidence = done;
   const now = inputsPrint(storage);
   if (evidence.inputs !== undefined && evidence.inputs !== now) {
@@ -291,4 +304,28 @@ function foldInto(storage: Store, id: ServerId, since?: Record<string, string>):
     storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'folded', into: id } satisfies LayoutMark));
   } catch { return { ran: true, reason: 'unrecorded', serverId: id, ...moved }; }
   return { ran: true, reason: 'folded', serverId: id, ...moved };
+}
+
+/** The pending inputs as Settings shows them — the machine the legacy mirror
+ * named — or null when nothing is pending. */
+export function pendingInputs(storage: Pick<Storage, 'getItem'>): { machineId: string } | null {
+  const mark = layoutMark(storage);
+  return mark?.state === 'pending' ? { machineId: mark.machineId } : null;
+}
+
+/**
+ * The person discards the pending inputs (③d-3). ONE write: the marker
+ * closes as `discarded`. The inputs and the quarantine copy are left as they
+ * are (see the module note). Not pending → nothing is written (`already-done`
+ * or `no-current`); a failed write is `unrecorded`, the caller's block.
+ */
+export function discardPending(storage: Store): MigrationReport {
+  const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
+    ({ ran: false, reason, serverId, folded: [], cleared: [] });
+  const done = layoutMark(storage);
+  if (done?.state !== 'pending') return done ? none('already-done', done.state === 'folded' ? done.into : '') : none('no-current');
+  try {
+    storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'discarded' } satisfies LayoutMark));
+  } catch { return none('unrecorded'); }
+  return { ran: true, reason: 'discarded', serverId: '', folded: [], cleared: [] };
 }
