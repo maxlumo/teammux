@@ -7,6 +7,16 @@ The starting directory follows the active terminal/team session's working
 directory, or the server's home directory when no session is open yet.
 
 ## Components
+- Server door (board #358, owner 2026-10-13: "在 File 页面，其实也可以让我有一个
+  地方，能很快速、方便地切换不同的 server 连接"): when more than one server is
+  included (the ③c-1 tag rule), a row above the toolbar names this tree's
+  server with the one `ServerTag` beside a swap glyph and opens App's ONE
+  server popover — the same the rail and Settings open; there is no second
+  switcher. Picking a connected server is the ordinary focus move (D2): no
+  dial, no teardown; the other server's Files tree comes to the front with its
+  own parked position (its `ServerState` keeps it). Nothing is merged: Files
+  is the focused server's tree by design (D3). Single mode, or one included
+  server, has no door. Same control on the phone and the desktop.
 - Unified toolbar: named shared icon controls, 28px pointer / 44px coarse
   native targets with compact inset paint. Keep one row; measured overflow
   exposes trailing actions through the shared More menu, without shrinking
@@ -30,6 +40,7 @@ directory, or the server's home directory when no session is open yet.
 - Git integration: status view, per-file stage/unstage, diff viewer, commit log, add all/commit/push
 
 ## Interactions
+- Tap the server door → App's server popover (rail / Settings dialect); pick a server → focus moves there, Files shows that server's tree
 - Tap directory → navigate into it
 - Tap file → preview (or info page if not previewable, or if file size > 5 MB and the kind is not streamed — video streams at any size)
 - On the phone, a text preview (markdown, code, csv, html, pdf, converted

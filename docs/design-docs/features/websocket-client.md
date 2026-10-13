@@ -1875,6 +1875,19 @@ cross-server mutation, a verb by session where the api takes an id, a
 not-yet-answered slice shown as empty, a union poller, room work on a hidden
 member.
 
+### Every page that is one server's offers the ONE server door (#358, 2026-10-13)
+
+Owner: "在 File 页面，其实也可以让我有一个地方，能很快速、方便地切换不同的 server
+连接." Files is the focused server's tree (D3) and had no switcher, so on the
+phone switching meant leaving the page. The door is App's one server popover
+(`toggleServerMenu`, the rail's and Settings'), handed to the page as a
+toggle plus the open state and the popover's id; the page renders a row —
+swap glyph that quarter-turns while open, the server's tag — and owns no
+registry, no list, no focus logic. Shown by the ③c-1 tag rule (more than one
+server included), on both screens. A pick is the ordinary focus move (D2).
+A page-local server list, a door shown by mode rather than by the tag rule,
+or a door that merges trees are forbidden.
+
 ### The "current server" actions act on the focus, named, frozen at the click (#335 ③c-5)
 
 The system status strip, the scratch terminal, the Agents page (registry,

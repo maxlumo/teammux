@@ -27,6 +27,7 @@
   import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
+  import ServerTag from '../ui/ServerTag.svelte';
   import Segmented from '../ui/Segmented.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
@@ -102,7 +103,14 @@
   // follow the pane cwd, the pre-#181 rule. The Session-directory tool
   // (goSessionDir) keeps offering the pane cwd explicitly either way.
 
-  let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable('') } = $props();
+  let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable(''),
+    // The server door (board #358, owner 2026-10-13: "在 File 页面…能很快速、
+    // 方便地切换不同的 server 连接"): App's ONE server popover, the same the
+    // rail and Settings open — the host hands the toggle (null = no door: a
+    // single included server). Files stays this server's tree (D3); picking
+    // another server is the ordinary focus move, and the next tree shows its
+    // own parked cwd.
+    onServers = null, serversOpen = false, serversControls = undefined } = $props();
   const panelId = $props.id();
   const LIST_WIDTH = { min: 320, max: 520, default: 400 };
   $effect(() => {
@@ -1719,6 +1727,19 @@
 <!-- View blocks live in snippets so both layouts (mobile single-pane + desktop
      two-pane) render the same markup. -->
 {#snippet listPanel()}
+    {#if onServers && scope.tag}
+      <!-- Whose files these are, and the door to another server's (board
+           #358): the server's name as the ③c-1 tag beside a swap glyph, the
+           grammar of Settings' phone server row; opens App's one server
+           popover (aria-controls names it). Shown only with more than one
+           server included (the tag rule), on both screens. -->
+      <button type="button" class="server-door" class:open={serversOpen} aria-haspopup="dialog" aria-expanded={serversOpen}
+        aria-controls={serversOpen ? serversControls : undefined} aria-label={t('serversTitle')}
+        onclick={(e) => onServers?.(e)}>
+        <span class="quarter-turn" class:on={serversOpen}><Icon name="swap-h" size={14} /></span>
+        <ServerTag name={scope.tag} />
+      </button>
+    {/if}
     <div class="toolbar compact-tools" role="group" aria-label={t('filesTools')} use:measureToolbar
       oncontextmenu={(event) => contextFile(event)}
       use:longpress={{ onlongpress: ({ x, y }) => openFileMenu({ x, y }, 'directory') }}>
@@ -2173,6 +2194,16 @@
     .preview-open .files-left { display: none; }
   }
 
+  /* The server door (#358): a row above the tools in the sidebar's row
+     grammar — swap glyph that quarter-turns while the popover is open, the
+     server's tag. The same hover/press washes the side rows use. */
+  .server-door {
+    display: flex; align-items: center; gap: 6px; width: 100%; min-height: var(--control-height);
+    padding: 0 var(--tool-inset-inline); box-sizing: border-box; border: 0; border-bottom: 1px solid var(--border);
+    background: transparent; color: var(--text2); font: inherit; text-align: left; cursor: pointer;
+  }
+  .server-door:hover, .server-door.open { background: var(--surface2); }
+  .server-door :global(svg) { flex: none; color: var(--text3); }
   .toolbar {
     display: flex; flex-wrap: nowrap; align-items: center; gap: var(--tool-gap); min-width: 0;
     min-height: var(--control-height); padding: var(--tool-inset-block) var(--tool-inset-inline); box-sizing: border-box;

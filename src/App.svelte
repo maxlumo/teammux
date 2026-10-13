@@ -3981,7 +3981,8 @@
       </div>
     {/if}
     <div class="page-layer" class:hidden={!shown || page !== 'files'}>
-      <Files session={v.filesSession} guardPage="files" visible={shown && page === 'files'} {fontSize} onGoBack={(fn) => v.filesGoBack = fn} onimmersive={(on) => v.filesImmersive = on} navRequest={landingFor(v.filesNavReq, runtime)} jumped={!!v.jumpedFrom} />
+      <Files session={v.filesSession} guardPage="files" visible={shown && page === 'files'} {fontSize} onGoBack={(fn) => v.filesGoBack = fn} onimmersive={(on) => v.filesImmersive = on} navRequest={landingFor(v.filesNavReq, runtime)} jumped={!!v.jumpedFrom}
+        onServers={toggleServerMenu} serversOpen={serverMenuOpen} serversControls={serverPickerId} />
     </div>
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}

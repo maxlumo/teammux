@@ -8057,6 +8057,57 @@ test('§F unavailable, not substituted: a saved pane ref whose server was REMOVE
   assert.equal(second.app.document.querySelector('.scope-tree .hub-root .sidebar .proj-row.missing'), null, 'and not listed as missing either: it is not included');
 });
 
+// ─── #358: the Files page s server door ─────────────────────────────────
+
+test('#358: Files carries the one server door when more than one server is included — it opens App s server popover; picking another server is the ordinary focus move and Files then shows THAT server s own tree', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: { ...twoHubs(), fsList: async (path: string) => ({ path, entries: [{ name: `on-${asking()}.txt`, path: `${path}/on-${asking()}.txt`, type: 'file', size: 1 }] }) } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held)')!;
+  const door = () => front().querySelector<HTMLButtonElement>('.files-left .server-door, .server-door');
+  assert.ok(door(), 'the door is on the Files page');
+  assert.equal(door()!.querySelector('.server-tag')?.textContent, 'alpha', 'named by the one tag rule');
+  assert.equal(door()!.getAttribute('aria-haspopup'), 'dialog');
+  assert.match([...front().querySelectorAll('.file-row')].map((r) => r.textContent).join('|'), /on-a\.txt/u, 'A s tree');
+  door()!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(door()!.getAttribute('aria-expanded'), 'true');
+  const popover = h.app.document.querySelector('.server-menu, .pop-layer .server-list, .pop-layer');
+  assert.ok(popover, 'App s ONE server popover opened (the rail s and Settings )');
+  // Pick B: the ordinary focus move (D2) — no dial, no teardown.
+  const dials = events.filter((e) => e.startsWith('dial@')).length;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.server-menu .sm-pick, .pop-layer .sm-pick')].find((b) => /^beta\b/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) { await h.app.advance(200); await h.settle(); }
+  for (let i = 0; i < 6; i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'focus moved to B');
+  assert.equal(events.filter((e) => e.startsWith('dial@')).length, dials, 'no dial: a focus move');
+  assert.equal(trees(h.app).length, 2, 'both trees kept');
+  assert.equal(door()!.querySelector('.server-tag')?.textContent, 'beta', 'B s Files, B s door');
+  assert.match([...front().querySelectorAll('.file-row')].map((r) => r.textContent).join('|'), /on-b\.txt/u, 'B s own tree — nothing merged');
+  assert.doesNotMatch([...front().querySelectorAll('.file-row')].map((r) => r.textContent).join('|'), /on-a\.txt/u);
+});
+
+test('#358 (Single): no server door', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc } });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.server-door'), null, 'Single: no door');
+});
+
+test('#358 (Aggregate, one included): no server door — the tag rule, not the mode, decides; including the other brings it', async (context) => {
+  const h = await bootApp(context, aggregateOn({ ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop' }, ['b']), undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc } });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.server-door'), null, 'one included: nothing to switch to');
+  await toConnection(h);
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^files$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held) .server-door'), 'two included: the door appears');
+});
+
 // ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────
 
 /** Per-server session lists: A has `work`; B has `work` and `deploy`. */
