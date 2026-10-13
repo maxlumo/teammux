@@ -77,6 +77,18 @@ fn mode_word(word: &str) -> Option<&'static str> {
 /// stamp `›`, a quote marker, a dash — would become a mode switch.
 const TOAST_BULLETS: [char; 6] = ['●', '•', '○', '◦', '◆', '◇'];
 
+/// The glyphs kiro paints a column-zero block under: its prose, its tool
+/// calls and its ERRORS. `●` on kiro-cli 2.22.1 and `•` on 2.28.0 — the same
+/// move that broke the steer toast (#346) broke the high-traffic recovery
+/// (#361): measured 2026-10-14 on this host's pane scrollbacks (read with
+/// `capture-pane -p -J`, as `check_once` reads them), 49 of 49 blocks open
+/// with `•` and none with `●`, and auto-recovery had been silent since the
+/// upgrade. A CLOSED set of exactly the two measured glyphs, not "any glyph"
+/// (that was the #346 P1) and not `TOAST_BULLETS`: that one is wider on
+/// purpose for a line whose whole text is fixed, while here the line is the
+/// START of free text, and a false hit types `continue` into a working agent.
+pub(crate) const HEAD_GLYPHS: [char; 2] = ['●', '•'];
+
 /// kiro's own confirmation of a Ctrl+S: at column zero, one bullet from
 /// `TOAST_BULLETS`, a space, and EXACTLY `Switched to <Mode> mode`. The
 /// bullet is read as a glyph rather than as part of a fixed prefix because it
@@ -990,14 +1002,15 @@ pub(crate) const TRANSIENT: [&str; 3] = [
 const MODEL_UNAVAILABLE: &str = "themodelyouveselectedistemporarilyunavailable";
 /// Third kiro shape (kiro-cli 2.22.1, `--agent-engine v3`, board #267,
 /// 2026-09-28): `● <model> is experiencing high traffic. Try again, or select
-/// another model. (Request ID: <uuid>)`, hard-wrapped under the `●` bullet
-/// head that v3 also gives its prose and tool calls. It has no header of its
-/// own, so the block must be EXACTLY the error, punctuation included, with
-/// only whitespace collapsed (a hard wrap is a space): the bullet, a short
-/// model name, this sentence, a canonical 8-4-4-4-12 uuid and the closing
-/// `)` at block end. Letters alone are not enough (validator 15:04): a
-/// rewording without the parenthesis, the colon or the close paren is prose
-/// ABOUT the error, and a false hit types `continue` into a working agent.
+/// another model. (Request ID: <uuid>)`, hard-wrapped under the bullet head
+/// that v3 also gives its prose and tool calls — `●` on 2.22.1, `•` on 2.28.0
+/// (`HEAD_GLYPHS`, #361). It has no header of its own, so the block must be
+/// EXACTLY the error, punctuation included, with only whitespace collapsed (a
+/// hard wrap is a space): the bullet, a short model name, this sentence, a
+/// canonical 8-4-4-4-12 uuid and the closing `)` at block end. Letters alone
+/// are not enough (validator 15:04): a rewording without the parenthesis, the
+/// colon or the close paren is prose ABOUT the error, and a false hit types
+/// `continue` into a working agent.
 const HIGH_TRAFFIC: &str = " is experiencing high traffic. Try again, or select another model. (Request ID: ";
 /// "Claude Opus 4.1 (1M context)" is five.
 const MODEL_NAME_WORDS: usize = 5;
@@ -1012,7 +1025,12 @@ fn is_uuid(id: &str) -> bool {
 /// Is this block, its lines joined with spaces, exactly the high-traffic error?
 fn high_traffic(spaced: &str) -> bool {
     let flat = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    let Some(body) = flat.strip_prefix("● ") else { return false };
+    let Some(body) = flat
+        .strip_prefix(|c: char| HEAD_GLYPHS.contains(&c))
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
     let Some(at) = body.find(HIGH_TRAFFIC) else { return false };
     let name = &body[..at];
     let words = name.split(' ').count();
@@ -1117,6 +1135,33 @@ mod tests {
 
     /// v3's post-turn `memory` auto-capture is the housekeeping tool (board
     /// #227); every other tool, in either key spelling, is the agent's work.
+    /// #361: the head glyph is a closed set of the two measured glyphs, and
+    /// the model name is whatever kiro prints — never a list of models.
+    #[test]
+    fn high_traffic_takes_a_closed_set_of_head_glyphs_and_any_model_name() {
+        assert_eq!(HEAD_GLYPHS, ['●', '•'], "a new glyph is added here ON A MEASUREMENT, with a fixture");
+        let id = "ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146";
+        let sentence = |name: &str| format!("{name} is experiencing high traffic. Try again, or select another model. (Request ID: {id})");
+        for name in ["claude-fable-5.1", "claude-opus-5.5", "Auto", "Claude Sonnet 4.6", "global.openai.gpt-6-astra", "Claude Opus 4.1 (1M context)"] {
+            for head in ['●', '•'] {
+                assert!(high_traffic(&format!("{head} {}", sentence(name))), "{head} {name}");
+            }
+        }
+        // Names that are not a model name: six words, and a pipe or a slash
+        // (a path or a shell line, not a model).
+        for name in ["one two three four five six", "claude|opus", "anthropic/claude-opus-5.5", ""] {
+            for head in ['●', '•'] {
+                assert!(!high_traffic(&format!("{head} {}", sentence(name))), "{head} {name:?}");
+            }
+        }
+        // Any glyph outside the set, no glyph, a glyph glued to the name.
+        for head in ['›', '▸', '○', '◦', '◆', '◇', '·', '▪', '◉', '-', '>', '*'] {
+            assert!(!high_traffic(&format!("{head} {}", sentence("Auto"))), "{head:?}");
+        }
+        assert!(!high_traffic(&sentence("Auto")));
+        assert!(!high_traffic(&format!("•{}", sentence("Auto"))));
+    }
+
     #[test]
     fn memory_is_the_housekeeping_tool() {
         assert!(is_housekeeping_tool(&json!({"hook_event_name":"postToolUse","tool_name":"memory","tool_input":{}})));

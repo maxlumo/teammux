@@ -481,6 +481,24 @@ mod tests {
     /// prompt furniture below.
     const HIGH_TRAFFIC_SCREEN: &str = "  › [tmm chat 2026-09-28 13:55] human: @kiro\n    你现在什么阶段 在处理数据吗还是在训练了\n \n● Claude Opus 5.5 is experiencing high traffic. Try\n  again, or select another model. (Request ID:\n  ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)\n \n▸ Credits: 121.98 • Time: 129m 30s\n\n ◐ 7 tasks remaining · ctrl+x expand\n───────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit\n to exit\n───────────────────────────────────────────────────────\nkiro · Claude Opus 5.5 · high · ◑ 35% · Midway: 10h 53m\n/local/home/cfu/work/projects/lingting · (main)\n\n›  ask a question or describe a task ↵\n              /sessions to resume · /copy to clipboard\n";
 
+    /// The head glyphs a high-traffic block has been painted under: `●` on
+    /// kiro-cli 2.22.1, `•` on 2.28.0 (#361). Spelled out here, not read from
+    /// `HEAD_GLYPHS`, so dropping one from the const fails the tests instead
+    /// of silently shrinking what they loop over.
+    const HEADS: [char; 2] = ['●', '•'];
+
+    /// #361, kiro-cli 2.28.0 — three REAL blocks, verbatim from this host's
+    /// pane scrollbacks on 2026-10-14, read with `capture-pane -p -J` exactly
+    /// as `check_once` reads a pane (a blank line is a single space; 49 of 49
+    /// blocks found there open with `•`). A wide pane (80 columns): the
+    /// sentence wraps once, and the `•` in the credits line below is not a head.
+    const KIRO_228_WIDE: &str = "\n• claude-fable-5.1 is experiencing high traffic. Try again, or select another\n  model. (Request ID: b9b4f1e3-b712-42d8-8fa7-c85cafbd6085)\n \n▸ Credits: turn 4.58 • session 1474.07 | Time: 34s\n────────────────────────────────────────────────────────────────────────────────\n  › [tmm chat 2026-10-12 16:06] orchestrator: @reviewer @validator #352 tip\n";
+    /// A narrow pane (52 columns): the sentence wraps twice and the id sits
+    /// alone on the last line.
+    const KIRO_228_NARROW: &str = " \n• claude-fable-5.1 is experiencing high traffic. Try\n  again, or select another model. (Request ID:\n  3b94a118-d7bb-4c58-b1a7-d64e408bc98b)\n \n▸ Time: 9s\n────────────────────────────────────────────────────\n";
+    /// Another model, with the whole prompt furniture and status line below.
+    const KIRO_228_OPUS: &str = " \n• claude-opus-5.5 is experiencing high traffic. Try again, or select another\n  model. (Request ID: 9e61a315-74f8-4e7b-9e7b-1761efc0845b)\n \n▸ Time: 36s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nengineer · claude-opus-5.5 · high · ◔ 24% · Midway: 3h 32m\n/local/home/cfu/work/projects/lingting · (main)\n\n";
+
     /// Board #280: Claude Code 2.1.284's real paint, captured from a scratch
     /// claude against a local endpoint answering 503, at 100 and 57 columns.
     const CLAUDE_503_WIDE: &str = "❯ say hi\n\n● API Error: 503 Bedrock is unable to process your request. This is a server-side issue,\n  usually temporary — try again in a moment. If it persists, check your Amazon Bedrock\n  service status.\n\n✻ Crunched for 0s · done 11:52 AM\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n";
@@ -582,43 +600,90 @@ mod tests {
             Some("1|ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146".into()),
             "the v3 high-traffic paint is an incident, identified by its Request ID"
         );
-        // Another model, and a narrow pane that wraps inside the name.
-        assert!(scan_tail("kiro", "● Claude Sonnet 4.6 is\n  experiencing high traffic. Try again, or select\n  another model. (Request ID: 0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)\n"));
-        // Unwrapped, as a wide pane paints it.
-        assert!(scan_tail("kiro", "● Auto is experiencing high traffic. Try again, or select another model. (Request ID: deadbeef-0001-4abc-8def-0123456789ab)\n"));
+        for head in HEADS {
+            // Another model, and a narrow pane that wraps inside the name.
+            assert!(scan_tail("kiro", &format!("{head} Claude Sonnet 4.6 is\n  experiencing high traffic. Try again, or select\n  another model. (Request ID: 0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)\n")), "{head}");
+            // Unwrapped, as a wide pane paints it.
+            assert!(scan_tail("kiro", &format!("{head} Auto is experiencing high traffic. Try again, or select another model. (Request ID: deadbeef-0001-4abc-8def-0123456789ab)\n")), "{head}");
+        }
     }
 
+    /// #361: kiro-cli 2.28 paints the error under `•`; the detector wanted
+    /// `●` and auto-recovery sat silent while 49 blocks went by. The three
+    /// screens are the real paints (see the consts), as `check_once` sees them.
+    #[test]
+    fn kiro_2_28_high_traffic_blocks_as_painted_are_detected() {
+        for (name, screen, id) in [
+            ("wide, claude-fable-5.1", KIRO_228_WIDE, "b9b4f1e3-b712-42d8-8fa7-c85cafbd6085"),
+            ("narrow, claude-fable-5.1", KIRO_228_NARROW, "3b94a118-d7bb-4c58-b1a7-d64e408bc98b"),
+            ("wide + status line, claude-opus-5.5", KIRO_228_OPUS, "9e61a315-74f8-4e7b-9e7b-1761efc0845b"),
+        ] {
+            assert!(scan_tail("kiro", screen), "{name}");
+            // Identified by its Request ID, and hits=1: the credits line's
+            // own `•` and the rest of the chrome add no second block.
+            assert_eq!(error_signature("kiro", screen), Some(format!("1|{id}")), "{name}");
+        }
+        // The same screen under the 2.22.1 head is the same incident.
+        assert_eq!(error_signature("kiro", &KIRO_228_NARROW.replace('•', "●")), error_signature("kiro", KIRO_228_NARROW));
+        // A second error (a new Request ID) is a new incident, whichever head.
+        assert_ne!(error_signature("kiro", KIRO_228_WIDE), error_signature("kiro", KIRO_228_NARROW));
+    }
+
+    /// Every negative holds for BOTH head glyphs (#361): the closed set grows
+    /// what is accepted at the head and nothing else.
     #[test]
     fn quoting_the_high_traffic_error_is_not_having_it() {
-        let paint = "● Claude Opus 5.5 is experiencing high traffic. Try\n  again, or select another model. (Request ID:\n  ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)";
-        // A chat delivery quoting it: indented under the `›` stamp line.
-        let chat = format!("  › [tmm chat 2026-09-28 14:37] human: @orchestrator 有报这个错误\n{}\n", paint.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"));
-        assert!(!scan_tail("kiro", &chat), "a stamped quote must not trigger");
-        // The same with the stamp on the pane's column zero (v2 paint).
-        assert!(!scan_tail("kiro", &format!("[tmm chat 2026-09-28 14:37] human: @kiro {}", paint.replace('\n', " "))));
-        // Tool output reading it (board show, capture-pane): under a `●` Shell head.
-        let tool = format!("● Shell tmm board show 267\n    ╰ output:\n{}\n", paint.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
-        assert!(!scan_tail("kiro", &tool), "tool output must not trigger");
-        // The agent's own prose about it: words around the sentence.
-        assert!(!scan_tail("kiro", "● The pane shows Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)\n"),
-            "a long lead-in is not a model name");
-        assert!(!scan_tail("kiro", "● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146) — I will retry.\n"),
-            "text after the id is prose");
-        assert!(!scan_tail("kiro", "● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model.\n"),
-            "without its Request ID the sentence is a mention");
-        // Validator 15:04: letters right, punctuation wrong — each is prose,
-        // not kiro's paint, and each used to hit.
         let id = "ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146";
-        for (text, why) in [
-            (format!("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id}"), "no closing paren"),
-            (format!("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. Request ID {id}"), "no parenthesis or colon"),
-            (format!("● Claude Opus 5.5 is experiencing high traffic Try again or select another model (Request ID: {id})"), "no period or comma"),
-            (format!("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID {id})"), "no colon"),
-            (format!("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id}))"), "extra text after the close"),
-            ("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: ef8dd12f)".to_string(), "not a uuid"),
-            (format!("● Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {}x)", &id[..35]), "non-hex in the uuid"),
-        ] {
-            assert!(!scan_tail("kiro", &format!("{text}\n")), "{why}");
+        for head in HEADS {
+            let paint = format!("{head} Claude Opus 5.5 is experiencing high traffic. Try\n  again, or select another model. (Request ID:\n  {id})");
+            // A chat delivery quoting it: indented under the `›` stamp line.
+            let chat = format!("  › [tmm chat 2026-09-28 14:37] human: @orchestrator 有报这个错误\n{}\n", paint.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"));
+            assert!(!scan_tail("kiro", &chat), "{head}: a stamped quote must not trigger");
+            // The same with the stamp on the pane's column zero (v2 paint).
+            assert!(!scan_tail("kiro", &format!("[tmm chat 2026-09-28 14:37] human: @kiro {}", paint.replace('\n', " "))), "{head}");
+            // Tool output reading it (board show, capture-pane): under a Shell head.
+            let tool = format!("{head} Shell tmm board show 267\n    ╰ output:\n{}\n", paint.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
+            assert!(!scan_tail("kiro", &tool), "{head}: tool output must not trigger");
+            // The agent's own prose about it: words around the sentence.
+            assert!(!scan_tail("kiro", &format!("{head} The pane shows Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id})\n")),
+                "{head}: a long lead-in is not a model name");
+            assert!(!scan_tail("kiro", &format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id}) — I will retry.\n")),
+                "{head}: text after the id is prose");
+            assert!(!scan_tail("kiro", &format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model.\n")),
+                "{head}: without its Request ID the sentence is a mention");
+            // Validator 15:04: letters right, punctuation wrong — each is prose,
+            // not kiro's paint, and each used to hit.
+            for (text, why) in [
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id}"), "no closing paren"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. Request ID {id}"), "no parenthesis or colon"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic Try again or select another model (Request ID: {id})"), "no period or comma"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID {id})"), "no colon"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {id}))"), "extra text after the close"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: ef8dd12f)"), "not a uuid"),
+                (format!("{head} Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: {}x)", &id[..35]), "non-hex in the uuid"),
+            ] {
+                assert!(!scan_tail("kiro", &format!("{text}\n")), "{head}: {why}");
+            }
+        }
+    }
+
+    /// #361, validator-facing: the closed set is a SET. Any other head — a
+    /// quote marker, kiro's own stamp, a different bullet, no head at all, or
+    /// the glyph glued to the name — is not a high-traffic paint.
+    #[test]
+    fn only_the_two_measured_head_glyphs_open_a_high_traffic_block() {
+        let tail = "Claude Opus 5.5 is experiencing high traffic. Try again, or select another model. (Request ID: ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)";
+        for head in HEADS {
+            assert!(scan_tail("kiro", &format!("{head} {tail}\n")), "{head} is accepted");
+        }
+        for head in ['›', '▸', '○', '◦', '◆', '◇', '·', '▪', '■', '◉', '⏺', '-', '>', '*', '#', '+'] {
+            assert!(!scan_tail("kiro", &format!("{head} {tail}\n")), "{head:?} is not a head kiro paints its errors under");
+        }
+        assert!(!scan_tail("kiro", &format!("{tail}\n")), "no head");
+        for head in HEADS {
+            assert!(!scan_tail("kiro", &format!("{head}{tail}\n")), "{head}: glued to the name");
+            assert!(!scan_tail("kiro", &format!(" {head} {tail}\n")), "{head}: indented is a continuation, never a head");
+            assert!(!scan_tail("kiro", &format!("{head}  {head} {tail}\n")), "{head}: a second head is not a name");
         }
     }
 
@@ -627,7 +692,28 @@ mod tests {
         let tail = "  again, or select another model. (Request ID:\n  ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)\n \n▸ Credits: 1\n";
         assert_eq!(error_signature("kiro", tail), None);
         assert!(headless_error_tail(tail), "v3's `Request ID` earns the deeper capture like `request_id`");
-        assert!(deep_error_signature("kiro", &format!("● Claude Opus 5.5 is experiencing high traffic. Try\n{tail}")).is_some());
+        for head in HEADS {
+            assert!(deep_error_signature("kiro", &format!("{head} Claude Opus 5.5 is experiencing high traffic. Try\n{tail}")).is_some(), "{head}");
+        }
+    }
+
+    /// #361, the block grouping on the REAL 2.28 paint: the narrow block with
+    /// its `•` head scrolled off the fold is an orphan that earns the one deep
+    /// capture, and the deep rescan reads the head and hits.
+    #[test]
+    fn a_kiro_2_28_block_whose_head_is_above_the_fold_is_read_on_the_deep_capture() {
+        let headless: String = KIRO_228_NARROW.lines().skip(2).map(|l| format!("{l}\n")).collect();
+        assert!(headless.starts_with("  again, or select another model."), "{headless:?}");
+        assert_eq!(error_signature("kiro", &headless), None, "an orphan tail is never a hit");
+        assert!(headless_error_tail(&headless), "but it earns the deeper capture");
+        let deep = format!("earlier output\n{KIRO_228_NARROW}");
+        assert_eq!(
+            deep_error_signature("kiro", &deep),
+            Some("1|3b94a118-d7bb-4c58-b1a7-d64e408bc98b".into()),
+            "the recovered `•` head opens the block"
+        );
+        // Padded past error_signature's 40-line staleness window, as the deep window allows.
+        assert!(deep_error_signature("kiro", &format!("{}{deep}", "old line\n".repeat(120))).is_some());
     }
 
     #[test]
@@ -725,15 +811,23 @@ mod tests {
 
     #[test]
     fn a_headless_quote_or_tool_tail_resolves_to_its_real_head_and_stays_silent() {
-        // The fold hides a `[tmm chat …]` stamp (or a `●` tool bullet): the
+        // The fold hides a `[tmm chat …]` stamp (or a bullet tool head): the
         // orphan may look like an error tail, but the deep capture recovers
         // the real head and the block is disqualified — read, not guessed.
         let quote_tail = "  An unexpected error occurred during the response stream:\n  reason: Some(ModelTemporarilyUnavailable), please try\n  again. (request_id: aa22)\n\n╭───╮\n│ ❯ │\n╰───╯\n";
         assert!(headless_error_tail(quote_tail), "the tail alone cannot tell — it asks for the deep look");
         let deep_quote = format!("────────\n  [tmm chat 2026-09-05 11:40] human: @kiro look at this\n{quote_tail}");
         assert_eq!(deep_error_signature("kiro", &deep_quote), None, "the recovered stamp head disqualifies the block");
-        let deep_tool = format!("● Shell tmm board show 24\n{quote_tail}");
-        assert_eq!(deep_error_signature("kiro", &deep_tool), None, "the recovered tool head disqualifies the block");
+        for head in HEADS {
+            let deep_tool = format!("{head} Shell tmm board show 24\n{quote_tail}");
+            assert_eq!(deep_error_signature("kiro", &deep_tool), None, "{head}: the recovered tool head disqualifies the block");
+        }
+        // The same for the high-traffic shape: its paint under a tool head,
+        // recovered by the deep capture, is the tool's output and no hit.
+        let hidden = "  again, or select another model. (Request ID:\n  ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)\n";
+        for head in HEADS {
+            assert_eq!(deep_error_signature("kiro", &format!("{head} Shell tmm board show 267\n    ╰ output: Claude Opus 5.5 is experiencing high traffic. Try\n{hidden}")), None, "{head}");
+        }
     }
 
     #[test]
