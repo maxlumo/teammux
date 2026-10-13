@@ -185,5 +185,5 @@ test('a server s backend list has no module-level owner (board #335 ②b-3)', as
   // Preferences' embedded editor is bound by a guest scope, keyed like App's.
   const prefs = await readFile('src/lib/app/Preferences.svelte', 'utf8');
   // ③a: one guest scope per member, keyed by its handle (reviewer P1-C).
-  assert.match(prefs, /\{#each guests\.filter\(\(g\) => opened\.includes\(g\.runtime\)\) as g \(g\.runtime\)\}\s*\{@const on = g\.runtime === guestShown && AGENT_TABS\.includes\(tab\) && sectionOf\(g\.runtime\) === tab\}\s*<div class="guest" class:off=\{!on\} inert=\{!on\}>\s*<ServerScope runtime=\{g\.runtime\} state=\{g\.state\}>\s*<AgentsPage/u);
+  assert.match(prefs, /\{#each guests\.filter\(\(g\) => opened\.includes\(g\.runtime\)\) as g \(g\.runtime\)\}\s*\{@const on = g\.runtime === guestShown && AGENT_TABS\.includes\(tab\) && sectionOf\(g\.runtime\) === tab\}\s*<div class="guest" class:off=\{!on\} inert=\{!on\}>\s*<ServerScope runtime=\{g\.runtime\} state=\{g\.state\} tag=\{g\.tag \?\? null\}>\s*<AgentsPage/u, 'and the guest carries its own name by the one tag rule (③c-5, reviewer P2-2)');
 });

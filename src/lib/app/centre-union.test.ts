@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CentreSource } from './centre-union.svelte.ts';
 import type { Alert } from '../hub/notify-centre.svelte.ts';
 (globalThis as { $state?: unknown }).$state = (v: unknown) => v;
-const { createCentreUnion, unionAlerts } = await import('./centre-union.svelte.ts');
+const { createCentreUnion, unionAlerts, activeOwners } = await import('./centre-union.svelte.ts');
 const { createAlertLog, createCentreSurface } = await import('../hub/notify-centre.svelte.ts');
 
 const mem = () => { const m = new Map<string, string>(); return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); } }; };
@@ -68,4 +68,18 @@ test('the union is the window s one surface: anchor, jump and consume are the sh
   assert.equal(w.union.jump, null);
   w.union.close();
   assert.equal(w.union.anchor, null);
+});
+
+test('activeOwners: the focus owns its id; a published member owns over an orphan of the same id, whatever the array order (P1-C3 (c))', () => {
+  const focus = { id: 'a', tag: 'focus' };
+  const oldC = { id: 'c', tag: 'orphan' }, freshC = { id: 'c', tag: 'fresh' }, b = { id: 'b', tag: 'b' };
+  const orphan = (r: { tag: string }) => r.tag === 'orphan';
+  // Orphan first, fresh later — and the reverse.
+  assert.equal(activeOwners(focus, [oldC, b, freshC], orphan).get('c'), freshC, 'the fresh runtime is the owner, not the last pushed');
+  assert.equal(activeOwners(focus, [freshC, b, oldC], orphan).get('c'), freshC, 'and not the first pushed');
+  assert.equal(activeOwners(focus, [oldC], orphan).get('c'), oldC, 'an orphan alone still owns its index (shown unavailable)');
+  // The focus wins over a member of the same id (a stale member handle).
+  const staleA = { id: 'a', tag: 'stale' };
+  assert.equal(activeOwners(focus, [staleA], () => false).get('a'), focus);
+  assert.equal(activeOwners(null, [b], () => false).get('a'), undefined, 'no focus: nothing invented');
 });

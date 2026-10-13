@@ -237,6 +237,9 @@
   const stopped = $derived(stoppedAgents(selectedRow?.slots, managedAgents));
 
   let projectReadSequence = 0, rosterReadSequence = 0;
+  /** The list's own state for the union (P1-C4): has it ever answered, and
+   * did the latest refresh fail. A failure keeps the rows (last good list). */
+  let listAnswered = $state(false), listFailed = $state(false);
   async function reload(report = false) {
     const request = ++projectReadSequence;
     try {
@@ -248,6 +251,7 @@
         hubRooms().catch(() => ({ rooms: {}, states: {} })),
       ]);
       if (!alive || request !== projectReadSequence) return;
+      listAnswered = true; listFailed = false;
       const talk = roomsRes.rooms ?? {};
       // Kept for the rows themselves: the same map that orders the sidebar
       // answers "when did this project last say something" on each row, and
@@ -273,14 +277,17 @@
       // opening a room is room work (its log, roster, read mark); a hidden
       // member publishes its list and waits — the room opens when it is shown.
       if (!selected && rows.length && visible) openFirst();
-    } catch (e) { if (report && alive && request === projectReadSequence) throw e; }
+    } catch (e) {
+      if (alive && request === projectReadSequence) listFailed = true;
+      if (report && alive && request === projectReadSequence) throw e;
+    }
   }
 
   // ③c-2: publish this server's ordered list, by this runtime; withdraw it
   // with the tree. The union is read-only to this Hub beyond its own slice.
   $effect(() => {
     if (!union) return;
-    union.source.publish(scope.runtime, serverId(), { rows, talk: talkMap, unread: roomUnread, agentStates, panes });
+    union.source.publish(scope.runtime, serverId(), { rows, talk: talkMap, unread: roomUnread, agentStates, panes, answered: listAnswered, failed: listFailed, icon: backendIcon });
   });
   $effect(() => () => { union?.source.withdraw(scope.runtime); });
   /** The sidebar's list in Aggregate: every included server's rows merged
@@ -299,14 +306,28 @@
    * runtime (a view that lied here would act on the wrong machine). */
   function entryItems(entry) {
     if (entry.serverId === serverId()) return projectItems(entry.item);
-    const run = (act) => onRow(entry, union?.runtimeOf ?? (() => null), act);
-    if (!run((api) => api) ) return [{ label: t('hubUnionUnavailable'), icon: 'info', onselect: () => {} }];
-    const name = entry.item.project.name, session = entry.item.project.session;
+    // ONE project-action flow (reviewer P1-C1 on 018d4fa5): a foreign row's
+    // Close/Delete is the same `askAction` → confirm → `runAction` as a local
+    // row's — Delete is close + archive, never the irreversible purge — with
+    // the SOURCE api and the row's own id/name/session frozen at the ask, so
+    // a focus move during the confirm changes nothing about the target.
+    // `onRow` hands the act its api SYNCHRONOUSLY (frozen before any await);
+    // it is captured here, once, for the whole action.
+    let source = null;
+    if (!onRow(entry, union?.runtimeOf ?? (() => null), (api) => { source = api; })) return [{ label: t('hubUnionUnavailable'), icon: 'info', onselect: () => {} }];
+    const row = entry.item, server = entry.tag ?? entry.serverId;
+    const where = { ...row, api: source, server };
     return [
-      ...(entry.item.live ? [] : [{ label: t('projectUp'), icon: 'zap', onselect: () => { void run((api) => api.projectUp(session)); } }]),
-      ...(entry.item.live ? [{ label: t('projectDown'), icon: 'stop', danger: true, onselect: () => { void run((api) => api.projectDown(session)); } }] : []),
-      { label: `${t('projectDelete')} · ${entry.tag ?? name}`, icon: 'trash', danger: true, onselect: () => { void run((api) => api.projectDelete(session)); } },
+      ...(row.live ? [] : [{ label: t('projectUp'), icon: 'zap', onselect: () => { void bringUpRow(where); } }]),
+      ...(row.live ? [{ label: t('projectDown'), icon: 'stop', danger: true, onselect: () => askAction('down', row.project.name, row.project.session, where) }] : []),
+      { label: t('projectDelete'), icon: 'trash', danger: true, onselect: () => askAction('delete', row.project.name, row.project.session, where) },
     ];
+  }
+  /** Open a row's project on ITS server (the local `bringUp` is the selected
+   * row's). The api was frozen when the menu was built; a failure is logged
+   * like the local one's — Open destroys nothing and asks nothing. */
+  async function bringUpRow(where) {
+    try { await where.api.projectUp(where.project.id); } catch (e) { console.warn('up failed', e); }
   }
   // A landing from another tree (③c-2): the person picked this server's
   // project in a union list while another server was focused; the host
@@ -1367,11 +1388,13 @@
    * closed whichever project happened to be open, not the one long-pressed
    * (owner, 2026-08-24: "关的不是我选中的 是其他的"). Agent verbs keep the
    * default: the roster only shows the selected project's agents. */
-  const askAction = (kind, name, session = selected) => {
+  const askAction = (kind, name, session = selected, where = null) => {
     if (acting || purging) return;
-    const row = rows.find(r => r.project.session === session);
+    // `where`: another server's row (③c-2 union) — its api, id and liveness
+    // frozen here; the dialog names the server beside the project.
+    const row = where ?? rows.find(r => r.project.session === session);
     actionError = '';
-    pendingAct = { kind, name, session, projectId: row?.project.id, closed: !row?.live };
+    pendingAct = { kind, name, session, projectId: row?.project.id, closed: !row?.live, api: where?.api ?? null, server: where?.server ?? null };
   };
   async function refreshActionView(afterMutation = false) {
     if (actionRefreshing && !afterMutation) return;
@@ -1398,16 +1421,20 @@
     try {
       if (kind === 'down' || kind === 'delete') {
         if (!projectId) throw new Error(t('operationUnavailable'));
+        // The row's own server: this Hub's api, or the SOURCE api a union
+        // row froze at the ask (P1-C1) — never resolved again here.
+        const down = act.api ? act.api.projectDown : projectDown;
+        const archive = act.api ? act.api.projectArchive : projectArchive;
         // Delete is close then archive, not purge. Remember the completed
         // step on this captured intent so a retry never closes it again.
         if (kind === 'down' || !act.closed) {
           step = t('projectDown');
-          await projectDown(projectId);
+          await down(projectId);
           act.closed = true;
         }
         if (kind === 'delete') {
           step = t('projectArchive');
-          await projectArchive(projectId, true);
+          await archive(projectId, true);
         }
       } else if (kind === 'remove') {
         await hubAgentRemove(session, name);
@@ -1433,6 +1460,9 @@
     if (!alive || pendingAct !== act) return;
     pendingAct = null;
     if (generation !== selectionGeneration) return;
+    // Another server's project: its own Hub's list refresh will show the
+    // change; this Hub's rooms are untouched.
+    if (act.api) return;
     if (kind === 'delete' && session === selected) selected = '';
     await refreshActionView(true);
   }
@@ -1594,6 +1624,12 @@
       notifyNews([m], newsCtx(m.room, session, false), undefined, newsEffects);
     }
     if (m?.room) unreadSoon(m.room);
+    // Everything above is the LIST's (the unread badge on the published slice,
+    // the notification record); everything below is the ROOM's. A hidden
+    // member does no room work on a push either (D4; reviewer P2-1 on
+    // 018d4fa5): no feed merge, no scroll, no roster refresh — the room's
+    // state is rebuilt when it is shown (`loadFeed` on show).
+    if (!visible) return;
     if (!selected || m?.room !== room(selected)) return;
     // A history window takes no live rows; the to-tail dot says news waits.
     if (windowed) { newBelow = true; return; }
@@ -2023,7 +2059,7 @@
          changes size while the track moves (board #174). -->
     <div class="track side" bind:this={sideTrackEl}>
     <Sidebar {compact} open={sideOpen} {rows} {trash} {rowsBase} {selected}
-      entries={unionList?.rows ?? null} missing={unionList ? union.included.filter((s) => unionList.missing.includes(s.id)) : []} {selectedKey}
+      entries={unionList?.rows ?? null} missing={unionList ? union.included.filter((s) => unionList.missing.includes(s.id)) : []} unavailable={unionList?.unavailable ?? []} {selectedKey}
       {panes} {agentStates} {talkMap} {tick} {roomUnread}
       onselect={(session) => { selectProject(session); sideOpen = false; }}
       onselectEntry={pickEntry}
@@ -2264,7 +2300,7 @@
        good version of it, so it was lifted out rather than copied. -->
   <ConfirmDialog open={!!pendingAct} busy={acting} compact={compact}
     error={actionError} confirmIcon={pendingAct ? ACT_COPY[pendingAct.kind].icon : 'check'}
-    title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', pendingAct.name).replace('{n}', String(pendingAct.names?.length ?? '')) : ''}
+    title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', pendingAct.server ? `${pendingAct.name} · ${pendingAct.server}` : pendingAct.name).replace('{n}', String(pendingAct.names?.length ?? '')) : ''}
     note={pendingAct ? t(ACT_COPY[pendingAct.kind].note) : ''}
     confirmLabel={pendingAct ? t(ACT_COPY[pendingAct.kind].go) : ''}
     onconfirm={runAction} oncancel={() => (pendingAct = null)} />

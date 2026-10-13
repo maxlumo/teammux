@@ -66,6 +66,23 @@ export interface CentreUnion {
   consume(n: number): void;
 }
 
+/** Pure: the ACTIVE owner of each server id among the runtimes the window
+ * holds (reviewer P1-C3 (c) on 018d4fa5). The focus always owns its id; among
+ * the members a published runtime owns over an orphan — a retained editor's
+ * old handle (③b: "keep editing" on an orphan) must never shadow the fresh
+ * runtime for the same id, or the current server's new alerts are neither
+ * counted nor clearable. Two orphans, or two published: the first wins (the
+ * fleet holds one published runtime per id). */
+export function activeOwners<R extends { id: ServerId }>(focus: R | null, members: readonly R[], orphan: (r: R) => boolean): Map<ServerId, R> {
+  const live = new Map<ServerId, R>();
+  for (const r of members) {
+    const held = live.get(r.id);
+    if (!held || (orphan(held) && !orphan(r))) live.set(r.id, r);
+  }
+  if (focus) live.set(focus.id, focus);
+  return live;
+}
+
 /** Pure: the merged list over `sources`, newest first, tagged when more than
  * one server is in the SET (not how many answered — the ③c-1 rule). */
 export function unionAlerts(sources: readonly CentreSource[]): UnionAlert[] {

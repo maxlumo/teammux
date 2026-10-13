@@ -128,18 +128,23 @@ therefore stay legible without making telemetry compete with the work.
 With Aggregate mode (websocket-client.md ③) the app holds several servers at
 once, but a machine's CPU is not another machine's, so the strip never sums
 or averages. It shows ONE server's reading — the focused one's. App passes
-the singleton two more props: `server` (the focus's id) and `tag` (its name
-by the ③c-1 rule, null in Single mode or with one server included). The one
-effect that owns the timer depends on `server`: a focus move drops the last
-reading (it was the other server's) and reads the new server at once, rather
-than wearing a stranger's numbers for up to a whole interval — the test holds
-the new server's answer and checks the old reading is already gone. The
-hover card's title is `sysVitals · <tag>` when the tag is set, so in Aggregate
-the card says whose numbers these are; Single is tag-free by construction.
-`load` is still injected from the bound runtime, so the component imports
-nothing of servers. Only the focus is polled (D4): no member's vitals are
-fetched for a hover or a row, and the server switcher's card carries no
-readings at all (websocket-client.md ③c-5).
+the singleton two more props: `owner` (the bound runtime HANDLE, not its id —
+reviewer P1-C2 on 018d4fa5: a same-id runtime replaced by a reconnect is a new
+owner) and `tag` (its name: in Aggregate ALWAYS the focus's name, one member
+included or many — orchestrator 02:28, the name is the identity of the number
+and coarse input has no hover; Single passes null). The one effect that owns
+the timer depends on `owner`, and every run is a GENERATION: the last reading
+is dropped before anything is asked, the new owner is read at once, and an
+answer is shown only if the generation it was asked in is still current — a
+late answer of the old owner's (A's request still out when the focus moved
+to B) is dropped, so B's tag never sits over A's numbers; unanswered is no
+reading, never a relabelled old one. The name sits BESIDE the reading (the
+one `ServerTag` atom) and the card's title carries it too. `load` is still
+injected from the bound runtime, so the component imports nothing of
+servers. Only the focus is polled (D4): no member's vitals are fetched for a
+hover or a row, and the server switcher's card carries no readings at all
+(websocket-client.md ③c-5). The 08:17 sentence promising every member's
+reading on its Connection row is withdrawn (orchestrator 02:28).
 
 ## Tests
 
@@ -151,10 +156,14 @@ readings at all (websocket-client.md ③c-5).
 - `system.source.test.ts` pins the contracts refactors would silently break:
   no ws/App/hub imports, the interval clamp, hidden-stops-timer, the
   failed-load-keeps-reading shape, tokens-only type.
-- `App.shell.mount.test.ts` (③c-5): the reading is the focus's and named by
-  the tag rule; a focus move drops the old reading before the new server
-  answers and reads it at once; the other member is never polled; Single
-  names no server.
+- `App.shell.mount.test.ts` (③c-5): the reading is the focus's and named
+  beside the number; a focus move drops the old reading before the new server
+  answers and reads it at once; A's late answer does not overwrite B's; A→B→A
+  fast lands only the final owner's; one included member is still named;
+  the other member is never polled; Single names no server.
+- `SystemStatus.mount.test.ts`: a fresh handle for the same id is a new
+  owner (the old handle's late answer is dropped); a late answer after
+  unmount writes nothing.
 
 ## Rules and their reasons
 
@@ -164,13 +173,15 @@ Each entry is a decision with the reason it was made; treat them as normative. T
 
 (board #56, refined by #85): desktop `system_status` samples CPU/MEM/root disk in-process through exact-pinned, desktop-gated `sysinfo`; the 20s client poll is the CPU delta window and first CPU is null. `SystemStatus` keeps the last good reading. App mounts one connected-client sampler: desktop places it at the primary sidebar's exact x/width and `.sidebar`, `.term-side`, `.files-left` reserve its named height; touch reveals that same instance only under the current visible page's open shared side drawer, whose bottom reservation includes the safe area. Metrics are natural-width and left-aligned. The main page remains full-height and receives no footer row. A fixed strip without matching sidebar reservation, duplicate per-page samplers, a full-width footer, pointer-through claims, and layer-only insets are forbidden.
 
-### The strip shows one server's reading, the focus's, never a sum (#335 ③c-5)
+### The strip shows one server's reading, the focus's, named beside it, never a sum (#335 ③c-5; P1-C2)
 
 A machine's CPU, memory and disk are its own; adding two machines' is a
 number that describes nothing. With several servers held, `SystemStatus`
-takes the focus's id and name (`server`, `tag`): a focus move drops the last
-reading and reads the new server at once, and the card names whose numbers
-these are when the ③c-1 rule says a name is needed. Only the focus is polled
-(D4); no other member's vitals are fetched for any surface. Summing or
-averaging across servers, keeping the old server's reading until the next
-tick after a focus move, and a per-member sampler are forbidden.
+takes the focus's HANDLE and name (`owner`, `tag`): a new owner drops the
+last reading, invalidates every answer still in flight (generation) and reads
+again at once; in Aggregate the name sits beside the number always. Only the
+focus is polled (D4); no other member's vitals are fetched for any surface.
+Summing or averaging across servers, keeping the old server's reading until
+the next tick after a focus move, showing an old owner's late answer under
+the new name, keying the owner by id (a reconnected same-id runtime borrows
+nothing), a hover-only name, and a per-member sampler are forbidden.

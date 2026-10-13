@@ -110,7 +110,11 @@
      * ③ plan): its runtime and state. Each member keeps its own Agents editor,
      * mounted on first open and kept, so a focus change never destroys a
      * draft in one; only the `guestShown` one is visible and takes input. */
-    guests?: { runtime: import('./server-runtime.ts').ServerRuntime; state: import('./server-state.ts').ServerState | undefined }[];
+    /** Each member's runtime, its state, and its NAME by the one tag rule
+     * (③c-5, reviewer P2 on 018d4fa5: a touch guest's head must say whose
+     * it is like the desktop page's does; App hands the same `serverTag`
+     * answer it hands every tree, never CURRENT's name). */
+    guests?: { runtime: import('./server-runtime.ts').ServerRuntime; state: import('./server-state.ts').ServerState | undefined; tag?: string | null }[];
     guestShown?: import('./server-runtime.ts').ServerRuntime | null;
     /** Is this page on screen? App keeps it mounted, hidden, once a guest
      * exists (③a): hidden, no guest is visible or takes input. */
@@ -758,7 +762,7 @@
       {#each guests.filter((g) => opened.includes(g.runtime)) as g (g.runtime)}
       {@const on = g.runtime === guestShown && AGENT_TABS.includes(tab) && sectionOf(g.runtime) === tab}
       <div class="guest" class:off={!on} inert={!on}>
-      <ServerScope runtime={g.runtime} state={g.state}>
+      <ServerScope runtime={g.runtime} state={g.state} tag={g.tag ?? null}>
       <AgentsPage
         section={sectionOf(g.runtime)}
         visible={on && guestInput}

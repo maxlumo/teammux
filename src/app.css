@@ -647,6 +647,10 @@ button:disabled {
 .side-unread { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-meta); font-weight: 650; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .side-unread + .side-age { margin-left: 0; }
 .proj-row.unread .p-name { font-weight: 650; }
+/* A union row whose server answered before and fails now (#335 ③c, P1-C4):
+   the last good list, muted the way the notification centre mutes an
+   unreachable server's rows. */
+.proj-row.unavailable { opacity: var(--muted-opacity, 0.6); }
 /* .grid: the Board sidebar's four count chips are a FIXED set, and flex-wrap
    broke them 3+1 with a ragged orphan (owner, 2026-09-01: "不要 3 1 这样的布
    局，列之间左侧点点要对齐"). Equal grid columns align the left dots per

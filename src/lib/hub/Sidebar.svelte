@@ -32,6 +32,9 @@
     entries?: HubUnionRow[] | null;
     /** Servers included in the union whose list has not arrived. */
     missing?: { id: string; name: string }[];
+    /** Servers whose last refresh failed: their rows (the last good list)
+     * stay, muted, and the foot names them (P1-C4). */
+    unavailable?: string[];
     trash?: ProjectRow[];
     rowsBase?: ReadonlySet<string> | null;
     selected?: string;
@@ -55,7 +58,7 @@
     onpurge?: (row: ProjectRow) => void;
   }
   let {
-    compact = false, open = false, rows = [], entries = null, missing = [], trash = [], rowsBase = null,
+    compact = false, open = false, rows = [], entries = null, missing = [], unavailable = [], trash = [], rowsBase = null,
     selected = '', selectedKey = '', panes = [], agentStates = {}, talkMap = {}, tick = Date.now(),
     roomUnread = {}, onselect = () => {}, onselectEntry = () => {}, oncreate = () => {}, onclose = () => {},
     onmenu = () => {}, onmenuEntry = () => {}, onrestore = () => {}, onpurge = () => {},
@@ -64,7 +67,7 @@
    * rows as single-server entries (no tag, this Hub's own clock and maps). */
   const list = $derived<HubUnionRow[]>(entries ?? rows.map((row) => ({
     serverId: '', item: row, ref: { kind: 'session', serverId: '', session: row.project.session }, key: row.project.id, tag: null,
-    slice: { rows, talk: talkMap, unread: roomUnread, agentStates, panes },
+    slice: { rows, talk: talkMap, unread: roomUnread, agentStates, panes, answered: true, failed: false, icon: catalog.icon },
   })));
   const isOpen = (e: HubUnionRow) => (entries ? e.key === selectedKey : e.item.project.session === selected);
   const pick = (e: HubUnionRow) => { if (entries) onselectEntry(e); else onselect(e.item.project.session); };
@@ -117,8 +120,12 @@
     {#each list as e (e.key)}
       {@const row = e.item}
       {@const unread = e.slice.unread[row.project.session]?.count ?? 0}
-      {@const agents = rowAgents(row, e.slice.panes as SidebarPane[], e.slice.agentStates as Record<string, string>, catalog)}
+      {@const agents = rowAgents(row, e.slice.panes as SidebarPane[], e.slice.agentStates as Record<string, string>, e.slice)}
+      <!-- A row's agent faces are drawn with ITS server's catalog (the slice
+           carries the source's `icon`), never the focus's (P2-5). A row whose
+           server's latest refresh failed is the last good list: muted. -->
       <div class="side-row proj-row" role="group" aria-label={unread ? `${row.project.name} · ${t('hubUnreadCount').replace('{n}', String(unread))}` : row.project.name} class:open={isOpen(e)} class:unread={unread > 0}
+        class:unavailable={unavailable.includes(e.serverId)}
         class:appear={!!rowsBase && !rowsBase.has(row.project.id)}
         data-server={e.serverId || undefined}
         animate:flip={{ duration: moveMs() }}
@@ -158,10 +165,21 @@
     {/each}
     {#each missing as m (m.id)}
       <!-- A server in the union whose list has not arrived (no Hub answer
-           yet, or no Hub): said, never a shorter list in silence (②a-5). -->
+           yet, its first list still out or failed, or no Hub): said, never a
+           shorter list in silence (②a-5, P1-C4). -->
       <div class="side-row proj-row missing" role="note">
         <span class="dot off"></span>
         <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
+      </div>
+    {/each}
+    {#each (entries ? unavailable : []) as id (id)}
+      {@const name = entries?.find((e) => e.serverId === id)?.tag ?? id}
+      <!-- A server that answered before and fails now: its rows above are
+           the last good list, muted; here it is named (one word, the
+           notification centre's: not reachable). -->
+      <div class="side-row proj-row missing" role="note">
+        <span class="dot off"></span>
+        <span class="p-main"><span class="p-top"><span class="p-name">{name}</span><span class="side-age">{t('hubUnionUnavailable')}</span></span></span>
       </div>
     {/each}
     {#if trash.length}

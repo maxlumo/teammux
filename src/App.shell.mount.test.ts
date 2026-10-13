@@ -5042,36 +5042,93 @@ test('③c-2: picking another server s row moves the focus there (D2) and select
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .hub-root .chat-head .h1-text')?.textContent, 'app');
 });
 
-test('③c-2: another server s row menu acts on THAT server s api; a server with no live runtime offers nothing; a server whose list has not come is listed as missing', async (context) => {
+test('③c-2/P1-C1: another server s row Close/Delete is the ONE project-action flow — confirmed, by B s project ID, on B s api frozen at the ask; Delete is close + archive, never purge; a focus move during the confirm does not change the target; a server with no live runtime offers nothing; a server whose list has not come is listed as missing', async (context) => {
   const events: string[] = [];
+  const args: string[] = [];
   const cLet = { let: null as (() => void) | null };
+  let bRefuses = false;
   const servers = [
     { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
     { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
     { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
   ];
+  // A and B both have a project named `app` whose id ≠ session (`a-app` / `b-app`).
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }),
     tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
   }), (url) => (url.includes('//b') ? 'm-b' : url.includes('//c') ? 'm-c' : 'm-a'), {
-    ...sandbox, calls: events, rpc: twoHubs(),
+    ...sandbox, calls: events, rpc: twoHubs({
+      projectDown: async (id: string) => { args.push(`${asking()}:down:${id}`); if (bRefuses && asking() === 'b') throw new Error('B refused'); return {}; },
+      projectArchive: async (id: string, archived: boolean) => { args.push(`${asking()}:archive:${id}:${archived}`); return {}; },
+      projectDelete: async (id: string) => { args.push(`${asking()}:PURGE:${id}`); return {}; },
+    }),
     gate: (url, n) => (url.includes('//c') && n > 0 ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window: any) { window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
   const missing = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row.missing .p-name')].map((n) => n.textContent);
   assert.deepEqual(missing, ['charlie'], 'C, included but not answering, is listed as missing — not silently absent');
-  // B s row: Close goes to B.
-  const rowB = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row')].find((r) => r.dataset.server === 'b' && r.querySelector('.p-name')?.textContent === 'other')!;
-  rowB.querySelector<HTMLButtonElement>('.row-menu')!.click();
+  const menuOf = async (server: string, name: string) => {
+    const row = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row')].find((r) => r.dataset.server === server && r.querySelector('.p-name')?.textContent === name)!;
+    row.querySelector<HTMLButtonElement>('.row-menu')!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+    return (re: RegExp) => [...h.app.document.querySelectorAll<HTMLButtonElement>('[role=menu] button, .ctx-menu button, .menu-item')].find((b) => re.test(b.textContent ?? ''))!;
+  };
+  const dialog = () => h.app.document.querySelector('[role=alertdialog]');
+  // Close B's `app` (same name as A's): confirmed first, zero mutation until then.
+  let pick = await menuOf('b', 'app');
+  pick(/close/iu).click();
   for (let i = 0; i < 3; i++) await h.settle();
-  const item = [...h.app.document.querySelectorAll<HTMLButtonElement>('[role=menu] button, .ctx-menu button, .menu-item')].find((b) => /close/iu.test(b.textContent ?? ''));
-  assert.ok(item, `B s row offers Close: ${[...h.app.document.querySelectorAll('[role=menu] button, .ctx-menu button, .menu-item')].map((b: any) => b.textContent?.trim()).join('|')}`);
-  const before = events.length;
-  item.click();
+  assert.ok(dialog(), 'a cross-server Close asks first, like a local one');
+  assert.match(dialog()!.textContent ?? '', /app.*beta|beta.*app/su, `the confirmation names project AND server: ${dialog()!.textContent}`);
+  assert.deepEqual(args, [], 'zero mutation before the confirm');
+  // Cancel: zero calls.
+  answerDialog(h.app, /^cancel$/iu);
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(dialog(), null);
+  assert.deepEqual(args, [], 'Cancel: zero calls');
+  // Ask again; move the FOCUS to B while the dialog is open (the target is
+  // frozen: still B's `app`, by B's id, on B's api); confirm.
+  pick = await menuOf('b', 'app');
+  pick(/close/iu).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(dialog());
+  await pickServer(h, 'beta');
   for (let i = 0; i < 4; i++) await h.settle();
-  // A destructive Close asks first in the Hub's own flow; a cross-server one runs on B directly through onRow.
-  assert.ok(events.slice(before).includes('rpc@b:projectDown'), `the action went to B: ${events.slice(before).filter((e) => e.startsWith('rpc@')).join(',')}`);
-  assert.ok(!events.slice(before).includes('rpc@a:projectDown'), 'never to A');
+  // (the dialog belongs to A's Hub, now held; answer it there)
+  answerDialog(h.app, /^close$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(50); await h.settle(); }
+  assert.deepEqual(args, ['b:down:b-app'], `confirmed: only B, by B s project ID, not the session name: ${args.join(',')}`);
+  assert.ok(!events.some((e) => e === 'rpc@a:projectDown'), 'never to A');
+  // Back on A; Delete B's `other`: close + archive on B, never projectDelete.
+  await pickServer(h, 'alpha');
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  args.length = 0;
+  pick = await menuOf('b', 'other');
+  pick(/delete/iu).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(dialog(), 'Delete asks');
+  assert.match(dialog()!.textContent ?? '', /recycle bin|回收站/iu, 'and it is the recoverable archive, not a purge');
+  answerDialog(h.app, /^delete$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(50); await h.settle(); }
+  assert.deepEqual(args, ['b:down:b-other', 'b:archive:b-other:true'], `close then archive, on B, by id: ${args.join(',')}`);
+  assert.ok(!args.some((a: string) => a.includes('PURGE')), 'projectDelete (irreversible) is never called from a row menu');
+  // B refuses: the error is shown on the same target, and Retry does not
+  // redo the completed step.
+  args.length = 0; bRefuses = true;
+  pick = await menuOf('b', 'app');
+  pick(/close/iu).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  answerDialog(h.app, /^close$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(50); await h.settle(); }
+  assert.ok(dialog(), 'the dialog stays on the failed target');
+  assert.match(dialog()!.textContent ?? '', /B refused/u, `the error is visible: ${dialog()!.textContent}`);
+  assert.deepEqual(args, ['b:down:b-app']);
+  bRefuses = false;
+  answerDialog(h.app, /^close$/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(50); await h.settle(); }
+  assert.equal(dialog(), null, 'retried and done');
+  assert.deepEqual(args, ['b:down:b-app', 'b:down:b-app'], 'the retry runs the failed step on the same target');
 });
 
 test('③c-2 (D4): a hidden member s Hub refreshes only its list — no room is opened, no feed/roster/activity polled — until it is shown', async (context) => {
@@ -5104,6 +5161,20 @@ test('③c-2 (D4): a hidden member s Hub refreshes only its list — no room is 
   const hidden = events.slice(mark).filter((e) => e.startsWith('rpc@b:')).map((e) => e.slice('rpc@b:'.length));
   assert.deepEqual(hidden.filter((n) => /^hub(Log|Agents|Activity)$/u.test(n)), [], `hidden again, room open: no room poll of B: ${hidden.join(',')}`);
   assert.ok(hidden.filter((n) => n === 'projectList').length >= 2, 'but its list still refreshes');
+  // The PUSH path (reviewer P2-1 on 018d4fa5): a turn message arrives on
+  // hidden B's OPEN room. List work only — the unread badge (`hubUnread`) and
+  // the notification record — never the room's: no feed scroll, no
+  // `hubAgents` roster refresh. Exact counts per method, not only projectList.
+  const pushMark = events.length;
+  conn(h, 'b')!.push({ id: '501', seq: 501, ts: 1_800_000_020_000, from: 'ops', to: ['human'], body: 'turn on hidden B', room: 'proj:app' });
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  const afterPush = events.slice(pushMark).filter((e) => e.startsWith('rpc@b:')).map((e) => e.slice('rpc@b:'.length));
+  const count = (n: string) => afterPush.filter((x) => x === n).length;
+  assert.deepEqual({ hubAgents: count('hubAgents'), hubLog: count('hubLog'), hubActivity: count('hubActivity') }, { hubAgents: 0, hubLog: 0, hubActivity: 0 }, `a push on hidden B does no room work: ${afterPush.join(',')}`);
+  // `hubRead` MAY appear once: it is the #334 re-send of a read mark made
+  // while B was SHOWN (the tail was on screen then) that the unread refresh
+  // retries until the server ACKs it — a read that happened, not new room work.
+  assert.ok(count('hubRead') <= 1 && count('hubUnread') <= 1 && count('projectList') <= 1 && count('listSessionsWithPanes') <= 1 && count('hubRooms') <= 1, `list work only, once at most each: ${afterPush.join(',')}`);
 });
 
 // ─── reviewer R1 / R2 on aed2f654 ─────────────────────────────────────
@@ -7183,6 +7254,43 @@ test('③c-4 (D6): a member that is not connected is listed unavailable — its 
   assert.equal(h.app.document.querySelector('.nc-foot .command-button'), null, 'nothing left to clear');
 });
 
+test('③c-4/P1-C3 (a): the bell is the WINDOW s — a focus without a Hub does not take the entry away from a member that has one: B s alerts are counted and reachable', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'terminal' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs({
+    // A has NO Hub: its bus answers method-not-found; B's is as before.
+    hubRooms: async () => { if (asking() === 'a') throw Object.assign(new Error('no hub'), { code: -32601 }); return { rooms: { 'proj:app': 9000, 'proj:other': 50 }, states: {} }; },
+  }) });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .hub-root'), null, 'A has no Hub');
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell');
+  assert.ok(bell, 'the bell is reachable: B has a Hub and alerts');
+  // Both indexes count: B's (its Hub feeds it) and A's (A is connected; its
+  // index exists and is reachable to clear, Hub or no Hub).
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 2\b/u, `both unviewed alerts count: ${bell.getAttribute('aria-label')}`);
+  await openBell(h);
+  assert.deepEqual(bellRows(h), ['b:beta:from beta', 'a:alpha:from alpha'], 'both rows, neither unavailable');
+});
+
+test('③c-4/P1-C3 (b): a member that NEVER came up (refuses from boot) still has its index shown — read-only, unavailable, not counted, untouched by Clear', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs(), gate: (url) => (url.includes('//b') ? Promise.reject(new Error('unauthorized')) : null) });
+  for (let i = 0; i < 12; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(conn(h, 'b')?.isConnected() ?? false, false, 'B never connected');
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!;
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, `only A counts: ${bell.getAttribute('aria-label')}`);
+  await openBell(h);
+  assert.deepEqual(bellRows(h), ['b:beta:from beta!', 'a:alpha:from alpha'], 'B s persisted index is shown, muted');
+  assert.match(h.app.document.querySelector('.nc-foot')?.textContent ?? '', /beta/u, 'and named unreachable');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-foot button')].find((b) => /clear/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 2; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_hub_alerts::a'), '[]', 'A s list cleared');
+  assert.equal(JSON.parse(ls.getItem('tmux_hub_alerts::b')!).length, 1, 'B s index untouched: no runtime ever owned it, and the union never writes an unavailable one');
+  assert.deepEqual(bellRows(h), ['b:beta:from beta!']);
+});
+
 test('③c-4: a system notification s tag names the room ON ITS SERVER, and the title names the server when more than one is included', async (context) => {
   const sys: { title: string; tag?: string }[] = [];
   const h = await bootApp(context, aggregateOn({
@@ -7213,34 +7321,74 @@ const hoverOn = async (h: Awaited<ReturnType<typeof bootApp>>, el: Element) => {
 };
 const cardText = (h: Awaited<ReturnType<typeof bootApp>>) => h.app.document.querySelector('.hover-card')?.textContent ?? '';
 
-test('③c-5: the system status is the FOCUSED server s reading, named by the tag rule, and never a sum — a focus move drops the old reading and reads the new server at once', async (context) => {
+test('③c-5: the system status is the FOCUSED server s reading, named beside the number, never a sum — a focus move drops the old reading and reads the new server at once; a LATE answer of the old owner s is dropped (P1-C2)', async (context) => {
   const events: string[] = [];
-  // B's reading is held until released: the window between the focus move
-  // and B's answer is where a stale reading of A's would show.
-  let releaseB: (() => void) | null = null;
+  // Both servers answer only when released: the window between a focus move
+  // and the new owner's answer is where a stale reading would show, and an
+  // old owner's answer arriving AFTER the new one is the late-overwrite.
+  const pending: Record<string, Array<() => void>> = { a: [], b: [] };
+  const release = (id: string) => { for (const r of pending[id]!.splice(0)) r(); };
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
   }), undefined, { ...sandbox, calls: events, rpc: { ...twoHubs(), systemStatus: async () => {
-    if (asking() !== 'b') return { cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 };
-    await new Promise<void>((r) => { releaseB = r; });
-    return { cpu_pct: 90, mem_used: 9, mem_total: 10, disk_used: 1, disk_total: 10 };
+    const id = asking();
+    await new Promise<void>((r) => { pending[id]!.push(r); });
+    return id === 'b' ? { cpu_pct: 90, mem_used: 9, mem_total: 10, disk_used: 1, disk_total: 10 } : { cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 };
   } } });
   for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
   const vitals = () => h.app.document.querySelector('.sysvitals')?.textContent ?? '';
+  release('a');
+  for (let i = 0; i < 4; i++) { await h.app.advance(50); await h.settle(); }
   assert.match(vitals(), /10\s*%|CPU10/u, `A s reading: ${vitals()}`);
   assert.ok(!events.some((e) => e === 'rpc@b:systemStatus'), 'only the focus is polled (D4): B never asked');
+  assert.equal(h.app.document.querySelector('.sysvitals .server-tag')?.textContent, 'alpha', 'the name sits BESIDE the reading (not hover-only: coarse input has no hover)');
   await hoverOn(h, h.app.document.querySelector('.sysvitals')!);
-  assert.match(cardText(h), /alpha/u, `the card names the server: ${cardText(h)}`);
-  // Focus B: A s numbers go, B s come, read at once (not at the next tick).
+  assert.match(cardText(h), /alpha/u, `and the card names it too: ${cardText(h)}`);
+  // Let A's interval fire once more so an A request is IN FLIGHT when the
+  // focus moves (the late answer the P1 is about).
+  for (let i = 0; i < 2; i++) { await h.app.advance(20_000); await h.settle(); }
+  assert.ok(pending.a!.length >= 1, `an A request is in flight: ${pending.a!.length}`);
+  // Focus B: A s numbers go at once, B is read at once.
   const mark = events.length;
   await pickServer(h, 'beta');
   for (let i = 0; i < 4; i++) { await h.app.advance(100); await h.settle(); }
   assert.ok(events.slice(mark).includes('rpc@b:systemStatus'), 'B read at once on focus');
   assert.doesNotMatch(vitals(), /10\s*%|CPU10/u, `A s reading is gone before B answers: ${vitals()}`);
-  releaseB!();
-  for (let i = 0; i < 4; i++) { await h.app.advance(100); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.sysvitals'), null, 'unanswered = no reading (nothing is relabelled)');
+  release('b');
+  for (let i = 0; i < 4; i++) { await h.app.advance(50); await h.settle(); }
   assert.match(vitals(), /90\s*%|CPU90/u, `B s reading, not A s or a sum: ${vitals()}`);
+  assert.equal(h.app.document.querySelector('.sysvitals .server-tag')?.textContent, 'beta', 'named B');
+  // NOW A's old request answers, late: dropped, B's reading stands.
+  release('a');
+  for (let i = 0; i < 4; i++) { await h.app.advance(50); await h.settle(); }
+  assert.match(vitals(), /90\s*%|CPU90/u, `A s late answer did not overwrite B s: ${vitals()}`);
   assert.doesNotMatch(vitals(), /100|50/u, 'not summed or averaged');
+  // A→B→A fast: two moves before either answers; only the LAST owner's
+  // answer lands, the stale middle one is dropped.
+  await pickServer(h, 'alpha');
+  for (let i = 0; i < 2; i++) { await h.app.advance(50); await h.settle(); }
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 2; i++) { await h.app.advance(50); await h.settle(); }
+  await pickServer(h, 'alpha');
+  for (let i = 0; i < 2; i++) { await h.app.advance(50); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.sysvitals'), null, 'nothing shown until the final owner answers');
+  release('b');
+  for (let i = 0; i < 2; i++) { await h.app.advance(50); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.sysvitals'), null, 'the middle owner s answer is dropped');
+  release('a');
+  for (let i = 0; i < 4; i++) { await h.app.advance(50); await h.settle(); }
+  assert.match(vitals(), /10\s*%|CPU10/u, `the final owner s answer lands: ${vitals()}`);
+  assert.equal(h.app.document.querySelector('.sysvitals .server-tag')?.textContent, 'alpha');
+});
+
+test('③c-5 (Aggregate, one included member): the reading is still named — the name is the identity of the number, not the >1 tag rule', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }, ['b']), undefined, { ...sandbox, rpc: { ...twoHubs(), systemStatus: async () => ({ cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 }) } });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.sysvitals .server-tag')?.textContent, 'alpha', 'named with B excluded');
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .chat-head .server-tag'), null, 'while the page heads follow the >1 rule and are untagged');
 });
 
 test('③c-5 (Single): the status card names no server', async (context) => {
@@ -7248,6 +7396,7 @@ test('③c-5 (Single): the status card names no server', async (context) => {
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
   }, undefined, { ...sandbox, rpc: { ...twoHubs(), systemStatus: async () => ({ cpu_pct: 10, mem_used: 1, mem_total: 10, disk_used: 1, disk_total: 10 }) } });
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.sysvitals .server-tag'), null, 'no name beside the reading');
   await hoverOn(h, h.app.document.querySelector('.sysvitals')!);
   assert.doesNotMatch(cardText(h), /alpha|beta/u, `no server in the card: ${cardText(h)}`);
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-head .server-tag'), null, 'nor on the scratch head');
@@ -7317,44 +7466,111 @@ test('③c-5: the owner-bound surfaces say whose they are when several servers a
   assert.match((h.app.window as any).__copied ?? '', /addr=ws%3A%2F%2Fb%3A9899/u, `B s link: ${(h.app.window as any).__copied}`);
 });
 
+test('③c-5 (touch): the guest Agents editor names its server too — the same tag answer App hands every tree, including a revealed OTHER member s guest, never CURRENT s name', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'mobile',
+  }), undefined, { rpc: guestRpc(), setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  await settingsTab(h, /^agents/iu);
+  const shownTag = () => h.app.document.querySelector('.agents-embed .guest:not(.off) .mid .page-head .server-tag')?.textContent;
+  assert.equal(shownTag(), 'alpha', 'A s guest head names A');
+  // Focus B: its guest comes forward, named B.
+  await settingsTab(h, /^connection/iu);
+  await pickServer(h, 'beta');
+  assert.equal(ls.getItem('tmux_server_current'), 'b');
+  await settingsTab(h, /^agents/iu);
+  assert.equal(shownTag(), 'beta', 'B s guest head names B');
+  // Both guests are mounted; the hidden one still carries ITS name (not CURRENT s).
+  const tags = [...h.app.document.querySelectorAll('.agents-embed .guest .mid .page-head .server-tag')].map((e) => e.textContent).sort();
+  assert.deepEqual(tags, ['alpha', 'beta'], 'each guest names its own server');
+});
+
 // ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────
 
 /** Per-server session lists: A has `work`; B has `work` and `deploy`. */
 const twoSessionLists = () => {
-  const byServer: Record<string, { sessions: unknown[]; panes: unknown[] }> = {
+  const byServer: Record<string, { sessions: any[]; panes: any[] }> = {
     a: { sessions: [{ name: 'work', windows: 1 }], panes: [{ session: 'work', window: 1, pane: 0 }] },
     b: { sessions: [{ name: 'work', windows: 1 }, { name: 'deploy', windows: 2 }], panes: [{ session: 'work', window: 1, pane: 0 }, { session: 'deploy', window: 1, pane: 0 }, { session: 'deploy', window: 2, pane: 0 }] },
   };
   const mine = () => byServer[asking()] ?? { sessions: [], panes: [] };
-  return {
-    listSessionsWithPanes: async () => mine(),
-    listSessions: async () => mine().sessions,
+  const rpc = {
+    listSessionsWithPanes: async () => ({ sessions: [...mine().sessions], panes: [...mine().panes] }),
+    listSessions: async () => [...mine().sessions],
     listPanes: async (session: string) => (mine().panes as any[]).filter((p) => p.session === session),
     projectList: async () => ({ projects: [] }),
   };
+  return { rpc, byServer };
 };
 const foreignRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .session.foreign:not(.missing)')]
   .map((r) => `${r.querySelector('.server-tag')?.textContent ?? '-'}:${r.querySelector('.name')?.textContent}`);
 const ownRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .session:not(.foreign) .session-row .name')].map((n) => n.textContent);
 
-test('③c-3: the focused Terminal sidebar lists the other included servers sessions as a tagged selector under its own; a hidden member loads its list once and never polls', async (context) => {
+test('③c-3/P1-C4: the focused Terminal sidebar lists the other included servers sessions as a tagged selector under its own; a hidden member keeps its list CURRENT on the 20 s list cadence and stops when excluded', async (context) => {
   const events: string[] = [];
+  const lists = twoSessionLists();
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
-  }), undefined, { ...sandbox, calls: events, rpc: twoSessionLists() });
+  }), undefined, { ...sandbox, calls: events, rpc: lists.rpc });
   for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
   assert.deepEqual(ownRows(h), ['work'], 'A s own list, untagged, as before');
   assert.deepEqual(foreignRows(h), ['beta:work', 'beta:deploy'], 'B s sessions, tagged, below');
-  const before = events.filter((e) => e === 'rpc@b:listSessionsWithPanes').length;
-  assert.equal(before, 1, 'B s hidden Sessions loaded its list once');
+  const count = () => events.filter((e) => e === 'rpc@b:listSessionsWithPanes').length;
+  const before = count();
+  assert.equal(before, 1, 'B s hidden Sessions loaded its list once at join');
+  // B gains a session while hidden: within the cadence the selector shows it.
+  lists.byServer.b!.sessions.push({ name: 'ci', windows: 1 });
+  lists.byServer.b!.panes.push({ session: 'ci', window: 1, pane: 0 });
   for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
-  assert.equal(events.filter((e) => e === 'rpc@b:listSessionsWithPanes').length, before, 'and never polls (D4: this page has no poll, hidden or shown)');
+  const after = count();
+  assert.ok(after - before >= 2 && after - before <= 4, `~3 list refreshes in a minute (the Hub s cadence), not zero and not a hot loop: ${after - before}`);
+  assert.deepEqual(foreignRows(h), ['beta:work', 'beta:deploy', 'beta:ci'], 'the new session is in the selector');
+  // Exclude B: its tree goes and its list work stops.
+  await toConnection(h);
+  includeSwitch(h, 'beta')!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  const mark = count();
+  for (let i = 0; i < 12; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.equal(count(), mark, 'excluded: no more list refreshes of B');
+});
+
+test('P1-C4: a member whose Hub answered the handshake but whose FIRST project list fails stays listed as missing — not as an empty list; a later success lists it; a later failure keeps the last good list and names it unavailable', async (context) => {
+  let bListFails = true;
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs({ projectList: async () => { if (asking() === 'b' && bListFails) throw new Error('B list failed'); return { projects: asking() === 'b' ? [{ project: { id: 'b-app', name: 'app', session: 'app', path: '/app', room: 'proj:app', updated_at: 9000 }, live: true, slots: [] }] : [{ project: { id: 'a-app', name: 'app', session: 'app', path: '/app', room: 'proj:app', updated_at: 1000 }, live: true, slots: [] }] }; } }) });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const missing = () => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row.missing .p-name')].map((n) => n.textContent);
+  assert.deepEqual(missing(), ['beta'], 'B s Hub is up but its list has not answered: missing');
+  assert.deepEqual(sideRows(h), ['alpha:app*'], 'not an empty B list');
+  // B's list answers on its next refresh.
+  bListFails = false;
+  for (let i = 0; i < 6; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.deepEqual(missing(), []);
+  assert.deepEqual(sideRows(h), ['beta:app', 'alpha:app*']);
+  // B's list fails again: the last good row stays, muted; B is named.
+  bListFails = true;
+  for (let i = 0; i < 6; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.deepEqual(sideRows(h), ['beta:app', 'alpha:app*'], 'the last good list is kept');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held) .hub-root .sidebar .proj-row.unavailable[data-server="b"]'), 'B s row is muted');
+  assert.match([...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row.missing')].map((r) => r.textContent).join('|'), /beta.*not connected|beta.*未连接/iu, 'B named unavailable');
+});
+
+test('P1-C4: another server s sessions are pickable while THIS server s first Projects request still hangs', async (context) => {
+  let aHangs = true;
+  const lists = twoSessionLists();
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: { ...lists.rpc, projectList: async () => { if (asking() === 'a' && aHangs) await new Promise<void>(() => {}); return { projects: [] }; } } });
+  for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(foreignRows(h), ['beta:work', 'beta:deploy'], 'B s selector is shown though A s Projects never reported');
 });
 
 test('③c-3: picking another server s session focuses that server and opens the pane THERE — A s terminal is untouched', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
-  }), undefined, { ...sandbox, rpc: twoSessionLists() });
+  }), undefined, { ...sandbox, rpc: twoSessionLists().rpc });
   for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
   const ls = h.app.window.localStorage;
   const a = conn(h, 'a')!;
@@ -7376,7 +7592,7 @@ test('③c-3: picking another server s session focuses that server and opens the
 
 test('③c-3: Single lists no other servers', async (context) => {
   const events: string[] = [];
-  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, calls: events, rpc: twoSessionLists() });
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, calls: events, rpc: twoSessionLists().rpc });
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
   assert.deepEqual(foreignRows(h), []);
   assert.equal(h.app.document.querySelector('.term-side .group-label .server-tag'), null);

@@ -323,7 +323,7 @@ test('Settings only offers the category when there is a bus and no Agents page',
   assert.match(source, /const frontHub = \$derived\(revealed \? viewOf\(revealed\)\.hubState\.available : hubEligible\);/u);
   assert.match(source, /showAgents=\{frontHub && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
   // ③a: one guest per member, the focused one shown (reviewer P1-C).
-  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs' && !switching\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
+  assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\), tag: serverTag\(tagScope, runtime\.id\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs' && !switching\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
   // jump travels through that one guard rather than straight from the state.
   // ③a (reviewer P1-1(b)): the request names its server; Preferences hands
@@ -1027,6 +1027,11 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
     'mount gate wraps the sidebar strip');
   assert.match(source, /<SystemStatus[^/]*visible=\{connected\}/u,
     'a disconnect stops the singleton timer');
+  // ③c-5 / P1-C2: the sample owner is the bound HANDLE (a same-id fresh
+  // runtime is a new owner); the name is the focus's whenever in Aggregate.
+  assert.match(source, /<SystemStatus[^/]*owner=\{scopeRuntime\} tag=\{sysOwnerName\}/u, 'owner = the bound handle; the name = the Aggregate focus s, always');
+  assert.match(source, /const sysOwnerName = \$derived\(connMode === 'aggregate' && serverCurId \? \(serverList\.find\(\(s\) => s\.id === serverCurId\)\?\.name \?\? serverCurId\) : null\);/u,
+    'not the >1 tag rule: one included member is still named (orchestrator 02:28)');
   // Desktop: exact sidebar column and exact reservation, never a main footer.
   assert.match(source, /\.sys-sidebar \{[^}]*position: fixed[^}]*left: 46px[^}]*width: var\(--sidebar-w\)/u,
     'desktop strip is confined to the primary sidebar column');
@@ -1483,4 +1488,20 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
     'owner, block and set re-checked at commit; a stale answer keeps the tree and re-owes the question');
   assert.equal([...source.matchAll(/aggregate\.dismiss\(/gu)].length, 1, 'one place lets an orphan go');
   assert.match(source, /ondismiss: \(id\) => \{[^\n]*!membershipFrozen\(\)\) void askOrphan\(r\); \}/u, 'the list s Dismiss is the same ask');
+});
+
+test('the bell s projection separates index-exists / runtime-eligible / reachable, and is the WINDOW s (#335 ③c-4; reviewer P1-C3 on 018d4fa5)', () => {
+  const sources = source.slice(source.indexOf('const centreSources = $derived.by'), source.indexOf('const centre = createCentreUnion'));
+  // (c) the ACTIVE owner per id — a fresh runtime over a retained orphan —
+  // through the one pure rule, never "the last same-id runtime in the array".
+  assert.match(sources, /const live = activeOwners\(scopeRuntime, background, \(r\) => aggregate\.orphan\(r\)\);/u);
+  // (b) an index with no runtime is still read (its own slot), never null.
+  assert.match(sources, /log: runtime \? serverStates\.get\(runtime\)\?\.centre \?\? null : indexOnlyLog\(s\.id\),/u, 'no runtime ≠ no index');
+  assert.match(sources, /if \(runtime\) indexOnlyLogs\.delete\(s\.id\);/u, 'a runtime s state owns the slot the moment one exists');
+  assert.match(source, /log = createAlertLog\(createServerStore\(localStorage, id, writeGate\)\)/u, 'the index-only log reads THAT server s slot through the one store');
+  // Reachable is DERIVED (agent-status rule), never a socket poll.
+  assert.match(sources, /: aggregate\.status\(s\.id\)\?\.kind === 'connected'\);/u);
+  // (a) the entry is the window s: any eligible member or any index with entries.
+  assert.match(source, /const centreShown = \$derived\(hubEligible \|\| background\.some\(\(r\) => viewOf\(r\)\.hubState\.available\) \|\| centreSources\.some\(\(s\) => \(s\.log\?\.items\.length \?\? 0\) > 0\)\);/u,
+    'a focus without a Hub does not take the bell away from a member that has one');
 });

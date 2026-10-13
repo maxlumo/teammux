@@ -21,7 +21,7 @@
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
   import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
-  import { createCentreUnion } from './lib/app/centre-union.svelte.ts';
+  import { activeOwners, createCentreUnion } from './lib/app/centre-union.svelte.ts';
   import { createWindowDrain } from './lib/app/window-drain.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
@@ -403,10 +403,31 @@
    * saved order — tagged by the ③c-1 rule; a member not connected right now
    * is listed unavailable (D6: shown, not counted read, not cleared). Single
    * includes one server, so the union is that server's list, as before. */
+  /** A saved server's index when NO runtime holds it (reviewer P1-C3 on
+   * 018d4fa5: a member that never came up — offline from boot, refusing its
+   * token — still has its own slot's alerts, and D6 says an unreachable
+   * list is shown, not counted, not cleared). Read-only in effect: the union
+   * never clears or marks an unavailable source. One per id, dropped the
+   * moment a runtime for that id exists (its state owns the slot then). */
+  const indexOnlyLogs = new Map();
+  const indexOnlyLog = (id) => {
+    let log = indexOnlyLogs.get(id);
+    // Read once (inside a derived nothing may be written): no runtime of ours
+    // writes this slot while it has no runtime, so the read stays current
+    // until a runtime exists — and then the runtime's state owns the slot.
+    if (!log) { log = createAlertLog(createServerStore(localStorage, id, writeGate)); indexOnlyLogs.set(id, log); }
+    return log;
+  };
   const centreSources = $derived.by(() => {
-    const live = new Map([...(scopeRuntime ? [scopeRuntime] : []), ...background].map((r) => [r.id, r]));
+    // The ACTIVE owner of each id (P1-C3 (c)): the focus always; among the
+    // members a published one over an orphan — a retained editor's old
+    // handle (③b: keep editing) must not shadow the fresh runtime for the
+    // same id, or the current server's new alerts are neither counted nor
+    // clearable.
+    const live = activeOwners(scopeRuntime, background, (r) => aggregate.orphan(r));
     return tagScope.included.map((s, order) => {
       const runtime = live.get(s.id);
+      if (runtime) indexOnlyLogs.delete(s.id);
       // Reachable by the DERIVED state (agent-status rule): the focus by the
       // shell's `connected`, a member by its status — never a socket poll.
       const available = !!runtime && (runtime === scopeRuntime
@@ -414,7 +435,9 @@
         : aggregate.status(s.id)?.kind === 'connected');
       return {
         serverId: s.id, name: s.name || hostLabel(s.address), order,
-        log: runtime ? serverStates.get(runtime)?.centre ?? null : null,
+        // The index EXISTS whether or not a runtime holds it: a runtime's
+        // state owns the slot; without one the slot is read as it is.
+        log: runtime ? serverStates.get(runtime)?.centre ?? null : indexOnlyLog(s.id),
         available,
       };
     });
@@ -1599,6 +1622,10 @@
    * the included set — Aggregate's included entries, Single's one — read
    * once here for every tag in the app. */
   const tagScope = $derived({ included: connMode === 'aggregate' ? includedServers(serverList, excludedIds) : serverList.filter((s) => s.id === serverCurId) });
+  /** The status strip's owner name: in Aggregate ALWAYS the focus's name
+   * (orchestrator 02:28 on ③c-5 — a reading is identified by its machine on
+   * every input, hover or not, one member included or many); Single none. */
+  const sysOwnerName = $derived(connMode === 'aggregate' && serverCurId ? (serverList.find((s) => s.id === serverCurId)?.name ?? serverCurId) : null);
   /** What a server list row needs in Aggregate; null in Single. */
   const memberRows = $derived(connMode === 'aggregate' ? {
     included: (id) => !excludedIds.has(id),
@@ -2256,7 +2283,11 @@
 
   // The notification centre's popover (board #322): the server picker's
   // placement and dismissal, anchored to whichever control opened it.
-  const centreShown = $derived(hubEligible); // the centre is fed by the Hub bus
+  /** The window's bell is reachable when ANY included source can feed it or
+   * has something to show (reviewer P1-C3 (a) on 018d4fa5; plan P2-1): the
+   * focus's Hub, a member's Hub, or an index with entries. A focus without a
+   * Hub does not take the entry away from the members that have one. */
+  const centreShown = $derived(hubEligible || background.some((r) => viewOf(r).hubState.available) || centreSources.some((s) => (s.log?.items.length ?? 0) > 0));
   let centreEl = $state(null);
   let centreW = $state(0);
   let centreH = $state(0);
@@ -3679,11 +3710,14 @@
          20px square IS one — which is the bug #337 reported. It sets only
          custom properties, and the bar's own geometry is declared on `main`,
          so nothing else moves. -->
-    <!-- The FOCUSED server's reading, named when the tag rule says so (③c-5):
-         one server's numbers, never several machines' summed. -->
+    <!-- The FOCUSED server's reading (③c-5): one server's numbers, never
+         several machines' summed. Its owner is the bound HANDLE, so a late
+         answer of a replaced runtime's is dropped (P1-C2); in Aggregate the
+         name sits beside the number always (orchestrator 02:28: the name is
+         the identity of the number — not the >1 tag rule, not hover-only). -->
     <aside class="sys-sidebar compact-tools" aria-label="Server system status">
       <SystemStatus load={() => bound()?.api.systemStatus() ?? Promise.reject(new Error('not connected'))} visible={connected}
-        server={serverCurId} tag={serverTag(tagScope, serverCurId)} />
+        owner={scopeRuntime} tag={sysOwnerName} />
       {#if !layout.isTouchDevice}
         <button
           class="sys-scratch"
@@ -3816,7 +3850,7 @@
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={frontHub && agentsLivesInSettings(layout.isTouchDevice)}
-      guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime) }))} guestShown={front}
+      guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime), tag: serverTag(tagScope, runtime.id) }))} guestShown={front}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
       visible={page === 'prefs' && !switching}
       agentsEditRequest={view.agentsEditReq}

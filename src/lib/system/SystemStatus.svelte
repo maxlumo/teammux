@@ -20,6 +20,7 @@
   // flash of zeros).
   import { sysDetail, sysParts, SYS_POLL_MS, SYS_POLL_MIN_MS, type SystemStatus } from './system.ts';
   import { hoverInfo } from '../ui/hover.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import { untrack } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
 
@@ -28,19 +29,25 @@
     interval = SYS_POLL_MS,
     visible = true,
     tag = null,
-    server = null,
+    owner = null,
   }: {
     load: () => Promise<SystemStatus | null>;
     interval?: number;
     visible?: boolean;
-    /** The server's name by the ③c-1 tag rule (null = not shown): the
-     * reading is ONE server's — the focused one's — never a sum (board 335
-     * ③c-5), and when several servers are included the card says whose. */
+    /** The name of the server whose reading this is, or null (board 335
+     * ③c-5; orchestrator 02:28): the reading is ONE server's — the focused
+     * one's — never a sum, and in Aggregate the name sits BESIDE the number
+     * always (a number without its machine is not a reading; coarse input
+     * has no hover). Single passes null. */
     tag?: string | null;
-    /** Whose reading this is: when the focus moves to another server the
-     * last reading is that server's no more — it is dropped and read again
-     * at once rather than shown for up to a whole interval. */
-    server?: string | null;
+    /** The HANDLE whose reading this is — the bound runtime, not its id
+     * (reviewer P1-C2 on 018d4fa5): a sample belongs to the handle that was
+     * bound when it was asked. A new handle (another server, or the same id
+     * reconnected on a fresh runtime) drops the last reading, invalidates
+     * every answer still in flight and reads again at once; a late answer of
+     * the old handle's is never shown under the new name. Unanswered = no
+     * reading, never a relabelled old number. */
+    owner?: unknown;
   } = $props();
 
   let status = $state<SystemStatus | null>(null);
@@ -55,9 +62,14 @@
     note: t('sysRefresh').replace('{s}', String(Math.round(tempo / 1000))),
   });
 
-  async function tick() {
+  // The sample GENERATION: bumped whenever the owner, the visibility or the
+  // tempo changes and when the component is destroyed. An answer is shown
+  // only if the generation it was asked under is still the current one.
+  let gen = 0;
+  async function tick(mine: number) {
     try {
       const r = await load();
+      if (gen !== mine) return;  // another owner's turn now, or ended: dropped
       if (r) status = r; // a null/failed answer keeps the last reading
     } catch {
       /* fail-soft: telemetry may never break the page that carries it */
@@ -66,13 +78,17 @@
 
   // ONE effect owns the timer: visible → an immediate read (the old reading
   // is up to a whole interval stale) + the interval; hidden → cleanup stops
-  // it. Re-runs when `visible` or the clamped tempo change.
+  // it. Re-runs when `owner`, `visible` or the clamped tempo change; each run
+  // is a new generation, so a late answer of the previous run's writes
+  // nothing (after destroy a write has no DOM to reach; the generation is
+  // what guards the re-run).
   $effect(() => {
-    void server;   // another server's reading is not this one's
-    if (!visible) return;
+    void owner;   // another handle's reading is not this one's
+    const mine = ++gen;
     untrack(() => { status = null; });
-    void tick();
-    const timer = setInterval(tick, tempo);
+    if (!visible) return;
+    void tick(mine);
+    const timer = setInterval(() => void tick(mine), tempo);
     return () => clearInterval(timer);
   });
 </script>
@@ -80,8 +96,10 @@
 {#if parts.length}
   <!-- A quiet monitor readout, not three attention-seeking cards: tiny
        categorical dots aid scanning, muted labels orient, and only the mono
-       readings use full ink. The hover card carries the complete reading. -->
+       readings use full ink. The hover card carries the complete reading.
+       The owner's name leads it when there is one (the one tag atom). -->
   <div class="sysvitals appear" use:hoverInfo={detail}>
+    <ServerTag name={tag} />
     {#each parts as p (p.k)}
       <span class="sv" class:cpu={p.k === 'CPU'} class:mem={p.k === 'MEM'} class:disk={p.k === 'DISK'}>
         <span class="sv-k">{p.k}</span><span class="sv-v">{p.v}</span>

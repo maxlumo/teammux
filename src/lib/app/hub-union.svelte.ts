@@ -18,6 +18,7 @@
 // the view can say so rather than show a shorter list in silence.
 import { SvelteMap } from 'svelte/reactivity';
 import type { ProjectRow } from '../projects/projects.ts';
+import type { BackendCatalog } from '../core/agents.ts';
 import { compareRowsWithClock } from '../projects/projects.ts';
 import type { ServerId, SessionRef } from './refs.ts';
 import { sessionRef } from './refs.ts';
@@ -35,6 +36,19 @@ export interface HubSlice {
   agentStates: Record<string, unknown>;
   /** Live panes, this server's (for the row's agent counts). */
   panes: readonly unknown[];
+  /** Has this server's list ANSWERED at least once? Before that the rows
+   * are nothing yet, not an empty list (reviewer P1-C4 on 018d4fa5): a Hub
+   * publishes from mount, so a slice may exist with its first `projectList`
+   * still out or failed — the union lists that server as missing, not as
+   * having no projects. */
+  answered: boolean;
+  /** Did the LATEST refresh fail? The last good list is kept and shown, the
+   * server marked unavailable; `false` again on the next good answer. */
+  failed: boolean;
+  /** The source server's own backend catalog, resolved: the icon for a
+   * stopped slot's command (reviewer P2-5: two servers' same-named backend
+   * may differ; a row is drawn with ITS server's facts, never the focus's). */
+  icon: BackendCatalog['icon'];
 }
 
 export type HubUnionRow = UnionRow<ProjectRow, SessionRef> & {
@@ -51,7 +65,7 @@ export interface HubUnion {
   /** The merged list over `included` (saved order), with `tag` per row when
    * more than one server is included and `missing` for those without a
    * slice. Reactive: a `$derived` over it follows every publish. */
-  rows(included: readonly { id: ServerId; name: string }[]): { rows: HubUnionRow[]; missing: ServerId[] };
+  rows(included: readonly { id: ServerId; name: string }[]): { rows: HubUnionRow[]; missing: ServerId[]; unavailable: ServerId[] };
 }
 
 export function createHubUnion(): HubUnion {
@@ -65,8 +79,13 @@ export function createHubUnion(): HubUnion {
       for (const { id, slice } of slices.values()) byId.set(id, slice);
       const serverSlices: ServerSlice<ProjectRow>[] = included.map((s, order) => {
         const slice = byId.get(s.id);
-        return { serverId: s.id, name: s.name, order, ok: !!slice, items: slice?.rows ?? [] };
+        // A slice that has not ANSWERED is not a list (a Hub publishes from
+        // mount): missing, like no slice at all.
+        return { serverId: s.id, name: s.name, order, ok: !!slice?.answered, items: slice?.answered ? slice.rows : [] };
       });
+      // Answered before, failing now: the last good rows stay, the server is
+      // named unavailable (P1-C4) — not dropped, not pretended fresh.
+      const unavailable = included.filter((s) => { const slice = byId.get(s.id); return !!slice?.answered && slice.failed; }).map((s) => s.id);
       const list = unionRows<ProjectRow, SessionRef>(serverSlices, {
         ref: (serverId, row) => sessionRef(serverId, row.project.session),
         // Each head measured by ITS server's clock (reviewer P1, 2026-10-10).
@@ -75,10 +94,11 @@ export function createHubUnion(): HubUnion {
           { row: b.item, talk: byId.get(b.serverId)?.talk ?? {} },
         ),
       });
-      const empty: HubSlice = { rows: [], talk: {}, unread: {}, agentStates: {}, panes: [] };
+      const empty: HubSlice = { rows: [], talk: {}, unread: {}, agentStates: {}, panes: [], answered: false, failed: false, icon: () => null };
       return {
         rows: list.rows.map((r) => ({ ...r, slice: byId.get(r.serverId) ?? empty })),
         missing: list.missing,
+        unavailable,
       };
     },
   };

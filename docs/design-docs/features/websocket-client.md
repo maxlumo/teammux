@@ -1129,11 +1129,24 @@ silence. Picking another server's row moves the focus there (D2, no teardown)
 and hands that Hub the session as a landing it alone reads
 (`view.hubSelectReq` through `landingFor`); a row of a server that is not a
 connected member is not a focus change (`pickMember`). A foreign row's menu
-offers only what `onRow` can run on THAT server's runtime — Open, Close,
-Delete, named with the server — and nothing when it has no live runtime. D4
-is held here: a hidden member's Hub runs only its list refresh (the 20 s
-`reload`), opens no room and polls nothing of one; its room opens when it is
-first shown. Single hands no union: the Hub is as before.
+is the ONE project-action flow (reviewer P1-C1 on 018d4fa5): Close and
+Delete go through the same `askAction` → confirm → `runAction` as a local
+row's, with the SOURCE api (`onRow`, handed synchronously) and the row's own
+project id, name and liveness frozen at the ask; the dialog names project
+and server; Delete is the recoverable close + archive, never `projectDelete`
+(the purge has its one entry, the recycle bin); a failure stays on the same
+target with Retry, which never repeats a completed step; a focus move during
+the confirm changes nothing about the target. A server with no live runtime
+offers nothing. Each slice carries its list's STATE (P1-C4): a Hub publishes
+from mount, so a slice whose first `projectList` has not answered — or
+failed — is MISSING to the union, not an empty list; a slice whose latest
+refresh failed keeps its last good rows, muted, and the server is named
+unavailable; it carries its own catalog's `icon` too, so a row's agent faces
+are its server's, never the focus's (P2-5). D4 is held here: a hidden
+member's Hub runs only its list refresh (the 20 s `reload`) and, on a push,
+only the LIST's work — the unread badge and the notification record — never
+the room's (no feed merge, no roster refresh; P2-1); its room opens when it
+is first shown. Single hands no union: the Hub is as before.
 
 **The Terminal sidebar's other servers are a selector** (③c-3;
 `app/sessions-union.svelte.ts`). The same shape as the Hub's union, with
@@ -1146,18 +1159,27 @@ is not a terminal here (D3: a split stays within one tree): it focuses that
 server (D2) and opens the pane there — `openTerminal` writes into the focused
 tree's view, which the focus move just made that server's. A server that is
 not a connected member is not a focus change. Panes, kill, search and the
-pane picker stay this server's; the foreign section is not searched. D4: a
-hidden member's Sessions loads its list once so the selector can show it; the
-page never had a poll and gains none.
+pane picker stay this server's; the foreign section is not searched, and it
+does not wait on this server's first Projects answer (P1-C4): another
+server's published list is shown as soon as it is published. D4 and the ③
+plan's list-refresh promise: a hidden member's Sessions keeps its list CURRENT
+on the same 20 s list cadence the Hub keeps (one `list_sessions_with_panes`
+per tick, nothing of a pane), and on its server's reconnect; the refresh
+stops when it is shown (the show path owns it), excluded or its tree goes.
+The shown page still has no poll of its own.
 
 **The system status and the "current server" actions are the focus's**
 (③c-5). The sidebar's vitals are ONE server's reading — the focused one's —
 never several machines' summed or averaged: App hands the one `SystemStatus`
-the focus's id and its name by the ③c-1 rule, so a focus move drops the old
-reading and reads the new server at once rather than showing a stranger's
-numbers for up to a whole interval, and in Aggregate the reading's card says
-whose it is. Only the focus is polled (D4): no other member's vitals are
-fetched for a hover or anything else. The server switcher's row carries the
+the bound HANDLE as its owner and, in Aggregate, the focus's name ALWAYS
+(orchestrator 02:28: the name is the identity of the number, beside it, not
+hover-only and not the >1 rule; Single names none). A new owner drops the old
+reading, invalidates every answer still in flight and reads the new server at
+once (reviewer P1-C2: a late answer of the old owner's never shows under the
+new name; a same-id runtime replaced by a reconnect is a new owner). Only the
+focus is polled (D4): no other member's vitals are fetched for a hover or
+anything else; the 08:17 sentence promising each member's reading on its
+Connection row is withdrawn. The server switcher's row carries the
 name, the address and a failure's reason; its hover card carries only what
 the row hides — the machine id, the status word behind the breathing dot,
 and "Excluded" for a server left out on purpose — because a card that
@@ -1730,6 +1752,24 @@ a socket that a server's pages are using.
   at its next timer; reviewer P2 on 341554b3), and ends every runtime in the
   fleet, the bound one included (reviewer P2-1).
 
+### A union is a projection with one action flow and honest states (#335 ③c-2/③c-3; reviewer P1-C1/P1-C4)
+
+The Hub and Terminal sidebars' other-server rows are projections of what each
+tree PUBLISHED, merged by the one rule; nothing is polled for them. A row's
+verb is the same verb its own tree offers, through the same confirmation,
+with the source api and the row's own id frozen at the ask — never a second
+menu that calls an api directly, never `projectDelete` from a row. A slice
+says whether it has ANSWERED and whether its latest refresh FAILED: not
+answered is missing, failed keeps the last good list and names the server
+unavailable; an empty list is only ever an answered one. A foreign section
+never waits on the local list's first answer. A hidden member keeps its
+published lists current on the existing 20 s list cadence and does no room
+work, on a tick or on a push; the work stops with the tree. A row is drawn
+with its own server's facts (catalog, clock). Forbidden: an unconfirmed
+cross-server mutation, a verb by session where the api takes an id, a
+not-yet-answered slice shown as empty, a union poller, room work on a hidden
+member.
+
 ### The "current server" actions act on the focus, named, frozen at the click (#335 ③c-5)
 
 The system status strip, the scratch terminal, the Agents page (registry,
@@ -1740,12 +1780,14 @@ server's tree, so their owner is fixed by construction; the strip and the
 Connection section take the focus's id and act on the runtime they resolved
 when the action started, not on whatever the focus is when it completes. In
 Aggregate each of these heads names its owner with the one tag
-(`ui/ServerTag`, ③c-1 rule); Single names none. The server switcher's row
-hover carries only what the row hides (motion.md §1.16): machine id, the
-connecting/reconnecting word, Excluded. A summed reading, a copy-link that
-reads CURRENT after an await, a native `title` beside the card, and a hover
-that repeats the row are forbidden. The strip's own contract is in
-system-status.md.
+(`ui/ServerTag`, ③c-1 rule) — the status strip excepted: its name is the
+Aggregate focus's always (orchestrator 02:28), and its owner is the HANDLE
+(P1-C2); Single names none. The server switcher's row hover carries only what
+the row hides (motion.md §1.16): machine id, the connecting/reconnecting
+word, Excluded. A summed reading, an old owner's late reading under a new
+name, a copy-link that reads CURRENT after an await, a native `title` beside
+the card, and a hover that repeats the row are forbidden. The strip's own
+contract is in system-status.md.
 
 ### Connection-link copy feedback belongs to its attempt (#167, 2026-09-12)
 

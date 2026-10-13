@@ -66,3 +66,11 @@ test('the sidebar monitor uses quiet token dots and readable value ink', () => {
     'numbers use primary ink — the all-text3 grey regression is retired');
   assert.ok(!/#[0-9a-f]{3,8}\b/iu.test(source), 'no raw component colour');
 });
+
+test('a reading belongs to the handle that asked for it: a late answer of another generation is dropped (board #335 ③c-5, reviewer P1-C2)', () => {
+  assert.match(source, /owner\?: unknown;/u, 'the owner is the HANDLE, not an id — a reconnected same-id runtime is a new owner');
+  assert.match(source, /void owner;\s*(?:\/\/[^\n]*\n\s*)*const mine = \+\+gen;\s*untrack\(\(\) => \{ status = null; \}\);/u,
+    'a new owner is a new generation and drops the last reading before anything is asked');
+  assert.match(source, /const r = await load\(\);\s*if \(gen !== mine\) return;/u, 'an answer is shown only under the generation it was asked in');
+  assert.match(source, /<ServerTag name=\{tag\} \/>/u, 'the owner s name sits beside the reading itself, not only in the hover card');
+});

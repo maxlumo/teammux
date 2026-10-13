@@ -407,16 +407,25 @@ test('a confirmed project verb runs on the row it was asked on, never on `select
   // the one long-pressed (owner, 2026-08-24: "关的不是我选中的 是其他的").
   // #167 freezes the project ID as well: a later poll cannot redirect the
   // mutation or its partial close/archive retry.
-  assert.match(source, /askAction = \(kind, name, session = selected\)/u);
+  assert.match(source, /askAction = \(kind, name, session = selected, where = null\)/u);
   const ask = source.slice(source.indexOf('const askAction'), source.indexOf('async function refreshActionView'));
-  assert.match(ask, /rows\.find\(r => r\.project\.session === session\)/u);
+  assert.match(ask, /const row = where \?\? rows\.find\(r => r\.project\.session === session\)/u);
   assert.match(ask, /projectId: row\?\.project\.id/u);
   const run = source.slice(source.indexOf('async function runAction'), source.indexOf('function restoreProject'));
-  assert.match(run, /await projectDown\(projectId\)/u);
-  assert.doesNotMatch(run, /rows\.find/u);
+  assert.match(run, /const down = act\.api \? act\.api\.projectDown : projectDown;\s*const archive = act\.api \? act\.api\.projectArchive : projectArchive;/u,
+    'the verb runs on the api frozen at the ask — this Hub s, or the union row s SOURCE (#335 ③c, reviewer P1-C1)');
+  assert.match(run, /await down\(projectId\)/u);
+  assert.match(run, /await archive\(projectId, true\)/u);
+  assert.doesNotMatch(run, /rows\.find|projectDelete/u, 'never re-resolved, never the irreversible purge');
   // The context menu's two destructive verbs both pass their row's identity.
   assert.match(source, /askAction\('down', name, session\)/u);
   assert.match(source, /askAction\('delete', name, session\)/u);
+  // A union row's (another server's) verbs go through the SAME ask, with its
+  // source frozen; the menu never calls an api itself (P1-C1).
+  const foreign = source.slice(source.indexOf('function entryItems'), source.indexOf('async function bringUpRow'));
+  assert.match(foreign, /askAction\('down', row\.project\.name, row\.project\.session, where\)/u);
+  assert.match(foreign, /askAction\('delete', row\.project\.name, row\.project\.session, where\)/u);
+  assert.doesNotMatch(foreign, /api\.project(?:Down|Delete|Archive)\(/u, 'no second action path beside the confirmed one');
   // The async flavor of the same bug: a poller's late reply must still be
   // about the project it asked about, or a project switch mid-flight merges
   // the OLD room's data into the NEW one. Each poller freezes `selected` and

@@ -199,25 +199,35 @@
   }
 
   // ─── Data loading ──────────────────────────────────────
-  // ③c-3: a hidden member in a union loads its list ONCE so the selector can
-  // show it (D4: list only; this page never had a poll, and gains none). Its
-  // list refreshes as before when it is shown or its server reconnects.
+  // Shown: load on show, as always (this page has no poll of its own while
+  // shown — the terminal's subscription and the person's refresh drive it).
   $effect(() => {
-    if (visible || union) void refresh();
+    if (visible) void refresh();
     return () => {
       viewEpoch++;
       pendingKill = null; killing = false; killError = '';
       closeCtx();
     };
   });
+  // ③c-3 / P1-C4: a HIDDEN member in a union keeps its list CURRENT for the
+  // selector — the same 20 s list cadence the Hub keeps for its project list
+  // (D4: list only, nothing of a pane), one `list_sessions_with_panes` per
+  // tick; stopped the moment it is shown (the show path owns it then), out
+  // of the union, or its tree goes (the effect's cleanup is the leave).
+  $effect(() => {
+    if (visible || !union) return;
+    void refresh();
+    const timer = setInterval(() => void refresh(), 20000);
+    return () => clearInterval(timer);
+  });
 
   // After a reconnect, the cached sessions/panes likely went stale (process
   // exited, new windows, …). Re-pull when we hear the app's reconnect-success
-  // event. Only acts if the page is currently visible — invisible pages get
-  // their refresh from the visibility $effect above the next time they show.
+  // event — shown, or hidden in a union (its published slice is read by the
+  // focus); a hidden Single page gets its refresh the next time it shows.
   $effect(() => {
     // Only for THIS list's server (board #335 ②b-4).
-    const onReconn = (e: Event) => { if ((e as CustomEvent).detail?.serverId === serverId && visible) refresh(); };
+    const onReconn = (e: Event) => { if ((e as CustomEvent).detail?.serverId === serverId && (visible || union)) refresh(); };
     window.addEventListener('ws-reconnected', onReconn);
     return () => window.removeEventListener('ws-reconnected', onReconn);
   });
@@ -689,11 +699,16 @@
         {/if}
       </div>
     {/if}
+    </div>
+    {/if}
     <!-- ③c-3: every OTHER included server's sessions, a SELECTOR (D3): a
          row focuses that server and opens the pane there; the panes, kill
          and search above stay this server's. Not searched: the query is a
-         question about this server's list. -->
+         question about this server's list. OUTSIDE this server's first-answer
+         gate (P1-C4): another server's published list does not wait for this
+         server's Projects to report. -->
     {#if foreign && !isSearching && (foreign.rows.length || foreign.missing.length)}
+    <div class="rows foreign-rows">
       <div class="group-label" class:side-h={!chips}>
         <Icon name="swap-h" size={12} />
         {t('groupOtherServers')}
@@ -702,7 +717,7 @@
         <div class="session foreign" data-server={r.serverId}>
           <div class="session-row" role="button" tabindex="0"
             onclick={() => { onPickServer?.(r.ref); onPick?.(); }}
-            onkeydown={(e) => { if (e.key === 'Enter') { onPickServer?.(r.ref); onPick?.(); } }}>
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPickServer?.(r.ref); onPick?.(); } }}>
             <span class="dot" class:attached={r.item.attached}></span>
             <span class="name">{r.item.name}</span>
             <ServerTag name={r.tag} />
@@ -715,7 +730,6 @@
           <div class="session-row"><span class="dot"></span><span class="name">{m.name}</span><span class="trailing"><span class="ago">{t('hubUnionMissing')}</span></span></div>
         </div>
       {/each}
-    {/if}
     </div>
     {/if}
   </div>
