@@ -22,6 +22,7 @@
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
   import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
   import { createCentreUnion } from './lib/app/centre-union.svelte.ts';
+  import { createWindowDrain } from './lib/app/window-drain.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
@@ -352,6 +353,13 @@
   function handOverFocus(leaving, to) {
     const next = aggregate.runtimes().find((r) => r.id === to && !aggregate.orphan(r) && r.connection.isConnected());
     if (!next || !scopeSwap.refocus(next)) return false;
+    // The survivor's tree was filled from its slot when it JOINED; the merge
+    // has since moved the absorbed server's navigation into that slot and
+    // the publish gate re-owned it (`followMerges`). Read it again now, or
+    // the handed-to tree keeps the member's empty view and its next save
+    // writes that emptiness over the moved record (the ②b restore failure,
+    // in the live shape; found by the P1-2 test's positive assertion).
+    fillViewFrom(next, viewOf(next), () => scopeSwap.bound() === next);
     // Settled: from here the set no longer wants `next` as a member (its own
     // dial, still returning, is the focus's and must not be joined over).
     owedHandover = null;
@@ -1339,21 +1347,21 @@
    * the window can present the question — not over a switch in flight (its
    * guard would end the switch's intent), a walk already asking, an address
    * connect, a window activation or the connect form's candidate (its claim
-   * would end theirs: `windowLeases`), a membership change, or a block (its
+   * would end theirs: `windowDrain.leases`), a membership change, or a block (its
    * tree is held). Busy: it stays pending and is asked by this same
    * mechanism when the window is free again; no second modal. */
   const orphansToAsk = new SvelteSet();
   let askingOrphan = false;
   /** Is a window operation in flight — a switch, a walk, an address connect
-   * (`serverSwitch.busy`), an activation or a form candidate (`windowLeases`),
+   * (`serverSwitch.busy`), an activation or a form candidate (`windowDrain.leases`),
    * a membership change? Then the window is not free: no owed question is
    * asked (it would claim the window and end the operation), and no focus
    * hands over beneath it (`focusAbsorbed`). */
-  const windowBusy = () => switching?.phase === 'connecting' || serverSwitch.busy || windowLeases > 0 || membershipBusy;
+  const windowBusy = () => switching?.phase === 'connecting' || serverSwitch.busy || windowDrain.leases > 0 || membershipBusy;
   function askOrphans() {
     // A failed switch's panel is not an operation, but it COVERS the trees
     // (they are held under it): a question asked there could not be answered.
-    if (ended || askingOrphan || windowBusy() || switching || migrationBlocked) return;
+    if (windowDrain.ended || askingOrphan || windowBusy() || switching || migrationBlocked) return;
     const next = [...orphansToAsk].find((r) => aggregate.orphan(r));
     for (const r of orphansToAsk) if (!aggregate.orphan(r)) orphansToAsk.delete(r);
     if (!next) return;
@@ -1361,40 +1369,23 @@
     askingOrphan = true;
     void askOrphan(next).finally(() => { askingOrphan = false; scheduleAsk(); });
   }
-  /** The drain, scheduled on the window going quiet — a walk, switch or
-   * address connect ending (`serverSwitch.onidle`), a lease released, Retry
-   * unblocking — and run on its own turn (P2 on e0dafe3c): the operation
-   * whose end freed the window finishes its own continuation first — the
-   * walk's answer reaches the caller that asked and that caller commits
-   * (writes its mode, opens its candidate, mints its activation) — before
-   * the queue is looked at; the queue never grabs the window's generation
-   * the moment a guard resolves. One timer, whoever asked. */
-  let askTimer = 0;
-  /** The shell has ended (reviewer P1-3 on 9c1f757c): nothing the window
-   * owed is done any more — no drain, no handover, no ask, no mint — and a
-   * release landing late (a candidate's close in the teardown, an
-   * activation's `finally`, the switch module's `onidle`) schedules nothing.
-   * Set FIRST in `onDestroy`, before any resource is closed. */
-  let ended = false;
-  function scheduleAsk() {
-    if (ended || askTimer) return;
-    askTimer = setTimeout(() => { askTimer = 0; drainWindow(); }, 0);
-  }
   /** What the window owes, in order: a focus handover first (it decides
-   * which tree is in front), then an orphan's ask. */
+   * which tree is in front), then an orphan's ask. WHEN it runs — on its own
+   * turn after the window goes quiet (a walk, switch or address connect
+   * ending via `serverSwitch.onidle`, a lease released, Retry unblocking),
+   * once per ask, and never after the shell's end (reviewer P1-3 on
+   * 9c1f757c) — is `app/window-drain.ts`, the one scheduler; `onDestroy`
+   * ends it FIRST, before any resource is closed, so a release landing late
+   * in the teardown schedules nothing. */
   function drainWindow() {
-    if (ended) return;
     settleHandover();
     askOrphans();
   }
+  const windowDrain = createWindowDrain(drainWindow);
+  const scheduleAsk = windowDrain.schedule;
   /** Window operations in flight outside the switch module: an activation
    * from its mint to its `done`, a candidate from open to close. */
-  let windowLeases = 0;
-  function leaseWindow() {
-    windowLeases++;
-    let released = false;
-    return () => { if (released) return; released = true; windowLeases--; scheduleAsk(); };
-  }
+  const leaseWindow = () => windowDrain.lease();
   // Retry unblocked: an orphan still owed its ask gets it.
   $effect(() => { void migrationBlocked; untrack(scheduleAsk); });
   /** An orphan's tree is asked, in that tree: "discard" lets it go; "keep
@@ -2556,11 +2547,9 @@
   // the bound one included (the fleet skips it on purpose, because the swap
   // that replaces it normally ends it; there is no next swap now).
   onDestroy(() => {
-    ended = true;
+    windowDrain.end();
     owedHandover = null;
     orphansToAsk.clear();
-    clearTimeout(askTimer);
-    askTimer = 0;
     candidateOpen?.close();
     switchCandidate?.close();
     activations.endAll();

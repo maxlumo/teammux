@@ -1441,10 +1441,16 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   assert.match(settle, /if \(windowBusy\(\) \|\| migrationBlocked\) return false;/u, 'nothing settles under a window operation or a block');
   assert.match(hand, /^function handOverFocus\(leaving, to\) \{\s*const next = aggregate\.runtimes\(\)\.find\(\(r\) => r\.id === to && !aggregate\.orphan\(r\) && r\.connection\.isConnected\(\)\);/u,
     'the member handed to is published, not an orphan, and CONNECTED (X3: a tree is not a connection)');
+  assert.match(hand, /if \(!next \|\| !scopeSwap\.refocus\(next\)\) return false;\s*(?:\/\/[^\n]*\n\s*)*fillViewFrom\(next, viewOf\(next\), \(\) => scopeSwap\.bound\(\) === next\);/u,
+    'the handed-to tree is refilled from its slot: the merge moved the absorbed navigation there after the member joined');
   // P1-3 on 9c1f757c: an explicit terminated state, set before anything is
-  // closed; no drain, no schedule, no ask after it.
-  assert.match(source, /onDestroy\(\(\) => \{\s*ended = true;\s*owedHandover = null;\s*orphansToAsk\.clear\(\);\s*clearTimeout\(askTimer\);\s*askTimer = 0;/u, 'the root ends FIRST, then its resources are closed');
-  assert.match(source, /function drainWindow\(\) \{\s*if \(ended\) return;\s*settleHandover\(\);\s*askOrphans\(\);\s*\}/u, 'the handover is settled before an orphan is asked; nothing after the end');
+  // closed; no drain, no schedule, no ask after it. The scheduler is ONE
+  // module (`app/window-drain.ts`, where the end→late-release→timer order is
+  // pinned as a unit) and App holds ONE instance of it.
+  assert.match(source, /onDestroy\(\(\) => \{\s*windowDrain\.end\(\);\s*owedHandover = null;\s*orphansToAsk\.clear\(\);/u, 'the root ends FIRST, then its resources are closed');
+  assert.match(source, /function drainWindow\(\) \{\s*settleHandover\(\);\s*askOrphans\(\);\s*\}\s*const windowDrain = createWindowDrain\(drainWindow\);\s*const scheduleAsk = windowDrain\.schedule;/u, 'the handover is settled before an orphan is asked; the one scheduler decides when, and never after the end');
+  assert.equal([...source.matchAll(/createWindowDrain\(/gu)].length, 1, 'one scheduler instance');
+  assert.doesNotMatch(source, /\b(?:askTimer|windowLeases)\b|let ended\b/u, 'no second timer, lease count or ended flag beside the scheduler s');
   const steps = ['scopeSwap.refocus(next)', 'owedHandover = null', 'focusServer(localStorage, next.id)', 'serverSwitch.supersede()', 'serverSwitch.dismiss()', 'activations.claim()', 'aggregate.handOver(next)', 'aggregate.adopt(leaving, false)', 'background = aggregate.runtimes()', 'loadServerRegistry()', 'syncMembers()']
     .map((n) => { const i = hand.indexOf(n); assert.ok(i >= 0, `handOverFocus has ${n}`); return i; });
   assert.deepEqual([...steps].sort((a, b) => a - b), steps, 'bind, settle the debt (so the sync does not join over the canonical s own dial), mirror, supersede, hand over, adopt, publish the set, then follow the registry (whose sync orphans the adopted tree)');
@@ -1458,14 +1464,13 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   // never over a switch, a walk, an address connect (`serverSwitch.busy`), an
   // activation or a candidate (`windowLeases`), a membership change, a block.
   assert.match(source, /orphaned\(runtime\) \{ orphansToAsk\.add\(runtime\); scheduleAsk\(\); \}/u);
-  assert.match(source, /const windowBusy = \(\) => switching\?\.phase === 'connecting' \|\| serverSwitch\.busy \|\| windowLeases > 0 \|\| membershipBusy;/u, 'ONE definition of the window being busy (a FAILED switch s panel is a resting state, not an operation)');
-  assert.match(source, /function askOrphans\(\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(ended \|\| askingOrphan \|\| windowBusy\(\) \|\| switching \|\| migrationBlocked\) return;/u, 'but no question is asked under its panel either, nor after the end');
-  assert.match(source, /function scheduleAsk\(\) \{\s*if \(ended \|\| askTimer\) return;\s*askTimer = setTimeout\(\(\) => \{ askTimer = 0; drainWindow\(\); \}, 0\);\s*\}/u, 'the drain runs after the caller s own completion, and never after the end');
+  assert.match(source, /const windowBusy = \(\) => switching\?\.phase === 'connecting' \|\| serverSwitch\.busy \|\| windowDrain\.leases > 0 \|\| membershipBusy;/u, 'ONE definition of the window being busy (a FAILED switch s panel is a resting state, not an operation)');
+  assert.match(source, /function askOrphans\(\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(windowDrain\.ended \|\| askingOrphan \|\| windowBusy\(\) \|\| switching \|\| migrationBlocked\) return;/u, 'but no question is asked under its panel either, nor after the end');
   // P2: every window operation's end schedules it — the switch module's
   // (walk, switch, address connect), a lease's release, a membership op's
   // end, Retry unblocking.
   assert.match(source, /onidle: scheduleAsk,/u, 'a guard, switch or address connect ending asks what is owed');
-  assert.match(source, /return \(\) => \{ if \(released\) return; released = true; windowLeases--; scheduleAsk\(\); \};/u);
+  assert.match(source, /const leaseWindow = \(\) => windowDrain\.lease\(\);/u, 'a lease is the scheduler s (its release schedules the drain, once)');
   assert.equal([...source.matchAll(/finally \{ membershipBusy = false; scheduleAsk\(\); \}/gu)].length, 2, 'the mode change and the include switch');
   assert.match(source, /\$effect\(\(\) => \{ void migrationBlocked; untrack\(scheduleAsk\); \}\);/u, 'Retry unblocking asks what is owed');
   assert.match(source, /const release = leaseWindow\(\);\s*const c = chain \?\? newChain\(\);/u, 'an activation holds the window from its mint');

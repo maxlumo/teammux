@@ -1248,7 +1248,12 @@ attribution and the merge's navigation rewrite for the survivor) BEFORE any
 tree is shown as the front; a write that fails blocks, and tree, debt and
 detached handle stay as they are for Retry, which runs the gate again and
 settles. Past the gate, with the survivor a published, CONNECTED, non-orphan
-member: `refocus` to it (the front moves), the mirror written (`focusServer`;
+member: `refocus` to it (the front moves) and its tree REFILLED from its
+slot (`fillViewFrom`): the member's view was filled when it joined, and the
+merge has since moved the absorbed server's navigation into that slot and the
+gate re-owned it — without the refill the handed-to tree keeps its empty view
+and its next save writes that emptiness over the moved record (found by the
+P1-2 test's positive assertion on the parsed slot); the mirror written (`focusServer`;
 CURRENT already names it, so a mirror failure is the gate's — it blocks, and
 Retry owes the focus its dial), the window's attempts aimed at the absorbed
 server made stale (`supersede`, `claim`; a FAILED switch's panel, a resting
@@ -1270,12 +1275,21 @@ consumed once, whatever settles it. The connect form's walk asks a bound
 tree whether or not its handle is alive (`confirmFormLeave`): a detached
 handle still has its drafts.
 
-The root has an explicit END (reviewer P1-3 on 9c1f757c): `onDestroy` sets
-`ended`, drops the debt and the queue, and clears the drain's timer BEFORE
-any resource is closed, and `scheduleAsk`, `drainWindow` and `askOrphans`
-return at once after it — a lease released late (an activation's `finally`
-when the teardown's dispose settles its dial, a candidate's close, the
-switch module's `onidle`) schedules nothing, mints nothing, dials nothing.
+The root has an explicit END (reviewer P1-3 on 9c1f757c). WHEN the drain
+runs is one module, `app/window-drain.ts` — one timer whoever asked, run on
+its own turn; leases for the window operations outside the switch module;
+`end()` — and App holds ONE instance of it. `onDestroy` ends it, drops the
+debt and the queue BEFORE any resource is closed; a pending drain is cleared
+and does not run, a schedule after the end is refused, and `askOrphans`
+returns at once — so a lease released late (an activation's `finally` when
+the teardown's dispose settles its dial, a candidate's close, the switch
+module's `onidle`) schedules nothing, mints nothing, dials nothing. The
+third phase (end → late release → the timers run → zero drains) is pinned by
+`window-drain.test.ts` on that scheduler, in explicit order, because the App
+harness's fake timers could not order it (reviewer 00:13 on 1125b5f4); the
+App tests pin the first two phases and the source pin ties App to the one
+instance. The timer callback checks `ended` itself too, for a host whose
+`clearTimeout` is a no-op.
 
 "Discard" lets it go
 (`dismiss` → release → end); "keep editing" keeps it, detached, listed in

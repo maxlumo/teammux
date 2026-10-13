@@ -6629,7 +6629,15 @@ test('P1-2 (publish gate): the canonical absorbs the focus alias whose v2 naviga
   for (let i = 0; i < 4; i++) { await h.app.advance(10); await h.settle(); }
   assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') !== draftA.closest('.scope-tree'), 'C s tree is the front');
   assert.ok(draftA.closest('.scope-tree.held'), 'A behind, kept');
-  assert.ok(!JSON.stringify(ls.getItem('tmux_state::c') ?? '').includes('"serverId":"a"'), `no ref in the survivor s slot still names the alias: ${ls.getItem('tmux_state::c')}`);
+  // The survivor's slot, PARSED (reviewer P2 on 1125b5f4: a stringified
+  // string hides the refs): the pane A's slot carried now names C and is
+  // the handed-to tree's, and no ref — pane or cell — still names the
+  // alias. A positive ref, so an empty record cannot pass as "rebound".
+  const slotC = JSON.parse(ls.getItem('tmux_state::c') ?? 'null');
+  assert.equal(slotC?.pane?.serverId, 'c', `the moved pane names the canonical: ${ls.getItem('tmux_state::c')}`);
+  assert.equal(slotC?.pane?.target, 'work:1.0', 'and is the pane A s slot carried');
+  const refsC = [slotC?.pane, ...((slotC?.splitCells ?? []) as Array<{ pane?: { serverId?: string } }>).map((cell) => cell.pane)].filter(Boolean) as Array<{ serverId?: string }>;
+  assert.ok(refsC.length >= 1 && refsC.every((r) => r.serverId === 'c'), `every ref in the survivor s slot names the canonical: ${JSON.stringify(refsC)}`);
 });
 
 for (const phase of ['timer-pending', 'drain-saw-busy', 'release-after-end'] as const) test(`P1-3 (lifecycle, ${phase}): the App ends with a handover owed and an orphan ask pending — nothing is minted, dialled, asked or called afterwards`, async (context) => {
@@ -6739,7 +6747,13 @@ for (const phase of ['timer-pending', 'drain-saw-busy', 'release-after-end'] as 
   assert.equal(ls.getItem('tmux_server_current'), cur, 'no identity write after the end');
 });
 
-test('X2 (CURRENT-only): a legitimate focus move onto another member while the handover is owed VOIDS the debt — nothing hands over to C afterwards, nothing is activated', async (context) => {
+test('X2 (another member bound): a legitimate focus move onto another member while the handover is owed VOIDS the debt — nothing hands over to C afterwards, nothing is activated', async (context) => {
+  // Named for what it proves (reviewer P2 on 1125b5f4): the pick binds B,
+  // so the debt is voided by the `bound() !== leaving` branch. The separate
+  // CURRENT-only branch (`currentServerId() !== to` with the leaving tree
+  // still bound) has no App path that reaches it with the window free — every
+  // operation that moves CURRENT without binding holds a lease until it binds
+  // or restores CURRENT — so it is pinned at the source, not claimed here.
   // Three servers: A alias focus, C canonical member, B another member. C
   // absorbs A beneath a switch walk; the person answers Keep editing — but
   // before the drain, picks B in the list (a legitimate window op moving
@@ -6783,9 +6797,10 @@ test('X2 (CURRENT-only): a legitimate focus move onto another member while the h
   assert.ok(c.isConnected() && !c.disposed(), 'C stays a member');
   assert.ok(b.isConnected(), 'B up');
   assert.equal(a.disposed(), false, 'A kept');
+  const dialsBefore = events.filter((e) => e.startsWith('dial@')).length;
   for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
   assert.equal(ls.getItem('tmux_server_current'), 'b', 'the debt never wrote C back, nothing was activated');
-  assert.equal(events.filter((e) => e.startsWith('dial@c:')).length, events.filter((e) => e.startsWith('dial@c:')).length, 'no extra dial');
+  assert.equal(events.filter((e) => e.startsWith('dial@')).length, dialsBefore, `no dial after the move settled (an activation would dial): ${events.slice(-5).join(', ')}`);
   const asked = h.app.document.querySelector('[role=alertdialog]');
   assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
   answerDialog(h.app, /keep editing/iu);
@@ -6840,7 +6855,12 @@ test('X3 (orphan canonical, P2 gap): C absorbs the focus A beneath a switch walk
   c.drop();
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
   assert.ok(JSON.parse(ls.getItem('tmux_servers')!).some((e: any) => e.id === 'c'), 'C s entry is still saved (elsewhere: both kept)');
-  assert.equal(c.isConnected(), false, 'C detached: an orphan');
+  // C's socket is down here; whether the fleet has ORPHANED it yet is not
+  // claimed (reviewer P2 on 1125b5f4: the reconnector waits for the switch
+  // to be idle, so a drop alone is not "elsewhere"). What the test proves
+  // is the outcome below — the debt does not hand over to C, and C is asked
+  // as an orphan when the walk ends.
+  assert.equal(c.isConnected(), false, 'C s socket is down');
   // Keep editing ends the switch; the debt settles — NOT to orphan C.
   answerDialog(h.app, /keep editing/iu);
   for (let i = 0; i < 8; i++) { await h.app.advance(300); await h.settle(); }
