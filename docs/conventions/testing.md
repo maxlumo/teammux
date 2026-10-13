@@ -165,13 +165,23 @@ and SIGINT/SIGTERM run the down themselves (JS `finally` does not run on a
 signal). Every compose call carries `-p tmm-e2e`, which outranks a
 `COMPOSE_PROJECT_NAME` in the caller's shell, so the down can never be aimed
 at another local project; one fixed name also means one environment per
-host — two checkouts running it at once would tear each other down. A
+host — two checkouts running it at once would tear each other down. So a
+kept environment is EXCLUSIVE: while someone holds one (`--keep`), nobody
+else on the host runs `npm run test:e2e:docker` or a compose `down` on
+`tmm-e2e` — say so in the room before starting, and ask before ending one
+you did not start (incident 2026-10-12 16:19: the validator's kept
+environment on the review tip was torn down by the builder's own P2 check,
+and the live run had to begin again). A
 container's health is "ready", not "listening": the entrypoint drops a marker
 at start and writes it after the project and agent are in place, and the
 health check needs the marker, so `compose --wait` returns usable machines on
 a slow cold start or restart. `--keep` leaves the machines up and prints
-each `ws://` address and token for a browser session by hand. The first run
-compiles
+each `ws://` address and token for a browser session by hand. The image is
+built from the CHECKOUT THAT RUNS THE SCRIPT — the build context is the repo
+root the script resolves from its own path — so the UI the containers serve
+is that checkout's: to verify a branch's UI in the browser (the ③ pass needs
+the Aggregate UI), run `npm run test:e2e:docker -- --keep` FROM that branch's
+worktree, not from main. The first run compiles
 tmm + server in release inside the image (minutes; the cargo registry and
 target are BuildKit cache mounts, so later builds are incremental); a warm
 run is ≈ 45 s. Measured on Docker 25.0.14 / Compose v5.5.0, host

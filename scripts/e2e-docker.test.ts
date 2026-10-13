@@ -340,17 +340,31 @@ test('a signal mid-run tears down (unless --keep) and exits 130', async () => {
     const downsAfterUp = f.calls.slice(f.calls.findIndex((c) => c.includes('up'))).filter((c) => c.includes('down') && c.includes('-v'));
     assert.equal(downsAfterUp.length > 0, expectDown, `${JSON.stringify(argv)}: ${f.logs.join('\n')}`);
   }
-  // A down that fails on the signal path names the error and the clean-up command.
+  // A down that fails on the signal path names the error and the clean-up
+  // command — from the HANDLER (reviewer evidence P2 on 0d33d801). The
+  // handler is called synchronously from inside `login`, so the logs it
+  // wrote are exactly those present when `handler()` returns; a snapshot
+  // taken there cannot contain anything the final down logs later.
   const f = fakeDocker({ postDown: 1 });
   let handler: ((sig: string) => void) | undefined;
+  let afterHandler: string[] | undefined;
   const realExit = process.exit;
   (process as unknown as { exit: (c: number) => void }).exit = () => {};
   try {
-    const login = async (url: string) => { if (url.endsWith('19901') && handler) handler('SIGTERM'); return { machineId: `m-${url.slice(-1)}`, sessions: ['demo'] }; };
+    const login = async (url: string) => {
+      if (url.endsWith('19901') && handler) { handler('SIGTERM'); afterHandler = [...f.logs]; }
+      return { machineId: `m-${url.slice(-1)}`, sessions: ['demo'] };
+    };
     await f.run([], { onSignal: (h: (sig: string) => void) => { handler = h; }, loginAndList: login });
   } finally {
     process.exit = realExit;
   }
-  const at = f.logs.findIndex((l) => /\[e2e:docker\] SIGTERM/.test(l));
-  assert.ok(f.logs.slice(at).some((l) => /down exited 1; the environment may be left behind — docker compose -p tmm-e2e/.test(l)), f.logs.join('\n'));
+  assert.ok(afterHandler);
+  const at = afterHandler.findIndex((l) => /\[e2e:docker\] SIGTERM/.test(l));
+  assert.ok(at >= 0);
+  assert.deepEqual(afterHandler.slice(at), [
+    '[e2e:docker] SIGTERM',
+    '[e2e:docker] compose down -v --remove-orphans (SIGTERM)',
+    '[e2e:docker] down exited 1; the environment may be left behind — docker compose -p tmm-e2e -f docker/validator/compose.yaml down -v --remove-orphans',
+  ], 'the handler itself logged the down failure and the clean-up command');
 });
