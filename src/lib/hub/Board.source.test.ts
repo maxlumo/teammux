@@ -250,7 +250,7 @@ test('a feed jump opens its issue in its OWN session (board #13 follow-up)', () 
   assert.match(source, /issueRequest = null/u, 'the request arrives as a prop');
   assert.match(source, /if \(req\.session && req\.session !== cur\) \{ cur = req\.session; picked = !embedded; \}/u,
     'the jump re-aims the page at the issue\u2019s session — embedded keeps following the room');
-  assert.match(source, /guard\(\(\) => \{\s*\n\s*if \(req\.session/u, 'the dirty guard wraps the jump');
+  assert.match(source, /const run = \(\) => \{[\s\S]*?if \(req\.session[\s\S]*?guard\(run\);/u, 'the dirty guard wraps the jump (the continuation `run`, #357: also re-checked for validity before it runs)');
   assert.match(source, /void openIssue\(req\.id\);/u, 'and the issue detail opens');
   assert.match(source, /req\.n === issueReqSeen/u, 'each request fires once — the n makes the newest win');
 });
@@ -963,7 +963,9 @@ test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026
   // ONE merge: the Board publishes to the generalised projects union, never a
   // second comparator or poller (tenet 9).
   assert.match(source, /import type \{ BoardUnion, BoardUnionRow \} from '\.\.\/app\/hub-union\.svelte\.ts';/u);
-  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: complete\?\.rows \?\? \[\], talk: complete\?\.talk \?\? \{\}, counts: complete\?\.counts \?\? \{\}, answered: !!complete, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime — only the last COMPLETE pair (projects AND counts), answered by it alone (reviewer P1-A)');
+  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime — THE counts map as it stands (bulk batches, boardList results and local confirmations all write it), answered only once BOTH reads have answered (reviewer P1-A, R1 on 0feb403e)');
+  assert.match(source, /if \(!bc\) \{ listFailed = true; return; \}/u, 'a counts failure changes a flag, never the map: it can not read as "no boards"');
+  assert.doesNotMatch(source, /complete\?\.|let complete = |complete = \{/u, 'no second, frozen counts snapshot');
   assert.match(source, /\$effect\(\(\) => \(\) => \{ union\?\.source\.withdraw\(guardOwner\); \}\);/u, 'and withdraws it with the tree');
   // The row list: the union filtered by EACH SERVER'S counts, else this server's
   // own boards as single-server entries — never one shape for Aggregate and
@@ -996,13 +998,17 @@ test('the Board s list reads start inside a thunk: a call that throws must not s
   assert.doesNotMatch(source, /Promise\.all\(\[\s*projectList\(\),/u, 'no bare call in the array literal');
 });
 
-test('a landing is HELD until the board can take it, newest wins, and leaves any open detail through the guard (#357 reviewer P1-B / P2)', () => {
+test('a landing is HELD until the board can take it, newest wins, and ONE validity covers the hold and the continuation (#357 reviewer P1-B / R2)', () => {
   // Marking the request seen BEFORE the guard ran dropped it for good when the
-  // guard refused (this board's own request running): the focus had moved and
-  // the chosen board never opened.
-  assert.match(source, /issueReqSeen = req\.n;\s*landing = req;/u, 'arrival only records the newest request');
+  // guard refused (this board's own request running).
+  assert.match(source, /issueReqSeen = req\.n;\s*voidLanding\(\);[^\n]*\n\s*landing = req;/u, 'arrival records the newest request and voids the older');
   assert.doesNotMatch(source, /issueReqSeen = req\.n;\s*guard\(/u, 'seen is never advanced into a guard that may refuse');
-  assert.match(source, /const req = landing;\s*if \(!req \|\| submitting\) return;\s*landing = null;\s*untrack\(\(\) => guard\(\(\) => \{/u, 'taken only when nothing of this board is committing, through the one existing guard');
+  assert.match(source, /if \(!req\) \{ if \(landing \|\| landingParked\) voidLanding\(\); return; \}/u, 'a cleared request voids what it held');
+  assert.match(source, /if \(!visible\) \{ if \(landingArmed\) untrack\(voidLanding\); return; \}/u, 'leaving the displayed board after the hold voids it — no replay on return');
+  assert.match(source, /\$effect\(\(\) => \{ if \(!visible && landingParked\) untrack\(voidLanding\); \}\);/u, 'a question the landing parked is withdrawn when the board is left');
+  assert.match(source, /if \(submitting\) return;/u, 'taken only when nothing of this board is committing');
+  assert.match(source, /if \(gen !== landingGen \|\| !visible \|\| !alive\) return;/u, 'and re-checked right before the continuation runs');
+  assert.match(source, /if \(landingParked && pendingDiscard === landingParked\) pendingDiscard = null;/u, 'a parked Keep/Discard is withdrawn with it — the existing guard, no new modal');
   assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else sel = null;/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
 });
 

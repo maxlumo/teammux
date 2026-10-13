@@ -306,9 +306,11 @@ completion).
   has not answered is "no list yet", one whose latest refresh failed is "not
   connected" with its last complete list kept (muted). A board's list is both
   reads — projects AND per-board counts — so a failed counts read never reads
-  as "no boards". The landing is held while the target Board is committing,
-  then opens that project's board LIST (an open issue is left through the
-  usual Keep/Discard). The head's name and tag are the Hub head's stack. A
+  as "no boards", and a delete or create the person just confirmed is in the
+  union at once, here and on the other server's Board. The landing is held
+  while the target Board is committing, then opens that project's board LIST
+  (an open issue is left through the usual Keep/Discard); it is void once the
+  person leaves that board — no replay on return. The head's name and tag are the Hub head's stack. A
   hidden member's Board does list refresh only (its existing 20 s timer).
   Single: this server's boards, untagged.
 - Four fixed columns: **todo / doing / review / done**. Issues carry title,

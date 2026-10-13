@@ -127,28 +127,62 @@
   //
   // A landing is HELD, not consumed on arrival (reviewer P1-B on 390ba4dd): the
   // guard refuses while this board's own request is running (`submitting`),
-  // and a request marked seen before the guard ran was dropped for good — the
-  // focus had moved, the chosen board never opened. Only the NEWEST request is
-  // kept (a newer pick replaces an older one), and it is taken once nothing
-  // of this board is committing; this component's destroy ends it.
+  // and a request marked seen before the guard ran was dropped for good. Only
+  // the NEWEST request is kept, and it is taken once nothing of this board is
+  // committing.
+  //
+  // The held landing and the guard continuation it may park share ONE
+  // validity (reviewer R2 on 0feb403e): this board is still DISPLAYED (shown,
+  // and being shown IS being the focus — a hidden member's tree is not), the
+  // parent's request is still THIS request (a cleared or newer one voids it),
+  // and the board is alive. It is checked when the hold is taken, when the
+  // board frees, and again right before the continuation runs; losing it
+  // VOIDS the landing — there is no replay when the person comes back — and
+  // withdraws a Keep/Discard it parked. No new modal: the existing guard.
   let issueReqSeen = $state(0);
   let landing = $state<{ session: string; id: number; n: number } | null>(null);
+  let landingGen = 0;
+  let landingArmed = false;                 // the held landing has been seen displayed
+  let landingParked: (() => void) | null = null;
+  function voidLanding() {
+    landingGen++; landingArmed = false;
+    landing = null;
+    if (landingParked && pendingDiscard === landingParked) pendingDiscard = null;
+    landingParked = null;
+  }
   $effect(() => {
     const req = issueRequest;
-    if (!req || req.n === issueReqSeen) return;
-    issueReqSeen = req.n;
-    landing = req;
+    untrack(() => {
+      if (!req) { if (landing || landingParked) voidLanding(); return; }
+      if (req.n === issueReqSeen) return;
+      issueReqSeen = req.n;
+      voidLanding();            // a newer selection voids the older one
+      landing = req;
+    });
   });
+  // A question the landing parked is the landing's too: leaving withdraws it.
+  $effect(() => { if (!visible && landingParked) untrack(voidLanding); });
   $effect(() => {
     const req = landing;
-    if (!req || submitting) return;
-    landing = null;
-    untrack(() => guard(() => {
-      if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
-      creating = false; sideOpen = false;
-      if (req.id) void openIssue(req.id);
-      else sel = null;
-    }));
+    if (!req) return;
+    if (!visible) { if (landingArmed) untrack(voidLanding); return; }   // left after it was held
+    landingArmed = true;
+    if (submitting) return;
+    untrack(() => {
+      const gen = landingGen;
+      landing = null; landingArmed = false;
+      const run = () => {
+        if (gen !== landingGen || !visible || !alive) return;  // the last look, right before it runs
+        landingParked = null;
+        if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
+        creating = false; sideOpen = false;
+        if (req.id) void openIssue(req.id);
+        else sel = null;
+      };
+      landingParked = run;
+      guard(run);
+      if (pendingDiscard !== run) landingParked = null;
+    });
   });
   // Embedded, the new-issue button lives in the DRAWER head (board #23: the
   // embedded page-head was one redundant project-name row), so creation
@@ -173,14 +207,18 @@
   const projects = $derived(visibleBoards(allProjects, countsMap));
   /** The list's own state for the union (P1-C4). A Board's list is TWO
    * required reads — the projects AND the per-board counts that decide which
-   * boards exist (an empty board is hidden, board #39) — so `complete` is the
-   * last pair in which BOTH answered, and the union sees only that: a first
-   * counts failure leaves the server missing (never `{}` read as "no boards"),
-   * a later failure keeps the last complete list and counts and names the
-   * server unavailable (reviewer P1-A on 390ba4dd). `hubRooms` stays
-   * tolerant: a missing clock only orders the rows. */
-  type Complete = { rows: ProjectRow[]; talk: Record<string, number>; counts: Record<string, BoardCountRow> };
-  let complete = $state<Complete | null>(null);
+   * boards exist (an empty board is hidden, board #39). There is ONE counts
+   * map (`countsMap`): bulk batches, `boardList` results and the local
+   * create/delete/status confirmations all write it, and the slice publishes
+   * THAT map as it stands. The only extra state is two flags: `completeOnce`
+   * (a first batch in which BOTH reads answered) gates `answered`, so a counts
+   * failure can never read as "no boards"; `listFailed` marks a later failure,
+   * cleared by the next success. A failed batch changes flags and never the
+   * map, so "the last complete list" is simply the map as last confirmed —
+   * local confirmations included (reviewer R1 on 0feb403e, which a frozen
+   * snapshot broke). `hubRooms` stays tolerant: a missing clock only orders
+   * the rows. */
+  let completeOnce = $state(false);
   let listFailed = $state(false);
   let projectReadSequence = 0;
   async function loadProjects() {
@@ -205,18 +243,13 @@
         ask(() => boardCounts()).catch(() => null),
       ]);
       if (request !== projectReadSequence) return;
+      // Counts did not answer: flags only. The map, the rows and the clock stay
+      // as last confirmed ("could not ask" is not "every board is empty").
+      if (!bc) { listFailed = true; return; }
       talkMap = rooms.rooms ?? {};
       allProjects = sortRows((r.projects ?? []).filter((row) => !row.project.archived), talkMap);
-      // A failed counts read keeps the last map — "could not ask" is not
-      // "every board is empty" (the sidebar would blank otherwise) — and the
-      // union does not take this refresh at all: it is not a complete list.
-      if (bc) {
-        countsMap = bc.counts ?? {};
-        complete = { rows: allProjects, talk: talkMap, counts: countsMap };
-        listFailed = false;
-      } else {
-        listFailed = true;
-      }
+      countsMap = bc.counts ?? {};
+      completeOnce = true; listFailed = false;
       // No session to follow: land on the first NON-EMPTY board — the ones
       // the sidebar actually shows (board #39).
       if (!cur) cur = visibleBoards(allProjects, countsMap)[0]?.project.session ?? '';
@@ -243,7 +276,7 @@
   // tree. The union is read-only to this Board beyond its own slice.
   $effect(() => {
     if (!union) return;
-    union.source.publish(guardOwner, serverId, { rows: complete?.rows ?? [], talk: complete?.talk ?? {}, counts: complete?.counts ?? {}, answered: !!complete, failed: listFailed });
+    union.source.publish(guardOwner, serverId, { rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed });
   });
   $effect(() => () => { union?.source.withdraw(guardOwner); });
   /** The sidebar's list: in Aggregate every included server's boards merged
@@ -254,11 +287,11 @@
   const unionList = $derived(union ? union.source.rows(union.included) : null);
   const sideRows = $derived<BoardUnionRow[]>(unionList
     ? unionList.rows.filter((r) => (r.slice.counts[r.item.project.session]?.total ?? 0) > 0)
-    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: !!complete, failed: listFailed } })));
+    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed } })));
   const curKey = $derived(refKey(sessionRef(serverId, cur)));
   const missingRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.missing.includes(s.id)) : []);
   const unavailableRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.unavailable.includes(s.id)) : []);
-  /** Rows of a server whose latest refresh failed are the last complete list,
+  /** Rows of a server whose latest refresh failed are the map as last confirmed,
    * muted like the Hub's (the same `.proj-row.unavailable`). */
   const unavailableIds = $derived(new Set(unionList?.unavailable ?? []));
   function pick(s: string) {

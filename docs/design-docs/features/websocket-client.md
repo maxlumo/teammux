@@ -1270,19 +1270,30 @@ a tall column reads whole.
 
 Follow-up after review (#357, reviewer on 390ba4dd; orchestrator ruling):
 
-- **A Board's list is two required reads.** `projectList` and `boardCounts`
-  both answer, or the refresh is not a list: the slice is `answered` only by
-  the last COMPLETE pair, so a first counts failure leaves the server missing
-  ("no list yet") instead of `{}` read as "no boards", and a later failure
-  keeps the last complete list and counts, muted (`.proj-row.unavailable`,
-  the Hub's), the server named "not connected". `hubRooms` stays tolerant: a
-  missing clock only orders the rows.
-- **A landing is held, not consumed on arrival.** The cross-server pick sets
+- **A Board's list is two required reads, and ONE counts map.** `projectList`
+  and `boardCounts` both answer for a refresh to be a list. The slice publishes
+  the Board's `countsMap` as it stands — bulk batches, `boardList` results and
+  the local create/delete/status confirmations all write it — plus two flags:
+  `completeOnce` (a first batch where BOTH reads answered) gates `answered`,
+  so a counts failure never reads as "no boards"; `listFailed` marks a later
+  failure and clears on the next success. A failed batch changes flags and
+  never the map, so "the last complete list" is the map as last confirmed,
+  local confirmations included (a frozen snapshot, tried first, lost them —
+  reviewer R1 on 0feb403e). A server still without its first complete batch
+  is "no list yet"; one that failed later keeps its rows, muted, "not
+  connected". `hubRooms` stays tolerant: a missing clock only orders the rows.
+- **A landing is held, and it has ONE validity.** The cross-server pick sets
   the newest request; the target Board takes it through the existing guard
-  once nothing of it is committing (`submitting`), a newer pick replaces an
-  older one, and destroy ends it — the focus never moves to a board that then
-  silently ignores the choice. `id: 0` is the board LIST of that project: an
-  open detail is left through the same guard (dirty → Keep/Discard).
+  once nothing of it is committing (`submitting`). The held landing and any
+  Keep/Discard it parks share one condition: the board is still DISPLAYED (a
+  shown tree is the focus), the parent's request is still that request, and
+  the board is alive — checked when the hold is taken, when the board frees,
+  and again right before the continuation runs. Leaving the board, a cleared
+  or newer request, or destroy voids it: no replay when the person comes back,
+  and a parked question is withdrawn. `id: 0` is the board LIST of that
+  project: an open detail is left through the same guard (dirty →
+  Keep/Discard). The focus never moves to a board that then silently ignores
+  the choice, and a navigation that no longer exists never asks.
 - **The Board's head wears the Hub head's Name + tag stack**, one atom in
   app.css (`.title-stack`/`.name-line`, #359), and the width ghost is priced
   by the counts of the rows actually rendered.

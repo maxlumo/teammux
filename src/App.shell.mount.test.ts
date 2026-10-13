@@ -8452,16 +8452,62 @@ test('#357 (Board, P1-A): a boardCounts failure is NOT an answer — B is missin
   assert.ok(!aRow.classList.contains('unavailable'), 'A is untouched');
 });
 
+// R1 (reviewer on 0feb403e): the slice publishes THE counts map — bulk batches,
+// boardList results and local confirmations all write it — so a delete the
+// person just confirmed is in the union at once, here and on the other
+// server's foreground, and a later bulk failure keeps it.
+test('#357 (Board, R1): deleting the last issue of a board removes its row from the union IMMEDIATELY — on this server and on the other server s foreground — and a later bulk failure keeps that and names the server unavailable', async (context) => {
+  const boards = twoBoards();
+  let deleted = false, aCountsFail = false;
+  const issue = { id: 1, title: 'only issue', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] };
+  const rpc = { ...boards.rpc,
+    boardList: async (session: string) => ({ issues: asking() === 'a' && session === 'app' ? (deleted ? [] : [issue]) : [issue], statuses: ['todo', 'doing', 'review', 'done'] }),
+    boardGet: async () => issue,
+    boardDelete: async () => { deleted = true; return {}; },
+    boardCounts: async () => {
+      if (asking() === 'a' && aCountsFail) throw new Error('A counts failed');
+      const c = boards.counts();
+      return { counts: asking() === 'a' && deleted ? { ...c, app: { todo: 0, doing: 0, review: 0, done: 0, total: 0 } } : c };
+    },
+  };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  const settleFor = async (n: number) => { for (let i = 0; i < n; i++) { await h.app.advance(300); await h.settle(); } };
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root')!;
+  for (let i = 0; i < 30 && boardRows(h).length < 3; i++) { await h.app.advance(500); await h.settle(); }
+  assert.deepEqual(boardRows(h), ['beta:ops', 'alpha:app*', 'beta:app']);
+  front().querySelector<HTMLElement>('.card')!.click();
+  await settleFor(4);
+  front().querySelector<HTMLButtonElement>('[aria-label="Delete issue"]')!.click();
+  await settleFor(2);
+  answerDialog(h.app, /^delete/iu);
+  await settleFor(4);                                  // 1.2 s: no 20 s bulk has run
+  assert.ok(deleted, 'the delete was confirmed');
+  assert.ok(!boardRows(h).includes('alpha:app*') && !boardRows(h).includes('alpha:app'), `this server s union: the emptied board is gone at once: ${boardRows(h).join(',')}`);
+  // The other server s foreground reads the SAME published map.
+  await pickServer(h, 'beta');
+  await settleFor(6);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  await settleFor(4);
+  assert.ok(!boardRows(h).some((r) => r.startsWith('alpha:')), `B s foreground: A s emptied board is gone too: ${boardRows(h).join(',')}`);
+  // A s later bulk batches fail: the confirmed update is KEPT, A is named unavailable.
+  aCountsFail = true;
+  for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .board-root .sidebar .proj-row.missing'); i++) { await h.app.advance(5000); await h.settle(); }
+  assert.ok(!boardRows(h).some((r) => r.startsWith('alpha:')), 'the confirmed delete survives a failing bulk');
+  assert.match(h.app.document.querySelector('.scope-tree:not(.held) .board-root .sidebar .proj-row.missing')?.textContent ?? '', /alpha.*not connected/u, 'and the server is named unavailable');
+});
+
 // P1-B (reviewer on 390ba4dd): a cross-server pick aimed at a board whose own
 // request is RUNNING was consumed on arrival and dropped by the guard — the
 // focus had moved to B, but the board the person chose never opened.
-async function pendingSaveOnB(context: any) {
+async function pendingSaveOnB(context: any, failSave = false) {
   const boards = twoBoards();
   const saves: string[] = [];
   let release!: () => void;
   const held = new Promise<void>((r) => { release = r; });
   const rpc = { ...boards.rpc,
-    boardSave: async (session: string) => { saves.push(`${asking()}:${session}`); await held; return { id: 1 }; },
+    boardSave: async (session: string) => { saves.push(`${asking()}:${session}`); await held; if (failSave) throw new Error('save refused'); return { id: 1 }; },
     boardList: async (session: string) => ({ issues: [{ id: 1, title: `${asking()} ${session} issue`, body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }], statuses: ['todo', 'doing', 'review', 'done'] }),
     boardGet: async (session: string) => ({ id: 1, title: `${asking()} ${session} issue`, body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }),
   };
@@ -8489,13 +8535,27 @@ async function pendingSaveOnB(context: any) {
   front().querySelector<HTMLButtonElement>('button.go[aria-label="Save"]')!.click();
   await settleFor(3);
   assert.deepEqual(saves, ['b:ops'], 'the save is running on B s ops board');
-  return { h, saves, release: () => release(), pickB, open, settleFor, front, ls };
+  // Back to A as a person does it: the server switcher, then the Board page
+  // again (a landing is for the board that is DISPLAYED — it is void on a page
+  // nobody is looking at).
+  const focusA = async () => {
+    await pickServer(h, 'alpha');
+    await settleFor(6);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+    await settleFor(4);
+  };
+  const backToB = async () => {
+    await pickServer(h, 'beta');
+    await settleFor(6);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+    await settleFor(4);
+  };
+  return { h, saves, release: () => release(), pickB, open, settleFor, front, ls, focusA, backToB };
 }
 
 test('#357 (Board, P1-B): picking another board of B from A while B is mid-save moves the focus AND the chosen board opens once the save is done — the old save applies to its own board', async (context) => {
   const f = await pendingSaveOnB(context);
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   assert.equal(f.ls.getItem('tmux_server_current'), 'a');
   await f.pickB('app');
   assert.equal(f.ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
@@ -8508,15 +8568,47 @@ test('#357 (Board, P1-B): picking another board of B from A while B is mid-save 
 
 test('#357 (Board, P1-B): a newer pick replaces an older held one — the person s LAST choice is where B ends', async (context) => {
   const f = await pendingSaveOnB(context);
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   await f.pickB('app');                       // held: B is committing
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   await f.pickB('ops');                       // newer; same board B is on
   f.release();
   await f.settleFor(12);
   assert.equal(f.open(), 'beta:ops*', `the newest choice wins, the older (app) is void: ${boardRowsOf(f.h)}`);
+});
+
+// R2 (reviewer on 0feb403e): a held landing is valid only while its board is
+// DISPLAYED (and so the focus): leaving voids it — no replay on return — and
+// withdraws a Keep/Discard it had parked.
+const dialogs = (h: Awaited<ReturnType<typeof bootApp>>) => h.app.document.querySelectorAll('[role=alertdialog]').length;
+for (const failSave of [false, true]) {
+  test(`#357 (Board, R2, save ${failSave ? 'FAILS' : 'succeeds'}): a landing held behind B s save is VOID once the person leaves — releasing the save later does not move B, no question appears anywhere, and coming back does not replay it`, async (context) => {
+    const f = await pendingSaveOnB(context, failSave);
+    await f.focusA();
+    await f.pickB('app');                       // held behind the running save
+    assert.equal(f.open(), 'beta:ops*');
+    await f.focusA();                           // leaves B (a retained tree, not destroyed)
+    f.release();
+    await f.settleFor(12);
+    assert.equal(dialogs(f.h), 0, 'no stray Keep/Discard in the hidden tree');
+    await f.backToB();
+    assert.equal(f.open(), 'beta:ops*', `no replay on return: B is still where its person left it: ${boardRowsOf(f.h)}`);
+    assert.equal(dialogs(f.h), 0, 'and nothing asks about a navigation that no longer exists');
+  });
+}
+
+test('#357 (Board, R2): a Keep/Discard the landing PARKED is withdrawn when the person leaves — it does not wait in the hidden tree to ask about a stale pick', async (context) => {
+  const f = await detailOnB(context);
+  await f.dirty();
+  await f.focusA();
+  await f.pickB('app');                         // B has an unsaved edit: the guard parks its question
+  assert.equal(dialogs(f.h), 1, 'the existing Keep/Discard is up on B');
+  await f.focusA();                             // leave: the question is about a pick that no longer stands
+  assert.equal(dialogs(f.h), 0, 'withdrawn with the landing');
+  await f.backToB();
+  assert.equal(dialogs(f.h), 0, 'and not asked again on return');
+  assert.equal(f.detail(), true, 'B is still in its detail');
+  assert.equal(f.front().querySelector<HTMLInputElement>('.d-title-input')!.value, 'unsaved edit', 'with its draft');
 });
 
 // P2 (reviewer on 390ba4dd): an id-0 landing is "that project's board LIST".
@@ -8545,7 +8637,19 @@ async function detailOnB(context: any) {
   front().querySelector<HTMLElement>('.card')!.click();
   await settleFor(4);
   assert.ok(front().querySelector('.detail'), 'B s ops board is in an issue detail');
-  return { h, ls, settleFor, front, pickB, detail: () => !!front().querySelector('.detail'), dirty: async () => {
+  const focusA = async () => {
+    await pickServer(h, 'alpha');
+    await settleFor(6);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+    await settleFor(4);
+  };
+  const backToB = async () => {
+    await pickServer(h, 'beta');
+    await settleFor(6);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+    await settleFor(4);
+  };
+  return { h, ls, settleFor, front, pickB, focusA, backToB, detail: () => !!front().querySelector('.detail'), dirty: async () => {
     const title = front().querySelector<HTMLInputElement>('.d-title-input')!;
     title.value = 'unsaved edit'; title.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
     await settleFor(2);
@@ -8554,8 +8658,7 @@ async function detailOnB(context: any) {
 
 test('#357 (Board, id 0): picking B s SAME board from A while B sits in a clean issue detail lands on the board LIST — the detail is left', async (context) => {
   const f = await detailOnB(context);
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   await f.pickB('ops');
   assert.equal(f.detail(), false, 'the detail is gone: the landing is the list');
   assert.equal(boardRows(f.h).find((r) => r.endsWith('*')), 'beta:ops*');
@@ -8564,8 +8667,7 @@ test('#357 (Board, id 0): picking B s SAME board from A while B sits in a clean 
 test('#357 (Board, id 0): with an UNSAVED edit in that detail the existing Keep/Discard dialog stands in between — Keep leaves the draft as it was, Discard lands on the list', async (context) => {
   const f = await detailOnB(context);
   await f.dirty();
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   await f.pickB('ops');
   assert.ok(f.h.app.document.querySelector('[role=alertdialog]'), 'the guard asks');
   answerDialog(f.h.app, /keep editing/iu);
@@ -8578,8 +8680,7 @@ test('#357 (Board, id 0): with an UNSAVED edit in that detail the existing Keep/
 test('#357 (Board, id 0): Discard on that dialog drops the draft and lands on the board list', async (context) => {
   const f = await detailOnB(context);
   await f.dirty();
-  await pickServer(f.h, 'alpha');
-  await f.settleFor(6);
+  await f.focusA();
   await f.pickB('ops');
   answerDialog(f.h.app, /discard/iu);
   await f.settleFor(4);
