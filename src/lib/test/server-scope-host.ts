@@ -13,7 +13,8 @@
 import { scopeContext } from '../app/server-context.ts';
 import { scopeFlags } from './mount-reactive.svelte.ts';
 import { createServerState } from '../app/server-state.ts';
-import type { ServerRuntime } from '../app/server-runtime.ts';
+import { createServerRuntime, type ServerRuntime } from '../app/server-runtime.ts';
+import { RPC_KIND } from '../core/ws-api.ts';
 
 /** One server's scope over `transport`: what App hands the provider, or —
  * for Preferences' embedded editor — the guest props (②b-3). */
@@ -28,3 +29,22 @@ export const testScope = (transport?: unknown) => {
 };
 
 export const testScopeContext = (transport?: unknown) => scopeContext(testScope(transport));
+
+/** A REAL runtime over the fixture's mocked transport (board #357): the very
+ * `createServerRuntime` App builds, so `detach()`, `alive()` and `onDetach`
+ * are production code. Reachable from a test as `window.__serverRuntime`, so a
+ * test ends the handle the way the fleet / absorb does — by calling it. */
+export const realTestScope = (transport?: unknown) => {
+  const state = createServerState(localStorage);
+  const connection = { connect: async () => 'm', disconnect() {}, dispose() {}, getMachineId: () => 'm', getHostname: () => 'h', isConnected: () => true };
+  // The runtime gates every method it can ENUMERATE, and the harness's mock
+  // module answers by property lookup only: hand it a plain object with one
+  // forwarding method per RPC, resolved at call time like the bare scope's.
+  const api = Object.fromEntries(Object.keys(RPC_KIND).map((name) => [name, (...args: unknown[]) => (transport as Record<string, (...a: unknown[]) => unknown>)[name]!(...args)]));
+  const runtime = createServerRuntime(
+    { id: 'test', name: 'test', address: 'ws://t:1', token: 't' } as never,
+    { storage: localStorage as never, slot: { connection, api } as never },
+  );
+  (globalThis as { __serverRuntime?: unknown }).__serverRuntime = runtime;
+  return { runtime, state };
+};

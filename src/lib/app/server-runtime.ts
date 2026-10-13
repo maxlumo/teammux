@@ -130,6 +130,12 @@ export interface ServerRuntime {
    * `dispose` (board #335 ②b-4). A host's end calls this first, releases the
    * server's state, and disposes last. */
   detach(): void;
+  /** Be told when this handle stops serving (board #357): `listener` runs
+   * once, right after `alive()` turns false — by `detach()` or by `dispose()`,
+   * whoever calls them (fleet drop, absorb, release). `alive()` is a plain read
+   * and cannot wake anything; this is the edge a reactive host turns into a
+   * signal. Returns the unsubscribe. The runtime stays rune-free. */
+  onDetach(listener: () => void): () => void;
   /** Terminal, like `Connection.dispose`: the connection is released and every
    * answer still in flight is dropped instead of being published. Idempotent,
    * and it touches no other runtime. */
@@ -440,7 +446,16 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
   /** Stop serving: every call through `api` refuses from now on. The
    * connection is left for the host's end (release, then `dispose`). */
   function detach() {
+    if (dead) return;
     dead = true;
+    for (const listener of [...detachListeners]) {
+      try { listener(); } catch { /* a listener's failure must not undo the detach */ }
+    }
+  }
+  const detachListeners = new Set<() => void>();
+  function onDetach(listener: () => void): () => void {
+    detachListeners.add(listener);
+    return () => { detachListeners.delete(listener); };
   }
 
   function dispose() {
@@ -462,6 +477,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     setFrozen: (on: boolean) => { frozen = on; },
     frozen: () => frozen,
     detach,
+    onDetach,
     dispose,
   };
 }

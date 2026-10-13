@@ -25,12 +25,25 @@
   // page can see one server's runtime with another server's memory.
   import { setServerScope } from './server-context.ts';
 
+  import { onDestroy } from 'svelte';
+  import { observeLiveness } from './runtime-liveness.svelte.ts';
+
   let { runtime, state, tag = null, eligible = null, children } = $props();
+
+  // A runtime that stops serving (`detach`: fleet drop, absorb, release) is a
+  // plain `let` inside the runtime — `alive()` cannot wake an effect. This
+  // scope is the host's reactive layer for ITS runtime: the runtime's detach
+  // notification bumps a stamp, and the eligibility it hands the pages reads
+  // the stamp, so an effect that asked "may I still act?" runs again on a REAL
+  // detach, with no other change needed (board #357, reviewer on 0b50b8c7).
+  // svelte-ignore state_referenced_locally — one runtime for the instance's life
+  const liveness = observeLiveness(runtime);
+  onDestroy(liveness.stop);
 
   // svelte-ignore state_referenced_locally
   // One runtime, and its state, for this instance's whole life. The tag is
   // read LIVE through the getter (③c-1): it follows the included set.
-  if (runtime) setServerScope({ runtime, state, get tag() { return tag; }, get eligible() { return eligible; } });
+  if (runtime) setServerScope({ runtime, state, get tag() { return tag; }, get eligible() { return () => { void liveness.read(); return eligible ? eligible() : true; }; } });
 </script>
 
 {#if runtime}{@render children?.()}{/if}

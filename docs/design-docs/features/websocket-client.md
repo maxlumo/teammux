@@ -1291,7 +1291,13 @@ Follow-up after review (#357, reviewer on 390ba4dd; orchestrator ruling):
   scope (`scope.eligible()`: this tree is the CURRENT binding and its runtime
   is attached), because being shown is not being the focus — a leave question
   can reveal a background tree — and a runtime detached or absorbed under a
-  still-mounted tree can serve nothing. The board never imports CURRENT or
+  still-mounted tree can serve nothing. Liveness is OBSERVABLE: `alive()` is a
+  plain read, so the runtime offers an `onDetach` edge (it stays rune-free),
+  `ServerScope` turns it into one stamp (`runtime-liveness.svelte.ts`) that the
+  eligibility it hands the pages reads — a real `detach()` wakes the effect that
+  withdraws a parked question, with no poller and no other change needed. The
+  landing's own parked Discard is re-checked BEFORE it clears the draft, note
+  or attachments, not only before the navigation. The board never imports CURRENT or
   compares ids as a stand-in for the handle. It is evaluated at the hold, when
   the board frees, and again right before the continuation runs; any false
   VOIDS the landing and withdraws the question that belongs to it — no replay

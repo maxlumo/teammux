@@ -113,7 +113,11 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/app/centre-union.svelte.ts'],
     'nav-saved.ts': ['src/App.svelte'],
     // ③b-1: the member set names the runtime and dial-result TYPES only.
-    'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],
+    'server-runtime.ts': ['src/lib/app/server-members.svelte.ts',
+      // #357: the host-side liveness stamp names the runtime's `onDetach` edge
+      // (a type import); ServerScope, the provider, is its only user and no
+      // page reaches it.
+      'src/lib/app/runtime-liveness.svelte.ts'],
     'server-scope.ts': ['src/App.svelte'],
     // ②b-4: the activation generation, App's alone.
     'activation.ts': ['src/App.svelte',

@@ -366,3 +366,54 @@ test('landing cell — destroy while held: nothing runs afterwards (the fixture 
   await f.release();
   assert.deepEqual(f.saves, ['fixture']);
 });
+
+// ─── The REAL runtime's detach reaches a held landing (board #357, round 5) ─
+// `alive()` is a plain read: only the runtime's `onDetach`, turned into a
+// stamp by ServerScope, can wake the effect that withdraws a parked question.
+// These cells use the real `createServerRuntime` under the real `ServerScope`
+// and end the handle with its own `detach()` — no `setScope`.
+const compiledReal = compileMount(new URL('./BoardUnderScope.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], {});
+async function realLanding(context: any) {
+  const app = await (await compiledReal).mount(context, {
+    props: { session: 'fixture', visible: true, guardPage: 'board', issueRequest: null },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      projectList: async () => ({ projects: [
+        { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
+        { project: { id: 'other', session: 'other', name: 'Other' }, live: true },
+      ] }),
+      boardCounts: async () => ({ counts: { fixture: counts, other: counts } }),
+    })],
+  });
+  const q = <E extends Element>(sel: string) => app.document.querySelector<E>(sel);
+  const runtime = () => (app.window as unknown as { __serverRuntime: { detach(): void; alive(): boolean } }).__serverRuntime;
+  await flush(app);
+  q<HTMLElement>('.card')!.click(); await flush(app);
+  const input = q<HTMLInputElement>('.d-title-input')!;
+  input.value = 'unsaved edit'; input.dispatchEvent(new app.window.Event('input', { bubbles: true })); await flush(app);
+  await app.setProps({ issueRequest: { session: 'other', id: 0, n: 1 } });      // the landing parks the existing Keep/Discard
+  return { app, q, runtime, title: () => q('.page-head h1')?.textContent?.trim(), dialogs: () => app.document.querySelectorAll('[role=alertdialog]').length };
+}
+
+test('real runtime.detach() withdraws the question a landing parked, voids the landing, keeps the draft — through the production notification, no setScope', async (context) => {
+  const f = await realLanding(context);
+  assert.equal(f.dialogs(), 1, 'the existing guard asks (dirty draft, eligible landing)');
+  assert.equal(f.runtime().alive(), true);
+  f.runtime().detach();                       // the call fleet / absorb makes; nothing else changes
+  await flush(f.app);
+  assert.equal(f.runtime().alive(), false);
+  assert.equal(f.dialogs(), 0, 'withdrawn by the runtime s own notification');
+  assert.equal(f.title(), 'Fixture', 'the board did not move');
+  assert.equal(f.q<HTMLInputElement>('.d-title-input')!.value, 'unsaved edit', 'and the draft is untouched');
+});
+
+test('an old Discard clicked after the runtime detached — before anything re-rendered — clears NOTHING: the check is before the discard transaction, not only before the navigation', async (context) => {
+  const f = await realLanding(context);
+  const discard = [...f.app.document.querySelectorAll<HTMLButtonElement>('[role=alertdialog] button')].find((b) => /discard/iu.test(b.textContent ?? ''))!;
+  f.runtime().detach();
+  discard.click();                            // same tick: no flush between the detach and the click
+  await flush(f.app);
+  assert.equal(f.q<HTMLInputElement>('.d-title-input')!.value, 'unsaved edit', 'the draft survives a stale Discard');
+  assert.equal(f.title(), 'Fixture', 'and nothing navigated');
+  assert.equal(f.dialogs(), 0);
+});

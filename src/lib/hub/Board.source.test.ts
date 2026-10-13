@@ -1012,6 +1012,11 @@ test('a landing is HELD until the board can take it, newest wins, and ONE eligib
   assert.match(source, /\$effect\(\(\) => \{ const ok = eligible\(\); if \(!ok && landingParked\) untrack\(voidLanding\); \}\);/u, 'a question the landing parked goes with it');
   assert.match(source, /if \(landingParked && pendingDiscard === landingParked\) pendingDiscard = null;/u, 'withdrawn from the existing guard — no new modal');
   assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else sel = null;/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
+  // The transaction boundary: the question the LANDING parked is re-checked
+  // BEFORE the discard clears the draft / note / attachments — not only before
+  // the final navigation — and only the landing's own question is restricted.
+  assert.match(source, /if \(go && go === landingParked && landingParkedOk && !landingParkedOk\(\)\) \{ voidLanding\(\); return; \}\s*pendingDiscard = null; draft = \{ \.\.\.draftBase \};/u, 'the check precedes every side effect of the Discard');
+  assert.match(source, /landingParkedOk = \(\) => gen === landingGen && eligible\(\);/u);
 });
 
 test('the measurement ghost is priced by the RENDERED rows counts, not the focused server s map (#357 reviewer P2)', () => {

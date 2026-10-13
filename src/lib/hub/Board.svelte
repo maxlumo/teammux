@@ -150,12 +150,13 @@
   let landing = $state<{ session: string; id: number; n: number } | null>(null);
   let landingGen = 0;
   let landingParked: (() => void) | null = null;
+  let landingParkedOk: (() => boolean) | null = null;   // is the parked question still the landing's to ask?
   const eligible = () => visible && (scope.eligible ? scope.eligible() : true) && alive;
   function voidLanding() {
     landingGen++;
     landing = null;
     if (landingParked && pendingDiscard === landingParked) pendingDiscard = null;
-    landingParked = null;
+    landingParked = null; landingParkedOk = null;
   }
   $effect(() => {
     const req = issueRequest;
@@ -181,15 +182,16 @@
       landing = null;
       const run = () => {
         if (gen !== landingGen || !eligible()) return;      // the last look, right before it runs
-        landingParked = null;
+        landingParked = null; landingParkedOk = null;
         if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
         creating = false; sideOpen = false;
         if (req.id) void openIssue(req.id);
         else sel = null;
       };
       landingParked = run;
+      landingParkedOk = () => gen === landingGen && eligible();
       guard(run);
-      if (pendingDiscard !== run) landingParked = null;
+      if (pendingDiscard !== run) { landingParked = null; landingParkedOk = null; }
     });
   });
   // Embedded, the new-issue button lives in the DRAWER head (board #23: the
@@ -1333,7 +1335,15 @@
     confirmIcon="check"
     title={t('confirmDiscardTitle')} note={creating ? t('boardCreateDiscardNote') : t('boardDiscardNote')}
     confirmLabel={t('confirmDiscard')} cancelLabel={t('configKeepEditing')}
-    onconfirm={() => { const go = pendingDiscard; pendingDiscard = null; draft = { ...draftBase }; nTitle = ''; nBody = ''; nAssignee = ''; noteText = ''; createStage.clear(); bodyStage.clear(); noteStage.clear(); go?.(); }}
+    onconfirm={() => {
+      const go = pendingDiscard;
+      // The question the LANDING parked is answerable only while the landing is
+      // still eligible — checked BEFORE the discard clears the draft, the note
+      // or the attachments, not only before the final navigation (reviewer on
+      // 0b50b8c7). Other parked actions (leave walks, Back) are not the
+      // landing's and keep their legitimate Discard.
+      if (go && go === landingParked && landingParkedOk && !landingParkedOk()) { voidLanding(); return; }
+      pendingDiscard = null; draft = { ...draftBase }; nTitle = ''; nBody = ''; nAssignee = ''; noteText = ''; createStage.clear(); bodyStage.clear(); noteStage.clear(); go?.(); }}
     oncancel={cancelDiscard} />
   <!-- Deleting is the DANGER confirmation (board #29): the dialog names the
        captured issue, nothing reaches boardDelete before the confirm, and
