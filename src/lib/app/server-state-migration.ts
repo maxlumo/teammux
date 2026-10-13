@@ -282,12 +282,13 @@ export function claimPending(storage: Store, id: ServerId): MigrationReport {
   const done = layoutMark(storage);
   if (done?.state !== 'pending') return done ? none('already-done', done.state === 'folded' ? done.into : '') : none('no-current');
   let evidence = done;
-  const now = inputsPrint(storage);
-  if (evidence.inputs !== undefined && evidence.inputs !== now) {
+  const current = currentEvidence(storage, done);
+  if (evidence.inputs !== undefined && evidence.inputs !== current.inputs) {
     // The inputs changed since they were set aside — only a build from
     // before #335 writes them — so the machine they belong to is read again
-    // from the mirror that build keeps, before anybody claims them.
-    evidence = { ...evidence, machineId: storage.getItem('tmux_machine_id') || '', inputs: now };
+    // from the mirror that build keeps (`currentEvidence`, the one
+    // definition the projection shows too), before anybody claims them.
+    evidence = { ...evidence, machineId: current.machineId, inputs: current.inputs };
     try { storage.setItem(LAYOUT_KEY, JSON.stringify(evidence)); } catch { return none('unrecorded', id); }
   }
   const own = loadServers(storage).find((s) => s.id === id)?.machineId || '';
@@ -322,9 +323,23 @@ export interface PendingInputs {
   key: string;
 }
 
+/** The CURRENT attribution evidence of a pending record, read-only — the
+ * one definition `claimPending` applies before it writes it back (reviewer
+ * P1-D2 on 30dcc2ad: the shown machine, the inputs' fingerprint and the
+ * confirmation key all come from this one answer, never half from the old
+ * marker and half from the new inputs): the inputs unchanged since the
+ * marker was written → the marker's machine; changed (only a pre-#335 page
+ * writes them) → the mirror that page keeps, read now (empty when it kept
+ * none: unknown, never the old machine). */
+function currentEvidence(storage: Pick<Storage, 'getItem'>, mark: Extract<LayoutMark, { state: 'pending' }>): { machineId: string; inputs: string } {
+  const inputs = inputsPrint(storage);
+  if (mark.inputs !== undefined && mark.inputs !== inputs) return { machineId: storage.getItem('tmux_machine_id') || '', inputs };
+  return { machineId: mark.machineId, inputs };
+}
+
 /** The identity of the pending inputs as storage holds them now. */
-function pendingKey(storage: Pick<Storage, 'getItem'>, machineId: string): string {
-  return fingerprint(`${storage.getItem('tmux_machine_id') || machineId}|${inputsPrint(storage)}`);
+function pendingKey(evidence: { machineId: string; inputs: string }): string {
+  return fingerprint(`${evidence.machineId}|${evidence.inputs}`);
 }
 
 export function pendingInputs(storage: Pick<Storage, 'getItem'>): PendingInputs | null {
@@ -332,7 +347,9 @@ export function pendingInputs(storage: Pick<Storage, 'getItem'>): PendingInputs 
   // the host gate, which classifies a failing storage as blocked; this
   // projection must not turn "cannot read" into "nothing pending".
   const mark = layoutMark(storage);
-  return mark?.state === 'pending' ? { machineId: mark.machineId, key: pendingKey(storage, mark.machineId) } : null;
+  if (mark?.state !== 'pending') return null;
+  const evidence = currentEvidence(storage, mark);
+  return { machineId: evidence.machineId, key: pendingKey(evidence) };
 }
 
 /**
@@ -361,7 +378,7 @@ export function discardPending(storage: Store, confirmed: string): MigrationRepo
   // The SAME inputs the person confirmed (reviewer P1-D2 residual): a
   // pre-#335 page may have rewritten the inputs meanwhile (now another
   // machine's), and a confirmation given for one set does not close another.
-  if (pendingKey(storage, done.machineId) !== confirmed) return none('stale');
+  if (pendingKey(currentEvidence(storage, done)) !== confirmed) return none('stale');
   try {
     storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'discarded' } satisfies LayoutMark));
   } catch { return none('unrecorded'); }

@@ -2425,7 +2425,9 @@ test('③d-3/P1-D1 (residual): the projection s own read failing AFTER a success
   for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
   assert.equal(state.failed, 1, 'exactly the post-fold projection read failed');
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'folded', 'the claim itself was recorded');
-  // Blocked: no tree bound to A, Retry offered, B's captured api refuses, nothing more dialled.
+  // Blocked: no tree bound to A, Retry offered, nothing more dialled. (The
+  // server LEFT keeps serving reads — the K contract; this test does not
+  // claim the write api is frozen, see the write-gate tests for that.)
   assert.ok(retryButton(h.app), 'blocked with Retry');
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held)'), null, 'no tree is shown as the front');
   // B, the server left, keeps running (ruling (a): the source is given up
@@ -2459,21 +2461,16 @@ test('③d-3/P1-D2 (residual): the confirmation is for ONE set — inputs rewrit
   // B's own gate re-reads the evidence (still pending, now m-b's).
   ls.setItem('tmux_hub_drafts', JSON.stringify({ work: 'typed on B by the old build' }));
   ls.setItem('tmux_machine_id', 'm-c');   // (a THIRD machine: B cannot claim either, so the record stays pending for the rest of the test)
-  // The mode goes to Aggregate: A joins and its bind runs the gate, which
-  // re-reads the evidence (m-c's now — A, m-a, cannot claim: still pending).
-  // No navigation: Settings and its dialog are left alone by everything but
-  // the void rule.
-  modeButton(h, /all included|aggregate/iu)!.click();
-  for (let i = 0; i < 10; i++) { await first.app.advance(500); await first.settle(); }
-  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate');
-  assert.equal(trees(first.app).length, 2, 'A joined');
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
-  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).machineId, 'm-c', 'the evidence was re-read: another machine s now');
-  assert.ok(first.app.document.querySelector('.preferences .pending-inputs') && !first.app.document.querySelector('.preferences')!.closest('.page-layer.hidden'), 'still on Connection');
-  assert.equal(dialog(), null, 'the ask for A s set was withdrawn when the set changed');
+  // NO gate runs (reviewer P1-D2 on 30dcc2ad): no claim, no mode change, no
+  // reconnect. The person presses the old Confirm: refused as stale; the
+  // host re-reads the projection — which must now show the CURRENT evidence
+  // (m-c's inputs), not the old marker's machine with the new set's key.
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).machineId, 'm-a', 'the marker itself still says m-a: nothing re-attributed it');
   confirm.click();
   for (let i = 0; i < 4; i++) await first.settle();
   assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the stale confirmation closed nothing');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).machineId, 'm-a', 'and wrote no marker');
+  assert.equal(dialog(), null);
   // The row shows the CURRENT set; a fresh confirmation closes it.
   assert.match(first.app.document.querySelector('.preferences .pending-inputs')?.textContent ?? '', /m-c/u, 'the row names the current machine');
   discard().click();

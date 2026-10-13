@@ -529,8 +529,13 @@ marker carries) is finished FIRST, and one that cannot be finished leaves
 the marker and the intent as they are and blocks (`unrecorded` → Retry): the
 recovery is never closed over. The confirmation is for ONE set of inputs
 (reviewer's residual on ed593949): the ask captures the set's identity
-(`PendingInputs.key`: the mirror's machine and the inputs' own fingerprint
-as storage holds them, not the slot baselines), the dialog is voided — not
+(`PendingInputs.key`), and the row's machine, the key and a claim's
+attribution all come from ONE read-only answer (`currentEvidence`, reviewer
+P1-D2 on 30dcc2ad): inputs unchanged since the marker → the marker's machine;
+inputs rewritten (only a pre-#335 page does) → the mirror that page keeps,
+read now, or unknown when it kept none — never the old marker's machine over
+new inputs, so a refused confirmation re-presents the CURRENT source and the
+next confirmation is about it. The dialog is voided — not
 hidden — when a block begins, the record is claimed or the set changes under
 it, and the commit (`discardPending(storage, key)`) refuses a different set
 as `stale` with nothing written; a pre-#335 page rewriting the inputs as

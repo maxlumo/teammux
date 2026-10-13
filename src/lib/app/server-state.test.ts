@@ -890,3 +890,25 @@ test('a discard is bound to the SET the person confirmed: inputs rewritten by a 
   slots.setItem('tmux_hub_drafts::n', JSON.stringify({ work: 'n typed on the new build' }));
   assert.equal(discardPending(slots, k).reason, 'discarded', 'the key is the inputs identity, not the slot baselines');
 });
+
+test('the projection shows the CURRENT attribution with no gate in between: inputs rewritten by an old build → the shown machine is the mirror s (or unknown), the key is that set s, and a confirmation given for the old set is stale (reviewer P1-D2 on 30dcc2ad)', () => {
+  const storage = pending([{ id: 'n' }]);
+  const before = pendingInputs(storage)!;
+  assert.equal(before.machineId, 'm-a');
+  // No claimPending, no gate: the old build rewrites the inputs as B's.
+  storage.setItem('tmux_hub_drafts', JSON.stringify({ work: 'typed on B by the old build' }));
+  storage.setItem('tmux_machine_id', 'm-b');
+  const now = pendingInputs(storage)!;
+  assert.equal(now.machineId, 'm-b', 'the shown machine is the CURRENT evidence, not the old marker s');
+  assert.notEqual(now.key, before.key, 'and the key is the new set s');
+  assert.equal(JSON.parse(storage.getItem(LAYOUT_KEY)!).machineId, 'm-a', 'read-only: the marker was not rewritten by the projection');
+  assert.equal(discardPending(storage, before.key).reason, 'stale', 'the old confirmation closes nothing');
+  assert.equal(layoutMark(storage)?.state, 'pending');
+  // The mirror gone (the old build kept none): unknown, never the old machine.
+  storage.removeItem('tmux_machine_id');
+  assert.equal(pendingInputs(storage)!.machineId, '', 'unknown');
+  // The projection and the claim agree: a claim re-reads the same evidence.
+  storage.setItem('tmux_machine_id', 'm-b');
+  storage.setItem('tmux_servers', JSON.stringify([{ id: 'b', name: 'b', address: 'ws://b:9899', token: 't', machineId: 'm-b' }]));
+  assert.equal(claimPending(storage, 'b').reason, 'folded', 'B claims what the projection said was B s');
+});
