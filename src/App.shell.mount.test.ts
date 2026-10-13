@@ -7633,6 +7633,127 @@ test('③c-5 (touch): the guest Agents editor names its server too — the same 
   assert.deepEqual(tags, ['alpha', 'beta'], 'each guest names its own server');
 });
 
+// ─── #335 ③d-2: the r1 §F acceptance matrix — rows no earlier test holds ──
+
+test('§F reload (Aggregate): mode, excluded set, focus, each tree s draft and view come back; every ref keeps its own serverId; an excluded server is listed excluded, not resolved by a same-named session on another server', async (context) => {
+  // A focus (work:1.0), B member with its own `work:2.0`, D excluded. All
+  // three have a session named `work`; a reload must restore each tree from
+  // ITS slot — never B's `work` for A, never a tree for D.
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const rpc = { ...editorRpc, listSessions: async () => [{ name: 'work' }, { name: 'other' }], listSessionsWithPanes: async () => ({ sessions: [{ name: 'work', windows: 1 }, { name: 'other', windows: 1 }], panes: [{ session: 'work', window: 1, pane: 0 }, { session: 'other', window: 3, pane: 0 }] }) };
+  const machine = (url: string) => (url.includes('//b') ? 'm-b' : url.includes('//d') ? 'm-d' : 'm-a');
+  const first = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ v: 2, page: 'terminal', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }), parked: JSON.stringify({ v: 2, page: 'terminal', pane: { kind: 'pane', serverId: 'b', session: 'work', target: 'work:2.0' }, splitLayout: 1, splitCells: [] }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    // A is the pre-#335 LIVE server here (`twoServers` seeds unprefixed live
+    // keys for A), so its draft is the legacy key the boot folds into A's slot.
+    tmux_hub_drafts: JSON.stringify({ work: 'draft on A' }), 'tmux_hub_drafts::b': JSON.stringify({ work: 'draft on B' }),
+  }, ['d']), machine, { ...sandbox, rpc });
+  for (let i = 0; i < 8; i++) { await first.app.advance(500); await first.settle(); }
+  assert.equal(trees(first.app).length, 2, 'A and B mounted; D excluded has no tree');
+  // An edit on A (a Files draft) and on B's view (focus B, open `other`), then back to A.
+  const draftA = await dirtyEditor(first.app, first.settle);
+  const h1 = { app: first.app, settle: first.settle, switchTo: first.switchTo } as any;
+  await pickServer(h1, 'beta');
+  for (let i = 0; i < 4; i++) { await first.app.advance(300); await first.settle(); }
+  await first.openSession('other');
+  assert.equal(first.restored(), 'b:other:3.0', 'B s edit saved as B s');
+  await pickServer(h1, 'alpha');
+  for (let i = 0; i < 4; i++) { await first.app.advance(300); await first.settle(); }
+  const ls = first.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft still mounted');
+  const after = dumpStorage(first.app);
+  await first.app.close();
+
+  // Reload.
+  const second = await bootApp(context, after, machine, { ...sandbox, rpc });
+  for (let i = 0; i < 10; i++) { await second.app.advance(500); await second.settle(); }
+  const ls2 = second.app.window.localStorage;
+  assert.equal(ls2.getItem('tmux_connection_mode'), 'aggregate', 'mode');
+  assert.deepEqual(JSON.parse(ls2.getItem('tmux_excluded_servers')!), ['d'], 'excluded set');
+  assert.equal(ls2.getItem('tmux_server_current'), 'a', 'focus');
+  assert.equal(trees(second.app).length, 2, 'A and B back, D still not mounted');
+  assert.equal(second.onScreen(), 'work:1.0', 'A s own view, not B s same-named `work:2.0`');
+  const slotB = JSON.parse(ls2.getItem('tmux_state::b')!);
+  assert.equal(slotB.pane?.target, 'other:3.0', 'B s edit survived the reload');
+  assert.equal(slotB.pane?.serverId, 'b', 'with B s own serverId');
+  assert.equal(JSON.parse(ls2.getItem('tmux_state::a')!).pane?.serverId, 'a');
+  assert.equal(ls2.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft on A' }));
+  assert.equal(ls2.getItem('tmux_hub_drafts::b'), JSON.stringify({ work: 'draft on B' }));
+  // D: listed as excluded (an explicit state), not absent and not substituted.
+  const h2 = { app: second.app, settle: second.settle } as any;
+  await toConnection(h2);
+  const rowD = [...second.app.document.querySelectorAll<HTMLButtonElement>('.preferences .server-list .sm-pick')].find((b) => /^delta\b/iu.test((b.textContent ?? '').trim()));
+  assert.ok(rowD, 'D is listed');
+  assert.equal(includeSwitch(h2, 'delta')?.getAttribute('aria-checked'), 'false', 'as excluded');
+  assert.equal(second.app.document.querySelector('.scope-tree .term-side .session.foreign[data-server="d"]'), null, 'and contributes no sessions to any union');
+});
+
+test('§F isolation: a background member drops and reconnects while the focus is typing in an editor and has a download running — the focus s draft, its download and its connection are untouched; the member comes back on its own', async (context) => {
+  let bDown = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: { ...editorRpc, ...twoHubs() }, gate: (url) => (url.includes('//b') && bDown ? Promise.reject(new Error('B down')) : null) });
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  const a = conn(h, 'a')!;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  draftA.value = '# notes\n\nunsaved, still typing'; draftA.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  // A download in flight on A (its signed URL is A s own).
+  const dialsA = events.filter((e) => e.startsWith('dial@a:')).length;
+  // B drops; its reconnect fails for a while; then it is allowed back.
+  bDown = true;
+  conn(h, 'b')!.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(2000); await h.settle(); }
+  assert.equal(conn(h, 'b')!.isConnected(), false, 'B is down');
+  assert.ok(a.isConnected() && !a.disposed(), 'A s connection untouched');
+  assert.equal(events.filter((e) => e.startsWith('dial@a:')).length, dialsA, 'A was not re-dialled');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved, still typing', 'A s draft, with the text typed meanwhile');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'the focus did not move');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nobody was asked anything');
+  bDown = false;
+  for (let i = 0; i < 12 && !(conn(h, 'b')?.isConnected()); i++) { await h.app.advance(3000); await h.settle(); }
+  assert.ok(conn(h, 'b')!.isConnected(), 'B came back on its own loop');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved, still typing', 'and A s draft is still there');
+  assert.equal(trees(h.app).length, 2);
+});
+
+test('§F unavailable, not substituted: a saved pane ref whose server was REMOVED does not open a same-named pane on the focus; the union shows the removed server nowhere, and the refs of the remaining servers keep their ids', async (context) => {
+  // A and B both have `work:1.0`. B's slot names B's pane; B is removed
+  // while the app runs; after a reload nothing of B's is resolved on A.
+  const rpc = { ...editorRpc, listSessions: async () => [{ name: 'work' }], listSessionsWithPanes: async () => ({ sessions: [{ name: 'work', windows: 1 }], panes: [{ session: 'work', window: 1, pane: 0 }] }) };
+  const first = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ v: 2, page: 'terminal', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }), parked: JSON.stringify({ v: 2, page: 'terminal', pane: { kind: 'pane', serverId: 'b', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }) }),
+    tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  for (let i = 0; i < 8; i++) { await first.app.advance(500); await first.settle(); }
+  assert.equal(trees(first.app).length, 2);
+  const h1 = { app: first.app, settle: first.settle } as any;
+  await toConnection(h1);
+  first.app.document.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Remove beta"]')!.click(); await first.settle();
+  answerDialog(first.app, /^remove$/iu);
+  for (let i = 0; i < 6; i++) { await first.app.advance(300); await first.settle(); }
+  const ls = first.app.window.localStorage;
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['a'], 'B removed');
+  assert.equal(trees(first.app).length, 1, 'B s tree gone');
+  assert.equal(first.onScreen(), 'work:1.0', 'A still on ITS work:1.0');
+  assert.equal(JSON.parse(ls.getItem('tmux_state::a')!).pane?.serverId, 'a');
+  const after = dumpStorage(first.app);
+  await first.app.close();
+  const second = await bootApp(context, after, undefined, { ...sandbox, rpc });
+  for (let i = 0; i < 8; i++) { await second.app.advance(500); await second.settle(); }
+  assert.equal(trees(second.app).length, 1, 'only A');
+  assert.equal(second.onScreen(), 'work:1.0', 'A s own pane');
+  assert.equal(second.app.document.querySelector('.scope-tree .term-side .session.foreign'), null, 'no foreign row for a server that is gone');
+  assert.equal(second.app.document.querySelector('.scope-tree .hub-root .sidebar .proj-row.missing'), null, 'and not listed as missing either: it is not included');
+});
+
 // ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────
 
 /** Per-server session lists: A has `work`; B has `work` and `deploy`. */
