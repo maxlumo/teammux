@@ -309,6 +309,9 @@ function foldInto(storage: Store, id: ServerId, since?: Record<string, string>):
 /** The pending inputs as Settings shows them — the machine the legacy mirror
  * named — or null when nothing is pending. */
 export function pendingInputs(storage: Pick<Storage, 'getItem'>): { machineId: string } | null {
+  // A read that THROWS throws (reviewer P1-D1 on 18a3bff4): the caller is
+  // the host gate, which classifies a failing storage as blocked; this
+  // projection must not turn "cannot read" into "nothing pending".
   const mark = layoutMark(storage);
   return mark?.state === 'pending' ? { machineId: mark.machineId } : null;
 }
@@ -322,8 +325,17 @@ export function pendingInputs(storage: Pick<Storage, 'getItem'>): { machineId: s
 export function discardPending(storage: Store): MigrationReport {
   const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
     ({ ran: false, reason, serverId, folded: [], cleared: [] });
+  if (layoutMark(storage)?.state === 'pending') {
+    // The same barrier as a claim (reviewer P1-D2 on 18a3bff4): a slot move
+    // a failure left open — in the journal, or the legacy intent the marker
+    // itself carries (`moving`) — is finished FIRST; if it cannot be, the
+    // marker is not touched (it holds the recovery) and the discard is the
+    // storage block like any other migration write.
+    try { resumeSlotMove(storage); } catch { return none('unrecorded'); }
+  }
   const done = layoutMark(storage);
   if (done?.state !== 'pending') return done ? none('already-done', done.state === 'folded' ? done.into : '') : none('no-current');
+  if (done.moving) return none('unrecorded');   // still open after the resume: nothing is closed over it
   try {
     storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'discarded' } satisfies LayoutMark));
   } catch { return none('unrecorded'); }

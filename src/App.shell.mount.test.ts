@@ -2366,6 +2366,65 @@ test('③d-3: Settings › Connection shows the pending inputs with ONE action, 
   assert.equal(second.app.document.querySelector('.preferences .pending-inputs'), null);
 });
 
+test('③d-3/P1-D1: a storage whose MARKER cannot be read at boot still mounts the shell, blocked with Retry and no dial — the pending row s read goes through the same gate, never a throw out of the component; Retry after the read recovers shows the row', async (context) => {
+  const store = { down: true };
+  const events: string[] = [];
+  const h = await bootApp(context, { ...danglingSeed(), tmux_state_layout: JSON.stringify({ v: '335', state: 'pending', machineId: 'm-a' }) }, undefined, {
+    calls: events,
+    setup(window: any) {
+      const get = window.Storage.prototype.getItem;
+      window.Storage.prototype.getItem = function (this: Storage, k: string) {
+        if (store.down && k === 'tmux_state_layout') throw new Error('SecurityError');
+        return get.call(this, k);
+      };
+      window.Element.prototype.getAnimations = () => [];
+    },
+  });
+  await h.app.advance(3000);
+  assert.ok(h.app.document.querySelector('main'), 'the shell mounted');
+  assert.ok(cardButton(h.app, /retry/iu), 'blocked: Retry offered');
+  assert.deepEqual(events.filter((e) => e.startsWith('connect:') || e.startsWith('dial@')), [], 'nothing dialled');
+  store.down = false;
+  cardButton(h.app, /retry/iu)!.click();
+  for (let i = 0; i < 6; i++) await h.settle();
+  await h.app.advance(1000);
+  await toConnection({ app: h.app, settle: h.settle } as any);
+  assert.ok(h.app.document.querySelector('.preferences .pending-inputs'), 'the pending row appears once the marker can be read');
+});
+
+test('③d-3/P1-D2: a block that begins while the Discard confirmation waits withdraws it — the stale Confirm writes no marker; the record is still pending for Retry', async (context) => {
+  // Single on B with m-a's inputs pending. While the confirmation waits, the
+  // mode goes to Aggregate: A joins, its bind claims the pending inputs (A IS
+  // m-a) — and that fold's write FAILS, so the gate blocks the app. The
+  // dialog must go with the freeze, and its Confirm must write nothing.
+  const store = refusing(['tmux_hub_drafts::a']);
+  store.state.failing = false;
+  const first = await bootApp(context, danglingSeed(), undefined, { setup(window: any) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  await connectCard(first.app, first.settle, 'ws://b:9899');
+  const ls = first.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  const h = { app: first.app, settle: first.settle } as any;
+  await toConnection(h);
+  [...first.app.document.querySelectorAll<HTMLButtonElement>('.preferences .pending-inputs button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  const dialog = () => first.app.document.querySelector('[role=alertdialog]');
+  assert.ok(dialog(), 'the confirmation is up');
+  const confirm = [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!;
+  store.state.failing = true;
+  const toAggregate = modeButton(h, /all included|aggregate/iu);
+  assert.ok(toAggregate, 'the mode control is on the page');
+  toAggregate.click();
+  for (let i = 0; i < 10; i++) { await first.app.advance(500); await first.settle(); }
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate', 'the mode was written; A joined');
+  assert.ok(first.app.document.querySelector('.preferences .pending-inputs button[disabled]'), 'blocked (A s claim could not be recorded): the row is frozen');
+  assert.equal(dialog(), null, 'and the confirmation was withdrawn with the freeze');
+  // The stale button, pressed anyway: the host refuses at the commit.
+  confirm.click();
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the stale Confirm wrote no marker');
+  assert.ok(first.app.document.querySelector('.preferences .pending-inputs'), 'the record is still shown, pending, for Retry');
+});
+
 test('③d-3: a discard whose marker write fails blocks like any migration write — Retry; the record stays pending', async (context) => {
   const store = refusing(['tmux_state_layout']);
   store.state.failing = false;
@@ -6146,7 +6205,7 @@ test('P2 (NC shape): C s address-row redial HANGS while B s earlier reconnect an
 // must complete: CURRENT/mirror/front on C, A kept and refusing, A asked
 // once as an orphan, C never ended.
 type FExit = 'switch-walk-keep' | 'switch-dial-fail' | 'form-candidate-fail' | 'form-candidate-cancel' | 'form-owned-fail' | 'form-owned-cancel' | 'form-newer-target';
-async function fAbsorbUnder(context: TestContext, exit: FExit, seed: Record<string, string> = {}) {
+async function fAbsorbUnder(context: TestContext, exit: FExit, seed: Record<string, string> = {}, before?: (h: Awaited<ReturnType<typeof bootApp>>) => void) {
   let aliasProves = false;
   let cHangs = false;
   const cLet = { let: null as (() => void) | null };
@@ -6169,6 +6228,7 @@ async function fAbsorbUnder(context: TestContext, exit: FExit, seed: Record<stri
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  before?.(h);
   const ls = h.app.window.localStorage;
   const a = conn(h, 'a')!, c = conn(h, 'c')!;
   const aApi = a.api;
@@ -6272,37 +6332,52 @@ for (const exit of fExits) test(`M1 F (owed handover, exit=${exit}): the operati
  * at JOIN, before the handover, which would make the "cleared" case pass for
  * the wrong reason. `work:9.0` ≠ A's `work:1.0`, so the two are told apart. */
 const cPane = (target: string) => ({ kind: 'pane', serverId: 'c', session: 'work', target });
-const navCases: Array<[string, string, string, (slot: any) => void]> = [
+const navCases: Array<[string, string, string, (slot: any) => void, string]> = [
   ['A cleared → stays cleared (C had a pane)',
     JSON.stringify({ v: 2, page: 'files', pane: null, splitLayout: 1, splitCells: [] }),
     JSON.stringify({ v: 2, page: 'files', pane: cPane('work:9.0'), splitLayout: 1, splitCells: [] }),
-    (slot) => { assert.equal(slot.pane, null, `C s old pane did not come back: ${JSON.stringify(slot)}`); assert.deepEqual(slot.splitCells, []); }],
+    (slot) => { assert.equal(slot.pane, null, `C s old pane did not come back: ${JSON.stringify(slot)}`); assert.deepEqual(slot.splitCells, []); }, 'work:9.0'],
   ['A single pane → stays single (C had a 2-cell split)',
     JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }),
     JSON.stringify({ v: 2, page: 'files', pane: cPane('work:9.0'), splitLayout: 2, splitCells: [{ id: 1, pane: cPane('work:9.0') }, { id: 2, pane: cPane('work:8.0') }] }),
-    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c', 're-owned'); assert.equal(slot.splitLayout, 1); assert.deepEqual(slot.splitCells, [], 'C s split is gone'); }],
+    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c', 're-owned'); assert.equal(slot.splitLayout, 1); assert.deepEqual(slot.splitCells, [], 'C s split is gone'); }, 'work:9.0'],
   ['A unset → takes nothing, C stays empty (no invented pane)',
     JSON.stringify({ page: 'files' }),
     JSON.stringify({ page: 'files' }),
-    (slot) => { assert.ok(!slot.pane, `no pane: ${JSON.stringify(slot)}`); }],
+    (slot) => { assert.ok(!slot.pane, `no pane: ${JSON.stringify(slot)}`); }, ''],
   ['A with a pane → lands on an empty C (the P1-2 shape)',
     JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }),
     JSON.stringify({ page: 'files' }),
-    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c'); }],
+    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c'); }, ''],
 ];
-for (const [name, aNav, cNav, check] of navCases) test(`P1-NAV (handover refill): ${name}`, async (context) => {
-  const { h, ls } = await fAbsorbUnder(context, 'switch-walk-keep', { 'tmux_state::a': aNav, 'tmux_state::c': cNav, tmux_layout_mode: 'desktop' });
+for (const [name, aNav, cNav, check, cBefore] of navCases) test(`P1-NAV (handover refill): ${name}`, async (context) => {
+  // The premise is asserted BEFORE the absorb (reviewer P2-NAV on 18a3bff4):
+  // C's held tree really shows its old pane (and split) from its own slot.
+  const { h, ls, draftA } = await fAbsorbUnder(context, 'switch-walk-keep', { 'tmux_state::a': aNav, 'tmux_state::c': cNav, tmux_layout_mode: 'desktop' }, (hh) => {
+    const held = trees(hh.app).find((x) => x.held);
+    assert.ok(held, 'C s tree is mounted, held');
+    assert.equal(held.target, cBefore || 'none', `C s old terminal before the absorb: ${held.target}`);
+    const cNavParsed = JSON.parse(cNav);
+    const cellsBefore = held.el.querySelectorAll('.terminal-body .cell').length;
+    assert.equal(cellsBefore, (cNavParsed.splitLayout ?? 1) > 1 ? cNavParsed.splitCells.length : 0, `C s old split before the absorb: ${cellsBefore}`);
+  });
   assert.equal(ls.getItem('tmux_server_current'), 'c', 'handed over to C');
-  // Let the focused view's save effect run: what C's tree now SAVES is the test.
+  // A's orphan ask (the fixture leaves it open): answer it, so C is the
+  // front and A is behind — then read the front.
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'A is asked as an orphan');
+  answerDialog(h.app, /keep editing/iu);
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind');
   const slot = JSON.parse(ls.getItem('tmux_state::c') ?? 'null');
   assert.ok(slot, 'C s slot exists');
   check(slot);
-  // The front tree agrees with the slot: SplitView's cells (`.cell`) are
-  // mounted only for a split (reviewer P2 on a036a84a: the former selector
-  // matched nothing and passed vacuously).
-  const front = h.app.document.querySelector('.scope-tree:not(.held)');
-  const cells = front?.querySelectorAll('.terminal-body .cell').length ?? 0;
+  // The FRONT (C's tree) agrees with the slot: its terminal target and the
+  // real SplitView cells (`.cell`), not a vacuous selector.
+  const front = trees(h.app).find((x) => !x.held);
+  assert.ok(front && front.el !== draftA.closest('.scope-tree'), 'C s tree is the front');
+  assert.equal(front.target, slot.pane?.target ?? 'none', `the front terminal is the slot s pane: ${front.target}`);
+  const cells = front.el.querySelectorAll('.terminal-body .cell').length;
   if (slot.splitLayout === 1) assert.equal(cells, 0, `no split in front: ${cells}`);
   else assert.equal(cells, slot.splitCells.length, 'the split in front is the slot s');
 });

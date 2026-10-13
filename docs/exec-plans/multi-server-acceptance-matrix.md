@@ -24,14 +24,15 @@ recorded evidence gap, not claimed.
 | Same-named **session / pane** | T | `§F reload (Aggregate)…` (A restores its `work:1.0`, B its own); `§F unavailable, not substituted…`; `③c-3: picking another server s session…` |
 | Same-named **room** (notifications) | T | `③c-4: picking ANOTHER server s alert… hub_read goes to that server only — A s same-named room is untouched`; `③c-4: a system notification s tag names the room ON ITS SERVER…` |
 | Same-named **agent** (Agents page) | T | `③c-5 (touch): the guest Agents editor names its server…`; `P1-2: on touch, removing B whose guest Agents editor is dirty…` (each guest is its own server's) |
-| Same **#issue / file path** across servers | T (landing) | `③c-2: picking another server s row moves the focus there (D2) and selects THAT project in its Hub; nothing is torn down` (A's Hub reads no landing aimed at B) — a landing is aimed at one tree (`landingFor`); Board/Files landings share the mechanism (`App.source`: "the Hub union s cross-server pick is a landing like the others") |
+| Same **#issue / file path** across servers | shared mechanism + R | the cross-server pick is a landing aimed at one tree (`landingFor`), proven for the Hub's session landing (`③c-2: picking another server s row… nothing is torn down`) and pinned as the one mechanism for Board/Files landings (`App.source`: "the Hub union s cross-server pick is a landing like the others"). A behaviour test of a same-named Board issue / Files path on two servers does not exist; the browser row covers it |
 | Different **tokens, capabilities, latency** | T | every two-server fixture (`twoServers`: `tokA`/`tokB`, `m-a`/`m-b`); capabilities: `③c-4/P1-C3 (a)` (A no Hub, B Hub); latency: `③c-5…` (held answers), `P1-C4: … FIRST project list fails…` |
 
 ## 2. Isolation of the focus from the members
 
 | row | state | evidence |
 |---|---|---|
-| B drops / reconnects while A types, downloads, saves | T | `§F isolation: a background member drops and reconnects while the focus is typing…`; `③b-1: each member reconnects on its own loop — B dropping never touches A…` |
+| B drops / reconnects while A types (editor draft) | T | `§F isolation: a background member drops and reconnects while the focus is typing…` (the focus's draft, connection and dial count; nobody asked); `③b-1: each member reconnects on its own loop — B dropping never touches A…` (connections and dials) |
+| … while A downloads or saves | P2 | not held by an App test: the isolation test starts no download and performs no Save. A download's independence from another server's socket follows from every runtime owning its connection (`file-handling.md`, `websocket-client.md` ②b-4: a download's signed URL is its connection's), and the switch-time download tests (`a switch while A s reconnect dial hangs…`, `K, the PRE-dial entry…`) cover a download surviving another server's dial — but not a member's drop. Browser row or a later test |
 | Hidden member does only list work (D4), on a tick and on a push | T | `③c-2 (D4): a hidden member s Hub refreshes only its list…` (per-method counts incl. the push path); `③c-3/P1-C4: … hidden member keeps its list CURRENT on the 20 s list cadence and stops when excluded` |
 | Only the focus is polled for vitals | T | `③c-5: the system status is the FOCUSED server s reading…` (`rpc@b:systemStatus` never) |
 
@@ -78,7 +79,7 @@ recorded evidence gap, not claimed.
 
 | row | state | evidence |
 |---|---|---|
-| Single behaves as before | T | the whole pre-③ suite (2000+ tests) plus the `(Single)` rows: `③b-2 (D2): Single switches as before`, `③c-1: Single names nothing`, `③c-3: Single lists no other servers`, `③c-4 (Single)…`, `③c-5 (Single)…`, `③b-3: … Single shows no include switches` |
+| Single behaves as before | T | the pre-③ suite (1805 tests at `ea56861b`, all still passing on the tip — count is not scope; the Single paths are the ones those tests exercise) plus the `(Single)` rows: `③b-2 (D2): Single switches as before`, `③c-1: Single names nothing`, `③c-3: Single lists no other servers`, `③c-4 (Single)…`, `③c-5 (Single)…`, `③b-3: … Single shows no include switches` |
 
 ## 8. Phone and desktop
 
@@ -87,6 +88,15 @@ recorded evidence gap, not claimed.
 | Same model and atoms; layout only | T | touch rows: `③c-5 (touch)…`, `③c-4/P1-C3 (a, touch)…`, `P1-2: on touch…`, `③b-2: on a phone, Back…`; desktop rows throughout |
 | Forced desktop / narrow / coarse / uiZoom / safe-area screenshots | R | validator's screenshot matrix on the containers |
 | Long same-prefix server names, 10em tag ellipsis on touch | P2 | recorded by the reviewer (③c P2-6); no layout evidence here |
+
+## The M1 handover matrix
+
+The ③b owed-handover cells (M1: F0–F7, B-series, X1–X6) are indexed on the
+issue (#335, builder-3's 1125b5f4 note and the reviewer's 00:13 re-marking)
+and are not restated here; this table does not replace them. Still R there:
+F2 (slow release / owned-fail combination), F6 (registry change after a true
+answer), the B-series real-absorb variants, X4 (manual vs automatic Dismiss
+race), X6 (guest). X2's CURRENT-only branch is a source pin (below).
 
 ## Known evidence gaps (recorded, not claimed)
 
@@ -117,9 +127,32 @@ Sessions "Other servers" section listing `gw-b`'s; the status strip named
 CURRENT changes, both trees stay, roles swap, the Hub head tag and the strip
 read `gw-b`, no JS error.
 
-Preset for the absorb (dirty F) shape: start with the two trees as above,
-THEN add the alias address to `tmux_machines` under the canonical's machine
-(seeding it before boot makes the first alias dial absorb at once); the alias
-handshake first reports no `machine_id`, then the canonical's. The owed
-handover completes once the walk ends; a Board draft counts as dirty for the
-guard (the validator's 01:04 note).
+Preset for the absorb (dirty F) shape — a CONTROLLED alias, not two real
+containers: a real server reports its `machine_id` on the first handshake, so
+two containers can never produce the "alias entry without a machine id whose
+later dial proves the canonical's machine" sequence; it needs an alias
+address in front of ONE container (a proxy or a second address of `gw-a`)
+whose first handshake is made to omit `machine_id` and whose later one
+reports `gw-a`'s. Seed `tmux_servers` with the canonical (`gw-a`, its
+machine id) and the alias entry (NO `machineId`), CURRENT = the alias,
+`tmux_machines` WITHOUT the alias address (seeding it before boot makes the
+first alias dial absorb at once); boot to two trees (alias focus, canonical
+member); THEN add the alias address to `tmux_machines` under `gw-a`'s machine
+and let the canonical's failover dial the alias address. The dirty premise is
+a **Files editor draft** on the alias tree (the validator's 01:04 note could
+not show a Board draft being recognised by the guard; do not rely on it). The
+owed handover completes once the walk ends (Keep editing): CURRENT, the
+mirror and the front on the canonical, the alias tree kept and asked once as
+an orphan.
+
+Preset for the Discard row (③d-3): the row appears only while the
+pre-#335 inputs are PENDING, i.e. unattributable at boot. Seed the legacy
+keys (`tmux_state` = a legacy nav, `tmux_hub_drafts` = `{"demo":"x"}`,
+`tmux_machine_id` = `gw-a`'s machine id), `tmux_server_current` = an id that
+names NO saved server (e.g. `gone`), `tmux_servers` with `gw-b` ONLY (so no
+saved server's machine can claim them), no `tmux_state_layout`. Boot: the
+marker records `pending`; connect to `gw-b` (the card); Settings › Connection
+shows "State from an earlier version · <machine>" with Discard. A seed whose
+CURRENT names a saved server, or that contains a server whose machine matches,
+is folded or claimed at boot and shows no row — which is the validator's
+04:59 observation.

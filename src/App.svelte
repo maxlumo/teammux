@@ -2759,7 +2759,7 @@
       // Recorded is not yet released: the gate opens in `foldCurrent`, after
       // the claim, so what it held never lands before the fold it waited on.
       else migrationBlocked = false;
-      pendingInputs = readPendingInputs(localStorage);
+      refreshPending();
     } catch { holdStorage(); }
     loadServerRegistry();
   }
@@ -2806,20 +2806,33 @@
         reason = claim === 'folded' ? 'claimed' : claim;
       }
     } catch { reason = 'unrecorded'; }
-    pendingInputs = readPendingInputs(localStorage);
     if (reason === 'unrecorded') { holdStorage(); return 'blocked'; }
+    refreshPending();
     return reason === 'claimed' ? 'claimed' : 'ok';
   }
   /** The pre-#335 inputs still awaiting their server (③d-3), as Settings
-   * shows them; re-read after every fold or claim and after a discard. */
-  let pendingInputs = $state(readPendingInputs(localStorage));
-  /** The person discards them (confirmed in Settings): one marker write;
-   * a failed write is the storage block like any other migration write. */
+   * shows them: a PROJECTION of the migration state, read only through this
+   * one guarded door (reviewer P1-D1 on 18a3bff4) — at boot by
+   * `prepareStorage`, after every fold or claim, after a discard — never at
+   * init outside the gate. A read that fails is the storage block like any
+   * other migration failure (the row stays as it was; Retry re-reads), never
+   * "nothing pending", and never a throw out of the component. */
+  let pendingInputs = $state(null);
+  function refreshPending() {
+    try { pendingInputs = readPendingInputs(localStorage); } catch { holdStorage(); }
+  }
+  /** The person discards them (confirmed in Settings). Re-validated at the
+   * commit like every deferred write (reviewer P1-D2 on 18a3bff4): a block
+   * that began while the dialog waited refuses it (the registry is frozen,
+   * and so is this), and a record that is no longer pending writes nothing.
+   * One marker write; a failed write — or an open slot move that cannot be
+   * finished — is the storage block like any other migration write. */
   function discardPendingInputs() {
+    if (migrationBlocked || !pendingInputs) return;
     let reason;
     try { reason = discardPending(localStorage).reason; } catch { reason = 'unrecorded'; }
-    pendingInputs = readPendingInputs(localStorage);
-    if (reason === 'unrecorded') holdStorage();
+    if (reason === 'unrecorded') { holdStorage(); return; }
+    refreshPending();
   }
   /** A deep link that arrived while the migration was blocked: parsed and
    * stripped from the address bar at once, APPLIED only once the migration

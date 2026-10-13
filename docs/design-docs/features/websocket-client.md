@@ -520,10 +520,18 @@ marker becomes `discarded` (`discardPending`) — and touches nothing else: the
 unprefixed inputs stay (a build rolled back to before #335 finds exactly the
 state it left) and so does the quarantine copy. A `discarded` marker is
 closed: a later boot reads it as consumed and a server whose machine matches
-folds nothing (`already-done`). Nothing infers a discard, and the row is
-frozen with the registry while the app is blocked; a marker write that fails
-is the migration block like any other (`unrecorded` → Retry), the record
-still pending. When
+folds nothing (`already-done`). Nothing infers a discard. The discard is a
+deferred write like every other (reviewer P1-D2 on 18a3bff4): the dialog is
+withdrawn when a block begins while it waits, and the commit re-checks
+`migrationBlocked` and that a record is still pending; it passes the claim's
+barrier too — an open slot move (the journal's, or the legacy `moving` the
+marker carries) is finished FIRST, and one that cannot be finished leaves
+the marker and the intent as they are and blocks (`unrecorded` → Retry): the
+recovery is never closed over. The row shown in Settings is a PROJECTION of
+the marker, read only through the host's fail-closed gate (reviewer P1-D1:
+at boot in `prepareStorage`, after every fold or claim, after a discard —
+never at component init), so a storage whose marker cannot be read blocks
+with Retry instead of mounting nothing or reading "nothing pending". When
 the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
 panel of its own (which would cover the migration's Retry with one the freeze
 refuses); the gate keeps the switch's target, and Retry, once storage is
@@ -939,17 +947,23 @@ shaped it (orchestrator, 2026-10-11/12) and its six design points:
   rebuilt on a focus move. No second transport, no aggregation service.
 - **D2 — the focus moves in place.** Picking a connected member changes
   CURRENT and the mirror and brings its tree forward; no dial, no walk, no
-  teardown. A server that is not up is the ordinary switch.
+  teardown. Picking a member that is NOT up is not a focus change: the app
+  stays where it is and the row shows that server's own state (an excluded
+  one is included and joins through its own dial); the person focuses it
+  once it is up (orchestrator 02:28/03:23). Single switches as before.
 - **D3 — one tree, one terminal.** A split stays within a server; another
   server's session is a selector that moves the focus there.
 - **D4 — a hidden member does list work only.** Its Hub's 20 s project
   refresh and its Sessions' 20 s list refresh, the unread badge and the
   notification record on a push; no room, no pane, no vitals.
-- **D5 — projections, not pollers.** The Hub sidebar, the Sessions selector
-  and the bell are k-way merges of what each tree PUBLISHED, every row with
-  its server's tag by one rule (`server-tag.ts`: more than one included) and
-  its own clock and catalog; every action goes back to its source through
-  the same confirmed flow as a local one, on an api frozen at the ask.
+- **D5 — projections, not pollers.** The Hub sidebar (a k-way merge of each
+  tree's published, ordered slice), the Sessions selector (each other
+  server's published list, concatenated in saved order) and the bell (the
+  included servers' bounded alert indexes, sorted by each entry's own time)
+  are built from what each tree PUBLISHED, every row with its server's tag
+  by one rule (`server-tag.ts`: more than one included) and its own clock
+  and catalog; every action goes back to its source through the same
+  confirmed flow as a local one, on an api frozen at the ask.
 - **D6 — one scope for shown, counted and cleared.** The INCLUDED members;
   an offline included member is listed unavailable, not counted, not
   cleared; an excluded server is not in the view.
@@ -1420,7 +1434,12 @@ doc already describes. Design decisions, in the order they bit:
   Migration attributes history addresses through the same map: the current
   machine's alternates never re-materialize as entries, an unseen machine
   yields one entry, unattributed addresses dedupe by address.
-- **Switching is in place, no reload** (board 315, owner 2026-10-08: "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key scopeRuntime}` — the target's runtime handle — on arrival. The ORDER is the contract, each step finished before the next:
+- **Switching is in place, no reload** (board 315, owner 2026-10-08;
+  the paragraph below describes the REPLACING switch — Single mode, and in
+  Aggregate a switch to a server that is not a member; since #335 ③ a focus
+  move between connected members is not a switch at all (D2 above: no
+  teardown, the trees stay mounted), and the tree of the server left is
+  kept, held, when it is a member — see "Several servers at once"): "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key scopeRuntime}` — the target's runtime handle — on arrival. The ORDER is the contract, each step finished before the next:
   1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
   2. **One intent**: the CURRENT server's reconnect loop stops, `switching` hides the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing. The server being left is NOT stopped: its runtime, its socket and its downloads keep running (order (a), orchestrator 2026-10-11 04:04).
   3. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
@@ -1445,7 +1464,7 @@ doc already describes. Design decisions, in the order they bit:
   - `App.shell.mount.test.ts` mounts App on a connection registry that gives every runtime an INDEPENDENT fake connection with a real dispose (reviewer P2-2 on cc45d7d1): each dial (`dial@<key>:<url>|<token>`), RPC (`rpc@<key>:<name>`) and dispose names the connection it happened on. The ruling's regressions run there: a reconnect answering as B while A's dialog is open, a captured A call refused; an unrecordable peer closed; a failed form connect that wrote the mirror never handing A its address or token; a boot or a failover that absorbs an alias bringing canonical up on its own connection; a reused provisional runtime surviving its stale minter; Cancel during the second handshake binding nothing; and the App's own end disposing every connection.
   - `leave-host.mount.test.ts` mounts the REAL Files and AgentsPage in App's page structure (`LeaveHost.test.svelte`: Files in a hidden layer, Agents under the held `prefs` condition) and drives the real walk: a cancel at either editor loses nothing, Settings stays mounted while Files asks, a save in flight is waited for. The fixture mirrors App's condition; `App.source.test.ts` pins App's own expression.
   - `Files.mount.test.ts` drives Files' real discard dialog through the walk.
-  - Not covered by a test: App itself end to end (no App mount harness); the browser check in `temp/check/c315.mjs` (fake ws as two machines) is the evidence for the shell, the panel and no reload.
+  - App end to end is covered since #335 by `App.shell.mount.test.ts` (the App harness with a fake connection per server); at the time of board 315 there was none, and the browser check in `temp/check/c315.mjs` (fake ws as two machines) was the evidence for the shell, the panel and no reload.
   - `server-memory.source.test.ts` keeps the `resetServerMemory` list honest against every module-level store under `src/lib`; it is maintenance, not a proof.
 - **Single click switches; a pencil renames** (2026-09-12, #165, lead decision
   01:32). The old 260ms click hold guessed whether another click would arrive

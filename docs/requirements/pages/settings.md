@@ -47,16 +47,20 @@ where Agents is a page of its own, reads as one plain list):
   one-time, idempotent, and never loses the current user.
 - Connection mode (board #335 ③): **Connect to: One server / All
   included** (`ui/Segmented`, persisted to `tmux_connection_mode`). In
-  Aggregate every saved server is a background member: connected on its own
-  socket, its tree kept mounted, held and inert behind the focused one. Every
+  Aggregate every INCLUDED saved server is a member: it dials on its own
+  socket and, once up and published, its tree is kept mounted, held and inert
+  behind the focused one (an excluded server, or one that never came up, has
+  no tree; its row says so). Every
   row of the ONE server list (popover and this page) carries an include
   switch (`ui/Switch`, the set in `tmux_excluded_servers`) and the member's
   derived status — the one status-dot language, a failure's reason after the
   address (not answering, paused on storage, reaches another known server),
   and "Excluded" for a server left out. Picking a CONNECTED member moves the
   focus (CURRENT and the mirror) with no dial and no teardown; picking an
-  excluded one includes it; picking a saved server that is not up is the
-  ordinary switch. Every mode or include change asks the trees it would
+  excluded one includes it (it joins through its own dial; the app stays
+  where it is); picking a member that is not up is not a focus change — the
+  row shows its state and the person focuses it once it is up. Every mode or
+  include change asks the trees it would
   destroy first, one at a time, in that tree, and a "keep editing" changes
   nothing; excluding the focus moves the focus to the next connected member
   first and is refused when there is none. While the app is blocked on

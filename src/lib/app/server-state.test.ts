@@ -811,3 +811,42 @@ test('the person discards the pending inputs (③d-3): one marker write, nothing
   assert.equal(discardPending(failing).reason, 'unrecorded');
   assert.equal(layoutMark(failing)?.state, 'pending', 'still pending');
 });
+
+test('a discard finishes an open slot move first, like a claim; one that cannot be finished keeps the marker and the intent and is unrecorded (reviewer P1-D2 on 18a3bff4)', () => {
+  // The journal's open move (a merge that failed part-way).
+  const storage = aliasPending();
+  storage.setItem('tmux_hub_drafts::a', JSON.stringify({ work: 'TYPED' }));
+  const restore = refuse(storage, 'tmux_hub_drafts::c');
+  assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
+  assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the intent is open');
+  // Still refusing: the discard cannot finish the move → unrecorded, nothing closed, the intent kept.
+  assert.equal(discardPending(storage).reason, 'unrecorded');
+  assert.equal(layoutMark(storage)?.state, 'pending', 'the marker is not closed over an open move');
+  assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the recovery is kept');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'TYPED' }, 'and the alias edit');
+  restore();
+  // Writable again: the discard finishes the move (the edit reaches canonical), then closes the record.
+  assert.equal(discardPending(storage).reason, 'discarded');
+  assert.deepEqual(openMoves(storage), [], 'the move was finished first');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'nothing of the move was lost to the discard');
+  assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'discarded' });
+  // The legacy intent carried by the marker itself (`moving`, pre-journal clients).
+  const legacy = pending([{ id: 'a2', machineId: 'm-a' }]);
+  const mark = JSON.parse(legacy.getItem(LAYOUT_KEY)!);
+  legacy.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moving: { from: 'a2', to: 'zz' } }));
+  legacy.setItem('tmux_hub_drafts::a2', JSON.stringify({ work: 'on the alias' }));
+  const restore2 = refuse(legacy, 'tmux_hub_drafts::zz');
+  assert.equal(discardPending(legacy).reason, 'unrecorded', 'the legacy move cannot be finished: refused');
+  assert.deepEqual(JSON.parse(legacy.getItem(LAYOUT_KEY)!).moving, { from: 'a2', to: 'zz' }, 'the intent is still in the marker');
+  assert.equal(JSON.parse(legacy.getItem(LAYOUT_KEY)!).state, 'pending');
+  restore2();
+  assert.equal(discardPending(legacy).reason, 'discarded', 'finished, then closed');
+  assert.deepEqual(JSON.parse(legacy.getItem('tmux_hub_drafts::zz')!), { work: 'on the alias' }, 'the move landed before the record closed');
+});
+
+test('pendingInputs throws when the marker cannot be READ — it never turns a failing storage into "nothing pending" (reviewer P1-D1 on 18a3bff4)', () => {
+  const storage = pending([{ id: 'a2', machineId: 'm-a' }]);
+  const get = storage.getItem;
+  storage.getItem = (k: string) => { if (k === LAYOUT_KEY) throw new Error('SecurityError'); return get(k); };
+  assert.throws(() => pendingInputs(storage), /SecurityError/u);
+});

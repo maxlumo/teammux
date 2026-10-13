@@ -162,8 +162,10 @@ reading on its Connection row is withdrawn (orchestrator 02:28).
   fast lands only the final owner's; one included member is still named;
   the other member is never polled; Single names no server.
 - `SystemStatus.mount.test.ts`: a fresh handle for the same id is a new
-  owner (the old handle's late answer is dropped); a late answer after
-  unmount writes nothing.
+  owner (the old handle's late answer is dropped); after unmount a late
+  answer reaches no DOM (the test asserts the absence of the corner, not the
+  absence of an internal assignment — the cleanup clears the timer and does
+  not bump the generation).
 
 ## Rules and their reasons
 

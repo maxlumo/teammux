@@ -1282,7 +1282,10 @@ it is not a button, so it is on the capsule allowlist of
 `app/server-tag.ts` (`serverTag(scope, id)`): more than one server INCLUDED —
 the source set, not how many answered, so a member that is offline keeps the
 others named — and never otherwise, which makes Single tag-free by
-construction. The atom decides nothing itself (`ServerTag.source.test.ts`
+construction. ONE ruled exception, by a different rule (orchestrator
+2026-10-13 02:28): the system status strip names the Aggregate focus ALWAYS,
+one member included or many, because a reading without its machine is not a
+reading; it uses the same atom (system-status.md). The atom decides nothing itself (`ServerTag.source.test.ts`
 pins it to its tokens and to the absence of any mode logic); App computes the
 scope once and hands each tree its name through its scope (`ServerScope`
 `tag`, a live read). A page that computed its own "should I name the server"

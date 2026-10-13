@@ -1090,7 +1090,10 @@
 
 <!-- The discard asks first (③d-3): it is the one irreversible thing on this
      page besides removing a server, and like that one it names what goes. -->
-<ConfirmDialog open={discardAsk} compact={layout.isTouchDevice}
+<!-- A block that begins while the confirmation waits withdraws it (reviewer
+     P1-D2 on 18a3bff4): the registry froze, and this with it. The COMMIT is
+     the host's, which re-validates on its own (blocked, still pending). -->
+<ConfirmDialog open={discardAsk && !connectionModeFrozen} compact={layout.isTouchDevice}
   title={t('pendingInputsDiscardTitle')} note={t('pendingInputsDiscardNote')}
   confirmLabel={t('pendingInputsDiscard')} confirmIcon="trash"
   onconfirm={() => { discardAsk = false; onDiscardPending?.(); }} oncancel={() => { discardAsk = false; }} />
