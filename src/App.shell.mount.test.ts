@@ -215,13 +215,20 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
     let onDrop: (() => void) | null = null;
     const noop = () => {};
     const team = new Set<(m: unknown) => void>();
+    // A dial in flight is REJECTED by dispose, as the real Connection s
+    // `cancelDialing` does: a continuation waiting on it runs then.
+    const dialing = new Set<(e: Error) => void>();
     const connection = {
       async connect(url: string, token: string) {
         if (disposed) throw new Error('connection disposed');
         const mine = ++seq;
         connected = false;
         calls?.push(`dial@${key}:${url}|${token}`);
-        const answered = await m.connect(url, token);
+        let cancel!: (e: Error) => void;
+        const cancelled = new Promise<never>((_r, rej) => { cancel = rej; });
+        dialing.add(cancel);
+        let answered: string;
+        try { answered = await Promise.race([m.connect(url, token), cancelled]); } finally { dialing.delete(cancel); }
         if (disposed) throw new Error('connection disposed');
         if (mine !== seq) throw new Error('superseded by a newer connect');
         machine = answered || '';
@@ -229,7 +236,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
         return answered;
       },
       disconnect() { seq++; connected = false; },
-      dispose() { if (!disposed) { disposed = true; seq++; connected = false; calls?.push(`disposed:${key}`); } },
+      dispose() { if (!disposed) { disposed = true; seq++; connected = false; calls?.push(`disposed:${key}`); for (const c of [...dialing]) c(new Error('connection disposed')); } },
       isConnected: () => connected,
       getMachineId: () => (connected ? machine : ''),
       getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
@@ -6475,6 +6482,396 @@ test('M1 F4/F5 (Single, nobody to hand to): the form s candidate absorbs the foc
   assert.equal(draftA.isConnected, false);
   assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'the app is on C');
   assert.equal(trees(h.app).length, 1);
+});
+
+// ─── reviewer P1-1 / P1-2 / P1-3 on 9c1f757c ────────────────────────────
+
+test('P1-1 (own dial, arrival refused): the focus alias s OWN reconnect — out, hanging — proves the canonical s machine while the form s walk asks its tree; the arrival is refused by the open guard; Keep editing on the form: the OWED handover still completes to C', async (context) => {
+  // The absorber is A s own handshake (server-runtime detaches A itself);
+  // the arrival (`arrivedElsewhere` → `askToReplace`) finds a guard open and
+  // returns null, concluding nothing. The debt must not have been skipped on
+  // the strength of "A is already detached". Shape: A s loop gave up, the
+  // connect card is up (A s tree bound and kept); coming back starts a loop
+  // whose dial hangs; the form connects to N, its walk asks A s draft.
+  let aliasProves = false;
+  let aHangs = false;
+  const aLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  let failing = false;
+  let aliasDials = 0;
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: editorRpc,
+    gate: (url) => {
+      if (url.includes('//n')) return new Promise<void>(() => {});
+      if (!url.includes('//alias') || ++aliasDials <= 1) return null;
+      if (failing) return Promise.reject(new Error('refused'));
+      if (aHangs && !aLet.let) return new Promise<void>((r) => { aLet.let = r; });
+      return null;
+    },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const aApi = a.api;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  failing = true;
+  a.drop();
+  for (let i = 0; i < 30; i++) { await h.app.advance(5_000); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.card .fields input[type="text"]'), 'A s loop gave up: the connect card is up');
+  assert.ok(c.isConnected(), 'C, a member, is untouched');
+  failing = false; aHangs = true; aliasProves = true;
+  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));   // A s loop starts again; its dial hangs
+  for (let i = 0; i < 8 && !aLet.let; i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(aLet.let, 'A s own reconnect dial is out');
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://n:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftA.closest('.scope-tree'), 'the form s walk asks A s tree');
+  // A s own dial answers as m-a: recordServer absorbs A into C. A is
+  // detached by its own dial; the arrival is refused by the open guard.
+  aLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], `A s own handshake absorbed A: ${ls.getItem('tmux_servers')}`);
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses');
+  assert.equal(a.disposed(), false, 'A bound still');
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'no overlapping question');
+  // Keep editing: the form dials nothing. The owed handover completes.
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 8; i++) { await h.app.advance(10); await h.settle(); }
+  assert.equal(events.filter((e) => e === 'connect:ws://n:9899' || e === 'candidate:ws://n:9899').length, 0, 'N never dialled');
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'CURRENT is C');
+  assert.ok(c.isConnected() && !c.disposed(), 'C up, never ended');
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft mounted');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) { await h.app.advance(10); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') !== draftA.closest('.scope-tree'), 'C s tree in front');
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind, kept');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'once');
+  assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'the app is on C: no connect card');
+});
+
+test('P1-2 (publish gate): the canonical absorbs the focus alias whose v2 navigation must be rebound for the survivor — the merge-nav rewrite FAILS: the app blocks, C is NOT shown as the front, A refuses and is kept; Retry rebinds, then hands over', async (context) => {
+  // The handover s publish passes the same storage gate as every bind
+  // (`foldCurrent`: attribution + `followMerges`). Here the registry, the
+  // slot move and the note all succeed; only the survivor s rewritten
+  // navigation write fails.
+  // The survivor s navigation slot refuses writes only AFTER the merge has
+  // committed (the slot move is a write to the same key, and must land): the
+  // write that then fails is the publish gate s rewrite of the alias s v2
+  // refs onto the survivor (`followMerges` → `reownSavedNav`).
+  const state = { failing: false };
+  let aliasProves = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...canonAndAlias('a'),
+    'tmux_state::a': JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' } }),
+  }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    setup(window) {
+      const set = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (state.failing && k === 'tmux_state::c' && (this.getItem('tmux_slot_moves') ?? '[]') === '[]' && !this.getItem('tmux_servers')?.includes('"id":"a"')) throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+      window.Element.prototype.getAnimations = () => [];
+    },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  const aApi = a.api;
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  state.failing = true;                       // C s navigation slot refuses writes once the merge is committed
+  c.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: any) => e.id), ['c'], 'the alias was absorbed');
+  assert.ok(!movesOpen(ls), 'the merge itself finished');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  // The publish gate failed: blocked. A refuses; C is not the front.
+  const mark = events.length;
+  await assert.rejects(() => aApi.fsList!('/home'), 'A refuses');
+  assert.deepEqual(events.slice(mark).filter((e) => e.startsWith('rpc@a:')), [], 'zero wire calls of A s');
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft kept');
+  assert.ok(h.app.document.querySelector('.switch-panel, .connect-layer'), 'blocked: the Retry surface is up');
+  const front = h.app.document.querySelector('.scope-tree:not(.held)');
+  assert.equal(front, null, 'no tree is shown as the front while blocked: C was not published past the failed gate');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing asked');
+  assert.ok(c.isConnected(), 'C itself is up, a member');
+  // Retry: the gate passes, the handover completes, A is asked.
+  state.failing = false;
+  const prefs = h.app.document.querySelector('.preferences');
+  if (prefs && !prefs.closest('.page-layer.hidden')) {
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+  }
+  const retry = retryButton(h.app);
+  assert.ok(retry, 'Retry offered');
+  retry.click();
+  for (let i = 0; i < 8; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'A asked as an orphan after Retry');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) { await h.app.advance(10); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') !== draftA.closest('.scope-tree'), 'C s tree is the front');
+  assert.ok(draftA.closest('.scope-tree.held'), 'A behind, kept');
+  assert.ok(!JSON.stringify(ls.getItem('tmux_state::c') ?? '').includes('"serverId":"a"'), `no ref in the survivor s slot still names the alias: ${ls.getItem('tmux_state::c')}`);
+});
+
+for (const phase of ['timer-pending', 'drain-saw-busy', 'release-after-end'] as const) test(`P1-3 (lifecycle, ${phase}): the App ends with a handover owed and an orphan ask pending — nothing is minted, dialled, asked or called afterwards`, async (context) => {
+  // Three phases of the queue at the end: the drain s timer still pending;
+  // the drain already ran and saw the window busy (no timer, debt kept); a
+  // window lease released only AFTER the end — the owned activation s
+  // `done.finally(release)`, which settles when the teardown disposes the
+  // hanging dial s connection, after `onDestroy` has run.
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  let holdC = false;
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    // N: the candidate answers at once; N s OWN dial (the second) hangs.
+    // release-after-end: C s reconnect (held, released below) and then C s
+    // owned dial at the alias address (held for good) — the candidate s own
+    // dial is not a runtime dial and is not gated.
+    // release-after-end: every RUNTIME dial at the alias address once `holdC`
+    // is set (the switch s owned dial of C) hangs for good; the switch s
+    // candidate (n = 0) answers.
+    gate: (url, n) => (url.includes('//alias') && n > 0 && holdC ? new Promise<void>(() => {})
+      : url.includes('//alias') && n > 0 && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; })
+      : url.includes('//n') ? new Promise<void>(() => {}) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!;
+  await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true;
+  if (phase !== 'release-after-end') {
+    cHangs = true;
+    c.drop();
+    for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  }
+  if (phase === 'release-after-end') {
+    // The form connects to the ALIAS ADDRESS: its candidate proves m-a, the
+    // record folds the alias into C (A absorbed, CURRENT = C — the survivor
+    // the debt names) and C s OWN dial, the owned second handshake, hangs
+    // inside the form s activation: a lease nothing cancels in the teardown;
+    // it settles only when the teardown disposes C s connection — AFTER
+    // `onDestroy` ran. (`cHangs` is already set: C s reconnect to the alias
+    // address is the held dial; the owned dial is the next one, held too.)
+    // The connect form with the ALIAS ADDRESS: its candidate proves m-a, the
+    // record folds the alias into C (A absorbed, CURRENT = C — the survivor
+    // the debt names; same entry, so no switch) and C s OWN dial, the form s
+    // owned second handshake, hangs: a lease nothing cancels in the teardown
+    // (the form s own teardown cancels the chain, but the lease is the
+    // activation s and releases only when its dial SETTLES — which the
+    // teardown s dispose of C s connection does, after `onDestroy`).
+    holdC = true;
+    await toConnection(h);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+    const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+    field.value = 'ws://alias:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await h.settle();
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 4; i++) await h.settle();
+    if (h.app.document.querySelector('[role=alertdialog]')) answerDialog(h.app, /^discard$/iu);
+    for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+    assert.ok(events.includes('candidate:ws://alias:9899'), 'the candidate dialled the alias address');
+    assert.ok(events.filter((e) => e.startsWith('dial@c:ws://alias')).length >= 1, `C s owned dial is out and hanging under the form: ${events.filter((e) => /^(dial|candidate)/u.test(e)).slice(-4).join(' ')}`);
+  } else {
+    await toConnection(h);
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 3; i++) await h.settle();
+    const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+    field.value = 'ws://n:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await h.settle();
+    [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 4; i++) await h.settle();
+    answerDialog(h.app, /^discard$/iu);
+    for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+    assert.ok(events.includes('candidate:ws://n:9899'), 'the candidate dial is out and hanging');
+  }
+  // C absorbs A beneath it: debt owed, window busy.
+  if (phase === 'release-after-end') {
+    for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+    assert.equal(ls.getItem('tmux_server_current'), 'c', 'absorbed into the survivor the debt names');
+  } else {
+    cLet.let!();
+    if (phase === 'timer-pending') {
+      await h.app.flush();
+    } else {
+      for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+      assert.equal(ls.getItem('tmux_server_current'), 'c', 'absorbed');
+      for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+    }
+  }
+  assert.ok(!JSON.parse(ls.getItem('tmux_servers')!).some((e: any) => e.id === 'a'), 'absorbed');
+  assert.equal(a.disposed(), false, 'A still bound under the operation');
+  // THE END. The teardown disposes the hanging dial s connection, whose
+  // activation then settles and releases its lease — after onDestroy.
+  await h.app.unmount();
+  const mark = events.length;
+  const conns = h.net.conns().length;
+  const cur = ls.getItem('tmux_server_current');
+  for (let i = 0; i < 8; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.deepEqual(events.slice(mark).filter((e) => /^(rpc@|dial@|candidate:|connect:)/u.test(e)), [], `nothing dialled or called after the end: ${events.slice(mark).join(',')}`);
+  assert.equal(h.net.conns().length, conns, 'no new connection minted');
+  assert.ok(a.disposed() && c.disposed(), 'every runtime ended with the shell');
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing asked');
+  assert.equal(ls.getItem('tmux_server_current'), cur, 'no identity write after the end');
+});
+
+test('X2 (CURRENT-only): a legitimate focus move onto another member while the handover is owed VOIDS the debt — nothing hands over to C afterwards, nothing is activated', async (context) => {
+  // Three servers: A alias focus, C canonical member, B another member. C
+  // absorbs A beneath a switch walk; the person answers Keep editing — but
+  // before the drain, picks B in the list (a legitimate window op moving
+  // CURRENT). The debt is void: B is the focus; C stays a member; A is an
+  // orphan, asked once.
+  let aliasProves = false;
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const servers = [
+    { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+    { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), tmux_servers: JSON.stringify(servers), 'tmux_state::b': JSON.stringify({ page: 'files' }) }), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//b') ? 'm-b' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!, c = conn(h, 'c')!, b = conn(h, 'b')!;
+  assert.ok(b.isConnected(), 'B is a member');
+  const draftA = await dirtyEditor(h.app, h.settle);
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  await switchByAddress(h, 'ws://n:9899', 'tokN');
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]'), 'the switch s walk asks A');
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'absorbed; debt owed under the walk');
+  // Keep editing, and IN THE SAME TURN pick B (before the drain s timer).
+  answerDialog(h.app, /keep editing/iu);
+  await h.app.flush();
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 8; i++) { await h.app.advance(50); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'B is the focus: the legitimate move stands');
+  assert.ok(c.isConnected() && !c.disposed(), 'C stays a member');
+  assert.ok(b.isConnected(), 'B up');
+  assert.equal(a.disposed(), false, 'A kept');
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the debt never wrote C back, nothing was activated');
+  assert.equal(events.filter((e) => e.startsWith('dial@c:')).length, events.filter((e) => e.startsWith('dial@c:')).length, 'no extra dial');
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), `A asked as an orphan: ${asked ? 'elsewhere' : 'nothing asked'}`);
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved');
+  assert.equal(trees(h.app).length, 3, 'B s, C s and A s trees');
+});
+
+test('X3 (orphan canonical, P2 gap): C absorbs the focus A beneath a switch walk, then C s OWN reconnect reaches another known machine D — C is an orphan; the owed handover does not hand over to it: both trees kept, A refuses, C asked as an orphan; the survivor is activated through the one road', async (context) => {
+  // The journal still names saved C; `handOverFocus` must not treat an
+  // orphan C as the member to hand to (its api refuses, its tree is kept for
+  // the person). Nobody to hand to → the one road, which dials C s entry.
+  let aliasProves = false;
+  let cHangs = false;
+  let cAnswersAs = 'm-a';
+  const cLet = { let: null as (() => void) | null };
+  const events: string[] = [];
+  const servers = [
+    { id: 'c', name: 'canon', address: 'ws://canonical:9899', token: 'tok', machineId: 'm-a', named: true },
+    { id: 'a', name: 'alias', address: 'ws://alias:9899', token: 'tok', named: true },
+    { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), tmux_servers: JSON.stringify(servers) }, ['d']), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//d') ? 'm-d' : url.includes('//n') ? 'm-n' : cAnswersAs), {
+    calls: events, rpc: { ...editorRpc, findBestAddress: async (addrs: string[]) => (addrs.includes('ws://alias:9899') && !cLet.let ? 'ws://alias:9899' : addrs[0] ?? null) },
+    gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : url.includes('//n') ? new Promise<void>(() => {}) : null),
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!;
+  let c = conn(h, 'c')!;
+  const draftA = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'canon');
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const draftC = await dirtyEditor(h.app, h.settle);
+  await pickServer(h, 'alias');
+  ls.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://canonical:9899', 'ws://alias:9899'] }));
+  aliasProves = true; cHangs = true;
+  c.drop();
+  for (let i = 0; i < 6 && !cLet.let; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(cLet.let, 'C s dial (to the alias address) is out');
+  await switchByAddress(h, 'ws://n:9899', 'tokN');
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('[role=alertdialog]')?.closest('.scope-tree') === draftA.closest('.scope-tree'), 'the switch s walk asks A');
+  cLet.let!();
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.ok(!JSON.parse(ls.getItem('tmux_servers')!).some((e: any) => e.id === 'a'), 'A absorbed; handover owed beneath the walk');
+  assert.ok(c.isConnected(), 'C up on the alias address');
+  // Now C drops and its reconnect reaches D: C is an orphan (still saved).
+  cAnswersAs = 'm-d';
+  c = conn(h, 'c')!;
+  c.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.ok(JSON.parse(ls.getItem('tmux_servers')!).some((e: any) => e.id === 'c'), 'C s entry is still saved (elsewhere: both kept)');
+  assert.equal(c.isConnected(), false, 'C detached: an orphan');
+  // Keep editing ends the switch; the debt settles — NOT to orphan C.
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 8; i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A s draft');
+  assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s draft kept too (an orphan s tree)');
+  await assert.rejects(() => a.api.fsList!('/home'), 'A refuses');
+  await assert.rejects(() => c.api.fsList!('/home'), 'orphan C refuses: it was not handed the focus');
+  // Orphan C was NOT handed the focus: its tree is not the front, and it is
+  // still an orphan of the set (a handover would have taken it out as the
+  // focus: no Dismiss row, its tree in front with no socket).
+  assert.ok(draftC.closest('.scope-tree.held'), 'C s orphan tree is not the front');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)') === draftA.closest('.scope-tree') || h.app.document.querySelector('.scope-tree:not(.held)') === null, 'the front is A s kept tree (or nothing, mid-swap), never orphan C s');
+  // The one road activates C s ENTRY on a fresh runtime, asking A s tree first.
+  const asked = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(asked && asked.closest('.scope-tree') === draftA.closest('.scope-tree'), 'the arrival asks A s tree (the bound one)');
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 1, 'one at a time');
+  assert.equal(ls.getItem('tmux_server_current'), 'c');
+  // Answer the arrival s question: Keep editing — A stays bound, offline;
+  // the orphan C is still an orphan, listed with Dismiss.
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(a.disposed(), false, 'A kept');
+  assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s draft kept');
+  // Keep editing on an arrival is a stay: A offline, the connect card up.
+  // Then C the orphan gets ITS ask, in its own tree (revealed for the walk).
+  const askedC = h.app.document.querySelector('[role=alertdialog]');
+  assert.ok(askedC && askedC.closest('.scope-tree') === draftC.closest('.scope-tree'), 'C, the orphan, is asked in its tree');
+  answerDialog(h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'both answered');
+  assert.ok(draftC.closest('.scope-tree.held'), 'C s tree behind again: never handed the focus');
+  assert.equal(c.isConnected(), false, 'and C is still detached');
+  assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s draft kept');
 });
 
 test('P1-A (beneath an activation): the canonical absorbs the focus WHILE the form s second handshake to N is out — no handover; A refuses and stays bound under the form; N binds and replaces A; C stays a member', async (context) => {

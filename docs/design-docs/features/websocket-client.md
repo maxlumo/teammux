@@ -1195,52 +1195,67 @@ its mode, opened its candidate, minted its activation) before the queue is
 looked at: the queue never grabs the generation the moment a guard resolves.
 
 The BOUND runtime's identity ends at the same boundary as any member's
-(reviewer P1-A on e0dafe3c; P1-A/P1-B on 4c7cd64c). "The tree is kept for
-the person to be asked" and "the identity stays callable" are two different
-things. The fleet's `end` hook, finding the bound runtime's id GONE from the
-registry (absorbed — not merely replaced by a swap), runs `focusAbsorbed`,
-whose first step is UNCONDITIONAL: detach (api refusing), close the socket,
-stop the idle reconnect loop — before any fallible I/O, before asking whether
-anyone can take the focus. Out of the fleet the handle is out of service, so
-a block that follows (the merge note or the mirror failing to write) cannot
-freeze what the fleet no longer lists; it must already refuse, and a
-pre-captured call makes zero wire calls. (A handle its OWN dial detached is
-left alone: that dial's continuation arrives on the survivor through
-`arrivedElsewhere`, the existing road; a loop with a dial in flight is
-stopped when that answer lands.)
-
-What follows is the HANDOVER, owed work from this moment (`owedHandover =
+(reviewer P1-A on e0dafe3c; P1-A/P1-B on 4c7cd64c; P1-1/P1-2/P1-3 on
+9c1f757c). "The tree is kept for the person to be asked" and "the identity
+stays callable" are two different things. The fleet's `end` hook, finding
+the bound runtime's id GONE from the registry (absorbed — not merely
+replaced by a swap), runs `focusAbsorbed`, which does two things and nothing
+else: it DETACHES (api refusing, socket closed, idle reconnect loop stopped
+— idempotent, so a handle its own dial already detached is detached again
+to no effect: who detached it says nothing about who will complete the
+handover, since that dial's arrival may be refused by a guard in flight and
+conclude nothing), and it REGISTERS the owed handover (`owedHandover =
 { leaving, to }`, `to` the survivor the registry folded the entry into —
 `absorbedInto`, which reads the open move journal when the note has not
-landed). It completes NOW when the window is free: `refocus` to the
-canonical (the front moves), the mirror written for it (`focusServer`;
+landed) and schedules the drain. It never publishes: it runs inside the
+absorbing dial's reconcile, and the handover's publish writes (the storage
+gate). Out of the fleet the handle is out of service, so a block that
+follows cannot freeze what the fleet no longer lists; it must already
+refuse, and a pre-captured call makes zero wire calls.
+
+The HANDOVER settles on the window's own turn (`drainWindow`: handover
+first, then an orphan's ask), when no window operation is in flight
+(`windowBusy()`: a switch connecting, a walk, an address connect, a form's
+candidate or an activation out, a membership change) and the app is not
+blocked. The X2 contract (orchestrator 15:52): the debt is VOID once
+another tree was bound (the swap ended this one) or once a legitimate window
+operation moved CURRENT off the survivor — a connect, a switch, a focus move
+owns the front and binds its own target; a failed one puts CURRENT back on
+the survivor (`restoreCurrent` follows the merge) and the debt settles then
+— and it is never settled by activating whatever CURRENT names. The PUBLISH
+passes the same storage gate as every bind (`foldCurrent`: the inputs'
+attribution and the merge's navigation rewrite for the survivor) BEFORE any
+tree is shown as the front; a write that fails blocks, and tree, debt and
+detached handle stay as they are for Retry, which runs the gate again and
+settles. Past the gate, with the survivor a published, CONNECTED, non-orphan
+member: `refocus` to it (the front moves), the mirror written (`focusServer`;
 CURRENT already names it, so a mirror failure is the gate's — it blocks, and
-Retry owes the focus its dial — and the focus still follows CURRENT), the
-window's attempts aimed at the absorbed server made stale (`supersede`,
-`claim`; a FAILED switch's panel, a resting state, is put away with its
-reason kept as the notice), the canonical out of the set as the focus
-(`handOver`), the absorbed tree into it as a member (`adopt`, published to
-the trees at once — a block skips the sync), and the sync that follows,
-finding its id unsaved, makes it an orphan: mounted, held, asked when the
-window is free. Otherwise — a window operation in flight (`windowBusy()`:
-a switch's confirm walk asking this very tree, a form's candidate or owned
-handshake, an address connect), or a block — the debt is RECORDED and
-settled by the drain on the window's own turn (`drainWindow`: handover
-first, then an orphan's ask), when the operation ends. It is VOID if that
-operation bound another tree meanwhile (the swap ended this one) or if
-CURRENT no longer names the survivor (a newer operation owns the front: a
-failed one's Back puts CURRENT on the survivor — `restoreCurrent` follows
-the merge — a successful one bound its target), and it settles by the one
-road when no connected member is there to take it (Single): an activation
-of CURRENT (`arriveOn`, Retry's own), which asks the kept tree's guards
-first and replaces it through the swap. While owed, the canonical stays a
-wanted member (its own dial, returning, must not find it unwanted and leave
-it); the bound runtime is never joined as a member of its own set (a join
-would dial it over its live socket); the member set never lets an orphan's
-late answer leave it (`answered` returns on `h.orphan` before the `wanted`
-test). The debt is consumed once, whatever settles it. The connect form's
-walk asks a bound tree whether or not its handle is alive
-(`confirmFormLeave`): a detached handle still has its drafts.
+Retry owes the focus its dial), the window's attempts aimed at the absorbed
+server made stale (`supersede`, `claim`; a FAILED switch's panel, a resting
+state, is put away with its reason kept as the notice), the canonical out of
+the set as the focus (`handOver`), the absorbed tree into it as a member
+(`adopt`, published to the trees at once — a block skips the sync), and the
+sync that follows, finding its id unsaved, makes it an orphan: mounted,
+held, asked when the window is free. With no such member — Single; a
+canonical that dropped, or whose own reconnect reached another known machine
+meanwhile and made IT an orphan (a tree is not a connection) — the one road:
+an activation of the survivor (`arriveOn`, Retry's own, from the gate just
+run), which asks the kept tree's guards first and replaces it through the
+swap. While owed, the canonical stays a wanted member (its own dial,
+returning, must not find it unwanted and leave it); the bound runtime is
+never joined as a member of its own set (a join would dial it over its live
+socket); the member set never lets an orphan's late answer leave it
+(`answered` returns on `h.orphan` before the `wanted` test). The debt is
+consumed once, whatever settles it. The connect form's walk asks a bound
+tree whether or not its handle is alive (`confirmFormLeave`): a detached
+handle still has its drafts.
+
+The root has an explicit END (reviewer P1-3 on 9c1f757c): `onDestroy` sets
+`ended`, drops the debt and the queue, and clears the drain's timer BEFORE
+any resource is closed, and `scheduleAsk`, `drainWindow` and `askOrphans`
+return at once after it — a lease released late (an activation's `finally`
+when the teardown's dispose settles its dial, a candidate's close, the
+switch module's `onidle`) schedules nothing, mints nothing, dials nothing.
 
 "Discard" lets it go
 (`dismiss` → release → end); "keep editing" keeps it, detached, listed in
@@ -1654,13 +1669,14 @@ a socket that a server's pages are using.
   still bound is the exception: the swap that replaces it ends it, after its
   replacement has had the chance to adopt its state — but its IDENTITY ends
   at the fleet's boundary like any other's when its entry is absorbed
-  (`focusAbsorbed`; reviewer P1-A on e0dafe3c, P1-B on 4c7cd64c): detach,
-  close, stop the loop is the unconditional first step, before any fallible
-  I/O. The focus HANDOVER to the survivor is owed work (P1-A on 4c7cd64c):
-  done at once with the window free, else recorded and settled on the
-  window's own turn when the operation in flight ends — void if that
-  operation bound another tree or moved CURRENT elsewhere; by the one
-  activation road when no member can take it; consumed once.
+  (`focusAbsorbed`; reviewer P1-A on e0dafe3c, P1-B on 4c7cd64c, P1-1/2/3
+  on 9c1f757c): detach, close, stop the loop is the unconditional first step
+  — no `alive()` inference — and the fleet callback does nothing else but
+  register the owed handover. The handover settles on the window's own turn,
+  through the storage gate, never inside a dial's reconcile; void if another
+  tree was bound or a legitimate operation moved CURRENT off the survivor;
+  by the one activation road when no connected member can take it; consumed
+  once. After the root's `ended`, nothing owed is done.
 - **An owed question is asked on the window's own turn, when it is free.**
   The identity layer registers an orphan's ask (`orphaned` → queue +
   `scheduleAsk`) and never claims the window from inside a dial's reconcile

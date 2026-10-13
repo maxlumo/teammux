@@ -268,38 +268,46 @@
    * operation in flight would supersede it (a switch whose confirm walk is
    * asking this very tree) or have its swap end the member just bound. */
   function focusAbsorbed(leaving) {
-    // Its OWN dial found the entry gone and detached it (server-runtime.ts):
-    // that dial's continuation owns what follows — it arrives on the
-    // survivor through `arrivedElsewhere` (reviewer P1-B on cc45d7d1).
-    // Nothing is owed here, and nothing is cancelled under it.
-    if (!leaving.alive()) return;
+    // Detach is idempotent: a handle its OWN dial already detached
+    // (server-runtime.ts) is detached again to no effect. Who detached it
+    // says nothing about who will complete the handover (reviewer P1-1 on
+    // 9c1f757c): that dial's arrival may be refused by a guard in flight and
+    // conclude nothing — so the debt is registered for EVERY committed
+    // disappearance of the bound entry, and an arrival that does take over
+    // voids it by binding (`settleHandover`: bound !== leaving).
     leaving.detach();
     leaving.connection.disconnect();
     // Its reconnect loop: stopped now when idle. A loop with a dial IN FLIGHT
     // is left to finish — its continuation may be the block's source (a
     // record that committed and then failed reports `unrecorded` through it)
-    // — and is stopped when that answer lands (`memberReconnected`,
-    // `onReconnected`); every dial of a dead handle answers `gone` at once.
+    // or the arrival itself — and is stopped when that answer lands
+    // (`memberReconnected`, `onReconnected`); every dial of a dead handle
+    // answers `gone` at once.
     if (!reconnectors.get(leaving)?.isActive()) forgetReconnector(leaving);
     // The canonical the record folded this entry into, named NOW: CURRENT
     // may already name a window operation's target (a form connect moved
     // it before the member absorbed the focus), and that is its, not ours.
-    owedHandover = { leaving, to: absorbedInto(localStorage, leaving.id) };
-    // Handed over NOW when the window is free and a member is there to take
-    // it — synchronous, no I/O that can fail but the mirror's; anything that
-    // would mint or dial waits for the window's own turn (`drainWindow`),
-    // never runs inside a dial's reconcile.
-    if (windowBusy() || migrationBlocked || !handOverFocus(leaving)) scheduleAsk();
+    if (owedHandover?.leaving !== leaving) owedHandover = { leaving, to: absorbedInto(localStorage, leaving.id) };
+    // Settled on the window's own turn, never inside a dial's reconcile:
+    // the handover's publish passes the storage gate, which writes.
+    scheduleAsk();
   }
   /** The detached bound runtime whose focus handover is still owed, and the
-   * canonical it is owed to (the id CURRENT named when it was absorbed). */
+   * canonical it is owed to (the id the registry folded it into). */
   let owedHandover = null;
   /** Complete the owed handover if the window is free; true when nothing is
    * owed any more (done, or void). Run before the orphan drain on every
-   * turn the window frees (`drainWindow`), and at once from
-   * `focusAbsorbed`. A failed switch's panel is a resting state, not an
-   * operation: a handover completes under it and dismisses it, with its
-   * reason kept as the notice — the server it would go Back to is gone. */
+   * turn the window frees (`drainWindow`). A failed switch's panel is a
+   * resting state, not an operation: a handover completes under it and
+   * dismisses it, with its reason kept as the notice — the server it would
+   * go Back to is gone.
+   *
+   * The X2 contract (orchestrator 15:52): the debt is VOID once a legitimate
+   * window operation moved CURRENT off the survivor — a connect, a switch, a
+   * focus move: that operation owns the front and binds (or has bound) its
+   * own target; a failed one puts CURRENT back on the survivor
+   * (`restoreCurrent` follows the merge) and the debt is settled then. It is
+   * never settled by activating whatever CURRENT names. */
   function settleHandover() {
     const leaving = owedHandover?.leaving;
     if (!leaving) return true;
@@ -309,36 +317,39 @@
     // answered "keep editing"): the choice stands until they connect.
     if (heldOffline) { owedHandover = null; return true; }
     if (windowBusy() || migrationBlocked) return false;
-    if (handOverFocus(leaving)) return true;
+    const to = owedHandover.to;
+    if (!to || currentServerId(localStorage) !== to) { owedHandover = null; return true; }
+    // The PUBLISH passes the storage gate (reviewer P1-2 on 9c1f757c): the
+    // inputs' attribution and the merge's navigation rewrite for the
+    // survivor — the same gate every bind passes (`foldCurrent`) — before any
+    // tree is shown as the front. A write that fails BLOCKS: the tree, the
+    // debt and the detached handle stay as they are; Retry runs the gate
+    // again and settles then (it drains).
+    const gate = foldCurrent();
+    if (gate.fold === 'blocked') return false;
+    if (handOverFocus(leaving, to)) return true;
     owedHandover = null;
-    // Nobody to hand to — CURRENT names no published member (Single; the
-    // operation that absorbed the focus failed to bind its target): the one
-    // defined path is an activation of CURRENT, which asks this tree's
-    // guards first and replaces it through the swap, as Retry's owed
-    // arrival does — and IS Retry's owed arrival when its gate blocks.
-    const minted = mintCurrent();
-    if (migrationBlocked) { owedActivation = true; return true; }
+    // Nobody to hand to — the survivor is no published, connected member
+    // (Single; a member that dropped or lost its own identity meanwhile):
+    // the one defined path is an activation of the survivor, which asks this
+    // tree's guards first and replaces it through the swap, as Retry's owed
+    // arrival does.
+    const minted = mintFrom(gate);
     if (minted.runtime) arriveOn(minted);
     return true;
   }
-  /** The focus hands over to the connected member CURRENT names — the
-   * canonical whose own reconnect reached the focus's address and absorbed
-   * the focus into its entry, so nothing else will ever bring the focus there.
-   * The mirror is written for it (CURRENT already names it: the commit point;
-   * a mirror failure is the host gate's and the focus still follows
-   * CURRENT), the front moves, the window's attempts aimed at the absorbed
-   * server go stale, the canonical leaves the set as the focus and the
-   * absorbed tree joins it as a member — which the sync that follows,
-   * finding its id unsaved, makes an ORPHAN: mounted, held, drafts and all,
-   * asked when the window is free. False when no such member is up. */
-  function handOverFocus(leaving) {
-    // The canonical it is owed to — and CURRENT must still name it: a newer
-    // operation that moved CURRENT elsewhere and failed has been put back
-    // onto the server left (`restoreCurrent` follows the merge); one that
-    // moved it and SUCCEEDED bound its target, and this is void above.
-    const to = owedHandover?.to ?? currentServerId(localStorage);
-    if (!to || currentServerId(localStorage) !== to) return false;
-    const next = aggregate.runtimes().find((r) => r.id === to && !aggregate.orphan(r));
+  /** The focus hands over to the connected member `to` — the canonical
+   * whose own reconnect reached the focus's address and absorbed the focus
+   * into its entry, so nothing else will ever bring the focus there. The
+   * mirror is written for it (CURRENT already names it: the commit point; a
+   * mirror failure is the host gate's and the focus still follows CURRENT),
+   * the front moves, the window's attempts aimed at the absorbed server go
+   * stale, the canonical leaves the set as the focus and the absorbed tree
+   * joins it as a member — which the sync that follows, finding its id
+   * unsaved, makes an ORPHAN: mounted, held, drafts and all, asked when the
+   * window is free. False when no such member is published and connected. */
+  function handOverFocus(leaving, to) {
+    const next = aggregate.runtimes().find((r) => r.id === to && !aggregate.orphan(r) && r.connection.isConnected());
     if (!next || !scopeSwap.refocus(next)) return false;
     // Settled: from here the set no longer wants `next` as a member (its own
     // dial, still returning, is the focus's and must not be joined over).
@@ -1318,7 +1329,7 @@
   function askOrphans() {
     // A failed switch's panel is not an operation, but it COVERS the trees
     // (they are held under it): a question asked there could not be answered.
-    if (askingOrphan || windowBusy() || switching || migrationBlocked) return;
+    if (ended || askingOrphan || windowBusy() || switching || migrationBlocked) return;
     const next = [...orphansToAsk].find((r) => aggregate.orphan(r));
     for (const r of orphansToAsk) if (!aggregate.orphan(r)) orphansToAsk.delete(r);
     if (!next) return;
@@ -1335,13 +1346,20 @@
    * the queue is looked at; the queue never grabs the window's generation
    * the moment a guard resolves. One timer, whoever asked. */
   let askTimer = 0;
+  /** The shell has ended (reviewer P1-3 on 9c1f757c): nothing the window
+   * owed is done any more — no drain, no handover, no ask, no mint — and a
+   * release landing late (a candidate's close in the teardown, an
+   * activation's `finally`, the switch module's `onidle`) schedules nothing.
+   * Set FIRST in `onDestroy`, before any resource is closed. */
+  let ended = false;
   function scheduleAsk() {
-    if (askTimer) return;
+    if (ended || askTimer) return;
     askTimer = setTimeout(() => { askTimer = 0; drainWindow(); }, 0);
   }
   /** What the window owes, in order: a focus handover first (it decides
    * which tree is in front), then an orphan's ask. */
   function drainWindow() {
+    if (ended) return;
     settleHandover();
     askOrphans();
   }
@@ -2496,7 +2514,11 @@
   // the bound one included (the fleet skips it on purpose, because the swap
   // that replaces it normally ends it; there is no next swap now).
   onDestroy(() => {
+    ended = true;
+    owedHandover = null;
+    orphansToAsk.clear();
     clearTimeout(askTimer);
+    askTimer = 0;
     candidateOpen?.close();
     switchCandidate?.close();
     activations.endAll();
