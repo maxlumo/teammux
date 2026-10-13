@@ -354,12 +354,20 @@
     const next = aggregate.runtimes().find((r) => r.id === to && !aggregate.orphan(r) && r.connection.isConnected());
     if (!next || !scopeSwap.refocus(next)) return false;
     // The survivor's tree was filled from its slot when it JOINED; the merge
-    // has since moved the absorbed server's navigation into that slot and
-    // the publish gate re-owned it (`followMerges`). Read it again now, or
-    // the handed-to tree keeps the member's empty view and its next save
-    // writes that emptiness over the moved record (the ②b restore failure,
-    // in the live shape; found by the P1-2 test's positive assertion).
-    fillViewFrom(next, viewOf(next), () => scopeSwap.bound() === next);
+    // has since REPLACED that slot with the absorbed server's record (the
+    // CURRENT source wins) and the publish gate re-owned it (`followMerges`).
+    // The tree adopts that record WHOLE (reviewer P1-NAV on 7e0f69de;
+    // orchestrator 03:58): the person's last choice on this machine was the
+    // absorbed server's — a pane, a split, or deliberately none — and the
+    // member's pre-merge view came from a slot the merge superseded, so it is
+    // no navigation of this tree's own any more. Filling only the non-empty
+    // fields kept the old pane and the next save wrote it back over the
+    // moved record; leaving the view alone kept an empty view and saved that
+    // emptiness (the P1-2 test's positive assertion). Behind the gate above;
+    // editors and drafts are untouched (only the four navigation fields).
+    const nv = viewOf(next);
+    nv.termPane = null; nv.splitLayout = 1; nv.splitCells = []; nv.activeCellId = null;
+    fillViewFrom(next, nv, () => scopeSwap.bound() === next);
     // Settled: from here the set no longer wants `next` as a member (its own
     // dial, still returning, is the focus's and must not be joined over).
     owedHandover = null;
@@ -4038,6 +4046,17 @@
         </button>
         <button class:active={page === 'board'} aria-current={page === 'board' ? 'page' : undefined} onclick={() => switchTab('board')}>
           <span class="tab-glyph" class:on={page === 'board'}><Icon name="layout" size={19} /></span><span>{t('board')}</span>
+        </button>
+      {:else if centreShown}
+        <!-- The window's notification door when THIS server has no Hub
+             (reviewer P1-C3 on 7e0f69de): the phone's bell lives in the Hub
+             header, which is not mounted here, so the Hub tab's slot carries
+             the same window-level centre instead — another member's alerts
+             stay reachable, and picking one focuses that server (D2). No Hub
+             is pretended for this server: the tab is the bell, not Chat. -->
+        <button class="tab-bell" aria-label={centre.unviewed ? `${t('notifyCentre')} · ${t('hubUnreadCount').replace('{n}', String(centre.unviewed))}` : t('notifyCentre')}
+          aria-haspopup="dialog" aria-expanded={!!centre.anchor} onclick={(e) => centre.toggle(e.currentTarget)}>
+          <span class="tab-glyph" class:on={!!centre.anchor}><Icon name="bell" size={19} />{#if centre.unviewed}<span class="unread-dot tab-badge" aria-hidden="true"></span>{/if}</span><span>{t('notifyCentre')}</span>
         </button>
       {/if}
       <button class:active={page === 'files'} aria-current={page === 'files' ? 'page' : undefined} onclick={() => switchTab('files')}>

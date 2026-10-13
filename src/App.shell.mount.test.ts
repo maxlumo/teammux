@@ -6074,13 +6074,13 @@ test('P2 (NC shape): C s address-row redial HANGS while B s earlier reconnect an
 // must complete: CURRENT/mirror/front on C, A kept and refusing, A asked
 // once as an orphan, C never ended.
 type FExit = 'switch-walk-keep' | 'switch-dial-fail' | 'form-candidate-fail' | 'form-candidate-cancel' | 'form-owned-fail' | 'form-owned-cancel' | 'form-newer-target';
-async function fAbsorbUnder(context: TestContext, exit: FExit) {
+async function fAbsorbUnder(context: TestContext, exit: FExit, seed: Record<string, string> = {}) {
   let aliasProves = false;
   let cHangs = false;
   const cLet = { let: null as (() => void) | null };
   const n = { let: null as (() => void) | null, fail: null as ((e: Error) => void) | null, dials: 0 };
   const events: string[] = [];
-  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : url.includes('//p') ? 'm-p' : 'm-a'), {
+  const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), ...seed }), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : url.includes('//p') ? 'm-p' : 'm-a'), {
     calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
     gate: (url) => {
       if (url.includes('//alias') && cHangs && !cLet.let) return new Promise<void>((r) => { cLet.let = r; });
@@ -6188,6 +6188,42 @@ for (const exit of fExits) test(`M1 F (owed handover, exit=${exit}): the operati
   assert.equal(trees(h.app).length, 2);
   // The connect card (if the exit was the form s) is gone: the app is on C.
   assert.equal(h.app.document.querySelector('.card .fields input[type="text"]'), null, 'no connect card');
+});
+
+/** The handed-to tree adopts the MOVED record whole (reviewer P1-NAV on
+ * 7e0f69de; orchestrator 03:58): C's pre-merge navigation (its own slot's,
+ * superseded by the merge) never survives A's explicit choice — empty or a
+ * single pane — and an A with navigation lands it on an empty C. */
+const navCases: Array<[string, string, string, (slot: any, v: Element | null) => void]> = [
+  ['A cleared → stays cleared (C had a pane)',
+    JSON.stringify({ v: 2, page: 'files', pane: null, splitLayout: 1, splitCells: [] }),
+    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' }, splitLayout: 1, splitCells: [] }),
+    (slot) => { assert.equal(slot.pane, null, `C s old pane did not come back: ${JSON.stringify(slot)}`); assert.deepEqual(slot.splitCells, []); }],
+  ['A single pane → stays single (C had a 2-cell split)',
+    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }),
+    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' }, splitLayout: 2, splitCells: [{ id: 1, pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:1.0' } }, { id: 2, pane: { kind: 'pane', serverId: 'c', session: 'old', target: 'old:2.0' } }] }),
+    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c', 're-owned'); assert.equal(slot.splitLayout, 1); assert.deepEqual(slot.splitCells, [], 'C s split is gone'); }],
+  ['A unset → takes nothing, C stays empty (no invented pane)',
+    JSON.stringify({ page: 'files' }),
+    JSON.stringify({ page: 'files' }),
+    (slot) => { assert.ok(!slot.pane, `no pane: ${JSON.stringify(slot)}`); }],
+  ['A with a pane → lands on an empty C (the P1-2 shape)',
+    JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' }, splitLayout: 1, splitCells: [] }),
+    JSON.stringify({ page: 'files' }),
+    (slot) => { assert.equal(slot.pane?.target, 'work:1.0'); assert.equal(slot.pane?.serverId, 'c'); }],
+];
+for (const [name, aNav, cNav, check] of navCases) test(`P1-NAV (handover refill): ${name}`, async (context) => {
+  const { h, ls } = await fAbsorbUnder(context, 'switch-walk-keep', { 'tmux_state::a': aNav, 'tmux_state::c': cNav, tmux_layout_mode: 'desktop' });
+  assert.equal(ls.getItem('tmux_server_current'), 'c', 'handed over to C');
+  // Let the focused view's save effect run: what C's tree now SAVES is the test.
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const slot = JSON.parse(ls.getItem('tmux_state::c') ?? 'null');
+  assert.ok(slot, 'C s slot exists');
+  check(slot, h.app.document.querySelector('.scope-tree:not(.held)'));
+  // The front tree agrees with the slot.
+  const front = h.app.document.querySelector('.scope-tree:not(.held)');
+  const cells = front?.querySelectorAll('.split-cell, .term-cell').length ?? 0;
+  if (slot.splitLayout === 1) assert.ok(cells <= 1, `no split in front: ${cells}`);
 });
 
 test('M1 F5/X2 (newer target): the pending target N is replaced by a NEWER user target P that succeeds — P binds, A ends by the swap as answered, C stays a member, the owed handover is void (never writes C back over P)', async (context) => {
@@ -7270,6 +7306,36 @@ test('③c-4/P1-C3 (a): the bell is the WINDOW s — a focus without a Hub does 
   assert.match(bell.getAttribute('aria-label') ?? '', /· 2\b/u, `both unviewed alerts count: ${bell.getAttribute('aria-label')}`);
   await openBell(h);
   assert.deepEqual(bellRows(h), ['b:beta:from beta', 'a:alpha:from alpha'], 'both rows, neither unavailable');
+});
+
+test('③c-4/P1-C3 (a, touch): on a phone the window s bell is reachable without a focus Hub — the Hub tab s slot carries the notification door; it opens the union and picking B s row focuses B', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'terminal' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: twoHubs({
+    hubRooms: async () => { if (asking() === 'a') throw Object.assign(new Error('no hub'), { code: -32601 }); return { rooms: { 'proj:app': 9000, 'proj:other': 50 }, states: {} }; },
+    hubLog: async (session: string) => ({ messages: asking() === 'b' && session === 'other' ? [{ id: '9', seq: 9, ts: 1_800_000_005_000, from: 'ops', to: ['human'], body: 'from beta', room: 'proj:other' }] : [], has_more: false }),
+    hubLogAround: async () => ({ messages: [{ id: '9', seq: 9, ts: 1_800_000_005_000, from: 'ops', to: ['human'], body: 'from beta', room: 'proj:other' }], has_more: false }),
+  }), setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .hub-root'), null, 'A has no Hub');
+  assert.equal(h.app.document.querySelector('.rail-bell'), null, 'no rail on a phone');
+  assert.equal([...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button')].find((b) => /^chat$/iu.test(b.textContent?.trim() ?? '')), undefined, 'no Chat tab is pretended for A');
+  const door = h.app.document.querySelector<HTMLButtonElement>('.tabbar .tab-bell');
+  assert.ok(door, 'the tab bar carries the window s notification door');
+  assert.ok(reachable(door), 'and it is on screen');
+  assert.match(door.getAttribute('aria-label') ?? '', /· 2\b/u, `the badge: ${door.getAttribute('aria-label')}`);
+  door.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.deepEqual(bellRows(h), ['b:beta:from beta', 'a:alpha:from alpha'], 'the union opened from the door');
+  // Pick B's row: the focus moves to B (D2) and B's Hub lands.
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-list .nc-row')].find((r) => r.dataset.server === 'b')!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) { await h.app.advance(200); await h.settle(); }
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'focused B');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held) .hub-root'), 'B s Hub in front');
+  assert.ok([...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button')].some((b) => /^chat$/iu.test(b.textContent?.trim() ?? '')), 'B has a Hub: the Chat tab is back, the door gone');
+  assert.equal(h.app.document.querySelector('.tabbar .tab-bell'), null);
 });
 
 test('③c-4/P1-C3 (b): a member that NEVER came up (refuses from boot) still has its index shown — read-only, unavailable, not counted, untouched by Clear', async (context) => {

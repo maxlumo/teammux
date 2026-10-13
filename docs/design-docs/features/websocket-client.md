@@ -1270,12 +1270,17 @@ attribution and the merge's navigation rewrite for the survivor) BEFORE any
 tree is shown as the front; a write that fails blocks, and tree, debt and
 detached handle stay as they are for Retry, which runs the gate again and
 settles. Past the gate, with the survivor a published, CONNECTED, non-orphan
-member: `refocus` to it (the front moves) and its tree REFILLED from its
-slot (`fillViewFrom`): the member's view was filled when it joined, and the
-merge has since moved the absorbed server's navigation into that slot and the
-gate re-owned it — without the refill the handed-to tree keeps its empty view
-and its next save writes that emptiness over the moved record (found by the
-P1-2 test's positive assertion on the parsed slot); the mirror written (`focusServer`;
+member: `refocus` to it (the front moves) and its tree given the MOVED
+record WHOLE (`fillViewFrom` over a cleared view): the member's view was
+filled when it joined from a slot the merge has since REPLACED with the
+absorbed server's record (the CURRENT source wins) and the gate re-owned —
+the person's last choice on this machine, a pane, a split or deliberately
+none. Leaving the view alone kept an empty view and saved that emptiness over
+the moved record (found by the P1-2 test's positive assertion on the parsed
+slot); filling only the non-empty fields kept the member's old pane or split
+over an explicit clear or single pane (reviewer P1-NAV on 7e0f69de) — so the
+four navigation fields are reset and the record adopted as it is, behind the
+gate, editors and drafts untouched; the mirror written (`focusServer`;
 CURRENT already names it, so a mirror failure is the gate's — it blocks, and
 Retry owes the focus its dial), the window's attempts aimed at the absorbed
 server made stale (`supersede`, `claim`; a FAILED switch's panel, a resting

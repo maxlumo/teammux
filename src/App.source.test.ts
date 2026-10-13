@@ -1446,8 +1446,8 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   assert.match(settle, /if \(windowBusy\(\) \|\| migrationBlocked\) return false;/u, 'nothing settles under a window operation or a block');
   assert.match(hand, /^function handOverFocus\(leaving, to\) \{\s*const next = aggregate\.runtimes\(\)\.find\(\(r\) => r\.id === to && !aggregate\.orphan\(r\) && r\.connection\.isConnected\(\)\);/u,
     'the member handed to is published, not an orphan, and CONNECTED (X3: a tree is not a connection)');
-  assert.match(hand, /if \(!next \|\| !scopeSwap\.refocus\(next\)\) return false;\s*(?:\/\/[^\n]*\n\s*)*fillViewFrom\(next, viewOf\(next\), \(\) => scopeSwap\.bound\(\) === next\);/u,
-    'the handed-to tree is refilled from its slot: the merge moved the absorbed navigation there after the member joined');
+  assert.match(hand, /if \(!next \|\| !scopeSwap\.refocus\(next\)\) return false;\s*(?:\/\/[^\n]*\n\s*)*const nv = viewOf\(next\);\s*nv\.termPane = null; nv\.splitLayout = 1; nv\.splitCells = \[\]; nv\.activeCellId = null;\s*fillViewFrom\(next, nv, \(\) => scopeSwap\.bound\(\) === next\);/u,
+    'the handed-to tree adopts the moved record WHOLE — an explicit empty or single pane included — never only the non-empty fields (P1-NAV on 7e0f69de)');
   // P1-3 on 9c1f757c: an explicit terminated state, set before anything is
   // closed; no drain, no schedule, no ask after it. The scheduler is ONE
   // module (`app/window-drain.ts`, where the end→late-release→timer order is
@@ -1504,4 +1504,9 @@ test('the bell s projection separates index-exists / runtime-eligible / reachabl
   // (a) the entry is the window s: any eligible member or any index with entries.
   assert.match(source, /const centreShown = \$derived\(hubEligible \|\| background\.some\(\(r\) => viewOf\(r\)\.hubState\.available\) \|\| centreSources\.some\(\(s\) => \(s\.log\?\.items\.length \?\? 0\) > 0\)\);/u,
     'a focus without a Hub does not take the bell away from a member that has one');
+  // On touch too (reviewer P1-C3 residual on 7e0f69de): the tab bar carries
+  // the same window-level door when the focus has no Hub — the same
+  // `centreShown`, never `hubEligible`.
+  const tabbar = source.match(/<nav class="tabbar"[^>]*>[\s\S]*?<\/nav>/u)?.[0] ?? '';
+  assert.match(tabbar, /\{:else if centreShown\}\s*(?:<!--[\s\S]*?-->\s*)*<button class="tab-bell"[^>]*onclick=\{\(e\) => centre\.toggle\(e\.currentTarget\)\}/u, 'the phone s door, on the window projection');
 });
