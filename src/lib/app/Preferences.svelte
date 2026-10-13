@@ -89,9 +89,10 @@
     /** State a build from before #335 left behind, awaiting the server whose
      * machine it names (③d-3): shown here with ONE action, Discard, which
      * asks first and closes only that record. Null: nothing pending. */
-    pendingInputs?: { machineId: string } | null;
-    /** The person confirmed the discard; the host writes the marker. */
-    onDiscardPending?: (() => void) | null;
+    pendingInputs?: { machineId: string; key: string } | null;
+    /** The person confirmed the discard of THIS set (`key`); the host
+     * re-validates and writes the marker. */
+    onDiscardPending?: ((key: string) => void) | null;
     activeAddress?: string;
     /** The address whose row was tapped and is still connecting — it wears the
      *  app-wide running cue (`.live-dot`) until App reports the outcome. */
@@ -169,7 +170,13 @@
     /** The registry is frozen (blocked): the mode cannot change either. */
     connectionModeFrozen?: boolean;
   } = $props();
-  let discardAsk = $state(false);
+  /** The ask is FOR one set of inputs (reviewer P1-D2 residual on ed593949):
+   * the key captured when the dialog opened. The dialog is withdrawn — the
+   * ask voided, not hidden — when a block begins, when the record is claimed
+   * or gone, or when the pending set changes under it; the current record is
+   * then shown again for a fresh confirmation. */
+  let discardAsk = $state<string | null>(null);
+  $effect(() => { if (connectionModeFrozen || !pendingInputs || pendingInputs.key !== discardAsk) discardAsk = null; });
 
   const TAB_KEY = 'tmux_settings_tab';
   const storedTab = localStorage.getItem(TAB_KEY);
@@ -988,7 +995,7 @@
                 <small class="config-note">{t('pendingInputsNote').replace('{machine}', pendingInputs.machineId ? pendingInputs.machineId.slice(0, 8) : '—')}</small>
               </div>
               <div class="pref-control">
-                <CommandButton variant="danger" label={t('pendingInputsDiscard')} icon="trash" disabled={connectionModeFrozen} onclick={() => { discardAsk = true; }} />
+                <CommandButton variant="danger" label={t('pendingInputsDiscard')} icon="trash" disabled={connectionModeFrozen} onclick={() => { discardAsk = pendingInputs?.key ?? null; }} />
               </div>
             </div>
           {/if}
@@ -1090,13 +1097,13 @@
 
 <!-- The discard asks first (③d-3): it is the one irreversible thing on this
      page besides removing a server, and like that one it names what goes. -->
-<!-- A block that begins while the confirmation waits withdraws it (reviewer
-     P1-D2 on 18a3bff4): the registry froze, and this with it. The COMMIT is
-     the host's, which re-validates on its own (blocked, still pending). -->
-<ConfirmDialog open={discardAsk && !connectionModeFrozen} compact={layout.isTouchDevice}
+<!-- The ask is voided (the effect above) by a block, a claim or a change of
+     the pending set; the COMMIT carries the confirmed key and the host
+     re-validates it on its own (reviewer P1-D2 on 18a3bff4 / ed593949). -->
+<ConfirmDialog open={discardAsk !== null} compact={layout.isTouchDevice}
   title={t('pendingInputsDiscardTitle')} note={t('pendingInputsDiscardNote')}
   confirmLabel={t('pendingInputsDiscard')} confirmIcon="trash"
-  onconfirm={() => { discardAsk = false; onDiscardPending?.(); }} oncancel={() => { discardAsk = false; }} />
+  onconfirm={() => { const key = discardAsk; discardAsk = null; if (key) onDiscardPending?.(key); }} oncancel={() => { discardAsk = null; }} />
 
 <style>
   /* Page skeleton (ui-unification.md): shared sidebar + main column. */

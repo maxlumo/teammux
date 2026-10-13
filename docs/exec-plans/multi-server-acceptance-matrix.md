@@ -31,7 +31,7 @@ recorded evidence gap, not claimed.
 
 | row | state | evidence |
 |---|---|---|
-| B drops / reconnects while A types (editor draft) | T | `§F isolation: a background member drops and reconnects while the focus is typing…` (the focus's draft, connection and dial count; nobody asked); `③b-1: each member reconnects on its own loop — B dropping never touches A…` (connections and dials) |
+| B drops / reconnects while A types (editor draft) | T | `§F isolation: a background member drops and reconnects while the focus is typing in an editor…` (the focus's draft, connection and dial count; nobody asked); `③b-1: each member reconnects on its own loop — B dropping never touches A…` (connections and dials) |
 | … while A downloads or saves | P2 | not held by an App test: the isolation test starts no download and performs no Save. A download's independence from another server's socket follows from every runtime owning its connection (`file-handling.md`, `websocket-client.md` ②b-4: a download's signed URL is its connection's), and the switch-time download tests (`a switch while A s reconnect dial hangs…`, `K, the PRE-dial entry…`) cover a download surviving another server's dial — but not a member's drop. Browser row or a later test |
 | Hidden member does only list work (D4), on a tick and on a push | T | `③c-2 (D4): a hidden member s Hub refreshes only its list…` (per-method counts incl. the push path); `③c-3/P1-C4: … hidden member keeps its list CURRENT on the 20 s list cadence and stops when excluded` |
 | Only the focus is polled for vitals | T | `③c-5: the system status is the FOCUSED server s reading…` (`rpc@b:systemStatus` never) |

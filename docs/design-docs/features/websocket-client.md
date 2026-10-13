@@ -527,11 +527,21 @@ withdrawn when a block begins while it waits, and the commit re-checks
 barrier too — an open slot move (the journal's, or the legacy `moving` the
 marker carries) is finished FIRST, and one that cannot be finished leaves
 the marker and the intent as they are and blocks (`unrecorded` → Retry): the
-recovery is never closed over. The row shown in Settings is a PROJECTION of
-the marker, read only through the host's fail-closed gate (reviewer P1-D1:
-at boot in `prepareStorage`, after every fold or claim, after a discard —
-never at component init), so a storage whose marker cannot be read blocks
-with Retry instead of mounting nothing or reading "nothing pending". When
+recovery is never closed over. The confirmation is for ONE set of inputs
+(reviewer's residual on ed593949): the ask captures the set's identity
+(`PendingInputs.key`: the mirror's machine and the inputs' own fingerprint
+as storage holds them, not the slot baselines), the dialog is voided — not
+hidden — when a block begins, the record is claimed or the set changes under
+it, and the commit (`discardPending(storage, key)`) refuses a different set
+as `stale` with nothing written; a pre-#335 page rewriting the inputs as
+another machine's meanwhile therefore leaves them for that machine to claim.
+The row shown in Settings is a PROJECTION of the marker, read only through
+the host's fail-closed gate (reviewer P1-D1: at boot in `prepareStorage`,
+after every fold or claim, after a discard — never at component init), so a
+storage whose marker cannot be read blocks with Retry instead of mounting
+nothing or reading "nothing pending"; and that read is a second fallible
+step of the gate (the residual): its failure is the gate's `blocked`, never
+a success the gate releases, mints or publishes on. When
 the gate blocks, it OWNS the outcome: a switch that hit it shows no failed
 panel of its own (which would cover the migration's Retry with one the freeze
 refuses); the gate keeps the switch's target, and Retry, once storage is
@@ -1439,7 +1449,7 @@ doc already describes. Design decisions, in the order they bit:
   Aggregate a switch to a server that is not a member; since #335 ③ a focus
   move between connected members is not a switch at all (D2 above: no
   teardown, the trees stay mounted), and the tree of the server left is
-  kept, held, when it is a member — see "Several servers at once"): "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the server-bound content tree is not mounted while `switching` is set and is remounted under `{#key scopeRuntime}` — the target's runtime handle — on arrival. The ORDER is the contract, each step finished before the next:
+  kept, held, when it is a member — see "Several servers at once"): "切换的过程要丝滑一些，不要整个画面又像到登录页面重新登录加载一样"). It was storage writes + `location.reload()` until then, which flashed the disconnected top bar and the connect card. `lib/app/server-switch.ts` is THE switch; every entry (rail/phone switcher, Settings › Connection, Add server, the failed panel's Retry/Back) calls `switchTo`. The shell (rail, tab bar) stays drawn; the trees stay MOUNTED (held, inert) while `switching` is set — a tree is unmounted only when the swap actually replaces its binding (the Single source once the target is bound; never a member's) — and the target's tree is mounted under its own runtime handle on arrival. The ORDER is the contract, each step finished before the next:
   1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
   2. **One intent**: the CURRENT server's reconnect loop stops, `switching` hides the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing. The server being left is NOT stopped: its runtime, its socket and its downloads keep running (order (a), orchestrator 2026-10-11 04:04).
   3. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
@@ -1447,7 +1457,7 @@ doc already describes. Design decisions, in the order they bit:
   5. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, move CURRENT to the canonical entry. Then `comeUp`: the candidate closes and the target's OWN runtime comes up on the one bring-up road (`activate({ replace: true, elsewhere: 'fail' })`).
   6. **Only once the target is bound** is the server left given up: the swap ends it — its downloads suspended with their parts kept (`releaseServerState`, file-handling.md), then disposed — and `resetServerMemory()` and `centreSurface.reset()` clear what named it.
 
-  A failure at any step leaves the server left INTACT, still running: CURRENT goes back to it (`restoreCurrent`) unless the migration froze CURRENT, and the panel shows. Its runtime, connection and downloads survive; its page instances do not, because the tree is hidden for the switch. Back therefore comes up on the SAME runtime and restores A's navigation from A's slot — and `resetServerMemory` closes the save gate (`navRestored = null`), or the reset navigation would be saved over that slot before the restore reads it (reviewer 04:05; the App.shell case "a failed switch s Back returns to A on the SAME connection"). Every server has its own connection, so a dial for another address of the current server or a reconnect cannot touch the switch's candidate, and an answer that arrives after a switch began lands nowhere (`probeCaps` checks the intent and the bound runtime).
+  A failure at any step leaves the server left INTACT, still running: CURRENT goes back to it (`restoreCurrent`) unless the migration froze CURRENT, and the panel shows. Its runtime, connection, downloads AND its tree survive (since ③a the tree is held, not unmounted, so its editors and drafts are still there); Back comes up on the SAME runtime. The save gate was closed on the reset (`navRestored = null`) when the switch still unmounted the source's pages, or the reset navigation would have been saved over that slot before the restore read it (reviewer 04:05; the App.shell case "a failed switch s Back returns to A on the SAME connection") — the reason is kept, the unmount is history. Every server has its own connection, so a dial for another address of the current server or a reconnect cannot touch the switch's candidate, and an answer that arrives after a switch began lands nowhere (`probeCaps` checks the intent and the bound runtime).
 
   A failure keeps the panel (Retry · Back to the source · Edit · the server switcher); in FAILED only the server control and the panel work, the page buttons stay disabled. A second address of the SAME machine is not a switch: failover keeps its path and nothing resets. The disconnected connect page reaching a different server comes up the same way (`onConnected(true)`).
 

@@ -782,12 +782,20 @@ test('an absorption that fails at the CURRENT write recovers on reload, and the 
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' });
 });
 
+/** The discard a person confirmed for what is pending NOW. */
+const discardNow = (storage: Parameters<typeof discardPending>[0]) => {
+  let key = '';
+  try { key = pendingInputs(storage)?.key ?? ''; } catch { /* the read failing is the caller's block */ }
+  return discardPending(storage, key);
+};
+
 test('the person discards the pending inputs (③d-3): one marker write, nothing else touched; the owner arriving later folds nothing; not pending → nothing written', () => {
   const storage = pending([{ id: 'a2', machineId: 'm-a' }, { id: 'n' }]);
-  assert.deepEqual(pendingInputs(storage), { machineId: 'm-a' }, 'Settings sees the machine the mirror named');
+  assert.equal(pendingInputs(storage)?.machineId, 'm-a', 'Settings sees the machine the mirror named');
+  assert.ok(pendingInputs(storage)?.key, 'and the identity of the set');
   const inputs = RESIDENT_KEYS.map((k) => storage.getItem(k));
   const quarantine = storage.getItem('tmux_state::unattributed');
-  const r = discardPending(storage);
+  const r = discardNow(storage);
   assert.equal(r.reason, 'discarded');
   assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'discarded' }, 'the marker closes');
   assert.equal(pendingInputs(storage), null, 'nothing pending any more');
@@ -798,17 +806,17 @@ test('the person discards the pending inputs (③d-3): one marker write, nothing
   assert.equal(claimPending(storage, 'a2').reason, 'already-done');
   assert.equal(storage.getItem('tmux_hub_drafts::a2'), null);
   assert.equal(migrateServerState(storage).reason, 'already-done', 'a later boot reads it as consumed');
-  assert.equal(discardPending(storage).reason, 'already-done', 'a second discard writes nothing');
+  assert.equal(discardNow(storage).reason, 'already-done', 'a second discard writes nothing');
   // Not pending: a folded marker is left alone.
   const folded = pending([{ id: 'a2', machineId: 'm-a' }]);
   assert.equal(claimPending(folded, 'a2').reason, 'folded');
-  assert.equal(discardPending(folded).reason, 'already-done');
+  assert.equal(discardNow(folded).reason, 'already-done');
   assert.deepEqual(layoutMark(folded), { v: LAYOUT_VERSION, state: 'folded', into: 'a2' });
   // A failed write is `unrecorded` (the caller's block).
   const failing = pending([{ id: 'a2', machineId: 'm-a' }]);
   const set = failing.setItem.bind(failing);
   failing.setItem = (k: string, v: string) => { if (k === LAYOUT_KEY) throw new Error('QuotaExceededError'); set(k, v); };
-  assert.equal(discardPending(failing).reason, 'unrecorded');
+  assert.equal(discardNow(failing).reason, 'unrecorded');
   assert.equal(layoutMark(failing)?.state, 'pending', 'still pending');
 });
 
@@ -820,13 +828,13 @@ test('a discard finishes an open slot move first, like a claim; one that cannot 
   assert.throws(() => recordServer(storage, { address: 'ws://alias:9899', token: 't', machineId: 'm-a' }), /Quota/u);
   assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the intent is open');
   // Still refusing: the discard cannot finish the move → unrecorded, nothing closed, the intent kept.
-  assert.equal(discardPending(storage).reason, 'unrecorded');
+  assert.equal(discardNow(storage).reason, 'unrecorded');
   assert.equal(layoutMark(storage)?.state, 'pending', 'the marker is not closed over an open move');
   assert.deepEqual(openMoves(storage), [{ from: 'a', to: 'c' }], 'the recovery is kept');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::a')!), { work: 'TYPED' }, 'and the alias edit');
   restore();
   // Writable again: the discard finishes the move (the edit reaches canonical), then closes the record.
-  assert.equal(discardPending(storage).reason, 'discarded');
+  assert.equal(discardNow(storage).reason, 'discarded');
   assert.deepEqual(openMoves(storage), [], 'the move was finished first');
   assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::c')!), { work: 'TYPED' }, 'nothing of the move was lost to the discard');
   assert.deepEqual(layoutMark(storage), { v: LAYOUT_VERSION, state: 'discarded' });
@@ -836,11 +844,11 @@ test('a discard finishes an open slot move first, like a claim; one that cannot 
   legacy.setItem(LAYOUT_KEY, JSON.stringify({ ...mark, moving: { from: 'a2', to: 'zz' } }));
   legacy.setItem('tmux_hub_drafts::a2', JSON.stringify({ work: 'on the alias' }));
   const restore2 = refuse(legacy, 'tmux_hub_drafts::zz');
-  assert.equal(discardPending(legacy).reason, 'unrecorded', 'the legacy move cannot be finished: refused');
+  assert.equal(discardNow(legacy).reason, 'unrecorded', 'the legacy move cannot be finished: refused');
   assert.deepEqual(JSON.parse(legacy.getItem(LAYOUT_KEY)!).moving, { from: 'a2', to: 'zz' }, 'the intent is still in the marker');
   assert.equal(JSON.parse(legacy.getItem(LAYOUT_KEY)!).state, 'pending');
   restore2();
-  assert.equal(discardPending(legacy).reason, 'discarded', 'finished, then closed');
+  assert.equal(discardNow(legacy).reason, 'discarded', 'finished, then closed');
   assert.deepEqual(JSON.parse(legacy.getItem('tmux_hub_drafts::zz')!), { work: 'on the alias' }, 'the move landed before the record closed');
 });
 
@@ -849,4 +857,36 @@ test('pendingInputs throws when the marker cannot be READ — it never turns a f
   const get = storage.getItem;
   storage.getItem = (k: string) => { if (k === LAYOUT_KEY) throw new Error('SecurityError'); return get(k); };
   assert.throws(() => pendingInputs(storage), /SecurityError/u);
+});
+
+test('a discard is bound to the SET the person confirmed: inputs rewritten by a pre-#335 page meanwhile (another machine s) are not closed by the old confirmation — stale, nothing written; a fresh confirmation on the new set closes it (reviewer P1-D2 residual on ed593949)', () => {
+  const storage = pending([{ id: 'b', machineId: 'm-b' }]);
+  const confirmed = pendingInputs(storage)!.key;          // the ask: A's (m-a's) inputs
+  // An old build on the same origin writes B's inputs and mirror meanwhile.
+  storage.setItem('tmux_hub_drafts', JSON.stringify({ work: 'typed on B by the old build' }));
+  storage.setItem('tmux_machine_id', 'm-b');
+  // A gate of a non-B member re-reads the evidence (still pending, now m-b's).
+  assert.equal(claimPending(storage, 'x').reason, 'pending');
+  assert.equal(layoutMark(storage)?.state, 'pending');
+  const r = discardPending(storage, confirmed);
+  assert.equal(r.reason, 'stale', 'the confirmation was for A s set, not B s');
+  assert.equal(layoutMark(storage)?.state, 'pending', 'B s inputs stay pending');
+  assert.equal(JSON.parse(storage.getItem('tmux_hub_drafts')!).work, 'typed on B by the old build');
+  // B can still claim them.
+  assert.equal(claimPending(storage, 'b').reason, 'folded', 'B claims what the stale confirmation could not close');
+  assert.deepEqual(JSON.parse(storage.getItem('tmux_hub_drafts::b')!), { work: 'typed on B by the old build' });
+  // And on a fresh pending set, a fresh confirmation closes it.
+  const again = pending([{ id: 'b', machineId: 'm-b' }]);
+  assert.equal(discardNow(again).reason, 'discarded');
+  // The inputs rewritten with the SAME machine is still another set: stale.
+  const same = pending([{ id: 'n' }]);
+  const k0 = pendingInputs(same)!.key;
+  same.setItem('tmux_hub_drafts', JSON.stringify({ work: 'rewritten by the old build, same machine' }));
+  assert.equal(discardPending(same, k0).reason, 'stale', 'the key is the inputs identity, not the machine alone');
+  assert.equal(layoutMark(same)?.state, 'pending');
+  // A slot-baseline change alone (not an input change) does NOT stale the ask.
+  const slots = pending([{ id: 'n' }]);
+  const k = pendingInputs(slots)!.key;
+  slots.setItem('tmux_hub_drafts::n', JSON.stringify({ work: 'n typed on the new build' }));
+  assert.equal(discardPending(slots, k).reason, 'discarded', 'the key is the inputs identity, not the slot baselines');
 });

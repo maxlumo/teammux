@@ -2392,6 +2392,97 @@ test('③d-3/P1-D1: a storage whose MARKER cannot be read at boot still mounts t
   assert.ok(h.app.document.querySelector('.preferences .pending-inputs'), 'the pending row appears once the marker can be read');
 });
 
+test('③d-3/P1-D1 (residual): the projection s own read failing AFTER a successful claim is the gate s failure — blocked, no tree bound to the target, the server left intact, no further dial; Retry resumes', async (context) => {
+  // The fold (migrate + claim) succeeds and writes the marker `folded`; the
+  // very next read of the marker — the pending projection's — throws.
+  const events: string[] = [];
+  const state = { armed: false, folded: false, failed: 0 };
+  const h = await bootApp(context, danglingSeed(), undefined, {
+    calls: events,
+    setup(window: any) {
+      const set = window.Storage.prototype.setItem;
+      const get = window.Storage.prototype.getItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (state.armed && k === 'tmux_state_layout' && /"folded"/u.test(v)) state.folded = true;
+        return set.call(this, k, v);
+      };
+      window.Storage.prototype.getItem = function (this: Storage, k: string) {
+        if (state.armed && state.folded && k === 'tmux_state_layout') { state.failed++; state.armed = false; throw new Error('SecurityError'); }
+        return get.call(this, k);
+      };
+      window.Element.prototype.getAnimations = () => [];
+    },
+  });
+  await connectCard(h.app, h.settle, 'ws://b:9899');
+  const ls = h.app.window.localStorage;
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  const b = conn(h, 'b')!;
+  const bApi = b.api;
+  // Arm, then switch to A — the owner: A's bind claims the inputs (the fold
+  // succeeds) and the projection read right after fails.
+  state.armed = true;
+  await h.switchTo('alpha');
+  for (let i = 0; i < 8; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(state.failed, 1, 'exactly the post-fold projection read failed');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'folded', 'the claim itself was recorded');
+  // Blocked: no tree bound to A, Retry offered, B's captured api refuses, nothing more dialled.
+  assert.ok(retryButton(h.app), 'blocked with Retry');
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held)'), null, 'no tree is shown as the front');
+  // B, the server left, keeps running (ruling (a): the source is given up
+  // only once the target is bound — and nothing was bound).
+  assert.ok(b.isConnected() && !b.disposed(), 'B is intact');
+  await bApi.fsList!('/home');
+  const dials = events.filter((e) => e.startsWith('dial@a:')).length;
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.equal(events.filter((e) => e.startsWith('dial@a:')).length, dials, 'no further dial while blocked');
+  // Retry: the read works now; A comes up.
+  retryButton(h.app)!.click();
+  for (let i = 0; i < 10; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held)'), 'A s tree is the front after Retry');
+  assert.equal(ls.getItem('tmux_hub_drafts::a'), JSON.stringify({ work: 'draft of m-a' }), 'the claimed inputs are A s');
+});
+
+test('③d-3/P1-D2 (residual): the confirmation is for ONE set — inputs rewritten by an old build meanwhile are not closed by it; the dialog is withdrawn and the new set asks afresh', async (context) => {
+  const first = await bootApp(context, danglingSeed(), undefined, { setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  await connectCard(first.app, first.settle, 'ws://b:9899');
+  const ls = first.app.window.localStorage;
+  const h = { app: first.app, settle: first.settle } as any;
+  await toConnection(h);
+  const discard = () => [...first.app.document.querySelectorAll<HTMLButtonElement>('.preferences .pending-inputs button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!;
+  discard().click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  const dialog = () => first.app.document.querySelector('[role=alertdialog]');
+  assert.ok(dialog(), 'asked for A s (m-a s) inputs');
+  const confirm = [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^discard$/iu.test(b.textContent?.trim() ?? ''))!;
+  // An old build on the same origin rewrites the inputs as B's meanwhile;
+  // B's own gate re-reads the evidence (still pending, now m-b's).
+  ls.setItem('tmux_hub_drafts', JSON.stringify({ work: 'typed on B by the old build' }));
+  ls.setItem('tmux_machine_id', 'm-c');   // (a THIRD machine: B cannot claim either, so the record stays pending for the rest of the test)
+  // The mode goes to Aggregate: A joins and its bind runs the gate, which
+  // re-reads the evidence (m-c's now — A, m-a, cannot claim: still pending).
+  // No navigation: Settings and its dialog are left alone by everything but
+  // the void rule.
+  modeButton(h, /all included|aggregate/iu)!.click();
+  for (let i = 0; i < 10; i++) { await first.app.advance(500); await first.settle(); }
+  assert.equal(ls.getItem('tmux_connection_mode'), 'aggregate');
+  assert.equal(trees(first.app).length, 2, 'A joined');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending');
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).machineId, 'm-c', 'the evidence was re-read: another machine s now');
+  assert.ok(first.app.document.querySelector('.preferences .pending-inputs') && !first.app.document.querySelector('.preferences')!.closest('.page-layer.hidden'), 'still on Connection');
+  assert.equal(dialog(), null, 'the ask for A s set was withdrawn when the set changed');
+  confirm.click();
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_state_layout')!).state, 'pending', 'the stale confirmation closed nothing');
+  // The row shows the CURRENT set; a fresh confirmation closes it.
+  assert.match(first.app.document.querySelector('.preferences .pending-inputs')?.textContent ?? '', /m-c/u, 'the row names the current machine');
+  discard().click();
+  for (let i = 0; i < 3; i++) await first.settle();
+  answerDialog(first.app, /^discard$/iu);
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_state_layout')!), { v: '335', state: 'discarded' });
+});
+
 test('③d-3/P1-D2: a block that begins while the Discard confirmation waits withdraws it — the stale Confirm writes no marker; the record is still pending for Retry', async (context) => {
   // Single on B with m-a's inputs pending. While the confirmation waits, the
   // mode goes to Aggregate: A joins, its bind claims the pending inputs (A IS
@@ -7769,7 +7860,7 @@ test('§F reload (Aggregate): mode, excluded set, focus, each tree s draft and v
   assert.equal(second.app.document.querySelector('.scope-tree .term-side .session.foreign[data-server="d"]'), null, 'and contributes no sessions to any union');
 });
 
-test('§F isolation: a background member drops and reconnects while the focus is typing in an editor and has a download running — the focus s draft, its download and its connection are untouched; the member comes back on its own', async (context) => {
+test('§F isolation: a background member drops and reconnects while the focus is typing in an editor — the focus s draft, its connection and its dial count are untouched, nobody is asked; the member comes back on its own', async (context) => {
   let bDown = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn({
@@ -7780,7 +7871,6 @@ test('§F isolation: a background member drops and reconnects while the focus is
   const draftA = await dirtyEditor(h.app, h.settle);
   draftA.value = '# notes\n\nunsaved, still typing'; draftA.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
   await h.settle();
-  // A download in flight on A (its signed URL is A s own).
   const dialsA = events.filter((e) => e.startsWith('dial@a:')).length;
   // B drops; its reconnect fails for a while; then it is allowed back.
   bDown = true;

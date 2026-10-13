@@ -2807,7 +2807,10 @@
       }
     } catch { reason = 'unrecorded'; }
     if (reason === 'unrecorded') { holdStorage(); return 'blocked'; }
-    refreshPending();
+    // The projection's own read is a second fallible read (reviewer P1-D1
+    // residual on ed593949): its failure is this gate's failure — blocked,
+    // nothing released, minted or published.
+    if (!refreshPending()) return 'blocked';
     return reason === 'claimed' ? 'claimed' : 'ok';
   }
   /** The pre-#335 inputs still awaiting their server (③d-3), as Settings
@@ -2818,8 +2821,9 @@
    * other migration failure (the row stays as it was; Retry re-reads), never
    * "nothing pending", and never a throw out of the component. */
   let pendingInputs = $state(null);
+  /** Returns whether the read succeeded; a failure has already blocked. */
   function refreshPending() {
-    try { pendingInputs = readPendingInputs(localStorage); } catch { holdStorage(); }
+    try { pendingInputs = readPendingInputs(localStorage); return true; } catch { holdStorage(); return false; }
   }
   /** The person discards them (confirmed in Settings). Re-validated at the
    * commit like every deferred write (reviewer P1-D2 on 18a3bff4): a block
@@ -2827,11 +2831,13 @@
    * and so is this), and a record that is no longer pending writes nothing.
    * One marker write; a failed write — or an open slot move that cannot be
    * finished — is the storage block like any other migration write. */
-  function discardPendingInputs() {
-    if (migrationBlocked || !pendingInputs) return;
+  function discardPendingInputs(confirmed) {
+    if (migrationBlocked || !pendingInputs || pendingInputs.key !== confirmed) return;
     let reason;
-    try { reason = discardPending(localStorage).reason; } catch { reason = 'unrecorded'; }
+    try { reason = discardPending(localStorage, confirmed).reason; } catch { reason = 'unrecorded'; }
     if (reason === 'unrecorded') { holdStorage(); return; }
+    // `stale` (the module saw another set than the one confirmed) and every
+    // other outcome: show what is pending NOW; a new ask is the person's.
     refreshPending();
   }
   /** A deep link that arrived while the migration was blocked: parsed and

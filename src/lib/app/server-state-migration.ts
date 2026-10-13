@@ -213,8 +213,10 @@ export interface MigrationReport {
    *   `serverId` is empty).
    * `discarded`: this call closed the pending inputs by the person's choice
    *   (`discardPending` only).
+   * `stale`: the inputs the person confirmed are not the inputs pending now
+   *   (`discardPending` only); nothing written — ask again on the current.
    */
-  reason: 'folded' | 'unrecorded' | 'pending' | 'no-current' | 'already-done' | 'discarded';
+  reason: 'folded' | 'unrecorded' | 'pending' | 'no-current' | 'already-done' | 'discarded' | 'stale';
   /** The server the live values were filed under — or, for `already-done`,
    * the one an earlier run filed them under. */
   serverId: ServerId;
@@ -308,21 +310,41 @@ function foldInto(storage: Store, id: ServerId, since?: Record<string, string>):
 
 /** The pending inputs as Settings shows them — the machine the legacy mirror
  * named — or null when nothing is pending. */
-export function pendingInputs(storage: Pick<Storage, 'getItem'>): { machineId: string } | null {
+export interface PendingInputs {
+  /** The machine the legacy mirror named: what Settings shows. */
+  machineId: string;
+  /** The IDENTITY of this set of inputs (reviewer P1-D2 residual on
+   * ed593949): the machine and the inputs' own fingerprint, as they are NOW
+   * in storage — not the marker's recorded `inputs` (a pre-#335 page may
+   * have rewritten them since; `claimPending` re-reads the same way) and not
+   * the slot baselines (unrelated to what a person is confirming). A discard
+   * confirmed for one key refuses another. */
+  key: string;
+}
+
+/** The identity of the pending inputs as storage holds them now. */
+function pendingKey(storage: Pick<Storage, 'getItem'>, machineId: string): string {
+  return fingerprint(`${storage.getItem('tmux_machine_id') || machineId}|${inputsPrint(storage)}`);
+}
+
+export function pendingInputs(storage: Pick<Storage, 'getItem'>): PendingInputs | null {
   // A read that THROWS throws (reviewer P1-D1 on 18a3bff4): the caller is
   // the host gate, which classifies a failing storage as blocked; this
   // projection must not turn "cannot read" into "nothing pending".
   const mark = layoutMark(storage);
-  return mark?.state === 'pending' ? { machineId: mark.machineId } : null;
+  return mark?.state === 'pending' ? { machineId: mark.machineId, key: pendingKey(storage, mark.machineId) } : null;
 }
 
 /**
- * The person discards the pending inputs (③d-3). ONE write: the marker
+ * The person discards the pending inputs (③d-3) — the set identified by
+ * `confirmed` (a `PendingInputs.key` from the ask). ONE write: the marker
  * closes as `discarded`. The inputs and the quarantine copy are left as they
  * are (see the module note). Not pending → nothing is written (`already-done`
- * or `no-current`); a failed write is `unrecorded`, the caller's block.
+ * or `no-current`); another set pending now → `stale`, nothing written; a
+ * failed write, or an open slot move that cannot be finished, is
+ * `unrecorded`, the caller's block.
  */
-export function discardPending(storage: Store): MigrationReport {
+export function discardPending(storage: Store, confirmed: string): MigrationReport {
   const none = (reason: MigrationReport['reason'], serverId = ''): MigrationReport =>
     ({ ran: false, reason, serverId, folded: [], cleared: [] });
   if (layoutMark(storage)?.state === 'pending') {
@@ -336,6 +358,10 @@ export function discardPending(storage: Store): MigrationReport {
   const done = layoutMark(storage);
   if (done?.state !== 'pending') return done ? none('already-done', done.state === 'folded' ? done.into : '') : none('no-current');
   if (done.moving) return none('unrecorded');   // still open after the resume: nothing is closed over it
+  // The SAME inputs the person confirmed (reviewer P1-D2 residual): a
+  // pre-#335 page may have rewritten the inputs meanwhile (now another
+  // machine's), and a confirmation given for one set does not close another.
+  if (pendingKey(storage, done.machineId) !== confirmed) return none('stale');
   try {
     storage.setItem(LAYOUT_KEY, JSON.stringify({ v: LAYOUT_VERSION, state: 'discarded' } satisfies LayoutMark));
   } catch { return none('unrecorded'); }

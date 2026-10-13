@@ -928,11 +928,14 @@ test('the fold gate: an unrecorded migration binds no server and moves no CURREN
   assert.match(source, /if \(reason === 'pending'\) \{\s*const claim = claimPending\(localStorage, id\)\.reason;/u, 'a pending input meets every server that is bound');
   // ③d-3: the person may DISCARD a pending input from Settings — one marker
   // write through the migration module, a failed write the same block.
-  assert.match(source, /function discardPendingInputs\(\) \{\s*if \(migrationBlocked \|\| !pendingInputs\) return;\s*let reason;\s*try \{ reason = discardPending\(localStorage\)\.reason; \} catch \{ reason = 'unrecorded'; \}\s*if \(reason === 'unrecorded'\) \{ holdStorage\(\); return; \}\s*refreshPending\(\);\s*\}/u,
-    'the discard re-validates at the commit (blocked, still pending), and a failed write blocks (P1-D2)');
+  assert.match(source, /function discardPendingInputs\(confirmed\) \{\s*if \(migrationBlocked \|\| !pendingInputs \|\| pendingInputs\.key !== confirmed\) return;\s*let reason;\s*try \{ reason = discardPending\(localStorage, confirmed\)\.reason; \} catch \{ reason = 'unrecorded'; \}\s*if \(reason === 'unrecorded'\) \{ holdStorage\(\); return; \}/u,
+    'the discard re-validates at the commit: not blocked, still pending, and the SAME set the person confirmed (P1-D2 + residual)');
   // P1-D1: the pending row is a projection read through ONE guarded door —
-  // never at init, never outside the gate; a failing read blocks.
-  assert.match(source, /let pendingInputs = \$state\(null\);\s*function refreshPending\(\) \{\s*try \{ pendingInputs = readPendingInputs\(localStorage\); \} catch \{ holdStorage\(\); \}\s*\}/u);
+  // never at init, never outside the gate; a failing read blocks AND fails
+  // the gate that asked (the residual: a second fallible read is a second
+  // failure, never a success the gate releases on).
+  assert.match(source, /let pendingInputs = \$state\(null\);\s*(?:\/\*\*[^*]*\*\/\s*)?function refreshPending\(\) \{\s*try \{ pendingInputs = readPendingInputs\(localStorage\); return true; \} catch \{ holdStorage\(\); return false; \}\s*\}/u);
+  assert.match(source, /if \(reason === 'unrecorded'\) \{ holdStorage\(\); return 'blocked'; \}\s*(?:\/\/[^\n]*\n\s*)*if \(!refreshPending\(\)\) return 'blocked';\s*return reason === 'claimed' \? 'claimed' : 'ok';/u, 'foldFor is blocked when the projection read fails');
   assert.equal([...source.matchAll(/readPendingInputs\(/gu)].length, 1, 'one read site (inside refreshPending)');
   assert.match(source, /\{pendingInputs\} onDiscardPending=\{discardPendingInputs\}/u, 'Settings shows it and asks App to discard');
   assert.doesNotMatch(source, /requireProof|foldNeedsProof|quarantineLegacyNav/u, 'nothing re-infers the attribution per App instance');
