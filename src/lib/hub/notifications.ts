@@ -169,11 +169,16 @@ export function notifiable(msgs: readonly FeedMsg[], opts: { first: boolean; awa
 
 /** Title + body for the system notification. Composed from NAMES only —
  * no invented prose, so it reads the same in every UI language. The `tag`
- * is per project, so one room's burst collapses to one tray card. */
-export function notifyText(items: readonly FeedMsg[], project: string): { title: string; body: string; tag: string } {
+ * is per ROOM ON ITS SERVER (board #335 ③c-4): one room's burst collapses to
+ * one tray card, and a same-named project on another server is another card
+ * — the tag was `tmm:<project>` before, which two servers' `app` shared. The
+ * title names the server when the tag rule says to (`serverName`, passed
+ * only when more than one server is included). */
+export function notifyText(items: readonly FeedMsg[], project: string, where: { server?: string; room?: string; serverName?: string } = {}): { title: string; body: string; tag: string } {
   const names = [...new Set(items.map((m) => m.from ?? ''))].filter(Boolean);
-  const title = `${names.join(', ')} · ${project}`;
-  return { title, body: excerpt(items[items.length - 1]?.body ?? ''), tag: `tmm:${project}` };
+  const title = `${names.join(', ')} · ${where.serverName ? `${where.serverName} · ` : ''}${project}`;
+  const tag = where.server || where.room ? `tmm:${where.server ?? ''}|${where.room ?? project}` : `tmm:${project}`;
+  return { title, body: excerpt(items[items.length - 1]?.body ?? ''), tag };
 }
 
 /** A one-line reading of a message body: the status marker gives way to its
@@ -350,6 +355,9 @@ export async function ensurePermission(): Promise<void> {
 export interface NewsCtx {
   first: boolean; away: boolean; project: string;
   server?: string; room?: string; session?: string; viewed?: boolean;
+  /** The server's name for the tray title — set only when the tag rule
+   * shows sources (more than one server included, ③c-1). */
+  serverName?: string;
 }
 export type RecordFn = (m: FeedMsg, ctx: NewsCtx & { kind: NewsKind }) => void;
 
@@ -376,6 +384,6 @@ export function notifyNews(
   const news = notifiable(fresh, { ...ctx, level: effects.level?.() ?? DEFAULT_LEVEL });
   if (!news.length || !effects.enabled()) return false;
   effects.cue(Date.now(), st);
-  effects.sys(notifyText(news, ctx.project));
+  effects.sys(notifyText(news, ctx.project, { server: ctx.server, room: ctx.room, serverName: ctx.serverName }));
   return true;
 }

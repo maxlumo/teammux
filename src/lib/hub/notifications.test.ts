@@ -209,6 +209,15 @@ test('notifyText: names only, deduped, last body excerpted', () => {
   assert.equal(notifyText([{ from: 'a', body: 'x' }], 'proj').tag, 'tmm:proj', 'one tray card per project, replaced not stacked');
 });
 
+test('notifyText (#335 ③c-4): the tag is the room ON ITS SERVER, so two servers `app` are two cards; the title names the server only when told to', () => {
+  const a = notifyText([{ from: 'dev', body: 'x' }], 'app', { server: 'srv-a', room: 'proj:app' });
+  const b = notifyText([{ from: 'dev', body: 'x' }], 'app', { server: 'srv-b', room: 'proj:app' });
+  assert.notEqual(a.tag, b.tag, 'a same-named room on another server is another card');
+  assert.equal(a.tag, 'tmm:srv-a|proj:app');
+  assert.equal(a.title, 'dev · app', 'Single, or one included server: no server in the title');
+  assert.equal(notifyText([{ from: 'dev', body: 'x' }], 'app', { server: 'srv-a', room: 'proj:app', serverName: 'alpha' }).title, 'dev · alpha · app', 'Aggregate with several included: the server is named');
+});
+
 // ─── Where the check runs (board #72) ───────────────────────────────────────
 
 test('isAway: hidden, unfocused, or another page on screen', () => {

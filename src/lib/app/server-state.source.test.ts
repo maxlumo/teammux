@@ -102,7 +102,10 @@ test('the identity modules have exactly the production consumers this commit giv
       // ③c-3: the sessions union mints each foreign row's PaneRef from the
       // slice's serverId (App's); Sessions only hands the ref it was given
       // back to the host (a type import).
-      'src/lib/app/sessions-union.svelte.ts', 'src/lib/sessions/Sessions.svelte'],
+      'src/lib/app/sessions-union.svelte.ts', 'src/lib/sessions/Sessions.svelte',
+      // ③c-4: the bell's union keys its sources by ServerId (a type import);
+      // App owns it, and every alert already carries its server.
+      'src/lib/app/centre-union.svelte.ts'],
     'nav-saved.ts': ['src/App.svelte'],
     // ③b-1: the member set names the runtime and dial-result TYPES only.
     'server-runtime.ts': ['src/lib/app/server-members.svelte.ts'],

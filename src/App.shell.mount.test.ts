@@ -3961,15 +3961,18 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
   // 16:12): C comes back on its own, nobody touches the card.
   assert.equal(ls.getItem('tmux_server_current'), 'c', 'on C');
   assert.ok(conn(h, 'c')?.isConnected(), `Retry re-dialled C: ${dialsOf(events, 'c').slice(-3).join(',')}`);
-  // C's centre shows it, from C's own slot.
+  // C's centre shows it, from C's own slot. (The alias, whose registry
+  // commit never happened, is still a live member with its own copy — the
+  // bell is the UNION since ③c-4, so it counts both until the registry
+  // decides; C's row is the one that matters here.)
   const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell');
   assert.ok(bell, 'C has the Hub');
-  assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, `C s bell counts it: ${bell.getAttribute('aria-label')}`);
+  assert.match(bell.getAttribute('aria-label') ?? '', /· [12]\b/u, `C s bell counts it: ${bell.getAttribute('aria-label')}`);
   bell.click();
   for (let i = 0; i < 3; i++) await h.settle();
   const item = [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-list .nc-row')]
-    .find((el) => /from the alias/u.test(el.textContent ?? ''));
-  assert.ok(item, `C s centre lists it: ${h.app.document.querySelector('.nc-list')?.textContent ?? 'no list'}`);
+    .find((el) => /from the alias/u.test(el.textContent ?? '') && el.dataset.server === 'c');
+  assert.ok(item, `C s centre lists it as C s: ${h.app.document.querySelector('.nc-list')?.textContent ?? 'no list'}`);
   // And picking it LANDS: C's Hub opens the room on that message — not the
   // "another server" refusal an alert still naming the alias would get.
   item.click();
@@ -3978,7 +3981,7 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
   for (let i = 0; i < 12 && !hit; i++) { await h.app.advance(100); await h.settle(); hit = h.app.document.querySelector('.jump-hit[data-msg="7"]'); }
   assert.ok(hit, `the jump landed on message 7: ${h.app.document.querySelector('.nc-fail')?.textContent ?? 'no failure shown'}`);
   assert.ok(!hit.closest('.scope-tree.held'), 'in C s own, shown tree');
-  assert.doesNotMatch(h.app.document.querySelector('.rail-bell')?.getAttribute('aria-label') ?? '', /· 1\b/u, 'and seen there, the alert counts no more');
+  assert.equal((JSON.parse(ls.getItem('tmux_hub_alerts::c') ?? '[]') as { key: string; viewed: boolean }[]).find((x) => x.key === 'proj:work|7')?.viewed, true, 'and seen there, C s alert counts no more');
   assert.ok(conn(h, 'c')!.isConnected() && !events.some((e) => e.startsWith('rpc@a:hubLog')), 'asked of C, never of the alias');
 });
 
@@ -7054,6 +7057,130 @@ test('P2(b): B is orphaned while the connect FORM s walk asks A — its dial, ou
   for (let i = 0; i < 3; i++) await h.settle();
   assert.equal(draftA.isConnected && draftA.value, '# notes\n\nunsaved', 'A untouched');
   assert.equal(draftB.isConnected && draftB.value, '# notes\n\nunsaved', 'B kept');
+});
+
+// ─── #335 ③c-4: the bell s union ─────────────────────────────────────────
+
+/** Two servers, each with a stored alert on a room NOT open at boot (the Hub
+ * opens `app` first and reading marks it); B s is newer. A s is seeded under
+ * the pre-#335 LIVE key, which the boot folds into A s slot (`twoServers`
+ * seeds A s navigation the same way). */
+const twoAlerts = () => ({
+  tmux_hub_alerts: JSON.stringify([{ key: 'proj:old|1', room: 'proj:old', server: 'a', session: 'old', project: 'old', seq: 1, id: '1', ts: 1_800_000_000_000, from: 'dev', toHuman: true, kind: 'reply', excerpt: 'from alpha', viewed: false }]),
+  'tmux_hub_alerts::b': JSON.stringify([{ key: 'proj:other|9', room: 'proj:other', server: 'b', session: 'other', project: 'other', seq: 9, id: '9', ts: 1_800_000_005_000, from: 'ops', toHuman: true, kind: 'reply', excerpt: 'from beta', viewed: false }]),
+});
+const bellRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.nc-list .nc-row')]
+  .map((r) => `${r.dataset.server}:${r.querySelector('.server-tag')?.textContent ?? '-'}:${r.querySelector('.nc-text')?.textContent}${r.classList.contains('unavailable') ? '!' : ''}`);
+const openBell = async (h: Awaited<ReturnType<typeof bootApp>>) => {
+  h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+};
+
+test('③c-4: the bell is the UNION of every included server s alerts — newest first across servers, each row tagged, the badge the sum; Single shows one server s list untagged', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!;
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 2\b/u, `both unviewed: ${bell.getAttribute('aria-label')}`);
+  await openBell(h);
+  assert.deepEqual(bellRows(h), ['b:beta:from beta', 'a:alpha:from alpha'], 'B s newer alert first, every row tagged');
+  assert.ok(h.app.document.querySelector('.nc-foot .command-button'), 'Clear offered');
+});
+
+test('③c-4 (Single): one server, one list, no tag, Clear as before', async (context) => {
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }, undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!;
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, 'A s alone');
+  await openBell(h);
+  assert.deepEqual(bellRows(h), ['a:-:from alpha'], 'A s list, untagged');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-foot button')].find((b) => /clear/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 2; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_hub_alerts::a'), '[]', 'A s list cleared');
+  assert.ok(JSON.parse(h.app.window.localStorage.getItem('tmux_hub_alerts::b')!).length === 1, 'B s, not included in Single, untouched');
+});
+
+test('③c-4: picking ANOTHER server s alert focuses that server (D2) and lands in ITS Hub on the message; hub_read goes to that server only — A s same-named room is untouched', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, calls: events, rpc: twoHubs({ hubLog: async (session: string) => ({ messages: asking() === 'b' && session === 'other' ? [{ id: '9', seq: 9, ts: 1_800_000_005_000, from: 'ops', to: ['human'], body: 'from beta', room: 'proj:other' }] : [], has_more: false }) }) });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  await openBell(h);
+  const rowB = [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-list .nc-row')].find((r) => r.dataset.server === 'b')!;
+  const mark = events.length;
+  rowB.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
+  let hit: Element | null = null;
+  for (let i = 0; i < 16 && !hit; i++) { await h.app.advance(100); await h.settle(); hit = h.app.document.querySelector('.scope-tree:not(.held) .jump-hit[data-msg="9"]'); }
+  assert.ok(hit, `the jump landed on B s message in B s Hub: ${h.app.document.querySelector('.nc-fail')?.textContent ?? 'no failure shown'}`);
+  for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }
+  // The jump marked B s entry viewed in B s list; A s list is untouched. A
+  // room read mark (hub_read) is the Hub s own and goes to the room s server
+  // only — here the reader is on B s room, so nothing of A s is read.
+  assert.equal((JSON.parse(ls.getItem('tmux_hub_alerts::b')!) as { viewed: boolean }[])[0]!.viewed, true, 'B s alert viewed');
+  assert.equal((JSON.parse(ls.getItem('tmux_hub_alerts::a')!) as { viewed: boolean }[])[0]!.viewed, false, 'A s alert not');
+  const reads = events.slice(mark).filter((e) => /^rpc@[ab]:hubRead$/u.test(e));
+  assert.ok(!reads.includes('rpc@a:hubRead'), `no hub_read to A: ${reads.join(',')}`);
+  assert.ok(conn(h, 'a')!.isConnected() && !conn(h, 'a')!.disposed(), 'A stays a member');
+  // The room the jump opened is B s, read through B s own Hub (its
+  // hub_log went to B); the read mark that follows reading it is that Hub s
+  // (`markSeen` → `hubRead` on ITS scope.runtime.api — the ②b-4 rule pinned
+  // in App.source), so it can only ever reach B. jsdom does not scroll, so
+  // the Feed s own at-tail read is not driven here.
+  assert.ok(events.slice(mark).includes('rpc@b:hubLog'), 'B s room log was asked of B');
+  assert.ok(!events.slice(mark).includes('rpc@a:hubLog'), 'nothing of the jump asked A');
+});
+
+test('③c-4 (D6): a member that is not connected is listed unavailable — its alerts shown muted and named in the foot, not counted, and Clear leaves them; the reachable list is cleared', async (context) => {
+  let bDown = false;
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs(), gate: (url) => (url.includes('//b') && bDown ? Promise.reject(new Error('down')) : null) });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  // B drops and its reconnect fails for good.
+  bDown = true;
+  conn(h, 'b')!.drop();
+  for (let i = 0; i < 4; i++) { await h.app.advance(3000); await h.settle(); }
+  assert.equal(conn(h, 'b')!.isConnected(), false, 'B is down');
+  const bell = h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!;
+  assert.match(bell.getAttribute('aria-label') ?? '', /· 1\b/u, `only A s counts: ${bell.getAttribute('aria-label')}`);
+  await openBell(h);
+  assert.deepEqual(bellRows(h), ['b:beta:from beta!', 'a:alpha:from alpha'], 'B s row shown, marked unavailable');
+  assert.match(h.app.document.querySelector('.nc-foot')?.textContent ?? '', /beta/u, 'the foot names the unreachable server');
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.nc-foot button')].find((b) => /clear/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 2; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_hub_alerts::a'), '[]', 'A s list cleared');
+  assert.equal(JSON.parse(ls.getItem('tmux_hub_alerts::b')!).length, 1, 'B s list untouched');
+  assert.equal(JSON.parse(ls.getItem('tmux_hub_alerts::b')!)[0].viewed, false, 'and not counted read');
+  assert.deepEqual(bellRows(h), ['b:beta:from beta!'], 'B s row remains, muted');
+  assert.equal(h.app.document.querySelector('.nc-foot .command-button'), null, 'nothing left to clear');
+});
+
+test('③c-4: a system notification s tag names the room ON ITS SERVER, and the title names the server when more than one is included', async (context) => {
+  const sys: { title: string; tag?: string }[] = [];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop', tmux_notify_level: 'replies',
+  }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) {
+    window.Element.prototype.getAnimations = () => [];
+    window.Notification = class { static permission = 'granted'; constructor(title: string, opts: any) { sys.push({ title, tag: opts?.tag }); } };
+    window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+    Object.defineProperty(window.document, 'hidden', { value: true, configurable: true });
+  } });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  // A message arrives on B s room `app` while the window is hidden (away).
+  conn(h, 'b')!.push({ id: '77', seq: 77, ts: 1_800_000_009_000, from: 'ops', to: ['human'], body: 'ping from beta', room: 'proj:app' });
+  for (let i = 0; i < 6; i++) { await h.app.advance(300); await h.settle(); }
+  const card = sys.find((s) => /ping|ops/u.test(s.title) || (s.tag ?? '').includes('proj:app'));
+  assert.ok(card, `a tray card: ${JSON.stringify(sys)}`);
+  assert.equal(card.tag, 'tmm:b|proj:app', 'the tag is the room on its server');
+  assert.match(card.title, /beta/u, 'the title names the server');
 });
 
 // ─── #335 ③c-3: the Terminal sidebar s sessions union ─────────────────

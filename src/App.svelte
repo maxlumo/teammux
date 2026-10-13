@@ -21,6 +21,7 @@
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
   import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
+  import { createCentreUnion } from './lib/app/centre-union.svelte.ts';
   import AddServerDialog from './lib/app/AddServerDialog.svelte';
   import { appPrefs } from './lib/hub/hub-prefs.svelte.ts';
   import { moveTrack, pinTrack } from './lib/hub/reveal.ts';
@@ -387,7 +388,30 @@
    * server it is on through — never a module-level socket. */
   const bound = () => scopeSwap.bound();
   const live = () => bound()?.connection ?? null;
-  const centre = $derived(serverStates.get(scopeRuntime)?.centre ?? noServerCentre);
+  /** The bound server's centre: what its Hub records into and jumps from. */
+  const focusCentre = $derived(serverStates.get(scopeRuntime)?.centre ?? noServerCentre);
+  /** The bell's UNION over the included servers (③c-4, `centre-union`):
+   * every member's list — the focus's and each background member's, in
+   * saved order — tagged by the ③c-1 rule; a member not connected right now
+   * is listed unavailable (D6: shown, not counted read, not cleared). Single
+   * includes one server, so the union is that server's list, as before. */
+  const centreSources = $derived.by(() => {
+    const live = new Map([...(scopeRuntime ? [scopeRuntime] : []), ...background].map((r) => [r.id, r]));
+    return tagScope.included.map((s, order) => {
+      const runtime = live.get(s.id);
+      // Reachable by the DERIVED state (agent-status rule): the focus by the
+      // shell's `connected`, a member by its status — never a socket poll.
+      const available = !!runtime && (runtime === scopeRuntime
+        ? connected && !reconnecting
+        : aggregate.status(s.id)?.kind === 'connected');
+      return {
+        serverId: s.id, name: s.name || hostLabel(s.address), order,
+        log: runtime ? serverStates.get(runtime)?.centre ?? null : null,
+        available,
+      };
+    });
+  });
+  const centre = createCentreUnion(() => centreSources, centreSurface);
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -1561,6 +1585,24 @@
     if (moved !== true) { pickMember(target); return; }
     const v = viewOf(scopeSwap.bound());
     v.hubSelectReq = { serverId: ref.serverId, session: ref.session, n: (v.hubSelectReq?.n ?? 0) + 1 };
+  }
+  /** A bell row picked (③c-4): the jump lands in the ALERT'S server's Hub.
+   * Another included server's row focuses that server first (D2, as a
+   * union project row does: `pickServerProject`); a server that is not a
+   * connected member is not a focus change, and the row says why
+   * (`pickMember`). The jump request is the window's one; the Hub that
+   * reads it refuses an alert of another server (`hubJumpOtherServer`), so
+   * only the focused server's Hub — the alert's — acts on it. */
+  function pickAlert(alert) {
+    centre.close();
+    if (alert.server && alert.server !== currentServerId(localStorage)) {
+      const target = loadServers(localStorage).find((s) => s.id === alert.server);
+      if (!target) { centre.failed(alert, t('hubJumpOtherServer')); return; }
+      const moved = focusMember(alert.server);
+      if (moved !== true) { pickMember(target); return; }
+    }
+    centre.requestJump(alert);
+    if (page !== 'hub') switchTab('hub');
   }
   /** Which servers are NAMED beside what they own (③c-1, `server-tag.ts`):
    * the included set — Aggregate's included entries, Single's one — read
@@ -3687,7 +3729,7 @@
       style:--pop-maxw="{centrePos.maxW}px" style:--pop-maxh="{centrePos.maxH}px"
       style:--pop-origin={centrePlace?.origin}
       bind:this={centreEl} bind:offsetWidth={centreW} bind:offsetHeight={centreH}>
-      <NotifyCentre {centre} onpick={(a) => { centre.close(); centre.requestJump(a); if (page !== 'hub') switchTab('hub'); }} />
+      <NotifyCentre {centre} onpick={pickAlert} />
     </div>
   {/if}
 

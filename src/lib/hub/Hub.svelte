@@ -685,6 +685,8 @@
       first, away, project: roomProjectName(rows, roomName),
       server: serverId(), room: roomName, session,
       viewed: !away && following && !windowed,
+      // The tray title names the server by the one tag rule (③c-1/③c-4).
+      ...(scope?.tag ? { serverName: scope.tag } : {}),
     };
   }
   const newsEffects = {
