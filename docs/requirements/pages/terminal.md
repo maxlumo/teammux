@@ -38,7 +38,14 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   整合…所有项目") the session sheet is ONE list: the other servers' sessions
   are rows of the main list, right under this server's projects, each with its
   tag on its own second line — the bottom section the phone rarely scrolls to
-  is gone there. The desktop sidebar keeps the grouped section.
+  is gone there. The desktop sidebar keeps the grouped section. A foreign row
+  shows the NAME of the declared project its session belongs to when that
+  differs from the session (the identity the local row shows) and opens by the
+  session. The Terminal's union is of LIVE sessions only: a Terminal is about
+  live panes, and another server's declared-but-stopped projects are in the
+  Hub and Board unions, where opening one is a focus move plus that server's
+  own Open. With another server's rows listed, an empty list on this server
+  says "No sessions on this server"; search stays this server's.
   A server whose list has not arrived is listed as "no list yet". The section
   never waits for this server's own first Projects answer. A hidden member's
   page keeps its list current on the same 20 s list cadence the Hub uses

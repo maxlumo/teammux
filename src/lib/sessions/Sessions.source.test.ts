@@ -68,3 +68,15 @@ test('the phone s session sheet is ONE list: foreign rows inline, the grouped se
   assert.ok(source.indexOf('<Projects') < source.indexOf('{#if foreignInline && foreign && !isSearching}'), 'the inline rows follow this server s Projects section');
   assert.match(source, /\{#if !foreignInline && foreign && !isSearching && \(foreign\.rows\.length \|\| foreign\.missing\.length\)\}/u, 'phone: the section is gone, desktop: unchanged');
 });
+
+test('a foreign row shows the project NAME from the HOST s map, keyed by server + session; Sessions imports nothing of the Hub (#357)', async () => {
+  assert.match(source, /foreignNames = null/u);
+  assert.match(source, /const foreignName = \(r: \{ serverId: string; item: \{ name: string \} \}\) => foreignNames\?\.get\(`\$\{r\.serverId\}\\u0000\$\{r\.item\.name\}`\) \|\| r\.item\.name;/u, 'keyed by server AND session; absent → the session name');
+  assert.equal(source.match(/\{foreignName\(r\)\}/gu)?.length, 2, 'the inline row and the grouped row both show it');
+  assert.doesNotMatch(source, /hub-union|HubUnion|createHubUnion|projectNames/u, 'the derivation is the host s');
+  const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
+  assert.match(app, /const projectNames = \$derived\.by\(\(\) => \{[\s\S]*?hubUnion\.rows\(tagScope\.included\)\.rows[\s\S]*?names\.set\(`\$\{r\.serverId\}\\u0000\$\{r\.item\.project\.session\}`, r\.item\.project\.name\)/u, 'derived in App from the Hub union s already-published rows');
+  assert.match(app, /foreignNames=\{projectNames\}/u);
+  // The empty hint is about THIS server when another server s rows are listed.
+  assert.match(source, /\{foreign && foreign\.rows\.length \? t\('noSessionsHere'\) : t\('noSessions'\)\}/u);
+});

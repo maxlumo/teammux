@@ -26,6 +26,14 @@ it publishes; the age tick and everything else wait for it to be shown. A
 server with no answer is "no list yet", one that failed is "not connected"
 with its last good rows (P1-C4). Single hands no union: the Board is as before.
 
+After review (reviewer on 390ba4dd): the Board's slice is published only from
+the last COMPLETE pair (projects AND counts — counts decide which boards
+exist), a held landing waits for the target's own commit and the newest wins,
+`id: 0` leaves an open detail through the existing guard, the head wears the
+Hub's `.title-stack`/`.name-line` from app.css, and the width ghost is priced
+by the rendered rows. See websocket-client.md § The Board and the phone's
+Terminal list.
+
 ### A card shows WHO is on it with the agent's own face; the dot only in doing (board #293, 2026-10-01; #327, 2026-10-09)
 
 Owner, 14:38 on 10-01, after the promo: "board 里不同的 agent 分别在处理哪个，视频里那个可视化比我们当前的看起来更好一些" — the card's `· @assignee` text became a picture and the name, with a dot while that agent runs. Owner, 10-09 (#327): "你用的 logo 好像又是自己发明的一个字母头像…就用他的头像就好…不要去发明新的头像" and "在那个done的页面里…还显示了一个『正在工作』的状态，这让我感觉他好像还在处理这个已经完成的档的任务". So, amending #293's lettered `agentHue` tile:

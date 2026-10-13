@@ -31,7 +31,7 @@
    * picking one is the host's (`onPickServer`: focus that server, open the
    * pane there). Null: this server's list alone (Single). */
   let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true,
-    union = null, onPickServer = null, foreignInline = false }: {
+    union = null, onPickServer = null, foreignInline = false, foreignNames = null }: {
     openTerminal: (session: string, target: string, command?: string) => void;
     activeTarget?: string;
     visible?: boolean;
@@ -49,6 +49,10 @@
      * there the column is tall enough to read whole, and the grouping tells
      * the two apart at a glance (③c-3). */
     foreignInline?: boolean;
+    /** project NAME by `serverId\u0000session`, from the host: a foreign row
+     * shows the name of the declared project its session belongs to when it
+     * differs from the session — the identity the local row shows (#357). */
+    foreignNames?: ReadonlyMap<string, string> | null;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
@@ -281,6 +285,7 @@
   $effect(() => () => { union?.source.withdraw(runtime!); });
   /** The other included servers' sessions, tagged, and who has not answered. */
   const foreign = $derived(union ? union.source.rows(union.included, serverId) : null);
+  const foreignName = (r: { serverId: string; item: { name: string } }) => foreignNames?.get(`${r.serverId}\u0000${r.item.name}`) || r.item.name;
 
 
   async function doRefresh() {
@@ -657,7 +662,7 @@
           <span class="dot" class:off={!r.item.attached}></span>
           <span class="p-main">
             <span class="p-top">
-              <span class="p-name">{r.item.name}</span>
+              <span class="p-name">{foreignName(r)}</span>
               {#if r.item.windows > 1}<span class="side-age">{r.item.windows}w</span>{/if}
             </span>
             {#if r.tag}<span class="p-source"><ServerTag name={r.tag} /></span>{/if}
@@ -730,7 +735,10 @@
         {#if isSearching}
           {t('noMatches')} "<span class="empty-q">{query}</span>"
         {:else}
-          {t('noSessions')}
+          <!-- With another server's sessions listed beside this one (#357), "No
+               sessions" above a B row would be false: the claim is about THIS
+               server. Search stays this server's, so a miss is unchanged. -->
+          {foreign && foreign.rows.length ? t('noSessionsHere') : t('noSessions')}
         {/if}
       </div>
     {/if}
@@ -754,7 +762,7 @@
             onclick={() => { onPickServer?.(r.ref); onPick?.(); }}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPickServer?.(r.ref); onPick?.(); } }}>
             <span class="dot" class:attached={r.item.attached}></span>
-            <span class="name">{r.item.name}</span>
+            <span class="name">{foreignName(r)}</span>
             <ServerTag name={r.tag} />
             <span class="trailing">{#if r.item.windows > 1}<span class="w-badge">{r.item.windows}w</span>{/if}</span>
           </div>

@@ -304,8 +304,13 @@ completion).
   focus there (no dial, no teardown) and lands on THAT project's board, with
   no issue opened; the board body is always one server's. A server whose list
   has not answered is "no list yet", one whose latest refresh failed is "not
-  connected" with its last good rows kept; a hidden member's Board does list
-  refresh only (the 20 s cadence). Single: this server's boards, untagged.
+  connected" with its last complete list kept (muted). A board's list is both
+  reads — projects AND per-board counts — so a failed counts read never reads
+  as "no boards". The landing is held while the target Board is committing,
+  then opens that project's board LIST (an open issue is left through the
+  usual Keep/Discard). The head's name and tag are the Hub head's stack. A
+  hidden member's Board does list refresh only (its existing 20 s timer).
+  Single: this server's boards, untagged.
 - Four fixed columns: **todo / doing / review / done**. Issues carry title,
   body, assignee, opened-by, and their own **note thread** (progress and
   decisions live ON the issue, not only in chat). The **title is OPTIONAL**

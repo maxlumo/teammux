@@ -2476,23 +2476,9 @@
      keeps it reachable. The buttons are `flex: none` and always keep their
      box. */
   .title-group { display: flex; align-items: center; gap: 1px; flex: 0 1 auto; min-width: 0; }
-  /* Name + tag (#356, #359): a WRAPPING row — the tag is a line under the
-     name exactly when the two do not fit side by side, on any screen; the
-     name never ellipsises to make room for the tag (design-language: "the
-     tag yields to the name"). The h1 does not shrink (`flex: 1 0 auto`), so
-     the wrappable tag yields first; `max-width: 100%` lets the ellipsis
-     engage only once the name alone is wider than the group. The wrapped
-     form uses the 2px rhythm the project rows' `.p-main` stack already uses.
-     The phone stacks unconditionally: there the stack IS the complete form. */
-  .title-stack { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
-  /* The name line hugs its text (no grow) and never wraps inside: the
-     chevron is glued to the name's right edge whatever line the tag is on.
-     It does not shrink for the tag (flex-shrink 0) — the tag wraps first —
-     and `max-width: 100%` keeps it inside the group so the name's own
-     ellipsis engages only once the name alone is too wide. */
-  .name-line { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; max-width: 100%; min-width: 0; }
-  .name-line h1, .name-line .h1-edit { flex: 0 1 auto; min-width: 0; }
-  .title-stack.stacked { flex-direction: column; align-items: flex-start; }
+  /* Name + tag (#356, #359, #357): the Name + tag stack — `.title-stack` /
+     `.name-line` — is ONE shared atom in app.css, worn by this head and the
+     Board's. */
   .head-tools { display: flex; align-items: center; gap: var(--tool-gap); flex: none; }
   /* The title yields width before any native command target does. */
   h1 { display: flex; align-items: center; min-width: 0; }

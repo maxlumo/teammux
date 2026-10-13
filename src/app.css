@@ -611,6 +611,22 @@ button:disabled {
   .page-head h1 { flex: 1 1 auto; }
 }
 
+/* Name + server tag (#356, #359; the Board's head since #357): a WRAPPING row
+   — the tag is a line under the name exactly when the two do not fit side by
+   side, on any screen; the name never ellipsises to make room for the tag
+   (design-language: "the tag yields to the name"). The name line hugs its text
+   (no grow) and never wraps inside: a chevron, where the head has one, is glued
+   to the name's right edge whatever line the tag is on. It does not shrink for
+   the tag (flex-shrink 0) — the tag wraps first — and `max-width: 100%` keeps
+   it inside the group so the name's own ellipsis engages only once the name
+   alone is too wide. The wrapped form uses the 2px rhythm the project rows'
+   `.p-main` stack uses. `.stacked` (the phone) stacks unconditionally. Scoped
+   under `.page-head` so it outranks the head's own `h1 { flex: 1 1 auto }`. */
+.page-head .title-stack { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
+.page-head .name-line { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; max-width: 100%; min-width: 0; }
+.page-head .name-line h1, .page-head .name-line .h1-edit { flex: 0 1 auto; min-width: 0; }
+.page-head .title-stack.stacked { flex-direction: column; align-items: flex-start; }
+
 .side-row {
   display: flex; align-items: center; gap: 8px;
   width: 100%; text-align: left;

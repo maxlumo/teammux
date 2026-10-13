@@ -1575,6 +1575,16 @@
    * merge over the included set. ONE source for the app, read-only to the
    * Hubs beyond their own slice; Single hands no union at all. */
   const hubUnion = createHubUnion();
+  /** project NAME by (server, session), read off the Hub union's rows the
+   * hidden members already publish (D4) — the Terminal's foreign rows show the
+   * identity the local row shows (#357). A hidden member's Terminal never loads
+   * its own Projects section, so this is the data the app already has. */
+  const projectNames = $derived.by(() => {
+    const names = new Map();
+    if (connMode !== 'aggregate') return names;
+    for (const r of hubUnion.rows(tagScope.included).rows) names.set(`${r.serverId}\u0000${r.item.project.session}`, r.item.project.name);
+    return names;
+  });
   const hubUnionFor = $derived(connMode === 'aggregate' ? {
     source: hubUnion, included: tagScope.included,
     runtimeOf: (id) => { const r = scopeSwap.bound()?.id === id ? scopeSwap.bound() : background.find((x) => x.id === id); return r && r.alive() ? r : null; },
@@ -4018,7 +4028,7 @@
           onGoBack={(fn) => v.sessionsGoBack = fn}
           visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
-          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp}
+          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignNames={projectNames}
           chips={false} />
       </aside>
       {#if layout.isTouchDevice && sessListOpen}

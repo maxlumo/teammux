@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const source = await readFile(new URL('./Hub.svelte', import.meta.url), 'utf8');
+const appCssSrc = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
 // The staging pipeline moved out of Hub unchanged (board #329): its rules are
 // read where it now lives; send()'s own snapshot/restore stays here.
 const pipeline = await readFile(new URL('./attachments.svelte.ts', import.meta.url), 'utf8');
@@ -502,19 +503,20 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // line 1 = name ▾ and line 2 = tag; nothing floats beside a two-line block.
   assert.match(group, /<div class="title-stack" class:stacked=\{compact\}>\s*<div class="name-line">\s*\{#if renaming\}[\s\S]*?\{:else\}\s*<h1>[\s\S]*?<\/h1>\s*\{\/if\}\s*\{#if selected\}[\s\S]*?icon="chevron-down"[\s\S]*?\{\/if\}\s*<\/div>\s*\{#if !renaming\}<ServerTag name=\{scope\?\.tag\} \/>\{\/if\}\s*<\/div>/u,
     'name line = (name | rename input) + chevron; the tag is the stack s second item');
-  assert.match(source, /\.name-line \{[^}]*display: flex;[^}]*gap: 1px;[^}]*flex: 0 0 auto; max-width: 100%; min-width: 0;[^}]*\}/u, 'the name line hugs its text, never grows, never shrinks for the tag, stays inside the group');
-  assert.match(source, /\.name-line h1, \.name-line \.h1-edit \{ flex: 0 1 auto; min-width: 0; \}/u, 'inside the line the NAME shrinks (ellipsis) so the chevron stays glued');
+  assert.match(appCssSrc, /\.page-head \.name-line \{[^}]*display: flex;[^}]*gap: 1px;[^}]*flex: 0 0 auto; max-width: 100%; min-width: 0;[^}]*\}/u, 'the name line hugs its text, never grows, never shrinks for the tag, stays inside the group');
+  assert.match(appCssSrc, /\.page-head \.name-line h1, \.page-head \.name-line \.h1-edit \{ flex: 0 1 auto; min-width: 0; \}/u, 'inside the line the NAME shrinks (ellipsis) so the chevron stays glued');
   // #359 (owner 2026-10-13): the trigger is FIT, not mode — pure CSS. The
   // stack wraps; the h1 keeps its intrinsic width (no shrink) so the tag
   // yields first; max-width 100% lets the ellipsis engage only when the name
   // alone overflows the group. No ResizeObserver, no JS measurement.
-  assert.match(source, /\.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
+  assert.match(appCssSrc, /\.page-head \.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
 
-  assert.match(source, /\.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
+  assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
   // (reviewer P2 on eeb81e7e: scoped to the SCRIPT, not a template window)
   const script = source.slice(0, source.indexOf('</script>'));
   assert.ok(!/title-stack|name-line|titleStack|nameLine/u.test(script), 'no script touches the stack: no ResizeObserver or width read decides the wrap — CSS does');
-  assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(source), 'tokens only');
+  assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(appCssSrc), 'tokens only'); // the atom lives in app.css since #357 (the Board s head wears it too)
+  assert.doesNotMatch(source, /\.title-stack\s*\{|\.name-line\s*\{/u, 'the Hub keeps no private copy of the atom');
   // The NAME wins the width fight against the PATH (owner, 2026-08-30: "名字
   // 还是优先要显示全的") but never against the BUTTONS (owner, 2026-09-02,
   // board #72: a long name on a phone pushed the icon buttons off-screen while

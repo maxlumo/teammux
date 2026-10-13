@@ -1268,6 +1268,34 @@ is), each with the tag on its own line and the same pick (focus + open
 there); the desktop sidebar keeps its grouped "Other servers" section, where
 a tall column reads whole.
 
+Follow-up after review (#357, reviewer on 390ba4dd; orchestrator ruling):
+
+- **A Board's list is two required reads.** `projectList` and `boardCounts`
+  both answer, or the refresh is not a list: the slice is `answered` only by
+  the last COMPLETE pair, so a first counts failure leaves the server missing
+  ("no list yet") instead of `{}` read as "no boards", and a later failure
+  keeps the last complete list and counts, muted (`.proj-row.unavailable`,
+  the Hub's), the server named "not connected". `hubRooms` stays tolerant: a
+  missing clock only orders the rows.
+- **A landing is held, not consumed on arrival.** The cross-server pick sets
+  the newest request; the target Board takes it through the existing guard
+  once nothing of it is committing (`submitting`), a newer pick replaces an
+  older one, and destroy ends it — the focus never moves to a board that then
+  silently ignores the choice. `id: 0` is the board LIST of that project: an
+  open detail is left through the same guard (dirty → Keep/Discard).
+- **The Board's head wears the Hub head's Name + tag stack**, one atom in
+  app.css (`.title-stack`/`.name-line`, #359), and the width ghost is priced
+  by the counts of the rows actually rendered.
+- **A foreign Terminal row shows the project NAME** from a `(serverId,
+  session) → name` map the HOST derives from the Hub union's already-published
+  rows (a hidden member's Terminal never loads its own Projects) and passes as
+  `foreignNames`; Sessions imports nothing of the Hub. The Terminal union is
+  live sessions only; declared-but-stopped projects of another server are in
+  the Hub and Board unions.
+- **"2× refresh", worded exactly:** a hidden member's Hub and Board each keep
+  their EXISTING 20 s timer (two pages, two timers, ~3 reads a minute apiece);
+  the union adds none.
+
 **The system status and the "current server" actions are the focus's**
 (③c-5). The sidebar's vitals are ONE server's reading — the focused one's —
 never several machines' summed or averaged: App hands the one `SystemStatus`

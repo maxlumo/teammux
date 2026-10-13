@@ -963,7 +963,7 @@ test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026
   // ONE merge: the Board publishes to the generalised projects union, never a
   // second comparator or poller (tenet 9).
   assert.match(source, /import type \{ BoardUnion, BoardUnionRow \} from '\.\.\/app\/hub-union\.svelte\.ts';/u);
-  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime');
+  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: complete\?\.rows \?\? \[\], talk: complete\?\.talk \?\? \{\}, counts: complete\?\.counts \?\? \{\}, answered: !!complete, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime — only the last COMPLETE pair (projects AND counts), answered by it alone (reviewer P1-A)');
   assert.match(source, /\$effect\(\(\) => \(\) => \{ union\?\.source\.withdraw\(guardOwner\); \}\);/u, 'and withdraws it with the tree');
   // The row list: the union filtered by EACH SERVER'S counts, else this server's
   // own boards as single-server entries — never one shape for Aggregate and
@@ -994,4 +994,26 @@ test('the Board s list reads start inside a thunk: a call that throws must not s
   assert.match(source, /const ask = <T,>\(f: \(\) => Promise<T>\): Promise<T> => \(async \(\) => f\(\)\)\(\);/u);
   assert.match(source, /ask\(\(\) => projectList\(\)\),\s*ask\(\(\) => hubRooms\(\)\)\.catch\(\(\) => \(\{ rooms: \{\} \}\)\),\s*ask\(\(\) => boardCounts\(\)\)\.catch\(\(\) => null\),/u);
   assert.doesNotMatch(source, /Promise\.all\(\[\s*projectList\(\),/u, 'no bare call in the array literal');
+});
+
+test('a landing is HELD until the board can take it, newest wins, and leaves any open detail through the guard (#357 reviewer P1-B / P2)', () => {
+  // Marking the request seen BEFORE the guard ran dropped it for good when the
+  // guard refused (this board's own request running): the focus had moved and
+  // the chosen board never opened.
+  assert.match(source, /issueReqSeen = req\.n;\s*landing = req;/u, 'arrival only records the newest request');
+  assert.doesNotMatch(source, /issueReqSeen = req\.n;\s*guard\(/u, 'seen is never advanced into a guard that may refuse');
+  assert.match(source, /const req = landing;\s*if \(!req \|\| submitting\) return;\s*landing = null;\s*untrack\(\(\) => guard\(\(\) => \{/u, 'taken only when nothing of this board is committing, through the one existing guard');
+  assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else sel = null;/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
+});
+
+test('the measurement ghost is priced by the RENDERED rows counts, not the focused server s map (#357 reviewer P2)', () => {
+  assert.match(source, /const maxCount = \$derived\(Math\.max\(0, \.\.\.sideRows\.flatMap\(\(r\) => \{\s*const c = r\.slice\.counts\[r\.item\.project\.session\];/u);
+  assert.doesNotMatch(source, /Object\.values\(countsMap\)\.flatMap/u, 'the old focus-only map is gone');
+});
+
+test('the Board head wears the Hub head s Name + tag atom from app.css — no local paint (#357 reviewer P2, #359 grammar)', () => {
+  assert.match(source, /<div class="title-stack" class:stacked=\{narrowVp\}>\s*<div class="name-line"><h1>\{boardTitle\(allProjects, cur\) \?\? \(cur \|\| t\('board'\)\)\}<\/h1><\/div>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u, 'name line (the name) then the tag as the stack s second item');
+  const style = source.slice(source.indexOf('<style>'));
+  assert.doesNotMatch(style, /title-stack|name-line/u, 'the atom is app.css s, not re-declared here');
+  assert.match(appCss, /\.page-head \.title-stack \{/u);
 });

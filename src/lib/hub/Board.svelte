@@ -121,18 +121,34 @@
   // its OWN session — a manual pick may have parked this page on another
   // project, and the issue id is session-gated. The dirty-draft guard still
   // stands between the jump and an open edit. With no issue (`id` 0) it is a
-  // LANDING on that project's board alone — a union row of this server picked
-  // from another server's Board (#357, D2) — and opens nothing.
+  // LANDING on that project's board LIST — a union row of this server picked
+  // from another server's Board (#357, D2): it opens no issue and leaves any
+  // open detail through the same guard (dirty → Keep/Discard).
+  //
+  // A landing is HELD, not consumed on arrival (reviewer P1-B on 390ba4dd): the
+  // guard refuses while this board's own request is running (`submitting`),
+  // and a request marked seen before the guard ran was dropped for good — the
+  // focus had moved, the chosen board never opened. Only the NEWEST request is
+  // kept (a newer pick replaces an older one), and it is taken once nothing
+  // of this board is committing; this component's destroy ends it.
   let issueReqSeen = $state(0);
+  let landing = $state<{ session: string; id: number; n: number } | null>(null);
   $effect(() => {
     const req = issueRequest;
     if (!req || req.n === issueReqSeen) return;
     issueReqSeen = req.n;
-    guard(() => {
+    landing = req;
+  });
+  $effect(() => {
+    const req = landing;
+    if (!req || submitting) return;
+    landing = null;
+    untrack(() => guard(() => {
       if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
       creating = false; sideOpen = false;
       if (req.id) void openIssue(req.id);
-    });
+      else sel = null;
+    }));
   });
   // Embedded, the new-issue button lives in the DRAWER head (board #23: the
   // embedded page-head was one redundant project-name row), so creation
@@ -155,9 +171,17 @@
   let allProjects = $state<ProjectRow[]>([]);
   let countsMap = $state<Record<string, BoardCountRow>>({});
   const projects = $derived(visibleBoards(allProjects, countsMap));
-  /** The list's own state for the union (P1-C4): has it ever answered, and
-   * did the latest refresh fail. A failure keeps the rows (last good list). */
-  let listAnswered = $state(false), listFailed = $state(false);
+  /** The list's own state for the union (P1-C4). A Board's list is TWO
+   * required reads — the projects AND the per-board counts that decide which
+   * boards exist (an empty board is hidden, board #39) — so `complete` is the
+   * last pair in which BOTH answered, and the union sees only that: a first
+   * counts failure leaves the server missing (never `{}` read as "no boards"),
+   * a later failure keeps the last complete list and counts and names the
+   * server unavailable (reviewer P1-A on 390ba4dd). `hubRooms` stays
+   * tolerant: a missing clock only orders the rows. */
+  type Complete = { rows: ProjectRow[]; talk: Record<string, number>; counts: Record<string, BoardCountRow> };
+  let complete = $state<Complete | null>(null);
+  let listFailed = $state(false);
   let projectReadSequence = 0;
   async function loadProjects() {
     const request = ++projectReadSequence;
@@ -181,12 +205,18 @@
         ask(() => boardCounts()).catch(() => null),
       ]);
       if (request !== projectReadSequence) return;
-      listAnswered = true; listFailed = false;
       talkMap = rooms.rooms ?? {};
       allProjects = sortRows((r.projects ?? []).filter((row) => !row.project.archived), talkMap);
       // A failed counts read keeps the last map — "could not ask" is not
-      // "every board is empty" (the sidebar would blank otherwise).
-      if (bc) countsMap = bc.counts ?? {};
+      // "every board is empty" (the sidebar would blank otherwise) — and the
+      // union does not take this refresh at all: it is not a complete list.
+      if (bc) {
+        countsMap = bc.counts ?? {};
+        complete = { rows: allProjects, talk: talkMap, counts: countsMap };
+        listFailed = false;
+      } else {
+        listFailed = true;
+      }
       // No session to follow: land on the first NON-EMPTY board — the ones
       // the sidebar actually shows (board #39).
       if (!cur) cur = visibleBoards(allProjects, countsMap)[0]?.project.session ?? '';
@@ -213,7 +243,7 @@
   // tree. The union is read-only to this Board beyond its own slice.
   $effect(() => {
     if (!union) return;
-    union.source.publish(guardOwner, serverId, { rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed });
+    union.source.publish(guardOwner, serverId, { rows: complete?.rows ?? [], talk: complete?.talk ?? {}, counts: complete?.counts ?? {}, answered: !!complete, failed: listFailed });
   });
   $effect(() => () => { union?.source.withdraw(guardOwner); });
   /** The sidebar's list: in Aggregate every included server's boards merged
@@ -224,10 +254,13 @@
   const unionList = $derived(union ? union.source.rows(union.included) : null);
   const sideRows = $derived<BoardUnionRow[]>(unionList
     ? unionList.rows.filter((r) => (r.slice.counts[r.item.project.session]?.total ?? 0) > 0)
-    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: listAnswered, failed: listFailed } })));
+    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: !!complete, failed: listFailed } })));
   const curKey = $derived(refKey(sessionRef(serverId, cur)));
   const missingRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.missing.includes(s.id)) : []);
   const unavailableRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.unavailable.includes(s.id)) : []);
+  /** Rows of a server whose latest refresh failed are the last complete list,
+   * muted like the Hub's (the same `.proj-row.unavailable`). */
+  const unavailableIds = $derived(new Set(unionList?.unavailable ?? []));
   function pick(s: string) {
     guard(() => {
       if (s !== cur) { cur = s; }
@@ -840,9 +873,14 @@
   const CHIP_GAP_X = 10; // .side-wins column-gap in app.css
   let winsW = $state(0);
   let chipWs = $state<number[]>([0, 0, 0, 0]);
-  const maxCount = $derived(Math.max(0, ...Object.values(countsMap).flatMap(
-    (c) => STATUSES.map((st) => Number(c[st as keyof BoardCountRow]) || 0),
-  )));
+  // The widest count of the rows ACTUALLY RENDERED (#357): in a union a
+  // row wears its own server's counts, so pricing the ghost off the focused
+  // server's map alone would size 4 or 2 columns for the small numbers and let
+  // a big count from another server overflow its chip.
+  const maxCount = $derived(Math.max(0, ...sideRows.flatMap((r) => {
+    const c = r.slice.counts[r.item.project.session];
+    return c ? STATUSES.map((st) => Number(c[st as keyof BoardCountRow]) || 0) : [];
+  })));
   const cols = $derived(chipCols(winsW, Math.max(...chipWs), CHIP_GAP_X));
   const col = (s: string) => issues.filter((i) => i.status === s);
   const noteCount = (i: BoardIssue) => (typeof i.notes === 'number' ? i.notes : i.notes.length);
@@ -912,7 +950,7 @@
       {#each sideRows as r (r.key)}
         {@const p = r.item}
         {@const c = r.slice.counts[p.project.session]}
-        <button class="side-row proj-row" class:open={r.key === curKey} class:foreign={r.serverId !== serverId} data-server={r.serverId} onclick={() => pickRow(r)}>
+        <button class="side-row proj-row" class:open={r.key === curKey} class:foreign={r.serverId !== serverId} class:unavailable={unavailableIds.has(r.serverId)} data-server={r.serverId} onclick={() => pickRow(r)}>
           <span class="dot" class:off={!p.live}></span>
           <span class="p-main">
             <span class="p-top">
@@ -973,7 +1011,13 @@
     </button>
     <!-- The page names the PROJECT, not itself (board #15): the tab already
          says "Board", so the title says WHOSE board this is. -->
-    <h1>{boardTitle(allProjects, cur) ?? (cur || t('board'))}</h1><ServerTag name={scope?.tag} />
+    <!-- The Hub head's Name + tag stack, the ONE atom in app.css (#359, #357):
+         the tag is a line under the name exactly when they do not fit, the
+         name never ellipsises to make room; no local paint. -->
+    <div class="title-stack" class:stacked={narrowVp}>
+      <div class="name-line"><h1>{boardTitle(allProjects, cur) ?? (cur || t('board'))}</h1></div>
+      <ServerTag name={scope?.tag} />
+    </div>
     <span class="spacer"></span>
     {#if !sel && !creating}
       <!-- New issue lives in the page head's top-right (reopened #11:

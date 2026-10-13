@@ -8364,6 +8364,7 @@ const twoBoards = () => {
   const mine = () => byServer[asking()] ?? { projects: [], rooms: {}, counts: {} };
   return {
     byServer,
+    counts: () => mine().counts,
     rpc: {
       ...oneRoomHub(),
       projectList: async () => ({ projects: mine().projects }),
@@ -8375,6 +8376,7 @@ const twoBoards = () => {
     },
   };
 };
+const boardRowsOf = (h: Awaited<ReturnType<typeof bootApp>>) => boardRows(h).join(',');
 const boardRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .board-root .sidebar .proj-row:not(.mirror):not(.missing)')]
   .map((r) => `${r.querySelector('.server-tag')?.textContent ?? '-'}:${r.querySelector('.p-name')?.textContent}${r.classList.contains('open') ? '*' : ''}`);
 
@@ -8391,6 +8393,9 @@ test('#357 (Board): the sidebar is the UNION of every included server s boards �
   assert.ok(row.querySelector('.p-source .server-tag'), 'the tag on its own line');
   assert.ok(row.classList.contains('foreign'));
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .board-root .page-head .server-tag')?.textContent, 'alpha', 'the body is A s (D3)');
+  const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root .page-head .title-stack')!;
+  assert.deepEqual([...stack.children].map((c) => c.classList.contains('name-line') ? 'name-line' : c.classList.contains('server-tag') ? 'server-tag' : c.tagName), ['name-line', 'server-tag'], 'the Hub head s Name + tag stack: name line, then the tag');
+  assert.match(stack.querySelector('.name-line h1')?.textContent ?? '', /app/u);
 });
 
 test('#357 (Board): picking another server s board focuses that server (D2, no dial) and lands on THAT project s board; the body is then B s', async (context) => {
@@ -8414,6 +8419,184 @@ test('#357 (Board): picking another server s board focuses that server (D2, no d
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .board-root .issue-detail, .scope-tree:not(.held) .board-root .detail'), null, 'a landing opens no issue');
 });
 
+test('#357 (Board, P1-A): a boardCounts failure is NOT an answer — B is missing until BOTH reads succeed, then its rows appear; a later failure keeps the last complete list, muted, and names B unavailable (through the real Board producer)', async (context) => {
+  const boards = twoBoards();
+  let bCountsFail = true;
+  const rpc = { ...boards.rpc, boardCounts: async () => {
+    if (asking() === 'b' && bCountsFail) throw new Error('B counts failed');
+    return { counts: boards.counts() };
+  } };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  const missing = () => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .board-root .sidebar .proj-row.missing')].map((r) => r.textContent!.replace(/\s+/gu, ' ').trim());
+  for (let i = 0; i < 30 && !boardRows(h).includes('-:app*') && !boardRows(h).some((r) => r.endsWith(':app*')); i++) { await h.app.advance(500); await h.settle(); }
+  // B's projectList answered, its counts did not: A's boards only, and B is SAID to be missing.
+  assert.deepEqual(boardRows(h), ['alpha:app*'], `B contributes nothing yet: ${boardRows(h).join(',')}`);
+  assert.equal(missing().length, 1, `B is named: ${missing().join('|')}`);
+  assert.match(missing()[0]!, /beta.*no list yet/u, 'first failure = NO LIST YET (unknown), not "not connected"');
+  // B recovers within the 20 s cadence: its rows appear, the missing row goes.
+  bCountsFail = false;
+  for (let i = 0; i < 12 && boardRows(h).length < 3; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.deepEqual(boardRows(h), ['beta:ops', 'alpha:app*', 'beta:app'], `B s rows appear: ${boardRows(h).join(',')}`);
+  assert.deepEqual(missing(), [], 'no longer missing');
+  // A later failure: the last complete list stays, muted; B is named unavailable.
+  bCountsFail = true;
+  for (let i = 0; i < 12 && missing().length < 1; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.deepEqual(boardRows(h), ['beta:ops', 'alpha:app*', 'beta:app'], `the last complete list is kept: ${boardRows(h).join(',')}`);
+  assert.equal(missing().length, 1, `B named unavailable: ${missing().join('|')}`);
+  assert.match(missing()[0]!, /beta.*not connected/u, 'a later failure = not connected, with the last list kept');
+  const bRows = [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .board-root .sidebar .proj-row[data-server="b"]:not(.missing)')];
+  assert.ok(bRows.length === 2 && bRows.every((r) => r.classList.contains('unavailable')), 'B s kept rows wear the Hub s muted style');
+  const aRow = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root .sidebar .proj-row[data-server="a"]:not(.missing)')!;
+  assert.ok(!aRow.classList.contains('unavailable'), 'A is untouched');
+});
+
+// P1-B (reviewer on 390ba4dd): a cross-server pick aimed at a board whose own
+// request is RUNNING was consumed on arrival and dropped by the guard — the
+// focus had moved to B, but the board the person chose never opened.
+async function pendingSaveOnB(context: any) {
+  const boards = twoBoards();
+  const saves: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  const rpc = { ...boards.rpc,
+    boardSave: async (session: string) => { saves.push(`${asking()}:${session}`); await held; return { id: 1 }; },
+    boardList: async (session: string) => ({ issues: [{ id: 1, title: `${asking()} ${session} issue`, body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }], statuses: ['todo', 'doing', 'review', 'done'] }),
+    boardGet: async (session: string) => ({ id: 1, title: `${asking()} ${session} issue`, body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }),
+  };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  const ls = h.app.window.localStorage;
+  const settleFor = async (n: number) => { for (let i = 0; i < n; i++) { await h.app.advance(300); await h.settle(); } };
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root')!;
+  const open = () => boardRows(h).find((r) => r.endsWith('*'));
+  const pickB = async (name: string) => {
+    [...front().querySelectorAll<HTMLElement>('.sidebar .proj-row[data-server="b"]:not(.missing)')].find((r) => r.querySelector('.p-name')?.textContent === name)!.click();
+    for (let i = 0; i < 12 && ls.getItem('tmux_server_current') !== 'b'; i++) await settleFor(1);
+    await settleFor(6);
+  };
+  for (let i = 0; i < 30 && boardRows(h).length < 3; i++) { await h.app.advance(500); await h.settle(); }
+  // B s ops board, an issue edited and its Save left running.
+  await pickB('ops');
+  assert.equal(open(), 'beta:ops*', `B on ops: ${boardRows(h).join(',')}`);
+  front().querySelector<HTMLElement>('.card')!.click();
+  await settleFor(4);
+  const title = front().querySelector<HTMLInputElement>('.d-title-input')!;
+  title.value = 'edited title'; title.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await settleFor(2);
+  front().querySelector<HTMLButtonElement>('button.go[aria-label="Save"]')!.click();
+  await settleFor(3);
+  assert.deepEqual(saves, ['b:ops'], 'the save is running on B s ops board');
+  return { h, saves, release: () => release(), pickB, open, settleFor, front, ls };
+}
+
+test('#357 (Board, P1-B): picking another board of B from A while B is mid-save moves the focus AND the chosen board opens once the save is done — the old save applies to its own board', async (context) => {
+  const f = await pendingSaveOnB(context);
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  assert.equal(f.ls.getItem('tmux_server_current'), 'a');
+  await f.pickB('app');
+  assert.equal(f.ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
+  assert.equal(f.open(), 'beta:ops*', 'B is still committing ops: nothing leaves under the running request');
+  f.release();
+  await f.settleFor(12);
+  assert.equal(f.open(), 'beta:app*', `the chosen board opens after the save: ${boardRowsOf(f.h)}`);
+  assert.deepEqual(f.saves, ['b:ops'], 'the old save ran once, on its own board');
+});
+
+test('#357 (Board, P1-B): a newer pick replaces an older held one — the person s LAST choice is where B ends', async (context) => {
+  const f = await pendingSaveOnB(context);
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  await f.pickB('app');                       // held: B is committing
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  await f.pickB('ops');                       // newer; same board B is on
+  f.release();
+  await f.settleFor(12);
+  assert.equal(f.open(), 'beta:ops*', `the newest choice wins, the older (app) is void: ${boardRowsOf(f.h)}`);
+});
+
+// P2 (reviewer on 390ba4dd): an id-0 landing is "that project's board LIST".
+// When the target already sits in an issue DETAIL of that same project, the
+// detail is left through the existing guard — clean: straight to the list;
+// dirty: the Keep/Discard dialog, Keep leaves everything as it was.
+async function detailOnB(context: any) {
+  const boards = twoBoards();
+  const issue = (session: string) => ({ id: 1, title: `${asking()} ${session} issue`, body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] });
+  const rpc = { ...boards.rpc,
+    boardList: async (session: string) => ({ issues: [issue(session)], statuses: ['todo', 'doing', 'review', 'done'] }),
+    boardGet: async (session: string) => issue(session) };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  const ls = h.app.window.localStorage;
+  const settleFor = async (n: number) => { for (let i = 0; i < n; i++) { await h.app.advance(300); await h.settle(); } };
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root')!;
+  const pickB = async (name: string) => {
+    [...front().querySelectorAll<HTMLElement>('.sidebar .proj-row[data-server="b"]:not(.missing)')].find((r) => r.querySelector('.p-name')?.textContent === name)!.click();
+    for (let i = 0; i < 12 && ls.getItem('tmux_server_current') !== 'b'; i++) await settleFor(1);
+    await settleFor(6);
+  };
+  for (let i = 0; i < 30 && boardRows(h).length < 3; i++) { await h.app.advance(500); await h.settle(); }
+  await pickB('ops');
+  front().querySelector<HTMLElement>('.card')!.click();
+  await settleFor(4);
+  assert.ok(front().querySelector('.detail'), 'B s ops board is in an issue detail');
+  return { h, ls, settleFor, front, pickB, detail: () => !!front().querySelector('.detail'), dirty: async () => {
+    const title = front().querySelector<HTMLInputElement>('.d-title-input')!;
+    title.value = 'unsaved edit'; title.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await settleFor(2);
+  } };
+}
+
+test('#357 (Board, id 0): picking B s SAME board from A while B sits in a clean issue detail lands on the board LIST — the detail is left', async (context) => {
+  const f = await detailOnB(context);
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  await f.pickB('ops');
+  assert.equal(f.detail(), false, 'the detail is gone: the landing is the list');
+  assert.equal(boardRows(f.h).find((r) => r.endsWith('*')), 'beta:ops*');
+});
+
+test('#357 (Board, id 0): with an UNSAVED edit in that detail the existing Keep/Discard dialog stands in between — Keep leaves the draft as it was, Discard lands on the list', async (context) => {
+  const f = await detailOnB(context);
+  await f.dirty();
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  await f.pickB('ops');
+  assert.ok(f.h.app.document.querySelector('[role=alertdialog]'), 'the guard asks');
+  answerDialog(f.h.app, /keep editing/iu);
+  await f.settleFor(4);
+  assert.equal(f.h.app.document.querySelector('[role=alertdialog]'), null);
+  assert.equal(f.detail(), true, 'Keep: still in the detail');
+  assert.equal(f.front().querySelector<HTMLInputElement>('.d-title-input')!.value, 'unsaved edit', 'and the draft is untouched');
+});
+
+test('#357 (Board, id 0): Discard on that dialog drops the draft and lands on the board list', async (context) => {
+  const f = await detailOnB(context);
+  await f.dirty();
+  await pickServer(f.h, 'alpha');
+  await f.settleFor(6);
+  await f.pickB('ops');
+  answerDialog(f.h.app, /discard/iu);
+  await f.settleFor(4);
+  assert.equal(f.detail(), false, 'Discard: the list');
+});
+
+test('#357 (Board): the width ghost carries the widest count of ALL rendered rows — B s 1200 prices the chips even though A s own counts are tiny', async (context) => {
+  const boards = twoBoards();
+  boards.byServer.b!.counts = { ops: { todo: 1200, doing: 0, review: 0, done: 0, total: 1200 }, app: { todo: 1, doing: 0, review: 0, done: 0, total: 1 } };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: boards.rpc });
+  for (let i = 0; i < 30 && boardRows(h).length < 3; i++) { await h.app.advance(500); await h.settle(); }
+  const ghost = h.app.document.querySelector('.scope-tree:not(.held) .board-root .sidebar .proj-row.mirror .b-count');
+  assert.equal(ghost?.textContent, '1200', 'A is focused with counts of 2; the ghost is priced by B s 1200');
+});
+
 test('#357 (Board, Single): one server s boards, untagged, no source line — as before', async (context) => {
   const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: twoBoards().rpc });
   for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
@@ -8430,7 +8613,9 @@ test('#357 (Terminal, phone): the other servers sessions are IN the main list un
   }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...twoSessionLists().rpc,
     // A s `work` is a PROJECT here, so the PROJECTS section renders and the
     // order claim below is about real rows.
-    projectList: async () => ({ projects: asking() === 'a' ? [{ project: { id: 'a-work', name: 'work', session: 'work', path: '/work', room: 'proj:work', updated_at: 1 }, live: true, slots: [] }] : [] }),
+    projectList: async () => ({ projects: asking() === 'a'
+      ? [{ project: { id: 'a-work', name: 'work', session: 'work', path: '/work', room: 'proj:work', updated_at: 1 }, live: true, slots: [] }]
+      : [{ project: { id: 'b-deploy', name: 'Deploy', session: 'deploy', path: '/deploy', room: 'proj:deploy', updated_at: 5 }, live: true, slots: [] }] }),
     hubRooms: async () => ({ rooms: {}, states: {} }),
   }, setup(window: any) {
     // The phone's picker is the SHEET form: App's `.side-sheet` condition is
@@ -8440,7 +8625,7 @@ test('#357 (Terminal, phone): the other servers sessions are IN the main list un
     window.Element.prototype.getAnimations = () => [];
   } });
   for (let i = 0; i < 30 && inlineForeign(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
-  assert.deepEqual(inlineForeign(h), ['beta:work', 'beta:deploy'], 'B s sessions as rows of the main list');
+  assert.deepEqual(inlineForeign(h), ['beta:work', 'beta:Deploy'], 'B s sessions as rows of the main list — a declared project by its NAME (the local row s identity), a bare session by its session');
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .foreign-rows'), null, 'no "Other servers" section on the phone');
   // Open the sheet as a person does on the phone — the Back gesture at the
   // Terminal s floor lifts the drawer (board #58). This server s PROJECTS
@@ -8456,21 +8641,43 @@ test('#357 (Terminal, phone): the other servers sessions are IN the main list un
   assert.equal(order[0], 'projects', 'this server s projects section first');
   assert.ok(order.indexOf('foreign') > 0 && order.lastIndexOf('projects') < order.indexOf('foreign'), 'the foreign rows follow it, in the same list');
   const ls = h.app.window.localStorage;
-  [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')].find((r) => r.querySelector('.p-name')?.textContent === 'deploy')!.click();
+  [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')].find((r) => r.querySelector('.p-name')?.textContent === 'Deploy')!.click();
   for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(ls.getItem('tmux_server_current'), 'b', 'the focus moved to B');
-  assert.equal(h.restored(), 'b:deploy:1.0', 'opened THERE');
+  assert.equal(h.restored(), 'b:deploy:1.0', 'opened THERE, by the SESSION — never by the label');
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side.open'), null, 'the pick closed the sheet');
   for (let i = 0; i < 20 && inlineForeign(h).length < 1; i++) { await h.app.advance(500); await h.settle(); }
   assert.deepEqual(inlineForeign(h), ['alpha:work'], 'B s picker now lists A s session inline');
 });
 
+test('#357 (Terminal, phone): with another server s sessions listed, an empty THIS server says "No sessions on this server" — never a bare "No sessions" above a B row', async (context) => {
+  const lists = twoSessionLists();
+  lists.byServer.a = { sessions: [], panes: [] };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'terminal' }), parked: JSON.stringify({ page: 'terminal' }) }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...lists.rpc, projectList: async () => ({ projects: [] }), hubRooms: async () => ({ rooms: {}, states: {} }) }, setup(window: any) {
+    const mm = window.matchMedia;
+    window.matchMedia = (q: string) => Object.assign(mm(q), { matches: /760px/u.test(q) });
+    window.Element.prototype.getAnimations = () => [];
+  } });
+  for (let i = 0; i < 30 && inlineForeign(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
+  const empty = () => h.app.document.querySelector('.scope-tree:not(.held) .term-side .empty')?.textContent?.trim();
+  assert.deepEqual(inlineForeign(h), ['beta:work', 'beta:deploy'], 'B s sessions are listed');
+  // The sheet opens as a person opens it (the Back gesture at the floor), so
+  // this server s Projects reports and the list stops being "not asked yet".
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 12 && !empty(); i++) { await h.app.advance(300); await h.settle(); }
+  assert.equal(empty(), 'No sessions on this server', `the claim is about THIS server: ${empty()}`);
+});
+
 test('#357 (Terminal, desktop): the sidebar keeps its "Other servers" group — the tall column reads whole and the grouping tells the two apart', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'desktop',
-  }), undefined, { ...sandbox, rpc: twoSessionLists().rpc });
+  }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...twoSessionLists().rpc,
+    projectList: async () => ({ projects: asking() === 'b' ? [{ project: { id: 'b-deploy', name: 'Deploy', session: 'deploy', path: '/deploy', room: 'proj:deploy', updated_at: 5 }, live: true, slots: [] }] : [] }),
+    hubRooms: async () => ({ rooms: {}, states: {} }) } });
   for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
-  assert.deepEqual(foreignRows(h), ['beta:work', 'beta:deploy']);
+  assert.deepEqual(foreignRows(h), ['beta:work', 'beta:Deploy'], 'the grouped section shows the project NAME too');
   assert.equal(inlineForeign(h).length, 0, 'no inline rows on the desktop');
 });
