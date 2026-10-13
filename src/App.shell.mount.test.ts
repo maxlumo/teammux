@@ -7526,6 +7526,53 @@ test('③c-4: the bell is the UNION of every included server s alerts — newest
   assert.ok(h.app.document.querySelector('.nc-foot .command-button'), 'Clear offered');
 });
 
+test('#356: a notification row is three fixed lines — a long sender and an old date never cost the project its name; the tag and "to you" sit on the meta line; the time is tiered', async (context) => {
+  // Mock-timer clock: 2027-01-15 (1_800_000_000_000 ms) — A's alert is from
+  // today, B's is from last year (older tier) with a long sender.
+  const old = { key: 'proj:tmux-mobile|9', room: 'proj:tmux-mobile', server: 'b', session: 'tmux-mobile', project: 'tmux-mobile', seq: 9, id: '9', ts: Date.UTC(2026, 9, 11, 10, 57), from: 'orchestrator-of-everything', toHuman: true, kind: 'reply', excerpt: 'a long excerpt that will be cut at one line', viewed: false };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',
+    'tmux_hub_alerts::b': JSON.stringify([old]),
+  }), undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await openBell(h);
+  const row = [...h.app.document.querySelectorAll<HTMLElement>('.nc-list .nc-row')].find((r) => r.dataset.server === 'b')!;
+  assert.ok(row);
+  const top = row.querySelector('.nc-top')!, meta = row.querySelector('.nc-meta')!;
+  assert.equal(top.querySelector('.nc-project')?.textContent, 'tmux-mobile', 'the project name is intact');
+  assert.deepEqual([...top.children].map((c) => c.className.split(' ')[0]), ['unread-dot', 'nc-project', 'nc-time'], 'identity line: dot, project, time — nothing else competes');
+  assert.deepEqual([...meta.children].map((c) => c.className.split(' ')[0]), ['server-tag', 'nc-who', 'nc-tag'], 'meta line: tag, who, to-you');
+  assert.equal(meta.querySelector('.nc-who')?.textContent, 'orchestrator-of-everything');
+  assert.match(top.querySelector('.nc-time')?.textContent ?? '', /^\d{4}-\d{2}-\d{2}$/u, `older than this year: the date alone, ${top.querySelector('.nc-time')?.textContent}`);
+  const rowA = [...h.app.document.querySelectorAll<HTMLElement>('.nc-list .nc-row')].find((r) => r.dataset.server === 'a')!;
+  assert.match(rowA.querySelector('.nc-time')?.textContent ?? '', /^\d{2}:\d{2}$/u, 'today: HH:MM only');
+  assert.equal(row.querySelector('.nc-text')?.textContent, old.excerpt, 'the excerpt is its own line');
+});
+
+test('#356: the Hub header stacks the server tag under the project name on the phone and keeps it inline on the desktop; Single has no tag either way', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 30 && !h.app.document.querySelector('.scope-tree:not(.held) .hub-root .chat-head .server-tag'); i++) { await h.app.advance(500); await h.settle(); }
+  const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .hub-root .chat-head .title-stack')!;
+  assert.ok(stack, 'the name and tag share one stack');
+  assert.ok(stack.classList.contains('stacked'), 'phone: stacked');
+  assert.deepEqual([...stack.children].map((c) => c.tagName.toLowerCase() + (c.classList.contains('server-tag') ? '.server-tag' : '')), ['h1', 'span.server-tag'], 'the name on top, the tag under it');
+  assert.equal(stack.querySelector('.h1-text')?.textContent, 'app');
+  assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
+});
+
+test('#356 (desktop): the header tag stays inline', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .hub-root .chat-head .title-stack')!;
+  assert.ok(stack && !stack.classList.contains('stacked'), 'desktop: inline');
+  assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
+  // Single: no tag, no stack content beyond the name.
+});
+
 test('③c-4 (Single): one server, one list, no tag, Clear as before', async (context) => {
   const h = await bootApp(context, {
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',

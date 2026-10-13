@@ -1185,6 +1185,20 @@ export function localWhen(sec: number, now = new Date()): string {
   return at.toDateString() === now.toDateString() ? time : `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${time}`;
 }
 
+/** A LIST row's absolute moment (unix SECONDS), tiered so the column stays
+ * one stable width and never both the full date and the time (board #356,
+ * owner 2026-10-13: a `2026-10-11 10:57` beside a long sender collapsed the
+ * project name to "tm…"): today → `HH:MM`; this year → `MM-DD HH:MM`; older →
+ * `YYYY-MM-DD`. The hover card keeps `localWhen`'s full form. Pure. */
+export function listWhen(sec: number, now = new Date()): string {
+  const at = new Date(sec * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  if (at.toDateString() === now.toDateString()) return time;
+  const md = `${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+  return at.getFullYear() === now.getFullYear() ? `${md} ${time}` : `${at.getFullYear()}-${md}`;
+}
+
 /** The card menu's queue ⇄ steer item for one agent (board #271), or null
  * when there is none to offer: the server must report the mode the session
  * RUNS (`input_mode`, derived from the pane) and the backend must switch it

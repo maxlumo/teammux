@@ -493,6 +493,13 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   assert.ok(group.includes('class="h1-edit"'), 'so does the rename input — the ⋯ must not jump when renaming starts');
   assert.ok(group.includes('icon="chevron-down"'), 'and so does its caret — the dropdown grammar (owner, 2026-08-30: "向下的直角箭头…像把这个名字展开")');
   assert.match(source, /\.title-group \{[^}]*gap: 1px[^}]*\}/u, 'a tight, deliberate gap — not the row rhythm');
+  // #356 (owner 2026-10-13): the server tag is INLINE after the name on the
+  // desktop and STACKED under it on the phone — one markup, `compact` flips
+  // the direction; the stack uses the project rows' 2px rhythm, no new token.
+  assert.match(group, /<div class="title-stack" class:stacked=\{compact\}>\s*<h1>[\s\S]*?<\/h1>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u, 'name and tag share one stack element; the tag follows the name');
+  assert.match(source, /\.title-stack \{[^}]*display: flex;[^}]*min-width: 0;[^}]*\}/u);
+  assert.match(source, /\.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*gap: 2px;[^}]*\}/u, 'the phone stacks, tag tight under the name');
+  assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(source), 'tokens only');
   // The NAME wins the width fight against the PATH (owner, 2026-08-30: "名字
   // 还是优先要显示全的") but never against the BUTTONS (owner, 2026-09-02,
   // board #72: a long name on a phone pushed the icon buttons off-screen while

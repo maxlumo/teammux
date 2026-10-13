@@ -3,7 +3,7 @@ import { ALL_TARGET, teamTarget } from './hub-composer.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import type { FeedBlock } from './hub.ts';
-import { wakeLine, localWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
+import { wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
 import type { HubActivityEvent, HubAgent } from '../core/ws.ts';
 import { renderMarkdown } from '../core/markdown.ts';
 import { drawerWindowPills, mentionPalette, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
@@ -1943,6 +1943,20 @@ test('the card hover names the next wake: time, who set it, how many more (#275)
   assert.equal(wakeLine({ due_at: at(29, 14, 30), from: 'builder', more: 0 }, now), '14:30 · builder');
   assert.equal(wakeLine({ due_at: at(29, 9, 5), from: 'lead', more: 2 }, now), '09:05 · lead +2');
   assert.equal(wakeLine({ due_at: at(30, 8, 0), from: 'lead', more: 0 }, now), '2026-09-30 08:00 · lead', 'another day says the date');
+});
+
+test('listWhen is tiered — today HH:MM, this year MM-DD HH:MM, older YYYY-MM-DD — never the full date AND time (board #356: a list column of one stable width)', () => {
+  const now = new Date(2026, 9, 13, 21, 50);
+  const at = (y: number, mo: number, d: number, h: number, m: number) => new Date(y, mo - 1, d, h, m).getTime() / 1000;
+  assert.equal(listWhen(at(2026, 10, 13, 9, 5), now), '09:05', 'today');
+  assert.equal(listWhen(at(2026, 10, 11, 10, 57), now), '10-11 10:57', 'this year: month-day and time, no year');
+  assert.equal(listWhen(at(2026, 1, 1, 0, 0), now), '01-01 00:00', 'first day of the year is still this year');
+  assert.equal(listWhen(at(2025, 12, 31, 23, 59), now), '2025-12-31', 'older: the date alone, no time');
+  // Yesterday across a year boundary is "older" by year, not by day.
+  assert.equal(listWhen(at(2025, 12, 31, 12, 0), new Date(2026, 0, 1, 1, 0)), '2025-12-31');
+  for (const v of [listWhen(at(2026, 10, 11, 10, 57), now), listWhen(at(2025, 12, 31, 23, 59), now)]) assert.ok(v.length <= 11, `one stable width: ${v}`);
+  // The hover card's full form is unchanged.
+  assert.equal(localWhen(at(2026, 10, 11, 10, 57), now), '2026-10-11 10:57');
 });
 
 test('localWhen is today\u2019s HH:MM, else the date too (#284: the board hover shares the wake row\u2019s form)', () => {

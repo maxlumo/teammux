@@ -2097,11 +2097,18 @@
               }}
               onblur={commitRename} />
           {:else}
-            <h1>
-              <!-- Rename remains an explicit project-menu action. -->
-              <span class="h1-text" bind:this={titleNameEl}>{selectedRow?.project.name ?? ''}</span>
-            </h1>
-            <ServerTag name={scope?.tag} />
+            <!-- The name and its server tag (③c-1): one line on the desktop,
+                 where there is room; on the phone STACKED — the name on top
+                 at full width, the tag tight under it (board #356, owner
+                 2026-10-13: the inline tag squeezed "tmux-mobile" to five
+                 characters beside four head icons; "放到项目名下面，紧挨着"). -->
+            <div class="title-stack" class:stacked={compact}>
+              <h1>
+                <!-- Rename remains an explicit project-menu action. -->
+                <span class="h1-text" bind:this={titleNameEl}>{selectedRow?.project.name ?? ''}</span>
+              </h1>
+              <ServerTag name={scope?.tag} />
+            </div>
           {/if}
           {#if selected}
             <!-- The project's own verbs — Open/Rename/Close/Delete — as ONE
@@ -2463,6 +2470,12 @@
      keeps it reachable. The buttons are `flex: none` and always keep their
      box. */
   .title-group { display: flex; align-items: center; gap: 1px; flex: 0 1 auto; min-width: 0; }
+  /* Name + tag: inline on the desktop; a column on the phone (#356), the
+     2px rhythm the project rows' `.p-main` stack already uses — the tag is
+     a line under the name, never the name's rival for width. */
+  .title-stack { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .title-stack.stacked { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .title-stack.stacked h1 { max-width: 100%; }
   .head-tools { display: flex; align-items: center; gap: var(--tool-gap); flex: none; }
   /* The title yields width before any native command target does. */
   h1 { display: flex; align-items: center; min-width: 0; }

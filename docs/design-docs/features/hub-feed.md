@@ -601,6 +601,18 @@ An intentionally premature menu on first selection failed the original
 mounted characterization. A separate mounted case covers double-click
 filter toggling and the stopped card's explicit Resume control.
 
+### The header's server tag is inline on the desktop and stacked under the name on the phone (#356, 2026-10-13)
+
+Since ③c-1 the Hub head names its server with `ui/ServerTag` beside the
+project name. On a 390px phone the tag (`flex: none`) beside four head icons
+left the name five characters ("tmux-mo…" — owner 2026-10-13 21:48: 放到项目名
+下面，紧挨着). One markup, `.title-stack`, holds the name and the tag; on
+`compact` it is a column (`gap: 2px`, the project rows' stack rhythm) with the
+name on top at full width and the tag tight under it; on the desktop it is
+inline. Single mode has no tag either way (the ③c-1 rule). No new token, no
+new atom; the title-group's priorities (name over path, never over the
+buttons) are unchanged.
+
 ### An unsent line belongs to its project
 
 the composer's draft is per session (`hubPrefs.draft/setDraft`, `tmux_hub_drafts`), so switching projects parks the old draft and picks up that project's own — carrying the text across put a half-written line in front of the wrong agents — and a reload restores it, because a half-written message is work (owner, 2026-08-19). Written on every keystroke: one small JSON string, and a debounce loses the last characters exactly when the tab goes away. `draftUpdate()` (pure + tested) holds the two rules that regress silently — an empty draft REMOVES its key (else every project ever visited leaves a row) and the text is capped at `DRAFT_MAX` so a pasted file cannot fill localStorage and take the other prefs with it — and returns the SAME object when nothing changed, which is how the keystroke path skips the write. `renameSession` moves the draft key with the lead and read marker.
