@@ -135,12 +135,19 @@
         <button class="proj-pick" onclick={() => pick(e)}>
           <span class="dot" class:off={!row.live}></span>
           <span class="p-main">
+            <!-- Two lines, the notification row's grammar (#356/#360, owner
+                 2026-10-13 22:58: rows read "tmux-m…" under tag + unread +
+                 age): line 1 = identity — the name (the only shrinkable item)
+                 … unread · age (short, the row's STATE, flex:none); line 2 =
+                 the server tag, the widest element and the SOURCE, which
+                 yields to the name (design-language, #359). Single, or one
+                 included server, has no tag and the row stays one line. -->
             <span class="p-top">
               <span class="p-name">{row.project.name}</span>
-              <ServerTag name={e.tag} />
               {#if unread}<span class="side-unread appear-pop"><span class="unread-dot"></span>{unread}</span>{/if}
               <span class="side-age">{projectAgeLabel(row, e.slice.talk, tick)}</span>
             </span>
+            {#if e.tag}<span class="p-source"><ServerTag name={e.tag} /></span>{/if}
             {#if agents.length}
               <span class="side-wins" class:dim={!row.live}>
                 {#each agents as a (a.name)}

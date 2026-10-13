@@ -7600,6 +7600,45 @@ test('#356 (desktop, Aggregate): the header tag stays inline', async (context) =
   assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
 });
 
+// #360 (owner 2026-10-13 22:58: sidebar rows read "laminar-…", "tmux-m…",
+// "Ling…"): a tagged row is TWO lines — identity (name · unread · age) on
+// .p-top, the server tag alone on .p-source under it. One fixture: a long
+// name on both servers, 8 unread each.
+const LONG_360 = 'tmux-mobile-long-project-name';
+const rpc360 = () => ({
+  ...twoHubs(),
+  projectList: async () => ({ projects: [{ project: { id: `${asking()}-long`, name: LONG_360, session: LONG_360, path: `/${LONG_360}`, room: `proj:${LONG_360}`, updated_at: 9000 }, live: true, slots: [] }] }),
+  hubRooms: async () => ({ rooms: { [`proj:${LONG_360}`]: 9000 }, states: {} }),
+  hubUnread: async () => ({ rooms: { [`proj:${LONG_360}`]: { count: 8, first_seq: 1, last_seq: 8 } } }),
+});
+const rows360 = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row:not(.missing)')].filter((r) => r.querySelector('.p-name'));
+async function twoLineRows360(context: any, mode: 'mobile' | 'desktop') {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: mode,
+  }), undefined, { ...sandbox, rpc: rpc360(), setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 30 && !(rows360(h).length === 2 && rows360(h).every((r) => r.querySelector('.side-unread'))); i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(rows360(h).length, 2, `${mode}: both servers' rows`);
+  for (const row of rows360(h)) {
+    const top = row.querySelector('.p-top')!;
+    assert.deepEqual([...top.children].map((c) => c.className.split(' ')[0]), ['p-name', 'side-unread', 'side-age'], `${mode}: identity line — name, unread, age, nothing else`);
+    assert.equal(top.querySelector('.p-name')?.textContent, LONG_360, `${mode}: the whole name is in the DOM`);
+    assert.equal(top.querySelector('.server-tag'), null, `${mode}: no tag on the identity line`);
+    assert.equal(top.nextElementSibling?.className, 'p-source', `${mode}: the source line directly under it`);
+    assert.match(top.nextElementSibling?.querySelector('.server-tag')?.textContent ?? '', /^(alpha|beta)$/u, `${mode}: the tag alone on it`);
+    assert.match(top.querySelector('.side-unread')?.textContent ?? '', /8/u, `${mode}: unread stays on the identity line`);
+  }
+}
+test('#360 (phone, Aggregate): a tagged sidebar row is TWO lines — identity (name · unread · age) on .p-top, the server tag alone on .p-source under it; the long name is whole in the DOM', (context) => twoLineRows360(context, 'mobile'));
+test('#360 (desktop, Aggregate): the same two lines — not a compact rule', (context) => twoLineRows360(context, 'desktop'));
+test('#360 (Single): no tag, no source line — one line as before #335', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: rpc360() });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const row = rows360(h)[0]!;
+  assert.ok(row, 'A s row');
+  assert.equal(row.querySelector('.p-source'), null, 'Single: no source line');
+  assert.equal(row.querySelector('.server-tag'), null, 'Single: no tag');
+});
+
 test('③c-4 (Single): one server, one list, no tag, Clear as before', async (context) => {
   const h = await bootApp(context, {
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',

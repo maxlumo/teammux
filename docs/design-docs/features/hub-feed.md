@@ -623,6 +623,24 @@ menu still anchors on the name element; the chevron keeps its touch box.
 measurement; the title-group's priorities (name over path, never over the
 buttons) are unchanged.
 
+### A tagged sidebar row is two lines: identity, then source (#360, 2026-10-13)
+
+In Aggregate every sidebar row wears its server's `ServerTag` (③c-2). It sat
+on `.p-top`, the row's one flex line, between the name and the unread ·
+age — and there the name was the only shrinkable item, so a 240px sidebar
+read "laminar-…", "tmux-m…", "Ling…" (owner 2026-10-13 22:58, screenshot):
+the #356 disease in a second place. The row takes the notification row's
+grammar (§ Unread, #356): **line 1 = identity** — `.p-top`: the name (the
+only shrinkable item) … unread · age, short items that are the row's STATE,
+`flex: none`; **line 2 = source** — `.p-source`: the tag alone, the widest
+element, which yields to the name (design-language: the tag yields to the
+name). `.p-source` is a flex line in app.css beside `.p-top` (a component
+may not restyle the shared row atoms — `ui/sidebar.source.test.ts`), rendered
+only `{#if e.tag}`: Single, or one included server, has no tag and the row
+stays one line, as before #335. The ⋯ stays on the title line (its 32px room
+is `.p-top`'s), the agent chips stay under both. Missing/unavailable rows are
+unchanged — their name IS the server's.
+
 ### An unsent line belongs to its project
 
 the composer's draft is per session (`hubPrefs.draft/setDraft`, `tmux_hub_drafts`), so switching projects parks the old draft and picks up that project's own — carrying the text across put a half-written line in front of the wrong agents — and a reload restores it, because a half-written message is work (owner, 2026-08-19). Written on every keystroke: one small JSON string, and a debounce loses the last characters exactly when the tab goes away. `draftUpdate()` (pure + tested) holds the two rules that regress silently — an empty draft REMOVES its key (else every project ever visited leaves a row) and the text is capped at `DRAFT_MAX` so a pasted file cannot fill localStorage and take the other prefs with it — and returns the SAME object when nothing changed, which is how the keystroke path skips the write. `renameSession` moves the draft key with the lead and read marker.

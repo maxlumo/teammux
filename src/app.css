@@ -756,6 +756,9 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 .p-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 550; font-family: var(--font-display); }
 .p-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .p-top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+/* The row's second line (#360): the server tag alone, the source under the
+   identity line — the pill keeps its own width (a flex line, no stretch). */
+.p-source { display: flex; min-width: 0; }
 /* The row's ⋯ rides the TITLE line. As a column beside the whole row it took
    24px + an 8px gap from every agent line beneath as well (owner, 2026-09-24:
    "三个小点…挤占了底下列出的 Agent 的空间…放到标题行"). Absolute, because the

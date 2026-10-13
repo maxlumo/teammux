@@ -99,7 +99,7 @@ test('the two-line project ROW is one shared skeleton — Chat and Board wear it
   // was lifted to app.css; a scoped re-declaration outranks it silently
   // (0,2,0 vs the lifted rule's specificity), so the guard is the same as
   // the atoms': components may USE the classes, never restyle them.
-  const ROW_ATOMS = /\.p-name(?![\w-])|\.p-main(?![\w-])|\.p-top(?![\w-])|\.proj-row(?![\w-])/;
+  const ROW_ATOMS = /\.p-name(?![\w-])|\.p-main(?![\w-])|\.p-top(?![\w-])|\.p-source(?![\w-])|\.proj-row(?![\w-])/;
   for (const file of ['lib/hub/Sidebar.svelte', 'lib/hub/Board.svelte']) {
     const raw = await readFile(new URL(file, SRC), 'utf8');
     const style = /<style>([\s\S]*)<\/style>/.exec(raw)?.[1] ?? '';
@@ -116,7 +116,7 @@ test('the two-line project ROW is one shared skeleton — Chat and Board wear it
     assert.match(markup, /class="p-name"/u, `${file} names through the shared atom`);
   }
   const css = await readFile(new URL('app.css', SRC), 'utf8');
-  for (const atom of ['\\.proj-row\\s*\\{', '\\.proj-row \\.dot\\s*\\{', '\\.p-name\\s*\\{', '\\.p-main\\s*\\{', '\\.p-top\\s*\\{']) {
+  for (const atom of ['\\.proj-row\\s*\\{', '\\.proj-row \\.dot\\s*\\{', '\\.p-name\\s*\\{', '\\.p-main\\s*\\{', '\\.p-top\\s*\\{', '\\.p-source\\s*\\{']) {
     assert.match(css, new RegExp(atom, 'u'), `app.css defines the skeleton atom ${atom}`);
   }
   // The dot is deliberately SCOPED to .proj-row in app.css: Sessions and the
@@ -139,4 +139,20 @@ test('the row menu rides the title line and only that line keeps its room (owner
   assert.match(css, /\.proj-row \.row-menu \{ position: absolute; right: 10px; top: 6px; width: 24px; height: 24px; \}/u,
     'as a column beside the whole row the ⋯ took 32px from every agent line');
   assert.match(css, /\.proj-row:has\(\.row-menu\) \.p-top \{ padding-right: 32px; \}/u, 'Board rows, without a menu, reserve nothing');
+});
+
+test('a tagged row is two lines — identity (.p-top) then source (.p-source), the tag never on the name s line (#360, owner 2026-10-13 22:58)', async () => {
+  // On `.p-top` the tag sat between the name and unread · age, and the name
+  // was the only shrinkable item: a 240px sidebar read "laminar-…",
+  // "tmux-m…", "Ling…". The tag is the widest element and the row's SOURCE;
+  // it yields to the name (design-language) by taking its own line, the
+  // notification row's grammar (#356). Single has no tag: one line, as before.
+  const sidebar = await readFile(new URL('lib/hub/Sidebar.svelte', SRC), 'utf8');
+  const top = /<span class="p-top">([\s\S]*?)<\/span>\s*(\{#if e\.tag\}<span class="p-source"><ServerTag name=\{e\.tag\} \/><\/span>\{\/if\})/u.exec(sidebar);
+  assert.ok(top, 'the source line follows the identity line, rendered only with a tag');
+  assert.doesNotMatch(top![1]!, /ServerTag|p-source/u, 'nothing of the source on the identity line');
+  assert.match(top![1]!, /class="p-name"[\s\S]*side-unread[\s\S]*side-age/u, 'identity: name, unread, age — in that order');
+  const css = await readFile(new URL('app.css', SRC), 'utf8');
+  assert.match(css, /\.p-top \{ display: flex; align-items: baseline; gap: 6px; min-width: 0; \}\n(?:\/\*[\s\S]*?\*\/\n)?\.p-source \{ display: flex; min-width: 0; \}/u,
+    'the second line is a flex line beside .p-top in app.css — a shared row atom, not a component rule');
 });
