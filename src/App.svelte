@@ -3986,7 +3986,7 @@
          register their Back chains and requests into ITS view `v`; the
          window dispatches only through the focused one. -->
     <div class="scope-tree" class:held inert={held}>
-    <ServerScope {runtime} state={serverStates.get(runtime)} tag={serverTag(tagScope, runtime.id)}>
+    <ServerScope {runtime} state={serverStates.get(runtime)} tag={serverTag(tagScope, runtime.id)} eligible={() => runtime === scopeRuntime && runtime.alive()}>
     {#if v.hubState.available}
       <!-- Hub (agents-v2 desktop three-column view): kept mounted (like
            Files/Terminal below) and merely hidden when inactive, so the

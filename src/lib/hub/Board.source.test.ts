@@ -998,17 +998,19 @@ test('the Board s list reads start inside a thunk: a call that throws must not s
   assert.doesNotMatch(source, /Promise\.all\(\[\s*projectList\(\),/u, 'no bare call in the array literal');
 });
 
-test('a landing is HELD until the board can take it, newest wins, and ONE validity covers the hold and the continuation (#357 reviewer P1-B / R2)', () => {
+test('a landing is HELD until the board can take it, newest wins, and ONE eligibility covers the hold, the free and the continuation (#357 reviewer P1-B / R2)', () => {
   // Marking the request seen BEFORE the guard ran dropped it for good when the
   // guard refused (this board's own request running).
-  assert.match(source, /issueReqSeen = req\.n;\s*voidLanding\(\);[^\n]*\n\s*landing = req;/u, 'arrival records the newest request and voids the older');
   assert.doesNotMatch(source, /issueReqSeen = req\.n;\s*guard\(/u, 'seen is never advanced into a guard that may refuse');
+  assert.match(source, /issueReqSeen = req\.n;\s*voidLanding\(\);[^\n]*\n\s*if \(ok\) landing = req;/u, 'arrival records the newest request, voids the older, and holds it only if the board can act NOW');
   assert.match(source, /if \(!req\) \{ if \(landing \|\| landingParked\) voidLanding\(\); return; \}/u, 'a cleared request voids what it held');
-  assert.match(source, /if \(!visible\) \{ if \(landingArmed\) untrack\(voidLanding\); return; \}/u, 'leaving the displayed board after the hold voids it — no replay on return');
-  assert.match(source, /\$effect\(\(\) => \{ if \(!visible && landingParked\) untrack\(voidLanding\); \}\);/u, 'a question the landing parked is withdrawn when the board is left');
-  assert.match(source, /if \(submitting\) return;/u, 'taken only when nothing of this board is committing');
-  assert.match(source, /if \(gen !== landingGen \|\| !visible \|\| !alive\) return;/u, 'and re-checked right before the continuation runs');
-  assert.match(source, /if \(landingParked && pendingDiscard === landingParked\) pendingDiscard = null;/u, 'a parked Keep/Discard is withdrawn with it — the existing guard, no new modal');
+  // ONE eligibility: displayed ∧ the HOST's word (focused ∧ serving) ∧ not destroyed.
+  assert.match(source, /const eligible = \(\) => visible && \(scope\.eligible \? scope\.eligible\(\) : true\) && alive;/u, 'displayed ∧ focused ∧ serving (the host answers) ∧ alive');
+  assert.doesNotMatch(source, /currentServerId|serverCurId|from '[^']*server-switch/u, 'the board never imports the current binding nor compares ids for it');
+  assert.match(source, /const ok = eligible\(\);\s*if \(!ok\) \{ untrack\(voidLanding\); return; \}\s*if \(submitting\) return;/u, 'checked when the board frees, before it may act; ineligible voids');
+  assert.match(source, /if \(gen !== landingGen \|\| !eligible\(\)\) return;/u, 'and re-checked right before the continuation runs');
+  assert.match(source, /\$effect\(\(\) => \{ const ok = eligible\(\); if \(!ok && landingParked\) untrack\(voidLanding\); \}\);/u, 'a question the landing parked goes with it');
+  assert.match(source, /if \(landingParked && pendingDiscard === landingParked\) pendingDiscard = null;/u, 'withdrawn from the existing guard — no new modal');
   assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else sel = null;/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
 });
 

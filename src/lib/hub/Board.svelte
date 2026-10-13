@@ -132,47 +132,55 @@
   // committing.
   //
   // The held landing and the guard continuation it may park share ONE
-  // validity (reviewer R2 on 0feb403e): this board is still DISPLAYED (shown,
-  // and being shown IS being the focus — a hidden member's tree is not), the
-  // parent's request is still THIS request (a cleared or newer one voids it),
-  // and the board is alive. It is checked when the hold is taken, when the
-  // board frees, and again right before the continuation runs; losing it
-  // VOIDS the landing — there is no replay when the person comes back — and
-  // withdraws a Keep/Discard it parked. No new modal: the existing guard.
+  // eligibility (reviewer R2 on 0feb403e and c728ac80; orchestrator ruling):
+  //   displayed  — this board is shown (`visible`),
+  //   focused ∧ serving — asked of the HOST (`scope.eligible()`: this tree is
+  //                 the current binding and its runtime still serves; a leave
+  //                 question that merely REVEALS a background tree is not the
+  //                 focus, and a runtime detached under a still-mounted tree
+  //                 can serve nothing),
+  //   same request — the parent's request is still this one,
+  //   not destroyed.
+  // It is evaluated at the hold, when the board frees, and right before the
+  // continuation runs; any false VOIDS the landing and withdraws the
+  // Keep/Discard it parked — there is no replay when the person comes back.
+  // The existing guard; no new modal. The board never imports CURRENT or
+  // compares ids as a stand-in for the handle.
   let issueReqSeen = $state(0);
   let landing = $state<{ session: string; id: number; n: number } | null>(null);
   let landingGen = 0;
-  let landingArmed = false;                 // the held landing has been seen displayed
   let landingParked: (() => void) | null = null;
+  const eligible = () => visible && (scope.eligible ? scope.eligible() : true) && alive;
   function voidLanding() {
-    landingGen++; landingArmed = false;
+    landingGen++;
     landing = null;
     if (landingParked && pendingDiscard === landingParked) pendingDiscard = null;
     landingParked = null;
   }
   $effect(() => {
     const req = issueRequest;
+    const ok = req ? eligible() : false;
     untrack(() => {
       if (!req) { if (landing || landingParked) voidLanding(); return; }
       if (req.n === issueReqSeen) return;
       issueReqSeen = req.n;
       voidLanding();            // a newer selection voids the older one
-      landing = req;
+      if (ok) landing = req;    // held only by a board that can act on it NOW
     });
   });
-  // A question the landing parked is the landing's too: leaving withdraws it.
-  $effect(() => { if (!visible && landingParked) untrack(voidLanding); });
+  // A question the landing parked is the landing's too: it goes with it.
+  $effect(() => { const ok = eligible(); if (!ok && landingParked) untrack(voidLanding); });
   $effect(() => {
     const req = landing;
     if (!req) return;
-    if (!visible) { if (landingArmed) untrack(voidLanding); return; }   // left after it was held
-    landingArmed = true;
+    const ok = eligible();
+    if (!ok) { untrack(voidLanding); return; }
     if (submitting) return;
     untrack(() => {
       const gen = landingGen;
-      landing = null; landingArmed = false;
+      landing = null;
       const run = () => {
-        if (gen !== landingGen || !visible || !alive) return;  // the last look, right before it runs
+        if (gen !== landingGen || !eligible()) return;      // the last look, right before it runs
         landingParked = null;
         if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
         creating = false; sideOpen = false;

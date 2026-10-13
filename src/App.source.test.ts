@@ -523,7 +523,7 @@ test('the shell stays through a switch; only the server-bound content tree goes 
   // ③b (reviewer P1-1 on 99566068): the panel sits OVER the kept trees —
   // nothing a switch does not replace goes with it. Every tree is held while
   // a switch runs; the swap lets go of the one it replaces.
-  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{\/if\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\} tag=\{serverTag\(tagScope, runtime\.id\)\}>/u,
+  assert.match(source, /\{#if switching\}[\s\S]*?class="switch-panel[\s\S]*?\{\/if\}[\s\S]*?\{#each members as runtime \(runtime\)\}\s*\{@const v = viewOf\(runtime\)\}\s*\{@const held = storageHeld \|\| !!switching \|\| runtime !== front\}\s*\{@const shown = !held\}(?:\s*<!--[\s\S]*?-->)?\s*<div class="scope-tree" class:held inert=\{held\}>\s*<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\} tag=\{serverTag\(tagScope, runtime\.id\)\} eligible=\{\(\) => runtime === scopeRuntime && runtime\.alive\(\)\}>/u,
     'the panel sits over the kept trees; a different server rebuilds only its own, bound to that server, named by the one tag rule (③c-1)');
   assert.doesNotMatch(source, /\{:else\}\s*(?:<!--[\s\S]*?-->\s*)*\{#if \(page === 'settings'/u, 'the trees are not the switch panel s else branch');
   assert.match(source, /inert=\{switching\?\.phase === 'connecting'\}/u, 'SWITCHING: the rail takes no input');
@@ -733,6 +733,10 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // issue (`id: 0`) — aimed at the tree it names, never a new request kind.
   assert.match(source, /function pickServerBoard\(ref\) \{[\s\S]*?const moved = focusMember\(ref\.serverId\);[\s\S]*?v\.boardIssueReq = \{ serverId: ref\.serverId, session: ref\.session, id: 0, n: \(v\.boardIssueReq\?\.n \?\? 0\) \+ 1 \};/u);
   assert.match(source, /union=\{boardUnionFor\} onPickServer=\{pickServerBoard\}/u);
+  // The HOST answers "may a navigation aimed at this tree still act": this
+  // tree is the CURRENT binding (not merely a background tree a leave question
+  // revealed) and its runtime still serves (not detached/absorbed).
+  assert.match(source, /<ServerScope \{runtime\} state=\{serverStates\.get\(runtime\)\} tag=\{serverTag\(tagScope, runtime\.id\)\} eligible=\{\(\) => runtime === scopeRuntime && runtime\.alive\(\)\}>/u);
   assert.match(source, /const boardUnion = createBoardUnion\(\);\s*const boardUnionFor = \$derived\(connMode === 'aggregate' \? \{ source: boardUnion, included: tagScope\.included \} : null\);/u, 'Single hands no union');
   assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem\('tmux_state'\)/u,
     'nothing parses the saved state by hand any more');

@@ -241,3 +241,128 @@ test('a done card keeps the face and never the working dot (board #327)', async 
     assert.equal(who?.querySelector('.c-live'), null, 'busy elsewhere is not working on THIS done issue');
   } finally { await app.close(); }
 });
+
+// ─── A held landing's eligibility (board #357, R2 on c728ac80) ─────────────
+// A cross-server pick is a request the PARENT hands this board. It is held
+// while the board is committing and acts only while the board is displayed ∧
+// focused ∧ serving (the HOST's word, `scope.eligible`) ∧ it is still the same
+// request ∧ the board is not destroyed — at the hold, when the board frees,
+// and right before the continuation runs. These cells drive the real Board
+// with a parent that changes `issueRequest` / `visible` and a host that takes
+// the focus away (`setScope({ eligible: false })` is "a leave question merely
+// REVEALED this background tree" and "the runtime was detached under a still
+// mounted tree" alike: the host answers both with one boolean).
+async function landingBoard(context: any, opts: { failSave?: boolean } = {}) {
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  const saves: string[] = [];
+  const two = { fixture: counts, other: counts };
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true, guardPage: 'board', issueRequest: null },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      projectList: async () => ({ projects: [
+        { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
+        { project: { id: 'other', session: 'other', name: 'Other' }, live: true },
+      ] }),
+      boardCounts: async () => ({ counts: two }),
+      boardSave: async (session: string) => { saves.push(session); await held; if (opts.failSave) throw new Error('save refused'); return { id: 1 }; },
+    })],
+  });
+  const q = <E extends Element>(sel: string) => app.document.querySelector<E>(sel);
+  const title = () => q('.page-head h1')?.textContent?.trim();
+  const dialogs = () => app.document.querySelectorAll('[role=alertdialog]').length;
+  const land = (session: string, n: number) => app.setProps({ issueRequest: { session, id: 0, n } });
+  const open = async () => { q<HTMLElement>('.card')!.click(); await flush(app); };
+  const edit = async (value: string) => {
+    const input = q<HTMLInputElement>('.d-title-input')!;
+    input.value = value; input.dispatchEvent(new app.window.Event('input', { bubbles: true })); await flush(app);
+  };
+  const save = async () => { q<HTMLButtonElement>('button.go[aria-label="Save"]')!.click(); await flush(app); };
+  await flush(app);
+  return { app, q, title, dialogs, land, open, edit, save, saves, release: async () => { release(); await flush(app); } };
+}
+
+test('landing cell — hold + free, eligible: held behind the running save, lands once it ends (and the save ran once, on its own board)', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('changed'); await f.save();
+  await f.land('other', 1);
+  assert.equal(f.title(), 'Fixture', 'nothing leaves under the running request');
+  await f.release();
+  assert.equal(f.title(), 'Other', 'then it lands');
+  assert.deepEqual(f.saves, ['fixture']);
+});
+
+test('landing cell — newer request: the newest replaces the held one, whatever order they arrived in', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('changed'); await f.save();
+  await f.land('other', 1);
+  await f.land('fixture', 2);
+  await f.release();
+  assert.equal(f.title(), 'Fixture', 'the last pick wins; the older (other) is void');
+});
+
+test('landing cell — hold while displayed but NOT the focus (a leave question revealed a background tree): never taken, and not replayed when the focus arrives later', async (context) => {
+  const f = await landingBoard(context);
+  await f.app.setScope({ eligible: false });
+  await f.land('other', 1);
+  assert.equal(f.title(), 'Fixture', 'a displayed board that is not the focus does not act');
+  await f.app.setScope({ eligible: true });
+  assert.equal(f.title(), 'Fixture', 'and the pick, void at the hold, does not replay once it is the focus');
+});
+
+test('landing cell — free after detach/absorb with the component still mounted and displayed: the held landing is void, no edit, no question, the draft kept', async (context) => {
+  for (const failSave of [false, true]) {
+    const f = await landingBoard(context, { failSave });
+    await f.open(); await f.edit('my draft'); await f.save();
+    await f.land('other', 1);                         // held behind the running save
+    await f.app.setScope({ eligible: false });        // the host: no longer the focus / runtime no longer serves
+    await f.release();                                // the save settles (ok / refused) on the still-mounted tree
+    assert.equal(f.title(), 'Fixture', `save ${failSave ? 'refused' : 'ok'}: the old landing did not move the board`);
+    assert.equal(f.dialogs(), 0, 'and asked nothing');
+    if (failSave) assert.equal(f.q<HTMLInputElement>('.d-title-input')!.value, 'my draft', 'the refused save keeps the typed draft');
+    await f.app.setScope({ eligible: true });
+    assert.equal(f.title(), 'Fixture', 'no replay when it is eligible again');
+    await f.app.close();
+  }
+});
+
+test('landing cell — run: a Keep/Discard the landing parked is withdrawn the moment the host takes eligibility away; it does not come back', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('unsaved');
+  await f.land('other', 1);
+  assert.equal(f.dialogs(), 1, 'the existing guard asks');
+  await f.app.setScope({ eligible: false });
+  assert.equal(f.dialogs(), 0, 'withdrawn with the landing');
+  await f.app.setScope({ eligible: true });
+  assert.equal(f.dialogs(), 0, 'and not asked again');
+  assert.equal(f.q<HTMLInputElement>('.d-title-input')!.value, 'unsaved', 'the draft is untouched');
+});
+
+test('landing cell — leave (not displayed after the hold): void, no replay on return', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('changed'); await f.save();
+  await f.land('other', 1);
+  await f.app.setProps({ visible: false });
+  await f.release();
+  await f.app.setProps({ visible: true });
+  assert.equal(f.title(), 'Fixture');
+});
+
+test('landing cell — null request: the parent clears what it asked, the held landing goes with it', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('changed'); await f.save();
+  await f.land('other', 1);
+  await f.app.setProps({ issueRequest: null });
+  await f.release();
+  assert.equal(f.title(), 'Fixture');
+});
+
+test('landing cell — destroy while held: nothing runs afterwards (the fixture asserts no async activity after the test)', async (context) => {
+  const f = await landingBoard(context);
+  await f.open(); await f.edit('changed'); await f.save();
+  await f.land('other', 1);
+  await f.app.unmount();
+  await f.release();
+  assert.deepEqual(f.saves, ['fixture']);
+});

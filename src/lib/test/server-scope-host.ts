@@ -11,6 +11,7 @@
 // the test mocked, and a page that still imports the facade makes them too,
 // until the slot is retired.
 import { scopeContext } from '../app/server-context.ts';
+import { scopeFlags } from './mount-reactive.svelte.ts';
 import { createServerState } from '../app/server-state.ts';
 import type { ServerRuntime } from '../app/server-runtime.ts';
 
@@ -22,7 +23,8 @@ export const testScope = (transport?: unknown) => {
   // does — release it, say — without a second way to build one.
   (globalThis as { __serverState?: unknown }).__serverState = state;
   const runtime = { id: 'test', api: transport, connection: transport } as unknown as ServerRuntime;
-  return { runtime, state };
+  // The host's word on the binding: live, so a test can take the focus away.
+  return { runtime, state, get eligible() { return () => scopeFlags.eligible; } };
 };
 
 export const testScopeContext = (transport?: unknown) => scopeContext(testScope(transport));

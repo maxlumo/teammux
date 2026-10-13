@@ -23,6 +23,8 @@ interface MountOptions {
 }
 interface ClientApi {
   start(props: Record<string, unknown>): void;
+  setProps(patch: Record<string, unknown>): void;
+  setScope(flags: { eligible?: boolean }): void;
   tick(): Promise<void>;
   flushSync(): void;
   stop(): Promise<void>;
@@ -95,12 +97,15 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
             if (id === entry) return `
               import Component from ${JSON.stringify(fileURLToPath(component))};
               import { mount, unmount, tick, flushSync } from 'svelte';
+              import { reactiveProps, scopeFlags } from ${JSON.stringify(join(root, 'src/lib/test/mount-reactive.svelte.ts'))};
               ${compileOptions.serverScope
                 ? `import { testScopeContext as context } from ${JSON.stringify(join(root, 'src/lib/test/server-scope-host.ts'))};`
                 : 'const context = () => undefined;'}
-              let instance;
+              let instance, live;
               globalThis.__mountClient = {
-                start(props) { instance = mount(Component, { target: document.body, props, context: context(globalThis.__mountScopeTransport) }); },
+                start(props) { live = reactiveProps(props); instance = mount(Component, { target: document.body, props: live.props, context: context(globalThis.__mountScopeTransport) }); },
+                setProps(patch) { live.set(patch); },
+                setScope(flags) { Object.assign(scopeFlags, flags); },
                 tick, flushSync,
                 async stop() { const held = instance; instance = undefined; if (held) await unmount(held); }
               };
@@ -241,6 +246,10 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
       return {
         window: win, document: win.document, flush, close,
         async advance(ms: number) { context.mock.timers.tick(ms); await flush(); },
+        /** Change props the fixture was started with (a parent re-rendering). */
+        async setProps(patch: Record<string, unknown>) { api!.setProps(patch); await flush(); },
+        /** What the host says about the binding (\`ServerScope.eligible\`). */
+        async setScope(flags: { eligible?: boolean }) { api!.setScope(flags); await flush(); },
         /** Destroy the component but keep the realm, so a test can observe
          * what its teardown did — and what work it had in flight still does.
          * `close` remains idempotent after it. */

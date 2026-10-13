@@ -8498,6 +8498,42 @@ test('#357 (Board, R1): deleting the last issue of a board removes its row from 
   assert.match(h.app.document.querySelector('.scope-tree:not(.held) .board-root .sidebar .proj-row.missing')?.textContent ?? '', /alpha.*not connected/u, 'and the server is named unavailable');
 });
 
+test('#357 (Board, R1 P2): DELETE succeeds but the following boardList FAILS — the delete fold is then the ONLY immediate update, and it still reaches the union (this server and the other server s foreground)', async (context) => {
+  const boards = twoBoards();
+  let deleted = false;
+  const issue = { id: 1, title: 'only issue', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] };
+  const rpc = { ...boards.rpc,
+    boardList: async (session: string) => {
+      if (asking() === 'a' && session === 'app' && deleted) throw new Error('boardList refused after delete');
+      return { issues: [issue], statuses: ['todo', 'doing', 'review', 'done'] };
+    },
+    boardGet: async () => issue,
+    boardDelete: async () => { deleted = true; return {}; },
+    // The server is flaky after the delete: its bulk read fails too (a bulk that answered would say 0
+    // and prove nothing about the fold). Only the confirmDelete fold can have changed the row.
+    boardCounts: async () => { if (asking() === 'a' && deleted) throw new Error('A counts refused after delete'); return { counts: boards.counts() }; },
+  };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc });
+  const settleFor = async (n: number) => { for (let i = 0; i < n; i++) { await h.app.advance(300); await h.settle(); } };
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .board-root')!;
+  for (let i = 0; i < 30 && boardRows(h).length < 3; i++) { await h.app.advance(500); await h.settle(); }
+  front().querySelector<HTMLElement>('.card')!.click();
+  await settleFor(4);
+  front().querySelector<HTMLButtonElement>('[aria-label="Delete issue"]')!.click();
+  await settleFor(2);
+  answerDialog(h.app, /^delete/iu);
+  await settleFor(4);
+  assert.ok(deleted);
+  assert.ok(!boardRows(h).some((r) => r.startsWith('alpha:')), `the confirmed delete is in the union although the refresh failed: ${boardRows(h).join(',')}`);
+  await pickServer(h, 'beta');
+  await settleFor(6);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^board$/iu.test((b.getAttribute('aria-label') ?? '').trim()))!.click();
+  await settleFor(4);
+  assert.ok(!boardRows(h).some((r) => r.startsWith('alpha:')), `and on B s foreground: ${boardRows(h).join(',')}`);
+});
+
 // P1-B (reviewer on 390ba4dd): a cross-server pick aimed at a board whose own
 // request is RUNNING was consumed on arrival and dropped by the guard — the
 // focus had moved to B, but the board the person chose never opened.

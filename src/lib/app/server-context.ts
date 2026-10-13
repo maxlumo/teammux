@@ -51,6 +51,14 @@ export interface ServerScope {
    * their template (`scope.tag`), never once at init. Absent in a host that
    * has no notion of several servers (tests of one page). */
   readonly tag?: string | null;
+  /** May a navigation aimed at this subtree still act? The HOST answers, it
+   * knows the binding (board #357): this tree is the CURRENT binding — the
+   * focus, not merely a background tree a leave question has revealed — and
+   * its runtime still serves (attached, not detached or absorbed). A page
+   * never compares ids or imports CURRENT for it; it asks. A LIVE getter over
+   * the host's reactive scope, so an effect that calls it follows the focus.
+   * Absent in a host with no notion of several servers: always eligible. */
+  readonly eligible?: (() => boolean) | null;
 }
 
 /**

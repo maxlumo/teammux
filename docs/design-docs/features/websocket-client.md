@@ -1282,18 +1282,23 @@ Follow-up after review (#357, reviewer on 390ba4dd; orchestrator ruling):
   reviewer R1 on 0feb403e). A server still without its first complete batch
   is "no list yet"; one that failed later keeps its rows, muted, "not
   connected". `hubRooms` stays tolerant: a missing clock only orders the rows.
-- **A landing is held, and it has ONE validity.** The cross-server pick sets
-  the newest request; the target Board takes it through the existing guard
-  once nothing of it is committing (`submitting`). The held landing and any
-  Keep/Discard it parks share one condition: the board is still DISPLAYED (a
-  shown tree is the focus), the parent's request is still that request, and
-  the board is alive — checked when the hold is taken, when the board frees,
-  and again right before the continuation runs. Leaving the board, a cleared
-  or newer request, or destroy voids it: no replay when the person comes back,
-  and a parked question is withdrawn. `id: 0` is the board LIST of that
-  project: an open detail is left through the same guard (dirty →
-  Keep/Discard). The focus never moves to a board that then silently ignores
-  the choice, and a navigation that no longer exists never asks.
+- **A landing is held, and it has ONE eligibility.** The cross-server pick
+  sets the newest request; the target Board takes it through the existing
+  guard once nothing of it is committing (`submitting`). The held landing and
+  any Keep/Discard it parks share one condition — displayed ∧ focused ∧
+  serving ∧ same request ∧ not destroyed. "Displayed" is the board's own
+  `visible`; "focused ∧ serving" is the HOST's word, one getter on the server
+  scope (`scope.eligible()`: this tree is the CURRENT binding and its runtime
+  is attached), because being shown is not being the focus — a leave question
+  can reveal a background tree — and a runtime detached or absorbed under a
+  still-mounted tree can serve nothing. The board never imports CURRENT or
+  compares ids as a stand-in for the handle. It is evaluated at the hold, when
+  the board frees, and again right before the continuation runs; any false
+  VOIDS the landing and withdraws the question that belongs to it — no replay
+  when the person comes back. `id: 0` is the board LIST of that project: an
+  open detail is left through the same guard (dirty → Keep/Discard). The
+  focus never moves to a board that then silently ignores the choice, and a
+  navigation that no longer exists never asks.
 - **The Board's head wears the Hub head's Name + tag stack**, one atom in
   app.css (`.title-stack`/`.name-line`, #359), and the width ghost is priced
   by the counts of the rows actually rendered.

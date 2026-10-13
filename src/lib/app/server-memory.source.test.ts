@@ -95,6 +95,11 @@ test('every module-level store is reset on a switch or named global (board 315)'
       // memory (probeFailedAt), global by design: see
       // websocket-client.md § The transport is an object, not a module.
       if (/^core\/(ws|connection|ws-api|connection-registry)\.ts$/u.test(rel)) continue;
+      // The mount harness (#357): `scopeFlags` is a TEST fixture's switch for what
+      // the host says about a binding. It is imported only by the harness
+      // entry, never by the app bundle, and each mounted fixture is its own
+      // realm — so it is not a cache a server switch could leave stale.
+      if (/^test\/mount-reactive\.svelte\.ts$/u.test(rel)) continue;
       found.push(`${rel}:${name}`);
       const per = PER_SERVER[rel]?.[name];
       const glob = GLOBAL[rel]?.[name];
