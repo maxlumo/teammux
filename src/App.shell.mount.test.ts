@@ -7557,7 +7557,8 @@ test('#356 (phone, Aggregate): the Hub header stacks the server tag under the pr
   const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .hub-root .chat-head .title-stack')!;
   assert.ok(stack, 'the name and tag share one stack');
   assert.ok(stack.classList.contains('stacked'), 'phone: stacked');
-  assert.deepEqual([...stack.children].map((c) => c.tagName.toLowerCase() + (c.classList.contains('server-tag') ? '.server-tag' : '')), ['h1', 'span.server-tag'], 'the name on top, the tag under it');
+  assert.deepEqual([...stack.children].map((c) => c.classList.contains('name-line') ? 'name-line' : c.classList.contains('server-tag') ? 'server-tag' : c.tagName), ['name-line', 'server-tag'], 'the name line (name + chevron) on top, the tag under it');
+  assert.ok(stack.children[0]?.querySelector('button[aria-haspopup="menu"]'), 'the chevron sits with the name, not beside the two-line block');
   assert.equal(stack.querySelector('.h1-text')?.textContent, 'app');
   assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
 });
@@ -7574,7 +7575,19 @@ test('#359 (desktop, Aggregate): the header stack is NOT mode-driven — no `sta
   assert.ok(stack && !stack.classList.contains('stacked'), 'desktop: no mode class — CSS wrap decides');
   assert.equal(stack.querySelector('.h1-text')?.textContent, long, 'the whole name is in the DOM (nothing truncates it before paint)');
   assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha', 'the tag is in the same wrapping stack, after the name');
+  // The chevron lives in the NAME LINE with the name (owner 22:57: it must
+  // never float beside a two-line block): the stack's children are the name
+  // line and the tag; the name line holds the h1 and the menu button.
   assert.equal(stack.children.length, 2);
+  const line = stack.children[0] as HTMLElement;
+  assert.ok(line.classList.contains('name-line'));
+  assert.ok(line.querySelector('h1 .h1-text'), 'the name is in the line');
+  const chevron = line.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+  assert.ok(chevron, 'the chevron is in the line, after the name');
+  assert.equal(line.lastElementChild, chevron, 'glued at the name s right edge');
+  assert.ok(stack.children[1]?.classList.contains('server-tag'), 'the tag is the second item: it alone wraps');
+  // Geometry (chevron on the name's line within 8px; tag below) is the
+  // validator's at 1280 and in split-screen; jsdom has no layout.
 });
 
 test('#356 (desktop, Aggregate): the header tag stays inline', async (context) => {

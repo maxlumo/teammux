@@ -608,12 +608,20 @@ project name. On a 390px phone the tag (`flex: none`) beside four head icons
 left the name five characters ("tmux-mo…" — owner 2026-10-13 21:48: 放到项目名
 下面，紧挨着); #356 stacked it by mode. The owner then asked for the same on
 the desktop whenever the name would be cut (#359, 22:34), so the trigger is
-FIT: `.title-stack` is a wrapping row — the h1 does not shrink, the tag is the
-wrappable item, so it goes under the name exactly when the two do not fit,
-and the name ellipsises only past the whole group (design-language: "the tag
-yields to the name"). `compact` still stacks unconditionally. No new token,
-no new atom, no measurement; the title-group's priorities (name over path,
-never over the buttons) are unchanged.
+FIT: `.title-stack` is a wrapping row whose first item is the NAME LINE —
+the name (or the rename input) with its chevron glued to the right edge, one
+non-wrapping unit that hugs its text and does not grow or shrink for the tag
+— and whose only wrappable item is the tag. So inline: name ▾ tag; wrapped:
+line 1 = name ▾, line 2 = tag. The first cut put the chevron OUTSIDE the stack
+as a sibling, and on a wrap it centred against the two-line block, leaving a
+hole right of the name (owner 22:57, two screenshots) — the chevron belongs
+to the name it expands (owner 2026-08-30), on every line arrangement. Inside
+the line the name shrinks (ellipsis) so the chevron stays glued when the name
+alone is too long; `max-width: 100%` keeps the line inside the group. The
+menu still anchors on the name element; the chevron keeps its touch box.
+`compact` still stacks unconditionally. No new token, no new atom, no
+measurement; the title-group's priorities (name over path, never over the
+buttons) are unchanged.
 
 ### An unsent line belongs to its project
 

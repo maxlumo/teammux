@@ -1276,11 +1276,15 @@ Owner, on #356's header: "那个 tag 放到名称底下，是按照模式来的�
 project 名称会被压缩成'...'时，你自动就把它放到底下？我发现在桌面上也需要这样的一个
 功能。" Wherever a name carries a `ServerTag` (the Hub head; the Board, Terminal
 and Files heads as they gain one), the two sit in ONE wrapping flex row
-(`.title-stack`): the name keeps its intrinsic width (`flex: 1 0 auto`,
-`max-width: 100%`), the tag is the wrappable item, so the tag drops under the
-name exactly when the two do not fit side by side — on any screen, at any
-width, by fit and not by mode — and the name ellipsises only once it alone is
-wider than the whole group. Pure CSS: no ResizeObserver, no measurement, no
+(`.title-stack`): the NAME LINE — the name and whatever is glued to it (the
+Hub's chevron) — is one non-wrapping unit that hugs its text (`flex: 0 0
+auto; max-width: 100%`), the tag is the wrappable item, so the tag drops under
+the name exactly when the two do not fit side by side — on any screen, at any
+width, by fit and not by mode — and the name ellipsises only once the line
+alone is wider than the whole group. A control that belongs to the name
+(the chevron) is INSIDE the name line, never a sibling of the stack: a
+sibling centres against the two-line block and floats mid-height beside a
+hole (owner 2026-10-13 22:57). Pure CSS: no ResizeObserver, no measurement, no
 second class flip; the wrapped form reuses the 2px stack rhythm. The phone
 stacks unconditionally (the stack is its complete form, #356). A tag that
 holds its place while the name truncates, or a JS-measured flip, is a

@@ -2088,56 +2088,58 @@
         <!-- Name and menu stay one tight group (board #32). The name is
              selectable prose; its sibling command owns the full hit target. -->
         <div class="title-group">
-          {#if renaming}
-            <input class="h1-edit" bind:this={renameEl} bind:value={renameDraft}
-              aria-label={t('projectRename')} maxlength="80"
-              onkeydown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
-                else if (e.key === 'Escape') { e.preventDefault(); renaming = false; }
-              }}
-              onblur={commitRename} />
-          {:else}
-            <!-- The name and its server tag (③c-1): inline while both FIT,
-                 the tag WRAPPED under the name the moment they do not (board
-                 #359, owner 2026-10-13: "当发现 project 名称会被压缩成…时…自动
-                 放到底下…桌面上也需要" — the trigger is fit, not mode). Pure
-                 CSS: the h1 keeps its intrinsic width (flex-basis auto, no
-                 shrink), so the wrappable tag is the first thing to yield;
-                 only a name wider than the whole group ellipsises (max-width
-                 100%). The phone's complete form is the stack, so compact
-                 stacks unconditionally (#356). -->
-            <div class="title-stack" class:stacked={compact}>
-              <h1>
-                <!-- Rename remains an explicit project-menu action. -->
-                <span class="h1-text" bind:this={titleNameEl}>{selectedRow?.project.name ?? ''}</span>
-              </h1>
-              <ServerTag name={scope?.tag} />
+          <!-- The name, its chevron and its server tag (③c-1, #356, #359;
+               owner 2026-10-13 22:57, two screenshots): the NAME LINE is one
+               non-wrapping unit — the name (or the rename input) with the
+               chevron glued to its right edge (owner 2026-08-30: 紧挨着 name)
+               — and the tag is the ONLY wrappable item. Inline while both fit
+               (name ▾ tag); when they do not, line 1 = name ▾ hugging the
+               text, line 2 = tag. Pure CSS (fit, not mode); the phone stacks
+               unconditionally (#356) with the same name line. The name line
+               does not grow, so nothing floats mid-block beside a hole. -->
+          <div class="title-stack" class:stacked={compact}>
+            <div class="name-line">
+              {#if renaming}
+                <input class="h1-edit" bind:this={renameEl} bind:value={renameDraft}
+                  aria-label={t('projectRename')} maxlength="80"
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                    else if (e.key === 'Escape') { e.preventDefault(); renaming = false; }
+                  }}
+                  onblur={commitRename} />
+              {:else}
+                <h1>
+                  <!-- Rename remains an explicit project-menu action. -->
+                  <span class="h1-text" bind:this={titleNameEl}>{selectedRow?.project.name ?? ''}</span>
+                </h1>
+              {/if}
+              {#if selected}
+                <!-- The project's own verbs — Open/Rename/Close/Delete — as ONE
+                     second-level menu (owner, 2026-08-29), glued to the name it
+                     acts on. The affordance is a DOWNWARD CHEVRON, tight against
+                     the name — it reads as "expand this name for its options",
+                     the dropdown grammar everyone already knows (owner,
+                     2026-08-30: "换成一个向下的直角箭头…有点像把这个名字展开给
+                     出的下拉标签选项，这样对于人类更好理解").
+                     Opens the SAME projectItems menu the sidebar row's
+                     long-press/right-click speaks. -->
+                <CommandButton variant="icon" icon="chevron-down" label={t('hubProjectMenu')} hasPopup="menu"
+                  onclick={(e) => {
+                    // The menu is the NAME expanding downward (board #32): its
+                    // LEFT edge sits on the name's own left edge, measured from
+                    // the name element's REAL rect (anchorOf carries the zoom
+                    // correction), so a wide menu near the right edge stops
+                    // clipping — the placement clamp still owns the viewport
+                    // edges. While renaming, the span is an input and the caret
+                    // itself anchors. Every other context menu keeps the
+                    // right-aligned pointer default.
+                    openCtx({ anchor: anchorOf(titleNameEl ?? e.currentTarget), align: 'left' },
+                      selectedRow?.project.name ?? '', projectItems(selectedRow, true));
+                  }} />
+              {/if}
             </div>
-          {/if}
-          {#if selected}
-            <!-- The project's own verbs — Open/Rename/Close/Delete — as ONE
-                 second-level menu (owner, 2026-08-29), glued to the name it
-                 acts on. The affordance is a DOWNWARD CHEVRON, tight against
-                 the name — it reads as "expand this name for its options",
-                 the dropdown grammar everyone already knows (owner,
-                 2026-08-30: "换成一个向下的直角箭头…有点像把这个名字展开给
-                 出的下拉标签选项，这样对于人类更好理解").
-                 Opens the SAME projectItems menu the sidebar row's
-                 long-press/right-click speaks. -->
-            <CommandButton variant="icon" icon="chevron-down" label={t('hubProjectMenu')} hasPopup="menu"
-              onclick={(e) => {
-                // The menu is the NAME expanding downward (board #32): its
-                // LEFT edge sits on the name's own left edge, measured from
-                // the name element's REAL rect (anchorOf carries the zoom
-                // correction), so a wide menu near the right edge stops
-                // clipping — the placement clamp still owns the viewport
-                // edges. While renaming, the span is an input and the caret
-                // itself anchors. Every other context menu keeps the
-                // right-aligned pointer default.
-                openCtx({ anchor: anchorOf(titleNameEl ?? e.currentTarget), align: 'left' },
-                  selectedRow?.project.name ?? '', projectItems(selectedRow, true));
-              }} />
-          {/if}
+            {#if !renaming}<ServerTag name={scope?.tag} />{/if}
+          </div>
         </div>
         <!-- The FULL path, not a middle-elided stub: it renders whole when it
              fits, and when it doesn't the box scrolls (wheel included) instead
@@ -2483,7 +2485,13 @@
      form uses the 2px rhythm the project rows' `.p-main` stack already uses.
      The phone stacks unconditionally: there the stack IS the complete form. */
   .title-stack { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
-  .title-stack h1 { flex: 1 0 auto; max-width: 100%; }
+  /* The name line hugs its text (no grow) and never wraps inside: the
+     chevron is glued to the name's right edge whatever line the tag is on.
+     It does not shrink for the tag (flex-shrink 0) — the tag wraps first —
+     and `max-width: 100%` keeps it inside the group so the name's own
+     ellipsis engages only once the name alone is too wide. */
+  .name-line { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; max-width: 100%; min-width: 0; }
+  .name-line h1, .name-line .h1-edit { flex: 0 1 auto; min-width: 0; }
   .title-stack.stacked { flex-direction: column; align-items: flex-start; }
   .head-tools { display: flex; align-items: center; gap: var(--tool-gap); flex: none; }
   /* The title yields width before any native command target does. */
