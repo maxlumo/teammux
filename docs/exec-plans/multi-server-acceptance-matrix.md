@@ -98,6 +98,13 @@ F2 (slow release / owned-fail combination), F6 (registry change after a true
 answer), the B-series real-absorb variants, X4 (manual vs automatic Dismiss
 race), X6 (guest). X2's CURRENT-only branch is a source pin (below).
 
+M1 F5 (the bound runtime never joined as a member of its own set) gained a
+direct test after the validator's bisect (20:39): `M1 F5 (bound runtime never
+joined…)` ×2 exits — no dial of the bound alias between the form connect and
+the exit, same connection object. F1 (cancel releases the lease) and P1-B
+(mirror-fail owes Retry a dial) are layered guards since 1125b5f4, kept as
+defence and recorded, not behaviour-tested.
+
 ## Known evidence gaps (recorded, not claimed)
 
 - Editor-head `ServerTag` in the Agents page is not on a tested path (③c-5 NC 13/14).

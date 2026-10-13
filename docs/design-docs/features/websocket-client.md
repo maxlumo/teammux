@@ -1362,7 +1362,11 @@ over an explicit clear or single pane (reviewer P1-NAV on 7e0f69de) — so the
 four navigation fields are reset and the record adopted as it is, behind the
 gate, editors and drafts untouched; the mirror written (`focusServer`;
 CURRENT already names it, so a mirror failure is the gate's — it blocks, and
-Retry owes the focus its dial), the window's attempts aimed at the absorbed
+Retry owes the focus its dial — a layered guard since 1125b5f4: the handover
+goes on to `handOver`/`adopt` after the failed mirror write and Retry's drain
+settles it again, so the owed dial of an already-connected survivor is a
+no-op; kept as defence, no harness shows it alone — validator 20:39), the
+window's attempts aimed at the absorbed
 server made stale (`supersede`, `claim`; a FAILED switch's panel, a resting
 state, is put away with its reason kept as the notice), the canonical out of
 the set as the focus (`handOver`), the absorbed tree into it as a member
@@ -1381,6 +1385,17 @@ socket); the member set never lets an orphan's late answer leave it
 consumed once, whatever settles it. The connect form's walk asks a bound
 tree whether or not its handle is alive (`confirmFormLeave`): a detached
 handle still has its drafts.
+
+An activation's lease is released on cancel as well as on its `done`
+(F1) — layered since 1125b5f4: `done.finally(release)` releases when the
+cancelled dial settles "superseded", so the cancel-path release matters only
+for a socket that never settles, which no harness can show; kept as defence
+(validator 20:39). The bound runtime is never joined as a member of its own
+set (F5, `memberIds`: `id !== held`) — held by a direct test since fd6083f6's
+follow-up: during a form connect that moved CURRENT to N while A is still
+bound, the events log carries no dial of A and A's connection object is the
+same before and after (the bisect showed the robust handover had masked the
+harm from 1125b5f4 on).
 
 The root has an explicit END (reviewer P1-3 on 9c1f757c). WHEN the drain
 runs is one module, `app/window-drain.ts` — one timer whoever asked, run on

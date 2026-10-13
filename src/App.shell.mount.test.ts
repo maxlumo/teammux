@@ -6470,6 +6470,73 @@ for (const [name, aNav, cNav, check, cBefore] of navCases) test(`P1-NAV (handove
   else assert.equal(cells, slot.splitCells.length, 'the split in front is the slot s');
 });
 
+for (const exit of ['form-owned-cancel', 'form-owned-fail'] as const) test(`M1 F5 (bound runtime never joined as a member of its own set, exit=${exit}): while the form s connect has moved CURRENT to N and A is still BOUND, the member sync dials and joins nothing of A s — zero dial of the alias from the form connect to the exit`, async (context) => {
+  // Aggregate, A (alias) focus and bound, C a member. The form connects to N:
+  // the candidate answers (CURRENT = N), N's own dial hangs. A is now bound
+  // but not CURRENT — exactly the state in which a sync that forgot `held`
+  // would list A as a member and dial it over its live socket (M1 F5). The
+  // events log must carry no `dial@a:` after the form connect, and A's
+  // connection must be the same one, never replaced. (The validator's bisect
+  // on fd6083f6: the guard was unheld since 1125b5f4 because the robust
+  // handover masked the harm; this asserts the harm's absence directly.)
+  let cHangs = false;
+  const cLet = { let: null as (() => void) | null };
+  const n = { let: null as (() => void) | null, fail: null as ((e: Error) => void) | null, dials: 0 };
+  const events: string[] = [];
+  const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') ? 'm-x' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: { ...editorRpc },
+    gate: (url) => {
+      if (url.includes('//alias') && cHangs && !cLet.let) return new Promise<void>((r) => { cLet.let = r; });
+      if (url.includes('//n')) {
+        n.dials++;
+        if (n.dials > 2) return Promise.reject(new Error('N down'));
+        return new Promise<void>((r, rej) => { n.let = r; n.fail = rej; });
+      }
+      return null;
+    },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+  });
+  // (the alias answers as its OWN machine m-x here: no absorb, no handover —
+  // the test is about the bound runtime alone)
+  for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const a = conn(h, 'a')!;
+  assert.ok(a.isConnected(), 'A bound and up');
+  assert.equal(trees(h.app).length, 2, 'A and C');
+  // Form connect to N.
+  await toConnection(h);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://n:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  const mark = events.length;
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 6 && !n.let; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(n.let, 'N s candidate dial is out');
+  const first = n.let; n.let = null; first();
+  for (let i = 0; i < 6 && !n.let; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(n.let, 'N s own dial is out');
+  const nId = JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.address === 'ws://n:9899')?.id;
+  assert.ok(nId && ls.getItem('tmux_server_current') === nId, 'CURRENT is N while A is still bound');
+  // Several sync rounds pass (registry change, the 20 s cadence, the window
+  // going quiet): A, bound, must not be joined.
+  for (let i = 0; i < 12; i++) { await h.app.advance(2000); await h.settle(); }
+  // The EXIT.
+  if (exit === 'form-owned-cancel') [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((x) => /^cancel$/iu.test((x.textContent ?? '').trim()))!.click();
+  else { const fail = n.fail!; n.let = null; n.fail = null; fail(new Error('N refused')); }
+  for (let i = 0; i < 10; i++) { await h.app.advance(300); await h.settle(); }
+  const since = events.slice(mark);
+  assert.deepEqual(since.filter((e) => e.startsWith('dial@a:')), [], `no dial of the bound alias from the form connect to the exit: ${since.filter((e) => e.startsWith('dial@')).join(', ')}`);
+  // (Disconnect closed A's socket for the form — the connect card's path —
+  // so A is bound and OFFLINE here; a join would have been a fresh dial on
+  // a new connection object, which is what the two assertions exclude.)
+  assert.equal(conn(h, 'a'), a, 'A s connection is the same object: never replaced by a join');
+  assert.equal(a.disposed(), false, 'and not disposed');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'the exit put CURRENT back on A');
+  assert.equal(trees(h.app).length, 2, 'A and C, as before');
+});
+
 test('M1 F5/X2 (newer target): the pending target N is replaced by a NEWER user target P that succeeds — P binds, A ends by the swap as answered, C stays a member, the owed handover is void (never writes C back over P)', async (context) => {
   const { h, ls, a, c, draftA } = await fAbsorbUnder(context, 'form-newer-target');
   const pId = JSON.parse(ls.getItem('tmux_servers')!).find((e: any) => e.address === 'ws://p:9899')?.id;
