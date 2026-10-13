@@ -712,8 +712,16 @@ mod tests {
             Some("1|3b94a118-d7bb-4c58-b1a7-d64e408bc98b".into()),
             "the recovered `•` head opens the block"
         );
-        // Padded past error_signature's 40-line staleness window, as the deep window allows.
-        assert!(deep_error_signature("kiro", &format!("{}{deep}", "old line\n".repeat(120))).is_some());
+        // The block sits more than 40 lines above the bottom (filler AFTER it:
+        // `signature_within` counts from the tail): the ordinary window no
+        // longer sees it, the deep window still does.
+        let buried = format!("{deep}{}", "newer line\n".repeat(60));
+        assert_eq!(error_signature("kiro", &buried), None, "outside the 40-line window");
+        assert_eq!(
+            deep_error_signature("kiro", &buried),
+            Some("1|3b94a118-d7bb-4c58-b1a7-d64e408bc98b".into()),
+            "inside the deep window"
+        );
     }
 
     #[test]

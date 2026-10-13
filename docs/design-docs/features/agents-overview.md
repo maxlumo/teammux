@@ -274,7 +274,7 @@ A fixed prefix asserts every byte before the part that matters, so any repaint b
 | agent state, working/idle, replies | hooks and the session jsonl (`telemetry::derive`, `kiro_reply_from_session`) | not screen readers |
 | the frontend | nothing parses kiro's screen text | — |
 
-Open on purpose, unchanged: a tool call whose output is, verbatim and alone, the high-traffic sentence under a short tool head would still read as a hit (`• Read x` + that line); it is the same exposure `●` always had, it needs the tool to print exactly the sentence with a uuid, and a false hit costs one `continue`.
+Open on purpose, unchanged: a tool call whose output is, verbatim and alone, the high-traffic sentence under a short tool head would still read as a hit (`• Read x` + that line); it is the same exposure `●` always had, it needs the tool to print exactly the sentence with a uuid. A false hit types `continue` into a working agent: once per incident when the hooks then confirm it, but up to `MAX_ATTEMPTS=4` spaced sends when they do not — this fix did not change that bound. Closing it needs a real tool paint to write the exclusion against (follow-up), not a model whitelist: the model name must stay free.
 
 ### The app owns managed agent configs, and drift is repaired at every start (moved from tmm-cli.md, board #102)
 
