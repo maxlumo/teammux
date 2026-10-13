@@ -7549,7 +7549,7 @@ test('#356: a notification row is three fixed lines — a long sender and an old
   assert.equal(row.querySelector('.nc-text')?.textContent, old.excerpt, 'the excerpt is its own line');
 });
 
-test('#356: the Hub header stacks the server tag under the project name on the phone and keeps it inline on the desktop; Single has no tag either way', async (context) => {
+test('#356 (phone, Aggregate): the Hub header stacks the server tag under the project name — one stack element, name on top, tag tight under it', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile',
   }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
@@ -7562,7 +7562,9 @@ test('#356: the Hub header stacks the server tag under the project name on the p
   assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
 });
 
-test('#356 (desktop): the header tag stays inline', async (context) => {
+// (Single has no tag on either screen — held by `③c-1: Single names nothing`
+// and `③c-4 (Single)…`, not re-tested here.)
+test('#356 (desktop, Aggregate): the header tag stays inline', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
   }), undefined, { ...sandbox, rpc: twoHubs() });
@@ -7570,7 +7572,6 @@ test('#356 (desktop): the header tag stays inline', async (context) => {
   const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .hub-root .chat-head .title-stack')!;
   assert.ok(stack && !stack.classList.contains('stacked'), 'desktop: inline');
   assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
-  // Single: no tag, no stack content beyond the name.
 });
 
 test('③c-4 (Single): one server, one list, no tag, Clear as before', async (context) => {
