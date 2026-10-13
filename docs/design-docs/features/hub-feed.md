@@ -601,17 +601,19 @@ An intentionally premature menu on first selection failed the original
 mounted characterization. A separate mounted case covers double-click
 filter toggling and the stopped card's explicit Resume control.
 
-### The header's server tag is inline on the desktop and stacked under the name on the phone (#356, 2026-10-13)
+### The header's server tag wraps under the name when they do not fit; the phone always stacks (#356, #359, 2026-10-13)
 
 Since ③c-1 the Hub head names its server with `ui/ServerTag` beside the
 project name. On a 390px phone the tag (`flex: none`) beside four head icons
 left the name five characters ("tmux-mo…" — owner 2026-10-13 21:48: 放到项目名
-下面，紧挨着). One markup, `.title-stack`, holds the name and the tag; on
-`compact` it is a column (`gap: 2px`, the project rows' stack rhythm) with the
-name on top at full width and the tag tight under it; on the desktop it is
-inline. Single mode has no tag either way (the ③c-1 rule). No new token, no
-new atom; the title-group's priorities (name over path, never over the
-buttons) are unchanged.
+下面，紧挨着); #356 stacked it by mode. The owner then asked for the same on
+the desktop whenever the name would be cut (#359, 22:34), so the trigger is
+FIT: `.title-stack` is a wrapping row — the h1 does not shrink, the tag is the
+wrappable item, so it goes under the name exactly when the two do not fit,
+and the name ellipsises only past the whole group (design-language: "the tag
+yields to the name"). `compact` still stacks unconditionally. No new token,
+no new atom, no measurement; the title-group's priorities (name over path,
+never over the buttons) are unchanged.
 
 ### An unsent line belongs to its project
 

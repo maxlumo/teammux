@@ -2097,11 +2097,15 @@
               }}
               onblur={commitRename} />
           {:else}
-            <!-- The name and its server tag (③c-1): one line on the desktop,
-                 where there is room; on the phone STACKED — the name on top
-                 at full width, the tag tight under it (board #356, owner
-                 2026-10-13: the inline tag squeezed "tmux-mobile" to five
-                 characters beside four head icons; "放到项目名下面，紧挨着"). -->
+            <!-- The name and its server tag (③c-1): inline while both FIT,
+                 the tag WRAPPED under the name the moment they do not (board
+                 #359, owner 2026-10-13: "当发现 project 名称会被压缩成…时…自动
+                 放到底下…桌面上也需要" — the trigger is fit, not mode). Pure
+                 CSS: the h1 keeps its intrinsic width (flex-basis auto, no
+                 shrink), so the wrappable tag is the first thing to yield;
+                 only a name wider than the whole group ellipsises (max-width
+                 100%). The phone's complete form is the stack, so compact
+                 stacks unconditionally (#356). -->
             <div class="title-stack" class:stacked={compact}>
               <h1>
                 <!-- Rename remains an explicit project-menu action. -->
@@ -2470,12 +2474,17 @@
      keeps it reachable. The buttons are `flex: none` and always keep their
      box. */
   .title-group { display: flex; align-items: center; gap: 1px; flex: 0 1 auto; min-width: 0; }
-  /* Name + tag: inline on the desktop; a column on the phone (#356), the
-     2px rhythm the project rows' `.p-main` stack already uses — the tag is
-     a line under the name, never the name's rival for width. */
-  .title-stack { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .title-stack.stacked { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .title-stack.stacked h1 { max-width: 100%; }
+  /* Name + tag (#356, #359): a WRAPPING row — the tag is a line under the
+     name exactly when the two do not fit side by side, on any screen; the
+     name never ellipsises to make room for the tag (design-language: "the
+     tag yields to the name"). The h1 does not shrink (`flex: 1 0 auto`), so
+     the wrappable tag yields first; `max-width: 100%` lets the ellipsis
+     engage only once the name alone is wider than the group. The wrapped
+     form uses the 2px rhythm the project rows' `.p-main` stack already uses.
+     The phone stacks unconditionally: there the stack IS the complete form. */
+  .title-stack { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
+  .title-stack h1 { flex: 1 0 auto; max-width: 100%; }
+  .title-stack.stacked { flex-direction: column; align-items: flex-start; }
   .head-tools { display: flex; align-items: center; gap: var(--tool-gap); flex: none; }
   /* The title yields width before any native command target does. */
   h1 { display: flex; align-items: center; min-width: 0; }

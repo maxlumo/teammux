@@ -7564,6 +7564,19 @@ test('#356 (phone, Aggregate): the Hub header stacks the server tag under the pr
 
 // (Single has no tag on either screen — held by `③c-1: Single names nothing`
 // and `③c-4 (Single)…`, not re-tested here.)
+test('#359 (desktop, Aggregate): the header stack is NOT mode-driven — no `stacked` class on the desktop; the name and the tag are both in one wrapping stack, so a name that does not fit beside the tag pushes the tag under it (pixel truth: validator at 1280; jsdom has no layout)', async (context) => {
+  const long = 'a-forty-character-project-name-for-the-fit-test';
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: twoHubs({ projectList: async () => ({ projects: [{ project: { id: `${asking()}-long`, name: long, session: long, path: `/${long}`, room: `proj:${long}`, updated_at: 9000 }, live: true, slots: [] }] }) }) });
+  for (let i = 0; i < 30 && !h.app.document.querySelector('.scope-tree:not(.held) .hub-root .chat-head .title-stack .server-tag'); i++) { await h.app.advance(500); await h.settle(); }
+  const stack = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .hub-root .chat-head .title-stack')!;
+  assert.ok(stack && !stack.classList.contains('stacked'), 'desktop: no mode class — CSS wrap decides');
+  assert.equal(stack.querySelector('.h1-text')?.textContent, long, 'the whole name is in the DOM (nothing truncates it before paint)');
+  assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha', 'the tag is in the same wrapping stack, after the name');
+  assert.equal(stack.children.length, 2);
+});
+
 test('#356 (desktop, Aggregate): the header tag stays inline', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',

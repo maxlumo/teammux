@@ -497,8 +497,14 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // desktop and STACKED under it on the phone — one markup, `compact` flips
   // the direction; the stack uses the project rows' 2px rhythm, no new token.
   assert.match(group, /<div class="title-stack" class:stacked=\{compact\}>\s*<h1>[\s\S]*?<\/h1>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u, 'name and tag share one stack element; the tag follows the name');
-  assert.match(source, /\.title-stack \{[^}]*display: flex;[^}]*min-width: 0;[^}]*\}/u);
-  assert.match(source, /\.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*gap: 2px;[^}]*\}/u, 'the phone stacks, tag tight under the name');
+  // #359 (owner 2026-10-13): the trigger is FIT, not mode — pure CSS. The
+  // stack wraps; the h1 keeps its intrinsic width (no shrink) so the tag
+  // yields first; max-width 100% lets the ellipsis engage only when the name
+  // alone overflows the group. No ResizeObserver, no JS measurement.
+  assert.match(source, /\.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
+  assert.match(source, /\.title-stack h1 \{ flex: 1 0 auto; max-width: 100%; \}/u, 'the name does not shrink for the tag; it ellipsises only past the whole group');
+  assert.match(source, /\.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
+  assert.ok(!/ResizeObserver|scrollWidth|clientWidth/u.test(source.slice(source.indexOf('title-stack'), source.indexOf('title-stack') + 2000)), 'no measurement: CSS decides');
   assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(source), 'tokens only');
   // The NAME wins the width fight against the PATH (owner, 2026-08-30: "名字
   // 还是优先要显示全的") but never against the BUTTONS (owner, 2026-09-02,

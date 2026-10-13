@@ -1270,6 +1270,23 @@ Owner, 2026-10-09: "现在的状态显示经常有红色的小点。比如网络
 
 Unread never wears `--status-*` (it is not a state; `--status-ok` already means "ended well") and never the halo or breathe (those say a turn is open). Two labelled red uses stay outside the dot language: the Board sidebar's categorical `todo` count chip (with its word) and the context bar's >85% band. `Sidebar.source.test.ts` and `totail.source.test.ts` pin the tokens and the absence of `--status-`/`--danger`/animation on the unread atoms.
 
+### A name never ellipsises to make room for its tag — the tag yields first (2026-10-13, board #359)
+
+Owner, on #356's header: "那个 tag 放到名称底下，是按照模式来的吗？还是说，当发现
+project 名称会被压缩成'...'时，你自动就把它放到底下？我发现在桌面上也需要这样的一个
+功能。" Wherever a name carries a `ServerTag` (the Hub head; the Board, Terminal
+and Files heads as they gain one), the two sit in ONE wrapping flex row
+(`.title-stack`): the name keeps its intrinsic width (`flex: 1 0 auto`,
+`max-width: 100%`), the tag is the wrappable item, so the tag drops under the
+name exactly when the two do not fit side by side — on any screen, at any
+width, by fit and not by mode — and the name ellipsises only once it alone is
+wider than the whole group. Pure CSS: no ResizeObserver, no measurement, no
+second class flip; the wrapped form reuses the 2px stack rhythm. The phone
+stacks unconditionally (the stack is its complete form, #356). A tag that
+holds its place while the name truncates, or a JS-measured flip, is a
+regression. Verified in a real browser at 1280 (85-char name whole, tag below;
+short name inline) and 700 (tag wraps first, the name ellipsises after).
+
 ### One server tag, shown by the source set (2026-10-12, board #335 ③c-1)
 
 Where several servers can show in one place — a page head, a union row, the
