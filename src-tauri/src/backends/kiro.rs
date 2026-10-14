@@ -533,17 +533,29 @@ pub(crate) fn kiro_reply_from_session(jsonl: &str) -> Option<String> {
     reply
 }
 
-/// Locate the session under `sessions_root` and read what it says.
+/// What a sessions root can tell us about one session (board #376 review
+/// P1, both rounds). THREE outcomes, because two of them used to be one:
 ///
-/// TWO questions, which `Option<String>` alone cannot answer apart (board
-/// #376 review P1): the OUTER option is whether this root HOLDS the session
-/// at all — the session's own directory, under any cwd bucket — and the
-/// inner one is whether that session has a reply for the latest turn. They
-/// must stay apart because only "this root does not have it" may send the
-/// caller to another root; "it is here and says nothing" is an ANSWER, and
-/// the #213 rule depends on it (a turn whose newest assistant row is kiro's
-/// `"..."` placeholder has no reply, and taking the PREVIOUS turn's text
-/// instead would post a stale sentence as this turn's).
+/// * `Missing` — this root does not hold the session. The only outcome that
+///   may send the caller to another root.
+/// * `Found(reply)` — it holds it; `reply` is the latest turn's text, or
+///   `None` when that turn has none (kiro's `"..."` placeholder, #213) or
+///   its file cannot be read yet. An answer, not a miss: taking another
+///   root's copy of the same id would post a different conversation's older
+///   sentence as this turn's reply.
+/// * `Unreadable` — we could not TELL. A permission error, an I/O error, a
+///   root that is not a directory, an entry we could not enumerate. "I could
+///   not ask" is not "there is nobody" (the same rule the roster learned in
+///   the vitals work), so this is never a reason to read a stale copy.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum SessionSource {
+    Missing,
+    Found(Option<String>),
+    Unreadable,
+}
+
+/// Locate the session under `sessions_root` and read what it says.
 ///
 /// `sessions_root` is `<KIRO_HOME>/sessions` for a managed agent,
 /// `~/.kiro/sessions` for the legacy store, and a temp dir in tests. Desktop
@@ -551,34 +563,55 @@ pub(crate) fn kiro_reply_from_session(jsonl: &str) -> Option<String> {
 /// reads an agent's session store (the Android build broke on the
 /// desktop-only `Path` import, 2026-09-20, the first APK after #207).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn session_lookup(sessions_root: &Path, session_id: &str) -> Option<Option<String>> {
+pub(crate) fn session_lookup(sessions_root: &Path, session_id: &str) -> SessionSource {
     if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
-        return None;
+        // Not a session id at all: no root can hold it, and nothing is
+        // uncertain about that.
+        return SessionSource::Missing;
     }
-    let dirs = std::fs::read_dir(sessions_root).ok()?;
-    for entry in dirs.flatten() {
-        let dir = entry.path().join(session_id);
-        if !dir.is_dir() {
+    let dirs = match std::fs::read_dir(sessions_root) {
+        Ok(dirs) => dirs,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionSource::Missing,
+        // A root we cannot read is not an empty root.
+        Err(_) => return SessionSource::Unreadable,
+    };
+    let mut unreadable = false;
+    for entry in dirs {
+        let Ok(entry) = entry else {
+            // One bucket we could not enumerate: we can still FIND the
+            // session in another, but we may not conclude it is absent.
+            unreadable = true;
             continue;
+        };
+        let dir = entry.path().join(session_id);
+        match std::fs::metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {
+                return SessionSource::Found(
+                    std::fs::read_to_string(dir.join("messages.jsonl"))
+                        .ok()
+                        .and_then(|text| kiro_reply_from_session(&text)),
+                )
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => unreadable = true,
         }
-        // This root owns the session, so whatever it says is the answer —
-        // including nothing, and including a file we cannot read: another
-        // root's copy of the same id is a different conversation's history,
-        // never this turn's reply.
-        return Some(
-            std::fs::read_to_string(dir.join("messages.jsonl"))
-                .ok()
-                .and_then(|text| kiro_reply_from_session(&text)),
-        );
     }
-    None
+    if unreadable {
+        SessionSource::Unreadable
+    } else {
+        SessionSource::Missing
+    }
 }
 
-/// The reply this root has for the session, flattening "not here" and "here
-/// with nothing to say" — the shape the callers that only want the text use.
+/// The reply this root has for the session, for the callers that only want
+/// the text: every outcome but a found reply is `None`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn session_reply(sessions_root: &Path, session_id: &str) -> Option<String> {
-    session_lookup(sessions_root, session_id).flatten()
+    match session_lookup(sessions_root, session_id) {
+        SessionSource::Found(reply) => reply,
+        _ => None,
+    }
 }
 
 /// The v3 fallback wired into the notify helper: the kiro Stop payload has no
@@ -612,10 +645,19 @@ pub(crate) fn reply_fallback(
     // reply this turn" is an answer, and falling through on it would hand
     // back an old sentence from a stale copy and spend the turn's reply edge
     // on it).
-    if let Some(found) = home.and_then(|h| session_lookup(&h.join("sessions"), &id)) {
-        return found;
+    if let Some(home) = home {
+        match session_lookup(&home.join("sessions"), &id) {
+            SessionSource::Found(reply) => return reply,
+            // We could not tell whether the live session is there, so we do
+            // not guess from a copy that may be another conversation's.
+            SessionSource::Unreadable => return None,
+            SessionSource::Missing => {}
+        }
     }
-    session_lookup(&legacy_sessions_root()?, &id).flatten()
+    match session_lookup(&legacy_sessions_root()?, &id) {
+        SessionSource::Found(reply) => reply,
+        _ => None,
+    }
 }
 
 /// kiro's GLOBAL session store, `~/.kiro/sessions` — the legacy half of
@@ -1443,11 +1485,44 @@ mod tests {
         let unwritten = root.join("unwritten");
         std::fs::create_dir_all(unwritten.join("sessions").join("297005da4b9f6bd1").join(id)).unwrap();
         assert_eq!(reply_fallback(payload, Some(unwritten.as_path())), None);
-        // And the two questions are visible in `session_lookup` itself: "not
-        // here" is the outer None, "here with nothing" the inner one.
-        assert_eq!(session_lookup(&unwritten.join("sessions"), id), Some(None));
-        assert_eq!(session_lookup(&empty.join("sessions"), id), None);
-        assert_eq!(session_lookup(&home.join("sessions"), id), Some(Some(live.to_string())));
+        // The three outcomes are visible in `session_lookup` itself, which
+        // is where the distinction is made.
+        assert_eq!(session_lookup(&unwritten.join("sessions"), id), SessionSource::Found(None));
+        assert_eq!(session_lookup(&empty.join("sessions"), id), SessionSource::Missing);
+        assert_eq!(
+            session_lookup(&home.join("sessions"), id),
+            SessionSource::Found(Some(live.to_string()))
+        );
+        // A root we cannot READ is not an empty root (review P1 round 2): a
+        // regular file where the sessions directory should be, a path whose
+        // parent is a file, an unreadable directory. None of them may send
+        // the hook to a stale copy — the reply goes missing instead, which
+        // `sniff`-style memory does not paper over and a person can see.
+        let not_a_dir = root.join("file-root");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        assert_eq!(session_lookup(&not_a_dir, id), SessionSource::Unreadable);
+        assert_eq!(reply_fallback(payload, Some(root.join("file-root").as_path())), None,
+            "an unreadable isolated home must not fall through to the global copy");
+        // A bucket we cannot enumerate: the session is NOT found, and we may
+        // not conclude it is absent.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked").join("sessions");
+            std::fs::create_dir_all(locked.join("bucket")).unwrap();
+            std::fs::set_permissions(locked.join("bucket"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Running as root defeats the permission bits; then there is
+            // simply nothing to assert here.
+            if std::fs::metadata(locked.join("bucket").join(id)).is_err()
+                && std::fs::read_dir(locked.join("bucket")).is_err()
+            {
+                assert_eq!(session_lookup(&locked, id), SessionSource::Unreadable);
+                assert_eq!(reply_fallback(payload, Some(root.join("locked").as_path())), None);
+            }
+            let _ = std::fs::set_permissions(locked.join("bucket"), std::fs::Permissions::from_mode(0o755));
+        }
+        // A path that is not a session id is Missing, not uncertain.
+        assert_eq!(session_lookup(&home.join("sessions"), "../etc"), SessionSource::Missing);
         // And a payload with no session id reads nothing at all.
         let bare = serde_json::json!({ "hook_event_name": "Stop" });
         assert_eq!(reply_fallback(bare.as_object().unwrap(), Some(home.as_path())), None);

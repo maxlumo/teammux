@@ -98,7 +98,7 @@ the defect, not existence; both files were there and the wrong one answered.
 Deleting the stale copy would not have helped before the fix, since the
 fallback never looked in the isolated home at all.
 
-The order needs TWO questions, not one (review P1, 02:02): whether a root
+The order needs THREE answers, not one (review P1, 02:02 and 02:08): whether a root
 HOLDS the session — its own directory under some cwd bucket — and whether
 that session has a reply for the latest turn. `session_lookup` answers both
 (`Option<Option<String>>`), and only the first may send the caller to
@@ -108,7 +108,15 @@ rule, and falling through on it would hand back a stale copy's old sentence
 as THIS turn's reply — posting it to the room and spending the turn's reply
 edge on it, which is a worse failure than the silence we started from. A
 session directory with no readable `messages.jsonl` (a turn that has only
-just started) answers the same way. The legacy root resolves
+just started) answers the same way. The third answer is `Unreadable`: a
+sessions root that is not a directory, a permission or I/O error, a bucket we
+could not enumerate. We could not TELL whether the live session is there, and
+"I could not ask" is not "there is nobody" — so it reads nothing rather than
+reaching for a copy that may be another conversation's. The reply is then
+missing, which someone can see; a confident wrong reply is what we were
+fixing. `session_lookup` returns those three (`Missing`, `Found(Option)`,
+`Unreadable`) and `session_reply` is the flattening wrapper for callers that
+only want the text. The legacy root resolves
 through one function (`legacy_sessions_root`) whose `cfg(test)` form is a
 per-process temp dir, so no test reads the developer's own `~/.kiro` (the
 #216 rule: the isolation door belongs where the path is resolved).
