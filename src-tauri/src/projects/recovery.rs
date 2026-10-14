@@ -687,6 +687,123 @@ mod tests {
         }
     }
 
+    /// #370, kiro-cli 2.28.0 — the RATE-LIMIT block, FOUR real instances verbatim
+    /// from this host's pane scrollbacks on 2026-10-14, read with
+    /// `capture-pane -p -J` exactly as `check_once` reads a pane (each pane's
+    /// binary was asked: `kiro-cli-chat 2.28.0`; the installed 2.31.0 came
+    /// later and has no sample): the blank line above, the `•` head, the
+    /// sentence wrapped after `(Request ID:`, the id alone on a continuation
+    /// line, a lone-space line, then the `▸` status line and the ruler. The
+    /// last is the block that left this very agent idle for 8 minutes.
+    const TMR_RESEARCHER: &str = "\n• Too many requests, please wait before trying again. (Request ID:\n  5b7cc714-59a6-4ada-83e8-b56977929ca8)\n \n▸ Credits: turn 5.76 • session 667.51 | Time: 1m 1s\n────────────────────────────────────────────────────────────────────────────────\n";
+    const TMR_WRITER_SHORT: &str = " \n• Too many requests, please wait before trying again. (Request ID:\n  7ecb7a2a-c58c-4cc5-892f-584b74ad361b)\n \n▸ Time: 7s\n────────────────────────────────────────────────────────────────────────────────\n";
+    const TMR_WRITER_CREDITS: &str = "\n• Too many requests, please wait before trying again. (Request ID:\n  538e07dc-427f-49c9-a911-c353c740c58a)\n \n▸ Credits: turn 7.85 • session 841.56 | Time: 29s\n────────────────────────────────────────────────────────────────────────────────\n";
+    const TMR_BUILDER: &str = "\n• Too many requests, please wait before trying again. (Request ID:\n  319ae15c-f2d3-4ada-bafc-9b9b20927ea8)\n \n▸ Credits: turn 31.76 • session 597.47 | Time: 8m 37s\n────────────────────────────────────────────────────────────────────────────────\n";
+    /// The same error in a NARROWER pane (the orchestrator's capture of the
+    /// builder's pane, as filed on #370): the sentence wraps twice.
+    const TMR_NARROW: &str = "• Too many requests, please wait before trying\n  again. (Request ID:\n  319ae15c-f2d3-4ada-bafc-9b9b20927ea8)\n";
+
+    #[test]
+    fn kiro_2_28_rate_limit_blocks_as_painted_are_detected() {
+        for (name, screen, id) in [
+            ("researcher, Credits + Time", TMR_RESEARCHER, "5b7cc714-59a6-4ada-83e8-b56977929ca8"),
+            ("writer, Time only", TMR_WRITER_SHORT, "7ecb7a2a-c58c-4cc5-892f-584b74ad361b"),
+            ("writer, Credits + Time", TMR_WRITER_CREDITS, "538e07dc-427f-49c9-a911-c353c740c58a"),
+            ("builder, the 8-minute stall", TMR_BUILDER, "319ae15c-f2d3-4ada-bafc-9b9b20927ea8"),
+            ("narrow pane, wrapped twice", TMR_NARROW, "319ae15c-f2d3-4ada-bafc-9b9b20927ea8"),
+        ] {
+            assert!(scan_tail("kiro", screen), "{name}");
+            // Identified by its Request ID, hits=1: the `•` inside the credits
+            // line and the `▸` status line are not heads of a second block.
+            assert_eq!(error_signature("kiro", screen), Some(format!("1|{id}")), "{name}");
+        }
+        // The same screen under the other measured head is the same incident.
+        assert_eq!(error_signature("kiro", &TMR_BUILDER.replace('•', "●")), error_signature("kiro", TMR_BUILDER));
+        // Two different errors are two incidents: a new Request ID re-arms.
+        assert_ne!(error_signature("kiro", TMR_RESEARCHER), error_signature("kiro", TMR_WRITER_SHORT));
+        // A rate limit is kiro's: no other backend's reader takes it, and it
+        // is not the high-traffic shape either (different sentence, no model).
+        assert!(!scan_tail("claude", TMR_BUILDER), "kiro's rate limit is not claude's");
+        for b in ["codex", "grok", "omp", "kimi"] {
+            assert!(!scan_tail(b, TMR_BUILDER), "{b}: no measured shape");
+        }
+    }
+
+    /// Every negative holds for BOTH head glyphs, exactly as for high traffic
+    /// (#361): the sentence is the whole block, nothing quoted, nothing after.
+    #[test]
+    fn quoting_the_rate_limit_error_is_not_having_it() {
+        let id = "319ae15c-f2d3-4ada-bafc-9b9b20927ea8";
+        for head in HEADS {
+            let paint = format!("{head} Too many requests, please wait before trying again. (Request ID:\n  {id})");
+            let chat = format!("  › [tmm chat 2026-10-14 20:42] orchestrator: @builder look\n{}\n", paint.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"));
+            assert!(!scan_tail("kiro", &chat), "{head}: a stamped quote must not trigger");
+            assert!(!scan_tail("kiro", &format!("[tmm chat 2026-10-14 20:42] orchestrator: @builder {}", paint.replace('\n', " "))), "{head}: a stamp on column zero");
+            let tool = format!("{head} Shell tmux capture-pane -p -J -t 2\n    ╰ output:\n{}\n", paint.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
+            assert!(!scan_tail("kiro", &tool), "{head}: tool output must not trigger");
+            // The shell command that greps for it, painted under the tool head.
+            assert!(!scan_tail("kiro", &format!("{head} Shell grep -c \"Too many requests, please wait before trying again. (Request ID: {id})\" log\n")), "{head}: a command line");
+            for (text, why) in [
+                (format!("{head} I saw: Too many requests, please wait before trying again. (Request ID: {id})"), "a lead-in"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID: {id}) — retrying."), "text after the close"),
+                (format!("{head} Too many requests, please wait before trying again."), "no Request ID: a mention"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID: {id}"), "no closing paren"),
+                (format!("{head} Too many requests, please wait before trying again. Request ID {id}"), "no parenthesis or colon"),
+                (format!("{head} Too many requests please wait before trying again (Request ID: {id})"), "no comma or period"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID {id})"), "no colon"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID: {id}))"), "extra paren after the close"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID: 319ae15c)"), "not a uuid"),
+                (format!("{head} Too many requests, please wait before trying again. (Request ID: {}x)", &id[..35]), "non-hex in the uuid"),
+                (format!("{head} too many requests, please wait before trying again. (Request ID: {id})"), "lower-case: not the sentence kiro paints"),
+                (format!("{head} Too many requests; please wait before trying again. (Request ID: {id})"), "a semicolon for the comma"),
+                (format!("{head} claude-opus-5.5 Too many requests, please wait before trying again. (Request ID: {id})"), "a model name before it: that is another sentence"),
+            ] {
+                assert!(!scan_tail("kiro", &format!("{text}\n")), "{head}: {why}");
+            }
+        }
+    }
+
+    /// #370: the closed set of head glyphs is `HEAD_GLYPHS`, the same two the
+    /// high-traffic block takes (#361) — no head, another bullet, a glyph
+    /// glued to the sentence or an indented one is not a rate-limit paint.
+    #[test]
+    fn only_the_two_measured_head_glyphs_open_a_rate_limit_block() {
+        let tail = "Too many requests, please wait before trying again. (Request ID: 319ae15c-f2d3-4ada-bafc-9b9b20927ea8)";
+        for head in HEADS {
+            assert!(scan_tail("kiro", &format!("{head} {tail}\n")), "{head} is accepted");
+        }
+        for head in ['›', '▸', '○', '◦', '◆', '◇', '·', '▪', '■', '◉', '⏺', '-', '>', '*', '#', '+'] {
+            assert!(!scan_tail("kiro", &format!("{head} {tail}\n")), "{head:?} is not a head kiro paints its errors under");
+        }
+        assert!(!scan_tail("kiro", &format!("{tail}\n")), "no head");
+        for head in HEADS {
+            assert!(!scan_tail("kiro", &format!("{head}{tail}\n")), "{head}: glued to the sentence");
+            assert!(!scan_tail("kiro", &format!(" {head} {tail}\n")), "{head}: indented is a continuation, never a head");
+            assert!(!scan_tail("kiro", &format!("{head}  {head} {tail}\n")), "{head}: a second head is not part of the sentence");
+        }
+    }
+
+    /// #370: a rate-limit block whose head sits above the fold is an orphan
+    /// that earns the one deep capture (the tail ends in `Request ID:`/uuid),
+    /// and the deep rescan reads the head and hits — and the narrow block is
+    /// only found inside the 40-line window until the deep one reaches it.
+    #[test]
+    fn a_rate_limit_block_whose_head_is_above_the_fold_is_read_on_the_deep_capture() {
+        let headless: String = TMR_NARROW.lines().skip(1).map(|l| format!("{l}\n")).collect();
+        assert!(headless.starts_with("  again. (Request ID:"), "{headless:?}");
+        assert_eq!(error_signature("kiro", &headless), None, "an orphan tail is never a hit");
+        assert!(headless_error_tail(&headless), "but it earns the deeper capture");
+        let deep = format!("earlier output\n{TMR_NARROW}");
+        assert_eq!(
+            deep_error_signature("kiro", &deep),
+            Some("1|319ae15c-f2d3-4ada-bafc-9b9b20927ea8".into()),
+            "the recovered `•` head opens the block"
+        );
+        let buried = format!("{deep}{}", "newer line\n".repeat(60));
+        assert_eq!(error_signature("kiro", &buried), None, "outside the 40-line window");
+        assert_eq!(deep_error_signature("kiro", &buried), Some("1|319ae15c-f2d3-4ada-bafc-9b9b20927ea8".into()), "inside the deep window");
+    }
+
     #[test]
     fn a_headless_high_traffic_tail_asks_for_the_deep_look() {
         let tail = "  again, or select another model. (Request ID:\n  ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146)\n \n▸ Credits: 1\n";

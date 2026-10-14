@@ -1014,12 +1014,35 @@ const MODEL_UNAVAILABLE: &str = "themodelyouveselectedistemporarilyunavailable";
 const HIGH_TRAFFIC: &str = " is experiencing high traffic. Try again, or select another model. (Request ID: ";
 /// "Claude Opus 4.1 (1M context)" is five.
 const MODEL_NAME_WORDS: usize = 5;
+/// Fourth kiro shape (kiro-cli 2.28.0, `--agent-engine v3`, #370, measured
+/// 2026-10-14 in four real blocks across three panes): the rate limit —
+/// `• Too many requests, please wait before trying again. (Request ID:
+/// <uuid>)`, hard-wrapped under the same bullet head as the high-traffic error
+/// (`HEAD_GLYPHS`). It names no model, so the block is EXACTLY this sentence:
+/// a head glyph, the words below, a canonical 8-4-4-4-12 uuid and the closing
+/// `)` at block end, with only whitespace collapsed (a hard wrap is a space).
+/// The same strictness as `HIGH_TRAFFIC` and for the same reason: letters
+/// alone are prose ABOUT the error, and a false hit types `continue` into a
+/// working agent. A 429 means "slow down": it rides the same ladder as every
+/// other shape (immediate first retry, then `BASE_BACKOFF_SECS`); it does not
+/// get a shorter one.
+const TOO_MANY_REQUESTS: &str = "Too many requests, please wait before trying again. (Request ID: ";
 
 /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, hex digits only.
 fn is_uuid(id: &str) -> bool {
     let parts: Vec<&str> = id.split('-').collect();
     parts.len() == 5
         && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Is this block, its lines joined with spaces, exactly the rate-limit error?
+fn too_many_requests(spaced: &str) -> bool {
+    let flat = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.strip_prefix(|c: char| HEAD_GLYPHS.contains(&c))
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|body| body.strip_prefix(TOO_MANY_REQUESTS))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .is_some_and(is_uuid)
 }
 
 /// Is this block, its lines joined with spaces, exactly the high-traffic error?
@@ -1052,6 +1075,7 @@ pub(crate) fn transient_error(glued: &str, spaced: &str) -> bool {
     (c.starts_with(HEADER) && TRANSIENT.iter().any(|m| c.contains(m)))
         || c.starts_with(MODEL_UNAVAILABLE)
         || high_traffic(spaced)
+        || too_many_requests(spaced)
 }
 
 #[cfg(test)]
@@ -1160,6 +1184,47 @@ mod tests {
         }
         assert!(!high_traffic(&sentence("Auto")));
         assert!(!high_traffic(&format!("•{}", sentence("Auto"))));
+    }
+
+    /// #370: the rate-limit shape is the sentence and nothing else, under the
+    /// closed head set — no model name, no lead-in, no tail, a canonical uuid.
+    #[test]
+    fn too_many_requests_is_exactly_the_sentence_under_a_closed_head() {
+        assert_eq!(HEAD_GLYPHS, ['●', '•']);
+        let id = "319ae15c-f2d3-4ada-bafc-9b9b20927ea8";
+        let sentence = format!("Too many requests, please wait before trying again. (Request ID: {id})");
+        for head in HEAD_GLYPHS {
+            assert!(too_many_requests(&format!("{head} {sentence}")), "{head}");
+            // A hard wrap is a space: the block arrives joined with spaces.
+            assert!(too_many_requests(&format!("{head} Too many requests, please wait before trying\n  again. (Request ID:\n  {id})")), "{head}: wrapped");
+            for bad in [
+                format!("{head} {sentence} "), // trailing space is whitespace: still the block
+            ] {
+                assert!(too_many_requests(&bad), "{head}: surrounding whitespace is collapsed");
+            }
+            for (bad, why) in [
+                (format!("{head} Note: {sentence}"), "a lead-in"),
+                (format!("{head} {sentence}."), "text after"),
+                (format!("{head} {}", sentence.replace("Too many", "Too Many")), "capitalised differently"),
+                (format!("{head} {}", sentence.replace(',', "")), "no comma"),
+                (format!("{head} {}", sentence.replace("(Request ID: ", "(request_id: ")), "the other shape's id key"),
+                (format!("{head} {}", sentence.replace(id, "not-a-uuid")), "not a uuid"),
+                (format!("{head} {}", sentence.strip_suffix(')').unwrap()), "no close paren"),
+                (format!("{head}{sentence}"), "glued to the head"),
+            ] {
+                assert!(!too_many_requests(&bad), "{head}: {why}");
+            }
+        }
+        assert!(!too_many_requests(&sentence), "no head");
+        for head in ['›', '▸', '○', '◦', '◆', '◇', '·', '-', '>'] {
+            assert!(!too_many_requests(&format!("{head} {sentence}")), "{head:?}");
+        }
+        // It is not the high-traffic sentence, and that one is not this.
+        assert!(!high_traffic(&format!("• {sentence}")));
+        assert!(!too_many_requests(&format!("• Auto is experiencing high traffic. Try again, or select another model. (Request ID: {id})")));
+        // transient_error is the one door: the glued form is canonicalised for
+        // the older shapes, and this one reads the spaced form.
+        assert!(transient_error(&format!("• {sentence}").replace(' ', ""), &format!("• {sentence}")));
     }
 
     #[test]
