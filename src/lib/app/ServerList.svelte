@@ -15,6 +15,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import type { ServerEntry } from './servers.ts';
   import type { MemberStatus } from './server-members.svelte.ts';
+  import { formatBuild, type BuildInfo } from '../core/build-info.ts';
   import Switch from '../ui/Switch.svelte';
   import { stateDotColor } from '../hub/hub.ts';
   import { hoverInfo } from '../ui/hover.ts';
@@ -58,11 +59,15 @@
     } | null;
     /** A refusal to show on the list (an include/exclude that failed). */
     notice?: string;
+    /** The build a LIVE server said it runs (board #368), asked per row on
+     * the page variant only: undefined = no answer to give (a row that is
+     * not connected says nothing), null = it named none (an older server). */
+    builds?: (id: string) => BuildInfo | null | undefined;
   }
   let {
     servers, currentId, link = { connected: true }, variant = 'menu',
     onpick, onrename, onremove, onadd, onclose = () => {}, container = null, frozen = '',
-    members = null, notice = '',
+    members = null, notice = '', builds,
   }: Props = $props();
 
   /** The one status-dot language (stateDotColor / .live-dot): the server
@@ -237,6 +242,15 @@
             <span class="sm-name">{s.name}</span>
           </span>
           <span class="sm-addr">{s.address}{#if failure(s.id)} · {failure(s.id)}{/if}</span>
+          {#if variant === 'page' && builds && dotOf(s.id) === 'live'}
+            {@const b = builds(s.id)}
+            {#if b !== undefined}
+              <!-- Which build the server runs (board #368): said on the row,
+                   not behind a hover, because the point is reading it. An
+                   older server names none and says so; never blank. -->
+              <span class="sm-addr sm-build">{b ? t('buildServerLine').replace('{build}', formatBuild(b)) : t('buildServerUnknown')}</span>
+            {/if}
+          {/if}
         </button>
       {/if}
       {#if members}
@@ -299,6 +313,9 @@
   .sm-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; transition: background var(--t-fast); }
   .sm-name { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sm-addr { font-family: var(--font-mono); font-size: var(--fs-meta); line-height: var(--control-line-height); color: var(--text2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The build line is read, not just glanced at: on a phone it wraps instead of
+     cutting the timestamp off with an ellipsis (#368). */
+  .sm-addr.sm-build { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
   .sm-row.cur .sm-name { color: var(--accent-ink); }
   .sm-check { color: var(--accent-ink); display: grid; place-items: center; width: var(--control-height); flex: none; }
   .sm-rename { flex: 1; min-width: 0; }

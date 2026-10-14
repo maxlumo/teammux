@@ -1606,7 +1606,9 @@ doc already describes. Design decisions, in the order they bit:
   introduced.
 - **A row's name defaults to the hostname the server reports** (board #310,
   owner 2026-10-05: "显示的名称应该默认是主机的名称，不是连接的url"). Every auth
-  answers `{authenticated, machine_id, hostname}`, and one App effect hands that
+  answers `{authenticated, machine_id, hostname, build}` (`build`: board #368, the server's
+  version, commit and build minute, read into `connection.getBuild()` and asked of the LIVE
+  socket each time, never stored on the entry like the hostname), and one App effect hands that
   hostname to `servers.ts adoptHostname` for this machine's entry. A URL host
   (`hostLabel(address)`, e.g. `d1x.cloudfront.net` or `192.168.11.221`) is only
   the pre-auth placeholder. A name the user typed is never overwritten:

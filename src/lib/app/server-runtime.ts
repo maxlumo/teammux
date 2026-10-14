@@ -31,6 +31,7 @@
 //   - FOCUS. There is no "current" here, exactly as in the connection
 //     registry. Which runtime a page looks at is the context provider's (②a-3)
 //     and App's (②b-1).
+import type { BuildInfo } from '../core/build-info.ts';
 import type { Connection } from '../core/connection.ts';
 import type { ConnectionSlot } from '../core/connection-registry.ts';
 import { RPC_KIND, type WsApi } from '../core/ws-api.ts';
@@ -115,6 +116,11 @@ export interface ServerRuntime {
   machineId(): string;
   /** The hostname the live socket reported, else the entry's adopted one. */
   hostname(): string;
+  /** The build the live socket's server reported (board #368): undefined
+   * while there is no authenticated socket, null when the server named none
+   * (an older one). Never remembered: a build is a fact about the process
+   * answering NOW, unlike the hostname an entry adopts. */
+  build(): BuildInfo | null | undefined;
   /** Is this handle still the one serving its server? False once it has been
    * released or detached, which a caller must check before REUSING a handle
    * it is holding: a failed switch's Back finds the same entry id, but the
@@ -473,6 +479,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     caps: () => caps,
     machineId: () => connection.getMachineId() || current().machineId || '',
     hostname: () => connection.getHostname() || current().hostname || '',
+    build: () => connection.getBuild(),
     alive: () => !dead,
     setFrozen: (on: boolean) => { frozen = on; },
     frozen: () => frozen,

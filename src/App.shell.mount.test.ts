@@ -59,6 +59,7 @@ function transport(calls: string[]) {
     isConnected: () => false,
     getMachineId: () => '',
     getHostname: () => '',
+    getBuild: () => undefined,
     setOnDisconnect: () => {},
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
@@ -151,7 +152,7 @@ test('a fresh client sees the Connection card, and its own settings behind the g
 /** The lifecycle members of a mocked transport; every OTHER function on it is
  * an RPC, answered over whichever connection it is called through. */
 const LIFECYCLE = new Set([
-  'connect', 'disconnect', 'dispose', 'isConnected', 'getMachineId', 'getHostname', 'setOnDisconnect',
+  'connect', 'disconnect', 'dispose', 'isConnected', 'getMachineId', 'getHostname', 'getBuild', 'setOnDisconnect',
   'subscribe', 'unsubscribe', 'resubscribeActive', 'addPaneOutputListener', 'removePaneOutputListener',
   'addPaneClosedListener', 'removePaneClosedListener', 'addTeamMessageListener', 'removeTeamMessageListener',
   'findBestAddress', 'classifyAddress', 'isAddressViable', 'noteAddressUnreachable',
@@ -240,6 +241,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
       isConnected: () => connected,
       getMachineId: () => (connected ? machine : ''),
       getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
+      getBuild: () => (connected ? null : undefined),
       setOnDisconnect: (fn: () => void) => { onDrop = fn; },
       subscribe: noop, unsubscribe: noop, resubscribeActive: noop,
       addPaneOutputListener: noop, removePaneOutputListener: noop,
@@ -294,6 +296,7 @@ function liveTransport(calls: string[], machine: () => string) {
     isConnected: () => connected,
     getMachineId: () => (connected ? machine() : ''),
     getHostname: () => (connected ? `${machine()}.host` : ''),
+    getBuild: () => (connected ? null : undefined),
     setOnDisconnect: () => {},
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
@@ -477,6 +480,7 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     isConnected: () => connected,
     getMachineId: () => (connected ? machine : ''),
     getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
+    getBuild: () => (connected ? null : undefined),
     setOnDisconnect: (fn: () => void) => { onDrop = fn; },
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},

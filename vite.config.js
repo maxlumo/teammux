@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   DEV_DOWNLOAD_PATH,
@@ -55,6 +57,22 @@ function allowCompactXtermLines() {
 // ignores only a worktree/ nested inside it.
 const AGENT_WORKTREES = fileURLToPath(new URL('./worktree', import.meta.url));
 
+const PACKAGE = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+
+/** The UI's own build identity (board #368): the package version, the
+ * checkout's short commit and the UTC minute this config ran. The same three
+ * words the server's login answer carries (`src-tauri/src/build_info.rs`), so
+ * a stale phone is a mismatch someone can read. `dev` when git cannot answer
+ * (a source archive), the way build.rs says it; never a failed build. */
+export function buildIdentity(now = new Date(), git = (args) => execFileSync('git', args, { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })) {
+  let commit = 'dev';
+  try {
+    const sha = git(['rev-parse', '--short=8', 'HEAD']).trim();
+    if (/^[0-9a-f]{8}$/.test(sha)) commit = sha;
+  } catch { /* no git: dev */ }
+  return { version: PACKAGE.version, commit, built: now.toISOString().slice(0, 16).replace('T', ' ') };
+}
+
 export function createViteConfig(command, env = process.env) {
   return {
     plugins: [allowCompactXtermLines(), svelte()],
@@ -66,6 +84,11 @@ export function createViteConfig(command, env = process.env) {
       entries: ['**/*.html', '!worktree/**'],
     },
     clearScreen: false,
+    // Replaced at build time; read through src/lib/core/build-info.ts only.
+    define: {
+      __TMM_BUILD__: JSON.stringify(buildIdentity()),
+      __TMM_LICENSE__: JSON.stringify(PACKAGE.license),
+    },
     server: {
       host: '0.0.0.0',
       port: DEV_WEB_PORT,

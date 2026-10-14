@@ -9,6 +9,12 @@ declare global {
     __TAURI_INTERNALS__?: unknown;
   }
 
+  /** Vite `define`s (vite.config.js): the UI's own build identity and licence.
+   *  Undefined where nothing ran Vite (node --test); read through
+   *  core/build-info.ts, never directly. */
+  const __TMM_BUILD__: { version: string; commit: string; built: string } | undefined;
+  const __TMM_LICENSE__: string | undefined;
+
   interface ImportMetaEnv {
     readonly DEV: boolean;
   }

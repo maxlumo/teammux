@@ -42,10 +42,10 @@ test('the category exists only where Agents is not a page of its own', () => {
   // Appearance with its font (owner, 2026-09-24). Connection ends the APP group as its way out; it no longer trails
   // the agent rows (the pre-group "Connection stays last" rule, superseded).
   const list = source.match(/const groups = \$derived\(\[[\s\S]*?\]\);/u)?.[0] ?? '';
-  const order = ['appearance', 'chat', 'notifications', 'shortcuts', 'connection', 'agents', 'teams', 'skills', 'mcp']
+  const order = ['appearance', 'chat', 'notifications', 'shortcuts', 'connection', 'about', 'agents', 'teams', 'skills', 'mcp']
     .map((id) => list.indexOf(`id: '${id}'`));
   assert.ok(order.every((i) => i >= 0), 'every category sits in the grouped list');
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'app group first, Connection last inside it, then the agent group');
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'app group first, About closing it right after Connection, then the agent group');
   assert.match(source, /const tabs = \$derived\(groups\.flatMap\(\(g\) => g\.rows\)\);/u,
     'the flat list every consumer reads is derived FROM the groups — one source of order');
   // A restored category that does not exist here must not leave a blank pane.
@@ -111,7 +111,7 @@ test('category and address rows explain themselves with the one hover card (moti
   // A category row's label is terse; the card says what is inside (one i18n
   // hint per category, kept OUTSIDE `tabs` so the pinned list shape holds).
   assert.match(source, /class="side-row" class:open=\{tab === item\.id\} onclick=\{\(\) => selectTab\(item\.id\)\}\s*use:hoverInfo=\{\(\) => \(\{ title: item\.label\(\), text: TAB_HINTS\[item\.id\]/u);
-  for (const id of ['appearance', 'chat', 'notifications', 'shortcuts', 'agents', 'teams', 'skills', 'mcp', 'connection']) {
+  for (const id of ['appearance', 'chat', 'notifications', 'shortcuts', 'agents', 'teams', 'skills', 'mcp', 'connection', 'about']) {
     assert.match(source, new RegExp(`${id}: 'settings[A-Za-z]+Hint'`, 'u'), `${id} has a hint`);
   }
   // An address row: the address and its state (current / dialing / alternate);

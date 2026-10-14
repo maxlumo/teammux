@@ -14,6 +14,7 @@
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { hoverInfo } from '../ui/hover.ts';
   import { t, i18n, setLocale } from '../core/i18n.svelte.ts';
+  import { buildParts, buildsDiffer, uiBuild, uiLicense, type BuildInfo } from '../core/build-info.ts';
   import { layout } from './layout.svelte.ts';
   import { fonts, uiFont, displayFont, availableFamilies } from './fonts.svelte.ts';
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
@@ -35,7 +36,7 @@
     showUiZoom = false,
     showShortcuts = false,
     shortcutHost = null,
-    serverInfo = { hostname: '', machineId: '' },
+    serverInfo = { hostname: '', machineId: '', build: null },
     serverTag = null,
     pendingInputs = null,
     onDiscardPending = null,
@@ -80,7 +81,9 @@
     showShortcuts?: boolean;
     /** App's shortcut host: lets a row say it is unavailable here (board 316). */
     shortcutHost?: ShortcutHost | null;
-    serverInfo?: { hostname: string; machineId: string };
+    /** `build`: what the focused server said it runs (board #368); null
+     * when it named none, which About says plainly. */
+    serverInfo?: { hostname: string; machineId: string; build: BuildInfo | null };
     /** The focused server's name by the ③c-1 tag rule (null = not shown):
      * the Connection section — its copy-link, its addresses, its optimizer —
      * acts on the FOCUSED server (③c-5), and with several included the
@@ -187,7 +190,7 @@
   const AGENT_TABS = ['agents', 'teams', 'skills', 'mcp'];
   // A stored 'terminal' (the category retired 2026-09-25) falls through to
   // Appearance, where its rows now live.
-  const validStoredTab = storedTab === 'connection' || storedTab === 'shortcuts' || storedTab === 'notifications' || storedTab === 'chat' || (storedTab != null && AGENT_TABS.includes(storedTab));
+  const validStoredTab = storedTab === 'connection' || storedTab === 'about' || storedTab === 'shortcuts' || storedTab === 'notifications' || storedTab === 'chat' || (storedTab != null && AGENT_TABS.includes(storedTab));
   const initialTab = validStoredTab ? storedTab : 'appearance';
   let tab = $state<string>(initialTab);
   if (storedTab && storedTab !== initialTab) localStorage.setItem(TAB_KEY, initialTab);
@@ -270,6 +273,7 @@
         { id: 'notifications', label: () => t('settingsNotifications') },
         ...(showShortcuts ? [{ id: 'shortcuts', label: () => t('settingsShortcuts') }] : []),
         { id: 'connection', label: () => t('settingsConnection') },
+        { id: 'about', label: () => t('settingsAbout') },
       ],
     },
     ...(showAgents ? [{
@@ -288,7 +292,7 @@
   const TAB_HINTS: Record<string, string> = {
     appearance: 'settingsAppearanceHint', chat: 'settingsChatHint', notifications: 'settingsNotificationsHint',
     shortcuts: 'settingsShortcutsHint', agents: 'settingsAgentsHint', teams: 'settingsTeamsHint',
-    skills: 'settingsSkillsHint', mcp: 'settingsMcpHint', connection: 'settingsConnectionHint',
+    skills: 'settingsSkillsHint', mcp: 'settingsMcpHint', connection: 'settingsConnectionHint', about: 'settingsAboutHint',
   };
   // The tab is DERIVED from the one registry (board 316): groups, rows,
   // defaults. A reason that is about this device/server (no Hub, too narrow
@@ -973,6 +977,39 @@
           <CommandButton label={t('shortcutReset')} icon="undo"
             onclick={() => { shortcuts.reset(); recordingShortcut = ''; shortcutError = ''; }} />
         </div>
+      {:else if tab === 'about'}
+        <!-- About (board #368): which build this app is, which build the
+             server is, and the one verdict a stale phone needs — they differ.
+             Dim when they agree or cannot be compared; the warn status colour
+             only for two real, different commits. -->
+        {#snippet buildValue(b: BuildInfo, differ: boolean)}
+          {@const p = buildParts(b)}
+          <small class="config-note connection-id about-build" class:mismatch={differ}><span>{p.id}</span><span>{p.when}</span></small>
+        {/snippet}
+        <div class="config-section">
+          <div class="preference-row">
+            <div class="pref-label"><strong class="config-field-label">tmux-mobile</strong><small class="config-note">{t('aboutThisApp')}</small></div>
+            <div class="pref-control">{@render buildValue(uiBuild, false)}</div>
+          </div>
+          {#if connected}
+            {@const differ = buildsDiffer(uiBuild, serverInfo.build)}
+            <div class="preference-row">
+              <div class="pref-label"><strong class="config-field-label">{t('aboutServer')}</strong></div>
+              <div class="pref-control">{#if serverInfo.build}{@render buildValue(serverInfo.build, differ)}{:else}<small class="config-note connection-id about-build">{t('buildUnknown')}</small>{/if}</div>
+            </div>
+            {#if differ}<div class="config-note about-mismatch appear" role="status">{t('aboutMismatch')}</div>{/if}
+          {/if}
+          <div class="preference-row">
+            <div class="pref-label"><strong class="config-field-label">{t('aboutSource')}</strong></div>
+            <div class="pref-control"><a class="config-note about-link" href="https://github.com/vokako/tmux-mobile" target="_blank" rel="noopener">github.com/vokako/tmux-mobile</a></div>
+          </div>
+          {#if uiLicense}
+            <div class="preference-row">
+              <div class="pref-label"><strong class="config-field-label">{t('aboutLicense')}</strong></div>
+              <div class="pref-control"><small class="config-note about-value">{uiLicense}</small></div>
+            </div>
+          {/if}
+        </div>
       {:else}
         <div class="config-section">
           {#if onConnectionMode}
@@ -1166,6 +1203,13 @@
   .connection-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--config-field-gap); margin-bottom: var(--config-field-gap); }
   .connection-title > div:first-child { display: flex; flex-direction: column; gap: var(--config-label-gap); min-width: 0; }
   .connection-id { font-family: var(--font-mono); user-select: text; }
+  /* About: the build lines read right-aligned beside their label and wrap
+     rather than ellipsise (they are the point); a real mismatch wears the one
+     warn status colour. */
+  .about-build { display: flex; flex-direction: column; align-items: flex-end; text-align: end; overflow-wrap: anywhere; }
+  .about-build.mismatch { color: var(--status-warn); }
+  .about-value { display: block; text-align: end; }
+  .about-link { display: block; text-align: end; color: var(--accent-ink); text-decoration: none; overflow-wrap: anywhere; }
   .conn-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .address-list { display: flex; flex-direction: column; gap: 8px; position: relative; }
   .address-row { display: flex; align-items: center; gap: 6px; }

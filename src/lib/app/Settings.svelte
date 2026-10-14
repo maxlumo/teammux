@@ -379,10 +379,6 @@
     <button class="share-btn" onclick={shareLink} disabled={!address} title={t('shareLink')}>
       <Icon name="copy" size={13} /> {shareFeedback?.kind === 'success' ? shareFeedback.message : t('shareLink')}
     </button>
-
-    <a class="about-link" href="https://github.com/vokako/tmux-mobile" target="_blank" rel="noopener">
-      {t('about')}
-    </a>
   </div>
 </div>
 
@@ -486,13 +482,6 @@
   }
   .share-btn:active:not(:disabled) { transform: scale(0.98); color: var(--accent); border-color: var(--accent); }
   .share-btn:disabled { opacity: 0.4; cursor: default; }
-  .about-link {
-    display: block; text-align: center; margin-top: 18px;
-    color: var(--text3); font-size: var(--fs-ui); text-decoration: none;
-    -webkit-tap-highlight-color: transparent;
-    transition: color var(--t-fast);
-  }
-  .about-link:active { color: var(--accent); }
   .cancel-btn {
     padding: 13px 20px; border: 1px solid var(--border); border-radius: var(--ui-radius-panel);
     background: none; color: var(--text2); font-size: var(--fs-body); font-weight: 600;

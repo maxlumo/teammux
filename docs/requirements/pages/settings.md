@@ -42,9 +42,24 @@ where Agents is a page of its own, reads as one plain list):
   renames, non-current rows removable, `+` row opens the Add server dialog
   (cancel changes nothing; connect is the same switch). Settings ›
   Connection lists every saved server with the same component and actions
-  (the current one marked, its address list below it). Migration from the
+  (the current one marked, its address list below it). A LIVE row (the focused
+  server, or a connected Aggregate member) adds a third line, on this page
+  only, naming ITS build: `server v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`,
+  or `server: unknown` for a server older than #368 that names none (board
+  #368). A row that is not connected says nothing; the popover stays two lines. Migration from the
   single-server keys is
   one-time, idempotent, and never loses the current user.
+- About (board #368, the last category of the app group): the app's name and
+  build (`v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`, baked by Vite from the
+  package version, `git rev-parse --short=8 HEAD` and the clock, `dev` /
+  `unknown` where git or the clock was unavailable), the FOCUSED server's
+  build for comparison, the repository link (here only; the connect form no
+  longer carries it) and the licence from `package.json`. The server line is
+  dim while the two agree or cannot be compared (a `dev` side, a server that
+  named none says `unknown`), and wears the warn status colour with one
+  sentence when both name a real commit and the commits differ: that is the
+  stale-PWA tell (UI from one build, server from another). The same commit
+  built twice is not a mismatch. Not connected: no server row.
 - Connection mode (board #335 ③): **Connect to: One server / All
   included** (`ui/Segmented`, persisted to `tmux_connection_mode`). In
   Aggregate every INCLUDED saved server is a member: it dials on its own
@@ -120,7 +135,7 @@ where Agents is a page of its own, reads as one plain list):
 - Tap Discard on the pending row → confirm → the `tmux_state_layout` marker closes as `discarded`
 
 ## API Calls
-- `auth(token)` or encrypted auth (client_nonce + proof) — authenticate on connect (returns machine_id, hostname)
+- `auth(token)` or encrypted auth (client_nonce + proof) — authenticate on connect (returns machine_id, hostname, build)
 - `set_socket(socket)` — set tmux socket path at runtime
 
 ## State Management
@@ -128,7 +143,7 @@ where Agents is a page of its own, reads as one plain list):
 - Address history (localStorage)
 - Locale / language preference (localStorage `tmux_locale`)
 - Interface scale, terminal font size, theme, terminal font name preference (localStorage)
-- Server info (hostname, machine_id)
+- Server info (hostname, machine_id, build)
 - State restore on reload (page, session, view mode) — per server, from that server's own slot (`tmux_state::<id>` and the other resident keys); in Aggregate the mode, the excluded set and the focus are restored too, and every member's tree from its own slot
 - Connection mode and excluded set (localStorage `tmux_connection_mode`, `tmux_excluded_servers`)
 

@@ -395,7 +395,7 @@
     // The connect card was up (the person had disconnected the absorbed
     // server to connect the form): the app is on a server again.
     if (connected && page === 'settings') page = defaultPage();
-    serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
+    serverInfo = infoOf(next);
     activeAddress = next.entry().address;
     loadServerRegistry();
     syncMembers();
@@ -945,7 +945,14 @@
   // Apply the persisted custom fonts (if any) before first paint — rewrites
   // --font-mono/--font-ui/--font-display inline; a no-op for the defaults.
   applyFontVars();
-  let serverInfo = $state({ hostname: '', machineId: '' });
+  let serverInfo = $state({ hostname: '', machineId: '', build: null });
+  /** What the app knows of the server a runtime serves, read in ONE place so
+   * every path that (re)binds it says the same things: the hostname and
+   * machine, and the build its socket named at login (board #368; null until
+   * the login answered or when the server named none). `null` = no server. */
+  function infoOf(runtime) {
+    return { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '', build: runtime?.build() ?? null };
+  }
   let activeAddress = $state(localStorage.getItem('tmux_address') || '');
   // The address whose row was just tapped and is still dialing (review,
   // 2026-09-03: switching an address gave no feedback on the row itself — the
@@ -1683,6 +1690,12 @@
     ondismiss: (id) => { const r = background.find((x) => x.id === id); if (r && aggregate.orphan(r) && !membershipFrozen()) void askOrphan(r); },
   } : null);
 
+  /** The build a server said at its login (board #368), for the Connection
+   * rows: the focused server's runtime or a background member's. */
+  function buildOf(id) {
+    return members.find((r) => r.id === id)?.build();
+  }
+
   /** The bound runtime's socket closed under it. */
   function onDrop() {
     if (switching) return; // the switch is bringing another server up
@@ -1748,7 +1761,7 @@
     // THAT server's own runtime — never by resuming this one over it.
     if (!result?.ok) { void arrivedElsewhere(result, attempt); return; }
     connected = true;
-    serverInfo = { hostname: runtime.hostname(), machineId: runtime.machineId() };
+    serverInfo = infoOf(runtime);
     activeAddress = runtime.entry().address;
     void keepNavFor(runtime);
     resubscribeAll();
@@ -1927,7 +1940,7 @@
     if (switched) return arriveAt(left);
     return activate({ replace: false, up: () => {
       connected = true;
-      serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '' };
+      serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '', build: live()?.getBuild() ?? null };
       activeAddress = bound()?.entry().address ?? '';
       void keepNavFor(scopeSwap.bound());
       // The device default (Chat), never a hard-coded Terminal (board #333);
@@ -2445,7 +2458,7 @@
     reconnectError = '';
     reconnecting = false;
     heldOffline = false;
-    serverInfo = { hostname: next.hostname(), machineId: next.machineId() };
+    serverInfo = infoOf(next);
     activeAddress = next.entry().address;
     loadServerRegistry();
     syncMembers();
@@ -2519,7 +2532,7 @@
     heldOffline = false;               // the person chose another server
     scratchOpen = false;                // the panel closes; its Terminal goes with the keyed tree
     hoverCard.hide();                   // a card may describe the old server's row
-    serverInfo = { hostname: '', machineId: '' };
+    serverInfo = infoOf(null);
     pendingAddress = '';
     // The pane, split, Files session and Hub answer are the VIEW's, and the
     // view is the runtime's (③a-4): this runs after the swap, so `view` is
@@ -2563,7 +2576,7 @@
     addressUp: () => {
       // The dial recorded the address on the entry; the shell follows it.
       const runtime = bound();
-      serverInfo = { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '' };
+      serverInfo = infoOf(runtime);
       loadServerRegistry();
       activeAddress = runtime?.entry().address ?? activeAddress;
       resubscribeAll();
@@ -3013,7 +3026,7 @@
   function bringUp() {
     const runtime = bound();
     connected = true;
-    serverInfo = { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '' };
+    serverInfo = infoOf(runtime);
     activeAddress = runtime?.entry().address ?? activeAddress;
     // Nothing to restore while the fold is unrecorded: the app shows the
     // reason, on a page that is not the connect card (board #335 ②b-4).
@@ -3840,7 +3853,7 @@
     <!-- Settings › Connection: the same ServerList as the popover (board 315). -->
     <ServerList variant="page" servers={serverList} currentId={serverCurId} link={serverLink}
       onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
-      members={memberRows} notice={membershipError} />
+      members={memberRows} notice={membershipError} builds={buildOf} />
   {/snippet}
 
   {#if addServer}

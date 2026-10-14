@@ -17,6 +17,8 @@
 // identity, persistence, reconnect policy and device reachability are the app
 // layer's (connection.source.test.ts pins that boundary).
 
+import { parseBuild, type BuildInfo } from './build-info.ts';
+
 // Cursor: x/y position, width, height, trailing trimmed lines.
 export interface Cursor { x: number; y: number; w: number; h: number; t: number }
 // Team messages / notification snapshots are consumed by still-unconverted
@@ -48,6 +50,8 @@ interface AppSocket extends WebSocket {
   _cipher: Cipher | null;
   _getMachineId?: () => string | null;
   _getHostname?: () => string | null;
+  /** undefined until the login answered; null when it named no build. */
+  _getBuild?: () => BuildInfo | null | undefined;
 }
 
 // ─── Wire framing for the encrypted binary path ─────────────────────────
@@ -269,6 +273,10 @@ export interface Connection {
   isConnected(): boolean;
   getMachineId(): string | null | undefined;
   getHostname(): string | null | undefined;
+  /** The build the server said it runs in its login answer (board #368):
+   * undefined while there is no authenticated socket, null when the server
+   * named none (an older one). */
+  getBuild(): BuildInfo | null | undefined;
   /** The URL the current socket was dialled with — the origin a signed
    * download URL of THIS connection must be resolved against. */
   url(): string | null;
@@ -502,6 +510,7 @@ export function createConnection(): Connection {
       let serverNonce: Uint8Array | null = null;
       let machineId: string | null = null;
       let hostname: string | null = null;
+      let build: BuildInfo | null = null;
 
       function authSuccess() {
         clearTimeout(timeout);
@@ -521,6 +530,7 @@ export function createConnection(): Connection {
       // Expose getters
       socket._getMachineId = () => machineId;
       socket._getHostname = () => hostname;
+      socket._getBuild = () => (authed ? build : undefined);
 
       // Frames are handled strictly in arrival order. Decrypt + wire-decode is
       // async, and its latency depends on the frame: a ≥256-byte payload goes
@@ -588,12 +598,12 @@ export function createConnection(): Connection {
               const pt = await decryptMsg(event.data, cipher);
               if (ws !== socket) return;
               const resp = JSON.parse(pt);
-              if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; authSuccess(); return; }
+              if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; build = parseBuild(resp.result.build); authSuccess(); return; }
             } catch {}
             clearTimeout(timeout); cipher = null; reject(new Error('auth failed')); return;
           } else {
             // Plain (token) response — text frame.
-            if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; authSuccess(); return; }
+            if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); authSuccess(); return; }
             clearTimeout(timeout); reject(new Error(data?.error?.message || 'auth failed')); return;
           }
         }
@@ -718,6 +728,10 @@ export function createConnection(): Connection {
 
   function getHostname(): string | null | undefined {
     return ws?._getHostname?.();
+  }
+
+  function getBuild(): BuildInfo | null | undefined {
+    return ws?._getBuild?.();
   }
 
   let rpcTimeouts = 0;
@@ -851,7 +865,7 @@ export function createConnection(): Connection {
   }
 
   return {
-    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, url,
+    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, getBuild, url,
     setOnDisconnect,
     addPaneOutputListener, removePaneOutputListener,
     addPaneClosedListener, removePaneClosedListener,

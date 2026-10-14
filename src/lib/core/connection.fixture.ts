@@ -160,6 +160,9 @@ export class FakeE2eServer {
   negotiated = 0;
   machineId: string;
   hostname: string;
+  /** What the login answer's `build` says (board #368); undefined = an older
+   * server, whose answer has no such member at all. */
+  build?: unknown;
   private token: string;
   private version: 1 | 2;
   private encKey!: CryptoKey;
@@ -255,7 +258,10 @@ export async function handshake(
   const auth = JSON.parse(socket.sent[0] as string);
   assert.equal(await server.accept(auth), true, 'proof verifies under the negotiated version');
   socket.binary(await server.seal(JSON.stringify({
-    result: { authenticated: true, machine_id: server.machineId, hostname: server.hostname, e2e: server.negotiated },
+    result: {
+      authenticated: true, machine_id: server.machineId, hostname: server.hostname, e2e: server.negotiated,
+      ...(server.build === undefined ? {} : { build: server.build }),
+    },
   })));
   await connecting;
   return socket;
@@ -267,12 +273,13 @@ export async function handshakePlain(
   url: string,
   token: string,
   machineId = 'machine',
+  build?: unknown,
 ): Promise<MockWebSocket> {
   const connecting = conn.connect(url, token);
   const socket = MockWebSocket.instances.at(-1)!;
   socket.readyState = MockWebSocket.OPEN;
   socket.message({ server_nonce: '00'.repeat(16) });
-  socket.message({ result: { authenticated: true, machine_id: machineId, hostname: machineId + '.host' } });
+  socket.message({ result: { authenticated: true, machine_id: machineId, hostname: machineId + '.host', ...(build === undefined ? {} : { build }) } });
   await connecting;
   return socket;
 }

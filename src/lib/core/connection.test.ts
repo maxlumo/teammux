@@ -568,3 +568,52 @@ test('dispose is idempotent and a disposed connection still refuses RPCs cleanly
   await assert.rejects(api.listSessions(), { code: 'DISCONNECTED', message: 'connection disposed' });
   assert.equal(recover, 0, 'a deliberate teardown never asks for recovery');
 });
+
+// ── Board #368: the build the server says it runs ────────────────────────
+
+const BUILD = { version: '1.0.0', commit: '46392f16', built: '2026-10-14 07:40' };
+
+test('the build a server names at login is read from the sealed answer, per connection', (t) => withWebCrypto(async () => {
+  const sealed = new FakeE2eServer('tok-a', 2, 'machine-a', 'alpha');
+  sealed.build = BUILD;
+  const older = new FakeE2eServer('tok-b', 2, 'machine-b', 'bravo'); // no `build` member at all
+  const a = createConnection();
+  const b = createConnection();
+  t.after(() => { a.dispose(); b.dispose(); });
+  assert.equal(a.getBuild(), undefined, 'no socket yet: nothing to say');
+  await handshake(a, sealed, A_URL, 'tok-a');
+  await handshake(b, older, B_URL, 'tok-b');
+  assert.deepEqual(a.getBuild(), BUILD);
+  assert.equal(b.getBuild(), null, 'an older server names none: null, not undefined, and not another connection\'s');
+}));
+
+test('the plain login path reads the build too, and a malformed one is null', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  await handshakePlain(conn, A_URL, 'tok', 'machine-a', BUILD);
+  assert.deepEqual(conn.getBuild(), BUILD);
+  conn.disconnect();
+  assert.equal(conn.getBuild(), undefined, 'a closed socket says nothing about a build');
+  for (const bad of ['v1.0.0', { version: '1.0.0', commit: 'abc' }, { version: 1, commit: 'abc', built: 'x' }, { version: '1.0.0', commit: '', built: 'x' }]) {
+    await handshakePlain(conn, A_URL, 'tok', 'machine-a', bad);
+    assert.equal(conn.getBuild(), null, `not three plain strings: ${JSON.stringify(bad)}`);
+    conn.disconnect();
+  }
+});
+
+test('between the socket opening and the login answer a server has named nothing: undefined, not "none"', async (t) => {
+  // `null` means "the server answered and named no build" (an older one); a
+  // socket that has not been answered yet must not say that, or About would
+  // call a server "unknown" in the second before it speaks.
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const dial = conn.connect(A_URL, 'tok');
+  dial.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  assert.equal(conn.getBuild(), undefined, 'socket open, login not answered');
+  socket.message({ result: { authenticated: true, machine_id: 'machine-a', hostname: 'alpha', build: BUILD } });
+  await dial;
+  assert.deepEqual(conn.getBuild(), BUILD);
+});
