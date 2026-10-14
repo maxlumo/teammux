@@ -1,6 +1,7 @@
 // Hub coordinator contracts. Feed, Composer and Roster own their view contracts.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = await readFile(new URL('./Hub.svelte', import.meta.url), 'utf8');
@@ -501,7 +502,7 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // INSIDE the stack, in the NAME LINE with the name — one non-wrapping unit
   // that hugs its text — and the tag is the only wrappable item, so on a wrap
   // line 1 = name ▾ and line 2 = tag; nothing floats beside a two-line block.
-  assert.match(group, /<div class="title-stack" class:stacked=\{compact\}>\s*<div class="name-line">\s*\{#if renaming\}[\s\S]*?\{:else\}\s*<h1>[\s\S]*?<\/h1>\s*\{\/if\}\s*\{#if selected\}[\s\S]*?icon="chevron-down"[\s\S]*?\{\/if\}\s*<\/div>\s*\{#if !renaming\}<ServerTag name=\{scope\?\.tag\} \/>\{\/if\}\s*<\/div>/u,
+  assert.match(group, /<div class="title-stack" class:stacked=\{compact\} use:titleFit=\{\{[\s\S]*?\}\}>\s*<div class="name-line">\s*\{#if renaming\}[\s\S]*?\{:else\}\s*<h1>[\s\S]*?<\/h1>\s*\{\/if\}\s*\{#if selected\}[\s\S]*?icon="chevron-down"[\s\S]*?\{\/if\}\s*<\/div>\s*\{#if !renaming\}<ServerTag name=\{scope\?\.tag\} \/>\{\/if\}\s*<\/div>/u,
     'name line = (name | rename input) + chevron; the tag is the stack s second item');
   assert.match(appCssSrc, /\.page-head \.name-line \{[^}]*display: flex;[^}]*gap: 1px;[^}]*flex: 0 0 auto; max-width: 100%; min-width: 0;[^}]*\}/u, 'the name line hugs its text, never grows, never shrinks for the tag, stays inside the group');
   assert.match(appCssSrc, /\.page-head \.name-line h1, \.page-head \.name-line \.h1-edit \{ flex: 0 1 auto; min-width: 0; \}/u, 'inside the line the NAME shrinks (ellipsis) so the chevron stays glued');
@@ -509,9 +510,14 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // stack wraps; the h1 keeps its intrinsic width (no shrink) so the tag
   // yields first; max-width 100% lets the ellipsis engage only when the name
   // alone overflows the group. No ResizeObserver, no JS measurement.
-  assert.match(appCssSrc, /\.page-head \.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
-
-  assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
+  // #369: the stack is a NOWRAP row — a flex-wrap row keeps the width it had on
+  // one line and left a hole between the chevron and the path (every pure-CSS
+  // form failed; the matrix is on the issue). Which of its two forms it wears
+  // is ONE class, `fit-wrapped`, put on by ui/title-fit.ts; CSS draws the
+  // column form (the phone's `.stacked` is the same form).
+  assert.match(appCssSrc, /\.page-head \.title-stack \{[^}]*display: flex; flex-wrap: nowrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a nowrap row with the 2px stack rhythm');
+  assert.doesNotMatch(appCssSrc, /\.page-head \.title-stack \{[^}]*flex-wrap: wrap/u, 'not a wrapping row: it keeps its one-line width');
+  assert.match(appCssSrc, /\.page-head \.title-stack\.stacked, \.page-head \.title-stack\.fit-wrapped \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally, and the fit class draws the same column');
   // #363 (owner 2026-10-14: "应该紧挨着") and #369 (the same screenshot, the
   // desktop fit-wrap): wherever the tag is on its own line, the 2px is
   // measured from the NAME, not from the chevron's 30px hit box. The command
@@ -526,7 +532,18 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   assert.doesNotMatch(appCssSrc, /\.title-stack\.stacked \.name-line > \.command-button/u, 'not scoped to the phone s stack: the desktop wrap has the same chevron');
   // (reviewer P2 on eeb81e7e: scoped to the SCRIPT, not a template window)
   const script = source.slice(0, source.indexOf('</script>'));
-  assert.ok(!/title-stack|name-line|titleStack|nameLine/u.test(script), 'no script touches the stack: no ResizeObserver or width read decides the wrap — CSS does');
+  // The ONE script that touches the stack is the fit action (#369, ruled by
+  // the orchestrator after the CSS-only matrix failed): it toggles one class,
+  // stores no width, and the head only WEARS it: nothing in this file's script
+  // names the stack or its name line.
+  assert.ok(!/title-stack|name-line|titleStack|nameLine/u.test(script), 'the head s script never touches the stack: the fit action does, through one class');
+  assert.match(source, /import \{ titleFit \} from '\.\.\/ui\/title-fit\.ts';/u, 'the one fit action, from the shared module');
+  assert.match(source, /use:titleFit=\{\{ active: !compact, key: /u, 'compact (the phone) is a no-op: it is stacked by its own class');
+  const fit = readFileSync(new URL('../ui/title-fit.ts', import.meta.url), 'utf8');
+  assert.match(fit, /classList\.remove\(FIT_CLASS\);\s*if \(active && overflowsItself\(stack\)\) stack\.classList\.add\(FIT_CLASS\);/u, 'take the class off, read once, put it on: no loop');
+  assert.doesNotMatch(fit, /\.style\b|setProperty|setInterval|setTimeout/u, 'writes no width or style and polls nothing');
+  assert.equal(fit.match(/new view\.ResizeObserver\(/gu)?.length, 1, 'ONE observer, rAF-coalesced');
+  assert.match(fit, /view\.requestAnimationFrame\(test\)/u);
   assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(appCssSrc), 'tokens only'); // the atom lives in app.css since #357 (the Board s head wears it too)
   assert.doesNotMatch(source, /\.title-stack\s*\{|\.name-line\s*\{/u, 'the Hub keeps no private copy of the atom');
   // The NAME wins the width fight against the PATH (owner, 2026-08-30: "名字
@@ -535,13 +552,10 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // the group was `flex: none`). So: the group shrinks at weight 1 with
   // min-width 0 (the ellipsis can engage), the path at weight 1000 (it yields
   // first, and scrolls), the buttons are flex: none.
-  assert.match(source, /\.title-group \{[^}]*flex: 0 0\.0001 auto; min-width: 0;[^}]*\}/u, 'the name group CAN shrink — buttons come first — but only after the path has given up every pixel');
-  // #369: a weight of 1 still took ~0.1px of a 140px deficit, and ANY
-  // shortfall wraps the tag while the path is far from its floor. The share
-  // must stay positive (past the floor the group shrinks: the buttons-first
-  // rule) and below the layout unit (1/64px) for any plausible deficit.
-  const share = Number(/\.title-group \{[^}]*flex: 0 ([\d.]+) auto/u.exec(source)?.[1]);
-  assert.ok(share > 0 && share <= 0.001, `the group s shrink share is a sliver, not 1: ${share}`);
+  assert.match(source, /\.title-group \{[^}]*flex: 0 1 auto; min-width: 0;[^}]*\}/u, 'the name group CAN shrink — buttons come first');
+  // (#369: the share is weight 1 again. Tuning it toward 0 only moved WHERE the
+  // tag wrapped; the fit action's 1px tolerance is what absorbs the few
+  // hundredths the group gives up while the path still has room.)
   assert.ok(!/\.title-group \{[^}]*flex: none/u.test(source), 'flex: none is what hid the buttons');
   // #234: no width cap on the name — the old 60% cap ellipsized the title
   // while the path still held width, inverting the stated priority. The

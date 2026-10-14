@@ -20,6 +20,7 @@
   import { registerLeaveGuard } from '../app/leave-guards.ts';
   import { useServerScope } from '../app/server-context.ts';
   import ServerTag from '../ui/ServerTag.svelte';
+  import { titleFit } from '../ui/title-fit.ts';
   import type { BoardUnion, BoardUnionRow } from '../app/hub-union.svelte.ts';
   import { sessionRef, refKey, type SessionRef } from '../app/refs.ts';
   import Icon from '../ui/Icon.svelte';
@@ -1059,7 +1060,7 @@
     <!-- The Hub head's Name + tag stack, the ONE atom in app.css (#359, #357):
          the tag is a line under the name exactly when they do not fit, the
          name never ellipsises to make room; no local paint. -->
-    <div class="title-stack" class:stacked={narrowVp}>
+    <div class="title-stack" class:stacked={narrowVp} use:titleFit={{ active: !narrowVp, key: `${boardTitle(allProjects, cur) ?? (cur || t('board'))}|${scope?.tag ?? ''}` }}>
       <div class="name-line"><h1>{boardTitle(allProjects, cur) ?? (cur || t('board'))}</h1></div>
       <ServerTag name={scope?.tag} />
     </div>

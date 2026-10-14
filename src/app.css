@@ -611,21 +611,26 @@ button:disabled {
   .page-head h1 { flex: 1 1 auto; }
 }
 
-/* Name + server tag (#356, #359; the Board's head since #357): a WRAPPING row
-   — the tag is a line under the name exactly when the two do not fit side by
-   side, on any screen; the name never ellipsises to make room for the tag
-   (design-language: "the tag yields to the name"). The name line hugs its text
+/* Name + server tag (#356, #359; the Board's head since #357): ONE row of two
+   forms — the tag beside the name while the two fit, a line UNDER the name when
+   they do not, on any screen; the name never ellipsises to make room for the
+   tag (design-language: "the tag yields to the name"). The row is plain nowrap:
+   which form it wears is `ui/title-fit.ts`'s one class (`fit-wrapped`, the
+   column form below), not a flex-wrap — a wrapping row keeps the width it had
+   on one line, which left a hole between the chevron and the path (#369; the
+   matrix of every pure-CSS form is on the issue). The name line hugs its text
    (no grow) and never wraps inside: a chevron, where the head has one, is glued
-   to the name's right edge whatever line the tag is on. It does not shrink for
-   the tag (flex-shrink 0) — the tag wraps first — and `max-width: 100%` keeps
-   it inside the group so the name's own ellipsis engages only once the name
-   alone is too wide. The wrapped form uses the 2px rhythm the project rows'
-   `.p-main` stack uses. `.stacked` (the phone) stacks unconditionally. Scoped
-   under `.page-head` so it outranks the head's own `h1 { flex: 1 1 auto }`. */
-.page-head .title-stack { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
+   to the name's right edge in either form. It does not shrink for the tag
+   (flex-shrink 0) — the row overflows instead, which is what the fit test
+   reads — and `max-width: 100%` keeps it inside the group so the name's own
+   ellipsis engages only once the name alone is too wide. The column form uses
+   the 2px rhythm the project rows' `.p-main` stack uses. `.stacked` (the
+   phone) stacks unconditionally. Scoped under `.page-head` so it outranks the
+   head's own `h1 { flex: 1 1 auto }`. */
+.page-head .title-stack { display: flex; flex-wrap: nowrap; align-items: center; column-gap: 6px; row-gap: 2px; min-width: 0; }
 .page-head .name-line { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; max-width: 100%; min-width: 0; }
 .page-head .name-line h1, .page-head .name-line .h1-edit { flex: 0 1 auto; min-width: 0; }
-.page-head .title-stack.stacked { flex-direction: column; align-items: flex-start; }
+.page-head .title-stack.stacked, .page-head .title-stack.fit-wrapped { flex-direction: column; align-items: flex-start; }
 /* Wherever the tag is on its own line — the phone's stack AND the desktop's
    fit-wrap — it sits 2px under the NAME, not under the chevron's hit box
    (#363, owner 2026-10-14: "标签和项目名中间的上下间隔有点大了，应该紧挨着";

@@ -1316,17 +1316,17 @@ Unread never wears `--status-*` (it is not a state; `--status-ok` already means 
 Owner, on #356's header: "那个 tag 放到名称底下，是按照模式来的吗？还是说，当发现
 project 名称会被压缩成'...'时，你自动就把它放到底下？我发现在桌面上也需要这样的一个
 功能。" Wherever a name carries a `ServerTag` (the Hub head; the Board, Terminal
-and Files heads as they gain one), the two sit in ONE wrapping flex row
-(`.title-stack`): the NAME LINE — the name and whatever is glued to it (the
+and Files heads as they gain one), the two sit in ONE flex row
+(`.title-stack`, nowrap since #369): the NAME LINE — the name and whatever is glued to it (the
 Hub's chevron) — is one non-wrapping unit that hugs its text (`flex: 0 0
-auto; max-width: 100%`), the tag is the wrappable item, so the tag drops under
+auto; max-width: 100%`), the tag is the item that moves, so the tag drops under
 the name exactly when the two do not fit side by side — on any screen, at any
 width, by fit and not by mode — and the name ellipsises only once the line
 alone is wider than the whole group. A control that belongs to the name
 (the chevron) is INSIDE the name line, never a sibling of the stack: a
 sibling centres against the two-line block and floats mid-height beside a
-hole (owner 2026-10-13 22:57). Pure CSS: no ResizeObserver, no measurement, no
-second class flip; the wrapped form reuses the 2px stack rhythm. The phone
+hole (owner 2026-10-13 22:57). The wrapped form reuses the 2px stack rhythm.
+(Pure CSS until #369: the fit decision is now one class set by one action, below.) The phone
 stacks unconditionally (the stack is its complete form, #356), and there the
 2px is measured from the NAME's text box to the tag (#363, owner 2026-10-14:
 "标签和项目名中间的上下间隔有点大了，应该紧挨着"): a control in the name line
@@ -1338,20 +1338,33 @@ Board head (no chevron) and the sidebar rows (`.p-main`) already 2px. The same
 rule holds on the desktop's fit-wrap (#369, owner 2026-10-14 17:10, two
 screenshots): it was scoped to the phone's `.stacked` and the wrapped desktop
 form kept the 30px box — 6.5px under the name at 820, 2px after, one rule for
-both forms; the inline head is 42px before and after. The same screenshot
-showed the path starting a tag's width right of the chevron. Cause: the
-title group shrank at weight 1 against the path's 1000, so a ~140px deficit
-still took ~0.1px off the group and ANY shortfall wraps the tag, while the stack
-(a flex item) kept almost its inline width. The group's share is now 0.0001
-(positive: past the path's 8ch floor the buttons-first rule still shrinks
-the name; below the layout unit for any real deficit), so the path gives up
-every pixel first and the tag wraps only when the head is truly out of room
-(measured with the Files drawer open: the path 181 → 55px before the tag
-wrapped; before, it wrapped with the path at 283px). Known and left: for the
-~40px of head width where the path is already at its floor and the group is
-still narrowing to its name line, the wrapped stack is wider than its name
-line by up to the tag + its gap (50px → 5px in a 1150 → 1100px sweep) —
-flex-wrap has no CSS shrink-wrap, and no script measures it. A tag
+both forms; the wrapped head was 49.4px, now 42px like the inline one. The same
+screenshot showed the path starting a tag's width right of the chevron, and
+that one could NOT be fixed in CSS. A wrapping flex row keeps the width it had
+on one line (a container's used width is fixed before its lines are broken), so
+the stack stood a tag's width wider than its name line. Measured in Chrome 152
+over 65 head widths × short/long name × short/long tag (260 cases): the
+flex-wrap stack left a hole over 8px in 16 of them (worst 98.7px, long tag);
+`inline-grid` with one max-content column, `repeat(auto-fit, minmax(min-content,
+max-content))` and `width: min-content` put the tag under the name at EVERY
+width; `inline-grid` with two columns never wraps and the tag overlaps the path
+(up to 237px). Tuning the title group's shrink weight toward 0 only moved where
+it wrapped (50px → 5px of hole over 40px of head width). So the stack is a
+plain nowrap row, and `ui/title-fit.ts` — one action, worn by the Hub and the
+Board head — decides which of its two forms it wears by toggling ONE class,
+`fit-wrapped`; CSS draws the column form (the phone's `.stacked` is the same
+form). It takes the class off, asks whether the row overflows itself (more than
+1px: the title group still gives up a few hundredths while the path has room),
+and puts it back — once per trigger, never polled; the answer is a function of
+the layout, so asking again cannot flip it. Triggers: the head's and the
+group's size (one rAF-coalesced ResizeObserver) and a changed name/tag/rename
+state; nothing else. It stores no width and writes no style; on the phone it is
+a no-op (`.stacked`). Measured 260/260 within 8px — the path starts 2.7–4px
+from the name line (wrapped) or from the tag (inline) — with the validator's
+24-character fixture: 925px inline (path 56.8px), 910px wrapped with the path
+at 91.7px (it was 55.4px behind a 40px hole). WebKit is unmeasured on this
+host (no engine here); ResizeObserver and `scrollWidth` are the portable parts,
+and the owner's Mac is the first WebKit check. A tag
 that
 holds its place while the name truncates, or a JS-measured flip, is a
 regression. Verified in a real browser at 1280 (85-char name whole, tag below;

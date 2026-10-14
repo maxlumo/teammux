@@ -608,10 +608,12 @@ project name. On a 390px phone the tag (`flex: none`) beside four head icons
 left the name five characters ("tmux-mo…" — owner 2026-10-13 21:48: 放到项目名
 下面，紧挨着); #356 stacked it by mode. The owner then asked for the same on
 the desktop whenever the name would be cut (#359, 22:34), so the trigger is
-FIT: `.title-stack` is a wrapping row whose first item is the NAME LINE —
+FIT: `.title-stack` is a row (nowrap since #369; one class, `fit-wrapped`,
+puts it in its column form — see design-language.md § Name + tag) whose first
+item is the NAME LINE —
 the name (or the rename input) with its chevron glued to the right edge, one
 non-wrapping unit that hugs its text and does not grow or shrink for the tag
-— and whose only wrappable item is the tag. So inline: name ▾ tag; wrapped:
+— and whose only item that moves is the tag. So inline: name ▾ tag; wrapped:
 line 1 = name ▾, line 2 = tag. The first cut put the chevron OUTSIDE the stack
 as a sibling, and on a wrap it centred against the two-line block, leaving a
 hole right of the name (owner 22:57, two screenshots) — the chevron belongs

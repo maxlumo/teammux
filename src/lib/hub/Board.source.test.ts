@@ -1025,8 +1025,11 @@ test('the measurement ghost is priced by the RENDERED rows counts, not the focus
 });
 
 test('the Board head wears the Hub head s Name + tag atom from app.css — no local paint (#357 reviewer P2, #359 grammar)', () => {
-  assert.match(source, /<div class="title-stack" class:stacked=\{narrowVp\}>\s*<div class="name-line"><h1>\{boardTitle\(allProjects, cur\) \?\? \(cur \|\| t\('board'\)\)\}<\/h1><\/div>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u, 'name line (the name) then the tag as the stack s second item');
+  assert.match(source, /<div class="title-stack" class:stacked=\{narrowVp\} use:titleFit=\{\{ active: !narrowVp, key: [\s\S]*?\}\}>\s*<div class="name-line"><h1>\{boardTitle\(allProjects, cur\) \?\? \(cur \|\| t\('board'\)\)\}<\/h1><\/div>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u, 'name line (the name) then the tag as the stack s second item');
   const style = source.slice(source.indexOf('<style>'));
   assert.doesNotMatch(style, /title-stack|name-line/u, 'the atom is app.css s, not re-declared here');
   assert.match(appCss, /\.page-head \.title-stack \{/u);
+  // #369: the Board's head wears the same ONE fit action as the Hub's (any head with a tag does).
+  assert.match(source, /import \{ titleFit \} from '\.\.\/ui\/title-fit\.ts';/u);
+  assert.match(source, /use:titleFit=\{\{ active: !narrowVp, key: /u, 'the phone is stacked by its own class: the action is a no-op there');
 });
