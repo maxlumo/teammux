@@ -15,16 +15,18 @@
   const serverState = createServerState(createServerStore(localStorage, runtime.id));
   let target = $state('app:0.0');
   let shown = $state(false);
+  const switches = [];
   globalThis.__strip = {
     dial: () => runtime.dial(),
     show() { shown = true; },
     retarget(t) { target = t; },
     get target() { return target; },
+    switches,
   };
 </script>
 
 {#if shown}
   <ServerScope {runtime} state={serverState}>
-    <Terminal {target} session="app" visible active onSwitchPane={(t) => { target = t; }} />
+    <Terminal {target} session="app" visible active onSwitchPane={(t) => { switches.push(t); target = t; }} />
   </ServerScope>
 {/if}

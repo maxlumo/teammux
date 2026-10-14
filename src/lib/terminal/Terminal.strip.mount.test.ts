@@ -63,7 +63,7 @@ async function mount(context: TestContext) {
       (win as unknown as { WebSocket: unknown }).WebSocket = socketClass(win, windows);
     },
   });
-  const host = (app.window as unknown as { __strip: { dial(): Promise<{ ok: boolean }>; show(): void; retarget(t: string): void; target: string } }).__strip;
+  const host = (app.window as unknown as { __strip: { dial(): Promise<{ ok: boolean }>; show(): void; retarget(t: string): void; target: string; switches: string[] } }).__strip;
   const flushAll = async () => { for (let i = 0; i < 12; i++) await app.flush(); };
   const dialled = host.dial();
   await flushAll();
@@ -111,4 +111,18 @@ test('#365: the marker follows the current window — a pick, an added window, a
   assert.deepEqual(lit(), ['1:zsh'], 'the marker moved back');
   assert.equal(marker().length, 1);
   assert.equal(marker()[0], pill, 'the SAME marker element throughout — it travels, it is not re-born');
+});
+
+test('#365: tapping the CURRENT tab switches nothing — only another window s tab does (the !isCurrent guard, validator NC survivor)', async (context) => {
+  const { host, flushAll, tabs, lit } = await mount(context);
+  assert.deepEqual(lit(), ['0:zsh']);
+  tabs()[0]!.click();
+  await flushAll();
+  assert.deepEqual([...host.switches], [], 'the lit tab is where you are: no pane switch, no re-capture');
+  tabs()[1]!.click();
+  await flushAll();
+  assert.deepEqual([...host.switches], ['app:1.0'], 'another tab switches once');
+  tabs()[1]!.click();
+  await flushAll();
+  assert.deepEqual([...host.switches], ['app:1.0'], 'and tapping it again, now current, does nothing');
 });

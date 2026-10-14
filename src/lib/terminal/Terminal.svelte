@@ -14,6 +14,7 @@
   import { flip } from 'svelte/animate';
   import { slideIndicator } from '../ui/indicator.ts';
   import { tabShape } from '../ui/tab-shape.ts';
+  import { scrollEdges } from '../ui/scroll-edges.ts';
   import { moveMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import { t } from '../core/i18n.svelte.ts';
@@ -1781,7 +1782,7 @@
              command as the name. The hover card (use:hoverInfo) carries the
              window's facts. A tab MOVES when tmux renumbers or reorders (keyed
              by window index, animate:flip); nothing here touches .term-wrap. -->
-        <div class="win-bar-scroll appear">
+        <div class="win-bar-scroll edge-fade appear" use:scrollEdges={{ key: winMarkerKey }}>
           <div class="tab-group win-tabs" use:slideIndicator={{ key: winMarkerKey, active: '.strip-tab.sel' }}>
           {#each windows as w (w.window)}
             {@const wAgent = paneAgent(w)}
@@ -2001,7 +2002,9 @@
   .win-tabs { display: flex; align-items: stretch; gap: 2px; flex: none; position: relative; z-index: 0; }
   .win-tab {
     gap: 6px; padding: 0 10px; background: none; cursor: pointer;
-    font: 500 var(--fs-body) var(--font-mono); white-space: nowrap;
+    /* The Chat tab's type (the ruling: one step on both): its label is the
+       roster's `.a-name` — display face, --fs-ui, 600. */
+    font-family: var(--font-display); font-size: var(--fs-ui); font-weight: 600; white-space: nowrap;
     -webkit-tap-highlight-color: transparent;
   }
   .win-tab-icon { position: relative; width: 14px; height: 14px; flex: none; }

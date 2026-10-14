@@ -871,8 +871,22 @@ by the contract above, not extended by new page-local overrides.
   `--tab-line` — the Chat composer band (`--bubble-in` / `--bubble-line`), the
   Terminal's terminal (`--bg` / the head `--border` the floor line replaces).
   Content is the strip's: avatars, rings, team clusters and Stop in Chat; the
-  backend mark and `index:name` (mono, as the drawer pills read) in the
-  Terminal, with its `+` and split/close/collapse commands after the group.
+  backend mark and `index:name` in the Terminal, with its `+` and
+  split/close/collapse commands after the group. The LABEL's type is the
+  atom's, not the content's: the Chat tab name's display face, `--fs-ui`,
+  600, on both — the whole `index:name` wears it, because a second face
+  inside one label would be the inconsistency the owner asked to remove. A
+  scrolled strip fades at its clipped edges (`.edge-fade` + `scrollEdges`,
+  the roster's), so a cut label never butts against the title. What the lit
+  tab is filled with is what it opens into, by design: Chat's lit tab is the
+  composer band's `--bubble-in`, the Terminal's is the terminal's `--bg`. In
+  the dark theme `--bg` is close to the frame, so the Terminal's lit tab
+  reads by its outline, its full ink and its join into the terminal, not by
+  a brighter fill; a lighter fill there would make the tab a block of a
+  different colour from the terminal it opens into. The phone Terminal
+  head is 44px (main: 43): the 8px head padding plus the 36px tab standing
+  on the floor line that replaced the 1px border; recovering 43 would need a
+  raw 7px inset (orchestrator, 2026-10-14: keep 44).
   Why tabs and not the old accent pills (orchestrator ruling): one current
   item among many reads as tabs with ONE marker; accent pills read as
   toggles, which is what `AgentChip` is kept for (MRU chips, the pane

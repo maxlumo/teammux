@@ -532,8 +532,17 @@ test('the window strip wears the ONE tab strip atom the Chat roster wears, and p
   assert.match(source, /const winMarkerKey = \$derived\(\[currentWindow, windows\.map\(\(w\) => w\.window\)\.join\(','\)\]\.join\('\|'\)\);/u,
     'the key changes with the current window and with every added or closed window');
   assert.match(source, /\.win-bar\.tab-strip \{\s*--tab-fill: var\(--bg\); --tab-line: var\(--border\);/u, 'the lit window opens into the terminal (the page --bg), the floor line is the head border it replaces');
-  const scroll = source.slice(source.indexOf('<div class="win-bar-scroll appear">'), source.indexOf('<div class="win-split">'));
+  const scroll = source.slice(source.indexOf('<div class="win-bar-scroll'), source.indexOf('<div class="win-split">'));
   assert.ok(scroll.length > 0 && /class="strip-tab win-tab"/u.test(scroll), 'the strip region is found');
   assert.doesNotMatch(scroll, /<AgentChip/u, 'AgentChip leaves the window strip whole');
   assert.doesNotMatch(source, /\.win-chip\b/u, 'its flip wrapper went with it');
+});
+
+test('the window tab LABEL wears the Chat tab s type, and the scrolled strip fades its clipped edges (#365 review: the ruling, validator P3 1 and 4)', async () => {
+  const roster = await readFile(new URL('../hub/Roster.svelte', import.meta.url), 'utf8');
+  assert.match(roster, /\.a-name \{ font-family: var\(--font-display\); font-size: var\(--fs-ui\); font-weight: 600;/u, 'the Chat tab name s type');
+  const tab = /\n\s*\.win-tab \{([^}]*)\}/u.exec(source)?.[1] ?? '';
+  assert.match(tab, /font-family: var\(--font-display\); font-size: var\(--fs-ui\); font-weight: 600;/u, 'the same three on the window tab');
+  assert.doesNotMatch(tab, /--font-mono/u, 'no mono label: one face in one label');
+  assert.match(source, /<div class="win-bar-scroll edge-fade appear" use:scrollEdges=\{\{ key: winMarkerKey \}\}>/u, 'the roster s edge fade, re-measured with the window set');
 });
