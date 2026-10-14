@@ -1525,7 +1525,16 @@ fn offline_report(
         return Vec::new();
     }
     for (name, why) in &offline {
-        let _ = crate::projects::rooms::post(room, from, &crate::projects::delivery::offline_line(name, why, from));
+        // Attributed to the SYSTEM and addressed to the sender (board #347
+        // review P1-A, orchestrator ruling): `from` would be filtered out
+        // of that sender's own context delta (`message.from != target`), and
+        // the envelope's route is what every reader uses to tell whose line
+        // this is.
+        let _ = crate::projects::rooms::post(
+            room,
+            from,
+            &crate::projects::delivery::offline_line(name, why, from),
+        );
     }
     let notice = crate::projects::delivery::offline_notice(&offline, from);
     crate::projects::deliver_chat_line(session, from, &notice);
@@ -2274,15 +2283,29 @@ mod tests {
             None,
         );
         assert!(r.error.is_none(), "{}", r.error.map(|e| e.message).unwrap_or_default());
-        let msg = r.result.expect("the stored message comes back");
+        let msg = r.result.clone().expect("the stored message comes back");
         assert_eq!(msg["room"], room);
         assert_eq!(msg["from"], "lead");
         assert_eq!(msg["to"], serde_json::json!(["reviewer"]), "the route is stored in the envelope");
         // And it is durably in the room, not just in the response.
         let page = rooms::history_page(&room, None, 10);
         let msgs = page["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["body"], "@reviewer 看一下");
+        // Board #347: this session has no tmux at all, so NOTHING was typed
+        // and the room says so — one line per unreached name, from the real
+        // RPC path (which is what makes the emission tested without tmux).
+        // `unknown` here because this scratch project declares no agent; a
+        // real stopped session declares its slots and reads `stopped`.
+        assert_eq!(msgs.len(), 2, "the chat line and one offline line: {msgs:?}");
+        assert_eq!(
+            msgs[1]["body"],
+            "[tmm] offline reviewer — lead's message was not typed in (unknown); nothing is queued for it"
+        );
+        assert_eq!(
+            r.result.as_ref().map(|v| v["offline"].clone()),
+            Some(serde_json::json!([{ "name": "reviewer", "why": "unknown" }])),
+            "and the answer carries it, which is how `tmm send` can say it"
+        );
     }
 
     #[test]
