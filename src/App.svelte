@@ -43,6 +43,7 @@
   import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
   import { createBoardUnion, createHubUnion } from './lib/app/hub-union.svelte.ts';
   import { createSessionsUnion } from './lib/app/sessions-union.svelte.ts';
+  import { clockKey } from './lib/sessions/terminal-merge.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
   import { createServerState, releaseServerState, reloadStored, stateForRuntime } from './lib/app/server-state.ts';
   import { createServerStore, createWriteGate } from './lib/app/server-store.ts';
@@ -1575,15 +1576,17 @@
    * merge over the included set. ONE source for the app, read-only to the
    * Hubs beyond their own slice; Single hands no union at all. */
   const hubUnion = createHubUnion();
-  /** project NAME by (server, session), read off the Hub union's rows the
-   * hidden members already publish (D4) — the Terminal's foreign rows show the
-   * identity the local row shows (#357). A hidden member's Terminal never loads
-   * its own Projects section, so this is the data the app already has. */
-  const projectNames = $derived.by(() => {
-    const names = new Map();
-    if (connMode !== 'aggregate') return names;
-    for (const r of hubUnion.rows(tagScope.included).rows) names.set(`${r.serverId}\u0000${r.item.project.session}`, r.item.project.name);
-    return names;
+  /** The Hub union's project row by (server, session), read off the rows the
+   * hidden members already publish (D4): its NAME, the row itself and ITS
+   * server's clock. The Terminal's foreign rows show the identity the local
+   * row shows (#357) and are placed among this server's rows by the same
+   * comparator the Hub's list uses (#371). A hidden member's Terminal never
+   * loads its own Projects section, so this is the data the app already has. */
+  const projectClocks = $derived.by(() => {
+    const clocks = new Map();
+    if (connMode !== 'aggregate') return clocks;
+    for (const r of hubUnion.rows(tagScope.included).rows) clocks.set(clockKey(r.serverId, r.item.project.session), { name: r.item.project.name, row: r.item, talk: r.slice.talk });
+    return clocks;
   });
   const hubUnionFor = $derived(connMode === 'aggregate' ? {
     source: hubUnion, included: tagScope.included,
@@ -4035,7 +4038,7 @@
           onGoBack={(fn) => v.sessionsGoBack = fn}
           visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
-          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignNames={projectNames} {scopeNote}
+          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignProjects={projectClocks} {scopeNote}
           chips={false} />
       </aside>
       {#if layout.isTouchDevice && sessListOpen}

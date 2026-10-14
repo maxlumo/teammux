@@ -7,7 +7,8 @@
   //
   // Hidden entirely on a server without project support (mobile builds), the
   // same method-not-found contract the Team tab uses.
-  import { useServerApi } from '../app/server-context.ts';
+  import { useServerScope } from '../app/server-context.ts';
+  import ServerTag from '../ui/ServerTag.svelte';
   import type { TmuxPane } from '../core/ws.ts';
   import type { ProjectRow } from './projects.ts';
   import { flip } from 'svelte/animate';
@@ -21,8 +22,10 @@
   import { hoverInfo } from '../ui/hover.ts';
   import type { HoverInfo, HoverLine } from '../ui/hover.svelte.ts';
   import { t } from '../core/i18n.svelte.ts';
+  import type { Snippet } from 'svelte';
+  import { mergeTerminalRows, type ForeignInput, type TermRow } from '../sessions/terminal-merge.ts';
 
-  let { visible = false, openTerminal, panes = {}, onTracked = () => {}, onReady = () => {}, onGoBack = null, dense = false, activeTarget = '', oncreate = null }: {
+  let { visible = false, openTerminal, panes = {}, onTracked = () => {}, onReady = () => {}, onGoBack = null, dense = false, activeTarget = '', oncreate = null, foreign = null, foreignRow = null }: {
     visible?: boolean;
     /** The sidebar head's New project command (dense only); the host owns the dialog. */
     oncreate?: (() => void) | null;
@@ -42,9 +45,23 @@
      * row wears the same selected wash the Chat sidebar's open row wears
      * (owner, 2026-08-24: "选中的有一个背景底色terminal的侧边栏也应该加上"). */
     activeTarget?: string;
+    /** The OTHER included servers' running sessions, to be listed IN this
+     * list among the rows (board #371): `rows` from the sessions union,
+     * `order` the saved server order, `clock` the host's project row for a
+     * (server, session). They are merged with this server's rows by the one
+     * comparator (`terminal-merge.ts`), so a live row of another server sits
+     * where its recency puts it. Null: this server's list alone. */
+    foreign?: ForeignInput | null;
+    /** How a foreign row is drawn (the host's: it owns the pick action). */
+    foreignRow?: Snippet<[TermRow]> | null;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b).
-  const { listPanes, hubRooms, projectArchive, projectDown, projectList, projectUp } = useServerApi();
+  // ONE read of the context: the scope gives both this server's api and its
+  // tag, a LIVE read in the template (`scope.tag`): set while several servers
+  // are included, null in Single (board #371).
+  const scope = useServerScope();
+  if (!scope) throw new Error('Projects needs a server scope');
+  const { listPanes, hubRooms, projectArchive, projectDown, projectList, projectUp } = scope.runtime.api;
 
   let rows = $state<ProjectRow[]>([]);
   let talkMap = $state<Record<string, number>>({});
@@ -103,6 +120,12 @@
   let collapsed = $state(false);
 
   const sorted = $derived(sortRows(rows, talkMap));
+  /** This server's rows with the other servers' running sessions interleaved
+   * (#371). With no foreign rows it is `sorted`, row for row. */
+  const entries = $derived(mergeTerminalRows({
+    localId: scope.runtime.id, local: sorted, localTalk: talkMap,
+    order: foreign?.order ?? [], foreign: foreign?.rows ?? [], clock: foreign?.clock ?? (() => null),
+  }));
 
   // Live windows beat the declaration while the session exists: they are what
   // you can actually tap into, including a window that has not settled yet.
@@ -257,14 +280,15 @@
 
 </script>
 
-{#if supported && sorted.length > 0}
+{#if (supported && sorted.length > 0) || (foreignRow && foreign && foreign.rows.length > 0)}
   <section class="projects" class:dense class:reveal={firstFill}
-    use:slideIndicator={{ key: `${activeTarget}|${sorted.map((r) => r.project.id).join(',')}`, active: '.proj.open', hidden: !dense || !activeTarget }}>
+    use:slideIndicator={{ key: `${activeTarget}|${entries.map((e) => e.key).join(',')}`, active: '.proj.open', hidden: !dense || !activeTarget }}>
     {#if dense}
       <!-- The shown project's wash glides between rows (motion principle 14),
            the same marker the Chat and Board sidebars carry. -->
       <span class="slide-pill soft" aria-hidden="true"></span>
     {/if}
+    {#if sorted.length > 0}
     <div class="group-label" class:side-h={dense} class:side-toggle-row={dense}>
       {#if dense}
         <!-- A sidebar section header is a LABEL, not a control: the Chat
@@ -292,90 +316,107 @@
         </button>
       {/if}
     </div>
+    {/if}
 
     {#if !collapsed}
       <!-- Keyed + animate:flip (motion.md): `sortRows` ranks live projects
            first, so a project going up or down changes rank and its card
            MOVES there instead of every card repainting. A card fades in when
            it mounts (a new project, or the section expanding). -->
-      {#each sorted as row (row.project.id)}
-        {@const chips = chipsFor(row)}
-        <div class="proj appear" class:live={row.live}
-          class:open={dense && !!activeTarget && activeTarget.startsWith(row.project.session + ':')}
-          animate:flip={{ duration: moveMs() }}
-          role="group" aria-label={row.project.name}
-          oncontextmenu={(e) => { e.preventDefault(); openCtx(pointOf(e), row); }}
-          use:longpress={{ onlongpress: (pt) => openCtx(pt, row) }}>
-          <div class="proj-top">
-            <button class="proj-main" onclick={() => open(row)} use:hoverInfo={() => projectInfo(row)}>
-              <span class="dot" class:on={row.live}></span>
-              <span class="body">
-                <span class="line">
-                  <span class="name">{row.project.name}</span>
-                  <span class={dense ? 'side-age' : 'age'}>{projectAgeLabel(row, talkMap, tick)}</span>
-                </span>
-                {#if !dense}
-                  <!-- The path is what tells two same-named folders apart, so a
-                       full-page card shows it. A sidebar row is one line like
-                       every other sidebar row; the path lives in the row's
-                       hover card instead (use:hoverInfo above). -->
-                  <span class="line sub">
-                    <span class="path">{shortPath(row.project.path)}</span>
+      <!-- ONE list (board #371): this server's rows and the other servers'
+           running sessions, interleaved by the domain comparator
+           (`terminal-merge.ts`). Each entry is wrapped so the keyed each has
+           the single animated child `animate:flip` requires, whichever kind
+           it holds; a foreign row is drawn by the host's snippet. -->
+      {#each entries as entry (entry.key)}
+        <div class="entry" animate:flip={{ duration: moveMs() }}>
+        {#if entry.item.kind === 'local'}
+          {@const row = entry.item.row}
+          {@const chips = chipsFor(row)}
+          <div class="proj appear" class:live={row.live}
+            class:open={dense && !!activeTarget && activeTarget.startsWith(row.project.session + ':')}
+            role="group" aria-label={row.project.name}
+            oncontextmenu={(e) => { e.preventDefault(); openCtx(pointOf(e), row); }}
+            use:longpress={{ onlongpress: (pt) => openCtx(pt, row) }}>
+            <div class="proj-top">
+              <button class="proj-main" onclick={() => open(row)} use:hoverInfo={() => projectInfo(row)}>
+                <span class="dot" class:on={row.live}></span>
+                <span class="body">
+                  <span class="line">
+                    <span class="name">{row.project.name}</span>
+                    <span class={dense ? 'side-age' : 'age'}>{projectAgeLabel(row, talkMap, tick)}</span>
                   </span>
-                {/if}
-              </span>
-            </button>
-            {#if dense}
-              <!-- The SIDEBAR row (board #77): no verbs in the open — "关闭之类的
-                   应该是点击后才有进一步操作". One quiet ⋯ opens the same context
-                   menu right-click/long-press already speak (rising consequence:
-                   Open/Close, then Remove), and the destructive ones confirm. -->
-              <button class="icon-btn row-menu" disabled={busy[row.project.id]} title={t('hubProjectMenu')} aria-label={t('hubProjectMenu')}
-                onclick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openCtx({ x: r.right, y: r.bottom, align: 'right' }, row); }}>
-                <Icon name="dots" size={13} />
+                  <!-- The row's second line (#360, #371): which server this
+                       project is on, in the SAME atom the Chat sidebar's rows
+                       wear. Sidebar rows only, and only while several servers
+                       are included, so Single is unchanged. -->
+                  {#if dense && scope.tag}<span class="p-source"><ServerTag name={scope.tag} /></span>{/if}
+                  {#if !dense}
+                    <!-- The path is what tells two same-named folders apart, so a
+                         full-page card shows it. A sidebar row is one line like
+                         every other sidebar row; the path lives in the row's
+                         hover card instead (use:hoverInfo above). -->
+                    <span class="line sub">
+                      <span class="path">{shortPath(row.project.path)}</span>
+                    </span>
+                  {/if}
+                </span>
               </button>
-            {:else}
-            <div class="acts">
-              {#if row.live}
-                <!-- Close confirms (board #77): it kills every pane in the session. -->
-                <button class="act" disabled={busy[row.project.id]} onclick={() => ask('down', row)}>{t('projectDown')}</button>
+              {#if dense}
+                <!-- The SIDEBAR row (board #77): no verbs in the open — "关闭之类的
+                     应该是点击后才有进一步操作". One quiet ⋯ opens the same context
+                     menu right-click/long-press already speak (rising consequence:
+                     Open/Close, then Remove), and the destructive ones confirm. -->
+                <button class="icon-btn row-menu" disabled={busy[row.project.id]} title={t('hubProjectMenu')} aria-label={t('hubProjectMenu')}
+                  onclick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openCtx({ x: r.right, y: r.bottom, align: 'right' }, row); }}>
+                  <Icon name="dots" size={13} />
+                </button>
               {:else}
-                <button class="act primary" disabled={busy[row.project.id]} onclick={() => run(row.project.id, () => projectUp(row.project.id))}>{t('projectUp')}</button>
+              <div class="acts">
+                {#if row.live}
+                  <!-- Close confirms (board #77): it kills every pane in the session. -->
+                  <button class="act" disabled={busy[row.project.id]} onclick={() => ask('down', row)}>{t('projectDown')}</button>
+                {:else}
+                  <button class="act primary" disabled={busy[row.project.id]} onclick={() => run(row.project.id, () => projectUp(row.project.id))}>{t('projectUp')}</button>
+                {/if}
+                <!-- Confirmed, because there is no un-remove in the UI and the
+                     server never auto-tracks a removed session again. The session
+                     itself is left alone — this forgets the declaration, it does
+                     not kill anything. -->
+                <button
+                  class="act icon"
+                  disabled={busy[row.project.id]}
+                  aria-label={t('projectArchive')}
+                  title={t('projectArchive')}
+                  onclick={() => ask('archive', row)}>
+                  <Icon name="trash" size={13} />
+                </button>
+              </div>
               {/if}
-              <!-- Confirmed, because there is no un-remove in the UI and the
-                   server never auto-tracks a removed session again. The session
-                   itself is left alone — this forgets the declaration, it does
-                   not kill anything. -->
-              <button
-                class="act icon"
-                disabled={busy[row.project.id]}
-                aria-label={t('projectArchive')}
-                title={t('projectArchive')}
-                onclick={() => ask('archive', row)}>
-                <Icon name="trash" size={13} />
-              </button>
             </div>
+
+            <!-- Windows belong INSIDE the project card: they are what the project
+                 is made of, not a separate list under it. Each one is tappable —
+                 jumping to the window you want is the whole point. A down project
+                 lists what `up` would restore, and the tap brings it up first. -->
+            {#if chips.length}
+              <div class={dense ? 'side-wins wins-indent' : 'wins'} class:dim={!row.live}>
+                {#each chips as chip (chip.name + (chip.window ?? ''))}
+                  <button class={dense ? 'side-win' : 'win'} onclick={() => openWindow(row, chip.name, chip.target)}>
+                    {#if chip.agentIcon}<img src={chip.agentIcon} alt={chip.agentTag} width="11" height="11" />{/if}
+                    <span class={dense ? 'side-win-name' : 'win-name'}>{chip.name}</span>
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <div class={dense ? 'side-wins wins-indent' : 'wins'}><span class="win-empty">{t('projectNoWindows')}</span></div>
             {/if}
           </div>
 
-          <!-- Windows belong INSIDE the project card: they are what the project
-               is made of, not a separate list under it. Each one is tappable —
-               jumping to the window you want is the whole point. A down project
-               lists what `up` would restore, and the tap brings it up first. -->
-          {#if chips.length}
-            <div class={dense ? 'side-wins wins-indent' : 'wins'} class:dim={!row.live}>
-              {#each chips as chip (chip.name + (chip.window ?? ''))}
-                <button class={dense ? 'side-win' : 'win'} onclick={() => openWindow(row, chip.name, chip.target)}>
-                  {#if chip.agentIcon}<img src={chip.agentIcon} alt={chip.agentTag} width="11" height="11" />{/if}
-                  <span class={dense ? 'side-win-name' : 'win-name'}>{chip.name}</span>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class={dense ? 'side-wins wins-indent' : 'wins'}><span class="win-empty">{t('projectNoWindows')}</span></div>
-          {/if}
+              {:else if foreignRow}
+          {@render foreignRow(entry)}
+        {/if}
         </div>
-
       {/each}
 
       {#if error}
@@ -456,6 +497,11 @@
   .projects.dense .head-add { width: 24px; height: 24px; padding: 0; flex: none; color: var(--text3); }
   .projects.dense .proj.live { border: none; }
   .projects.dense .proj-main { padding: 0; align-items: center; }
+  /* With a tag line (Aggregate, #371) the button is two lines tall and a
+     centred dot sat between them: it rides the NAME line instead, as in
+     Chat's rows (`.proj-row .dot` margin-top 6px). Single has no tag line,
+     so its rows are untouched. */
+  .projects.dense .proj-main:has(.p-source) { align-items: flex-start; }
   /* Chat's first line, verbatim: an 8px gap before the ⋯, which leaves the
      flow so the name→chips rhythm never depends on a button's height. */
   .projects.dense .proj { position: relative; }
@@ -468,6 +514,7 @@
      down, no glow (the 7px accent-glow dot is the card dialect). The name
      takes `.p-name`'s 550, not the card's 600. */
   .projects.dense .dot { width: 6px; height: 6px; margin-top: 0; background: var(--text3); }
+  .projects.dense .proj-main:has(.p-source) .dot { margin-top: 6px; }
   .projects.dense .dot.on { background: var(--status-ok); box-shadow: none; }
   .projects.dense .name { font-weight: 550; }
   .projects.dense .path { color: var(--text3); }

@@ -45,7 +45,7 @@ recorded evidence gap, not claimed.
 | From a Hub union row | T | `③c-2: picking another server s row moves the focus there (D2) and selects THAT project…` |
 | From a Sessions union row | T | `③c-3: picking another server s session focuses that server and opens the pane THERE — A s terminal is untouched` |
 | From a Board union row (#357) | T | `#357 (Board): picking another server s board focuses that server (D2, no dial) and lands on THAT project s board; the body is then B s` |
-| From the phone's Terminal list (#357) | T | `#357 (Terminal, phone): the other servers sessions are IN the main list … pick = focus + open there` |
+| From the phone's Terminal list (#357) | T | `#371 (Terminal, phone): the other servers sessions are IN the main list, interleaved … EVERY row tagged … pick = focus + open there` (was the #357 test of the same row; the order claim changed from "follow the projects" to the merge) |
 | From an image / file reference in chat | R | the chat's image/file references open in the focused tree's Files (one server by construction, ②b); a cross-server reference carries its `serverId` in the ref and is a landing like the others — browser row |
 
 ## 4. One server unhealthy does not block the rest

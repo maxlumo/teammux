@@ -3,6 +3,7 @@
   import type { TmuxSession, TmuxPane } from '../core/ws.ts';
   import type { SessionsUnion, SessionPick } from '../app/sessions-union.svelte.ts';
   import type { PaneRef } from '../app/refs.ts';
+  import { clockKey, type ProjectClock, type TermRow } from './terminal-merge.ts';
   import ServerTag from '../ui/ServerTag.svelte';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -32,7 +33,7 @@
    * picking one is the host's (`onPickServer`: focus that server, open the
    * pane there). Null: this server's list alone (Single). */
   let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true,
-    union = null, onPickServer = null, foreignInline = false, foreignNames = null, scopeNote = null }: {
+    union = null, onPickServer = null, foreignInline = false, foreignProjects = null, scopeNote = null }: {
     openTerminal: (session: string, target: string, command?: string) => void;
     activeTarget?: string;
     visible?: boolean;
@@ -50,10 +51,11 @@
      * there the column is tall enough to read whole, and the grouping tells
      * the two apart at a glance (③c-3). */
     foreignInline?: boolean;
-    /** project NAME by `serverId\u0000session`, from the host: a foreign row
-     * shows the name of the declared project its session belongs to when it
-     * differs from the session — the identity the local row shows (#357). */
-    foreignNames?: ReadonlyMap<string, string> | null;
+    /** The host's project rows by `clockKey(serverId, session)`: a foreign row
+     * shows the NAME of the declared project its session belongs to (#357),
+     * and the row's activity CLOCK is what places it among this server's
+     * rows (#371) — the same comparator the Hub's merged list uses. */
+    foreignProjects?: ReadonlyMap<string, ProjectClock> | null;
     /** Single with more servers saved (#364): the sidebar's foot row naming
      * the server shown. The page dialect (`chips`) has no sidebar foot. */
     scopeNote?: ScopeNoteSpec | null;
@@ -289,7 +291,8 @@
   $effect(() => () => { union?.source.withdraw(runtime!); });
   /** The other included servers' sessions, tagged, and who has not answered. */
   const foreign = $derived(union ? union.source.rows(union.included, serverId) : null);
-  const foreignName = (r: { serverId: string; item: { name: string } }) => foreignNames?.get(`${r.serverId}\u0000${r.item.name}`) || r.item.name;
+  const foreignClock = (serverId: string, session: string) => foreignProjects?.get(clockKey(serverId, session)) ?? null;
+  const foreignName = (r: { serverId: string; item: { name: string } }) => foreignClock(r.serverId, r.item.name)?.name || r.item.name;
 
 
   async function doRefresh() {
@@ -642,6 +645,42 @@
 
   <!-- Session list. -->
   <div class="list">
+    <!-- #357 (phone): every OTHER included server's sessions, IN the main
+         list — the sidebar row dress, the tag on its own second line (#360).
+         The same selector rows as the desktop's group below: pick = focus that
+         server + open the pane there (③c-3). #371: they are drawn by
+         `Projects`, INTERLEAVED with this server's rows by the one comparator
+         (`terminal-merge.ts`); under the list they sat past the fold of a long
+         one and the sheet read as Single while Chat's sidebar did not. Only a
+         server that has not published is named HERE, above the list: a status,
+         not a row to be ranked. Not searched. -->
+    {#if foreignInline && foreign && !isSearching}
+      {#each (union?.included ?? []).filter((s) => foreign.missing.includes(s.id)) as m (m.id)}
+        <div class="side-row proj-row missing" role="note">
+          <span class="dot off"></span>
+          <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
+        </div>
+      {/each}
+    {/if}
+    {#snippet foreignRowView(r: TermRow)}
+      {#if r.item.kind === 'foreign'}
+        {@const f = r.item}
+        <button class="side-row proj-row foreign" data-server={r.serverId} onclick={() => { onPickServer?.(f.ref); onPick?.(); }}>
+          <!-- A running session is a LIVE row: the same green dot a live project
+               wears in this list (#371). `attached` is this page's own class for
+               the sidebar's live dot (`.sidebar-mode .dot.attached`), not the
+               attached/detached split: every foreign row is a running one. -->
+          <span class="dot attached"></span>
+          <span class="p-main">
+            <span class="p-top">
+              <span class="p-name">{f.name}</span>
+              {#if f.pick.windows > 1}<span class="side-age">{f.pick.windows}w</span>{/if}
+            </span>
+            {#if f.tag}<span class="p-source"><ServerTag name={f.tag} /></span>{/if}
+          </span>
+        </button>
+      {/if}
+    {/snippet}
     <!-- Declarative projects sit above the raw session list: a project is the
          thing you keep, a session is only its current projection. The section
          hides itself on a server without project support. -->
@@ -654,32 +693,9 @@
       oncreate={() => showNew = true}
       onGoBack={(fn) => projectsGoBack = fn}
       onTracked={(names) => { trackedSessions = names; trackedReady = true; }}
-      onReady={(reload) => reloadProjects = reload} />
-    <!-- #357 (phone): every OTHER included server's sessions, IN the main
-         list under this server's projects — the sidebar row dress, the tag on
-         its own second line (#360). The same selector rows as the desktop's
-         group below: pick = focus that server + open the pane there (③c-3);
-         a server that has not published is named missing. Not searched. -->
-    {#if foreignInline && foreign && !isSearching}
-      {#each foreign.rows as r (r.key)}
-        <button class="side-row proj-row foreign" data-server={r.serverId} onclick={() => { onPickServer?.(r.ref); onPick?.(); }}>
-          <span class="dot" class:off={!r.item.attached}></span>
-          <span class="p-main">
-            <span class="p-top">
-              <span class="p-name">{foreignName(r)}</span>
-              {#if r.item.windows > 1}<span class="side-age">{r.item.windows}w</span>{/if}
-            </span>
-            {#if r.tag}<span class="p-source"><ServerTag name={r.tag} /></span>{/if}
-          </span>
-        </button>
-      {/each}
-      {#each (union?.included ?? []).filter((s) => foreign.missing.includes(s.id)) as m (m.id)}
-        <div class="side-row proj-row missing" role="note">
-          <span class="dot off"></span>
-          <span class="p-main"><span class="p-top"><span class="p-name">{m.name}</span><span class="side-age">{t('hubUnionMissing')}</span></span></span>
-        </div>
-      {/each}
-    {/if}
+      onReady={(reload) => reloadProjects = reload}
+      foreign={foreignInline && foreign && !isSearching && union ? { rows: foreign.rows, order: union.included.map((s) => s.id), clock: foreignClock } : null}
+      foreignRow={foreignRowView} />
     <!-- Creating a project is the same ROW in every sidebar (Chat's projects,
          Agents' definitions/skills/MCP): `.side-row.add`, quiet until hovered.
          It used to be a full-width bordered button in a bottom bar here, which

@@ -108,6 +108,11 @@ test('the identity modules have exactly the production consumers this commit giv
       // slice's serverId (App's); Sessions only hands the ref it was given
       // back to the host (a type import).
       'src/lib/app/sessions-union.svelte.ts', 'src/lib/sessions/Sessions.svelte',
+      // #371: the Terminal's ONE list merges this server's project rows with
+      // the foreign sessions through the same union merge; it mints a
+      // SessionRef for this server's rows (from the id the scope gave) and
+      // returns the PaneRef each foreign row was handed. A pure merge, not a page.
+      'src/lib/sessions/terminal-merge.ts',
       // ③c-4: the bell's union keys its sources by ServerId (a type import);
       // App owns it, and every alert already carries its server.
       'src/lib/app/centre-union.svelte.ts'],
@@ -148,7 +153,9 @@ test('the identity modules have exactly the production consumers this commit giv
     // through `onRow`.
     'server-union.ts': ['src/lib/app/hub-union.svelte.ts', 'src/lib/hub/Hub.svelte',
       // ③c-3: the sessions union merges by server order; Sessions renders it.
-      'src/lib/app/sessions-union.svelte.ts'],
+      'src/lib/app/sessions-union.svelte.ts',
+      // #371: the Terminal list's interleave (terminal-merge.ts) is this merge.
+      'src/lib/sessions/terminal-merge.ts'],
   };
   const found: Record<string, string[]> = {};
   for await (const file of glob('src/**/*.{ts,svelte}')) {

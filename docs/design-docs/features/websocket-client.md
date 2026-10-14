@@ -1261,12 +1261,33 @@ body stays one server's (D3), a hidden member's Board does the 20 s list
 refresh only (D4), and answered/failed are the slice states of P1-C4. The
 Terminal's union source is unchanged; what changes is WHERE its foreign rows
 are drawn. On the phone the session sheet is a union LIST: the foreign
-sessions are rows of the main list right under this server's projects
-(`foreignInline`, a host prop App derives from the sheet's own condition,
+sessions are rows of the main list (`foreignInline`, a host prop App derives from the sheet's own condition,
 `isTouchDevice && narrowVp` — the component never re-decides what a phone
 is), each with the tag on its own line and the same pick (focus + open
 there); the desktop sidebar keeps its grouped "Other servers" section, where
 a tall column reads whole.
+
+**Where the phone's foreign rows sit (board #371, 2026-10-14).** #357 put them
+right under this server's projects, which is the bottom of a list longer than
+the sheet: measured on a 390 px touch sheet (844 px tall), the list was 1208 px
+and the foreign rows started at y=1105, so the owner's Terminal sheet showed
+devbox only and read as Single next to a Chat sidebar that listed both. The
+#357 tests ran the DATA path (rows exist, tagged, in order of DOM) and could
+not see the fold. The rule is the Hub's and the Board's: ONE merged list, each
+server's slice in its own order, the slices interleaved by the domain
+comparator through the one merge (`terminal-merge.ts` →
+`server-union.ts unionRows`, `compareRowsWithClock`: live first, then
+activity, each row by its OWN server's clock). `Projects` runs the merge over
+its rows and the foreign sessions (`Sessions` hands them in, and draws a
+foreign row through a snippet because the pick action is its own); a foreign
+session's clock is the Hub union's project row for (server, session), which
+App already holds (`projectClocks`) and which travels WITH the row, so the
+same room name on two servers is two clocks. A session with no project row is
+live and unclocked. Every row in Aggregate wears the tag line from the scope's
+live tag (`scope.tag`, null in Single). Considered and refused: foreign rows
+first (puts another server's two sessions ahead of what the person came to
+pick), and last (the bug). Motion: the keyed each wraps every entry so
+`animate:flip` has its single child whichever kind it holds.
 
 Follow-up after review (#357, reviewer on 390ba4dd; orchestrator ruling):
 

@@ -8860,18 +8860,29 @@ test('#357 (Board, Single): one server s boards, untagged, no source line — as
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .board-root .sidebar .p-source'), null);
 });
 
+/** The phone sheet's rows in LIST order, each `tag:name` (`-` = no tag line):
+ * this server's project rows and the other servers' sessions together (#371). */
+const sheetRows = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .projects .entry')]
+  .map((e) => `${e.querySelector('.p-source .server-tag')?.textContent ?? '-'}:${(e.querySelector('.p-name') ?? e.querySelector('.name'))?.textContent}`);
+
 const inlineForeign = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')]
   .map((r) => `${r.querySelector('.p-source .server-tag')?.textContent ?? '-'}:${r.querySelector('.p-name')?.textContent}`);
 
-test('#357 (Terminal, phone): the other servers sessions are IN the main list under this server s projects, tagged on their own line — no separate bottom section; pick = focus + open there', async (context) => {
+test('#371 (Terminal, phone): the other servers sessions are IN the main list, interleaved with this server s projects by the Hub s recency rule, EVERY row tagged — no bottom section, no parking; pick = focus + open there', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'mobile',
   }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...twoSessionLists().rpc,
-    // A s `work` is a PROJECT here, so the PROJECTS section renders and the
-    // order claim below is about real rows.
+    // A has a live `work` (up at 1000 s) and a STOPPED `idle` (up at 9000 s);
+    // B has a live `Deploy` (up at 5000 s) and a bare session `work` with no
+    // project row. The Hub's rule: live first, then activity, each row by its
+    // OWN server's clock — so B's Deploy leads, A's work follows, B's unclocked
+    // session comes after every clocked live row, and the stopped one is last
+    // however recent it is. (#357 put B's rows after A's whole list, past the
+    // fold of a long one.)
     projectList: async () => ({ projects: asking() === 'a'
-      ? [{ project: { id: 'a-work', name: 'work', session: 'work', path: '/work', room: 'proj:work', updated_at: 1 }, live: true, slots: [] }]
-      : [{ project: { id: 'b-deploy', name: 'Deploy', session: 'deploy', path: '/deploy', room: 'proj:deploy', updated_at: 5 }, live: true, slots: [] }] }),
+      ? [{ project: { id: 'a-work', name: 'work', session: 'work', path: '/work', room: 'proj:work', last_up_at: 1000 }, live: true, slots: [] },
+         { project: { id: 'a-idle', name: 'idle', session: 'idle', path: '/idle', room: 'proj:idle', last_up_at: 9000 }, live: false, slots: [] }]
+      : [{ project: { id: 'b-deploy', name: 'Deploy', session: 'deploy', path: '/deploy', room: 'proj:deploy', last_up_at: 5000 }, live: true, slots: [] }] }),
     hubRooms: async () => ({ rooms: {}, states: {} }),
   }, setup(window: any) {
     // The phone's picker is the SHEET form: App's `.side-sheet` condition is
@@ -8881,21 +8892,23 @@ test('#357 (Terminal, phone): the other servers sessions are IN the main list un
     window.Element.prototype.getAnimations = () => [];
   } });
   for (let i = 0; i < 30 && inlineForeign(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
-  assert.deepEqual(inlineForeign(h), ['beta:work', 'beta:Deploy'], 'B s sessions as rows of the main list — a declared project by its NAME (the local row s identity), a bare session by its session');
+  assert.deepEqual(inlineForeign(h), ['beta:Deploy', 'beta:work'], 'B s sessions as rows of the main list, in the merge s order — a declared project by its NAME (the local row s identity), a bare session by its session');
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .foreign-rows'), null, 'no "Other servers" section on the phone');
   // Open the sheet as a person does on the phone — the Back gesture at the
   // Terminal s floor lifts the drawer (board #58). This server s PROJECTS
   // section loads on show and heads the list.
   const openSheet = async () => {
     h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
-    for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .term-side .projects'); i++) { await h.app.advance(300); await h.settle(); }
+    // (The section also renders for the other servers' rows alone, so wait for THIS server's own.)
+    for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .term-side .projects .proj'); i++) { await h.app.advance(300); await h.settle(); }
   };
   await openSheet();
   assert.ok(h.app.document.querySelector('.scope-tree:not(.held) .term-side.open'), 'the sheet is open');
   const side = h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held) .term-side .list')!;
-  const order = [...side.querySelectorAll<HTMLElement>('.projects, .proj-row.foreign')].map((el) => el.classList.contains('foreign') ? 'foreign' : 'projects');
-  assert.equal(order[0], 'projects', 'this server s projects section first');
-  assert.ok(order.indexOf('foreign') > 0 && order.lastIndexOf('projects') < order.indexOf('foreign'), 'the foreign rows follow it, in the same list');
+  void side;
+  // ONE list, in the Hub's order, every row on the same two-line grammar.
+  assert.deepEqual(sheetRows(h), ['beta:Deploy', 'alpha:work', 'beta:work', 'alpha:idle'],
+    'B s clocked live row leads, A s live row next, B s unclocked session after the clocked live rows, the STOPPED project last — not all-first, not all-last; and A s own rows carry their tag');
   const ls = h.app.window.localStorage;
   [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')].find((r) => r.querySelector('.p-name')?.textContent === 'Deploy')!.click();
   for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
@@ -8905,6 +8918,26 @@ test('#357 (Terminal, phone): the other servers sessions are IN the main list un
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side.open'), null, 'the pick closed the sheet');
   for (let i = 0; i < 20 && inlineForeign(h).length < 1; i++) { await h.app.advance(500); await h.settle(); }
   assert.deepEqual(inlineForeign(h), ['alpha:work'], 'B s picker now lists A s session inline');
+});
+
+test('#371 (Terminal, phone, Single): one server s rows, no tag line, no foreign rows — the list is as it was', async (context) => {
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:1.0') }), tmux_layout_mode: 'mobile',
+  }, undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...twoSessionLists().rpc,
+    projectList: async () => ({ projects: [
+      { project: { id: 'a-work', name: 'work', session: 'work', path: '/work', room: 'proj:work', last_up_at: 1000 }, live: true, slots: [] },
+      { project: { id: 'a-idle', name: 'idle', session: 'idle', path: '/idle', room: 'proj:idle', last_up_at: 9000 }, live: false, slots: [] }] }),
+    hubRooms: async () => ({ rooms: {}, states: {} }),
+  }, setup(window: any) {
+    const mm = window.matchMedia;
+    window.matchMedia = (q: string) => Object.assign(mm(q), { matches: /760px/u.test(q) });
+    window.Element.prototype.getAnimations = () => [];
+  } });
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .term-side .projects .proj'); i++) { await h.app.advance(300); await h.settle(); }
+  assert.deepEqual(sheetRows(h), ['-:work', '-:idle'], 'this server s own rows, live first, no tag on any');
+  assert.equal(inlineForeign(h).length, 0);
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .p-source'), null, 'no tag line anywhere in Single');
 });
 
 test('#357 (Terminal, phone): with another server s sessions listed, an empty THIS server says "No sessions on this server" — never a bare "No sessions" above a B row', async (context) => {

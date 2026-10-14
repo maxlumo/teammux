@@ -31,3 +31,36 @@ test('the dense row menu rides the title line, as in Chat (owner, 2026-09-24)', 
   assert.match(source, /\.projects\.dense \.row-menu \{ position: absolute; right: 10px; top: 6px; \}/u);
   assert.doesNotMatch(source, /\.projects\.dense \.proj-top \{[^}]*padding-right/u, 'the windows beneath take the full width');
 });
+
+// ── Board #371: the Terminal list is ONE list over the included servers ─────
+
+test('the rows are this server\'s and the other servers\' MERGED by the one comparator, every row on the same grammar (#371)', async () => {
+  // One list: the keyed each runs over the MERGED entries, the animated child is
+  // the wrapper (a keyed each with `animate:flip` allows no other child), and a
+  // foreign row is drawn by the host's snippet.
+  assert.match(source, /const entries = \$derived\(mergeTerminalRows\(\{/u);
+  assert.match(source, /local: sorted, localTalk: talkMap,/u, 'this server\'s slice is its own sortRows, with its own clock');
+  assert.match(source, /\{#each entries as entry \(entry\.key\)\}\s*<div class="entry" animate:flip=\{\{ duration: moveMs\(\) \}\}>/u);
+  assert.match(source, /\{:else if foreignRow\}\s*\{@render foreignRow\(entry\)\}/u);
+  assert.doesNotMatch(source, /\{#each sorted as/u, 'no second list of the same rows');
+  // The section also shows for the other servers' rows alone, but its header
+  // and New command belong to THIS server's rows.
+  assert.match(source, /\{#if \(supported && sorted\.length > 0\) \|\| \(foreignRow && foreign && foreign\.rows\.length > 0\)\}/u);
+  assert.match(source, /\{#if sorted\.length > 0\}\s*<div class="group-label"/u);
+  // The tag line: the Chat rows' atom, the scope's LIVE tag (null in Single),
+  // sidebar rows only. ONE context read for the api and the tag.
+  assert.match(source, /\{#if dense && scope\.tag\}<span class="p-source"><ServerTag name=\{scope\.tag\} \/><\/span>\{\/if\}/u);
+  assert.equal(source.match(/useServer(?:Scope|Api|Runtime)\(/gu)?.length, 1, 'one context read');
+  // Single is untouched: the dot only moves off-centre when there IS a tag line.
+  assert.match(source, /\.projects\.dense \.proj-main:has\(\.p-source\) \{ align-items: flex-start; \}/u);
+  assert.match(source, /\.projects\.dense \.proj-main:has\(\.p-source\) \.dot \{ margin-top: 6px; \}/u);
+});
+
+test('terminal-merge merges through the union\'s merge with the domain comparator and never sorts the merged list (#371)', async () => {
+  const merge = await readFile(new URL('../sessions/terminal-merge.ts', import.meta.url), 'utf8');
+  assert.match(merge, /compareRowsWithClock\(\{ row: x\.item\.row, talk: x\.item\.talk \}, \{ row: y\.item\.row, talk: y\.item\.talk \}\)/u, 'the Hub\'s comparator, each row by its OWN clock');
+  assert.match(merge, /unionRows<TermItem, Ref>\(slices, \{[\s\S]*?compare: \(x, y\) => cmp\(x, y\),/u, 'through the one merge');
+  assert.equal(merge.match(/\.sort\(/gu)?.length, 1, 'only a FOREIGN slice is ordered (it arrives in tmux\'s order); the merged list is never sorted');
+  assert.match(merge, /for \(const items of byServer\.values\(\)\) items\.sort/u);
+  assert.match(merge, /const row: ProjectRow = c \? \{ \.\.\.c\.row, live: true \} : unclocked\(f\.item\.name\);/u, 'a running session is LIVE, with the Hub\'s clock when the host has the project row');
+});

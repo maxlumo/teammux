@@ -36,9 +36,21 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   the pane picker above stay this server's, and the section is not searched.
   **On the phone** (board #357, owner 2026-10-13: "在 Terminal 页面…都没有
   整合…所有项目") the session sheet is ONE list: the other servers' sessions
-  are rows of the main list, right under this server's projects, each with its
-  tag on its own second line — the bottom section the phone rarely scrolls to
-  is gone there. The desktop sidebar keeps the grouped section. A foreign row
+  are rows of the main list, each with its tag on its own second line — the
+  bottom section the phone rarely scrolls to is gone there. The desktop
+  sidebar keeps the grouped section. **Where a foreign row sits** (board #371,
+  owner 2026-10-14: the phone's Terminal sheet read as Single while the Chat
+  sidebar beside it listed both servers — #357 had parked the foreign rows
+  AFTER this server's whole project list, past the fold of a long one): in
+  Aggregate the sheet is ONE list in the Hub's order — live first, then
+  recency, each row by ITS OWN server's clock — with every row, this
+  server's too, wearing the Chat sidebar's tag line; a foreign live row sits
+  where its recency puts it among this server's live rows, never parked last
+  and never forced first. Single has no tag and no foreign row. A foreign
+  session with no project row on its server (an untracked one) is live with no
+  recorded activity: after every live row that has some, before the stopped
+  projects. A server that has not published is a status, named above the list.
+  A foreign row
   shows the NAME of the declared project its session belongs to when that
   differs from the session (the identity the local row shows) and opens by the
   session. The Terminal's union is of LIVE sessions only: a Terminal is about
