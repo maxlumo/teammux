@@ -195,12 +195,16 @@ show. The script hands the image the checkout's PUBLIC source revision as build
 args instead: `SOURCE_COMMIT` (`git rev-parse --short=8 HEAD`) and
 `SOURCE_TIME` (the UTC minute), which vite and build.rs read FIRST, then git,
 then `dev`. A hash and a minute; no path, remote or credential, and no context
-widening. A value already in your environment wins, which is how you build the
-image "as" another commit: `SOURCE_COMMIT=<A> npm run test:e2e:docker -- --keep`.
-To produce the MISMATCH on the kept machines, run the script from the checkout
-at commit A (gateways at A), then serve a `vite build` of a checkout at B against
-one of them and open Settings › About: the server line turns amber and names A.
-A `vite` dev server never shows a commit (it is not a build).
+widening. A value already in your environment wins, but it only LABELS what the
+image says it is: the image is still built from the files of the checkout the
+script runs in, so `SOURCE_COMMIT=<A>` does not give you commit A's code. To
+produce the MISMATCH on the kept machines, run the script from a checkout AT
+commit A (gateways at A; its git supplies the label), then serve a `vite build`
+of a checkout at B against one of them and open Settings › About: the server
+line turns amber and names A. A `vite` dev server never shows a commit (it is
+not a build). The two sides compare by commit PREFIX (`git --short=8` is at
+least 8 characters), which is a best-effort tell, not proof that two builds are
+the same source: equal prefixes of different commits are possible in principle.
 
 One limit, written down so it is not mistaken for a guarantee: the compose
 network is not `internal` — on Docker 25 published ports do not forward from

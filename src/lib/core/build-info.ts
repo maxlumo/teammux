@@ -55,7 +55,9 @@ export function formatBuild(b: BuildInfo): string {
 
 /** The same commit, whichever abbreviation each side got: `git --short=8` is
  * AT LEAST 8 characters (a collision lengthens it), so one may be a prefix of
- * the other. */
+ * the other. Prefix compare; a short-hash collision is not detected. The aim
+ * is the stale-PWA tell, not proof of identity: the full object id would widen
+ * the login answer for no gain the owner can see. */
 export function sameCommit(a: string, b: string): boolean {
   return a.startsWith(b) || b.startsWith(a);
 }

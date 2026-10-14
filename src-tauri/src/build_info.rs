@@ -67,8 +67,8 @@ mod tests {
                 && BUILT.chars().filter(|c| c.is_ascii_digit()).count() == 12
         };
         assert!(built_ok, "BUILT is `YYYY-MM-DD HH:MM` UTC: {BUILT:?}");
-        // The clock is this year or later (the formatter, not just its shape).
-        assert!(BUILT == "unknown" || BUILT[..4].parse::<u32>().unwrap() >= 2026, "{BUILT}");
+        // The FORMAT is the contract, not the year: a handed SOURCE_TIME may be any
+        // legitimate past minute (an older release rebuilt).
         // A build handed a time (SOURCE_TIME, like SOURCE_COMMIT) says that one.
         if let Some(given) = option_env!("SOURCE_TIME") {
             let ok = given.len() == 16 && given.bytes().enumerate().all(|(i, b)| match i { 4 | 7 => b == b'-', 10 => b == b' ', 13 => b == b':', _ => b.is_ascii_digit() });

@@ -92,8 +92,10 @@ export function dockerEnv(base) {
  * image build takes (board #368). The image has no `.git` (.dockerignore keeps
  * it out, on purpose), so without this both sides of the stack would build as
  * `dev` and a build-A-image-with-a-build-B-UI mismatch could never be produced.
- * A caller's own SOURCE_COMMIT / SOURCE_TIME wins (build the image "as" some
- * commit); a git failure adds nothing (`dev`). Public metadata only: a hash and
+ * A caller's own SOURCE_COMMIT / SOURCE_TIME wins, but it only LABELS what the
+ * image says it is: the image is still built from this checkout's files, so to
+ * build commit A run the script from a checkout AT A. A git failure adds
+ * nothing (`dev`). Public metadata only: a hash and
  * a minute, never a path, a remote or a credential. */
 export function sourceRevisionEnv(base, run = spawnSync, now = new Date()) {
   const env = { ...base };

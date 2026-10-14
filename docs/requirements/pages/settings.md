@@ -69,7 +69,9 @@ where Agents is a page of its own, reads as one plain list):
   line is dim while the two agree or cannot be compared (a `dev` side, a dev
   server, a server that named none), and wears the warn status colour with one
   sentence when both name a real commit and the commits differ (compared by
-  prefix, because `--short=8` is at least 8 characters, not exactly 8): that
+  prefix, because `--short=8` is at least 8 characters, not exactly 8; a
+  best-effort tell, not proof of identical source: prefix compare; a short-hash
+  collision is not detected): that
   is the stale-PWA tell (UI from one build, server from another). The
   sentence does not promise a reload fetches the server's UI: it says the UI
   and the server are different builds, to update the installed app or reload a
