@@ -23,9 +23,10 @@
   import type { HoverInfo, HoverLine } from '../ui/hover.svelte.ts';
   import { t } from '../core/i18n.svelte.ts';
   import type { Snippet } from 'svelte';
+  import type { TmuxSession } from '../core/ws.ts';
   import { mergeTerminalRows, type ForeignInput, type TermRow } from '../sessions/terminal-merge.ts';
 
-  let { visible = false, openTerminal, panes = {}, onTracked = () => {}, onReady = () => {}, onGoBack = null, dense = false, activeTarget = '', oncreate = null, foreign = null, foreignRow = null }: {
+  let { visible = false, openTerminal, panes = {}, onTracked = () => {}, onReady = () => {}, onGoBack = null, dense = false, activeTarget = '', oncreate = null, foreign = null, foreignRow = null, localSessions = [], sessionRow = null }: {
     visible?: boolean;
     /** The sidebar head's New project command (dense only); the host owns the dialog. */
     oncreate?: (() => void) | null;
@@ -54,6 +55,12 @@
     foreign?: ForeignInput | null;
     /** How a foreign row is drawn (the host's: it owns the pick action). */
     foreignRow?: Snippet<[TermRow]> | null;
+    /** THIS server's untracked live sessions, to be placed in the SAME merge
+     * as live, unclocked rows (board #371 review P1), and how the host draws
+     * one. Both empty outside the phone's Aggregate list: there the host
+     * keeps its own SESSIONS group below. */
+    localSessions?: readonly TmuxSession[];
+    sessionRow?: Snippet<[TermRow]> | null;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b).
   // ONE read of the context: the scope gives both this server's api and its
@@ -123,7 +130,7 @@
   /** This server's rows with the other servers' running sessions interleaved
    * (#371). With no foreign rows it is `sorted`, row for row. */
   const entries = $derived(mergeTerminalRows({
-    localId: scope.runtime.id, local: sorted, localTalk: talkMap,
+    localId: scope.runtime.id, local: sorted, localTalk: talkMap, localSessions: sessionRow ? localSessions : [], localTag: scope.tag ?? null,
     order: foreign?.order ?? [], foreign: foreign?.rows ?? [], clock: foreign?.clock ?? (() => null),
   }));
 
@@ -280,7 +287,7 @@
 
 </script>
 
-{#if (supported && sorted.length > 0) || (foreignRow && foreign && foreign.rows.length > 0)}
+{#if (supported && sorted.length > 0) || (foreignRow && foreign && foreign.rows.length > 0) || (sessionRow && localSessions.length > 0)}
   <section class="projects" class:dense class:reveal={firstFill}
     use:slideIndicator={{ key: `${activeTarget}|${entries.map((e) => e.key).join(',')}`, active: '.proj.open', hidden: !dense || !activeTarget }}>
     {#if dense}
@@ -413,7 +420,9 @@
             {/if}
           </div>
 
-              {:else if foreignRow}
+              {:else if entry.item.kind === 'session' && sessionRow}
+          {@render sessionRow(entry)}
+        {:else if foreignRow}
           {@render foreignRow(entry)}
         {/if}
         </div>

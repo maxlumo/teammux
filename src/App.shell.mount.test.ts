@@ -8940,6 +8940,83 @@ test('#371 (Terminal, phone, Single): one server s rows, no tag line, no foreign
   assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .p-source'), null, 'no tag line anywhere in Single');
 });
 
+/** Two servers that each have a PROJECTED live session and a BARE (untracked) one;
+ * A also has a stopped project that is more recent than anything live. */
+const bareAndProjected = () => {
+  const mk = (names: string[]) => ({ sessions: names.map((name) => ({ name, windows: 1 })), panes: names.map((session) => ({ session, window: 1, pane: 0 })) });
+  const byServer: Record<string, { sessions: any[]; panes: any[] }> = { a: mk(['a-proj', 'a-raw']), b: mk(['b-proj', 'b-raw']) };
+  const mine = () => byServer[asking()] ?? { sessions: [], panes: [] };
+  const project = (id: string, live: boolean, up: number) => ({ project: { id, name: id, session: id, path: '/' + id, room: 'proj:' + id, last_up_at: up }, live, slots: [] });
+  return {
+    listSessionsWithPanes: async () => ({ sessions: [...mine().sessions], panes: [...mine().panes] }),
+    listSessions: async () => [...mine().sessions],
+    listPanes: async (session: string) => (mine().panes as any[]).filter((p) => p.session === session),
+    projectList: async () => ({ projects: asking() === 'a' ? [project('a-proj', true, 4000), project('a-old', false, 9000)] : [project('b-proj', true, 6000)] }),
+    hubRooms: async () => ({ rooms: {}, states: {} }),
+  };
+};
+const phoneSetup = (window: any) => {
+  const mm = window.matchMedia;
+  window.matchMedia = (q: string) => Object.assign(mm(q), { matches: /760px/u.test(q) });
+  window.Element.prototype.getAnimations = () => [];
+};
+const openSheet = async (h: Awaited<ReturnType<typeof bootApp>>, rows: number) => {
+  // The Back gesture at the Terminal's floor lifts the drawer (board #58); wait for the rows to be there.
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 40 && sheetRows(h).length < rows; i++) { await h.app.advance(300); await h.settle(); }
+};
+
+test('#371 (Terminal, phone): a BARE live session joins the same merge on EVERY server — the row set and order survive A→B→A, each row tagged, live before stopped, nothing doubled or lost, and each click goes to its own server', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('a-proj:1.0'), parked: legacyNav('b-proj:1.0') }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...bareAndProjected() }, setup: phoneSetup });
+  const ls = h.app.window.localStorage;
+  const aFocus = ['beta:b-proj', 'alpha:a-proj', 'alpha:a-raw', 'beta:b-raw', 'alpha:a-old'];
+  await openSheet(h, aFocus.length);
+  // A is the focus: a-proj/b-proj by their clocks (6000 s, 4000 s), then the two
+  // BARE sessions (live, no recorded activity; a tie goes to the server saved
+  // first), then A's STOPPED project — the most recent of all, and still last.
+  assert.deepEqual(sheetRows(h), aFocus);
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .list > .rows .session'), null, 'no second list: the old SESSIONS group holds no row');
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .term-side .group-label.side-h .icon, .scope-tree:not(.held) .term-side .list > .rows .group-label'), null, 'and no SESSIONS header over nothing');
+  // Pick B's bare session: the focus moves to B, opened there by ITS session.
+  [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')].find((r) => r.querySelector('.p-name')?.textContent === 'b-raw')!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'b'; i++) await h.settle();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'b');
+  assert.equal(h.restored(), 'b:b-raw:1.0', 'opened THERE, by the session');
+  // B is the focus: A's stopped project is not a session, so it is not in the
+  // Terminal's union (live only, by design); every LIVE row is where it was.
+  await openSheet(h, 4);
+  const bFocus = sheetRows(h);
+  assert.deepEqual(bFocus, aFocus.filter((r) => r !== 'alpha:a-old'), 'the same live rows, in the same order, with the same tags, whichever server is the focus');
+  // Pick A's bare session (now the foreign one): back to A.
+  [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .term-side .proj-row.foreign')].find((r) => r.querySelector('.p-name')?.textContent === 'a-raw')!.click();
+  for (let i = 0; i < 10 && ls.getItem('tmux_server_current') !== 'a'; i++) await h.settle();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  assert.equal(h.restored(), 'a:a-raw:1.0');
+  await openSheet(h, aFocus.length);
+  assert.deepEqual(sheetRows(h), aFocus, 'A→B→A: the first list again, row for row');
+});
+
+test('#371 (Terminal, phone): without project support the bare sessions ARE the list — tagged, merged, none lost', async (context) => {
+  const unsupported = async () => { throw Object.assign(new Error('no projects'), { code: -32601 }); };
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('a-proj:1.0'), parked: legacyNav('b-proj:1.0') }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...bareAndProjected(), projectList: unsupported }, setup: phoneSetup });
+  await openSheet(h, 4);
+  assert.deepEqual(sheetRows(h), ['alpha:a-proj', 'alpha:a-raw', 'beta:b-proj', 'beta:b-raw'], 'every session of both servers, tagged, in one list (no clocks: this server first, each in tmux order)');
+});
+
+test('#371 (Terminal, phone): while A\'s project list is still out, B\'s rows are listed and usable', async (context) => {
+  const hung = await bootApp(context, aggregateOn({
+    ...twoServers({ live: legacyNav('a-proj:1.0'), parked: legacyNav('b-proj:1.0') }), tmux_layout_mode: 'mobile',
+  }), undefined, { ...sandbox, rpc: { ...oneRoomHub(), ...bareAndProjected(), projectList: () => asking() === 'a' ? new Promise(() => {}) : bareAndProjected().projectList() }, setup: phoneSetup });
+  for (let i = 0; i < 40 && inlineForeign(hung).length < 2; i++) { await hung.app.advance(300); await hung.settle(); }
+  assert.deepEqual(inlineForeign(hung).sort(), ['beta:b-proj', 'beta:b-raw'], 'A\'s Projects has not answered; B\'s rows are already listed and usable');
+});
+
 test('#357 (Terminal, phone): with another server s sessions listed, an empty THIS server says "No sessions on this server" — never a bare "No sessions" above a B row', async (context) => {
   const lists = twoSessionLists();
   lists.byServer.a = { sessions: [], panes: [] };

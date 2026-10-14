@@ -1283,8 +1283,15 @@ foreign row through a snippet because the pick action is its own); a foreign
 session's clock is the Hub union's project row for (server, session), which
 App already holds (`projectClocks`) and which travels WITH the row, so the
 same room name on two servers is two clocks. A session with no project row is
-live and unclocked. Every row in Aggregate wears the tag line from the scope's
-live tag (`scope.tag`, null in Single). Considered and refused: foreign rows
+live and unclocked, and so is THIS server's own bare (untracked) session: it
+joins the same merge as the local slice (`localSessions`, drawn by `Sessions`'
+existing session row with a tag line and the live dot) instead of waiting in
+the SESSIONS group below, which holds none in this mode — the first cut left
+them there and the same row changed place and look with the focus (reviewer P1;
+regression `A→B→A` over a projected and a bare live session per server). Every
+row in Aggregate wears the tag line from the scope's live tag (`scope.tag`, null
+in Single); a foreign row's age slot is the Hub row's own label (the window
+count "2w" beside "27m" read as weeks). Considered and refused: foreign rows
 first (puts another server's two sessions ahead of what the person came to
 pick), and last (the bug). Motion: the keyed each wraps every entry so
 `animate:flip` has its single child whichever kind it holds.

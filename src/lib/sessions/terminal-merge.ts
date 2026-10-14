@@ -20,6 +20,7 @@
 import { compareRowsWithClock, type ProjectRow } from '../projects/projects.ts';
 import { unionRows, type ServerSlice, type UnionRow } from '../app/server-union.ts';
 import type { SessionPick } from '../app/sessions-union.svelte.ts';
+import type { TmuxSession } from '../core/ws.ts';
 import { refKey, sessionRef, type PaneRef, type Ref, type ServerId } from '../app/refs.ts';
 
 /** The Hub union's knowledge of one project, by (server, session). */
@@ -32,6 +33,10 @@ export interface ProjectClock {
 
 export type TermItem =
   | { kind: 'local'; row: ProjectRow; talk: Record<string, number> }
+  /** THIS server's untracked live session (#371 review P1): one kind of row
+   * whichever server it lives on, so it joins the same merge as a foreign
+   * bare session — live, unclocked, tagged. */
+  | { kind: 'session'; session: TmuxSession; tag: string | null; row: ProjectRow; talk: Record<string, number> }
   | { kind: 'foreign'; pick: SessionPick; name: string; tag: string | null; row: ProjectRow; talk: Record<string, number>; ref: PaneRef; clocked: boolean };
 
 export type TermRow = UnionRow<TermItem, Ref>;
@@ -58,6 +63,10 @@ export interface MergeArgs {
   /** Its Projects rows in ITS order (`sortRows`), and the clock they were ordered by. */
   local: readonly ProjectRow[];
   localTalk: Record<string, number>;
+  /** THIS server's untracked live sessions (those no project row tracks) and
+   * the tag they wear; empty/absent outside the phone's Aggregate list. */
+  localSessions?: readonly TmuxSession[];
+  localTag?: string | null;
   /** The saved order of the included servers: it breaks ties, so the list is
    * stable across renders instead of following whoever answered first. */
   order: readonly ServerId[];
@@ -70,6 +79,15 @@ export function mergeTerminalRows(a: MergeArgs): TermRow[] {
   const cmp = (x: { item: TermItem }, y: { item: TermItem }) =>
     compareRowsWithClock({ row: x.item.row, talk: x.item.talk }, { row: y.item.row, talk: y.item.talk });
   const locals: TermItem[] = a.local.map((row) => ({ kind: 'local', row, talk: a.localTalk }));
+  // Bare local sessions are live with no recorded activity, exactly the policy
+  // for a foreign one. The local slice must be ordered by the rule before it
+  // is merged, so it is ordered ONCE here — but only when there is something
+  // to place: with no bare sessions the project rows keep their own sortRows
+  // order untouched (Single, and any list without them).
+  if (a.localSessions?.length) {
+    for (const session of a.localSessions) locals.push({ kind: 'session', session, tag: a.localTag ?? null, row: unclocked(session.name), talk: {} });
+    locals.sort((x, y) => cmp({ item: x }, { item: y }));
+  }
   const byServer = new Map<ServerId, TermItem[]>();
   for (const f of a.foreign) {
     const c = a.clock(f.serverId, f.item.name);
@@ -90,5 +108,7 @@ export function mergeTerminalRows(a: MergeArgs): TermRow[] {
     compare: (x, y) => cmp(x, y),
     showSource: false,
   });
-  return merged.rows.map((r) => ({ ...r, key: r.item.kind === 'local' ? `local:${r.item.row.project.id}` : refKey(r.ref) }));
+  // A project row keeps its project id as its key (its animation identity);
+  // a bare local session is keyed by its server + session name, like a foreign one.
+  return merged.rows.map((r) => ({ ...r, key: r.item.kind === 'local' ? `local:${r.item.row.project.id}` : r.item.kind === 'session' ? `session:${JSON.stringify([r.serverId, r.item.session.name])}` : refKey(r.ref) }));
 }

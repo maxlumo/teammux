@@ -4,6 +4,7 @@
   import type { SessionsUnion, SessionPick } from '../app/sessions-union.svelte.ts';
   import type { PaneRef } from '../app/refs.ts';
   import { clockKey, type ProjectClock, type TermRow } from './terminal-merge.ts';
+  import { projectAgeLabel } from '../projects/projects.ts';
   import ServerTag from '../ui/ServerTag.svelte';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -455,6 +456,15 @@
   // Auto-expand during search so panes matching the query are visible.
   let isSearching = $derived(!!query.trim());
 
+  /** The phone's Aggregate list (#371): ONE list, so THIS server's untracked
+   * live sessions are placed by `Projects` in the same merge as its project
+   * rows and the other servers' sessions (live, unclocked, tagged), and the
+   * SESSIONS group below stays empty. Not while searching (the query is a
+   * question about this server's own list) and not before Projects has said
+   * which sessions it tracks (they would flash here and migrate). */
+  const mergedList = $derived(foreignInline && !!union && !isSearching);
+  const localRaw = $derived(mergedList && trackedReady ? filtered : []);
+
   // When the user opens the search box, focus the input (next microtask
   // so the input is rendered first).
   $effect(() => {
@@ -552,7 +562,7 @@
        path — in the cramped row it was squeezed to the point of being
        unreadable. The full path lives on the window rows below
        (right-aligned, scrollable). -->
-  {#snippet sessionItem(s: TmuxSession)}
+  {#snippet sessionItem(s: TmuxSession, tag: string | null = null, live = false)}
     {@const sum = sessionSummary(s)}
     {@const isActive = activeTarget.startsWith(s.name + ':')}
     {@const isExpanded = (isSearching && s.windows > 1) || expanded[s.name]}
@@ -569,7 +579,10 @@
         use:longpress={{ onlongpress: (pt) => { openSessionMenu(pt, s); } }}
         use:hoverInfo={() => sessionInfo(s)}
       >
-        <span class="dot" class:attached={s.attached}></span>
+        <!-- `live`: in the merged list (#371) every row's dot says LIVE, so a bare
+             session wears the green a live project and a foreign session wear,
+             not the attached/detached split of the SESSIONS group. -->
+        <span class="dot" class:attached={live || s.attached}></span>
         <span class="name">{s.name}</span>
         <span class="meta">
             {#if sum.agents.length}
@@ -601,6 +614,11 @@
           </button>
         </span>
       </div>
+      {#if tag}
+        <!-- Aggregate (#371): which server this bare session is on, in the
+             atom the other rows wear, under the name. -->
+        <div class="session-tag"><span class="p-source"><ServerTag name={tag} /></span></div>
+      {/if}
 
       {#if isExpanded && visiblePanes.length}
         <div class="pane-list appear-rise">
@@ -662,6 +680,9 @@
         </div>
       {/each}
     {/if}
+    {#snippet localSessionRowView(r: TermRow)}
+      {#if r.item.kind === 'session'}{@render sessionItem(r.item.session, r.item.tag, true)}{/if}
+    {/snippet}
     {#snippet foreignRowView(r: TermRow)}
       {#if r.item.kind === 'foreign'}
         {@const f = r.item}
@@ -674,7 +695,11 @@
           <span class="p-main">
             <span class="p-top">
               <span class="p-name">{f.name}</span>
-              {#if f.pick.windows > 1}<span class="side-age">{f.pick.windows}w</span>{/if}
+              <!-- The slot every row in this list uses for its AGE (#371): the Hub
+                   row's own label (the same formatter and clock the Hub shows),
+                   or nothing when the host has no project row. It used to be the
+                   WINDOW COUNT, "2w", which in a column of ages reads as weeks. -->
+              {#if f.clocked}<span class="side-age">{projectAgeLabel(f.row, f.talk)}</span>{/if}
             </span>
             {#if f.tag}<span class="p-source"><ServerTag name={f.tag} /></span>{/if}
           </span>
@@ -695,7 +720,8 @@
       onTracked={(names) => { trackedSessions = names; trackedReady = true; }}
       onReady={(reload) => reloadProjects = reload}
       foreign={foreignInline && foreign && !isSearching && union ? { rows: foreign.rows, order: union.included.map((s) => s.id), clock: foreignClock } : null}
-      foreignRow={foreignRowView} />
+      foreignRow={foreignRowView}
+      localSessions={localRaw} sessionRow={localSessionRowView} />
     <!-- Creating a project is the same ROW in every sidebar (Chat's projects,
          Agents' definitions/skills/MCP): `.side-row.add`, quiet until hovered.
          It used to be a full-width bordered button in a bottom bar here, which
@@ -732,7 +758,7 @@
          under the PROJECTS header, so the sessions looked like more projects.
          Page mode keeps the flat list headerless — there the page title
          already says what it is. -->
-    {#if !chips && filtered.length > 0}
+    {#if !chips && filtered.length > 0 && !mergedList}
       <div class="group-label" class:side-h={!chips}>
         <Icon name="terminal" size={12} />
         {t('groupSessions')}
@@ -740,7 +766,7 @@
     {/if}
     <!-- A row that changes rank (an activation re-sorts by recency) MOVES
          there (motion.md, animate:flip on the each's one child). -->
-    {#each filtered as s (s.name)}
+    {#each (mergedList ? [] : filtered) as s (s.name)}
       <div animate:flip={{ duration: moveMs() }}>{@render sessionItem(s)}</div>
     {/each}
 
@@ -898,6 +924,9 @@
   .sessions.sidebar-mode .session { border-radius: var(--ui-radius-row); }
   .sessions.sidebar-mode .session.active { border-color: transparent; }
   .sessions.sidebar-mode .session-row { padding: 8px 10px; border-radius: var(--ui-radius-row); }
+  /* The tag line under a bare session's name (#371): the row's own padding (10px)
+     plus the dot (6px) and the row gap, so the pill starts where the name does. */
+  .sessions.sidebar-mode .session-tag { padding: 0 10px 6px calc(10px + 6px + 8px); margin-top: -8px; }
   .content {
     display: flex;
     flex-direction: column;

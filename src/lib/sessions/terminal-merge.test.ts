@@ -12,7 +12,7 @@ const row = (session: string, live: boolean, lastUp = 0, id = session): ProjectR
 });
 const pick = (name: string) => ({ name, windows: 1, attached: false, target: `${name}:0.0` });
 const foreign = (serverId: string, name: string) => ({ serverId, item: pick(name), ref: paneRef(serverId, name, `${name}:0.0`), tag: serverId });
-const names = (rows: ReturnType<typeof mergeTerminalRows>) => rows.map((r) => r.item.kind === 'local' ? r.item.row.project.session : `${r.serverId}/${r.item.pick.name}`);
+const names = (rows: ReturnType<typeof mergeTerminalRows>) => rows.map((r) => r.item.kind === 'local' ? r.item.row.project.session : r.item.kind === 'session' ? `${r.serverId}/${r.item.session.name}` : `${r.serverId}/${r.item.pick.name}`);
 
 // devbox (local) has live l-new (up at 5000 s) and l-old (up at 1000 s), then stopped s1, s2.
 const local = [row('l-new', true, 5000), row('l-old', true, 1000), row('s1', false, 9000), row('s2', false, 8000)];
@@ -75,4 +75,47 @@ test('a foreign row carries the project NAME when the host knows one, else the s
   const label = (s: string) => { const it = merged.find((r) => r.item.kind === 'foreign' && r.item.pick.name === s)!.item; return it.kind === 'foreign' ? it.name : ''; };
   assert.equal(label('m-mid'), 'M Mid');
   assert.equal(label('untracked'), 'untracked');
+});
+
+// ── Review P1: THIS server's untracked live sessions are one kind of row ────
+
+const bare = (...names: string[]) => names.map((name) => ({ name, windows: 1 }) as unknown as import('../core/ws.ts').TmuxSession);
+const tagOf = (r: ReturnType<typeof mergeTerminalRows>[number]) => r.item.kind === 'session' || r.item.kind === 'foreign' ? r.item.tag : null;
+
+test('this server\'s bare live session is live and unclocked like a foreign one: after the clocked live rows, before every stopped project, tagged', () => {
+  const merged = mergeTerminalRows({ ...base, localSessions: bare('l-raw'), localTag: 'dev', foreign: [foreign('mac', 'm-mid')] });
+  assert.deepEqual(names(merged), ['l-new', 'mac/m-mid', 'l-old', 'dev/l-raw', 's1', 's2'], 'a bare session never sinks below a stopped project, however recent that one is');
+  assert.equal(tagOf(merged[3]!), 'dev');
+  assert.equal(merged[3]!.key, `session:${JSON.stringify(['dev', 'l-raw'])}`, 'keyed by server + session, like a foreign row');
+  assert.equal(merged[3]!.ref.kind, 'session');
+});
+
+test('a bare session on A is at the same place with the same tag whether A or B is the focus (the live rows, row for row)', () => {
+  // View 1: A (id dev) is the focus, with a project, a bare session and a stopped project; B's sessions are foreign.
+  // View 2: B (id mac) is the focus; A's sessions are the foreign ones. Stopped projects are not sessions, so they
+  // exist only in their own server's view; every LIVE row must be identical.
+  const clockOf = (s: string, n: string) => ({
+    [clockKey('dev', 'a-proj')]: { name: 'a-proj', row: row('a-proj', true, 4000), talk: {} },
+    [clockKey('mac', 'b-proj')]: { name: 'b-proj', row: row('b-proj', true, 6000), talk: {} },
+  } as Record<string, ProjectClock>)[clockKey(s, n)];
+  const aProj = row('a-proj', true, 4000), aOld = row('a-old', false, 9000), bProj = row('b-proj', true, 6000);
+  const inA = mergeTerminalRows({
+    localId: 'dev', local: [aProj, aOld], localTalk: {}, localSessions: bare('a-raw'), localTag: 'dev', order: ['dev', 'mac'],
+    foreign: [foreign('mac', 'b-proj'), foreign('mac', 'b-raw')], clock: clockOf,
+  });
+  const inB = mergeTerminalRows({
+    localId: 'mac', local: [bProj], localTalk: {}, localSessions: bare('b-raw'), localTag: 'mac', order: ['dev', 'mac'],
+    foreign: [foreign('dev', 'a-proj'), foreign('dev', 'a-raw')], clock: clockOf,
+  });
+  const live = (rows: typeof inA) => rows.filter((r) => r.item.row.live).map((r) => `${r.serverId}/${r.item.kind === 'local' ? r.item.row.project.session : r.item.kind === 'session' ? r.item.session.name : r.item.pick.name}`);
+  assert.deepEqual(live(inA), ['mac/b-proj', 'dev/a-proj', 'dev/a-raw', 'mac/b-raw'], 'recency first, then the unclocked, ties to the server saved first');
+  assert.deepEqual(live(inB), live(inA), 'the same rows in the same order from the other side');
+  assert.deepEqual(names(inA).at(-1), 'a-old', 'and A\'s stopped project is last in the view that has it');
+});
+
+test('without bare local sessions the local slice is exactly the project rows, unsorted by the merge', () => {
+  // A deliberately out-of-rule local order must come out as given: only a slice
+  // that gains bare sessions is ordered, and Single never does.
+  const odd = [row('s1', false, 9000), row('l-new', true, 5000)];
+  assert.deepEqual(names(mergeTerminalRows({ ...base, local: odd, foreign: [] })), ['s1', 'l-new']);
 });

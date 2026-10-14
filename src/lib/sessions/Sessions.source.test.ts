@@ -47,7 +47,8 @@ test('sidebar section headers speak the shared .side-h dialect', () => {
   const dense = /\.sessions\.sidebar-mode \.group-label \{([\s\S]*?)\}/u.exec(source)?.[1] ?? '';
   assert.doesNotMatch(dense, /font-family|font-size|letter-spacing/u, 'type comes from app.css');
   // A flat list gets a header too, so no group of rows is unlabelled.
-  assert.match(source, /\{#if !chips && filtered\.length > 0\}\s*<div class="group-label"/u);
+  // (#371: in the phone's Aggregate list the SESSIONS group is empty — its rows are in the merge — so its header goes with them.)
+  assert.match(source, /\{#if !chips && filtered\.length > 0 && !mergedList\}\s*<div class="group-label"/u);
 });
 
 test('the phone s session sheet is ONE list: the foreign rows are handed to Projects and merged INTO it, never appended; "phone" is the host s (#357, #371)', async () => {
@@ -69,6 +70,10 @@ test('the phone s session sheet is ONE list: the foreign rows are handed to Proj
   assert.match(row, /class="side-row proj-row foreign"/u);
   assert.match(row, /\{#if f\.tag\}<span class="p-source"><ServerTag name=\{f\.tag\} \/><\/span>\{\/if\}/u, 'the tag on its own second line (#360)');
   assert.match(row, /onPickServer\?\.\(f\.ref\); onPick\?\.\(\);/u, 'the same pick as the grouped rows: focus + open there, close the sheet');
+  // The age slot speaks AGES, as every row in the merged list does: the Hub
+  // row's own label. The window count ("2w") read as two weeks beside "27m".
+  assert.match(row, /\{#if f\.clocked\}<span class="side-age">\{projectAgeLabel\(f\.row, f\.talk\)\}<\/span>\{\/if\}/u);
+  assert.doesNotMatch(row, /windows\}w/u, 'no window count in the age slot');
   // Nothing draws the foreign rows beside Projects any more: the only
   // `foreign.rows` loop left is the DESKTOP group below.
   assert.equal(source.match(/\{#each foreign\.rows/gu)?.length, 1, 'one loop over foreign.rows: the desktop group');
@@ -89,4 +94,19 @@ test('a foreign row shows the project NAME and takes its CLOCK from the HOST s m
   assert.match(app, /foreignProjects=\{projectClocks\}/u);
   // The empty hint is about THIS server when another server s rows are listed.
   assert.match(source, /\{foreign && foreign\.rows\.length \? t\('noSessionsHere'\) : t\('noSessions'\)\}/u);
+});
+
+test('this server\'s UNTRACKED live sessions join the phone\'s merge instead of a tail group below it (#371 review P1)', async () => {
+  // A bare session is one kind of row whichever server it is on: foreign ones
+  // were merged and tagged, local ones sat in the SESSIONS group below the list,
+  // untagged — so the same row looked different depending on which server was
+  // the focus.
+  assert.match(source, /const mergedList = \$derived\(foreignInline && !!union && !isSearching\);/u, 'the host\'s phone condition + Aggregate, never while searching');
+  assert.match(source, /const localRaw = \$derived\(mergedList && trackedReady \? filtered : \[\]\);/u, 'the sessions no project tracks, once Projects has said which those are');
+  assert.match(source, /localSessions=\{localRaw\} sessionRow=\{localSessionRowView\} \/>/u, 'handed to Projects, which places them');
+  assert.match(source, /\{#each \(mergedList \? \[\] : filtered\) as s \(s\.name\)\}/u, 'and the group below holds none of them there');
+  assert.match(source, /\{#snippet localSessionRowView\(r: TermRow\)\}\s*\{#if r\.item\.kind === 'session'\}\{@render sessionItem\(r\.item\.session, r\.item\.tag, true\)\}\{\/if\}/u, 'drawn by the SAME session row (open, panes, kill menu are unchanged)');
+  assert.match(source, /\{#snippet sessionItem\(s: TmuxSession, tag: string \| null = null, live = false\)\}/u);
+  assert.match(source, /<span class="dot" class:attached=\{live \|\| s\.attached\}><\/span>/u, 'in the merged list the dot says LIVE, as every other row\'s does');
+  assert.match(source, /\{#if tag\}[\s\S]*?<div class="session-tag"><span class="p-source"><ServerTag name=\{tag\} \/><\/span><\/div>\s*\{\/if\}/u, 'the tag line, in the atom every other row wears');
 });

@@ -46,10 +46,18 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   recency, each row by ITS OWN server's clock — with every row, this
   server's too, wearing the Chat sidebar's tag line; a foreign live row sits
   where its recency puts it among this server's live rows, never parked last
-  and never forced first. Single has no tag and no foreign row. A foreign
-  session with no project row on its server (an untracked one) is live with no
-  recorded activity: after every live row that has some, before the stopped
-  projects. A server that has not published is a status, named above the list.
+  and never forced first. Single has no tag and no foreign row. A bare
+  (untracked) live session is one kind of row whichever server it lives on:
+  this server's own join the SAME merge as its project rows and the foreign
+  sessions (review P1 on #371: they used to sit in a SESSIONS group below the
+  list, untagged, while the same row of another server was merged and tagged,
+  so a row changed place and look when the focus moved), live with no recorded
+  activity: after every live row that has some, before the stopped projects,
+  ties to the server saved first. Switching the focus A→B→A leaves every live
+  row where it was; only a stopped project, which is not a session, exists in
+  its own server's view alone. A foreign row's age is its Hub row's own label
+  (the one the Hub shows), never the window count, and nothing when the host
+  has no project row for it. A server that has not published is a status, named above the list.
   A foreign row
   shows the NAME of the declared project its session belongs to when that
   differs from the session (the identity the local row shows) and opens by the
