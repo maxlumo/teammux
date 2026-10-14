@@ -126,8 +126,10 @@ pub fn sniff_codex(pane: &str) -> Vitals {
         }
         if let Some(f) = codex_footer(line) {
             if v.model.is_none() {
-                v.model = Some(f.model);
-                v.effort = f.effort;
+                if let Some(m) = f.model {
+                    v.model = Some(m);
+                    v.effort = f.effort;
+                }
             }
             if v.context_pct.is_none() {
                 v.context_pct = f.context_pct;
@@ -146,7 +148,7 @@ pub fn sniff_codex(pane: &str) -> Vitals {
 }
 
 pub(crate) struct CodexFooter {
-    pub(crate) model: String,
+    pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,
     pub(crate) context_pct: Option<u8>,
 }
@@ -167,32 +169,101 @@ pub(crate) fn codex_footer(line: &str) -> Option<CodexFooter> {
             model = codex_model_item(seg);
         }
     }
-    let (model, effort) = model?;
-    (cwd || context_pct.is_some()).then_some(CodexFooter { model, effort, context_pct })
+    let (model, effort) = match model {
+        Some((m, e)) => (Some(m), e),
+        None => (None, None),
+    };
+    // The readings are INDEPENDENT (board #373, codex-cli 0.162.1): a
+    // `Context NN% used|left` segment is anchor enough on its own — the
+    // literal word, a percentage and `used`/`left` do not line up by
+    // accident — so an unreadable model item costs the model and nothing
+    // else. It used to gate the whole footer, and when 0.162.1 renamed the
+    // item (slug → `GPT-6 Astra (Global)`) the context percentage went null
+    // with it. A cwd segment alone is NOT an anchor: `/`-leading words
+    // occur in ordinary output, so that half still needs the model.
+    (context_pct.is_some() || (model.is_some() && cwd)).then_some(CodexFooter {
+        model,
+        effort,
+        context_pct,
+    })
 }
 
-/// `<model> [<effort>]` — the model token must contain a digit
-/// (`xai.grok-4.6`, `gpt-5.2-codex` — every model id does) and the effort,
-/// when present, is one plain lowercase word; a `…`-truncated word
-/// (`defa…`) is not an effort.
+/// `<model> [<effort>]`, in either spelling codex has painted:
+///
+/// * the catalog SLUG — `xai.grok-4.6`, `gpt-5.2-codex`, `openai.gpt-5.6-sol`
+///   (0.148.0 … 0.154.0) — one lowercase token carrying a digit;
+/// * the catalog `display_name` — `GPT-6 Astra (Global)`,
+///   `GPT-6 Astra (US cross-region)` (0.162.1, measured 2026-10-15, board
+///   #373) — up to three name words then a parenthesised route.
+///
+/// The effort, when present, is one plain lowercase word after either form
+/// (`GPT-6.1 Sol (Global) medium`, the default footer on 0.162.1); a
+/// `…`-truncated word (`defa…`) is not an effort.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn codex_model_item(seg: &str) -> Option<(String, Option<String>)> {
-    let mut toks = seg.split_whitespace();
-    let model = toks.next()?;
-    if !looks_like_model(model) || !model.chars().any(|c| c.is_ascii_digit()) {
-        return None;
+    let seg = seg.trim();
+    // The whole item may be the model (no effort painted).
+    if let Some(model) = codex_model_name(seg) {
+        return Some((model.to_string(), None));
     }
-    let effort = toks.next();
+    // Otherwise the LAST word is the effort and the head is the model. The
+    // effort is split off by position rather than looked up by word, so a
+    // `…`-cut one (`defa…`) still leaves the model readable — it just is
+    // not an effort.
+    let (head, last) = seg.rsplit_once(char::is_whitespace)?;
+    let model = codex_model_name(head.trim_end())?;
+    Some((model.to_string(), is_effort_word(last).then(|| last.to_string())))
+}
+
+/// One plain lowercase word — codex's own effort levels are spelled that way,
+/// and a `…`-cut word is not one.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_effort_word(w: &str) -> bool {
+    !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// The model half of a footer item, with no effort on it: the slug form or
+/// the 0.162.1 `display_name` form (see `codex_model_item`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn codex_model_name(s: &str) -> Option<&str> {
+    if let Some(named) = s.strip_suffix(')') {
+        // `<Name words> (<route>)`. The route is what tells this apart from
+        // prose: a sentence does not end in a parenthesis whose opener sits
+        // after one to three version-bearing name words. A path or a kiro
+        // branch segment (`(feat/x)`) has no name part and no route words.
+        let (name, route) = named.rsplit_once('(')?;
+        let name = name.trim_end();
+        let route = route.trim();
+        let route_ok = !route.is_empty()
+            && route.split_whitespace().count() <= 4
+            && !route.contains('/')
+            && route.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '.');
+        let words: Vec<&str> = name.split_whitespace().collect();
+        let name_ok = (1..=3).contains(&words.len())
+            && words.iter().all(|w| looks_like_model_word(w))
+            && words.iter().any(|w| w.chars().any(|c| c.is_ascii_digit()));
+        return (route_ok && name_ok).then_some(s);
+    }
+    // The slug form: one token, lowercase, carrying a digit.
+    let mut toks = s.split_whitespace();
+    let model = toks.next()?;
     if toks.next().is_some() {
         return None;
     }
-    let effort = match effort {
-        None => None,
-        Some(e) if !e.is_empty() && e.chars().all(|c| c.is_ascii_lowercase()) => Some(e.to_string()),
-        // A truncated word (`defa…`) is not an effort — the model still is.
-        Some(_) => None,
-    };
-    Some((model.to_string(), effort))
+    (looks_like_model(model) && model.chars().any(|c| c.is_ascii_digit())).then_some(model)
+}
+
+/// A word a model's display name may be made of: letters, digits, `.`, `-`,
+/// starting with a letter or a digit. `GPT-6.1`, `Sol`, `Astra` — but not a
+/// count (`2`, no letter) and not a lowercase connective (`is`, no digit; the
+/// digit is required of the name as a whole, not of each word).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn looks_like_model_word(w: &str) -> bool {
+    !w.is_empty()
+        && w.len() <= 24
+        && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && w.chars().any(|c| c.is_ascii_alphabetic())
+        && w.starts_with(|c: char| c.is_ascii_alphanumeric())
 }
 
 /// `Context 5% used` (`context-used`) → 5; `Context 99% left`

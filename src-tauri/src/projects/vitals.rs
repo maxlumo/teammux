@@ -692,6 +692,81 @@ mod tests {
         assert_eq!(codex_context_item("5% used"), None);
     }
 
+    /// codex-cli **0.162.1**, real captures (2026-10-15, board #373). The
+    /// `model` status-line item stopped painting the catalog SLUG and now
+    /// paints its `display_name` — `GPT-6 Astra (Global)`, three
+    /// whitespace tokens with a parenthesised route. The owner noticed the
+    /// context percentage, not the model: the model segment gated the whole
+    /// footer, so one renamed item took the context reading with it and the
+    /// reviewer's card showed `vitals: null`.
+    ///
+    /// First fixture: the live `reviewer` pane (`tmux capture-pane -p -t
+    /// tmux-mobile:4`, inherited `tui.status_line = ["model",
+    /// "context-used", "current-dir"]`). The rest: an isolated socket with a
+    /// scratch CODEX_HOME symlinking the same config.
+    #[test]
+    fn codex_0_162_paints_the_models_display_name_with_a_route() {
+        let live = "\u{203a} Ask Codex to do anything\n\n  GPT-6 Astra (Global) \u{b7} Context 56% used \u{b7} /local/home/cfu/work/projects/tmux-\u{2026}\n  ? for shortcuts                                     \u{26a0}  6 warnings \u{b7} f2 to view\n";
+        let v = sniff_codex(live);
+        assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (Global)"));
+        assert_eq!(v.context_pct, Some(56), "`Context NN% used` is USED, as painted");
+        assert_eq!(v.effort, None, "the `model` item carries no effort");
+
+        // The same footer at 100 columns, from the isolated measurement.
+        let v = sniff_codex("\u{203a} Ask Codex to do anything\n\n  GPT-6.1 Sol (Global) \u{b7} Context 3% used \u{b7} /tmp/tmm-373-measure/cwd\n");
+        assert_eq!(v.model.as_deref(), Some("GPT-6.1 Sol (Global)"));
+        assert_eq!(v.context_pct, Some(3));
+
+        // The DEFAULT footer (no `[tui]` section) still appends the effort,
+        // now after the route: `<display name> [<effort>] · <cwd>`.
+        let v = sniff_codex("  GPT-6.1 Sol (Global) medium \u{b7} /tmp/tmm-373-measure/cwd\n");
+        assert_eq!(v.model.as_deref(), Some("GPT-6.1 Sol (Global)"));
+        assert_eq!(v.effort.as_deref(), Some("medium"));
+        assert_eq!(v.context_pct, None);
+
+        // A route with spaces in it (`us.openai.gpt-6-astra` →
+        // `GPT-6 Astra (US cross-region)`) is the same shape.
+        let v = sniff_codex("  GPT-6 Astra (US cross-region) \u{b7} Context 7% used \u{b7} ~/x\n");
+        assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (US cross-region)"));
+        assert_eq!(v.context_pct, Some(7));
+
+        // The older slug form keeps reading — a CLI downgrade is one `npm
+        // install` away, and other hosts are on 0.154.x.
+        let v = sniff_codex("  openai.gpt-5.6-sol \u{b7} Context 5% used \u{b7} /tmp/x\n");
+        assert_eq!(v.model.as_deref(), Some("openai.gpt-5.6-sol"));
+        assert_eq!(v.context_pct, Some(5));
+
+        // 20 columns (measured): codex truncates the display name itself and
+        // the line loses every `·`, so it is no longer a footer — one
+        // missing reading, never a wrong one.
+        assert!(codex_footer("GPT-6.1 Sol (Glob\u{2026}").is_none());
+    }
+
+    /// The model item and the context item are read INDEPENDENTLY (board
+    /// #373): a `Context NN% used|left` segment anchors the footer on its
+    /// own, so the next time codex renames the model item the context
+    /// percentage survives. Before this, `codex_footer` returned `None`
+    /// without a model and the owner lost both readings at once.
+    #[test]
+    fn a_context_segment_anchors_the_footer_without_any_model() {
+        let v = sniff_codex("  Some Future Model Item \u{b7} Context 42% used \u{b7} /tmp/x\n");
+        assert_eq!(v.model, None, "unreadable — and that is all that is lost");
+        assert_eq!(v.context_pct, Some(42));
+
+        let v = sniff_codex("  \u{f8ff} whatever codex paints next \u{b7} Context 42% used\n");
+        assert_eq!(v.context_pct, Some(42));
+        assert_eq!(v.model, None);
+    }
+
+    /// The /status card on 0.162.1 (captured 2026-10-15 after one real turn
+    /// — at zero use codex prints no `Context window` row at all): the LEFT
+    /// spelling is unchanged, so the older reading still holds on the
+    /// installed CLI.
+    #[test]
+    fn codex_0_162_status_card_still_says_left() {
+        assert_eq!(codex_context_left("  Context window:      97% left (42.9K used / 998K)"), Some(3));
+    }
+
     /// The footer anchors: a model segment (digit-bearing slug, at most one
     /// effort word) plus a cwd or a context segment; prose with a
     /// mid-sentence `·` has neither.
@@ -706,7 +781,7 @@ mod tests {
             "a bare count is not a model slug"
         );
         let f = codex_footer("gpt-5.2-codex medium \u{b7} ~/my-project").unwrap();
-        assert_eq!((f.model.as_str(), f.effort.as_deref(), f.context_pct), ("gpt-5.2-codex", Some("medium"), None));
+        assert_eq!((f.model.as_deref(), f.effort.as_deref(), f.context_pct), (Some("gpt-5.2-codex"), Some("medium"), None));
     }
 
     #[test]
@@ -826,3 +901,4 @@ mod tests {
         assert!(sniff_omp("").is_empty());
     }
 }
+

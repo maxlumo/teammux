@@ -1861,6 +1861,10 @@ test('modelLabel drops vendor and region prefixes, keeps the model id', () => {
   assert.equal(modelLabel('Fable 5.1 (Bedrock, 1M)'), 'Fable 5.1');
   assert.equal(modelLabel('Opus 4.8 (US)'), 'Opus 4.8');
   assert.equal(modelLabel('GPT 5.6 Sol (Bedrock, 1M)'), 'GPT 5.6 Sol');
+  // codex-cli 0.162.1 paints the catalog display name in its footer, so the
+  // route arrives through the pane sniff too (board #373).
+  assert.equal(modelLabel('GPT-6 Astra (Global)'), 'GPT-6 Astra');
+  assert.equal(modelLabel('GPT-6 Astra (US cross-region)'), 'GPT-6 Astra');
   // The unparenthesised route tail is the same fact — kimi's display name
   // (owner, 2026-09-21, board #230: "现在应该是 Kimi K3").
   assert.equal(modelLabel('Kimi K3 on Bedrock'), 'Kimi K3');
