@@ -194,6 +194,23 @@ test('titleFit: resize -> update -> destroy -> flush writes nothing after destro
   assert.equal(f.classes.has(FIT_CLASS), false);
 });
 
+test('titleFit: after destroy a late observer callback requests NO frame and a late update measures nothing (the ended barrier, #369 validator NC)', () => {
+  // `destroy` disconnects both observers, and a frame that did run would still
+  // find `ended` in test(): three layers. Each is pinned on its own, so removing
+  // any one of them fails here, not only the one the first write would reach.
+  const f = fixture({ scrollWidth: 170, clientWidth: 120 });
+  const action = titleFit(f.stack as unknown as HTMLElement);
+  action.destroy();
+  const at = f.writes.length;
+  f.resizeCallbacks[0]!();
+  f.mutationCallbacks[0]!();
+  assert.equal(f.frames.size, 0, 'schedule is closed once ended: not even a frame is requested');
+  action.update({ key: 'a-late-rename' });
+  assert.equal(f.frames.size, 0, 'a late update schedules nothing');
+  assert.equal(f.writes.length, at, 'a late update measures and writes nothing (test() is closed too)');
+  assert.equal(f.classes.has(FIT_CLASS), false);
+});
+
 test('titleFit: update coalesces with a queued frame — never a second frame for the same layout', () => {
   const f = fixture({ scrollWidth: 120, clientWidth: 120 });
   const action = titleFit(f.stack as unknown as HTMLElement);
