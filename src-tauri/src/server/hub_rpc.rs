@@ -1412,7 +1412,14 @@ fn deliver_mentions(
     // stayed silent). `offline_report` runs with no panes and no deliveries.
     let panes = match crate::tmux::list_panes(session) {
         Ok(panes) => panes,
-        Err(_) => return offline_report(session, room, from, &mentions, &[], ws.as_deref()),
+        // Two different facts (review P1-A, 02:30): tmux SAYS the session is
+        // not there — then every declared name is honestly `stopped` — or
+        // tmux could not be asked at all, and then we cannot call anyone
+        // stopped, only `unchecked`.
+        Err(e) => {
+            let checked = crate::tmux::session_confirmed_absent(&e);
+            return offline_report(session, room, from, &mentions, &[], ws.as_deref(), checked);
+        }
     };
     let managed_names: Vec<String> = panes
         .iter()
@@ -1442,12 +1449,14 @@ fn deliver_mentions(
         (Vec::new(), false)
     };
     let mut seen = std::collections::HashSet::new();
-    // What the one delivery path ACCEPTED: typed, or held for a busy
-    // queue-mode agent (#257). A pane that refused the line (copy mode,
-    // #250) is not in here and is not reported as offline either — it has
-    // its own `undelivered` warn, and saying both would be two reports of
-    // one event (review P2).
-    let mut accepted: Vec<String> = Vec::new();
+    // Who was FOUND: a live managed pane that a mention matched. Whether the
+    // one delivery path then typed the line, held it for a busy queue-mode
+    // agent (#257) or had it refused by the pane (copy mode, #250) is
+    // `deliver`'s to say — the last has its own `undelivered` warn — so none
+    // of the three makes a found agent "offline". Deriving offline from "not
+    // accepted" reported a live agent whose pane merely refused as `stopped`
+    // (review P1-A, 02:30).
+    let mut found: Vec<String> = Vec::new();
     for p in &panes {
         if !seen.insert(p.window) || !p.active {
             continue;
@@ -1486,57 +1495,65 @@ fn deliver_mentions(
         // deltas abut instead of overlapping. Typed is not confirmed: the
         // agent's userPromptSubmit echo settles it, and a pane that refused
         // it (#250, copy mode) is said in the feed.
-        if crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id) {
-            accepted.push(p.window_name.clone());
-        }
+        found.push(p.window_name.clone());
+        crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id);
     }
-    // A mention no pane received is SAID (board #347, owner: "当这个 agent
-    // 不在会话，或者停止什么的时候要返回一个 warning，提示 agent 不在线").
-    // It used to be dropped in silence, which reads exactly like a delivery
-    // that landed — the sender waits for an answer that cannot come. One
-    // room line per name, in the lifecycle grammar, so a human reads it in
-    // the feed and a Team sender meets it in its next context; `tmm send`
-    // prints the same words on stderr from the list this returns. The
-    // `declared` half — which of these names this project HAS a managed
-    // home for — is what separates a stopped teammate from a name that was
-    // never here.
-    offline_report(session, room, from, &mentions, &accepted, ws.as_deref())
+    // A mention that matched no live managed agent is SAID (board #347,
+    // owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个 warning，提示
+    // agent 不在线"). It used to be dropped in silence, which reads exactly
+    // like a delivery that landed — the sender waits for an answer that
+    // cannot come. `offline_report` writes the record and tells the sender's
+    // pane; `tmm send` prints the same words on stderr from the list this
+    // returns. The `declared` half inside it — which of these names this
+    // project HAS a managed home for — is what separates a stopped teammate
+    // from a name that was never here.
+    offline_report(session, room, from, &mentions, &found, ws.as_deref(), true)
 }
 
-/// Say which mentions reached nobody, and return them for the caller's own
-/// answer (board #347). Two channels, because they reach different readers:
-/// one room line per name — the record, which the feed and `tmm log` show —
-/// and ONE line typed into the SENDER's pane, which is the only thing that
-/// reaches an agent sender (the team context drops every `[tmm]` row and a
-/// Team agent's delta excludes its own messages: review P1-A). A human or a
-/// UI sender has no pane, and `deliver_chat_line` is quiet about that.
+/// Say which mentions matched no live managed agent, and return them for the
+/// caller's own answer (board #347). Two channels, because they reach
+/// different readers: one room line per name — the record, which the feed
+/// and `tmm log` show — and ONE line typed into the SENDER's pane, which is
+/// the only thing that reaches an agent sender (the team context drops every
+/// `[tmm]` row and a Team agent's delta excludes its own messages: review
+/// P1-A). A human or a UI sender has no pane, and `deliver_chat_line` is
+/// quiet about that; a sender pane that refuses the notice gets the ordinary
+/// `undelivered` warn and nothing is retried.
+///
+/// `checked` is whether tmux could answer at all. When it could not, no
+/// name is called stopped: `declared` is withheld and every name reads
+/// `unchecked`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn offline_report(
-    session: &str, room: &str, from: &str, mentions: &[String], accepted: &[String],
-    ws: Option<&str>,
+    session: &str, room: &str, from: &str, mentions: &[String], found: &[String],
+    ws: Option<&str>, checked: bool,
 ) -> Vec<(String, &'static str)> {
     let declared: Vec<String> = mentions
         .iter()
         .filter(|name| crate::projects::is_managed_in(ws, name))
         .cloned()
         .collect();
-    let offline = crate::projects::delivery::offline_mentions(mentions, accepted, &declared, from);
+    let offline = crate::projects::delivery::offline_mentions(
+        mentions, found, checked.then_some(declared.as_slice()), from,
+    );
     if offline.is_empty() {
         return Vec::new();
     }
     for (name, why) in &offline {
-        // Attributed to the SYSTEM and addressed to the sender (board #347
-        // review P1-A, orchestrator ruling): `from` would be filtered out
-        // of that sender's own context delta (`message.from != target`), and
-        // the envelope's route is what every reader uses to tell whose line
-        // this is.
+        // Posted under the SENDER's name with no recipients, which is what
+        // the feed's `offline` row reads. Addressing it to the sender looked
+        // like the way to reach them and is the way to hide it: `team_context`
+        // takes the newest row whose `to` holds the target as that target's
+        // delivery cursor, so the delta would start AFTER the warning (and
+        // would drop a row whose `from` is the target anyway). The sender's
+        // pane gets its own copy below instead.
         let _ = crate::projects::rooms::post(
             room,
             from,
             &crate::projects::delivery::offline_line(name, why, from),
         );
     }
-    let notice = crate::projects::delivery::offline_notice(&offline, from);
+    let notice = crate::projects::delivery::offline_notice(&offline, &stamp_now());
     crate::projects::deliver_chat_line(session, from, &notice);
     offline.into_iter().map(|(name, why)| (name.to_string(), why)).collect()
 }
@@ -2306,6 +2323,86 @@ mod tests {
             Some(serde_json::json!([{ "name": "reviewer", "why": "unknown" }])),
             "and the answer carries it, which is how `tmm send` can say it"
         );
+    }
+
+    /// Board #347 review P1-A (02:30), on REAL panes: "offline" means no live
+    /// managed agent matched the name — not "the line was not accepted". A
+    /// pane in copy mode REFUSES the line (#250, which says so itself with an
+    /// `undelivered` warn); that agent is found and alive, so it is neither
+    /// `stopped` nor reported twice. A name the project declares but nothing
+    /// runs is `stopped`; one it never declared is `unknown`.
+    #[test]
+    fn a_live_pane_that_refuses_is_not_offline_but_a_stopped_slot_is() {
+        crate::projects::tests::use_test_store();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let session = format!("tmm-offl-{tag}");
+        let ws = std::env::temp_dir().join(format!("tmm-offl-ws-{tag}"));
+        let recipe = serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent dev", "team": "" }).to_string();
+        for name in ["dev", "ghost"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), &recipe).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("offline-live-test")).expect("adopt project");
+        let target = format!("{session}:dev");
+        let post = |body: &str| {
+            let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": body })), None);
+            assert!(r.error.is_none(), "{}", r.error.map(|e| e.message).unwrap_or_default());
+            r.result.expect("posted")
+        };
+        let offline_of = |msg: &serde_json::Value| msg.get("offline").cloned().unwrap_or(serde_json::json!([]));
+        let room = project_room(&session);
+        let lines = || -> Vec<String> {
+            rooms::history_page(&room, None, 50)["messages"].as_array().unwrap().iter()
+                .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect()
+        };
+        let warns = || -> Vec<String> {
+            crate::projects::telemetry::recent_events(&session, 0).into_iter()
+                .filter(|e| e.kind == "warn").map(|e| e.text).collect()
+        };
+
+        // The live pane REFUSES: copy mode swallows the line. Found, alive,
+        // refused — and nobody is offline.
+        assert!(crate::tmux::run_tmux(&["copy-mode", "-t", &target]).is_ok());
+        let refused = post("@dev are you there");
+        assert_eq!(offline_of(&refused), serde_json::json!([]), "a found agent is not offline: {refused}");
+        assert!(
+            warns().iter().any(|w| w.starts_with("undelivered (pane is in copy mode)")),
+            "the refusal keeps ITS OWN warn: {:?}", warns()
+        );
+        assert!(
+            !lines().iter().any(|l| l.starts_with("[tmm] offline")),
+            "and the room says nothing more: {:?}", lines()
+        );
+
+        // Leave copy mode; a typed line is found and fine too.
+        let _ = crate::tmux::run_tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
+        let typed = post("@dev again");
+        assert_eq!(offline_of(&typed), serde_json::json!([]), "{typed}");
+
+        // A declared slot with no window is `stopped`; an undeclared name is
+        // `unknown`. One room line each, and the answer carries both.
+        let gone = post("@ghost @nobody hello");
+        assert_eq!(
+            offline_of(&gone),
+            serde_json::json!([{ "name": "ghost", "why": "stopped" }, { "name": "nobody", "why": "unknown" }]),
+            "{gone}"
+        );
+        let offline_lines: Vec<String> = lines().into_iter().filter(|l| l.starts_with("[tmm] offline")).collect();
+        assert_eq!(offline_lines.len(), 2, "one per name: {offline_lines:?}");
+        assert!(offline_lines[0].starts_with("[tmm] offline ghost —") && offline_lines[0].contains("(stopped)"), "{offline_lines:?}");
+        assert!(offline_lines[1].starts_with("[tmm] offline nobody —") && offline_lines[1].contains("(unknown)"), "{offline_lines:?}");
     }
 
     #[test]

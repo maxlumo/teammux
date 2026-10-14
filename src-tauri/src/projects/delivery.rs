@@ -176,44 +176,67 @@ pub fn agent_target(session: &str, window: &str) -> Option<String> {
     (is_agent && super::is_managed_in(ws.as_deref(), window)).then(|| format!("{}:{}.{}", session, p.window, p.pane))
 }
 
-/// Why a mentioned name could not be typed into (board #347). Two words,
-/// because the sender can only act on two: the slot is there and nothing is
-/// running it, or this project has no such agent at all.
+/// Why a mentioned name could not be typed into (board #347). Two words for
+/// what we know, because the sender can only act on two: the slot is there
+/// and nothing is running it, or this project has no such agent at all — and
+/// a third for what we do NOT know.
 pub const OFFLINE_STOPPED: &str = "stopped";
 pub const OFFLINE_UNKNOWN: &str = "unknown";
+/// tmux could not be asked whether the agent is running (a permission or
+/// connection failure, not a missing session): nothing was typed, but
+/// "stopped" would be an assertion we cannot back (review P1, 02:30).
+pub const OFFLINE_UNCHECKED: &str = "unchecked";
 
-/// The `@mentions` of one message that no pane received, each with its word
-/// (board #347; owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个
-/// warning，提示 agent 不在线"). A delivery to nobody used to be SILENT: the
-/// message was stored in the room, every mention of a stopped or misspelled
-/// agent was dropped on the floor, and the sender — human or agent — had no
-/// way to tell that from a delivery that landed.
+/// The `@mentions` of one message that matched NO live managed agent pane,
+/// each with its word (board #347; owner: "当这个 agent 不在会话，或者停止什么
+/// 的时候要返回一个 warning，提示 agent 不在线"). A delivery to nobody used to
+/// be SILENT: the message was stored in the room, every mention of a stopped
+/// or misspelled agent was dropped on the floor, and the sender — human or
+/// agent — had no way to tell that from a delivery that landed.
 ///
-/// `reached` is who was actually typed into (the caller knows, because it
-/// just did it); `declared` is which of the mentions this project HAS a
-/// managed home for (`is_managed_in`), which is what separates a stopped
-/// teammate from a name that was never here. Three names are never missing
-/// recipients: `all` addresses whoever is there, `human` reads the room
-/// instead of a pane, and the sender's own name is deliberately never typed
-/// back into its own pane.
+/// `found` is who was FOUND, not who was typed to: a name that matched a
+/// live managed pane is found whether the line was typed, held for a busy
+/// queue-mode agent (#257), or refused by the pane (copy mode, #250). Those
+/// three outcomes belong to `deliver` — the last has its own `undelivered`
+/// warn — and deriving "offline" from "not accepted" reported a live agent
+/// whose pane merely refused as `stopped`, a second and false report of one
+/// event (review P1-A, 02:30).
+///
+/// `declared` is which of the mentions this project HAS a managed home for
+/// (`is_managed_in`), which separates a stopped teammate from a name that was
+/// never here; `None` means tmux could not be asked at all, so no name can be
+/// called stopped. Three names are never missing recipients: `all` addresses
+/// whoever is there, `human` reads the room instead of a pane, and the
+/// sender's own name is deliberately never typed back into its own pane.
 ///
 /// Order is the mention order and each name is reported once, so a body that
 /// says `@dev @dev` warns once.
 pub fn offline_mentions<'a>(
-    mentions: &'a [String], reached: &[String], declared: &[String], from: &str,
+    mentions: &'a [String], found: &[String], declared: Option<&[String]>, from: &str,
 ) -> Vec<(&'a str, &'static str)> {
     let mut out: Vec<(&str, &'static str)> = Vec::new();
     for name in mentions {
         let n = name.as_str();
-        if n == "all" || n == "human" || n == from || reached.iter().any(|r| r == n) {
+        if n == "all" || n == "human" || n == from || found.iter().any(|r| r == n) {
             continue;
         }
         if out.iter().any(|(seen, _)| *seen == n) {
             continue;
         }
-        out.push((n, if declared.iter().any(|d| d == n) { OFFLINE_STOPPED } else { OFFLINE_UNKNOWN }));
+        let why = match declared {
+            None => OFFLINE_UNCHECKED,
+            Some(d) if d.iter().any(|x| x == n) => OFFLINE_STOPPED,
+            Some(_) => OFFLINE_UNKNOWN,
+        };
+        out.push((n, why));
     }
     out
+}
+
+/// A word as the sentence says it: `unchecked` carries its own meaning, the
+/// other two stand alone.
+fn why_text(why: &str) -> &str {
+    if why == OFFLINE_UNCHECKED { "unchecked: tmux could not be asked" } else { why }
 }
 
 /// The room line one offline recipient leaves: the lifecycle grammar every
@@ -223,9 +246,16 @@ pub fn offline_mentions<'a>(
 /// wait for an answer that cannot come — there is no retry and no queue (a
 /// message to nobody is not stored for later; the message itself stays in
 /// the room, where it was posted).
+///
+/// Posted under the sender's own name with no recipients (`rooms::post`):
+/// addressing it to the sender would make it the sender's delivery cursor in
+/// `team_context` and hide it from them (see hub-composer.md).
 pub fn offline_line(name: &str, why: &str, from: &str) -> String {
-    format!("[tmm] offline {name} — {from}'s message was not typed in ({why}); nothing is queued for it")
+    format!("[tmm] offline {name} — {from}'s message was not typed in ({}); nothing is queued for it", why_text(why))
 }
+
+/// The sender a server-authored notice wears in a pane.
+pub const NOTICE_SENDER: &str = "tmm";
 
 /// The ONE line the sender's own pane gets when its message reached nobody
 /// (board #347 review P1-A). The room line is the record for the feed and
@@ -235,16 +265,26 @@ pub fn offline_line(name: &str, why: &str, from: &str) -> String {
 /// them, not one per name: a pane is a conversation, and a burst of
 /// near-identical rows in it is noise.
 ///
+/// It is typed in the stamped RESULT shape — `[tmm chat <stamp>] tmm:
+/// [reply] …` — the one the reply edge already reads as "asks nothing"
+/// (`address::requesters`). A BARE `[tmm] offline …` line is an unstamped
+/// prompt, and `requesters` takes every unstamped typed prompt for a person
+/// at the keyboard: the agent's reply to its own warning would have been
+/// recorded as an answer to `human` (#289), and a notice that JOINS an open
+/// turn would have added a requester that never asked (review P1-B, 02:30).
+/// Pinned on the real output, not on a look-alike.
+///
 /// Quiet by construction for a human or a UI sender: `deliver_chat_line`
 /// types only into a live managed pane and does nothing otherwise, which is
-/// the right answer — the operator reads the feed.
-pub fn offline_notice(offline: &[(&str, &'static str)], from: &str) -> String {
-    let names: Vec<String> = offline.iter().map(|(name, why)| format!("@{name} ({why})")).collect();
+/// the right answer — the operator reads the feed. A sender pane that
+/// REFUSES it (copy mode) gets the ordinary `undelivered` warn from the
+/// delivery path, and nothing is retried.
+pub fn offline_notice(offline: &[(&str, &'static str)], stamp: &str) -> String {
+    let names: Vec<String> = offline.iter().map(|(name, why)| format!("@{name} ({})", why_text(why))).collect();
+    let (pane, it) = if offline.len() == 1 { ("its", "it") } else { ("their", "them") };
     format!(
-        "[tmm] offline — {}: your message is in the room but was not typed into {} pane; nothing is queued for {}. From {from}.",
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] offline — {}: your message is in the room but was not typed into {pane} pane; nothing is queued for {it}.",
         names.join(", "),
-        if offline.len() == 1 { "its" } else { "their" },
-        if offline.len() == 1 { "it" } else { "them" },
     )
 }
 
@@ -542,46 +582,79 @@ mod tests {
     fn a_mention_no_pane_received_is_named_with_its_reason() {
         let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mentions = names(&["dev", "reviewer", "buildr", "all", "human", "lead"]);
-        let reached = names(&["dev"]);
+        // `dev` was FOUND (a live managed pane matched it).
+        let found = names(&["dev"]);
         // `reviewer` has a managed home in this project; `buildr` is a typo
         // and `lead` belongs to another project — both read as unknown from
         // here, which is the only thing this project can honestly say.
         let declared = names(&["dev", "reviewer"]);
         assert_eq!(
-            offline_mentions(&mentions, &reached, &declared, "lead"),
+            offline_mentions(&mentions, &found, Some(&declared), "lead"),
             vec![("reviewer", OFFLINE_STOPPED), ("buildr", OFFLINE_UNKNOWN)],
             "the sender's own name, @all and @human are never missing recipients"
         );
-        // Everyone reached: nothing to say.
-        assert!(offline_mentions(&mentions[..1], &reached, &declared, "lead").is_empty());
+        // Everyone found: nothing to say.
+        assert!(offline_mentions(&mentions[..1], &found, Some(&declared), "lead").is_empty());
         // One warning per name, in mention order, however often it is said.
         assert_eq!(
-            offline_mentions(&names(&["dev", "dev"]), &[], &declared, "human"),
+            offline_mentions(&names(&["dev", "dev"]), &[], Some(&declared), "human"),
             vec![("dev", OFFLINE_STOPPED)]
         );
         // `@all` into an empty project is not a missing recipient: it names
         // whoever is there, and nobody is.
-        assert!(offline_mentions(&names(&["all"]), &[], &[], "human").is_empty());
+        assert!(offline_mentions(&names(&["all"]), &[], Some(&[]), "human").is_empty());
 
-        // The line it leaves says what did not happen AND that nothing is
-        // pending, in the grammar every other `[tmm]` row speaks.
-        let line = offline_line("reviewer", OFFLINE_STOPPED, "orchestrator");
+        // tmux could not be asked (review P1-A: a permission or connection
+        // failure is not "the session is gone"): nothing is called stopped,
+        // not even a name the project declares.
         assert_eq!(
-            line,
-            "[tmm] offline reviewer — orchestrator's message was not typed in (stopped); nothing is queued for it"
+            offline_mentions(&names(&["reviewer", "buildr"]), &[], None, "lead"),
+            vec![("reviewer", OFFLINE_UNCHECKED), ("buildr", OFFLINE_UNCHECKED)]
         );
 
-        // The sender's own pane gets ONE line for all of them (review P1-A:
-        // the team context cannot carry this, so the room line alone never
-        // reaches an agent sender).
-        let notice = offline_notice(&[("reviewer", OFFLINE_STOPPED), ("buildr", OFFLINE_UNKNOWN)], "orchestrator");
-        assert!(notice.starts_with("[tmm] offline — @reviewer (stopped), @buildr (unknown):"), "{notice}");
+        // The line it leaves says what did NOT happen AND that nothing is
+        // pending, in the grammar every other `[tmm]` row speaks.
+        assert_eq!(
+            offline_line("reviewer", OFFLINE_STOPPED, "orchestrator"),
+            "[tmm] offline reviewer — orchestrator's message was not typed in (stopped); nothing is queued for it"
+        );
+        assert!(
+            offline_line("reviewer", OFFLINE_UNCHECKED, "orchestrator").contains("(unchecked: tmux could not be asked)"),
+            "the unknown is said as unknown"
+        );
+    }
+
+    /// The sender's pane notice (review P1-A and P1-B, 02:30). It is typed in
+    /// the stamped RESULT shape, because a BARE `[tmm] offline …` line is an
+    /// unstamped prompt and `requesters` takes every unstamped typed prompt
+    /// for a person at the keyboard: the agent's reply to its own warning was
+    /// recorded as an answer to `human`, and a notice that joined an open
+    /// turn added a requester that never asked. Asserted on the REAL output
+    /// of `offline_notice`, never on a look-alike.
+    #[test]
+    fn the_senders_notice_asks_nothing_of_the_reply_edge() {
+        let notice = offline_notice(&[("reviewer", OFFLINE_STOPPED), ("buildr", OFFLINE_UNKNOWN)], "2026-10-15 02:40");
+        assert!(
+            notice.starts_with("[tmm chat 2026-10-15 02:40] tmm: [reply] offline — @reviewer (stopped), @buildr (unknown):"),
+            "{notice}"
+        );
         assert!(notice.contains("is in the room"), "what DID happen: {notice}");
         assert!(notice.contains("their pane") && notice.contains("nothing is queued for them"), "{notice}");
-        assert!(notice.contains("From orchestrator."), "{notice}");
-        // One name reads as one name.
-        let one = offline_notice(&[("reviewer", OFFLINE_STOPPED)], "human");
+        let one = offline_notice(&[("reviewer", OFFLINE_STOPPED)], "2026-10-15 02:40");
         assert!(one.contains("its pane") && one.contains("queued for it"), "{one}");
+
+        // On its own it is nobody's request — and not a human's either.
+        assert!(crate::address::requesters(&notice).is_empty(), "{notice}");
+        // Joining a turn that already has a real request leaves exactly that
+        // request: it neither adds a requester nor clears the edge.
+        let asked = "[tmm chat 2026-10-15 02:39] lead: @dev please look";
+        for prompt in [format!("{asked}\n\n{notice}"), format!("{notice}\n\n{asked}")] {
+            assert_eq!(crate::address::requesters(&prompt), vec!["lead".to_string()], "{prompt}");
+        }
+        // The look-alike this replaced WOULD have been a human request: that
+        // is the bug this test exists to keep out.
+        let bare = "[tmm] offline — @reviewer (stopped): your message is in the room.";
+        assert_eq!(crate::address::requesters(bare), vec!["human".to_string()]);
     }
 
     fn warns(session: &str) -> Vec<String> {

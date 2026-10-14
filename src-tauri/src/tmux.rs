@@ -160,6 +160,25 @@ fn exact_session(session: &str) -> String {
     if session.starts_with('=') { session.to_string() } else { format!("={session}:") }
 }
 
+/// True when a tmux error says the session (or the whole server) is simply
+/// not THERE, as opposed to tmux being unreachable (board #347 review P1-A:
+/// "no session" and "could not check" are different facts, and only the first
+/// may be called a stopped agent). Measured on tmux 3.6a with an isolated
+/// socket, 2026-10-15:
+///
+/// * no server and no socket file → `error connecting to <sock> (No such file or directory)`
+/// * a server without that session → `can't find session: <name>`
+/// * a socket we may not open → `error connecting to <sock> (Permission denied)`
+///
+/// plus `no server running on <sock>`, tmux's own words for a stale socket.
+/// A miss on a future wording is the SAFE direction: it reads as "could not
+/// check", never as a confident "stopped".
+pub(crate) fn session_confirmed_absent(error: &str) -> bool {
+    error.contains("can't find session")
+        || error.contains("no server running")
+        || (error.contains("error connecting to") && error.contains("No such file or directory"))
+}
+
 /// Quote a string for a tmux COMMAND LINE (a hook body, a key binding), where
 /// tmux's own parser splits on spaces and `;` and expands `$VAR`. Double quotes
 /// with `\`, `"` and `$` escaped survive that parser byte-for-byte (verified on
@@ -1905,6 +1924,18 @@ mod tests {
         });
         let dir = *failed.unwrap_err().downcast::<String>().unwrap();
         assert!(!std::path::Path::new(&dir).exists(), "a failing file-only test leaves no directory");
+    }
+
+    /// Board #347: tmux's three answers to "list this session's panes", as
+    /// measured on 3.6a. Only the first two mean the session is not there.
+    #[test]
+    fn a_missing_session_is_told_from_an_unreachable_tmux() {
+        assert!(session_confirmed_absent("tmux error: can't find session: nope\n"));
+        assert!(session_confirmed_absent("tmux error: error connecting to /tmp/x/sock (No such file or directory)\n"));
+        assert!(session_confirmed_absent("tmux error: no server running on /tmp/x/sock\n"));
+        assert!(!session_confirmed_absent("tmux error: error connecting to /tmp/x/sock (Permission denied)\n"));
+        assert!(!session_confirmed_absent("Failed to run tmux: No such file or directory (os error 2)"));
+        assert!(!session_confirmed_absent(""));
     }
 
     #[test]

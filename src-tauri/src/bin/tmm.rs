@@ -410,7 +410,13 @@ async fn main() {
             for row in r.get("offline").and_then(|v| v.as_array()).into_iter().flatten() {
                 let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let why = row.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
+                if why == "unchecked" {
+                    // tmux could not be asked, so this says what is KNOWN and
+                    // nothing about whether the agent runs (board #347).
+                    eprintln!("note: @{name} was not typed to anyone's pane — tmux could not be asked whether it is online; nothing is queued for it");
+                } else {
+                    eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
+                }
             }
         }
         // The scratch terminal's session (board #324): the same server entry
