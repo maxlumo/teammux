@@ -512,6 +512,13 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   assert.match(appCssSrc, /\.page-head \.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
 
   assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
+  // #363 (owner 2026-10-14: "应该紧挨着"): stacked, the 2px is measured from the
+  // NAME, not from the chevron's 30px hit box. The command in the name line
+  // takes its line height as layout height (tokens only) and stays on top of
+  // the tag, so its overflowing hit box is still its own. Measured at 390
+  // touch: name text box → tag 7.5px before, 2px after (jsdom has no layout).
+  assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \.name-line > \.command-button \{\s*margin-block: calc\(\(var\(--control-line-height\) - var\(--control-height\)\) \/ 2\);\s*z-index: 1;\s*\}/u,
+    'stacked: the chevron s hit box overflows instead of setting the name line s height');
   // (reviewer P2 on eeb81e7e: scoped to the SCRIPT, not a template window)
   const script = source.slice(0, source.indexOf('</script>'));
   assert.ok(!/title-stack|name-line|titleStack|nameLine/u.test(script), 'no script touches the stack: no ResizeObserver or width read decides the wrap — CSS does');

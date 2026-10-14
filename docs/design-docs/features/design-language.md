@@ -1286,7 +1286,15 @@ alone is wider than the whole group. A control that belongs to the name
 sibling centres against the two-line block and floats mid-height beside a
 hole (owner 2026-10-13 22:57). Pure CSS: no ResizeObserver, no measurement, no
 second class flip; the wrapped form reuses the 2px stack rhythm. The phone
-stacks unconditionally (the stack is its complete form, #356). A tag that
+stacks unconditionally (the stack is its complete form, #356), and there the
+2px is measured from the NAME's text box to the tag (#363, owner 2026-10-14:
+"标签和项目名中间的上下间隔有点大了，应该紧挨着"): a control in the name line
+keeps its full hit box but lays out at its line height
+(`margin-block: (--control-line-height − --control-height) / 2`, on top of
+the tag), because the Hub's 30px chevron in a 19px name line had put the tag
+7.5px under the name. Measured at 390 touch: Hub head 7.5px → 2px, the
+Board head (no chevron) and the sidebar rows (`.p-main`) already 2px. A tag
+that
 holds its place while the name truncates, or a JS-measured flip, is a
 regression. Verified in a real browser at 1280 (85-char name whole, tag below;
 short name inline) and 700 (tag wraps first, the name ellipsises after).
