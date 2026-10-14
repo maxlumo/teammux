@@ -470,14 +470,25 @@ since #290): a title like "修复 @all 的投递" would otherwise have typed a
 hand-off meant for one agent into every pane, because `mention_names` reads
 the whole body and cannot tell our words from the ones we quoted — the
 command's `name` argument is the only address in that line, and the stored
-title is untouched. The two steps are REPORTED APART: when the save has
-landed and the hand-off post fails, the CLI prints the assignment that is now
-on the board and then fails with the reason and the re-run, because a failed
-notification must read as neither a failed assignment nor a success. And
-`assign` is idempotent on the BOARD but deliberately NOT on the notification
-— re-running re-sends the hand-off, which is the recovery path for that very
-failure, and the reason the duplicate is the operator's choice rather than a
-silent repeat.
+title is untouched. The two steps are REPORTED APART, and the second one is
+reported as UNCERTAIN: a lost answer is not a failed request (reviewer's
+P1-B, 01:46) — the server may have posted and delivered the hand-off with
+only its reply going missing — so when the save has landed and the post's
+call fails, the CLI says the assignment IS on the board, that whether the
+agent was told is unknown and may already have happened, and that re-running
+sends it again and may duplicate it. Never "was not posted". `--output json`
+gets the same facts as fields (`{issue, assignee, saved: true, notified:
+"unconfirmed", error}`) so a machine caller can read the partial result
+instead of a sentence, and the exit is non-zero either way because the
+command did not finish. `assign` is therefore idempotent on the BOARD and
+deliberately not on the notification: re-running is the recovery path, its
+duplicate is the operator's informed choice, and no exactly-once is claimed
+anywhere. The failure paths are tested at the CLI against a fake server
+(`tests/board_assign_cli.rs`: the hand-off's answer dropped after the request
+is accepted, a save that really failed posting nothing, an unknown name
+writing nothing, the clean path, and `-` telling nobody), because the `-`
+that never reached the argument parser proved that string tests of the
+helpers do not hold this verb.
 
 `remove` is the eject button next to stop's pause button: it kills the window,
 DROPS THE SLOT (so `up` never recreates it) and deletes the isolated home (so

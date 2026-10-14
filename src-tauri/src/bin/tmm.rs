@@ -634,11 +634,29 @@ async fn main() {
                         if let Err((code, msg)) = try_rpc(&ctx, "hub_post", json!({
                             "session": session, "from": who, "body": body, "status": false, "detached": false
                         })).await {
-                            println!("✓ #{id} → {name} (saved)");
+                            // A lost ANSWER is not a failed request (board
+                            // #367 review P1-B-1): the server may have
+                            // posted and delivered the hand-off and only the
+                            // reply went missing. So this reports what IS
+                            // known — the assignment — and names the rest as
+                            // unconfirmed, including what a re-run costs. A
+                            // machine caller gets the same facts as fields
+                            // (P1-B-2); the exit code is non-zero either way,
+                            // because the command did not finish.
+                            if ctx.json {
+                                println!("{}", json!({
+                                    "issue": id, "assignee": name, "saved": true,
+                                    "notified": "unconfirmed", "error": msg
+                                }));
+                            } else {
+                                println!("✓ #{id} → {name} (saved)");
+                            }
                             fail(code, &format!(
-                                "the hand-off was NOT posted: {msg}\n\
-                                 #{id} is assigned to {name} on the board, but {name} has not been told. \
-                                 Re-run `tmm board assign {id} {name}` to send it again."
+                                "the hand-off could not be confirmed: {msg}\n\
+                                 #{id} IS assigned to {name} on the board. Whether {name} was told is \
+                                 unknown — it may already have been posted, since a lost answer is not a \
+                                 failed request. Re-running `tmm board assign {id} {name}` sends it again \
+                                 and may duplicate it; `tmm board show {id}` shows the room thread."
                             ));
                         }
                     }
