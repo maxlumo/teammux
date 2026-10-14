@@ -1024,8 +1024,9 @@ const MODEL_NAME_WORDS: usize = 5;
 /// The same strictness as `HIGH_TRAFFIC` and for the same reason: letters
 /// alone are prose ABOUT the error, and a false hit types `continue` into a
 /// working agent. A 429 means "slow down": it rides the same ladder as every
-/// other shape (immediate first retry, then `BASE_BACKOFF_SECS`); it does not
-/// get a shorter one.
+/// other shape (the first `continue` at once, an UNCONFIRMED one retried after
+/// `BASE_BACKOFF_SECS` and doubling); it does not get a shorter one. The
+/// ladder bounds one Request ID only: a fresh id is a fresh incident.
 const TOO_MANY_REQUESTS: &str = "Too many requests, please wait before trying again. (Request ID: ";
 
 /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, hex digits only.
