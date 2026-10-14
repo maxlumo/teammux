@@ -8284,7 +8284,7 @@ test('#366 (phone): the door shows the server s SHORT name and keeps the full on
 // split DOM but the stylesheet hides the list column beside a view — the
 // view's own header must then carry the door. The condition is whether the
 // list is ON SCREEN (`listShown`), not which DOM branch renders.
-test('#366 (forced Desktop, narrow and wide): exactly one door is in reach in every view, and it opens the picker', async (context) => {
+test('#366 (forced Desktop, narrow and wide): the preview, edit and info headers carry the door below 900 and none above it; it opens the picker (downloads and git: the source pin)', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
   }), undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc }, setup(window: any) {
@@ -8320,6 +8320,22 @@ test('#366 (forced Desktop, narrow and wide): exactly one door is in reach in ev
   h.app.window.dispatchEvent(new h.app.window.Event('resize'));
   for (let i = 0; i < 4; i++) await h.settle();
   assert.equal(files().querySelectorAll('.files-right .preview-header .server-door').length, 1, 'narrow again: back in the header');
+  // Edit and info: each view's own header, the same one door.
+  const headerDoor = (label: string) => {
+    const head = files().querySelector<HTMLElement>('.files-right .preview-header')!;
+    assert.equal(files().querySelectorAll('.files-right .server-door').length, 1, `${label}: one door in the right pane`);
+    assert.equal(head.querySelector('.server-door')?.previousElementSibling?.getAttribute('aria-label'), 'Back', `${label}: right after Back`);
+  };
+  files().querySelector<HTMLButtonElement>('.files-right .preview-header button[aria-label="Edit"]')!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(files().querySelector('.files-right textarea, .files-right .editor, .files-right .cm-editor'), 'the editor is open');
+  headerDoor('edit');
+  files().querySelector<HTMLButtonElement>('.files-right .preview-header button[aria-label="Back"]')!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  files().querySelector<HTMLButtonElement>('.files-right .preview-header button[aria-label="File information"]')!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(files().querySelector('.files-right .info-body'), 'the info view is open');
+  headerDoor('info');
 });
 
 test('#358 (Single): no server door', async (context) => {
