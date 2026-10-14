@@ -656,7 +656,8 @@ async fn main() {
                                  #{id} IS assigned to {name} on the board. Whether {name} was told is \
                                  unknown — it may already have been posted, since a lost answer is not a \
                                  failed request. Re-running `tmm board assign {id} {name}` sends it again \
-                                 and may duplicate it; `tmm board show {id}` shows the room thread."
+                                 and may duplicate it; `tmm log --grep \"board #{id}\"` shows whether \
+                                 the hand-off was posted."
                             ));
                         }
                     }

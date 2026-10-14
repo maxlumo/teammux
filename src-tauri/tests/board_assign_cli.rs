@@ -177,15 +177,39 @@ fn an_unknown_name_writes_nothing() {
     assert!(!calls.contains(&"hub_post".to_string()), "{calls:?}");
 }
 
-/// The whole path when nothing goes wrong, including the hand-off's one
-/// address: the title rides in de-addressed, so `@all` in it reaches nobody.
+/// The whole path when nothing goes wrong: the issue read, the name checked,
+/// the save, the hand-off — in that order and no more. (The hand-off's one
+/// ADDRESS is asserted where it is decided, on `assign_brief` through
+/// `mention_names`; this test watches the calls, not the text.)
 #[test]
-fn a_clean_assignment_hands_off_to_exactly_one_name() {
+fn a_clean_assignment_makes_the_four_calls_in_order() {
     let f = fake(vec![]);
     let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
     assert!(ok, "{out:?}");
     assert!(out.contains("✓ #12 → builder-2"), "{out:?}");
     assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save", "hub_post"]);
+}
+
+/// Re-running with the SAME assignee is the documented recovery path after a
+/// hand-off whose answer was lost, so it is not a no-op: the save is idempotent
+/// and the notification is sent again (tmm-cli.md says so, and says it may
+/// duplicate). This case is what keeps that contract from being quietly
+/// "optimised" into a skip, which would leave the only recovery path dead.
+#[test]
+fn re_running_with_the_same_assignee_re_sends_the_hand_off() {
+    let f = fake(vec![]);
+    let (ok, _out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(ok);
+    let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(ok, "{out:?}");
+    assert_eq!(
+        f.calls(),
+        vec![
+            "hub_board_get", "hub_agents", "hub_board_save", "hub_post",
+            "hub_board_get", "hub_agents", "hub_board_save", "hub_post",
+        ],
+        "the second run posts again — that is the recovery, not a duplicate by accident"
+    );
 }
 
 /// `-` clears, which needs no hand-off: nobody to tell.

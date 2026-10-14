@@ -476,7 +476,9 @@ P1-B, 01:46) — the server may have posted and delivered the hand-off with
 only its reply going missing — so when the save has landed and the post's
 call fails, the CLI says the assignment IS on the board, that whether the
 agent was told is unknown and may already have happened, and that re-running
-sends it again and may duplicate it. Never "was not posted". `--output json`
+sends it again and may duplicate it, pointing at `tmm log --grep "board #N"`
+— which is where the answer actually is, since the hand-off is a room post.
+Never "was not posted". `--output json`
 gets the same facts as fields (`{issue, assignee, saved: true, notified:
 "unconfirmed", error}`) so a machine caller can read the partial result
 instead of a sentence, and the exit is non-zero either way because the
@@ -486,7 +488,9 @@ duplicate is the operator's informed choice, and no exactly-once is claimed
 anywhere. The failure paths are tested at the CLI against a fake server
 (`tests/board_assign_cli.rs`: the hand-off's answer dropped after the request
 is accepted, a save that really failed posting nothing, an unknown name
-writing nothing, the clean path, and `-` telling nobody), because the `-`
+writing nothing, the clean path's four calls in order, `-` telling nobody,
+and a re-run with the SAME assignee posting again — that last one guards the
+recovery contract from being quietly turned into a skip), because the `-`
 that never reached the argument parser proved that string tests of the
 helpers do not hold this verb.
 
