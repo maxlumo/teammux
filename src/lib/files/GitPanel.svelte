@@ -12,6 +12,7 @@
   // - `goBack()` (instance export): host's back-navigation calls this first;
   //   returns true if the panel consumed the back (closed an open diff).
   import { flip } from 'svelte/animate';
+  import type { Snippet } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { createFeedbackLifetime, type FeedbackValue } from '../ui/feedback-lifetime.ts';
@@ -27,8 +28,11 @@
   type GitDiff = { file: string; diff: string; _root: string };
   type PreviewEntry = { type: 'file'; path: string; name: string };
 
-  let { cwd, fontSize = 14, onOpenFile, onClose }: {
+  /** `lead` (#366): the page's server door, rendered after Back in this
+   * view's header when Files is one pane (the host decides; null = none). */
+  let { cwd, fontSize = 14, onOpenFile, onClose, lead = null }: {
     cwd: string;
+    lead?: Snippet | null;
     fontSize?: number;
     onOpenFile: (entry: PreviewEntry) => void;
     onClose: () => void;
@@ -194,6 +198,7 @@
 
 <div class="preview-header">
   <button class="back-btn" onclick={() => { if (gitDiff) closeDiff(); else onClose(); }}><Icon name="chevron-left" size={16} /></button>
+  {@render lead?.()}
   <span class="preview-name"><Icon name="git-branch" size={14} /> {gitBranch || 'Git'}</span>
   <div class="preview-actions">
     <button class="act-btn" onclick={() => { gitTab === 'status' ? loadGitStatus() : loadGitLog(); }}><Icon name="refresh" size={14} /></button>

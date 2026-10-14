@@ -109,8 +109,10 @@
     // rail and Settings open — the host hands the toggle (null = no door: a
     // single included server). Files stays this server's tree (D3); picking
     // another server is the ordinary focus move, and the next tree shows its
-    // own parked cwd.
-    onServers = null, serversOpen = false, serversControls = undefined } = $props();
+    // own parked cwd. Since #366 it is a small pill at the head of the path
+    // line (and of each other view's header on one pane), `serverShort` its
+    // label (`shortServerTag`), the full name in its tooltip and label.
+    onServers = null, serversOpen = false, serversControls = undefined, serverShort = null } = $props();
   const panelId = $props.id();
   const LIST_WIDTH = { min: 320, max: 520, default: 400 };
   $effect(() => {
@@ -1726,6 +1728,26 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- View blocks live in snippets so both layouts (mobile single-pane + desktop
      two-pane) render the same markup. -->
+{#snippet serverDoor()}
+  {#if onServers && scope.tag}
+    <!-- Whose files these are, and the door to another server's (board #358,
+         #366): App's one server popover (aria-controls names it), shown only
+         with more than one server included (the tag rule). Since #366 (owner
+         2026-10-14: "你切换的按钮单独占了一整行…把它放到路径的最左侧，用一个
+         非常小的 button 来做切换，保留机器的前几个字母就好") it is not a row of
+         its own: a small pill, the server's SHORT name, at the head of the
+         line that says where you are — the path row in the list, the header
+         after Back in every other view on one pane (the desktop's list column
+         keeps it in view beside them). `flex: none`: the path scrolls, the
+         door never moves. -->
+    <button type="button" class="server-door" class:open={serversOpen} aria-haspopup="dialog" aria-expanded={serversOpen}
+      aria-controls={serversOpen ? serversControls : undefined} aria-label={`${t('serversTitle')}: ${scope.tag}`}
+      onclick={(e) => onServers?.(e)}>
+      <ServerTag name={serverShort ?? scope.tag} title={scope.tag} />
+    </button>
+  {/if}
+{/snippet}
+
 {#snippet listPanel()}
     <div class="toolbar compact-tools" role="group" aria-label={t('filesTools')} use:measureToolbar
       oncontextmenu={(event) => contextFile(event)}
@@ -1749,6 +1771,7 @@
          Back; both rest disabled at their end. The crumbs scroll in their own
          strip so the pair stays put. -->
     <div class="bc-path-row compact-tools">
+      {@render serverDoor()}
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} disabled={!canGoBack} onclick={popDir} />
       <CommandButton variant="icon" icon="arrow-right" label={t('forward')} disabled={!canGoForward} onclick={fwdDir} />
       <div class="bc-scroll" bind:this={bcPathEl}>
@@ -1899,6 +1922,7 @@
     <!-- File preview -->
     <div class="preview-header compact-tools">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToList} />
+      {#if !splitEligible}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile.name}</span>
       <div class="preview-actions">
         {#if isLinedPreview}
@@ -1932,6 +1956,7 @@
     <!-- File editor -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToPreview} />
+      {#if !splitEligible}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile.name}{isEdited ? ' *' : ''}</span>
       <div class="preview-actions">
         <CommandButton variant="icon" icon={wrapLines ? 'wrap-text' : 'no-wrap'} label={t('editorWrap')} pressed={wrapLines}
@@ -1978,6 +2003,7 @@
          download is the same OperationFeedback the slot shows. -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={() => { navAnim('back'); view = 'list'; }} />
+      {#if !splitEligible}{@render serverDoor()}{/if}
       <span class="preview-name">{t('downloads')}</span>
       <div class="preview-actions">
         {#if isTauri}<CommandButton variant="icon" icon="refresh" label={t('filesRefresh')} onclick={() => readDownloads().catch((e) => { error = e.message; })} />{/if}
@@ -2047,6 +2073,7 @@
     <!-- File info -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backFromInfo} />
+      {#if !splitEligible}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile?.name}</span>
       <div class="preview-actions">
         {#if isPreviewable(currentFile?.stat, currentFile?.name)}
@@ -2078,23 +2105,6 @@
   style:transform={swipeDX > 0 ? `translateX(${swipeDX}px)` : ''}
   style:--files-list-default={`${LIST_WIDTH.default}px`}
   ontouchstart={onTouchStart} ontouchmove={onTouchMove} ontouchend={onTouchEnd} ontouchcancel={onTouchCancel}>
-  {#if onServers && scope.tag}
-    <!-- Whose files these are, and the door to another server's (board #358):
-         the server's name as the ③c-1 tag beside a swap glyph, the grammar of
-         Settings' phone server row; opens App's one server popover
-         (aria-controls names it). Shown only with more than one server
-         included (the tag rule), on both screens. PAGE level, one instance,
-         above whichever view is showing — list, preview, edit, info, git,
-         downloads — so a person previewing a file on A who wants B does not
-         walk back to the list first (orchestrator 2026-10-13 23:17); reading
-         mode, a layer over the preview, keeps its immersion. -->
-    <button type="button" class="server-door" class:open={serversOpen} aria-haspopup="dialog" aria-expanded={serversOpen}
-      aria-controls={serversOpen ? serversControls : undefined} aria-label={t('serversTitle')}
-      onclick={(e) => onServers?.(e)}>
-      <span class="quarter-turn" class:on={serversOpen}><Icon name="swap-h" size={14} /></span>
-      <ServerTag name={scope.tag} />
-    </button>
-  {/if}
   {#if error}
     <div class="error appear">{error}</div>
   {/if}
@@ -2114,7 +2124,7 @@
         {#if view === 'preview'}{@render previewPanel()}
         {:else if view === 'edit'}{@render editPanel()}
         {:else if view === 'info'}{@render infoPanel()}
-        {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
+        {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={splitEligible ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
         {:else if view === 'local'}{@render localPanel()}
         {/if}
       </div>
@@ -2127,7 +2137,7 @@
     {:else if view === 'edit'}{@render editPanel()}
     {:else if view === 'local'}{@render localPanel()}
     {:else if view === 'info'}{@render infoPanel()}
-    {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
+    {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={splitEligible ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
     {/if}
   {/if}
   {#if copyFeedback || downloadFeedback || uploadFeedback || earlierFeedback}
@@ -2198,17 +2208,17 @@
     .preview-open .files-left { display: none; }
   }
 
-  /* The server door (#358): the page's first row, above every view, in the
-     sidebar's row grammar — swap glyph that quarter-turns while the popover
-     is open, the server's tag. The same hover/press washes the side rows use.
-     Reading mode hides it with the rest of the chrome. */
+  /* The server door (#358, #366): a small pill at the head of the path line
+     (and of each one-pane view's header) — the ONE tag atom at --fs-micro,
+     the server's short name. Its BOX is the row's control height (the
+     touch target the Back/Forward beside it have); only its paint is small.
+     Hover and open lift the pill's own wash; it never shrinks (flex: none),
+     so a long path scrolls under the crumbs, never past the door. */
   .server-door {
-    display: flex; align-items: center; gap: 6px; width: 100%; min-height: var(--control-height); flex-shrink: 0;
-    padding: 0 var(--tool-inset-inline); box-sizing: border-box; border: 0; border-bottom: 1px solid var(--border);
-    background: transparent; color: var(--text2); font: inherit; text-align: left; cursor: pointer;
+    display: inline-flex; align-items: center; flex: none; height: var(--control-height);
+    padding: 0; border: 0; background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
-  .server-door:hover, .server-door.open { background: var(--surface2); }
-  .server-door :global(svg) { flex: none; color: var(--text3); }
+  .server-door:hover :global(.server-tag), .server-door.open :global(.server-tag) { background: var(--control-hover); color: var(--text); }
   .toolbar {
     display: flex; flex-wrap: nowrap; align-items: center; gap: var(--tool-gap); min-width: 0;
     min-height: var(--control-height); padding: var(--tool-inset-block) var(--tool-inset-inline); box-sizing: border-box;

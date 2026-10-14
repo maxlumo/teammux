@@ -9,10 +9,21 @@ directory, or the server's home directory when no session is open yet.
 ## Components
 - Server door (board #358, owner 2026-10-13: "在 File 页面，其实也可以让我有一个
   地方，能很快速、方便地切换不同的 server 连接"): when more than one server is
-  included (the ③c-1 tag rule), the page's first row — above whichever view
-  is showing: list, preview, edit, info, git, downloads, one instance — names
-  this tree's server with the one `ServerTag` beside a swap glyph and opens App's ONE
-  server popover — the same the rail and Settings open; there is no second
+  included (the ③c-1 tag rule), a small pill naming this tree's server opens
+  App's ONE server popover. Where it sits (#366, owner 2026-10-14: "你切换的
+  按钮单独占了一整行。你看能不能把它放到路径的最左侧，用一个非常小的 button 来
+  做切换，保留机器的前几个字母就好"): not a row of its own, but the FIRST item
+  of the line that says where you are — the path row in the list (before
+  Back/Forward and the crumbs), the header right after Back in preview, edit,
+  info, git and downloads on one pane; with two panes the list column keeps
+  it in view. The label is the server's SHORT name (`shortServerTag`: first
+  word, at most 8 letters — "devbox", "macmini" stay whole, a long host name
+  shows its first word; if two included servers would share a short name both
+  show in full); the full name is the tooltip and the accessible name. The
+  pill is the one `ServerTag` at `--fs-micro`; its box is the row's control
+  height and never shrinks, so a long path scrolls in its own strip and never
+  pushes the door. Reading mode hides it. The popover is the one the rail and
+  Settings open; there is no second
   switcher. Picking a connected server is the ordinary focus move (D2): no
   dial, no teardown; the other server's Files tree comes to the front with its
   own parked position (its `ServerState` keeps it). Nothing is merged: Files

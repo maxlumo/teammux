@@ -31,3 +31,21 @@ export function serverTag(scope: TagScope, serverId: ServerId | null | undefined
   if (!serverId || !tagsShown(scope)) return null;
   return scope.included.find((s) => s.id === serverId)?.name ?? serverId;
 }
+
+/** A tag's SHORT form, for a door that must stay small (Files' path line,
+ * #366; owner 2026-10-14: "用一个非常小的 button 来做切换，保留机器的前几个字母
+ * 就好"): the name's first word (split on space, dot, dash, underscore), at
+ * most `SHORT_TAG_MAX` (8) characters — 8, not 6, so the owner's
+ * own "devbox" and "macmini" stay whole. A short form that another included
+ * server's would also produce names neither, so then the full name is used —
+ * a door that cannot tell two machines apart is no door. Null exactly when
+ * `serverTag` is null (the one rule decides WHETHER; this decides how long). */
+export const SHORT_TAG_MAX = 8;
+const shortOf = (name: string) => (name.split(/[\s._-]+/u).find(Boolean) ?? name).slice(0, SHORT_TAG_MAX);
+export function shortServerTag(scope: TagScope, serverId: ServerId | null | undefined): string | null {
+  const full = serverTag(scope, serverId);
+  if (full === null) return null;
+  const short = shortOf(full);
+  const clash = scope.included.some((s) => s.id !== serverId && shortOf(s.name) === short);
+  return clash ? full : short;
+}

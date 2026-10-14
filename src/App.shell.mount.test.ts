@@ -8248,13 +8248,36 @@ test('#358 (phone): the door is the PAGE s, above every view — still there whi
   const files = () => front().querySelector<HTMLElement>('.files')!;
   assert.ok(front().querySelector('.file-row'), 'the list view');
   assert.equal(files().querySelectorAll('.server-door').length, 1, 'one door');
-  assert.equal(files().firstElementChild?.classList.contains('server-door'), true, 'the page s first row, not the list panel s');
+  // #366: the door is the PATH ROW s first item, not a row of its own.
+  const pathRow = files().querySelector('.bc-path-row')!;
+  assert.equal(pathRow.firstElementChild?.classList.contains('server-door'), true, 'the path row s first item');
+  assert.equal(files().firstElementChild?.classList.contains('server-door'), false, 'no standalone row above the views');
   [...front().querySelectorAll<HTMLButtonElement>('.file-row .file-main')].find((b) => (b.textContent ?? '').includes('notes.md'))!.click();
   for (let i = 0; i < 8; i++) { await h.app.advance(200); await h.settle(); }
   assert.ok(front().querySelector('.preview-header'), 'the phone shows the preview alone');
   assert.equal(front().querySelector('.file-row'), null, 'the list panel is gone (single-pane chain)');
-  assert.equal(files().querySelectorAll('.server-door').length, 1, 'the SAME door is still on the page');
+  assert.equal(files().querySelectorAll('.server-door').length, 1, 'the door is still on the page');
+  const head = front().querySelector('.preview-header')!;
+  assert.equal(head.querySelector('.server-door')?.previousElementSibling?.getAttribute('aria-label'), 'Back', 'in the preview header, right after Back (#366)');
   assert.equal(files().querySelector('.server-door .server-tag')?.textContent, 'alpha');
+  // The popover still opens from it.
+  files().querySelector<HTMLButtonElement>('.server-door')!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('.server-menu'), 'App s server popover, from the preview s door');
+});
+
+test('#366 (phone): the door shows the server s SHORT name and keeps the full one in its tooltip and label', async (context) => {
+  const seed = twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) });
+  const servers = JSON.parse(seed.tmux_servers);
+  servers[0].name = 'dev-dsk-cfu-devbox-2a';
+  const h = await bootApp(context, aggregateOn({ ...seed, tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'mobile' }), undefined,
+    { ...sandbox, rpc: { ...twoHubs(), ...editorRpc }, setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const door = h.app.document.querySelector<HTMLButtonElement>('.scope-tree:not(.held) .bc-path-row .server-door')!;
+  assert.ok(door, 'the door heads the path row');
+  assert.equal(door.querySelector('.server-tag')?.textContent, 'dev', 'the first word');
+  assert.equal(door.querySelector('.server-tag')?.getAttribute('title'), 'dev-dsk-cfu-devbox-2a', 'the full name on hover');
+  assert.equal(door.getAttribute('aria-label'), 'Servers: dev-dsk-cfu-devbox-2a', 'and in its accessible name');
 });
 
 test('#358 (Single): no server door', async (context) => {

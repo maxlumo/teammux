@@ -40,7 +40,7 @@
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createMembers } from './lib/app/server-members.svelte.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
-  import { serverTag } from './lib/app/server-tag.ts';
+  import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
   import { createBoardUnion, createHubUnion } from './lib/app/hub-union.svelte.ts';
   import { createSessionsUnion } from './lib/app/sessions-union.svelte.ts';
   import { createScopeSwap } from './lib/app/server-scope.ts';
@@ -4016,7 +4016,7 @@
     {/if}
     <div class="page-layer" class:hidden={!shown || page !== 'files'}>
       <Files session={v.filesSession} guardPage="files" visible={shown && page === 'files'} {fontSize} onGoBack={(fn) => v.filesGoBack = fn} onimmersive={(on) => v.filesImmersive = on} navRequest={landingFor(v.filesNavReq, runtime)} jumped={!!v.jumpedFrom}
-        onServers={toggleServerMenu} serversOpen={serverMenuOpen} serversControls={serverPickerId} />
+        serverShort={shortServerTag(tagScope, runtime.id)} onServers={toggleServerMenu} serversOpen={serverMenuOpen} serversControls={serverPickerId} />
     </div>
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}

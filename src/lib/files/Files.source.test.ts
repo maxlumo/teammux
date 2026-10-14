@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -329,34 +330,45 @@ test('the download feedback slot shows the store row; it keeps no copy of its ow
 const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
 
 test('the door opens App s ONE server popover and is shown by the tag rule (#358)', () => {
-  assert.match(source, /\{#if onServers && scope\.tag\}/u, 'host-provided toggle AND the ③c-1 tag: more than one server included');
-  assert.match(source, /<button type="button" class="server-door"[^>]*aria-haspopup="dialog" aria-expanded=\{serversOpen\}\s*aria-controls=\{serversOpen \? serversControls : undefined\}/u, 'the popover s own dialog semantics, like the phone s Settings row');
-  assert.match(source, /onclick=\{\(e\) => onServers\?\.\(e\)\}/u, 'the host toggles; Files owns no server list');
-  assert.match(source, /<span class="quarter-turn" class:on=\{serversOpen\}><Icon name="swap-h" size=\{14\} \/><\/span>\s*<ServerTag name=\{scope\.tag\} \/>/u, 'the swap glyph that turns while open, the one tag atom');
+  const door = source.slice(source.indexOf('{#snippet serverDoor()}'), source.indexOf('{#snippet listPanel()}'));
+  assert.match(door, /\{#if onServers && scope\.tag\}/u, 'host-provided toggle AND the ③c-1 tag: more than one server included');
+  assert.match(door, /<button type="button" class="server-door"[^>]*aria-haspopup="dialog" aria-expanded=\{serversOpen\}\s*aria-controls=\{serversOpen \? serversControls : undefined\}/u, 'the popover s own dialog semantics, like the phone s Settings row');
+  assert.match(door, /onclick=\{\(e\) => onServers\?\.\(e\)\}/u, 'the host toggles; Files owns no server list');
   assert.ok(!/ServerList|loadServers|focusServer|currentServerId/u.test(source), 'no second switcher: Files imports nothing of the registry');
-  // PAGE level, one instance (orchestrator 2026-10-13 23:17): the door is the
-  // first child of `.files`, before the split/single-pane chain, so every
-  // view — list, preview, edit, info, git, downloads — has it; no snippet
-  // renders a second one. Reading mode (a layer over the preview, #226) hides
-  // it with the preview header.
-  assert.equal(source.match(/class="server-door"/gu)?.length, 1, 'one door in the template');
-  assert.match(source, /<div class="files" bind:this=\{filesEl\}[\s\S]*?>\n\s*\{#if onServers && scope\.tag\}\n(?:\s*<!--[\s\S]*?-->\n)?\s*<button type="button" class="server-door"/u, 'the page s first row');
-  assert.ok(source.indexOf('class="server-door"') < source.indexOf('{#if error}'), 'before the error line and every panel');
-  const listPanel = source.slice(source.indexOf('{#snippet listPanel()}'), source.indexOf('{#snippet previewPanel()}'));
-  assert.doesNotMatch(listPanel, /server-door/u, 'the list panel carries no door of its own');
-  assert.match(source, /\.files\.reading \.server-door \{ display: none; \}/u, 'reading mode hides it');
   // App hands Files the SAME toggle and open state the rail and Settings use.
   assert.match(app, /<Files [\s\S]*?onServers=\{toggleServerMenu\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\} \/>/u);
   assert.match(app, /onServers=\{connected && layout\.isTouchDevice \? toggleServerMenu : null\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\}/u, '(Settings phone row: the same three)');
 });
 
-test('the door wears tokens and the side-row washes, no raw sizes or colours (#358)', () => {
+// #366 (owner 2026-10-14: "你切换的按钮单独占了一整行…把它放到路径的最左侧，用一个
+// 非常小的 button 来做切换，保留机器的前几个字母就好"): no row of its own — ONE
+// snippet, rendered at the head of the line that says where you are.
+test('the door is a small pill at the head of the path line, not a row of its own (#366)', () => {
+  assert.equal(source.match(/class="server-door"/gu)?.length, 1, 'one door in the template (the snippet)');
+  assert.doesNotMatch(source, /<div class="files" bind:this=\{filesEl\}[\s\S]*?>\n\s*\{#if onServers/u, 'no page-level row above the views');
+  const door = source.slice(source.indexOf('{#snippet serverDoor()}'), source.indexOf('{#snippet listPanel()}'));
+  assert.match(door, /<ServerTag name=\{serverShort \?\? scope\.tag\} title=\{scope\.tag\} \/>/u, 'the one tag atom, SHORT label, full name in its tooltip');
+  assert.match(door, /aria-label=\{`\$\{t\('serversTitle'\)\}: \$\{scope\.tag\}`\}/u, 'the full name in its accessible name');
+  assert.doesNotMatch(door, /<Icon /u, 'the glyph went: the pill is the door');
+  const listPanel = source.slice(source.indexOf('{#snippet listPanel()}'), source.indexOf('{#snippet previewPanel()}'));
+  assert.match(listPanel, /<div class="bc-path-row compact-tools">\s*\{@render serverDoor\(\)\}\s*<CommandButton variant="icon" icon="arrow-left"/u, 'the path row s FIRST item, before Back/Forward and the crumbs');
+  // Every other view on one pane (#358: reachable from preview/edit/info/
+  // downloads/git): after its Back. Two panes: the list column holds it.
+  const after = source.slice(source.indexOf('{#snippet previewPanel()}'));
+  assert.equal(after.match(/\{#if !splitEligible\}\{@render serverDoor\(\)\}\{\/if\}/gu)?.length, 4, 'preview, edit, downloads, info');
+  assert.equal(source.match(/<GitPanel bind:this=\{gitPanelRef\} \{cwd\} \{fontSize\} lead=\{splitEligible \? null : serverDoor\}/gu)?.length, 2, 'git, on both layouts chains');
+  const git = readFileSync(new URL('./GitPanel.svelte', import.meta.url), 'utf8');
+  assert.match(git, /<button class="back-btn"[^\n]*\n\s*\{@render lead\?\.\(\)\}/u, 'git: after its Back');
+  assert.match(source, /\.files\.reading \.server-door \{ display: none; \}/u, 'reading mode hides it');
+  assert.match(app, /serverShort=\{shortServerTag\(tagScope, runtime\.id\)\} onServers=\{toggleServerMenu\}/u, 'the short form is the host s, from the one tag rule');
+});
+
+test('the door wears tokens: a control-height box that never shrinks, the pill as its paint (#358, #366)', () => {
   const css = source.slice(source.indexOf('<style>'));
   const rule = css.match(/\.server-door \{([^}]*)\}/u)?.[1] ?? '';
   assert.ok(rule, 'the rule exists');
-  assert.match(rule, /min-height: var\(--control-height\)/u);
-  assert.match(rule, /flex-shrink: 0/u, 'a row of the flex-column page: never squeezed by a tall view');
-  assert.match(rule, /padding: 0 var\(--tool-inset-inline\)/u);
-  assert.ok(!/font-size:\s*\d|#[0-9a-f]{3,8}\b/iu.test(rule), 'tokens only');
-  assert.match(css, /\.server-door:hover, \.server-door\.open \{ background: var\(--surface2\); \}/u, 'the side rows hover wash');
+  assert.match(rule, /height: var\(--control-height\)/u, 'the row s touch height, like Back/Forward beside it');
+  assert.match(rule, /flex: none/u, 'pinned: a long path scrolls in its strip, never pushes the door');
+  assert.ok(!/font-size|\d+px|#[0-9a-f]{3,8}\b/iu.test(rule), 'tokens only');
+  assert.match(css, /\.server-door:hover :global\(\.server-tag\), \.server-door\.open :global\(\.server-tag\) \{ background: var\(--control-hover\); color: var\(--text\); \}/u, 'hover/open lift the pill');
 });
