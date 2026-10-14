@@ -992,6 +992,13 @@ test('a lifecycle line splits into a highlighted verb and its subject', () => {
   // The typed text may contain an arrow; the split is the LAST one — the one
   // hub_command appended.
   assert.deepEqual(sysParts('/compact a → b → dev'), { verb: '/compact', who: 'dev', text: 'a → b', cmd: true });
+  // #367: a board hand-off is the same three atoms — the agent is the
+  // subject, the issue is the detail — so `tmm board assign` and the UI's
+  // picker leave a row that reads like every other lifecycle row.
+  assert.deepEqual(sysParts('assigned builder-2 — board #12 Fix the login flow'),
+    { verb: 'assigned', who: 'builder-2', text: 'board #12 Fix the login flow', cmd: false });
+  assert.deepEqual(sysParts('unassigned builder — board #12 Fix the login flow'),
+    { verb: 'unassigned', who: 'builder', text: 'board #12 Fix the login flow', cmd: false });
   // An unknown shape is left WHOLE — a guessed verb or name would truncate it.
   assert.deepEqual(sysParts('agent k left the building'), { verb: '', who: '', text: 'agent k left the building', cmd: false });
   assert.deepEqual(sysParts(undefined), { verb: '', who: '', text: '', cmd: false });
@@ -1006,8 +1013,11 @@ test('a lifecycle verb speaks the one status colour language', () => {
   assert.equal(sysVerbColor('stopped'), 'var(--text3)');
   assert.equal(sysVerbColor('removed'), 'var(--status-danger)');
   assert.equal(sysVerbColor('switched'), 'var(--accent)');
+  // A hand-off starts work moving; handing it back to nobody is rest (#367).
+  assert.equal(sysVerbColor('assigned'), 'var(--accent)');
+  assert.equal(sysVerbColor('unassigned'), sysVerbColor('stopped'));
   // Never a literal colour: both themes read the same tokens.
-  for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'wat', '']) {
+  for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'assigned', 'unassigned', 'wat', '']) {
     assert.match(sysVerbColor(v), /^var\(--|^color-mix\(/u, `${v} must resolve through a token`);
   }
 });

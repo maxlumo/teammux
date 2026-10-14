@@ -58,6 +58,7 @@ tmm log --grep <text> [--grep …] [--global]  search FULL history (any-match, b
 tmm board [list] | show <id>         the kanban; one issue + its note thread
 tmm board add "title" [--body <t>] [--image <path|url>] [--assignee <n>]
 tmm board take <id>                  claim: assignee = you, status = doing
+tmm board assign <id> <name|->        hand it to someone else; `-` clears it (#367)
 tmm board move <id> <todo|doing|review|done>
 tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue (an image alone is a note)
 
@@ -438,6 +439,29 @@ a teammate:
 | Input mode | `tmm agent mode <name> queue\|steer` | kiro card context menu: Switch to Steer / Switch to Queue (#271) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |
 | Project | `tmm project up\|down\|archive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action) |
+| Board hand-off | `tmm board assign <id> <name\|->` | Board detail: the assignee picker (its first row clears it) |
+
+**`tmm board assign` (board #367, 2026-10-15).** Found reassigning #363–#366
+away from an agent that had been removed: `take` claims an issue for the
+CALLER and `--assignee` only works at creation, so the one thing an
+orchestrator does all day — move an open issue to another agent — existed in
+the UI and nowhere else. The verb saves through `hub_board_save`, the same RPC
+the picker uses, and then does what the UI's rule has required since board #11:
+an assignment DISPATCHES. The hand-off is an ordinary `@name` post through
+`hub_post`, the one delivery carrier, so the agent is actually woken instead of
+silently gaining a label. Its text is a POINTER — the issue named, who handed
+it over, `tmm board take <id>` and `tmm board show <id>` — where the UI's brief
+inlines the whole issue and its note thread: the difference is the reader, as
+this recipient holds the CLI that prints the issue, while the UI briefs an
+agent on behalf of a human who cannot type `tmm` for it. A name is checked at
+the door against the project's managed agents (plus `human`, who reads the
+board) because an assignment to a typo looks exactly like a success, and `-`
+is the one spelling of "nobody" — a shell cannot pass an empty argument
+comfortably, and it is the picker's first row. The record is the server's:
+every assignee CHANGE now posts one `[tmm] assigned <name> — board #N <title>`
+room line (`unassigned <who-lost-it>` when cleared), from whichever surface
+saved it, which is how the status moves have always read — before this a
+reassignment was invisible to everyone except the new assignee.
 
 `remove` is the eject button next to stop's pause button: it kills the window,
 DROPS THE SLOT (so `up` never recreates it) and deletes the isolated home (so

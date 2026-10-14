@@ -1260,7 +1260,7 @@ export function systemLine(body: string | null | undefined): string | null {
 /** The lifecycle verbs the server narrates (`hub_rpc.rs`). A line that does not
  * start with one of them is left whole — an unknown shape must render as its own
  * text, never as a guessed verb plus a truncated remainder. */
-const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'removed', 'interrupted', 'switched', 'done']);
+const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'done']);
 
 /**
  * ONE structure for every line the app narrates: WHO it is about, WHAT
@@ -1387,7 +1387,11 @@ export function sysVerbColor(verb: string): string {
     case 'restarted':
     // A queue/steer switch (#271) changes how the agent takes input: accent,
     // like a start — never a status of its own.
-    case 'switched': return 'var(--accent)';
+    case 'switched':
+    // A board hand-off (#367) starts work moving, like a spawn; handing the
+    // issue back to nobody leaves it at rest, like a stop.
+    case 'assigned': return 'var(--accent)';
+    case 'unassigned': return 'var(--text3)';
     case 'done': return 'var(--status-ok)';
     case 'interrupted': return 'var(--status-warn)';
     case 'removed': return 'var(--status-danger)';

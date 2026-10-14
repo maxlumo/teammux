@@ -507,6 +507,19 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // itself; the actor is never notified of its own move.
             let prev = issue_id.and_then(|iid| crate::projects::board_get(session, iid).ok());
             let saved = crate::projects::board_save(session, issue_id, s("title"), s("body"), s("status"), s("assignee"), who).map_err(RpcError::InvalidParams)?;
+            // An assignment is a board CHANGE like a status move, so it
+            // leaves the same kind of record (board #367): one room line,
+            // from whichever surface made it — the UI's picker, `tmm board
+            // assign`, `tmm board take`. Before this only the status moved
+            // left a trace, and a reassignment was invisible to everyone who
+            // was not the new assignee. The WAKE is not here: the UI's brief
+            // and the CLI's hand-off own that, and they carry different text
+            // for different readers.
+            if let Some(prev) = &prev {
+                if let Some(line) = board_assign_line(prev, s("assignee"), saved) {
+                    let _ = rooms::post(&room, who, &line);
+                }
+            }
             if let (Some(prev), Some(new_status)) = (&prev, s("status")) {
                 let old_status = prev["status"].as_str().unwrap_or("");
                 if old_status != new_status {
@@ -1050,6 +1063,30 @@ pub(super) use crate::projects::deliver_chat_line;
 /// nothing actually changed (a save echoing the stored values is a no-op,
 /// not an event).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// The room line an assignee CHANGE leaves (board #367), or `None` when this
+/// save does not change one. Written in the lifecycle grammar every other
+/// `[tmm]` line speaks (`sysParts`: verb, subject, detail), so the feed reads
+/// it with the atoms it already has: `assigned <name> — board #N <title>`,
+/// and `unassigned <name> — …` when the issue is handed back to nobody, which
+/// names who LOST it because that is the fact a reader needs.
+fn board_assign_line(prev: &serde_json::Value, assignee: Option<&str>, id: i64) -> Option<String> {
+    let next = assignee?.trim();
+    let old = prev["assignee"].as_str().unwrap_or("").trim();
+    if next == old {
+        return None;
+    }
+    let title = crate::projects::issue_ref(
+        prev["title"].as_str().unwrap_or(""),
+        prev["body"].as_str().unwrap_or(""),
+        id,
+    );
+    Some(if next.is_empty() {
+        format!("[tmm] unassigned {old} — board #{id} {title}")
+    } else {
+        format!("[tmm] assigned {next} — board #{id} {title}")
+    })
+}
+
 fn board_change_notice(
     prev: &serde_json::Value,
     who: &str,
@@ -1641,6 +1678,39 @@ mod tests {
         assert_eq!(got, vec![("old".into(), "squad".into()), ("qa".into(), "squad".into()), ("sub".into(), "squad/inner".into())]);
         assert!(super::stopped_teams(None, &[]).is_empty());
         let _ = std::fs::remove_dir_all(ws);
+    }
+
+    /// Board #367: a reassignment used to leave NO trace in the room — only
+    /// the new assignee heard, through the UI's brief. One line now, from
+    /// whichever surface saved it, in the lifecycle grammar `sysParts`
+    /// already reads (verb, subject, detail).
+    #[test]
+    fn an_assignee_change_leaves_one_room_line() {
+        let prev = serde_json::json!({
+            "title": "Fix the login flow", "body": "B", "status": "doing",
+            "assignee": "builder", "created_by": "human",
+        });
+        assert_eq!(
+            super::board_assign_line(&prev, Some("builder-2"), 12).as_deref(),
+            Some("[tmm] assigned builder-2 — board #12 Fix the login flow")
+        );
+        // Handed back to nobody: the line names who LOST it.
+        assert_eq!(
+            super::board_assign_line(&prev, Some(""), 12).as_deref(),
+            Some("[tmm] unassigned builder — board #12 Fix the login flow")
+        );
+        // Saves that do not change the assignee say nothing — a status move,
+        // a note, a re-save of the same name.
+        assert_eq!(super::board_assign_line(&prev, None, 12), None);
+        assert_eq!(super::board_assign_line(&prev, Some("builder"), 12), None);
+        assert_eq!(super::board_assign_line(&prev, Some(" builder "), 12), None, "whitespace is not a change");
+        // A titleless issue is named by issue_ref's fallback, like every
+        // other notice (board #31).
+        let bare = serde_json::json!({ "title": "", "body": "   ", "assignee": "" });
+        assert_eq!(
+            super::board_assign_line(&bare, Some("dev"), 9).as_deref(),
+            Some("[tmm] assigned dev — board #9 #9")
+        );
     }
 
     #[test]

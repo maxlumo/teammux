@@ -62,6 +62,7 @@ USAGE (agent):
   tmm board add "title" [--body <text>] [--image <path|url>] [--assignee <name>]
   tmm board show <id>                 one issue with its note thread
   tmm board take <id>                 claim it: assignee = you, status = doing
+  tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
   tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
 
@@ -580,6 +581,62 @@ async fn main() {
                     let r = rpc(&ctx, "hub_board_delete", json!({ "session": session, "id": id })).await;
                     if ctx.json { println!("{r}"); } else { println!("✓ deleted #{id}"); }
                 }
+                // Handing an issue to SOMEONE ELSE (board #367). `take` is
+                // the self-claim and `add --assignee` is assignment at
+                // birth; between them there was no way to move an open
+                // issue to another agent, which the UI has always been able
+                // to do (non-negotiable 14). Same RPC as that UI, and the
+                // same @message carrier for the hand-off, so the agent
+                // actually starts instead of silently gaining a label.
+                "assign" => {
+                    let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
+                        fail(EXIT_USAGE, "board assign needs an issue id and a name: tmm board assign 3 builder  (`-` clears the assignee)");
+                    };
+                    let Some(raw) = rest.get(2) else {
+                        fail(EXIT_USAGE, "board assign needs a name: tmm board assign 3 builder  (`-` clears the assignee)");
+                    };
+                    let name = assign_target(raw);
+                    // The issue is read FIRST: a wrong id must fail here,
+                    // before anything is written, and the hand-off names the
+                    // issue with the same fallback every notice speaks.
+                    let issue = rpc(&ctx, "hub_board_get", json!({ "session": session, "id": id })).await;
+                    let g = |k: &str| issue.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let title = tmux_mobile::projects::issue_ref(&g("title"), &g("body"), id);
+                    let was = g("assignee");
+                    // A name is checked at the door, like `tmm send`'s: an
+                    // assignment to a typo is an issue nobody is doing, and
+                    // it would look exactly like a success.
+                    if !name.is_empty() && name != "human" {
+                        let peers = managed_names(&rpc(&ctx, "hub_agents", json!({ "session": session })).await);
+                        if !peers.contains(&name.to_string()) {
+                            fail(EXIT_USAGE, &format!(
+                                "no managed agent named {name} in this project (tmm agent list); \
+                                 assign to one of those, to human, or `-` to clear"
+                            ));
+                        }
+                    }
+                    let r = rpc(&ctx, "hub_board_save", json!({
+                        "session": session, "id": id, "assignee": name, "who": who
+                    })).await;
+                    // The assignment DOES something (the UI's rule since
+                    // board #11): the room line is the record, this is the
+                    // wake. `human` reads the board itself, and a clear has
+                    // nobody to tell.
+                    if !name.is_empty() && name != "human" {
+                        let body = assign_brief(id, &title, &who, name);
+                        let _ = rpc(&ctx, "hub_post", json!({
+                            "session": session, "from": who, "body": body, "status": false, "detached": false
+                        })).await;
+                    }
+                    if ctx.json {
+                        println!("{r}");
+                    } else if name.is_empty() {
+                        let was = if was.is_empty() { " (it had none)".to_string() } else { format!(" (was {was})") };
+                        println!("✓ #{id} unassigned{was}");
+                    } else {
+                        println!("✓ #{id} → {name}");
+                    }
+                }
                 "take" | "move" | "note" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
                         fail(EXIT_USAGE, "board {take|move|note} needs an issue id first: tmm board move 3 review");
@@ -603,7 +660,7 @@ async fn main() {
                     };
                     if ctx.json { println!("{r}"); } else { println!("✓ #{id}"); }
                 }
-                other => fail(EXIT_USAGE, &format!("unknown board command '{other}': tmm board [list|show|add|take|move|note|delete]")),
+                other => fail(EXIT_USAGE, &format!("unknown board command '{other}': tmm board [list|show|add|take|assign|move|note|delete]")),
             }
         }
         ("spawn", _) if flags.get("team").cloned().flatten().is_some() => {
@@ -1636,8 +1693,13 @@ fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<Str
                 continue;
             }
             flags.insert(name.to_string(), None);
-        } else if let Some(name) = a.strip_prefix('-') {
-            flags.insert(name.to_string(), None);
+        } else if a.len() > 1 && a.starts_with('-') {
+            // A LONE `-` is a positional, not a nameless flag (board #367,
+            // found by running the verb): it is how a shell spells "nobody"
+            // for `tmm board assign <id> -`, and `strip_prefix('-')` turned
+            // it into a flag named "" that nothing reads, so the argument
+            // vanished and the command asked for a name it had been given.
+            flags.insert(a[1..].to_string(), None);
         } else {
             pos.push(a.clone());
         }
@@ -2011,6 +2073,28 @@ fn others(names: &[String], me: &str, peers: &[String]) -> (bool, Vec<String>) {
     (reached, unknown)
 }
 
+/// `tmm board assign <id> <name|->`: the name to save, where a single `-`
+/// means CLEAR (board #367). An empty string is what `hub_board_save` stores
+/// for "nobody", and `-` is how a shell says that without quoting an empty
+/// argument — the same spelling the UI's picker offers as its first row.
+fn assign_target(raw: &str) -> &str {
+    let name = raw.trim().trim_start_matches('@');
+    if name == "-" { "" } else { name }
+}
+
+/// The hand-off line `board assign` posts: an `@mention` so the ONE delivery
+/// path types it into that agent's pane, the issue NAMED (never "an issue"),
+/// who handed it over, and the two commands that continue the flow. The body
+/// and the note thread are deliberately NOT inlined the way the UI's brief
+/// does it: the recipient of this one has `tmm` in its hands and the issue is
+/// one command away, whereas the UI briefs an agent for a human who cannot.
+fn assign_brief(id: i64, title: &str, who: &str, name: &str) -> String {
+    format!(
+        "@{name} [board #{id}] {title} — assigned to you by {who}. \
+         `tmm board take {id}` to claim it, `tmm board show {id}` for the body and the notes."
+    )
+}
+
 /// The managed agents in a `hub_agents` answer.
 fn managed_names(agents: &Value) -> Vec<String> {
     agents["agents"]
@@ -2268,6 +2352,44 @@ mod tests {
         assert_eq!(flags.get("input-mode").cloned().flatten().as_deref(), Some("steer"));
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
+    }
+
+    /// Board #367: there was no way to hand an OPEN issue to another agent
+    /// — `take` claims it for the caller and `--assignee` only works at
+    /// creation — so the orchestrator could not do from the CLI what the UI
+    /// does with its picker. `-` is how a shell spells "nobody", and the
+    /// hand-off NAMES the issue and the two commands that continue the flow,
+    /// because an @message that says only "you have #12" costs a lookup.
+    #[test]
+    fn board_assign_reads_a_name_or_a_dash_and_hands_the_issue_over() {
+        // The `-` has to SURVIVE the flag parser to reach `assign_target`.
+        // It did not, and only running the verb showed it: a lone `-` became
+        // a flag named "" and `board assign 3 -` answered "needs a name".
+        let args: Vec<String> = ["board", "assign", "3", "-"].iter().map(|s| s.to_string()).collect();
+        let (flags, pos, _) = split_flags(&args);
+        assert_eq!(pos, vec!["board", "assign", "3", "-"], "a lone dash is a positional");
+        assert!(flags.is_empty(), "and not a nameless flag");
+        // A real flag still parses, and so does a valued one after a dash.
+        let args: Vec<String> = ["board", "assign", "3", "-", "--output", "json"].iter().map(|s| s.to_string()).collect();
+        let (flags, pos, _) = split_flags(&args);
+        assert_eq!(pos, vec!["board", "assign", "3", "-"]);
+        assert_eq!(flags.get("output").cloned().flatten().as_deref(), Some("json"));
+
+        assert_eq!(super::assign_target("builder-2"), "builder-2");
+        assert_eq!(super::assign_target("  @builder-2 "), "builder-2", "an @ is how the room spells a name");
+        assert_eq!(super::assign_target("-"), "", "the one spelling of nobody");
+        assert_eq!(super::assign_target("human"), "human");
+
+        let brief = super::assign_brief(12, "Fix the login flow", "orchestrator", "builder-2");
+        assert!(brief.starts_with("@builder-2 "), "the mention is what types it into the pane: {brief}");
+        assert!(brief.contains("[board #12] Fix the login flow"), "{brief}");
+        assert!(brief.contains("by orchestrator"), "{brief}");
+        assert!(brief.contains("tmm board take 12"), "{brief}");
+        assert!(brief.contains("tmm board show 12"), "{brief}");
+        // A titleless issue is still named — issue_ref's fallback, same as
+        // every other notice.
+        let titleless = super::assign_brief(9, "#9", "human", "dev");
+        assert!(titleless.contains("[board #9] #9 —"), "{titleless}");
     }
 
     #[test]
