@@ -15,8 +15,10 @@ directory, or the server's home directory when no session is open yet.
   做切换，保留机器的前几个字母就好"): not a row of its own, but the FIRST item
   of the line that says where you are — the path row in the list (before
   Back/Forward and the crumbs), the header right after Back in preview, edit,
-  info, git and downloads on one pane; with two panes the list column keeps
-  it in view. The label is the server's SHORT name (`shortServerTag`: first
+  info, git and downloads whenever the list column is not on screen (one
+  pane, or forced Desktop below 900px where the list hides beside a view —
+  reviewer P1 on #366); when the list column IS on screen its path row keeps
+  the one door. The label is the server's SHORT name (`shortServerTag`: first
   word, at most 8 letters — "devbox", "macmini" stay whole, a long host name
   shows its first word; if two included servers would share a short name both
   show in full); the full name is the tooltip and the accessible name. The

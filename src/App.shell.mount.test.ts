@@ -8280,6 +8280,48 @@ test('#366 (phone): the door shows the server s SHORT name and keeps the full on
   assert.equal(door.getAttribute('aria-label'), 'Servers: dev-dsk-cfu-devbox-2a', 'and in its accessible name');
 });
 
+// #366 review P1 (reviewer on 7921fa60): forced Desktop below 900px takes the
+// split DOM but the stylesheet hides the list column beside a view — the
+// view's own header must then carry the door. The condition is whether the
+// list is ON SCREEN (`listShown`), not which DOM branch renders.
+test('#366 (forced Desktop, narrow and wide): exactly one door is in reach in every view, and it opens the picker', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop',
+  }), undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc }, setup(window: any) {
+    window.Element.prototype.getAnimations = () => [];
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 800 });
+  } });
+  for (let i = 0; i < 12; i++) { await h.app.advance(500); await h.settle(); }
+  const front = () => h.app.document.querySelector<HTMLElement>('.scope-tree:not(.held)')!;
+  const files = () => front().querySelector<HTMLElement>('.files')!;
+  assert.ok(files().querySelector('.files-split'), 'forced Desktop: the split DOM even at 800px');
+  // The list view: its path row carries the door.
+  assert.equal(files().querySelectorAll('.server-door').length, 1);
+  assert.ok(files().querySelector('.bc-path-row .server-door'));
+  // Open the file: the list column is hidden below 900 (.preview-open .files-left), so the PREVIEW header carries it.
+  [...front().querySelectorAll<HTMLButtonElement>('.file-row .file-main')].find((b) => (b.textContent ?? '').includes('notes.md'))!.click();
+  for (let i = 0; i < 8; i++) { await h.app.advance(200); await h.settle(); }
+  assert.ok(files().querySelector('.files-split.preview-open'), 'the preview is open beside a hidden list');
+  const inPreview = files().querySelectorAll('.files-right .preview-header .server-door');
+  assert.equal(inPreview.length, 1, 'narrow forced Desktop: the preview header has the door');
+  (inPreview[0] as HTMLButtonElement).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.ok(h.app.document.querySelector('.server-menu'), 'and it opens App s server picker');
+  (inPreview[0] as HTMLButtonElement).click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  // Widen past 900: the list is on screen again, so only its path row has the door.
+  (h.app.window as any).innerWidth = 1280;
+  h.app.window.dispatchEvent(new h.app.window.Event('resize'));
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(files().querySelectorAll('.files-right .server-door').length, 0, 'wide: the view header has none');
+  assert.equal(files().querySelectorAll('.files-left .bc-path-row .server-door').length, 1, 'the visible list keeps the one door');
+  // And back below 900: the header has it again.
+  (h.app.window as any).innerWidth = 800;
+  h.app.window.dispatchEvent(new h.app.window.Event('resize'));
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(files().querySelectorAll('.files-right .preview-header .server-door').length, 1, 'narrow again: back in the header');
+});
+
 test('#358 (Single): no server door', async (context) => {
   const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop' }, undefined, { ...sandbox, rpc: { ...twoHubs(), ...editorRpc } });
   for (let i = 0; i < 6; i++) { await h.app.advance(500); await h.settle(); }

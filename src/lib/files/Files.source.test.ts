@@ -355,8 +355,15 @@ test('the door is a small pill at the head of the path line, not a row of its ow
   // Every other view on one pane (#358: reachable from preview/edit/info/
   // downloads/git): after its Back. Two panes: the list column holds it.
   const after = source.slice(source.indexOf('{#snippet previewPanel()}'));
-  assert.equal(after.match(/\{#if !splitEligible\}\{@render serverDoor\(\)\}\{\/if\}/gu)?.length, 4, 'preview, edit, downloads, info');
-  assert.equal(source.match(/<GitPanel bind:this=\{gitPanelRef\} \{cwd\} \{fontSize\} lead=\{splitEligible \? null : serverDoor\}/gu)?.length, 2, 'git, on both layouts chains');
+  // Whether a view's header carries it is ONE derived condition: the list
+  // column is ON SCREEN (two panes AND >= 900px — forced Desktop below 900
+  // takes the split DOM yet hides the list; #366 review P1), not which DOM
+  // branch renders.
+  assert.match(source, /const listShown = \$derived\(splitEligible && wideEnough\);/u, 'the list is visible: split AND the 900 the stylesheet needs');
+  assert.match(source, /@media \(max-width: 899px\) \{[^}]*\.preview-open \.files-left \{ display: none; \}/u, 'the stylesheet rule that condition mirrors (SPLIT_MIN_WIDTH 900)');
+  assert.equal(after.match(/\{#if !listShown\}\{@render serverDoor\(\)\}\{\/if\}/gu)?.length, 4, 'preview, edit, downloads, info');
+  assert.equal(source.match(/<GitPanel bind:this=\{gitPanelRef\} \{cwd\} \{fontSize\} lead=\{listShown \? null : serverDoor\}/gu)?.length, 2, 'git, on both layouts chains');
+  assert.doesNotMatch(source, /!splitEligible\}\{@render serverDoor|lead=\{splitEligible/u, 'no door decision reads the DOM branch');
   const git = readFileSync(new URL('./GitPanel.svelte', import.meta.url), 'utf8');
   assert.match(git, /<button class="back-btn"[^\n]*\n\s*\{@render lead\?\.\(\)\}/u, 'git: after its Back');
   assert.match(source, /\.files\.reading \.server-door \{ display: none; \}/u, 'reading mode hides it');

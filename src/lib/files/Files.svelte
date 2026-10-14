@@ -202,6 +202,12 @@
   // its column is 320–900px of a WIDE window, so the window-width heuristic
   // lies there (owner, 2026-08-28: "文件的侧边栏可以是类似手机的单页模式").
   let splitEligible = $derived(!singlePane && !layout.isTouchDevice && (layout.forceDesktop || wideEnough));
+  /** The list column is ON SCREEN beside a view (#366 review P1): two panes
+   * AND the 900px the stylesheet's `.preview-open .files-left` rule needs —
+   * forced Desktop below 900 takes the split DOM yet hides the list. The ONE
+   * condition for whether a view's own header carries the server door: the
+   * list's path row carries it whenever the list is visible. */
+  const listShown = $derived(splitEligible && wideEnough);
 
   $effect(() => {
     const onResize = () => { wideEnough = window.innerWidth >= SPLIT_MIN_WIDTH; };
@@ -1922,7 +1928,7 @@
     <!-- File preview -->
     <div class="preview-header compact-tools">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToList} />
-      {#if !splitEligible}{@render serverDoor()}{/if}
+      {#if !listShown}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile.name}</span>
       <div class="preview-actions">
         {#if isLinedPreview}
@@ -1956,7 +1962,7 @@
     <!-- File editor -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToPreview} />
-      {#if !splitEligible}{@render serverDoor()}{/if}
+      {#if !listShown}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile.name}{isEdited ? ' *' : ''}</span>
       <div class="preview-actions">
         <CommandButton variant="icon" icon={wrapLines ? 'wrap-text' : 'no-wrap'} label={t('editorWrap')} pressed={wrapLines}
@@ -2003,7 +2009,7 @@
          download is the same OperationFeedback the slot shows. -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={() => { navAnim('back'); view = 'list'; }} />
-      {#if !splitEligible}{@render serverDoor()}{/if}
+      {#if !listShown}{@render serverDoor()}{/if}
       <span class="preview-name">{t('downloads')}</span>
       <div class="preview-actions">
         {#if isTauri}<CommandButton variant="icon" icon="refresh" label={t('filesRefresh')} onclick={() => readDownloads().catch((e) => { error = e.message; })} />{/if}
@@ -2073,7 +2079,7 @@
     <!-- File info -->
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backFromInfo} />
-      {#if !splitEligible}{@render serverDoor()}{/if}
+      {#if !listShown}{@render serverDoor()}{/if}
       <span class="preview-name">{currentFile?.name}</span>
       <div class="preview-actions">
         {#if isPreviewable(currentFile?.stat, currentFile?.name)}
@@ -2124,7 +2130,7 @@
         {#if view === 'preview'}{@render previewPanel()}
         {:else if view === 'edit'}{@render editPanel()}
         {:else if view === 'info'}{@render infoPanel()}
-        {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={splitEligible ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
+        {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={listShown ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
         {:else if view === 'local'}{@render localPanel()}
         {/if}
       </div>
@@ -2137,7 +2143,7 @@
     {:else if view === 'edit'}{@render editPanel()}
     {:else if view === 'local'}{@render localPanel()}
     {:else if view === 'info'}{@render infoPanel()}
-    {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={splitEligible ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
+    {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={listShown ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
     {/if}
   {/if}
   {#if copyFeedback || downloadFeedback || uploadFeedback || earlierFeedback}
