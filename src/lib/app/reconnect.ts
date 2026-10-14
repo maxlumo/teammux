@@ -16,6 +16,7 @@
 // the loop runs (a failover just proved another one).
 
 import type { ServerTarget } from './server-target.ts';
+import { dialTimeoutMs, isReachabilityFailure } from './dial-order.ts';
 
 export interface ReconnectState {
   reconnecting: boolean;
@@ -193,7 +194,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     // should fail fast; WAN (public internet, slow cellular, far regions)
     // legitimately needs more time for TCP + TLS handshake.
     const cls = classifyAddress(useAddr);
-    const attemptTimeout = cls === 0 ? 2000 : cls === 1 ? 3000 : 5000;
+    const attemptTimeout = dialTimeoutMs(cls);
 
     // The attempt keeps the socket only until somebody takes it back. When
     // that happens the LOOP is over, not just this attempt: a retry would
@@ -209,7 +210,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       // Reachability failures (timeout / refused, NOT auth errors) feed the
       // same cooldown memory the prober uses, so the next attempts skip
       // this address instead of re-burning its timeout.
-      if (/timeout|connection failed|closed during auth/i.test(e.message || '')) {
+      if (isReachabilityFailure(e)) {
         noteAddressUnreachable(useAddr);
       }
       if (n + 1 < maxAttempts) {

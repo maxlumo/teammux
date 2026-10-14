@@ -34,7 +34,8 @@
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_DRAG_THRESHOLD, RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
-  import { targetOf } from './lib/app/server-target.ts';
+  import { addressesOf, targetOf } from './lib/app/server-target.ts';
+  import { dialOrder, dialTimeoutMs } from './lib/app/dial-order.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
@@ -650,7 +651,7 @@
     const api = createWsApi(connection);
     let closed = false;
     const candidate = {
-      connect: (url, tok) => connection.connect(url, tok),
+      connect: (url, tok, timeoutMs) => connection.connect(url, tok, timeoutMs),
       setSocket: (socket) => api.setSocket(socket),
       machineId: () => connection.getMachineId() || '',
       current: () => !closed && owner.current(),
@@ -2601,7 +2602,12 @@
     // connection, recorded by machine, closed, and then the target's own
     // runtime dials — the same road the connect form takes.
     disconnect: () => { switchCandidate?.close(); switchCandidate = null; },
-    connect: (address, token) => { switchCandidate = openCandidate(); return switchCandidate.connect(address, token); },
+    connect: (address, token, timeoutMs) => { switchCandidate = openCandidate(); return switchCandidate.connect(address, token, timeoutMs); },
+    // The server's other addresses, for when one cannot be reached (board
+    // #353): the policy is lib/app/dial-order.ts's, the memory ws.ts's.
+    addresses: (target) => dialOrder(addressesOf(localStorage, target.id, target.address), isAddressViable),
+    dialTimeout: (address) => dialTimeoutMs(classifyAddress(address)),
+    unreachable: noteAddressUnreachable,
     setSocket: (socket) => switchCandidate?.setSocket(socket) ?? Promise.resolve(),
     machineId: () => switchCandidate?.machineId() || '',
     // Another address of the CURRENT server: its OWN runtime dials it and
@@ -2661,6 +2667,7 @@
     if (held) void ends.end(held);
   });
   function switchRetry() { void serverSwitch.retry(); }
+  function switchAddress(address) { void serverSwitch.retryAt(address); }
   function switchBack() { void serverSwitch.back(loadServers(localStorage)); }
 
   /** The `+` row: the Settings connect form IS the add flow (it upserts by
@@ -3890,12 +3897,24 @@
         {#if switching.phase === 'connecting'}
           <span class="reconnect-spinner" aria-hidden="true"></span>
           <strong class="switch-name">{t('serverSwitching').replace('{name}', switching.target.name || hostLabel(switching.target.address))}</strong>
-          <span class="switch-addr">{switching.target.address}</span>
+          <span class="switch-addr">{switching.address}</span>
         {:else}
           <Icon name="info" size={22} />
           <strong class="switch-name">{t('serverSwitchFailed').replace('{name}', switching.target.name || hostLabel(switching.target.address))}</strong>
-          <span class="switch-addr">{switching.target.address}</span>
+          <span class="switch-addr">{switching.address}</span>
           <p class="config-error" role="alert">{switching.error}</p>
+          {#if switching.addresses.length > 1}
+            <!-- The server's own addresses (board #353): a switch walks them
+                 on its own, and when none answered each is one tap to dial
+                 exactly that one. -->
+            <div class="switch-addrs" role="group" aria-label={t('serverSwitchAddresses')}>
+              <span class="switch-addrs-h">{t('serverSwitchAddresses')}</span>
+              {#each switching.addresses as address (address)}
+                <CommandButton label={`${ADDRESS_LABELS[classifyAddress(address)]} · ${address}`} icon="link"
+                  onclick={() => switchAddress(address)} />
+              {/each}
+            </div>
+          {/if}
           <div class="switch-actions">
             <CommandButton label={t('configRetry')} icon="refresh" variant="primary" onclick={switchRetry} />
             {#if switching.from}<CommandButton label={t('serverSwitchBack').replace('{name}', switching.from.name)} icon="arrow-left" onclick={switchBack} />{/if}
@@ -4613,6 +4632,8 @@
   .switch-panel :global(svg) { opacity: 0.65; }
   .switch-name { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
   .switch-addr { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--text2); overflow-wrap: anywhere; }
+  .switch-addrs { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-top: 6px; max-width: 100%; }
+  .switch-addrs-h { font-size: var(--fs-meta); color: var(--text3); }
   .switch-panel .config-error { margin: 0; max-width: 420px; }
   .switch-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 6px; }
 

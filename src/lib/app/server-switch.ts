@@ -23,19 +23,32 @@
 // in its own slots, was never touched.
 
 import { activateSwitched, restoreCurrent, type ServerEntry } from './servers.ts';
+import { isReachabilityFailure } from './dial-order.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 /** A saved entry, or a candidate from Add server (`id: ''` until auth). */
-export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & { id: string; name: string };
+export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & {
+  id: string;
+  name: string;
+  /** Dial exactly `address` and no other (a person's pick from the failed
+   * panel, board #353): no fall-over to the server's other addresses. */
+  only?: boolean;
+};
 
 export interface SwitchState {
   intent: number;
   /** The server the user was connected to when this switch began (frozen). */
   from: { id: string; name: string } | null;
+  /** What was asked for; Retry runs it again from its first address. */
   target: SwitchTarget;
+  /** The address in flight, or the last one tried when it failed (board #353). */
+  address: string;
   phase: 'connecting' | 'failed';
   error: string;
+  /** All of the server's addresses, in the order a switch tries them: the
+   * failed panel offers each. One entry when the server has no other. */
+  addresses: string[];
 }
 
 export interface SwitchDeps {
@@ -65,8 +78,17 @@ export interface SwitchDeps {
   onstate(state: SwitchState | null): void;
   /** The candidate's teardown: a failed or abandoned switch closes it. */
   disconnect(): void;
-  /** Dial the switch's TARGET as a candidate of its own (board #335 ②b-4). */
-  connect(address: string, token: string): Promise<unknown>;
+  /** Dial the switch's TARGET as a candidate of its own (board #335 ②b-4).
+   * `timeoutMs` bounds THIS dial (board #353: one address must not use up the
+   * whole switch). */
+  connect(address: string, token: string, timeoutMs?: number): Promise<unknown>;
+  /** The addresses a switch to `target` may dial, in the order to try them
+   * (board #353): the target's own first. Omitted, only its own address. */
+  addresses?(target: SwitchTarget): string[];
+  /** How long one dial of `address` may take. Omitted, the connection's own default. */
+  dialTimeout?(address: string): number | undefined;
+  /** `address` could not be reached: the host remembers it for the cooldown. */
+  unreachable?(address: string): void;
   setSocket(socket: string): Promise<unknown>;
   machineId(): string;
   /** Another address of the CURRENT server, dialled by its OWN runtime and
@@ -130,16 +152,45 @@ export function createServerSwitch(d: SwitchDeps) {
     d.stopReconnect();
     const from = fromConnected ? { id: d.currentId(), name: d.currentName() } : state?.from ?? null;
     const left = d.currentId();
-    set({ intent, from, target, phase: 'connecting', error: '' });
+    // The server's addresses, the target's own first (board #353). A person's
+    // pick from the failed panel is exactly that one.
+    const all = d.addresses?.(target) ?? [target.address];
+    const addresses = all.length ? all : [target.address];
+    const order = target.only ? [target.address] : addresses;
+    set({ intent, from, target, address: order[0]!, phase: 'connecting', error: '', addresses });
     let moved = false;
+    let used = target.address;
+    /** The address in flight; the failed panel names the last one tried. */
+    let tried = order[0]!;
     try {
-      await d.connect(target.address, target.token);
+      // Walk the addresses: one that cannot be reached (a timeout, a refusal,
+      // a socket closed during auth — the address that answered the probe and
+      // then stayed silent is this) hands over to the next, inside the SAME
+      // switch. An AUTH refusal stops the walk: the server answered.
+      for (let i = 0; ; i++) {
+        const address = order[i]!;
+        tried = address;
+        if (i > 0) set({ intent, from, target, address, phase: 'connecting', error: '', addresses });
+        try {
+          await d.connect(address, target.token, d.dialTimeout?.(address));
+          used = address;
+          break;
+        } catch (e) {
+          if (intent !== seq) return;
+          if (i + 1 >= order.length || !isReachabilityFailure(e)) {
+            if (isReachabilityFailure(e)) d.unreachable?.(address);
+            throw e;
+          }
+          d.unreachable?.(address);
+          d.disconnect(); // this candidate is dead: the next dial opens its own
+        }
+      }
       if (intent !== seq) return;
       if (target.socket) await d.setSocket(target.socket).catch(() => {});
       if (intent !== seq) return;
       const mid = d.machineId();
       const entry = activateSwitched(d.storage, {
-        address: target.address, token: target.token,
+        address: used, token: target.token,
         ...(target.socket ? { socket: target.socket } : {}),
         ...(mid ? { machineId: mid } : {}),
       });
@@ -163,7 +214,7 @@ export function createServerSwitch(d: SwitchDeps) {
       // OWNS the outcome now — its Retry, the target it kept — and a failed
       // panel here would cover that Retry with one the freeze refuses.
       if (d.frozen()) { set(null); return; }
-      set({ intent, from, target, phase: 'failed', error: String((e as Error)?.message || e) });
+      set({ intent, from, target, address: tried, phase: 'failed', error: String((e as Error)?.message || e), addresses });
     }
   }
 
@@ -233,6 +284,9 @@ export function createServerSwitch(d: SwitchDeps) {
     /** Another path (the connect page) took the socket: older asyncs lose it. */
     supersede() { seq++; },
     retry() { if (state?.phase === 'failed') return switchTo(state.target); },
+    /** Dial exactly `address` of the failed target's server (board #353): a
+     * person's pick from the panel, no fall-over to the others. */
+    retryAt(address: string) { if (state?.phase === 'failed') return switchTo({ ...state.target, address, only: true }); },
     /** A failed switch's panel is put away without a new intent: the host
      * bound the focus by another path (an owed handover, #335 ③b) while the
      * server the panel would go Back to is gone. A switch in flight is not

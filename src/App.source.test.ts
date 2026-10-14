@@ -424,8 +424,8 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
     'await guard(() => d.confirmLeave())',
     'const intent = ++seq',
     'd.stopReconnect()',
-    "set({ intent, from, target, phase: 'connecting'",
-    'await d.connect(target.address, target.token)',
+    "set({ intent, from, target, address: order[0]!, phase: 'connecting'",
+    'await d.connect(address, target.token, d.dialTimeout?.(address))',
     'activateSwitched(d.storage',
     'd.comeUp(target, entry)',
     'restoreCurrent(d.storage, left)',
@@ -1531,4 +1531,24 @@ test('the bell s projection separates index-exists / runtime-eligible / reachabl
   // `centreShown`, never `hubEligible`.
   const tabbar = source.match(/<nav class="tabbar"[^>]*>[\s\S]*?<\/nav>/u)?.[0] ?? '';
   assert.match(tabbar, /\{:else if centreShown\}\s*(?:<!--[\s\S]*?-->\s*)*<button class="tab-bell"[^>]*onclick=\{\(e\) => centre\.toggle\(e\.currentTarget\)\}/u, 'the phone s door, on the window projection');
+});
+
+test('a switch walks the server\u2019s addresses, and the failed panel offers each one (board #353)', async () => {
+  // The switch used to dial `target.address` and nothing else, so an address
+  // that answered the probe and then stayed silent was the end of the road
+  // until the person edited the connection by hand.
+  assert.match(source, /addresses: \(target\) => dialOrder\(addressesOf\(localStorage, target\.id, target\.address\), isAddressViable\),/u, 'the order is the one shared policy over the server\u2019s saved set');
+  assert.match(source, /dialTimeout: \(address\) => dialTimeoutMs\(classifyAddress\(address\)\),/u, 'one dial\u2019s patience is the reconnect machine\u2019s');
+  assert.match(source, /unreachable: noteAddressUnreachable,/u, 'a dead address goes into the same cooldown memory');
+  assert.match(source, /connect: \(address, token, timeoutMs\) => \{ switchCandidate = openCandidate\(\); return switchCandidate\.connect\(address, token, timeoutMs\); \},/u);
+  // The panel names the address in flight, lists the set and dials exactly one on a tap.
+  assert.match(source, /<span class="switch-addr">\{switching\.address\}<\/span>/u);
+  assert.match(source, /\{#if switching\.addresses\.length > 1\}[\s\S]*?\{#each switching\.addresses as address \(address\)\}[\s\S]*?<CommandButton label=\{`\$\{ADDRESS_LABELS\[classifyAddress\(address\)\]\} · \$\{address\}`\} icon="link"\s*onclick=\{\(\) => switchAddress\(address\)\} \/>/u);
+  assert.match(source, /function switchAddress\(address\) \{ void serverSwitch\.retryAt\(address\); \}/u);
+  // One policy for both loops: the reconnect machine asks the same two functions.
+  const reconnect = await readFile(new URL('./lib/app/reconnect.ts', import.meta.url), 'utf8');
+  assert.match(reconnect, /dialTimeoutMs\(cls\)/u);
+  assert.match(reconnect, /isReachabilityFailure\(e\)/u);
+  assert.doesNotMatch(reconnect, /cls === 0 \? 2000/u, 'no second copy of the timeouts');
+  assert.doesNotMatch(reconnect, /connection failed\|closed during auth/u, 'no second copy of what a dead address looks like');
 });

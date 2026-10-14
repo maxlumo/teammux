@@ -41,3 +41,13 @@ export function targetOf(storage: Reader, id: string): ServerTarget | null {
   const machineId = entry.machineId ?? '';
   return { address: entry.address, token: entry.token, machineId, alternates: alternatesOf(machineId, entry.address) };
 }
+
+/** Every address a switch to server `id` may dial, `first` leading (the one
+ * it was asked to dial), then the entry's own and the machine's other
+ * addresses in failover order (board #353). A candidate with no saved entry
+ * (`id: ''`, the Add-server form before auth) has only the address it named. */
+export function addressesOf(storage: Reader, id: string, first: string): string[] {
+  const entry = id ? loadServers(storage).find((s) => s.id === id) : undefined;
+  const machine = entry?.machineId ? machinesMap(storage)[entry.machineId] : undefined;
+  return [...new Set([first, ...(entry ? [entry.address] : []), ...(Array.isArray(machine) ? machine : [])].filter(Boolean))];
+}

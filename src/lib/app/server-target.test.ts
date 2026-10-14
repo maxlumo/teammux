@@ -1,7 +1,7 @@
 // Where to reach one saved server (board #335 ②b-2-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { targetOf } from './server-target.ts';
+import { addressesOf, targetOf } from './server-target.ts';
 
 const store = (init: Record<string, string>) => ({ getItem: (k: string) => init[k] ?? null });
 const registry = JSON.stringify([
@@ -39,4 +39,14 @@ test('any other server is where its own entry says, with its own failover set', 
 test('with no saved server there is nowhere to go', () => {
   assert.equal(targetOf(store({ tmux_address: 'ws://x:9899', tmux_token: 't' }), ''), null,
     'the mirror alone is not a server: the boot migrates it into an entry first');
+});
+
+test('a switch may dial the asked address, then the entry\u2019s own, then the machine\u2019s others, each once (board #353)', () => {
+  const s = store({ tmux_servers: registry, tmux_server_current: 'b', tmux_machines: machines });
+  assert.deepEqual(addressesOf(s, 'a', 'ws://a-lan:9899'), ['ws://a-lan:9899', 'ws://a-ts:9899']);
+  assert.deepEqual(addressesOf(s, 'a', 'ws://a-ts:9899'), ['ws://a-ts:9899', 'ws://a-lan:9899'], 'a pick leads; the entry\u2019s own follows');
+  assert.deepEqual(addressesOf(s, 'b', 'ws://b:9899'), ['ws://b:9899', 'ws://b-wan:9899']);
+  assert.deepEqual(addressesOf(s, 'n', 'ws://n:9899'), ['ws://n:9899'], 'no machine yet: only itself');
+  assert.deepEqual(addressesOf(s, '', 'ws://typed:9899'), ['ws://typed:9899'], 'a candidate with no entry has only what it named');
+  assert.deepEqual(addressesOf(s, 'gone', 'ws://x:1'), ['ws://x:1']);
 });

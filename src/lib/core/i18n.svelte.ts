@@ -171,6 +171,8 @@ const msgs: Record<string, Record<string, string>> = {
     pendingInputsDiscardNote: 'Everything the earlier version saved for that server — its drafts, read marks, alerts, open views and file history — will not be restored to any server. Nothing else changes.',
     serverSwitchBack: 'Back to {name}',
     serverSwitchEdit: 'Edit connection',
+    serverSwitchAddresses: 'This server\'s addresses',
+    serverSwitchTry: 'Connect through',
     serverSwitchOther: 'Other server',
     serversSaved: 'Saved servers',
     // Board #335 ③: how many saved servers this device connects to at once.
@@ -916,6 +918,8 @@ const msgs: Record<string, Record<string, string>> = {
     pendingInputsDiscardNote: '旧版本为那台服务器保存的全部内容——草稿、已读标记、通知、打开的界面和文件记录——将不再恢复到任何服务器。其它内容不变。',
     serverSwitchBack: '回到 {name}',
     serverSwitchEdit: '编辑连接',
+    serverSwitchAddresses: '这台服务端的地址',
+    serverSwitchTry: '通过此地址连接',
     serverSwitchOther: '其他服务端',
     serversSaved: '已保存的服务端',
     connectionMode: '连接',

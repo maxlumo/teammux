@@ -9096,3 +9096,55 @@ test('#368 (About): the build is a fact of the CURRENT socket — a drop shows n
   for (let i = 0; i < 40 && aboutServer(h).text !== 'unknown'; i++) { await h.app.advance(1000); await h.settle(); }
   assert.deepEqual(aboutServer(h), { text: 'unknown', mismatch: false, note: false });
 });
+
+// Board #353: a switch to a server whose first address answers the probe and
+// then never authenticates used to dial that one address and stop at the
+// failed panel; the person had to disconnect and re-pick by hand.
+const beta2 = (nav = 'work:1.0') => ({
+  ...twoServers({ live: legacyNav(nav), parked: legacyNav('work:2.0') }),
+  tmux_servers: JSON.stringify([
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b-lan:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ]),
+  tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://b-lan:9899', 'ws://b:9899'] }),
+  tmux_layout_mode: 'desktop',
+});
+const storedAddress = (h: { app: { window: { localStorage: Storage } } }, id: string) =>
+  (JSON.parse(h.app.window.localStorage.getItem('tmux_servers') ?? '[]') as { id: string; address: string }[]).find((s) => s.id === id)?.address;
+
+test('a switch whose first address times out falls over to the server\u2019s next one and records it (#353)', async (context) => {
+  const dead = new Set(['ws://b-lan:9899']);
+  const h = await bootApp(context, beta2(), undefined, {
+    gate: (url) => (dead.has(url) ? Promise.reject(new Error('connection timeout')) : null),
+    setup(window: any) { window.Element.prototype.getAnimations = () => []; },
+  });
+  await h.switchTo('beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'the switch arrived on beta');
+  assert.equal(storedAddress(h, 'b'), 'ws://b:9899', 'through the address that answered, which the entry now says');
+  assert.equal(h.app.document.querySelector('.switch-panel'), null, 'no failed panel');
+  assert.ok(h.calls.includes('connect:ws://b:9899'), `beta\u2019s own runtime dialled the address that proved itself: ${h.calls.filter((c) => c.startsWith('connect:')).join(',')}`);
+  assert.ok(!h.calls.includes('connect:ws://b-lan:9899'), 'and never the dead one');
+});
+
+test('when no address answers the failed panel lists them all and a tap dials exactly that one (#353)', async (context) => {
+  const dead = new Set(['ws://b-lan:9899', 'ws://b:9899']);
+  const h = await bootApp(context, beta2(), undefined, {
+    gate: (url) => (dead.has(url) ? Promise.reject(new Error('connection timeout')) : null),
+    setup(window: any) { window.Element.prototype.getAnimations = () => []; },
+  });
+  await h.switchTo('beta');
+  for (let i = 0; i < 4; i++) await h.settle();
+  const panel = h.app.document.querySelector('.switch-panel')!;
+  assert.ok(panel, 'the failed panel');
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a', 'alpha is still the current server');
+  assert.equal(panel.querySelector('.switch-addr')?.textContent, 'ws://b:9899', 'it names the last address tried');
+  const picks = [...panel.querySelectorAll<HTMLButtonElement>('.switch-addrs button')];
+  assert.deepEqual(picks.map((b) => b.textContent!.trim()), ['LAN · ws://b-lan:9899', 'LAN · ws://b:9899'], 'both of beta\u2019s addresses, each with its kind');
+  // The LAN one is still dead; the other has come back. Picking it dials exactly it.
+  dead.delete('ws://b:9899');
+  picks[1]!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'the pick arrived');
+  assert.equal(storedAddress(h, 'b'), 'ws://b:9899');
+});

@@ -7,6 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServerSwitch, type SwitchState, type SwitchTarget } from './server-switch.ts';
+import { addressesOf } from './server-target.ts';
+import { dialOrder, dialTimeoutMs } from './dial-order.ts';
 import { currentServerId, loadServers, migrateServers, RESIDENT_KEYS, recordServer, residentKey } from './servers.ts';
 import { migrateServerState } from './server-state-migration.ts';
 import { createServerStore } from './server-store.ts';
@@ -30,16 +32,21 @@ function world() {
     'ws://a:1': { machine: 'm-a', sessions: ['app'] },
     'ws://a-ts:9': { machine: 'm-a', sessions: ['app'] },
     'ws://b:2': { machine: 'm-b', sessions: ['app'] },
+    'ws://b-wan:3': { machine: 'm-b', sessions: ['app'] },
   };
   let at: string | null = null;
   const fails = new Map<string, number>();
+  const refused = new Set<string>();
   const pending = new Set<{ reject: (e: Error) => void }>();
   const log: string[] = [];
   return {
     log,
     get at() { return at; },
     fail(addr: string, n: number) { fails.set(addr, n); },
+    /** The server answers on `addr` and refuses the token. */
+    refuse(addr: string) { refused.add(addr); },
     async connect(addr: string) {
+      if (refused.has(addr)) throw new Error('auth failed');
       const n = fails.get(addr) ?? 0;
       if (n > 0) { fails.set(addr, n - 1); throw new Error('connection timeout'); }
       if (!servers[addr]) throw new Error('connection failed');
@@ -94,6 +101,8 @@ function app(storage = mem({
   const reconnects: string[] = [];
   const published: string[] = [];
   const idles: string[] = [];
+  const dials: string[] = [];
+  const unreachable: string[] = [];
   const handovers = createActivations();
   let frozen = false;
   /** What the TARGET's own runtime bring-up answers (App's `activate`):
@@ -117,7 +126,11 @@ function app(storage = mem({
     // The candidate: in this world one socket stands for "what the switch
     // dialled", the server's own runtimes are App's (App.shell covers them).
     disconnect: () => { resets.push('candidate-closed'); },
-    connect: (addr) => w.connect(addr),
+    connect: (addr, _token, timeoutMs) => { dials.push(`${addr}@${timeoutMs}`); return w.connect(addr); },
+    // The server's other addresses (board #353), as App wires them.
+    addresses: (target) => dialOrder(addressesOf(storage, target.id, target.address), () => true),
+    dialTimeout: () => dialTimeoutMs(2), // every fixture address is an internet one (ws.ts needs a window)
+    unreachable: (addr) => { unreachable.push(addr); },
     setSocket: async () => {},
     machineId: () => w.machineId(),
     redial: (addr) => w.connect(addr).then(() => 'up' as const),
@@ -132,7 +145,7 @@ function app(storage = mem({
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published, idles,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published, idles, dials, unreachable,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -433,4 +446,78 @@ test('a failed switch s panel is dismissed by the host without a new intent; a s
   up();
   await sw;
   assert.equal(currentServerId(t.storage), t.b.id);
+});
+
+// Board #353: a switch walks the server's addresses. The address that answers
+// the probe and then never authenticates ("LAN is up, the socket stalls") used
+// to be the only one a switch ever dialled; now a reachability failure hands
+// over to the next address inside the same switch.
+function twoAddresses() {
+  const t = app();
+  t.storage.setItem('tmux_machines', JSON.stringify({ 'm-a': ['ws://a:1'], 'm-b': ['ws://b:2', 'ws://b-wan:3'] }));
+  return t;
+}
+
+test('the first address times out: the switch falls over to the next and records the one that answered (board #353)', async () => {
+  const t = twoAddresses();
+  t.w.fail('ws://b:2', 1);
+  await t.sw.switchTo(t.b);
+  assert.deepEqual(t.dials, ['ws://b:2@5000', 'ws://b-wan:3@5000'], 'the target first, then the machine\u2019s other address, each with its class timeout');
+  assert.deepEqual(t.unreachable, ['ws://b:2'], 'the dead one is remembered, the live one is not');
+  assert.equal(t.w.at, 'ws://b-wan:3');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b-wan:3', 'the entry now says where the server proved to be');
+  assert.equal(t.states.at(-1), null, 'the switch concluded');
+  assert.ok(t.connected && t.mounted);
+  assert.equal(t.resets.filter((r) => r === 'candidate-closed').length >= 1, true, 'the dead candidate was closed before the next dial');
+});
+
+test('an auth refusal is the server answering: the walk stops and no address is blamed (board #353)', async () => {
+  const t = twoAddresses();
+  t.w.refuse('ws://b:2');
+  await t.sw.switchTo(t.b);
+  assert.deepEqual(t.dials, ['ws://b:2@5000'], 'another address of the same server would refuse the same token');
+  assert.deepEqual(t.unreachable, []);
+  const st = t.states.at(-1)!;
+  assert.equal(st.phase, 'failed');
+  assert.equal(st.error, 'auth failed');
+});
+
+test('every address unreachable: the panel names the last one tried and offers all of them (board #353)', async () => {
+  const t = twoAddresses();
+  t.w.fail('ws://b:2', 9); t.w.fail('ws://b-wan:3', 9);
+  await t.sw.switchTo(t.b);
+  const st = t.states.at(-1)!;
+  assert.equal(st.phase, 'failed');
+  assert.equal(st.address, 'ws://b-wan:3', 'the last one tried');
+  assert.deepEqual(st.addresses, ['ws://b:2', 'ws://b-wan:3'], 'the whole set, in the order tried');
+  assert.equal(st.target.address, 'ws://b:2', 'Retry starts again from what was asked for');
+  assert.deepEqual(t.unreachable, ['ws://b:2', 'ws://b-wan:3']);
+  assert.equal(t.states.some((s) => s?.phase === 'connecting' && s.address === 'ws://b-wan:3'), true, 'the panel followed the dial to the second address');
+});
+
+test('a pick from the failed panel dials exactly that address, with no fall-over, and becomes the entry\u2019s address on success (board #353)', async () => {
+  const t = twoAddresses();
+  t.w.fail('ws://b:2', 9); t.w.fail('ws://b-wan:3', 2); // the walk spends one, the first pick the other
+  await t.sw.switchTo(t.b);
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  t.dials.length = 0;
+  await t.sw.retryAt('ws://b-wan:3'); // still failing once: no fall-over to b:2
+  assert.deepEqual(t.dials, ['ws://b-wan:3@5000'], 'exactly the one picked');
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  assert.deepEqual(t.states.at(-1)!.addresses, ['ws://b-wan:3', 'ws://b:2'], 'the panel keeps offering the whole set');
+  t.dials.length = 0;
+  await t.sw.retryAt('ws://b-wan:3'); // it answers now
+  assert.deepEqual(t.dials, ['ws://b-wan:3@5000']);
+  assert.equal(t.w.at, 'ws://b-wan:3');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b-wan:3');
+  assert.equal(t.states.at(-1), null);
+});
+
+test('a server with one address is dialled once, as before (board #353)', async () => {
+  const t = app();
+  t.w.fail('ws://b:2', 1);
+  await t.sw.switchTo(t.b);
+  assert.deepEqual(t.dials, ['ws://b:2@5000'], 'nothing else to try');
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  assert.deepEqual(t.states.at(-1)!.addresses, ['ws://b:2']);
 });
