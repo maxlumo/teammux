@@ -822,7 +822,10 @@
              recipients and name stay, its arguments are cut, and the same
              unfold control shows them whole. -->
         {@const cmdFold = isAsk && b.command ? foldCmd(b.command) : null}
-        {@const foldable = isAsk && (b.command ? cmdFold !== null : foldBody(parts.text) !== parts.text)}
+        <!-- Images are behind the fold too (board #372): a message with a
+             picture folds like a long one and the picture opens with the same
+             control, so scrolling to a message never changes its box. -->
+        {@const foldable = isAsk && (b.command ? cmdFold !== null : foldBody(parts.text) !== parts.text || parts.images.length > 0)}
         {@const folded = foldable && !expanded[key]}
         <!-- An EXPANDED message is never pinned: sticky ignores the feed's
              scrolling, so a pinned screen-tall message had an unreachable
@@ -908,12 +911,20 @@
                 {/if}
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->
+              {#if folded && parts.images.length}
+                <!-- The picture is behind the fold; this line says it is
+                     there (the Board card's `[Image]`). It is the same line
+                     held or in flow, so the box never changes with the pin
+                     (board #372, owner 2026-10-14: scrolled to, a folded
+                     message stays folded). -->
+                <div class="m-imgs">[{t('hubImage')}]{parts.images.length > 1 ? ` ×${parts.images.length}` : ''}</div>
+              {/if}
               {#if foldable}{@render unfold(key, folded)}{/if}
-              {#if parts.images.length}
+              {#if parts.images.length && !folded}
                 <!-- Inside the bubble (owner, 2026-08-26): part of the
-                     message, clipped by the bubble's own radius. The
-                     held anchor hides these — a pinned landmark is for
-                     re-reading your words, not for a tall image. -->
+                     message, clipped by the bubble's own radius. A human
+                     message shows them once unfolded — and an unfolded one
+                     is never pinned, so no held bubble hides or grows a strip. -->
                 <div class="shots">
                   {#each parts.images as src, k (`${k}-${src}`)}
                     <ChatImage {src} alt={m.from} onview={onimage} />
@@ -1243,7 +1254,8 @@
   /* Referenced images, under the text they came with. */
   .shots { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; border-radius: var(--ui-radius-control); overflow: hidden; clear: both; }
   .m-body > .shots:first-child { margin-top: 2px; }
-  .msg.held .shots { display: none; }
+  /* The folded picture's marker: one quiet line, the same held or in flow. */
+  .m-imgs { margin-top: 4px; color: var(--text2); font-size: var(--fs-sub); }
   /* Lifecycle lines are the app narrating real actions (an agent stopped, a
      /command typed into a pane) — reading ink and body-adjacent size, not fine
      print the reader has to squint at ("不要只用灰色小字，让我看不太清", owner

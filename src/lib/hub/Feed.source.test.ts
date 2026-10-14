@@ -566,3 +566,17 @@ test('a sender run drops the header, never the bubble (#331)', () => {
   assert.match(source, /\{#if m\.from !== 'human' && !cont\}/u, 'only the header is dropped');
   assert.match(source, /\.msg\.cont \{ margin-top: -6px; \}/u, 'a tighter gap, not a second bubble species');
 });
+
+test('a held bubble differs from the one in flow by paint only: no rule under .held hides, shows or resizes anything (board #372)', () => {
+  // The flash: `.msg.held .shots { display: none }` made a pinned message
+  // 112px and the same message in flow 322px, so scrolling back to it jumped
+  // everything below by the strip's height. Held may add depth (a shadow) and
+  // nothing else; what a folded message holds is decided by its fold.
+  const rules = [...source.matchAll(/^\s*([^{}\n]*\.held[^{}\n]*)\{([^}]*)\}/gmu)].map((m) => [m[1]!.trim(), m[2]!.trim()]);
+  assert.deepEqual(rules, [['.msg.held .bubble', 'box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);']], 'one held rule, a shadow');
+  assert.doesNotMatch(source, /\.held[^{}]*\{[^}]*(display|height|max-height|overflow|visibility|opacity)\s*:/u);
+  // A message with pictures folds like a long one, and the strip renders only unfolded.
+  assert.match(source, /foldBody\(parts\.text\) !== parts\.text \|\| parts\.images\.length > 0/u, 'a picture makes a message foldable');
+  assert.match(source, /\{#if parts\.images\.length && !folded\}\s*<!--[\s\S]*?-->\s*<div class="shots">/u, 'the strip is only there unfolded');
+  assert.match(source, /\{#if folded && parts\.images\.length\}[\s\S]*?<div class="m-imgs">\[\{t\('hubImage'\)\}\]\{parts\.images\.length > 1 \? ` ×\$\{parts\.images\.length\}` : ''\}<\/div>/u, 'the folded marker names the picture and how many');
+});

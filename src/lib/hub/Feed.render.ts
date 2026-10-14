@@ -230,3 +230,34 @@ test('a run its reply ended rides in that reply, folded; a run still going stand
   assert.ok(lanes[0]!.querySelector('.s-live.live-dot'));
   assert.equal(tree.querySelectorAll('.steps').length, 2, 'two runs, one list markup each');
 });
+
+test('a human message with a picture folds behind Expand with an [Image] line; an agent\u2019s picture stays in the strip (#372)', { timeout: RENDER_TIMEOUT_MS }, async () => {
+  const Feed = (await h.load('/src/lib/hub/Feed.svelte')).default;
+  const { render } = h;
+  const { createRawSnippet } = await h.load('svelte');
+  const img = (n: number) => `![](/work/fixture/.tmm/uploads/p${n}-12345678.webp)`;
+  const messages = [
+    { id: 'one', ts: 1, from: 'human', body: `short words\n${img(1)}` },
+    { id: 'two', ts: 2, from: 'human', body: `${img(2)}\n${img(3)}` },
+    { id: 'plain', ts: 3, from: 'human', body: 'just words' },
+    { id: 'agent', ts: 4, from: 'dev', body: `look\n${img(4)}` },
+  ];
+  const tree = h.fragment(render(Feed, { props: {
+    selected: 'fixture', roomReady: true, agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }], managedNames: ['dev'],
+    blocks: feedBlocks(messages, [], 'chat', (n) => n), stepsRows: 5, following: false, newBelow: false,
+    emptyFeed: createRawSnippet(() => ({ render: () => '<div></div>' })),
+  } }).body as string);
+  const row = (id: string) => [...tree.querySelectorAll('.msg')][['one', 'two', 'plain', 'agent'].indexOf(id)]!;
+  for (const id of ['one', 'two']) {
+    assert.ok(row(id).querySelector('.m-unfold'), `${id}: the picture folds like a long text and opens with the same control`);
+    assert.equal(row(id).querySelector('.shots'), null, `${id}: no strip until it is expanded`);
+  }
+  assert.equal(row('one').querySelector('.m-imgs')?.textContent, '[Image]');
+  assert.equal(row('one').querySelector('.m-body')?.textContent?.includes('short words'), true, 'the words stay');
+  assert.equal(row('two').querySelector('.m-imgs')?.textContent, '[Image] ×2', 'an image-only message says how many');
+  assert.equal(row('plain').querySelector('.m-unfold'), null, 'words that fit have nothing to unfold');
+  assert.equal(row('plain').querySelector('.m-imgs'), null);
+  assert.ok(row('agent').querySelector('.shots'), 'an agent\u2019s picture is not folded: it is never pinned');
+  assert.equal(row('agent').querySelector('.m-unfold'), null);
+  assert.equal(row('agent').querySelector('.m-imgs'), null);
+});

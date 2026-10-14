@@ -147,3 +147,53 @@ test('a run of one sender shows its header once; every bubble keeps its own acti
     assert.equal(app.document.querySelectorAll('.m-acts').length, 1, 'a continued bubble opens its own action row');
   } finally { await app.close(); }
 });
+
+// Board #372 (owner 2026-10-14: a long or picture-bearing human message that
+// is scrolled to expanded in full and flashed; "scrolled to, keep it folded").
+// The cause was `.msg.held .shots { display: none }`: a held bubble was 112px,
+// the same message in flow 322px. Now the picture is behind the fold in EVERY
+// state, so what the bubble holds does not depend on the pin. jsdom has no
+// layout, so what is pinned is the CONTENT (identical held or not, no strip
+// for the pin to hide) and the explicit unfold being the only way it grows;
+// the pixels are the real browser's (the measurements on #372).
+// (Bound to one server's scope: the strip's ChatImage signs through the scope's API.)
+const compiledScoped = compileMount(new URL('./Feed.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
+test('a folded picture message has the same content held and in flow; only Expand brings the strip (#372)', async (context) => {
+  const blocks = feedBlocks([
+    { id: 'a', ts: 100, from: 'dev', body: 'earlier reply' },
+    { id: 'q', ts: 200, from: 'human', body: 'what is this?\n![](/work/fixture/.tmm/uploads/a-12345678.webp)' },
+    { id: 'b', ts: 300, from: 'dev', body: 'later reply' },
+  ], [], 'chat', (n) => n);
+  const app = await (await compiledScoped).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['dev'],
+      agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [{ fsDownloadHttp: async (path: string) => ({ url: `https://dl.test/?p=${encodeURIComponent(path)}` }) }],
+  });
+  try {
+    const q = (s: string) => app.document.querySelector<HTMLElement>(s);
+    const frames = async () => { for (let i = 0; i < 4; i++) { await app.advance(20); await app.flush(); } };
+    await frames();
+    const feed = q('.feed')!;
+    Object.defineProperty(feed, 'scrollHeight', { get: () => 3000, configurable: true });
+    Object.defineProperty(feed, 'clientHeight', { get: () => 500, configurable: true });
+    const ask = q('[data-ask]')!;
+    Object.defineProperty(ask, 'offsetTop', { get: () => 2000, configurable: true });
+    Object.defineProperty(ask, 'offsetHeight', { get: () => 60, configurable: true });
+    const scrollTo = async (top: number) => { feed.scrollTop = top; feed.dispatchEvent(new app.window.Event('scroll')); await frames(); };
+    const content = () => q('[data-ask] .bubble')!.innerHTML;
+    const inFlow = content();
+    assert.ok(!q('[data-ask].held'), 'in flow: not held');
+    assert.equal(q('[data-ask] .shots'), null, 'the picture is behind the fold');
+    assert.equal(q('[data-ask] .m-imgs')?.textContent, '[Image]', 'and the bubble says it is there');
+    assert.ok(q('[data-ask] .m-unfold'), 'with the control that opens it');
+    await scrollTo(1200); await scrollTo(800); await scrollTo(400);
+    assert.ok(q('.msg.held.ask-bottom'), 'now the question is held at the bottom edge');
+    assert.equal(content(), inFlow, 'held or in flow the bubble holds exactly the same content: nothing for the pin to hide or reveal');
+    // The one way it grows: the reader's Expand. It unpins the message and brings the strip.
+    q('.msg.held .m-unfold')!.click(); await frames();
+    assert.ok(q('[data-ask] .shots'), 'Expand shows the strip');
+    assert.equal(q('[data-ask] .m-imgs'), null, 'and the marker line goes');
+    assert.ok(!q('.msg.held'), 'an expanded message is never pinned');
+  } finally { await app.close(); }
+});
