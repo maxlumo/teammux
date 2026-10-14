@@ -100,9 +100,8 @@ fallback never looked in the isolated home at all.
 
 The order needs THREE answers, not one (review P1, 02:02 and 02:08): whether a root
 HOLDS the session — its own directory under some cwd bucket — and whether
-that session has a reply for the latest turn. `session_lookup` answers both
-(`Option<Option<String>>`), and only the first may send the caller to
-another root. "It is here and says nothing" is an ANSWER: a turn whose
+that session has a reply for the latest turn. `session_lookup` answers them, and only
+"this root does not hold it" may send the caller to another root. "It is here and says nothing" is an ANSWER: a turn whose
 newest assistant row is kiro's `"..."` placeholder has no reply by the #213
 rule, and falling through on it would hand back a stale copy's old sentence
 as THIS turn's reply — posting it to the room and spending the turn's reply
