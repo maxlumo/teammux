@@ -542,8 +542,13 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   const fit = readFileSync(new URL('../ui/title-fit.ts', import.meta.url), 'utf8');
   assert.match(fit, /classList\.remove\(FIT_CLASS\);\s*if \(active && overflowsItself\(stack\)\) stack\.classList\.add\(FIT_CLASS\);/u, 'take the class off, read once, put it on: no loop');
   assert.doesNotMatch(fit, /\.style\b|setProperty|setInterval|setTimeout/u, 'writes no width or style and polls nothing');
-  assert.equal(fit.match(/new view\.ResizeObserver\(/gu)?.length, 1, 'ONE observer, rAF-coalesced');
-  assert.match(fit, /view\.requestAnimationFrame\(test\)/u);
+  assert.equal(fit.match(/new view\.ResizeObserver\(/gu)?.length, 1, 'ONE size observer');
+  assert.equal(fit.match(/new view\.MutationObserver\(/gu)?.length, 1, 'and ONE child-set observer (#369 review P1: a control leaving the head changes the room with no resize)');
+  assert.match(fit, /new view\.ResizeObserver\(schedule\)/u, 'every trigger goes through the one rAF-coalesced schedule');
+  assert.match(fit, /new view\.MutationObserver\(schedule\)/u);
+  assert.equal(fit.match(/view\.requestAnimationFrame\(/gu)?.length, 1, 'the only frame request is schedule\'s: no trigger measures on its own');
+  const code = fit.slice(fit.indexOf('export const FIT_CLASS'));
+  assert.doesNotMatch(code, /subtree|attributes:\s*true|characterData/u, 'direct children only: no subtree, attribute or text watching');
   assert.ok(!/\.title-stack[^{]*\{[^}]*(?:font-size|#[0-9a-f]{3,8})/iu.test(appCssSrc), 'tokens only'); // the atom lives in app.css since #357 (the Board s head wears it too)
   assert.doesNotMatch(source, /\.title-stack\s*\{|\.name-line\s*\{/u, 'the Hub keeps no private copy of the atom');
   // The NAME wins the width fight against the PATH (owner, 2026-08-30: "名字

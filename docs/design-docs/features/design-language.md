@@ -1355,18 +1355,30 @@ Board head — decides which of its two forms it wears by toggling ONE class,
 `fit-wrapped`; CSS draws the column form (the phone's `.stacked` is the same
 form). It takes the class off, asks whether the row overflows itself (more than
 1px: the title group still gives up a few hundredths while the path has room),
-and puts it back — once per trigger, never polled; the answer is a function of
-the layout, so asking again cannot flip it. Triggers: the head's and the
-group's size (one rAF-coalesced ResizeObserver) and a changed name/tag/rename
-state; nothing else. It stores no width and writes no style; on the phone it is
-a no-op (`.stacked`). Measured 260/260 within 8px — the path starts 2.7–4px
+and puts it back — once per trigger, never polled. It judges from the same
+posture every time (the class off, then one read), so a repeat on an unchanged
+layout reads the same; that this settles rather than oscillates was observed in
+the real browser, not proved: after a width change the class is written 2–4
+times within a frame and then stays still (35 s of stillness: zero writes,
+across the Hub's 20 s list refresh), and widening and narrowing through the
+threshold in both directions lands on the same form at each width. Triggers: the
+size of the stack's parent and of the head (one rAF-coalesced ResizeObserver);
+a change in the CHILD SET of either (a control in the head appearing or
+leaving changes the room without resizing the head or the group — the Board's
+"new issue" button toggles with `!sel && !creating`; reviewer P1 on #369: at a
+fixed 800px viewport the Board wrapped with the button present, returned to
+inline when it left and wrapped again when it came back, no overlap at any
+stage); and a changed name/tag/rename key. `update` with an unchanged key is
+not a trigger; Svelte calls it whenever the options object is rebuilt, and the
+Hub's list refresh rebuilds it every 20 s. It stores no width and writes no
+style; on the phone it is a no-op (`.stacked`). Measured 260/260 within 8px — the path starts 2.7–4px
 from the name line (wrapped) or from the tag (inline) — with the validator's
 24-character fixture: 925px inline (path 56.8px), 910px wrapped with the path
 at 91.7px (it was 55.4px behind a 40px hole). WebKit is unmeasured on this
 host (no engine here); ResizeObserver and `scrollWidth` are the portable parts,
 and the owner's Mac is the first WebKit check. A tag
-that
-holds its place while the name truncates, or a JS-measured flip, is a
+that holds its place while the name truncates, a second mechanism that
+measures the stack, or a stored width, is a
 regression. Verified in a real browser at 1280 (85-char name whole, tag below;
 short name inline) and 700 (tag wraps first, the name ellipsises after).
 

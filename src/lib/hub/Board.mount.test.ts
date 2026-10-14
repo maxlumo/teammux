@@ -417,3 +417,40 @@ test('an old Discard clicked after the runtime detached — before anything re-r
   assert.equal(f.title(), 'Fixture', 'and nothing navigated');
   assert.equal(f.dialogs(), 0);
 });
+
+// #369 review P1: the Board's stack sits straight in the head, so its parent IS
+// the head, and the "new issue" button toggles with `!sel && !creating` — the
+// room the stack is GIVEN changes with no resize of the head and no change of
+// the title/tag key. jsdom has no layout and the harness's ResizeObserver never
+// fires, so this test fakes the two numbers the fit reads (the stack overflows
+// exactly while the button is in the head) and holds that the child-set
+// observer alone brings the form back in step, in both directions.
+test('Board: the new-issue control appearing or leaving re-fits the Name + tag stack with no resize, no name and no tag change (#369 review P1)', async context => {
+  let back!: () => boolean;
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true, onGoBack: (fn: typeof back) => back = fn },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      const head = (el: Element) => el.closest('.page-head');
+      const hasNew = (el: Element) => !!head(el)?.querySelector('[aria-label="New issue"]');
+      Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return this.classList?.contains('title-stack') ? 100 : 0; } });
+      Object.defineProperty(window.HTMLElement.prototype, 'scrollWidth', { configurable: true, get() { return this.classList?.contains('title-stack') ? (hasNew(this) ? 140 : 90) : 0; } });
+    },
+    modules: [rpc({})],
+  });
+  try {
+    await flush(app);
+    const stack = () => app.document.querySelector<HTMLElement>('.page-head .title-stack')!;
+    assert.ok(stack(), 'the Board head wears the stack');
+    assert.ok(app.document.querySelector('.page-head [aria-label="New issue"]'), 'the list view has the control');
+    assert.ok(stack().classList.contains('fit-wrapped'), 'with the control present the stack overflows: the tag is under the name');
+    // Open an issue: the control leaves the head. Nothing resized, nothing renamed.
+    app.document.querySelector<HTMLButtonElement>('.card')!.click(); await flush(app);
+    assert.equal(app.document.querySelector('.page-head [aria-label="New issue"]'), null, 'the control left');
+    assert.equal(stack().classList.contains('fit-wrapped'), false, 'the room came back: inline again');
+    // Back to the list: the control returns and takes the room again.
+    assert.equal(back(), true); await flush(app);
+    assert.ok(app.document.querySelector('.page-head [aria-label="New issue"]'), 'the control is back');
+    assert.ok(stack().classList.contains('fit-wrapped'), 'and the stack is re-fitted to the smaller room');
+  } finally { await app.close(); }
+});

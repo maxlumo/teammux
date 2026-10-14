@@ -13,15 +13,26 @@
 // `fit-wrapped`, and CSS draws it (the column form `.stacked` already is). It
 // stores no width and writes no style. The test: take the class off, ask
 // whether the row overflows itself, put the class back if it does — measured
-// once per trigger, never polled. The answer is a function of the layout alone,
-// so a re-run gives the same answer: no flip-flop, no loop.
+// once per trigger, never polled. It judges from the same posture (the class
+// off) every time, so a repeat on an unchanged layout reads the same.
 //
-// Triggers, and nothing else: the head's size (viewport, the Files drawer, the
-// buttons beside the title) and the stack's parent's size, one rAF-coalesced
-// ResizeObserver; and a changed `key` (a rename, a new tag) through Svelte's
-// `update`, because in the column form a changed word may not change any box
-// the observer sees. `active: false` is the phone: the stack is unconditionally
-// stacked there (`.stacked`) and the action is a no-op that takes its class off.
+// Triggers, and nothing else — each one something that changes the width the
+// stack is GIVEN, or its words:
+//   · a size change of the stack's parent or of the head (viewport, the Files
+//     drawer): one ResizeObserver;
+//   · a change in the CHILD SET of either (a control in the head appearing or
+//     disappearing — the Board's "new" button toggles with `!sel && !creating`
+//     — changes the room without resizing the head or the group: #369 review
+//     P1): one MutationObserver, `childList` only, no subtree;
+//   · a changed `key` (a rename, a new tag) through Svelte's `update`, because
+//     in the column form a changed word may not change any box an observer sees.
+//     `update` with the SAME key and `active` is not a trigger: Svelte calls it
+//     whenever the options object is rebuilt (the Hub's 20 s list refresh does).
+// Every trigger goes through `schedule()` (one rAF-coalesced test); the only
+// synchronous test is the first one and `update`'s, and each cancels a frame
+// still pending, so a torn-down stack is never written to (#369 review P2-A).
+// `active: false` is the phone: the stack is unconditionally stacked there
+// (`.stacked`) and the action is a no-op that takes its class off.
 
 export const FIT_CLASS = 'fit-wrapped';
 
@@ -43,38 +54,63 @@ export function overflowsItself(stack: { scrollWidth: number; clientWidth: numbe
 }
 
 export function titleFit(stack: HTMLElement, options: TitleFitOptions = {}) {
-  let { active = true } = options;
+  let { active = true, key } = options;
   const view = stack.ownerDocument.defaultView!;
   let frame = 0;
-  const test = () => {
+  let ended = false;
+  const cancel = () => {
+    if (frame) view.cancelAnimationFrame(frame);
     frame = 0;
+  };
+  /** The test itself. Cancels a frame still queued first: this reading
+   * supersedes it, and its handle must not be lost (the queued one would
+   * otherwise outlive `destroy`). */
+  const test = () => {
+    cancel();
+    if (ended) return;
     stack.classList.remove(FIT_CLASS);
     if (active && overflowsItself(stack)) stack.classList.add(FIT_CLASS);
   };
   const schedule = () => {
-    if (!frame) frame = view.requestAnimationFrame(test);
+    if (ended || frame) return;
+    frame = view.requestAnimationFrame(() => {
+      frame = 0;
+      test();
+    });
   };
   const resize = new view.ResizeObserver(schedule);
+  const children = new view.MutationObserver(schedule);
   const observe = () => {
     resize.disconnect();
+    children.disconnect();
     if (!active) return;
     // The head carries the width the row is judged against; the parent is the
-    // group whose own size follows the stack's. Either changing is a reason to
-    // ask again.
-    for (const el of new Set([stack.parentElement, stack.closest('.page-head')])) if (el) resize.observe(el);
+    // group whose own size follows the stack's (the Board's stack sits straight
+    // in the head: the two are one element and the Set keeps one).
+    for (const el of new Set([stack.parentElement, stack.closest('.page-head')])) {
+      if (!el) continue;
+      resize.observe(el);
+      children.observe(el, { childList: true });
+    }
   };
   observe();
   test();
   return {
     update(next: TitleFitOptions = {}) {
-      const was = active;
-      ({ active = true } = next);
-      if (active !== was) observe();
-      test();
+      // Svelte calls this whenever the options OBJECT is rebuilt — every 20 s
+      // list refresh rebuilds the Hub's, measured in the real browser — so it
+      // acts only on a real change of `active` or `key`. Anything else is not
+      // a trigger (and would force a layout for nothing).
+      const wasActive = active, wasKey = key;
+      ({ active = true, key } = next);
+      if (active !== wasActive) observe();
+      if (active !== wasActive || key !== wasKey) test();
     },
     destroy() {
-      if (frame) view.cancelAnimationFrame(frame);
+      ended = true;
+      cancel();
       resize.disconnect();
+      children.disconnect();
       stack.classList.remove(FIT_CLASS);
     },
   };
