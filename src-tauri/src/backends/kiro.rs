@@ -533,26 +533,52 @@ pub(crate) fn kiro_reply_from_session(jsonl: &str) -> Option<String> {
     reply
 }
 
-/// Locate and read the session's reply — `sessions_root` is `~/.kiro/sessions`
-/// in production and a temp dir in tests. `None` when nothing is found.
-/// Desktop only, like the rest of the spawn/observe surface: the mobile shell
-/// never reads an agent's session store (the Android build broke on the
+/// Locate the session under `sessions_root` and read what it says.
+///
+/// TWO questions, which `Option<String>` alone cannot answer apart (board
+/// #376 review P1): the OUTER option is whether this root HOLDS the session
+/// at all — the session's own directory, under any cwd bucket — and the
+/// inner one is whether that session has a reply for the latest turn. They
+/// must stay apart because only "this root does not have it" may send the
+/// caller to another root; "it is here and says nothing" is an ANSWER, and
+/// the #213 rule depends on it (a turn whose newest assistant row is kiro's
+/// `"..."` placeholder has no reply, and taking the PREVIOUS turn's text
+/// instead would post a stale sentence as this turn's).
+///
+/// `sessions_root` is `<KIRO_HOME>/sessions` for a managed agent,
+/// `~/.kiro/sessions` for the legacy store, and a temp dir in tests. Desktop
+/// only, like the rest of the spawn/observe surface: the mobile shell never
+/// reads an agent's session store (the Android build broke on the
 /// desktop-only `Path` import, 2026-09-20, the first APK after #207).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn session_reply(sessions_root: &Path, session_id: &str) -> Option<String> {
+pub(crate) fn session_lookup(sessions_root: &Path, session_id: &str) -> Option<Option<String>> {
     if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
         return None;
     }
     let dirs = std::fs::read_dir(sessions_root).ok()?;
     for entry in dirs.flatten() {
-        let file = entry.path().join(session_id).join("messages.jsonl");
-        if let Ok(text) = std::fs::read_to_string(&file) {
-            if let Some(reply) = kiro_reply_from_session(&text) {
-                return Some(reply);
-            }
+        let dir = entry.path().join(session_id);
+        if !dir.is_dir() {
+            continue;
         }
+        // This root owns the session, so whatever it says is the answer —
+        // including nothing, and including a file we cannot read: another
+        // root's copy of the same id is a different conversation's history,
+        // never this turn's reply.
+        return Some(
+            std::fs::read_to_string(dir.join("messages.jsonl"))
+                .ok()
+                .and_then(|text| kiro_reply_from_session(&text)),
+        );
     }
     None
+}
+
+/// The reply this root has for the session, flattening "not here" and "here
+/// with nothing to say" — the shape the callers that only want the text use.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn session_reply(sessions_root: &Path, session_id: &str) -> Option<String> {
+    session_lookup(sessions_root, session_id).flatten()
 }
 
 /// The v3 fallback wired into the notify helper: the kiro Stop payload has no
@@ -580,11 +606,16 @@ pub(crate) fn reply_fallback(
 ) -> Option<String> {
     let id = crate::agent_notifications::string_field(payload, &["session_id", "sessionId"])?;
     // The isolated home first. `sessions/` sits directly in KIRO_HOME, the
-    // same layout the global store has under `~/.kiro`.
-    if let Some(reply) = home.and_then(|h| session_reply(&h.join("sessions"), &id)) {
-        return Some(reply);
+    // same layout the global store has under `~/.kiro`. Its ANSWER stands,
+    // text or none: the legacy store is consulted only when the isolated
+    // home does not hold this session at all (board #376 review P1 — "no
+    // reply this turn" is an answer, and falling through on it would hand
+    // back an old sentence from a stale copy and spend the turn's reply edge
+    // on it).
+    if let Some(found) = home.and_then(|h| session_lookup(&h.join("sessions"), &id)) {
+        return found;
     }
-    session_reply(&legacy_sessions_root()?, &id)
+    session_lookup(&legacy_sessions_root()?, &id).flatten()
 }
 
 /// kiro's GLOBAL session store, `~/.kiro/sessions` — the legacy half of
@@ -1361,7 +1392,10 @@ mod tests {
         };
         let live = "Done. 用 Gemini 生成了封面。";
         let stale = "Team already saved; now restart…";
-        let home = crate::config::fresh_process_dir("tmm-kiro-376").join("editor");
+        // ONE call: `fresh_process_dir` clears its directory on every call,
+        // so a second one would wipe the roots built above it.
+        let root = crate::config::fresh_process_dir("tmm-kiro-376");
+        let home = root.join("editor");
         write(&home.join("sessions"), live);
         // The global store under test is this process's own temp dir
         // (`legacy_sessions_root`), so the developer's `~/.kiro` is never
@@ -1380,10 +1414,40 @@ mod tests {
         // were isolated) still gets the legacy answer — that is the only
         // source it has.
         assert_eq!(reply_fallback(payload, None).as_deref(), Some(stale));
-        // A home with no such session falls back rather than going mute.
-        let empty = crate::config::fresh_process_dir("tmm-kiro-376").join("fresh");
+        // A home that does not HOLD this session falls back rather than
+        // going mute: the legacy store may be the only place it exists.
+        let empty = root.join("fresh");
         std::fs::create_dir_all(empty.join("sessions")).unwrap();
         assert_eq!(reply_fallback(payload, Some(empty.as_path())).as_deref(), Some(stale));
+
+        // But a home that DOES hold it and has nothing to say for this turn
+        // is an ANSWER, not a miss (board #376 review P1). kiro's `"..."`
+        // placeholder row is exactly that case (#213), and falling through
+        // here would post the stale copy's old sentence as this turn's reply
+        // and spend the turn's reply edge on it.
+        let placeholder = root.join("quiet");
+        let dir = placeholder.join("sessions").join("297005da4b9f6bd1").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("messages.jsonl"),
+            "{\"payload\":{\"type\":\"assistant\",\"content\":\"earlier turn\"}}\n             {\"payload\":{\"type\":\"turn_end\"}}\n             {\"payload\":{\"type\":\"turn_start\"}}\n             {\"payload\":{\"type\":\"assistant\",\"content\":\"...\"}}",
+        )
+        .unwrap();
+        assert_eq!(
+            reply_fallback(payload, Some(placeholder.as_path())),
+            None,
+            "the authoritative source said nothing this turn: that is the answer"
+        );
+        // Same for a session directory whose file is not there yet (the turn
+        // has only just started) or cannot be read.
+        let unwritten = root.join("unwritten");
+        std::fs::create_dir_all(unwritten.join("sessions").join("297005da4b9f6bd1").join(id)).unwrap();
+        assert_eq!(reply_fallback(payload, Some(unwritten.as_path())), None);
+        // And the two questions are visible in `session_lookup` itself: "not
+        // here" is the outer None, "here with nothing" the inner one.
+        assert_eq!(session_lookup(&unwritten.join("sessions"), id), Some(None));
+        assert_eq!(session_lookup(&empty.join("sessions"), id), None);
+        assert_eq!(session_lookup(&home.join("sessions"), id), Some(Some(live.to_string())));
         // And a payload with no session id reads nothing at all.
         let bare = serde_json::json!({ "hook_event_name": "Stop" });
         assert_eq!(reply_fallback(bare.as_object().unwrap(), Some(home.as_path())), None);

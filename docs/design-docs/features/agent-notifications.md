@@ -96,7 +96,19 @@ nothing new was recorded: no room line, and no reply edge either — every
 `@editor` request from the owner was a dead end for the team too. ORDER was
 the defect, not existence; both files were there and the wrong one answered.
 Deleting the stale copy would not have helped before the fix, since the
-fallback never looked in the isolated home at all. The legacy root resolves
+fallback never looked in the isolated home at all.
+
+The order needs TWO questions, not one (review P1, 02:02): whether a root
+HOLDS the session — its own directory under some cwd bucket — and whether
+that session has a reply for the latest turn. `session_lookup` answers both
+(`Option<Option<String>>`), and only the first may send the caller to
+another root. "It is here and says nothing" is an ANSWER: a turn whose
+newest assistant row is kiro's `"..."` placeholder has no reply by the #213
+rule, and falling through on it would hand back a stale copy's old sentence
+as THIS turn's reply — posting it to the room and spending the turn's reply
+edge on it, which is a worse failure than the silence we started from. A
+session directory with no readable `messages.jsonl` (a turn that has only
+just started) answers the same way. The legacy root resolves
 through one function (`legacy_sessions_root`) whose `cfg(test)` form is a
 per-process temp dir, so no test reads the developer's own `~/.kiro` (the
 #216 rule: the isolation door belongs where the path is resolved).
