@@ -60,12 +60,15 @@ function observers() {
   let next = 1;
   const g = globalThis as any;
   const saved = { ResizeObserver: g.ResizeObserver, requestAnimationFrame: g.requestAnimationFrame, cancelAnimationFrame: g.cancelAnimationFrame };
-  g.ResizeObserver = class { constructor(fn: () => void) { callbacks.push(fn); } observe(e: unknown) { observed.add(e); } unobserve(e: unknown) { observed.delete(e); } disconnect() { observed.clear(); disconnects++; } };
+  let observeCalls = 0;
+  g.ResizeObserver = class { constructor(fn: () => void) { callbacks.push(fn); } observe(e: unknown) { observeCalls++; observed.add(e); } unobserve(e: unknown) { observed.delete(e); } disconnect() { observed.clear(); disconnects++; } };
   g.requestAnimationFrame = (fn: () => void) => { frames.set(next, fn); return next++; };
   g.cancelAnimationFrame = (id: number) => { frames.delete(id); };
   // Every frame that is pending, and the ones those schedule (the first placement queues the pill's `ready` frame).
   const flush = () => { for (let i = 0; i < 4 && frames.size; i++) { const run = [...frames.values()]; frames.clear(); run.forEach((fn) => fn()); } };
-  return { observed, callbacks, frames, flush, disconnects: () => disconnects, restore: () => Object.assign(g, saved) };
+  // Exactly the frames pending NOW (what the browser runs in one tick); the ones they schedule wait.
+  const step = () => { const run = [...frames.values()]; frames.clear(); run.forEach((fn) => fn()); };
+  return { observed, callbacks, frames, flush, step, observeCalls: () => observeCalls, disconnects: () => disconnects, restore: () => Object.assign(g, saved) };
 }
 
 test('slideIndicator: the wash follows the active row when ITS height changes, though the scroll container never resizes (board #345)', () => {
@@ -161,5 +164,71 @@ test('slideIndicator: an active item NESTED in a wrapper (the rail\u2019s slot) 
     assert.ok(o.observed.has(btn), 'the item itself');
     assert.ok(o.observed.has(slot), 'and its slot');
     action.destroy();
+  } finally { o.restore(); }
+});
+
+// Lifecycle (board #345, reviewer P1): a measure RE-REGISTERS what it watches,
+// so a late frame after `destroy` would hold the old DOM again. Each layer of
+// the close has its own test: the cancelled handles, the callback the browser
+// already took, the late observer delivery, and an `update` after the end.
+test('slideIndicator: destroyed before its first frame, every frame is cancelled and nothing is observed again', () => {
+  const o = observers();
+  try {
+    const s = sidebar();
+    const action = slideIndicator(s.node, { key: 'a', active: '.proj-row.open' });
+    assert.equal(o.frames.size, 1, 'the first placement is waiting for its frame');
+    const calls = o.observeCalls();
+    action.destroy();
+    assert.equal(o.frames.size, 0, 'and destroy took it back');
+    o.flush();
+    assert.equal(o.observeCalls(), calls, 'the observer is not asked to observe anything after destroy');
+    assert.equal(o.observed.size, 0, 'nothing re-registered');
+    assert.equal(s.vars().h, undefined, 'and nothing was measured');
+  } finally { o.restore(); }
+});
+
+test('slideIndicator: destroyed with the pill\u2019s `ready` frame pending cancels that one too', () => {
+  const o = observers();
+  try {
+    const s = sidebar();
+    const action = slideIndicator(s.node, { key: 'a', active: '.proj-row.open' });
+    o.step(); // the first placement; it queues the `ready` mark
+    assert.equal(o.frames.size, 1, 'the ready frame is waiting');
+    action.destroy();
+    assert.equal(o.frames.size, 0, 'cancelled with the rest');
+  } finally { o.restore(); }
+});
+
+test('slideIndicator: a frame callback the browser already took still re-registers nothing after destroy', () => {
+  const o = observers();
+  try {
+    const s = sidebar();
+    const action = slideIndicator(s.node, { key: 'a', active: '.proj-row.open' });
+    o.flush();
+    action.update({ key: 'b', active: '.proj-row.open' });
+    o.callbacks[0]!();
+    const taken = [...o.frames.values()]; // what the browser had already queued to run
+    assert.ok(taken.length > 0);
+    action.destroy();
+    assert.equal(o.observed.size, 0);
+    const before = s.vars();
+    taken.forEach((fn) => fn());
+    assert.equal(o.observed.size, 0, 'the stale callback measures nothing and observes nothing');
+    assert.deepEqual(s.vars(), before);
+  } finally { o.restore(); }
+});
+
+test('slideIndicator: an observer delivery after destroy queues no frame; neither does an update', () => {
+  const o = observers();
+  try {
+    const s = sidebar();
+    const action = slideIndicator(s.node, { key: 'a', active: '.proj-row.open' });
+    o.flush();
+    action.destroy();
+    o.callbacks[0]!();
+    assert.equal(o.frames.size, 0, 'a late delivery is ignored');
+    action.update({ key: 'b', active: '.proj-row.open' });
+    assert.equal(o.frames.size, 0, 'and so is a late update');
+    assert.equal(o.observed.size, 0);
   } finally { o.restore(); }
 });

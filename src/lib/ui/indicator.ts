@@ -94,6 +94,14 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
   let hidden = !!params.hidden;
   let settle: ReturnType<typeof setTimeout> | null = null;
   let frame = 0;
+  // `ended` closes the action: after `destroy` no late frame, timer or
+  // observer delivery may measure, because a measure RE-REGISTERS the watched
+  // elements (board #345 review P1). Cancelling the frame handles is the first
+  // layer, the flag the second for a callback the browser already took. The
+  // first placement rides the same `frame` handle as every other measure; the
+  // pill's `ready` mark is the one frame of its own.
+  let readyFrame = 0;
+  let ended = false;
   const ind = () => node.querySelector<HTMLElement>(':scope > .slide-pill');
   // What the pill's box depends on (board #345): the container, the active
   // item, and every sibling (a row above it that grows moves it). The set is
@@ -111,6 +119,7 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
     for (const e of want) if (!watched.has(e)) { ro.observe(e); watched.add(e); }
   };
   const measure = () => {
+    if (ended) return;
     const el = hidden ? null : node.querySelector<HTMLElement>(sel);
     watch(el);
     // Offsets are relative to the CONTAINER's padding box once the border is
@@ -128,18 +137,20 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
     // Enable the glide only after the first placement (the next frame, so the
     // first vars are painted without a transition).
     const i = ind();
-    if (i && !i.classList.contains('ready')) requestAnimationFrame(() => i.classList.add('ready'));
+    if (i && !i.classList.contains('ready') && !readyFrame) readyFrame = requestAnimationFrame(() => { readyFrame = 0; i.classList.add('ready'); });
   };
   // One frame answers any number of observer calls, and an `update` frame in
   // flight is that same frame (it measures after every sibling effect landed).
   const queue = () => {
+    if (ended) return;
     if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
   };
   const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(queue) : null;
   if (ro) { ro.observe(node); watched.add(node); }
-  requestAnimationFrame(measure);
+  queue();
   return {
     update(p: IndicatorParams = {}) {
+      if (ended) return;
       sel = p.active ?? DEFAULT_ACTIVE;
       hidden = !!p.hidden;
       // Measure on the next frame, after every sibling's class/attribute effect
@@ -154,8 +165,10 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
       settle = setTimeout(() => { settle = null; measure(); }, moveMs() + 20);
     },
     destroy() {
+      ended = true;
       if (settle) clearTimeout(settle);
-      if (frame) cancelAnimationFrame(frame);
+      for (const h of [frame, readyFrame]) if (h) cancelAnimationFrame(h);
+      frame = readyFrame = 0;
       ro?.disconnect();
       watched.clear();
     },
