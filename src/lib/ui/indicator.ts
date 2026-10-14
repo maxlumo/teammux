@@ -20,7 +20,14 @@
  * child (the rail's buttons sit in a `.rail-slot` wrapper). `hidden` collapses
  * the indicator while the container is being rearranged (the rail's icon drag)
  * and re-measures when it turns false again. A ResizeObserver re-measures on
- * layout change (rotation, split drag, font size). The atom only transitions
+ * layout change (rotation, split drag, font size) — and it watches more than
+ * the container: the active item and the container's direct children too
+ * (board #345). A scroll container (the sidebars' `.side-scroll`) keeps its
+ * own box when its content changes, so a row that grew by two agent chips, or
+ * a row above it that did, moved the active item's box while nothing the
+ * container-only observer watched had resized, and the wash kept the old one
+ * (owner: it "did not grow or shrink with the agents"). The observer's calls
+ * are coalesced to one frame (one write per frame however many rows move). The atom only transitions
  * once `.ready` is set — after the first measure — so the indicator is born in
  * place and never slides in from the corner.
  *
@@ -88,8 +95,24 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
   let settle: ReturnType<typeof setTimeout> | null = null;
   let frame = 0;
   const ind = () => node.querySelector<HTMLElement>(':scope > .slide-pill');
+  // What the pill's box depends on (board #345): the container, the active
+  // item, and every sibling (a row above it that grows moves it). The set is
+  // re-read at each measure, so a row added, removed or re-selected is
+  // watched from the next frame; the pill itself is not, it is OUR output.
+  const watched = new Set<Element>();
+  const watch = (el: HTMLElement | null) => {
+    if (!ro) return;
+    const want = new Set<Element>([node]);
+    if (el) {
+      want.add(el);
+      for (const c of Array.from(node.children)) if (!c.classList.contains('slide-pill')) want.add(c);
+    }
+    for (const e of watched) if (!want.has(e)) { ro.unobserve(e); watched.delete(e); }
+    for (const e of want) if (!watched.has(e)) { ro.observe(e); watched.add(e); }
+  };
   const measure = () => {
     const el = hidden ? null : node.querySelector<HTMLElement>(sel);
+    watch(el);
     // Offsets are relative to the CONTAINER's padding box once the border is
     // taken off; `offsetParent` is null for a display:none item.
     const box = el && el.offsetParent
@@ -107,8 +130,13 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
     const i = ind();
     if (i && !i.classList.contains('ready')) requestAnimationFrame(() => i.classList.add('ready'));
   };
-  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => measure()) : null;
-  ro?.observe(node);
+  // One frame answers any number of observer calls, and an `update` frame in
+  // flight is that same frame (it measures after every sibling effect landed).
+  const queue = () => {
+    if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
+  };
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(queue) : null;
+  if (ro) { ro.observe(node); watched.add(node); }
   requestAnimationFrame(measure);
   return {
     update(p: IndicatorParams = {}) {
@@ -129,6 +157,7 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
       if (settle) clearTimeout(settle);
       if (frame) cancelAnimationFrame(frame);
       ro?.disconnect();
+      watched.clear();
     },
   };
 }
