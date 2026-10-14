@@ -195,8 +195,22 @@ pub fn quote_token(sender: &str, hhmm: &str, body: &str) -> String {
     if squashed.chars().count() > QUOTE_CHARS {
         excerpt = format!("{}…", excerpt.trim_end());
     }
-    let excerpt = excerpt.replace('@', "＠").replace('」', "”");
+    let excerpt = unaddressed(&excerpt).replace('」', "”");
     format!("[re {sender} {hhmm}: 「{excerpt}」] ")
+}
+
+/// Text we QUOTE inside a line we are about to post carries no routing:
+/// `@` → `＠`. Every mention parser reads ASCII `@` only (`mention_names`
+/// here, `mentionTokens` on the client), so a quoted "@lead please" is read
+/// by a human and delivered to nobody.
+///
+/// The ONE rule, in one place (board #290 for a reply's quote; board #367
+/// review P1-A for a board hand-off, where an issue TITLE rides in the
+/// delivered line: "修复 @all 的投递" would otherwise have typed a hand-off
+/// meant for one agent into every pane in the project — quoted words must
+/// never be an address).
+pub fn unaddressed(text: &str) -> String {
+    text.replace('@', "＠")
 }
 
 /// How much of the quoted line a reply carries.

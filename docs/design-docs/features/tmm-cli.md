@@ -463,6 +463,22 @@ room line (`unassigned <who-lost-it>` when cleared), from whichever surface
 saved it, which is how the status moves have always read — before this a
 reassignment was invisible to everyone except the new assignee.
 
+Three things the review made explicit (reviewer 01:39, P1-A/P1-B). The issue
+TITLE rides in the delivered line, so it is DE-ADDRESSED first
+(`address::unaddressed`, the same `@` → `＠` rule a reply's quote has used
+since #290): a title like "修复 @all 的投递" would otherwise have typed a
+hand-off meant for one agent into every pane, because `mention_names` reads
+the whole body and cannot tell our words from the ones we quoted — the
+command's `name` argument is the only address in that line, and the stored
+title is untouched. The two steps are REPORTED APART: when the save has
+landed and the hand-off post fails, the CLI prints the assignment that is now
+on the board and then fails with the reason and the re-run, because a failed
+notification must read as neither a failed assignment nor a success. And
+`assign` is idempotent on the BOARD but deliberately NOT on the notification
+— re-running re-sends the hand-off, which is the recovery path for that very
+failure, and the reason the duplicate is the operator's choice rather than a
+silent repeat.
+
 `remove` is the eject button next to stop's pause button: it kills the window,
 DROPS THE SLOT (so `up` never recreates it) and deletes the isolated home (so
 `is_managed_in` stops recognising it). `delete` is archive's irreversible

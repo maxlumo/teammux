@@ -622,11 +622,25 @@ async fn main() {
                     // board #11): the room line is the record, this is the
                     // wake. `human` reads the board itself, and a clear has
                     // nobody to tell.
+                    // The two steps are reported APART (board #367 review
+                    // P1-B): the save has already landed here, so a failed
+                    // hand-off must not read as a failed assignment — and
+                    // must not read as a success either. `assign` is
+                    // idempotent on the BOARD and deliberately not on the
+                    // notification: re-running it re-sends the hand-off,
+                    // which is the recovery path for exactly this failure.
                     if !name.is_empty() && name != "human" {
                         let body = assign_brief(id, &title, &who, name);
-                        let _ = rpc(&ctx, "hub_post", json!({
+                        if let Err((code, msg)) = try_rpc(&ctx, "hub_post", json!({
                             "session": session, "from": who, "body": body, "status": false, "detached": false
-                        })).await;
+                        })).await {
+                            println!("✓ #{id} → {name} (saved)");
+                            fail(code, &format!(
+                                "the hand-off was NOT posted: {msg}\n\
+                                 #{id} is assigned to {name} on the board, but {name} has not been told. \
+                                 Re-run `tmm board assign {id} {name}` to send it again."
+                            ));
+                        }
                     }
                     if ctx.json {
                         println!("{r}");
@@ -2089,6 +2103,14 @@ fn assign_target(raw: &str) -> &str {
 /// does it: the recipient of this one has `tmm` in its hands and the issue is
 /// one command away, whereas the UI briefs an agent for a human who cannot.
 fn assign_brief(id: i64, title: &str, who: &str, name: &str) -> String {
+    // The issue's TITLE is quoted text, so it carries no routing: an `@` in
+    // it becomes `＠` through the project's one de-addressing rule (board
+    // #367 review P1-A — a title like "修复 @all 的投递" would otherwise have
+    // typed a hand-off meant for one agent into every pane, because
+    // `mention_names` reads the whole body and does not care which words we
+    // wrote and which we quoted). The command's `name` argument is the only
+    // address in this line. The stored title is untouched.
+    let title = tmux_mobile::address::unaddressed(title);
     format!(
         "@{name} [board #{id}] {title} — assigned to you by {who}. \
          `tmm board take {id}` to claim it, `tmm board show {id}` for the body and the notes."
@@ -2382,6 +2404,16 @@ mod tests {
 
         let brief = super::assign_brief(12, "Fix the login flow", "orchestrator", "builder-2");
         assert!(brief.starts_with("@builder-2 "), "the mention is what types it into the pane: {brief}");
+        // The TITLE is quoted text and must never route (P1-A): the only
+        // address in the line is the name the command was given, whatever
+        // the issue is called. Asserted through the parser that decides it.
+        let shouty = super::assign_brief(12, "fix the delivery to @all, ask @reviewer", "human", "builder-2");
+        assert_eq!(
+            tmux_mobile::address::mention_names(&shouty),
+            vec!["builder-2".to_string()],
+            "a title's @ is read by a person, not by the router: {shouty}"
+        );
+        assert!(shouty.contains("＠all") && shouty.contains("＠reviewer"), "still readable: {shouty}");
         assert!(brief.contains("[board #12] Fix the login flow"), "{brief}");
         assert!(brief.contains("by orchestrator"), "{brief}");
         assert!(brief.contains("tmm board take 12"), "{brief}");
