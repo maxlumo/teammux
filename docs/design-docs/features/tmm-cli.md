@@ -30,6 +30,7 @@ this reference stays one screen.
 ```
 # the room (context from $TMM_PROJECT / $TMM_AGENT, exported by the launcher)
 tmm send "@name <text>"              send to one or more recipients (@all, @human)
+                                     a name nobody is running is noted on stderr (#347)
 tmm send "@name /command [args]"     typed VERBATIM into its CLI, like the composer (#274);
                                      @name must be a managed agent (else exit 4, nothing
                                      recorded); "@human /x" is a chat message to the person
@@ -425,6 +426,15 @@ The rules behind each surface live next to their design, not here:
 | the task board (`hub_board_*`, `tmm board`) | [board.md](board.md) |
 | spawn, isolated homes, registry, per-backend knowledge, AGENTS.md | [agents-overview.md](agents-overview.md) |
 | project lifecycle, restart/resume | [projects.md](projects.md) |
+
+**A mention nobody received is noted, not failed** (board #367's sibling,
+#347, 2026-10-15). `tmm send` exits 0 and prints
+`note: @name is not online (stopped|unknown) — it was not typed to anyone's
+pane and nothing is queued for it` on stderr, once per unreached name, from
+the `offline` rows the server's answer carries. Exit 0 because the message IS
+in the room: being told is not a failure, and there is no retry and no queue
+to promise — the design and the two words are in
+[hub-composer.md](hub-composer.md#a-mention-nobody-received-is-said-board-347-2026-10-15).
 
 ## CLI/UI parity
 

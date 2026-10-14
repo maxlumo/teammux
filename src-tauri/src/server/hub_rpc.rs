@@ -272,7 +272,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let record_only =
                 is_status || p.get("record_only").and_then(|v| v.as_bool()).unwrap_or(false);
             let recipients = crate::address::mention_names(&body);
-            let msg = rooms::post_routed(&room, from, &body, &recipients).map_err(RpcError::Internal)?;
+            let mut msg = rooms::post_routed(&room, from, &body, &recipients).map_err(RpcError::Internal)?;
             // DELIVERY: an idle agent sits at its prompt and reads
             // nothing — @mentions are typed into the mentioned agents'
             // panes so the chat actually reaches them. (An agent that
@@ -287,7 +287,18 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 // so its copy is typed like a wake's. A courtesy flag, as
                 // `from` is: the skip only stops a turn looping into itself.
                 let detached = p.get("detached").and_then(|v| v.as_bool()).unwrap_or(false);
-                deliver_mentions(session, from, &body, &room, seq, id, detached);
+                let offline = deliver_mentions(session, from, &body, &room, seq, id, detached);
+                if !offline.is_empty() {
+                    // The answer carries it so the CALLER can say it where
+                    // its user is looking — `tmm send` on stderr (#347).
+                    let rows: Vec<serde_json::Value> = offline
+                        .iter()
+                        .map(|(name, why)| serde_json::json!({ "name": name, "why": why }))
+                        .collect();
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert("offline".into(), serde_json::Value::Array(rows));
+                    }
+                }
             }
             Ok(msg)
         }
@@ -1387,15 +1398,15 @@ fn deliver_mentions(
     before_seq: Option<i64>,
     msg_id: &str,
     to_sender: bool,
-) {
+) -> Vec<(String, &'static str)> {
     use crate::projects::agents;
 
     let mentions = crate::address::mention_names(body);
     if mentions.is_empty() {
-        return;
+        return Vec::new();
     }
     let ws = crate::projects::project_for_session(session).ok().flatten().map(|p| p.path);
-    let Ok(panes) = crate::tmux::list_panes(session) else { return };
+    let Ok(panes) = crate::tmux::list_panes(session) else { return Vec::new() };
     let managed_names: Vec<String> = panes
         .iter()
         .filter(|pane| crate::projects::is_managed_in(ws.as_deref(), &pane.window_name))
@@ -1424,6 +1435,7 @@ fn deliver_mentions(
         (Vec::new(), false)
     };
     let mut seen = std::collections::HashSet::new();
+    let mut reached: Vec<String> = Vec::new();
     for p in &panes {
         if !seen.insert(p.window) || !p.active {
             continue;
@@ -1463,7 +1475,28 @@ fn deliver_mentions(
         // agent's userPromptSubmit echo settles it, and a pane that refused
         // it (#250, copy mode) is said in the feed.
         crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id);
+        reached.push(p.window_name.clone());
     }
+    // A mention no pane received is SAID (board #347, owner: "当这个 agent
+    // 不在会话，或者停止什么的时候要返回一个 warning，提示 agent 不在线").
+    // It used to be dropped in silence, which reads exactly like a delivery
+    // that landed — the sender waits for an answer that cannot come. One
+    // room line per name, in the lifecycle grammar, so a human reads it in
+    // the feed and a Team sender meets it in its next context; `tmm send`
+    // prints the same words on stderr from the list this returns. The
+    // `declared` half — which of these names this project HAS a managed
+    // home for — is what separates a stopped teammate from a name that was
+    // never here.
+    let declared: Vec<String> = mentions
+        .iter()
+        .filter(|name| crate::projects::is_managed_in(ws.as_deref(), name))
+        .cloned()
+        .collect();
+    let offline = crate::projects::delivery::offline_mentions(&mentions, &reached, &declared, from);
+    for (name, why) in &offline {
+        let _ = crate::projects::rooms::post(room, from, &crate::projects::delivery::offline_line(name, why, from));
+    }
+    offline.into_iter().map(|(name, why)| (name.to_string(), why)).collect()
 }
 
 /// The soonest pending wake addressed to `name` (an `@name` or `@all` in
@@ -1502,7 +1535,8 @@ pub(super) fn fire_wake(id: i64) {
     let Ok(msg) = crate::projects::rooms::post_routed(&room, &w.sender, &body, &recipients) else { return };
     let seq = msg.get("seq").and_then(|v| v.as_i64());
     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    deliver_mentions(&session, &w.sender, &body, &room, seq, id, true);
+    // A fired wake has no caller to answer: its room line is the record.
+    let _ = deliver_mentions(&session, &w.sender, &body, &room, seq, id, true);
 }
 
 /// One row per live window: name, command, agent detection, derived status,

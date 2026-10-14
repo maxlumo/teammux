@@ -401,6 +401,17 @@ async fn main() {
             } else {
                 println!("✓ sent");
             }
+            // A mention no pane received is SAID where the sender is looking
+            // (board #347): the room keeps the line for the feed and for a
+            // Team agent's next context, and this is the immediate word for
+            // whoever typed the command. Not an error: the message IS in the
+            // room, and nothing is queued for the absent agent — exit 0 with
+            // a note, like the self-mention note above.
+            for row in r.get("offline").and_then(|v| v.as_array()).into_iter().flatten() {
+                let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let why = row.get("why").and_then(|v| v.as_str()).unwrap_or("");
+                eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
+            }
         }
         // The scratch terminal's session (board #324): the same server entry
         // the desktop panel uses, so an agent can open a scratch shell for a

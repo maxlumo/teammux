@@ -999,6 +999,10 @@ test('a lifecycle line splits into a highlighted verb and its subject', () => {
     { verb: 'assigned', who: 'builder-2', text: 'board #12 Fix the login flow', cmd: false });
   assert.deepEqual(sysParts('unassigned builder — board #12 Fix the login flow'),
     { verb: 'unassigned', who: 'builder', text: 'board #12 Fix the login flow', cmd: false });
+  // #347: a message that reached nobody is one row per name in the same
+  // three atoms — who it was for, what happened, and that nothing is queued.
+  assert.deepEqual(sysParts("offline reviewer — orchestrator's message was not typed in (stopped); nothing is queued for it"),
+    { verb: 'offline', who: 'reviewer', text: "orchestrator's message was not typed in (stopped); nothing is queued for it", cmd: false });
   // An unknown shape is left WHOLE — a guessed verb or name would truncate it.
   assert.deepEqual(sysParts('agent k left the building'), { verb: '', who: '', text: 'agent k left the building', cmd: false });
   assert.deepEqual(sysParts(undefined), { verb: '', who: '', text: '', cmd: false });
@@ -1016,6 +1020,10 @@ test('a lifecycle verb speaks the one status colour language', () => {
   // A hand-off starts work moving; handing it back to nobody is rest (#367).
   assert.equal(sysVerbColor('assigned'), 'var(--accent)');
   assert.equal(sysVerbColor('unassigned'), sysVerbColor('stopped'));
+  // Nobody received it, so somebody has to notice: the amber the language
+  // already keeps for "paused on a human", never red (#347).
+  assert.equal(sysVerbColor('offline'), sysVerbColor('interrupted'));
+  assert.equal(sysVerbColor('offline'), 'var(--status-warn)');
   // Never a literal colour: both themes read the same tokens.
   for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'assigned', 'unassigned', 'wat', '']) {
     assert.match(sysVerbColor(v), /^var\(--|^color-mix\(/u, `${v} must resolve through a token`);

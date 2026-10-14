@@ -176,6 +176,57 @@ pub fn agent_target(session: &str, window: &str) -> Option<String> {
     (is_agent && super::is_managed_in(ws.as_deref(), window)).then(|| format!("{}:{}.{}", session, p.window, p.pane))
 }
 
+/// Why a mentioned name could not be typed into (board #347). Two words,
+/// because the sender can only act on two: the slot is there and nothing is
+/// running it, or this project has no such agent at all.
+pub const OFFLINE_STOPPED: &str = "stopped";
+pub const OFFLINE_UNKNOWN: &str = "unknown";
+
+/// The `@mentions` of one message that no pane received, each with its word
+/// (board #347; owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个
+/// warning，提示 agent 不在线"). A delivery to nobody used to be SILENT: the
+/// message was stored in the room, every mention of a stopped or misspelled
+/// agent was dropped on the floor, and the sender — human or agent — had no
+/// way to tell that from a delivery that landed.
+///
+/// `reached` is who was actually typed into (the caller knows, because it
+/// just did it); `declared` is which of the mentions this project HAS a
+/// managed home for (`is_managed_in`), which is what separates a stopped
+/// teammate from a name that was never here. Three names are never missing
+/// recipients: `all` addresses whoever is there, `human` reads the room
+/// instead of a pane, and the sender's own name is deliberately never typed
+/// back into its own pane.
+///
+/// Order is the mention order and each name is reported once, so a body that
+/// says `@dev @dev` warns once.
+pub fn offline_mentions<'a>(
+    mentions: &'a [String], reached: &[String], declared: &[String], from: &str,
+) -> Vec<(&'a str, &'static str)> {
+    let mut out: Vec<(&str, &'static str)> = Vec::new();
+    for name in mentions {
+        let n = name.as_str();
+        if n == "all" || n == "human" || n == from || reached.iter().any(|r| r == n) {
+            continue;
+        }
+        if out.iter().any(|(seen, _)| *seen == n) {
+            continue;
+        }
+        out.push((n, if declared.iter().any(|d| d == n) { OFFLINE_STOPPED } else { OFFLINE_UNKNOWN }));
+    }
+    out
+}
+
+/// The room line one offline recipient leaves: the lifecycle grammar every
+/// other `[tmm]` row speaks (`sysParts`: verb, subject, detail), so the feed
+/// renders it with the atoms it already has. It says what did NOT happen and
+/// that nothing is pending, because the one thing a sender must not do is
+/// wait for an answer that cannot come — there is no retry and no queue (a
+/// message to nobody is not stored for later; the message itself stays in
+/// the room, where it was posted).
+pub fn offline_line(name: &str, why: &str, from: &str) -> String {
+    format!("[tmm] offline {name} — {from}'s message was not typed in ({why}); nothing is queued for it")
+}
+
 /// Deliver one line to one managed agent window whose pane is `target`.
 /// True when it was typed or held; false when the pane refused it (said in
 /// the feed as `undelivered`, board #250). `ask_at` is where the stamped
@@ -463,6 +514,43 @@ mod tests {
     fn held(session: &str, window: &str) -> usize {
         telemetry::held_rows(session, window).len()
     }
+    /// Board #347 (owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个
+    /// warning，提示 agent 不在线"). A mention nobody received used to be
+    /// silent, and silence reads exactly like a delivery that landed.
+    #[test]
+    fn a_mention_no_pane_received_is_named_with_its_reason() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mentions = names(&["dev", "reviewer", "buildr", "all", "human", "lead"]);
+        let reached = names(&["dev"]);
+        // `reviewer` has a managed home in this project; `buildr` is a typo
+        // and `lead` belongs to another project — both read as unknown from
+        // here, which is the only thing this project can honestly say.
+        let declared = names(&["dev", "reviewer"]);
+        assert_eq!(
+            offline_mentions(&mentions, &reached, &declared, "lead"),
+            vec![("reviewer", OFFLINE_STOPPED), ("buildr", OFFLINE_UNKNOWN)],
+            "the sender's own name, @all and @human are never missing recipients"
+        );
+        // Everyone reached: nothing to say.
+        assert!(offline_mentions(&mentions[..1], &reached, &declared, "lead").is_empty());
+        // One warning per name, in mention order, however often it is said.
+        assert_eq!(
+            offline_mentions(&names(&["dev", "dev"]), &[], &declared, "human"),
+            vec![("dev", OFFLINE_STOPPED)]
+        );
+        // `@all` into an empty project is not a missing recipient: it names
+        // whoever is there, and nobody is.
+        assert!(offline_mentions(&names(&["all"]), &[], &[], "human").is_empty());
+
+        // The line it leaves says what did not happen AND that nothing is
+        // pending, in the grammar every other `[tmm]` row speaks.
+        let line = offline_line("reviewer", OFFLINE_STOPPED, "orchestrator");
+        assert_eq!(
+            line,
+            "[tmm] offline reviewer — orchestrator's message was not typed in (stopped); nothing is queued for it"
+        );
+    }
+
     fn warns(session: &str) -> Vec<String> {
         telemetry::recent_events(session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect()
     }

@@ -869,6 +869,16 @@ wraps members when expanded. A new member appears with `appear-pop`;
 group/member reorders use the one `animate:flip` tempo; removal and a
 one-to-two-member group chrome change cut.
 
+### A mention nobody received is SAID (board #347, 2026-10-15)
+
+Owner: "如果某一个 agent 发送了一个消息，可能 at 了其他 agent，当这个 agent 不在会话，或者停止什么的时候要返回一个 warning，提示 agent 不在线". A delivery to nobody used to be silent. `deliver_mentions` walks the live panes and types into the ones a mention matched; every other name — a stopped teammate, a typo, an agent of a different project — was dropped on the floor. The message was stored in the room, so the sender could not tell that from a delivery that landed, and waited for an answer that could not come.
+
+Each unreached name now leaves one room line, `[tmm] offline <name> — <sender>'s message was not typed in (stopped|unknown); nothing is queued for it`, in the lifecycle grammar `sysParts` already reads — so a human meets it in the feed and a Team agent meets it in its next context, and the verb joins the amber family (`sysVerbColor`: somebody has to notice; nothing is broken, somebody is simply not there). `tmm send` prints the same words on stderr and still exits 0: the message IS in the room, and being told is not a failure.
+
+TWO words only, because a sender can act on two: `stopped` when this project HAS a managed home for that name (`is_managed_in`) and nothing is running it, `unknown` when it has none — a typo and another project's agent are both honestly unknown from here. Three names are never missing recipients: `@all` addresses whoever is there, `@human` reads the room instead of a pane, and the sender's own name is deliberately never typed back. One line per name, in mention order, so `@dev @dev` warns once.
+
+NO retry and NO queue (the classification is `projects::delivery::offline_mentions`, beside the one typing path, with `offline_line` as its wording): a message to nobody is not stored for later. What exists is the room — the message is there, and `tmm log` or the feed is where a late-starting agent reads it. Holding it would mean inventing a second queue beside the one the deliveries table already is (#249), and delivering it on start would type a line whose moment has passed.
+
 ### One team selection, exact member delivery (#239, 2026-09-23)
 
 Owner: "如果是一个 team 的话，我点击 team 的名称，可以一次性选中该
