@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackendCatalog } from '../core/agents.ts';
-import { draftOf, draftDirty, draftValid, draftPatch, rebaseDraft, issueRef, ISSUE_REF_CHARS, assignNotes, chipCols, assigneeView } from './board.ts';
+import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, ISSUE_REF_CHARS, assignNotes, chipCols, assigneeView } from './board.ts';
 
 // Since board #15 a draft carries all four editable fields; these helpers
 // build the full shape from the short form the assertions speak.
@@ -318,4 +318,15 @@ test('rememberBackends folds each poll into what was known', async () => {
   assert.equal(rememberBackends(known, [{ name: 'old', agent: 'kiro', managed: true }]), known, 'nothing new: the same object');
   assert.deepEqual(rememberBackends(known, [{ name: 'b', agent: 'codex', managed: true }, { name: 'x', agent: 'claude', managed: false }, { name: 'n', agent: null }]),
     { old: 'kiro', b: 'codex' }, 'a stopped agent missing from this poll is kept; direct windows and unknowns are not learned');
+});
+
+test('the submit chord is Cmd or Ctrl + Enter, never a bare/Shift Enter and never mid-IME (board #36, #348)', () => {
+  const k = (o: Partial<{ key: string; metaKey: boolean; ctrlKey: boolean; isComposing: boolean }>) =>
+    isSubmitChord({ key: 'Enter', metaKey: false, ctrlKey: false, isComposing: false, ...o });
+  assert.equal(k({ metaKey: true }), true, 'Cmd+Enter (mac)');
+  assert.equal(k({ ctrlKey: true }), true, 'Ctrl+Enter (everywhere else)');
+  assert.equal(k({}), false, 'a bare Enter is a newline');
+  assert.equal(k({ key: 'a', metaKey: true }), false, 'only Enter');
+  assert.equal(k({ metaKey: true, isComposing: true }), false, 'the Enter that commits an IME candidate is not a submit');
+  assert.equal(k({ ctrlKey: true, isComposing: true }), false);
 });

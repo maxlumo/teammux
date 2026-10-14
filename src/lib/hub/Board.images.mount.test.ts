@@ -569,3 +569,63 @@ test('a note in flight holds the project: a pick waits, and the answer lands on 
     assert.equal(app.q('.detail'), null, 'and no issue of the old board is painted into the new one');
   } finally { release?.(); await app.close(); }
 });
+
+// Board #348: the detail editor saves from the keyboard with the chord the
+// create form already speaks (board #36). The same guarded saveDraft the ✓
+// runs, so every refusal of the button is a refusal of the chord.
+const chord = (app: { window: any }, el: Element, init: Record<string, unknown> = { metaKey: true }) => {
+  const ev = new app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init });
+  el.dispatchEvent(ev);
+  return ev as KeyboardEvent;
+};
+
+test('Cmd+Enter in the detail body saves it like ✓ and the detail closes; Ctrl+Enter in the title saves the title (board #348)', async (context) => {
+  const body = await mount(context, { stateful: true });
+  try {
+    body.q<HTMLButtonElement>('.card')!.click(); await body.flush();
+    await body.type(body.q<HTMLTextAreaElement>('.d-body-edit')!, 'Edited body');
+    const ev = chord(body, body.q('.d-body-edit')!, { metaKey: true });
+    await body.flush();
+    assert.equal(ev.defaultPrevented, true, 'the chord is consumed, no stray newline');
+    assert.deepEqual(body.calls.saves, [{ id: 1, body: 'Edited body', session: 'fixture' }], 'exactly the changed field, saved once');
+    assert.equal(body.q('.d-body-edit'), null, 'saved: back to the board, as ✓ does');
+  } finally { await body.close(); }
+  const title = await mount(context, { stateful: true });
+  try {
+    title.q<HTMLButtonElement>('.card')!.click(); await title.flush();
+    await title.type(title.q<HTMLTextAreaElement>('.d-title-input') as unknown as HTMLTextAreaElement, 'Edited title');
+    chord(title, title.q('.d-title-input')!, { ctrlKey: true });
+    await title.flush();
+    assert.deepEqual(title.calls.saves, [{ id: 1, title: 'Edited title', session: 'fixture' }]);
+  } finally { await title.close(); }
+});
+
+test('the detail chord obeys ✓: nothing changed, a bare/Shift Enter, an IME Enter, a contentless draft and an upload in flight all save nothing (board #348)', async (context) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const app = await mount(context, { stateful: true, upload: () => gate.then(() => ({})) });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    const bodyEl = () => app.q<HTMLTextAreaElement>('.d-body-edit')!;
+    const titleEl = () => app.q<HTMLTextAreaElement>('.d-title-input') as unknown as HTMLTextAreaElement;
+    chord(app, bodyEl()); await app.flush();
+    assert.equal(app.calls.saves.length, 0, 'an unchanged draft has nothing to save');
+    await app.type(bodyEl(), 'Changed');
+    const bare = chord(app, bodyEl(), {}); await app.flush();
+    assert.equal(bare.defaultPrevented, false, 'a bare Enter is still a newline');
+    chord(app, bodyEl(), { shiftKey: true }); chord(app, bodyEl(), { metaKey: true, isComposing: true }); await app.flush();
+    assert.equal(app.calls.saves.length, 0, 'Shift+Enter and an IME composition\u2019s Enter never save');
+    await app.type(bodyEl(), ''); await app.type(titleEl(), '');
+    chord(app, bodyEl()); chord(app, titleEl()); await app.flush();
+    assert.equal(app.calls.saves.length, 0, 'a contentless draft is as unsavable by the keyboard as by the button');
+    await app.type(titleEl(), 'A'); await app.type(bodyEl(), 'Body A ');
+    await app.paste(bodyEl());
+    assert.equal(app.q<HTMLButtonElement>('.detail button[aria-label="Save"]')!.disabled, true, 'the button is closed while it uploads');
+    chord(app, bodyEl()); await app.flush();
+    assert.equal(app.calls.saves.length, 0, 'and so is the chord');
+    release(); await app.flush();
+    chord(app, bodyEl()); await app.flush();
+    assert.equal(app.calls.saves.length, 1, 'once the upload landed the same chord saves');
+    assert.match(app.calls.saves[0].body, REF);
+  } finally { release(); await app.close(); }
+});

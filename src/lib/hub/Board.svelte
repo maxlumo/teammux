@@ -32,7 +32,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { draftOf, draftDirty, draftValid, draftPatch, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, assignNotes, chipCols, assigneeView, rememberBackends } from './board.ts';
+  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, assignNotes, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
   import { flip } from 'svelte/animate';
@@ -865,6 +865,12 @@
   // drawer's close sees it — same territory rule as the files partition.
   // (The note action row peels FIRST, via its own window-capture listener
   // above — it stops propagation, so this handler never sees that press.)
+  /** The submit chord of a field (board #36, #348): `run` is the field's own
+   * guarded save (createIssue / saveDraft hold their busy, blocked and
+   * not-contentless gates, so a chord is a trigger, never a second path). */
+  const onChord = (run: () => void) => (e: KeyboardEvent) => {
+    if (isSubmitChord(e)) { e.preventDefault(); run(); }
+  };
   function onKey(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     if (shotView) return; // the Lightbox's own window handler closes it first
@@ -1119,7 +1125,8 @@
            edit" — a disabled input would be the same lie). The workflow
            stays live either way: status slider, assignee, note reply. -->
       {#if sel.editable}
-        <input class="d-title-input" bind:value={draft.title} placeholder={t('boardTitlePh')} readonly={submitting} />
+        <input class="d-title-input" bind:value={draft.title} placeholder={t('boardTitlePh')} readonly={submitting}
+          onkeydown={onChord(saveDraft)} />
       {:else if sel.title.trim()}
         <div class="d-title-static">{sel.title}</div>
       {/if}
@@ -1150,7 +1157,7 @@
       </div>
       {#if sel.editable}
         <textarea class="d-body-edit" bind:this={bodyEl} bind:value={draft.body} use:autoGrow={draft.body} placeholder={t('boardBodyPh')} rows="3"
-          onpaste={pasteInto(bodyStage)} readonly={submitting}></textarea>
+          onkeydown={onChord(saveDraft)} onpaste={pasteInto(bodyStage)} readonly={submitting}></textarea>
         <div class="attach-line">
           <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || bodyStage.attaching}
             pending={bodyStage.attaching} onclick={() => pickFor(bodyStage)} />
@@ -1263,7 +1270,7 @@
            composition's Enter commits the candidate text, never the issue
            (the note box's precedent, board #28). -->
       <textarea class="d-body-edit fill" placeholder={t('boardBodyPh')} bind:this={createEl} bind:value={nBody}
-        onkeydown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); createIssue(); } }}
+        onkeydown={onChord(createIssue)}
         onpaste={pasteInto(createStage)} readonly={submitting}></textarea>
       <div class="attach-line">
         <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || createStage.attaching}

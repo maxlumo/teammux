@@ -477,10 +477,10 @@ test('the create form submits from the keyboard: title Enter, body Cmd/Ctrl+Ente
   // Owner (2026-09-01): "我在 board 填写完 issue 描述后，可以 cmd+enter 直接
   // 提交确认". The body is MULTI-LINE, so a bare Enter must stay a newline —
   // the submit chord is Cmd+Enter (mac) / Ctrl+Enter (everywhere else), the
-  // pair every chat product speaks. Both modifiers, one handler: metaKey OR
-  // ctrlKey, so the contract holds cross-platform.
+  // pair every chat product speaks. Both modifiers, one definition:
+  // isSubmitChord (board.ts, #348) — metaKey OR ctrlKey, never mid-IME.
   assert.match(source,
-    /d-body-edit fill[^>]*onkeydown=\{\(e\) => \{ if \(e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\) && !e\.isComposing\) \{ e\.preventDefault\(\); createIssue\(\); \} \}\}/su,
+    /d-body-edit fill[^>]*onkeydown=\{onChord\(createIssue\)\}/su,
     'the create body submits on Cmd/Ctrl+Enter only — a bare or Shift Enter falls through to a real newline');
   // The IME guard is load-bearing on BOTH create inputs: a composition's
   // Enter commits the candidate text, never the issue (the note box set the
@@ -494,12 +494,30 @@ test('the create form submits from the keyboard: title Enter, body Cmd/Ctrl+Ente
   // submit path (createIssue itself holds the not-contentless + busy gates,
   // so a submit with neither field filled is a no-op from any trigger).
   const triggers = [...source.matchAll(/e\.preventDefault\(\); createIssue\(\);/g)].length;
-  assert.equal(triggers, 2, 'exactly two keyboard trigger sites (title, body) — the button references the fn');
+  assert.equal(triggers, 1, 'one hand-written trigger (the title Enter); the body goes through onChord');
+  assert.equal([...source.matchAll(/onChord\(createIssue\)/g)].length, 1, 'the create body is the one chord site for create');
   assert.match(source, /onclick=\{createIssue\}/u, 'the ✓ button shares the one submit');
-  // The DETAIL editor deliberately does NOT take the chord (lead, board #36:
-  // create body is the scope; the docs mandate no uniformity): its save is
-  // the diffed, guarded saveDraft button.
-  assert.ok(!/d-body-edit" [^>]*onkeydown/su.test(source), 'the detail body editor binds no keydown');
+});
+
+test('the detail editor saves from the keyboard with the SAME chord as create: Cmd/Ctrl+Enter in the title or the body = ✓ (board #348)', async () => {
+  // Owner: "board 界面里如果 edit 的时候，cmd + enter 确认的快捷键就失效了，要和
+  // 创建 issue 时一样". #36 left the detail editor out on purpose (create was
+  // its scope); the owner now wants one habit for both forms.
+  // ONE definition of the chord, and ONE wrapper that turns it into a trigger.
+  const board = await readFile(new URL('./board.ts', import.meta.url), 'utf8');
+  assert.match(board, /export const isSubmitChord = \(e: \{ key: string; metaKey: boolean; ctrlKey: boolean; isComposing: boolean \}\): boolean =>\s*e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\) && !e\.isComposing;/u,
+    'metaKey OR ctrlKey, and an IME composition never submits');
+  assert.equal([...source.matchAll(/isSubmitChord\(/g)].length, 1, 'Board asks the chord in exactly one place');
+  assert.match(source, /const onChord = \(run: \(\) => void\) => \(e: KeyboardEvent\) => \{\s*if \(isSubmitChord\(e\)\) \{ e\.preventDefault\(\); run\(\); \}\s*\};/u);
+  // Both edit fields (the title input and the body textarea) bind it to the
+  // same guarded saveDraft the ✓ button runs — a trigger, not a second save.
+  assert.match(source, /<input class="d-title-input"[^>]*onkeydown=\{onChord\(saveDraft\)\}/su, 'the detail title input saves on the chord');
+  assert.match(source, /<textarea class="d-body-edit" bind:this=\{bodyEl\}[^>]*onkeydown=\{onChord\(saveDraft\)\}/su, 'the detail body saves on the chord');
+  assert.equal([...source.matchAll(/onChord\(saveDraft\)/g)].length, 2, 'title and body, nothing else');
+  assert.match(source, /onclick=\{saveDraft\}/u, 'the ✓ button shares the one save');
+  // The note box keeps its own plain Enter (a one-line reply, board #28).
+  assert.match(source, /note-input[^>]*onkeydown=\{\(e\) => \{ if \(e\.key === 'Enter' && !e\.shiftKey && !e\.isComposing\) \{ e\.preventDefault\(\); addNote\(\); \} \}\}/su,
+    'the note field is not part of the chord');
 });
 
 test('the sidebar consumes ONE bulk counts read and reacts to local writes at once (board #39)', () => {
@@ -950,7 +968,7 @@ test('every submit acts on its frozen context, never the live cur/sel; the page 
 });
 
 test('the whole draft is locked while it is submitted, and a saved draft adopts what was sent (board #329 review)', () => {
-  assert.match(source, /<input class="d-title-input" bind:value=\{draft\.title\} placeholder=\{t\('boardTitlePh'\)\} readonly=\{submitting\} \/>/u);
+  assert.match(source, /<input class="d-title-input" bind:value=\{draft\.title\} placeholder=\{t\('boardTitlePh'\)\} readonly=\{submitting\}\s*onkeydown=\{onChord\(saveDraft\)\} \/>/u, 'the locked title input also carries the #348 chord');
   assert.match(source, /disabled=\{submitting\} onclick=\{\(\) => \{ if \(!submitting\) draft\.status = st; \}\}/u);
   assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting\}/gu)].length, 2);
   assert.equal([...source.matchAll(/onremove=\{\(i\) => \{ if \(!submitting\) \w+Stage\.remove\(i\); \}\}/gu)].length, 3);

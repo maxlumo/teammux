@@ -354,8 +354,13 @@ completion).
   Ctrl+Enter** (both modifiers, cross-platform) — a bare or Shift Enter in
   the body stays a real newline, an IME composition's Enter commits the
   candidate text and never the issue (on the title too), and every trigger
-  is the same createIssue the ✓ button calls. The DETAIL editor takes no
-  chord — its save is the diffed, guarded Save button.
+  is the same createIssue the ✓ button calls. The DETAIL editor speaks the
+  same chord (board #348, owner 2026-10-15: "edit 的时候 cmd + enter 确认的
+  快捷键就失效了，要和创建 issue 时一样"): **Cmd+Enter / Ctrl+Enter** in the
+  title or the body saves like the ✓ and returns to the board, and every
+  refusal of the button is a refusal of the chord (nothing changed, a
+  contentless draft, an upload in flight); the note box keeps its plain
+  Enter.
 - The four areas tile as **1, 2 or 4 columns — never 3** (board #27: with
   four areas, three across orphans the fourth on its own row). The count is
   decided by the BOARD's own container width (CSS container queries), so

@@ -35,6 +35,14 @@ export const draftDirty = (draft: IssueDraft, issue: IssueLike): boolean =>
 export const draftValid = (draft: IssueDraft): boolean =>
   draft.title.trim().length > 0 || draft.body.trim().length > 0;
 
+/** The submit chord of a board field (board #36, #348): Cmd+Enter on a Mac,
+ * Ctrl+Enter everywhere else. A bare or Shift Enter stays a newline in a
+ * multi-line field, and an IME composition's Enter commits the candidate
+ * text, never the form. The ONE definition: create and edit both ask it, and
+ * what they do with a `true` is their own guarded save. */
+export const isSubmitChord = (e: { key: string; metaKey: boolean; ctrlKey: boolean; isComposing: boolean }): boolean =>
+  e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing;
+
 /** The chars kept when a titleless issue is identified by its body. Mirrors
  * the Rust `projects::ISSUE_REF_CHARS` — the two ends of the same fallback. */
 export const ISSUE_REF_CHARS = 40;
