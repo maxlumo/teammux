@@ -192,10 +192,16 @@ pub fn sniff_codex(pane: &str) -> Vitals {
 /// no items; a missed reading is covered by `sniff_remembered`'s memory, and
 /// is always better than a confident wrong one.
 ///
-/// The residual, named: a capture that has a composer and NO footer at all,
-/// whose last two lines are someone's unmarked content, can still be read.
-/// Only a text pattern for the hints row would close that, and a fixed
-/// pattern for a CLI's furniture is what rotted in #346 and #361.
+/// The residuals, named as narrowly as they are true (reviewer's P2, #373):
+/// this excludes everything above the last two non-empty lines, not every
+/// quotation. Still readable: a capture with a composer and NO footer whose
+/// last two lines are unmarked content (live, only a pane mid-paint); and a
+/// footer with NO hints row under it, where the second candidate is then the
+/// content directly above the footer, so an unmarked quote there can lend an
+/// item the real footer does not paint. `codex_context_left`'s whole-pane
+/// scan has its own, wider exposure, bounded by its anchors and the marker
+/// guard alone. All of them would need a text pattern for codex's own
+/// furniture to close, which is what rotted in #346 and #361.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn footer_zone(pane: &str) -> Vec<&str> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
