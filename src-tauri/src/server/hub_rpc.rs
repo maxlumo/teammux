@@ -1399,6 +1399,27 @@ fn deliver_mentions(
     msg_id: &str,
     to_sender: bool,
 ) -> Vec<(String, &'static str)> {
+    deliver_mentions_with(session, from, body, room, before_seq, msg_id, to_sender, crate::tmux::list_panes)
+}
+
+/// `deliver_mentions` with the pane lister injected — the same seam
+/// `delivery::deliver_with` takes for the input mode. It exists so the one
+/// thing no real session can stage safely is testable: tmux answering with an
+/// ERROR (board #347 review P1-A). Making a live tmux unreachable would mean
+/// moving the process-global socket or environment, which is exactly what
+/// board #349's incidents were about.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[allow(clippy::too_many_arguments)]
+fn deliver_mentions_with(
+    session: &str,
+    from: &str,
+    body: &str,
+    room: &str,
+    before_seq: Option<i64>,
+    msg_id: &str,
+    to_sender: bool,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+) -> Vec<(String, &'static str)> {
     use crate::projects::agents;
 
     let mentions = crate::address::mention_names(body);
@@ -1410,7 +1431,7 @@ fn deliver_mentions(
     // mention is unreachable and the sender must still hear it (board #347
     // review P1-B: the whole session being stopped was the one case that
     // stayed silent). `offline_report` runs with no panes and no deliveries.
-    let panes = match crate::tmux::list_panes(session) {
+    let panes = match list_panes(session) {
         Ok(panes) => panes,
         // Two different facts (review P1-A, 02:30): tmux SAYS the session is
         // not there — then every declared name is honestly `stopped` — or
@@ -2403,6 +2424,40 @@ mod tests {
         assert_eq!(offline_lines.len(), 2, "one per name: {offline_lines:?}");
         assert!(offline_lines[0].starts_with("[tmm] offline ghost —") && offline_lines[0].contains("(stopped)"), "{offline_lines:?}");
         assert!(offline_lines[1].starts_with("[tmm] offline nobody —") && offline_lines[1].contains("(unknown)"), "{offline_lines:?}");
+    }
+
+    /// Board #347 review P1-A (02:30): when tmux cannot LIST the panes, "the
+    /// session is gone" and "tmux could not be asked" are different facts.
+    /// Both leave every mention unreached and both must say so; only the
+    /// first may be called by a name a project knows, and the second must
+    /// not claim anything stopped. The lister is injected, so no tmux is
+    /// moved or broken to stage it.
+    #[test]
+    fn an_unreachable_tmux_is_unchecked_and_a_missing_session_is_not() {
+        crate::projects::tests::use_test_store();
+        let run = |error: &str| {
+            let (session, room) = unique("unchecked");
+            let offline = deliver_mentions_with(
+                &session, "lead", "@dev @ghost hi", &room, None, "m1", false,
+                |_| Err(error.to_string()),
+            );
+            let rows: Vec<String> = rooms::history_page(&room, None, 20)["messages"].as_array().unwrap().iter()
+                .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect();
+            (offline, rows)
+        };
+
+        // tmux says the session is not there (measured 3.6a): honest, and the
+        // project declares nothing here, so the words are `unknown`.
+        let (gone, rows) = run("tmux error: can't find session: nope\n");
+        assert_eq!(gone, vec![("dev".to_string(), "unknown"), ("ghost".to_string(), "unknown")]);
+        assert!(rows.iter().all(|r| r.contains("(unknown)")), "{rows:?}");
+
+        // tmux could not be asked: NOTHING is asserted about any process.
+        let (blind, rows) = run("tmux error: error connecting to /tmp/x/sock (Permission denied)\n");
+        assert_eq!(blind, vec![("dev".to_string(), "unchecked"), ("ghost".to_string(), "unchecked")]);
+        assert_eq!(rows.len(), 2, "still one row per name — silence is the bug: {rows:?}");
+        assert!(rows.iter().all(|r| r.contains("(unchecked: tmux could not be asked)")), "{rows:?}");
+        assert!(rows.iter().all(|r| !r.contains("stopped")), "never a confident stopped: {rows:?}");
     }
 
     #[test]
