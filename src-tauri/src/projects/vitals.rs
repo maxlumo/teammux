@@ -618,6 +618,17 @@ mod tests {
         assert!(after.is_empty());
     }
 
+    /// The measured SHAPE of a codex capture (0.162.1, 2026-10-15): content,
+    /// the composer prompt at column zero, then the status line and the
+    /// hints row under it. Every footer fixture below is a footer line
+    /// inside this shape, because a footer outside it is not a footer —
+    /// `footer_zone` only reads under the composer (board #373 review P1).
+    fn codex_pane(footer: &str) -> String {
+        format!(
+            "\u{2022} ok\n\u{203a} Ask Codex to do anything\n\n{footer}\n  ? for shortcuts                 \u{26a0} 1 warning \u{b7} f2 to view\n"
+        )
+    }
+
     /// codex-cli 0.148.0, real pane capture (2026-08-22): the DEFAULT
     /// footer (no `[tui]` section) under the composer.
     #[test]
@@ -653,18 +664,18 @@ mod tests {
     /// which says LEFT. Every item is found by shape, so the order is free.
     #[test]
     fn codex_status_line_items_are_found_by_shape() {
-        let v = sniff_codex("  Context 1% used \u{b7} openai.gpt-5.6-sol default \u{b7} /tmp/tmm-codex-ctx\n");
+        let v = sniff_codex(&codex_pane("  Context 1% used \u{b7} openai.gpt-5.6-sol default \u{b7} /tmp/tmm-codex-ctx"));
         assert_eq!(v.model.as_deref(), Some("openai.gpt-5.6-sol"));
         assert_eq!(v.effort.as_deref(), Some("default"));
         assert_eq!(v.context_pct, Some(1));
 
-        let v = sniff_codex("  openai.gpt-5.6-sol \u{b7} Context 99% left \u{b7} 13.8K used \u{b7} /tmp/tmm-codex-ctx\n");
+        let v = sniff_codex(&codex_pane("  openai.gpt-5.6-sol \u{b7} Context 99% left \u{b7} 13.8K used \u{b7} /tmp/tmm-codex-ctx"));
         assert_eq!(v.model.as_deref(), Some("openai.gpt-5.6-sol"));
         assert_eq!(v.context_pct, Some(1));
 
         // Narrow: the effort word is cut — a `…` word is not an effort, and
         // the model + context still read.
-        let v = sniff_codex("  Context 1% used \u{b7} openai.gpt-5.6-sol defa\u{2026}\n");
+        let v = sniff_codex(&codex_pane("  Context 1% used \u{b7} openai.gpt-5.6-sol defa\u{2026}"));
         assert_eq!(v.model.as_deref(), Some("openai.gpt-5.6-sol"));
         assert_eq!(v.effort, None);
         assert_eq!(v.context_pct, Some(1));
@@ -719,20 +730,20 @@ mod tests {
 
         // The DEFAULT footer (no `[tui]` section) still appends the effort,
         // now after the route: `<display name> [<effort>] · <cwd>`.
-        let v = sniff_codex("  GPT-6.1 Sol (Global) medium \u{b7} /tmp/tmm-373-measure/cwd\n");
+        let v = sniff_codex(&codex_pane("  GPT-6.1 Sol (Global) medium \u{b7} /tmp/tmm-373-measure/cwd"));
         assert_eq!(v.model.as_deref(), Some("GPT-6.1 Sol (Global)"));
         assert_eq!(v.effort.as_deref(), Some("medium"));
         assert_eq!(v.context_pct, None);
 
         // A route with spaces in it (`us.openai.gpt-6-astra` →
         // `GPT-6 Astra (US cross-region)`) is the same shape.
-        let v = sniff_codex("  GPT-6 Astra (US cross-region) \u{b7} Context 7% used \u{b7} ~/x\n");
+        let v = sniff_codex(&codex_pane("  GPT-6 Astra (US cross-region) \u{b7} Context 7% used \u{b7} ~/x"));
         assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (US cross-region)"));
         assert_eq!(v.context_pct, Some(7));
 
         // The older slug form keeps reading — a CLI downgrade is one `npm
         // install` away, and other hosts are on 0.154.x.
-        let v = sniff_codex("  openai.gpt-5.6-sol \u{b7} Context 5% used \u{b7} /tmp/x\n");
+        let v = sniff_codex(&codex_pane("  openai.gpt-5.6-sol \u{b7} Context 5% used \u{b7} /tmp/x"));
         assert_eq!(v.model.as_deref(), Some("openai.gpt-5.6-sol"));
         assert_eq!(v.context_pct, Some(5));
 
@@ -742,6 +753,75 @@ mod tests {
         assert!(codex_footer("GPT-6.1 Sol (Glob\u{2026}").is_none());
     }
 
+    /// Which LINE may be the footer (board #373 review P1, reviewer 01:01:
+    /// "context独立可读不等于任意行中的context段都能认证footer"). A
+    /// `·`-joined item is not rare enough to authenticate a line, and this
+    /// very project types room messages that QUOTE a footer verbatim. So the
+    /// footer is where codex paints it — the bottom of the TUI, measured as
+    /// the second non-empty line from the bottom on 0.162.1 in every state —
+    /// and never a line that wears one of codex's content markers or a
+    /// `[tmm …]` stamp.
+    #[test]
+    fn only_the_bottom_of_the_pane_can_be_the_footer() {
+        // The validator's three reproductions, verbatim (01:06). Each line
+        // carries a LEGITIMATE context item; none of them is a footer.
+        let chat = "\u{203a} [tmm chat 2026-10-15 00:32] human: example \u{b7} Context 3% used \u{b7} /tmp/x\n";
+        assert_eq!(sniff_codex(chat), Vitals::default(), "a line we typed is not a reading");
+        let prose = "\u{2022} Explanation of footer \u{b7} Context 42% used \u{b7} /tmp/x\n";
+        assert_eq!(sniff_codex(prose), Vitals::default(), "codex's own bullet is content");
+        let quoted = [
+            "\u{2022} the reviewer pane says",
+            "    openai.gpt-5.6-sol \u{b7} Context 3% used \u{b7} /tmp/quoted",
+            "\u{203a} Ask Codex to do anything",
+        ]
+        .join("\n");
+        assert_eq!(sniff_codex(&quoted), Vitals::default(), "an indented quote ABOVE the composer is not the footer");
+
+        // The real paint, in the shape measured in every state: the composer
+        // at column zero, the status line under it, the hints row last.
+        let real = [
+            "\u{2022} Working (7s \u{2022} esc to interrupt)",
+            "\u{203a} Ask Codex to do anything",
+            "",
+            "  GPT-6.1 Sol (Global) \u{b7} Context 3% used \u{b7} /tmp/x",
+            "  ? for shortcuts                      \u{26a0} 1 warning \u{b7} f2 to view",
+        ]
+        .join("\n");
+        let v = sniff_codex(&real);
+        assert_eq!(v.model.as_deref(), Some("GPT-6.1 Sol (Global)"));
+        assert_eq!(v.context_pct, Some(3));
+
+        // No composer in the capture (a startup screen, a modal): no zone,
+        // so no items — a missed reading, never a wrong one. Both the bare
+        // line and a capture whose BOTTOM line looks like a footer: without
+        // the composer there is nothing to measure the position against.
+        assert_eq!(sniff_codex("  GPT-6.1 Sol (Global) \u{b7} Context 3% used \u{b7} /tmp/x\n"), Vitals::default());
+        let no_composer = [
+            "\u{2022} ok",
+            "  GPT-6.1 Sol (Global) \u{b7} Context 3% used \u{b7} /tmp/x",
+        ]
+        .join("\n");
+        assert_eq!(sniff_codex(&no_composer), Vitals::default());
+
+        // The `/status` card is in the SCROLLBACK on purpose: its own anchor
+        // authenticates it, so THAT reading keeps the whole pane…
+        let card = [
+            "  Context window:      97% left (42.9K used / 998K)",
+            "\u{203a} Ask Codex to do anything",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        assert_eq!(sniff_codex(&card).context_pct, Some(3));
+        // …but not off a line we typed that quotes it.
+        let quoted_card = [
+            "\u{203a} [tmm chat 2026-10-15 00:32] human: it said Context window: 97% left (42.9K used / 998K)",
+            "\u{203a} Ask Codex to do anything",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        assert_eq!(sniff_codex(&quoted_card).context_pct, None);
+    }
+
     /// The model item and the context item are read INDEPENDENTLY (board
     /// #373): a `Context NN% used|left` segment anchors the footer on its
     /// own, so the next time codex renames the model item the context
@@ -749,12 +829,14 @@ mod tests {
     /// without a model and the owner lost both readings at once.
     #[test]
     fn a_context_segment_anchors_the_footer_without_any_model() {
-        let v = sniff_codex("  Some Future Model Item \u{b7} Context 42% used \u{b7} /tmp/x\n");
+        // A model item in some shape we do not know yet — the next rename —
+        // painted where the footer is painted.
+        let v = sniff_codex(&codex_pane("  Sol-7 Nova [global tier] \u{b7} Context 42% used \u{b7} /tmp/x"));
         assert_eq!(v.model, None, "unreadable — and that is all that is lost");
         assert_eq!(v.context_pct, Some(42));
 
-        let v = sniff_codex("  \u{f8ff} whatever codex paints next \u{b7} Context 42% used\n");
-        assert_eq!(v.context_pct, Some(42));
+        let v = sniff_codex(&codex_pane("  Sol-7 Nova [global tier] \u{b7} Context 42% used"));
+        assert_eq!(v.context_pct, Some(42), "the context item needs no cwd beside it");
         assert_eq!(v.model, None);
     }
 
@@ -901,4 +983,3 @@ mod tests {
         assert!(sniff_omp("").is_empty());
     }
 }
-

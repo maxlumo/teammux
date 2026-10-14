@@ -107,23 +107,29 @@ use crate::projects::vitals::{looks_like_model, Vitals};
 /// `<model> [<effort>] · <cwd>`, and `context-remaining` spells
 /// `Context 99% left`, so every item is found BY SHAPE, not by position:
 /// a `Context NN% used|left` segment is the context, a segment starting
-/// `/`/`~` is the cwd, and a 1–2-token segment whose first token carries a
-/// digit is `<model> [<effort>]`. A line counts as the footer only when it
-/// has a model segment AND (a cwd or a context segment) — prose with one
-/// mid-sentence `·` has neither anchor.
+/// `/`/`~` is the cwd, and the rest is `<model> [<effort>]`.
+///
+/// WHICH LINE is the footer is a separate question from what its items say,
+/// and the answer is a POSITION, not a pattern (board #373 review P1,
+/// reviewer and validator 01:01–01:06, orchestrator ruling 01:06). A
+/// `·`-joined item is not rare enough to authenticate a line: the validator
+/// reproduced three readings off ordinary content — an indented quote of a
+/// footer, a sentence containing `· Context 42% used ·`, and a `[tmm chat]`
+/// line we had typed ourselves (this project's own room messages quote
+/// footers verbatim). So only `footer_zone` may be read for items.
 ///
 /// Context is also spelled `NN% context left` (codex's right-footer format
 /// string; `100% context left` is its zero-use rendering) and, in the
 /// `/status` card, `NN% left (21.5K used / 258K)` — both say LEFT where kiro
-/// says USED, so those readings are `100 - NN`.
+/// says USED, so those readings are `100 - NN`. Those two scan the WHOLE
+/// pane, because the card is in the scrollback and their anchors do
+/// authenticate themselves (the literal `% context left`, or `% left (`
+/// together with `used /`); they take the same line guard below.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn sniff_codex(pane: &str) -> Vitals {
     let mut v = Vitals::default();
-    for line in pane.lines().rev() {
-        let line = line.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
+    // The status-line ITEMS come only from where codex paints them.
+    for line in footer_zone(pane) {
         if let Some(f) = codex_footer(line) {
             if v.model.is_none() {
                 if let Some(m) = f.model {
@@ -135,16 +141,88 @@ pub fn sniff_codex(pane: &str) -> Vitals {
                 v.context_pct = f.context_pct;
             }
         }
-        if v.context_pct.is_none() {
+    }
+    // The self-anchored spellings read from the whole pane, because the
+    // `/status` card is in the scrollback — but never off a line that is
+    // somebody's content.
+    if v.context_pct.is_none() {
+        for line in pane.lines().rev().filter(|l| !codex_content_line(l)) {
             if let Some(pct) = codex_context_left(line) {
                 v.context_pct = Some(pct);
+                break;
             }
-        }
-        if v.model.is_some() && v.context_pct.is_some() {
-            break;
         }
     }
     v
+}
+
+/// The lines of a capture that MAY be the status line, newest first.
+///
+/// The footer is a POSITION: codex paints it at the bottom of its TUI, under
+/// the COMPOSER — `›` (or `>`) at column zero, the one line nothing else can
+/// be. Measured on codex-cli 0.162.1 (2026-10-15) in every state we could
+/// produce — idle, mid-turn (`• Working (7s • esc to interrupt)`), just after
+/// a turn, with the `/status` card open, at 20/28/36/44/100 columns, and on
+/// the live reviewer pane — the zone under the composer is exactly two
+/// non-empty lines: the status line, then `? for shortcuts … ⚠ N warnings`.
+/// `FOOTER_ZONE_LINES` = 3 is that plus one line of slack, for a status line
+/// that wraps or a build with another hints row.
+///
+/// What this keeps out is the whole class the reviewer and the validator
+/// found: everything ABOVE the composer — prose, a tool's output, an
+/// indented quote of a footer, a `[tmm chat]` line we typed ourselves — is
+/// not in the zone, whatever it contains. A capture with no composer line
+/// (a startup screen, a modal) has no zone and yields no items; a missed
+/// reading is covered by `sniff_remembered`'s memory, and is always better
+/// than a confident wrong one.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn footer_zone(pane: &str) -> Vec<&str> {
+    let lines: Vec<&str> = pane.lines().collect();
+    // The LAST composer line: a resumed pane holds older ones in scrollback.
+    let Some(composer) = lines.iter().rposition(|l| is_composer_line(l)) else {
+        return Vec::new();
+    };
+    lines[composer + 1..]
+        .iter()
+        .rev()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !codex_content_line(l))
+        .take(FOOTER_ZONE_LINES)
+        .collect()
+}
+
+/// How many non-empty lines under the composer may be read as the footer.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const FOOTER_ZONE_LINES: usize = 3;
+
+/// codex's composer prompt at COLUMN ZERO — `› Ask Codex to do anything`,
+/// `› /status`, `› ` with whatever is being typed (measured 0.162.1; `>` is
+/// the ascii fallback). Column zero is the point: an indented `›` is a quote
+/// inside somebody's content, and the footer and the hints row are both
+/// indented by two spaces.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_composer_line(line: &str) -> bool {
+    line.starts_with('\u{203a}') || line.starts_with('>')
+}
+
+/// True when the line is somebody's CONTENT rather than codex's own
+/// furniture, so no reading may come off it (board #373 review P1; kiro's
+/// identical rule is #346). Measured markers on this host: a line beginning
+/// with one of codex's block glyphs — `›` the composer stamp, `•` its
+/// message and progress bullet (`• PONG`, `• Working (7s • esc to
+/// interrupt)`), `■` an error block (0.154.0, board #362: `■ unexpected
+/// status 401 Unauthorized …`), `>` the ascii fallback — or a line carrying
+/// a `[tmm …]` stamp, which is a line WE typed into the pane and whose body
+/// may quote a footer verbatim. The zone's position does the rest: a wrapped
+/// continuation of such a block carries no marker of its own.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn codex_content_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with(['\u{203a}', '\u{2022}', '\u{25a0}', '>'])
+        || line.contains("[tmm chat ")
+        || line.contains("[tmm status ")
+        || line.contains("[tmm done]")
 }
 
 pub(crate) struct CodexFooter {
