@@ -16,6 +16,7 @@
   import { moveMs } from '../ui/motion.ts';
   import ServerTag from '../ui/ServerTag.svelte';
   import type { HubUnionRow } from '../app/hub-union.svelte.ts';
+  import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
 
   type MenuPosition = { x: number; y: number }
     | { anchor: ReturnType<typeof anchorOf>; trigger: Element };
@@ -47,6 +48,8 @@
     tick?: number;
     /** Unread news per project (board #322): `hub_unread`'s summary, by session. */
     roomUnread?: Record<string, { count: number }>;
+    /** Single with more servers saved (#364): the foot row naming the server. */
+    scopeNote?: ScopeNoteSpec | null;
     onselect?: (session: string) => void;
     /** A union entry picked: its server and session (③c-2). */
     onselectEntry?: (entry: HubUnionRow) => void;
@@ -60,7 +63,7 @@
   let {
     compact = false, open = false, rows = [], entries = null, missing = [], unavailable = [], trash = [], rowsBase = null,
     selected = '', selectedKey = '', panes = [], agentStates = {}, talkMap = {}, tick = Date.now(),
-    roomUnread = {}, onselect = () => {}, onselectEntry = () => {}, oncreate = () => {}, onclose = () => {},
+    roomUnread = {}, scopeNote = null, onselect = () => {}, onselectEntry = () => {}, oncreate = () => {}, onclose = () => {},
     onmenu = () => {}, onmenuEntry = () => {}, onrestore = () => {}, onpurge = () => {},
   }: Props = $props();
   /** ONE list shape for the template: the union's entries, or this server's
@@ -189,6 +192,7 @@
         <span class="p-main"><span class="p-top"><span class="p-name">{name}</span><span class="side-age">{t('hubUnionUnavailable')}</span></span></span>
       </div>
     {/each}
+    <ScopeNote note={scopeNote} />
     {#if trash.length}
       <button class="side-row add trash-bar" onclick={() => trashOpen = !trashOpen}>
         <Icon name={trashOpen ? 'chevron-down' : 'trash'} size={13} />

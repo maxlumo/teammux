@@ -48,7 +48,9 @@ Primary view for interacting with tmux panes. Renders terminal output with ANSI 
   read — the Board starts nothing. With another server's rows listed, an empty list on this server
   says "No sessions on this server"; search stays this server's.
   A server whose list has not arrived is listed as "no list yet". The section
-  never waits for this server's own first Projects answer. A hidden member's
+  never waits for this server's own first Projects answer. In Single with
+  more servers saved the sidebar ends with the Hub's "Showing <server> only ·
+  N more saved" row (#364, hub.md). A hidden member's
   page keeps its list current on the same 20 s list cadence the Hub uses
   (one `list_sessions_with_panes` per tick, nothing of a pane) and on its
   server's reconnect; the shown page has no poll of its own. The page head

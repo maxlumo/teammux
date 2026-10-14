@@ -39,6 +39,7 @@
   import { hoverInfo } from '../ui/hover.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
+  import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
 
   // The scope whose subtree holds this board, read once at init: its runtime
   // for the leave guard (#335 ②b-2-3) and the RPCs (②b-3), its state for that
@@ -60,7 +61,7 @@
    * the host's (`onPickServer`: focus that server, land on that board — D2);
    * the board body stays this server's (D3). Null in Single: this server's
    * list, untagged, as before. */
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, onPickServer = null }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
   // Hub's reveal: pinned at its width, the track's factor moving (reveal.ts).
@@ -1027,6 +1028,7 @@
           <span class="p-main"><span class="p-top"><span class="p-name">{u.name}</span><span class="side-age">{t('hubUnionUnavailable')}</span></span></span>
         </div>
       {/each}
+      <ScopeNote note={scopeNote} />
     </div>
   </aside>
   {#if sideOpen}

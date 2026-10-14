@@ -78,9 +78,11 @@
    * foreign row picked is the host's to land (`onPickServer`: focus that
    * server, select there); a foreign row's menu acts on THAT server's api
    * (`onRow`) or does nothing when it has no live runtime. Null: this Hub's
-   * own list, as before (Single, or a host without the notion). */
+   * own list, as before (Single, or a host without the notion).
+   * `scopeNote` (#364): Single with more servers saved — the sidebar's foot
+   * row naming the server shown (`app/ScopeNote.svelte`); null otherwise. */
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null,
-    union = null, selectRequest = null, onPickServer = null } = $props();
+    union = null, scopeNote = null, selectRequest = null, onPickServer = null } = $props();
   const drawerId = $props.id();
 
   // Layout follows the viewport, not the device class (a squeezed desktop
@@ -2060,7 +2062,7 @@
     <div class="track side" bind:this={sideTrackEl}>
     <Sidebar {compact} open={sideOpen} {rows} {trash} {rowsBase} {selected}
       entries={unionList?.rows ?? null} missing={unionList ? union.included.filter((s) => unionList.missing.includes(s.id)) : []} unavailable={unionList?.unavailable ?? []} {selectedKey}
-      {panes} {agentStates} {talkMap} {tick} {roomUnread}
+      {panes} {agentStates} {talkMap} {tick} {roomUnread} {scopeNote}
       onselect={(session) => { selectProject(session); sideOpen = false; }}
       onselectEntry={pickEntry}
       onmenuEntry={(entry, at) => openCtx(at, entry.item.project.name, entryItems(entry))}

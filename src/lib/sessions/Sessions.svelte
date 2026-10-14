@@ -17,6 +17,7 @@
   import type { HoverInfo, HoverLine } from '../ui/hover.svelte.ts';
   import { flip } from 'svelte/animate';
   import { moveMs } from '../ui/motion.ts';
+  import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
   import { sessionHasAgent, paneAgent, AGENTS } from '../core/agents.ts';
   // `onPick` lets the host close its slide-over after a choice — this list is
   // Terminal's sidebar now, not a page that navigates away by itself.
@@ -31,7 +32,7 @@
    * picking one is the host's (`onPickServer`: focus that server, open the
    * pane there). Null: this server's list alone (Single). */
   let { openTerminal: openTerminalRaw, activeTarget = '', visible = false, onPick = null, onGoBack = null, chips = true,
-    union = null, onPickServer = null, foreignInline = false, foreignNames = null }: {
+    union = null, onPickServer = null, foreignInline = false, foreignNames = null, scopeNote = null }: {
     openTerminal: (session: string, target: string, command?: string) => void;
     activeTarget?: string;
     visible?: boolean;
@@ -53,6 +54,9 @@
      * shows the name of the declared project its session belongs to when it
      * differs from the session — the identity the local row shows (#357). */
     foreignNames?: ReadonlyMap<string, string> | null;
+    /** Single with more servers saved (#364): the sidebar's foot row naming
+     * the server shown. The page dialect (`chips`) has no sidebar foot. */
+    scopeNote?: ScopeNoteSpec | null;
   } = $props();
   // This server's RPCs, read once at init (board #335 ②b): the subtree's
   // provider decides which server that is, never a module-level default.
@@ -775,6 +779,7 @@
       {/each}
     </div>
     {/if}
+    {#if !chips}<ScopeNote note={scopeNote} />{/if}
   </div>
 
   {#if showNew}

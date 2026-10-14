@@ -63,6 +63,8 @@ const msgs: Record<string, Record<string, string>> = {
     hubProjects: 'Projects',
     hubUnionMissing: 'no list yet',
     hubUnionUnavailable: 'That server is not connected',
+    // #364: Single mode, more servers saved — the foot row of a sidebar.
+    scopeNoteSingle: 'Showing {name} only · {n} more saved',
     hubRegistry: 'Agent Registry',
     hubSpawn: 'agent',
     hubRosterExpand: 'Expand agents',
@@ -799,6 +801,7 @@ const msgs: Record<string, Record<string, string>> = {
     hubProjects: '项目',
     hubUnionMissing: '列表未到',
     hubUnionUnavailable: '那台服务端未连接',
+    scopeNoteSingle: '只显示 {name} · 还有 {n} 台已保存',
     hubRegistry: 'Agent 注册表',
     hubSpawn: '拉起 agent',
     hubRosterExpand: '展开 agent 列表',

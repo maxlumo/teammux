@@ -68,3 +68,16 @@ test('app navigation shortcuts yield to focused menu and picker controls (#165)'
   assert.match(guard, /\[role="menu"\]/u);
   assert.match(guard, /\[role="dialog"\]/u);
 });
+
+test('the server picker opens ABOVE a phone sidebar sheet — the sheet s ScopeNote row is one of its doors (#364)', async () => {
+  // Measured 2026-10-14 at 390 (touch): at z 24 the picker opened UNDER the
+  // z 26 sheet whose foot row had opened it; elementFromPoint hit the sheet.
+  const css = await readFile(new URL('./app.css', import.meta.url), 'utf8');
+  const z = (re: RegExp, text: string) => Number(re.exec(text)?.[1] ?? NaN);
+  const sheet = z(/\.side-sheet\.side-sheet\.side-sheet \{[^}]*z-index: (\d+)/u, css);
+  const strip = z(/\.sys-sidebar \{[^}]*?z-index: (\d+)/u, source);
+  const menu = z(/\.server-menu \{[^}]*z-index: (\d+)/u, source);
+  assert.ok(Number.isFinite(sheet) && Number.isFinite(menu), `both layers declare a z: sheet ${sheet}, menu ${menu}`);
+  assert.ok(menu > sheet && (!Number.isFinite(strip) || menu > strip), `picker ${menu} above the sheet ${sheet} and its status strip ${strip}`);
+  assert.ok(menu < 60, 'and under the Dialog tier (60), so a rename confirm still covers it');
+});

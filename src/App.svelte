@@ -1598,6 +1598,13 @@
    * the same shape as the Hub's; a foreign session is a SELECTOR (D3). */
   const sessionsUnion = createSessionsUnion();
   const sessionsUnionFor = $derived(connMode === 'aggregate' ? { source: sessionsUnion, included: tagScope.included } : null);
+  /** Single with more servers saved (board #364): every sidebar says which
+   * server it shows and how many more are saved, and opens the server picker
+   * (`app/ScopeNote.svelte`). Aggregate has its tags and missing rows; null. */
+  const scopeNote = $derived(connMode === 'single' && serverList.length > 1 ? {
+    name: serverName, others: serverList.length - 1,
+    onopen: toggleServerMenu, expanded: serverMenuOpen, controls: serverPickerId,
+  } : null);
   /** Another server's session picked in the Terminal sidebar (③c-3): focus
    * that server (D2) and open the pane THERE — `openTerminal` writes into
    * the focused tree's view, which the focus move just made that server's.
@@ -3995,7 +4002,7 @@
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
         <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
-          union={hubUnionFor} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} />
+          union={hubUnionFor} {scopeNote} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
@@ -4014,7 +4021,7 @@
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}
         <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom}
-          union={boardUnionFor} onPickServer={pickServerBoard} />
+          union={boardUnionFor} onPickServer={pickServerBoard} {scopeNote} />
       {/if}
     </div>
     <div class="page-layer term-page" class:hidden={!shown || page !== 'terminal'} bind:this={v.termPageEl}>
@@ -4028,7 +4035,7 @@
           onGoBack={(fn) => v.sessionsGoBack = fn}
           visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
           onPick={() => sessListOpen = false}
-          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignNames={projectNames}
+          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignNames={projectNames} {scopeNote}
           chips={false} />
       </aside>
       {#if layout.isTouchDevice && sessListOpen}
@@ -4312,8 +4319,11 @@
     max-width: var(--pop-maxw, none);
     max-height: min(520px, calc(100vh / var(--ui-zoom, 1) - 16px), var(--pop-maxh, 100vh)); overflow-y: auto;
   }
+  /* z 40, Select's popover tier: since #364 the picker also opens from a
+     phone SHEET's foot row (ScopeNote), and the sheet is z 26 (its status
+     strip 27) — at 24 it opened underneath. Dialogs (60) stay above it. */
   .server-menu {
-    position: fixed; z-index: 24; width: max-content;
+    position: fixed; z-index: 40; width: max-content;
     min-width: min(220px, calc(100vw / var(--ui-zoom, 1) - 16px), var(--pop-maxw, 100vw));
     max-width: min(320px, calc(100vw / var(--ui-zoom, 1) - 16px), var(--pop-maxw, 100vw));
     max-height: min(calc(100vh / var(--ui-zoom, 1) - 16px), var(--pop-maxh, 100vh)); overflow-y: auto;

@@ -7668,6 +7668,44 @@ test('#360 (Single): no tag, no source line — one line as before #335', async 
   assert.equal(row.querySelector('.server-tag'), null, 'Single: no tag');
 });
 
+// #364 (owner 2026-10-14 08:27, phone: "侧边栏里…只有当前选择的一台"). Single
+// lists one server BY DESIGN; what was wrong is that nothing said so. Every
+// sidebar on the phone sheet path (compact) ends with the one ScopeNote row:
+// the server shown, how many more are saved, and the server picker on tap.
+const scopeNotes = (h: Awaited<ReturnType<typeof bootApp>>) => [...h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .scope-note')];
+test('#364 (phone, Single, two saved): the Hub, Board and Terminal sheets each say which server they show and open the server picker', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .hub-root .sidebar .proj-row'); i++) { await h.app.advance(500); await h.settle(); }
+  const hubNote = h.app.document.querySelector<HTMLButtonElement>('.scope-tree:not(.held) .hub-root .sidebar.side-sheet .scope-note');
+  assert.ok(hubNote, 'the Hub s phone SHEET (compact) carries the note');
+  assert.equal(hubNote.textContent?.trim(), 'Showing alpha only · 1 more saved', 'it names the focus and counts the others');
+  assert.equal(hubNote.previousElementSibling?.classList.contains('proj-row'), true, 'after the list, where the union s missing rows go');
+  assert.ok(hubNote.classList.contains('side-row') && hubNote.classList.contains('add'), 'the sidebars quiet command row, no new species');
+  assert.equal(h.app.document.querySelector('.server-menu'), null);
+  hubNote.click();
+  await h.settle();
+  assert.ok(h.app.document.querySelector('.server-menu'), 'a tap opens the one server picker');
+  assert.equal(hubNote.getAttribute('aria-expanded'), 'true');
+  const names = [...h.app.document.querySelectorAll('.server-menu .sm-pick')].map((b) => (b.textContent ?? '').trim().split(/\s/u)[0]);
+  assert.deepEqual(names, ['alpha', 'beta'], 'listing every saved server');
+  // One mounted instance per sidebar of the shown tree: Hub, Board, Terminal.
+  const where = scopeNotes(h).map((n) => n.closest('.hub-root') ? 'hub' : n.closest('.board-root, .board') ? 'board' : n.closest('.sessions, .term-page') ? 'terminal' : 'other');
+  assert.deepEqual([...new Set(where)].sort(), ['board', 'hub', 'terminal'], `every phone sidebar says it: ${where.join(',')}`);
+});
+test('#364 (phone, Aggregate): no note — the union s tags and missing rows say it', async (context) => {
+  const h = await bootApp(context, aggregateOn({ ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile' }), undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(sideRows(h).length, 4, 'both servers rows on the phone sheet');
+  assert.deepEqual(scopeNotes(h), [], 'Aggregate has no scope note');
+});
+test('#364 (Single, one saved): nothing to say — no note', async (context) => {
+  const seed = twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) });
+  const h = await bootApp(context, { ...seed, tmux_servers: JSON.stringify(JSON.parse(seed.tmux_servers).slice(0, 1)), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc: twoHubs() });
+  for (let i = 0; i < 12 && !h.app.document.querySelector('.scope-tree:not(.held) .hub-root .sidebar .proj-row'); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.scope-tree:not(.held) .hub-root .sidebar .proj-row'), 'the list is there');
+  assert.deepEqual(scopeNotes(h), []);
+});
+
 test('③c-4 (Single): one server, one list, no tag, Clear as before', async (context) => {
   const h = await bootApp(context, {
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), ...twoAlerts(), tmux_layout_mode: 'desktop',

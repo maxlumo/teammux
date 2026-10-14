@@ -107,6 +107,18 @@ completion).
   only — its 20 s list refresh and, on a push, the unread badge and the
   notification record — and opens its room when first shown. The Hub head
   wears the server tag too.
+- One server shown while more are saved (Single, board #364): the list is
+  that server's alone, and the sidebar SAYS so. Its last row, after the
+  projects, reads "Showing <server> only · N more saved" and opens the server
+  picker, where another server can be chosen; Connection settings is where
+  "All included" is. Owner 2026-10-14 08:27, on the phone: "在手机的侧边栏里，
+  我看到没有显示两种主机的连接，只有当前选择的一台" — a one-server list with
+  nothing on it read as the other machine's projects being lost. The same
+  row ends the Board's and the Terminal's sidebars (`app/ScopeNote.svelte`,
+  one component, the sidebars' quiet `.side-row.add`); Aggregate has none,
+  because its tags and "no list yet" rows already name every server. The
+  picker opens above the phone sheet that holds the row (z 40 over the
+  sheet's 26).
 
 ## Roster (agent cards)
 - One card per live window; managed agents carry the hook-derived state dot
