@@ -2476,8 +2476,20 @@
      priority (owner, 2026-09-21, board #234: "优先保证标题完整显示，可以压
      缩路径宽度，反正路径可以滚动"). The path's own min-width floor is what
      keeps it reachable. The buttons are `flex: none` and always keep their
-     box. */
-  .title-group { display: flex; align-items: center; gap: 1px; flex: 0 1 auto; min-width: 0; }
+     box.
+     The group's share is 0.0001, not 1 (#369, owner 2026-10-14 17:10: the
+     tag dropped under the name, and the path started a tag's width to the
+     right of the chevron): with weights 1000 : 1 a deficit of ~140px still
+     took ~0.1px off the group, and ANY shortfall wraps the tag — while the
+     stack, a flex item, keeps (almost) the width it had when name and tag
+     shared a line. At 0.0001 the share is ~1e-5px, below the layout unit
+     (1/64px), so the path gives up every pixel down to its floor first and
+     the tag wraps only when the head is truly out of room. Not 0: past the
+     floor the group must still shrink (the buttons-first rule above). Even
+     then a band remains where the wrapped stack is wider than its name line
+     (at most the tag + its gap, only while the path is at its floor) —
+     flex-wrap sizing has no CSS shrink-wrap; no script measures it. */
+  .title-group { display: flex; align-items: center; gap: 1px; flex: 0 0.0001 auto; min-width: 0; }
   /* Name + tag (#356, #359, #357): the Name + tag stack — `.title-stack` /
      `.name-line` — is ONE shared atom in app.css, worn by this head and the
      Board's. */

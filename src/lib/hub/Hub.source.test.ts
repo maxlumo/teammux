@@ -512,13 +512,18 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   assert.match(appCssSrc, /\.page-head \.title-stack \{[^}]*display: flex; flex-wrap: wrap;[^}]*row-gap: 2px;[^}]*min-width: 0;[^}]*\}/u, 'a wrapping row with the 2px stack rhythm');
 
   assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \{[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*\}/u, 'the phone stacks unconditionally');
-  // #363 (owner 2026-10-14: "应该紧挨着"): stacked, the 2px is measured from the
-  // NAME, not from the chevron's 30px hit box. The command in the name line
-  // takes its line height as layout height (tokens only) and stays on top of
-  // the tag, so its overflowing hit box is still its own. Measured at 390
-  // touch: name text box → tag 7.5px before, 2px after (jsdom has no layout).
-  assert.match(appCssSrc, /\.page-head \.title-stack\.stacked \.name-line > \.command-button \{\s*margin-block: calc\(\(var\(--control-line-height\) - var\(--control-height\)\) \/ 2\);\s*z-index: 1;\s*\}/u,
-    'stacked: the chevron s hit box overflows instead of setting the name line s height');
+  // #363 (owner 2026-10-14: "应该紧挨着") and #369 (the same screenshot, the
+  // desktop fit-wrap): wherever the tag is on its own line, the 2px is
+  // measured from the NAME, not from the chevron's 30px hit box. The command
+  // in the name line takes its line height as layout height (tokens only) and
+  // stays on top of the tag, so its overflowing hit box is still its own. ONE
+  // rule for every form — scoped to `.stacked` it left the wrapped desktop
+  // head with the 30px box (6.5px under the name at 820). Measured: phone
+  // 7.5 → 2px, desktop wrap 6.5 → 2px; the inline head is 42px either way
+  // (jsdom has no layout: this pin plus the validator's pixels).
+  assert.match(appCssSrc, /\.page-head \.title-stack \.name-line > \.command-button \{\s*margin-block: calc\(\(var\(--control-line-height\) - var\(--control-height\)\) \/ 2\);\s*z-index: 1;\s*\}/u,
+    'the chevron s hit box overflows instead of setting the name line s height — in BOTH forms');
+  assert.doesNotMatch(appCssSrc, /\.title-stack\.stacked \.name-line > \.command-button/u, 'not scoped to the phone s stack: the desktop wrap has the same chevron');
   // (reviewer P2 on eeb81e7e: scoped to the SCRIPT, not a template window)
   const script = source.slice(0, source.indexOf('</script>'));
   assert.ok(!/title-stack|name-line|titleStack|nameLine/u.test(script), 'no script touches the stack: no ResizeObserver or width read decides the wrap — CSS does');
@@ -530,7 +535,13 @@ test('the ⋯ is grouped WITH the name, so the row gap cannot separate them (own
   // the group was `flex: none`). So: the group shrinks at weight 1 with
   // min-width 0 (the ellipsis can engage), the path at weight 1000 (it yields
   // first, and scrolls), the buttons are flex: none.
-  assert.match(source, /\.title-group \{[^}]*flex: 0 1 auto; min-width: 0;[^}]*\}/u, 'the name group CAN shrink — buttons come first');
+  assert.match(source, /\.title-group \{[^}]*flex: 0 0\.0001 auto; min-width: 0;[^}]*\}/u, 'the name group CAN shrink — buttons come first — but only after the path has given up every pixel');
+  // #369: a weight of 1 still took ~0.1px of a 140px deficit, and ANY
+  // shortfall wraps the tag while the path is far from its floor. The share
+  // must stay positive (past the floor the group shrinks: the buttons-first
+  // rule) and below the layout unit (1/64px) for any plausible deficit.
+  const share = Number(/\.title-group \{[^}]*flex: 0 ([\d.]+) auto/u.exec(source)?.[1]);
+  assert.ok(share > 0 && share <= 0.001, `the group s shrink share is a sliver, not 1: ${share}`);
   assert.ok(!/\.title-group \{[^}]*flex: none/u.test(source), 'flex: none is what hid the buttons');
   // #234: no width cap on the name — the old 60% cap ellipsized the title
   // while the path still held width, inverting the stated priority. The

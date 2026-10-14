@@ -626,15 +626,20 @@ button:disabled {
 .page-head .name-line { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; max-width: 100%; min-width: 0; }
 .page-head .name-line h1, .page-head .name-line .h1-edit { flex: 0 1 auto; min-width: 0; }
 .page-head .title-stack.stacked { flex-direction: column; align-items: flex-start; }
-/* Stacked, the tag sits 2px under the NAME, not under the chevron's hit box
-   (#363, owner 2026-10-14: "标签和项目名中间的上下间隔有点大了，应该紧挨着").
-   Measured at 390 touch on 55d67144: the Hub's chevron is a 30px control in
-   a 19px name line, so the line was 30px and the tag sat 7.5px below the
-   name's text box (the Board head, no chevron: 2px). The command's LAYOUT
-   height becomes its line height and its hit box overflows equally above and
-   below (still 30px, painted the same); it stays on top of the tag so the
-   overflow is still its own. */
-.page-head .title-stack.stacked .name-line > .command-button {
+/* Wherever the tag is on its own line — the phone's stack AND the desktop's
+   fit-wrap — it sits 2px under the NAME, not under the chevron's hit box
+   (#363, owner 2026-10-14: "标签和项目名中间的上下间隔有点大了，应该紧挨着";
+   #369: the same screenshot, desktop form). Measured at 390 touch on
+   55d67144: the Hub's chevron is a 30px control in a 19px name line, so the
+   line was 30px and the tag sat 7.5px below the name's text box (the Board
+   head, no chevron: 2px); the desktop wrapped form measured 6.5px at 820.
+   The command's LAYOUT height becomes its line height and its hit box
+   overflows equally above and below (still its full size, painted the
+   same); it stays on top of the tag so the overflow is still its own. One
+   rule for every form: scoped to `.stacked` (#363) it left the desktop wrap
+   with the 30px box; inline the head is the 42px row either way (measured
+   42 before and after at 1280). */
+.page-head .title-stack .name-line > .command-button {
   margin-block: calc((var(--control-line-height) - var(--control-height)) / 2);
   z-index: 1;
 }

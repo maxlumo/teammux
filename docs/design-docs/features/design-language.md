@@ -1334,7 +1334,24 @@ keeps its full hit box but lays out at its line height
 (`margin-block: (--control-line-height − --control-height) / 2`, on top of
 the tag), because the Hub's 30px chevron in a 19px name line had put the tag
 7.5px under the name. Measured at 390 touch: Hub head 7.5px → 2px, the
-Board head (no chevron) and the sidebar rows (`.p-main`) already 2px. A tag
+Board head (no chevron) and the sidebar rows (`.p-main`) already 2px. The same
+rule holds on the desktop's fit-wrap (#369, owner 2026-10-14 17:10, two
+screenshots): it was scoped to the phone's `.stacked` and the wrapped desktop
+form kept the 30px box — 6.5px under the name at 820, 2px after, one rule for
+both forms; the inline head is 42px before and after. The same screenshot
+showed the path starting a tag's width right of the chevron. Cause: the
+title group shrank at weight 1 against the path's 1000, so a ~140px deficit
+still took ~0.1px off the group and ANY shortfall wraps the tag, while the stack
+(a flex item) kept almost its inline width. The group's share is now 0.0001
+(positive: past the path's 8ch floor the buttons-first rule still shrinks
+the name; below the layout unit for any real deficit), so the path gives up
+every pixel first and the tag wraps only when the head is truly out of room
+(measured with the Files drawer open: the path 181 → 55px before the tag
+wrapped; before, it wrapped with the path at 283px). Known and left: for the
+~40px of head width where the path is already at its floor and the group is
+still narrowing to its name line, the wrapped stack is wider than its name
+line by up to the tag + its gap (50px → 5px in a 1150 → 1100px sweep) —
+flex-wrap has no CSS shrink-wrap, and no script measures it. A tag
 that
 holds its place while the name truncates, or a JS-measured flip, is a
 regression. Verified in a real browser at 1280 (85-char name whole, tag below;
