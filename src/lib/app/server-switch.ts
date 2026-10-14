@@ -28,19 +28,14 @@ import { isReachabilityFailure } from './dial-order.ts';
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 /** A saved entry, or a candidate from Add server (`id: ''` until auth). */
-export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & {
-  id: string;
-  name: string;
-  /** Dial exactly `address` and no other (a person's pick from the failed
-   * panel, board #353): no fall-over to the server's other addresses. */
-  only?: boolean;
-};
+export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & { id: string; name: string };
 
 export interface SwitchState {
   intent: number;
   /** The server the user was connected to when this switch began (frozen). */
   from: { id: string; name: string } | null;
-  /** What was asked for; Retry runs it again from its first address. */
+  /** What was asked for, always: Retry runs it again as a whole walk, even
+   * after a pick from the panel (a pick is one operation, never part of this). */
   target: SwitchTarget;
   /** The address in flight, or the last one tried when it failed (board #353). */
   address: string;
@@ -139,12 +134,16 @@ export function createServerSwitch(d: SwitchDeps) {
   const begin = () => { inflight++; };
   const end = () => { if (--inflight === 0) d.onidle?.(); };
 
-  async function switchTo(target: SwitchTarget): Promise<void> {
+  async function switchTo(target: SwitchTarget, pick?: string): Promise<void> {
     if (state?.phase === 'connecting' || guarding || d.frozen()) return; // one intent at a time
     begin();
-    try { await run(target); } finally { end(); }
+    try { await run(target, pick); } finally { end(); }
   }
-  async function run(target: SwitchTarget): Promise<void> {
+  /** `pick` is a person's choice of ONE address from the failed panel (board
+   * #353): this operation dials exactly it, with no fall-over. It is a
+   * parameter of the operation and is never stored on the state, so the Retry
+   * after it is the whole walk again. */
+  async function run(target: SwitchTarget, pick?: string): Promise<void> {
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected && !(await guard(() => d.confirmLeave()))) return;
@@ -152,14 +151,14 @@ export function createServerSwitch(d: SwitchDeps) {
     d.stopReconnect();
     const from = fromConnected ? { id: d.currentId(), name: d.currentName() } : state?.from ?? null;
     const left = d.currentId();
-    // The server's addresses, the target's own first (board #353). A person's
-    // pick from the failed panel is exactly that one.
+    // The server's addresses, the target's own first (board #353): in the
+    // order asked for, whatever is picked, so the panel's list holds still.
     const all = d.addresses?.(target) ?? [target.address];
     const addresses = all.length ? all : [target.address];
-    const order = target.only ? [target.address] : addresses;
+    const order = pick ? [pick] : addresses;
     set({ intent, from, target, address: order[0]!, phase: 'connecting', error: '', addresses });
     let moved = false;
-    let used = target.address;
+    let used = pick ?? target.address;
     /** The address in flight; the failed panel names the last one tried. */
     let tried = order[0]!;
     try {
@@ -285,8 +284,9 @@ export function createServerSwitch(d: SwitchDeps) {
     supersede() { seq++; },
     retry() { if (state?.phase === 'failed') return switchTo(state.target); },
     /** Dial exactly `address` of the failed target's server (board #353): a
-     * person's pick from the panel, no fall-over to the others. */
-    retryAt(address: string) { if (state?.phase === 'failed') return switchTo({ ...state.target, address, only: true }); },
+     * person's pick from the panel, no fall-over to the others, for this one
+     * operation (the failed state keeps the original target). */
+    retryAt(address: string) { if (state?.phase === 'failed') return switchTo(state.target, address); },
     /** A failed switch's panel is put away without a new intent: the host
      * bound the focus by another path (an owed handover, #335 ③b) while the
      * server the panel would go Back to is gone. A switch in flight is not

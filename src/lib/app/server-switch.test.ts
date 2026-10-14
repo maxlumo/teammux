@@ -504,7 +504,7 @@ test('a pick from the failed panel dials exactly that address, with no fall-over
   await t.sw.retryAt('ws://b-wan:3'); // still failing once: no fall-over to b:2
   assert.deepEqual(t.dials, ['ws://b-wan:3@5000'], 'exactly the one picked');
   assert.equal(t.states.at(-1)!.phase, 'failed');
-  assert.deepEqual(t.states.at(-1)!.addresses, ['ws://b-wan:3', 'ws://b:2'], 'the panel keeps offering the whole set');
+  assert.deepEqual(t.states.at(-1)!.addresses, ['ws://b:2', 'ws://b-wan:3'], 'the panel keeps offering the whole set, in the same order');
   t.dials.length = 0;
   await t.sw.retryAt('ws://b-wan:3'); // it answers now
   assert.deepEqual(t.dials, ['ws://b-wan:3@5000']);
@@ -520,4 +520,39 @@ test('a server with one address is dialled once, as before (board #353)', async 
   assert.deepEqual(t.dials, ['ws://b:2@5000'], 'nothing else to try');
   assert.equal(t.states.at(-1)!.phase, 'failed');
   assert.deepEqual(t.states.at(-1)!.addresses, ['ws://b:2']);
+});
+
+test('a pick belongs to its one operation: the Retry after a failed pick is the whole walk again (board #353 review P1)', async () => {
+  const t = twoAddresses();
+  t.w.fail('ws://b:2', 9); t.w.fail('ws://b-wan:3', 2); // the walk and the pick each spend one; the Retry's walk reaches it alive
+  await t.sw.switchTo(t.b);
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  await t.sw.retryAt('ws://b-wan:3'); // a pick that is still dead
+  const failedPick = t.states.at(-1)!;
+  assert.equal(failedPick.phase, 'failed');
+  assert.equal(failedPick.address, 'ws://b-wan:3', 'the panel names the pick that failed');
+  assert.equal(failedPick.target.address, 'ws://b:2', 'while the state still holds what was ASKED for, not the pick');
+  assert.deepEqual(failedPick.addresses, ['ws://b:2', 'ws://b-wan:3'], 'and the list holds still');
+  // The picked address has recovered. A plain Retry must be the whole walk: the dead first address, then it.
+  t.dials.length = 0;
+  await t.sw.retry();
+  assert.deepEqual(t.dials, ['ws://b:2@5000', 'ws://b-wan:3@5000'], 'the whole walk, not the last pick alone');
+  assert.equal(t.w.at, 'ws://b-wan:3');
+  assert.equal(t.states.at(-1), null);
+});
+
+test('the reviewer\u2019s sequence: the walk fails on A and B, a pick of A fails, B recovers, a plain Retry dials B and records it (board #353 review P1)', async () => {
+  const t = twoAddresses();
+  t.w.fail('ws://b:2', 9); t.w.fail('ws://b-wan:3', 1); // A = b:2 stays dead, B = b-wan:3 failed once, in the walk
+  await t.sw.switchTo(t.b);
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  t.dials.length = 0;
+  await t.sw.retryAt('ws://b:2');
+  assert.deepEqual(t.dials, ['ws://b:2@5000'], 'a pick is still exactly one dial');
+  assert.equal(t.states.at(-1)!.phase, 'failed');
+  t.dials.length = 0;
+  await t.sw.retry(); // B has recovered
+  assert.deepEqual(t.dials, ['ws://b:2@5000', 'ws://b-wan:3@5000'], 'the plain Retry walks the set again, it is not the pick\u2019s only');
+  assert.equal(t.w.at, 'ws://b-wan:3');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b-wan:3', 'and records the address that answered');
 });
