@@ -160,41 +160,65 @@ pub fn sniff_codex(pane: &str) -> Vitals {
 ///
 /// The footer is a POSITION: codex paints it at the bottom of its TUI, under
 /// the COMPOSER — `›` (or `>`) at column zero, the one line nothing else can
-/// be. Measured on codex-cli 0.162.1 (2026-10-15) in every state we could
-/// produce — idle, mid-turn (`• Working (7s • esc to interrupt)`), just after
-/// a turn, with the `/status` card open, at 20/28/36/44/100 columns, and on
-/// the live reviewer pane — the zone under the composer is exactly two
-/// non-empty lines: the status line, then `? for shortcuts … ⚠ N warnings`.
-/// `FOOTER_ZONE_LINES` = 3 is that plus one line of slack, for a status line
-/// that wraps or a build with another hints row.
+/// be — as the LAST TWO non-empty lines of the capture. Measured on
+/// codex-cli 0.162.1 (2026-10-15) in every state we could produce — idle,
+/// mid-turn (`• Working (7s • esc to interrupt)`), just after a turn, with
+/// the `/status` card open, at 20/28/36/44/100 columns, and on the live
+/// reviewer pane — those two are always the status line and then
+/// `? for shortcuts … ⚠ N warnings`. The status line never wraps (codex
+/// truncates it with `…`), so there is no third; the second candidate is
+/// there only for a build that drops the hints row, and the hints row
+/// itself carries no item, so offering both costs nothing.
+///
+/// Two boundaries this had to learn the hard way (board #373 P1, reviewer
+/// 01:01 and 01:21):
+///
+/// * the window is counted in RAW lines and the content markers reject
+///   AFTERWARDS. Filtering first and then taking N reaches N *surviving*
+///   lines up the screen, which is further than N lines — the reviewer's
+///   second case, where a one-line slack let a quoted footer in the
+///   composer's own input supply a context percentage to a real default
+///   footer that had none. A wrong number beside a right model is the worst
+///   shape this code can produce;
+/// * the composer may be MANY lines (everything typed into it wraps under
+///   its `›` line), and those lines sit between the composer and the footer.
+///   Counting from the BOTTOM is what makes their number irrelevant.
 ///
 /// What this keeps out is the whole class the reviewer and the validator
-/// found: everything ABOVE the composer — prose, a tool's output, an
-/// indented quote of a footer, a `[tmm chat]` line we typed ourselves — is
-/// not in the zone, whatever it contains. A capture with no composer line
-/// (a startup screen, a modal) has no zone and yields no items; a missed
-/// reading is covered by `sniff_remembered`'s memory, and is always better
-/// than a confident wrong one.
+/// found: everything above those two lines — prose, a tool's output, an
+/// indented quote of a footer, a `[tmm chat]` line we typed ourselves, the
+/// composer's own input — is not the footer, whatever it contains. A capture
+/// with no composer line (a startup screen, a modal) has no zone and yields
+/// no items; a missed reading is covered by `sniff_remembered`'s memory, and
+/// is always better than a confident wrong one.
+///
+/// The residual, named: a capture that has a composer and NO footer at all,
+/// whose last two lines are someone's unmarked content, can still be read.
+/// Only a text pattern for the hints row would close that, and a fixed
+/// pattern for a CLI's furniture is what rotted in #346 and #361.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn footer_zone(pane: &str) -> Vec<&str> {
-    let lines: Vec<&str> = pane.lines().collect();
+    let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
     // The LAST composer line: a resumed pane holds older ones in scrollback.
     let Some(composer) = lines.iter().rposition(|l| is_composer_line(l)) else {
         return Vec::new();
     };
-    lines[composer + 1..]
+    let mut zone: Vec<&str> = lines[composer + 1..]
         .iter()
         .rev()
-        .map(|l| l.trim_end())
         .filter(|l| !l.trim().is_empty())
-        .filter(|l| !codex_content_line(l))
         .take(FOOTER_ZONE_LINES)
-        .collect()
+        .copied()
+        .collect();
+    // Rejection AFTER selection, never as part of it (see above).
+    zone.retain(|l| !codex_content_line(l));
+    zone
 }
 
-/// How many non-empty lines under the composer may be read as the footer.
+/// How many non-empty lines at the BOTTOM of a capture may be the footer:
+/// the status line and the hints row under it, as measured (`footer_zone`).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-const FOOTER_ZONE_LINES: usize = 3;
+const FOOTER_ZONE_LINES: usize = 2;
 
 /// codex's composer prompt at COLUMN ZERO — `› Ask Codex to do anything`,
 /// `› /status`, `› ` with whatever is being typed (measured 0.162.1; `>` is

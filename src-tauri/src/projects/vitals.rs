@@ -803,6 +803,56 @@ mod tests {
         .join("\n");
         assert_eq!(sniff_codex(&no_composer), Vitals::default());
 
+        // The reviewer's second case (01:21), whole screen: the composer's
+        // own input WRAPS under its `›` line, so a quoted footer sits
+        // directly above the real one — and that real one is the default
+        // footer, which carries no context. A one-line slack, or filtering
+        // the content out before counting, let the quote supply the
+        // percentage: a wrong number beside a right model.
+        let composer_wrap = [
+            "\u{203a} Explain this quoted sample",
+            "    openai.gpt-5.6-sol \u{b7} Context 3% used \u{b7} /tmp/quoted",
+            "  GPT-6 Astra (Global) medium \u{b7} /actual",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let v = sniff_codex(&composer_wrap);
+        assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (Global)"), "the REAL footer is the model");
+        assert_eq!(v.effort.as_deref(), Some("medium"));
+        assert_eq!(v.context_pct, None, "the default footer paints no context, and the quote above it is not one");
+
+        // The counting rule itself, stated as a property rather than a
+        // measured paint: the window is RAW lines and the markers reject
+        // afterwards. If a marked line were ever painted under the footer
+        // (a toast, a notice — we have measured none), filtering first and
+        // then taking two would reach two SURVIVING lines up the screen,
+        // which is three lines up, and the quote would be read again.
+        let marked_below = [
+            "\u{203a} Explain this quoted sample",
+            "    openai.gpt-5.6-sol \u{b7} Context 3% used \u{b7} /tmp/quoted",
+            "  GPT-6 Astra (Global) medium \u{b7} /actual",
+            "\u{2022} something painted under the footer",
+        ]
+        .join("\n");
+        let v = sniff_codex(&marked_below);
+        assert_eq!(v.context_pct, None, "two RAW lines up, not two surviving ones");
+        assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (Global)"));
+
+        // However many lines the composer's input takes, the zone is counted
+        // from the bottom, so their number cannot push the footer out of it.
+        let long_input = [
+            "\u{203a} paste of a whole pane:",
+            "    openai.gpt-5.6-sol \u{b7} Context 11% used \u{b7} /tmp/a",
+            "    openai.gpt-5.6-sol \u{b7} Context 22% used \u{b7} /tmp/b",
+            "    openai.gpt-5.6-sol \u{b7} Context 33% used \u{b7} /tmp/c",
+            "  GPT-6 Astra (Global) \u{b7} Context 67% used \u{b7} /actual",
+            "  ? for shortcuts                      \u{26a0} 1 warning \u{b7} f2 to view",
+        ]
+        .join("\n");
+        let v = sniff_codex(&long_input);
+        assert_eq!(v.model.as_deref(), Some("GPT-6 Astra (Global)"));
+        assert_eq!(v.context_pct, Some(67), "the footer's own number, not one from the input");
+
         // The `/status` card is in the SCROLLBACK on purpose: its own anchor
         // authenticates it, so THAT reading keeps the whole pane…
         let card = [
