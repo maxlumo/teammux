@@ -1047,6 +1047,7 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
      reads as bright as the tab edge it continues;
    · `.tab-group` — the destinations group: the slideIndicator container
      that holds the tabs and the one marker (`all-lit` on it: every tab lit);
+   · `.strip-label` — a tab's name: the one label type;
    · `.strip-tab` — one destination: a name on the frame at rest, the quiet
      wash on hover, the label dimmed while another is current (Chrome dims an
      inactive tab's label as well as its fill — two signals for one state);
@@ -1089,6 +1090,10 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
   transition: background var(--t-move) ease, border-color var(--t-move) ease;
 }
 .strip-tab:hover { --card-paint: var(--surface2); }
+/* A tab's LABEL (the name it reads): ONE type for every strip — the display
+   face, --fs-ui, 600 (#365 review P2: it was declared once per wearer). A
+   strip keeps its own layout and ink on the same element. */
+.strip-label { font-family: var(--font-display); font-size: var(--fs-ui); font-weight: 600; white-space: nowrap; }
 .strip-tab.sel { --card-paint: transparent; --card-line: transparent; }
 .tab-group:not(.all-lit) .strip-tab:not(.sel):not(.off) { color: var(--text2); }
 .slide-pill.tab {

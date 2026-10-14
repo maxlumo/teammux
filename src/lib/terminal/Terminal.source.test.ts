@@ -539,10 +539,15 @@ test('the window strip wears the ONE tab strip atom the Chat roster wears, and p
 });
 
 test('the window tab LABEL wears the Chat tab s type, and the scrolled strip fades its clipped edges (#365 review: the ruling, validator P3 1 and 4)', async () => {
+  // ONE label rule in the atom (#365 review P2), worn by both strips' names.
   const roster = await readFile(new URL('../hub/Roster.svelte', import.meta.url), 'utf8');
-  assert.match(roster, /\.a-name \{ font-family: var\(--font-display\); font-size: var\(--fs-ui\); font-weight: 600;/u, 'the Chat tab name s type');
-  const tab = /\n\s*\.win-tab \{([^}]*)\}/u.exec(source)?.[1] ?? '';
-  assert.match(tab, /font-family: var\(--font-display\); font-size: var\(--fs-ui\); font-weight: 600;/u, 'the same three on the window tab');
-  assert.doesNotMatch(tab, /--font-mono/u, 'no mono label: one face in one label');
+  const appCss = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
+  assert.match(appCss, /\n\.strip-label \{ font-family: var\(--font-display\); font-size: var\(--fs-ui\); font-weight: 600; white-space: nowrap; \}/u, 'the one label type');
+  assert.match(roster, /<span class="a-name strip-label" style:--who-ink=/u, 'the Chat tab name wears it');
+  assert.match(source, /<span class="win-tab-name strip-label">/u, 'the window tab name wears it');
+  for (const [name, src] of [['Terminal', source], ['Roster', roster]] as const) {
+    const css = src.slice(src.indexOf('<style>'));
+    assert.doesNotMatch(css, /font-family: var\(--font-(?:display|mono)\)[^}]*font-size: var\(--fs-ui\)/u, `${name}: no local copy of the label type`);
+  }
   assert.match(source, /<div class="win-bar-scroll edge-fade appear" use:scrollEdges=\{\{ key: winMarkerKey \}\}>/u, 'the roster s edge fade, re-measured with the window set');
 });

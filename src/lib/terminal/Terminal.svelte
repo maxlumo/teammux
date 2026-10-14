@@ -1797,7 +1797,7 @@
                 }
               }}>
               {#if wAgent}<img class="win-tab-icon" src={wAgent.icon} alt="" />{/if}
-              <span class="win-tab-name">{`${w.window}:${wAgent ? w.window_name : (w.current_command || w.window_name)}`}</span>
+              <span class="win-tab-name strip-label">{`${w.window}:${wAgent ? w.window_name : (w.current_command || w.window_name)}`}</span>
             </button>
           {/each}
           <span class="slide-pill tab" aria-hidden="true">
@@ -1976,7 +1976,8 @@
     z-index: 10;
   }
   /* Expanded: horizontal tab bar pinned to the top of the Terminal view.
-     Holds current-session windows; chip visuals live in AgentChip.
+     Holds current-session windows as the shared tab strip (#365, app.css
+     `.tab-strip`); AgentChip is the collapsed/split badge only.
      Geometry, border and the h1 dialect come from the shared .page-head
      (ui-unification.md "Page skeleton") — this block only keeps what is
      win-bar-specific. The gap stays denser than the head's 10px because
@@ -2002,9 +2003,6 @@
   .win-tabs { display: flex; align-items: stretch; gap: 2px; flex: none; position: relative; z-index: 0; }
   .win-tab {
     gap: 6px; padding: 0 10px; background: none; cursor: pointer;
-    /* The Chat tab's type (the ruling: one step on both): its label is the
-       roster's `.a-name` — display face, --fs-ui, 600. */
-    font-family: var(--font-display); font-size: var(--fs-ui); font-weight: 600; white-space: nowrap;
     -webkit-tap-highlight-color: transparent;
   }
   .win-tab-icon { position: relative; width: 14px; height: 14px; flex: none; }

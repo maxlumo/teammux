@@ -316,7 +316,7 @@
                   style:--ctx-amount={`${pct}%`} style:--ctx-color={ctxColor(a.vitals.context_pct)}></span>
               {/if}
             </span>
-            <span class="a-name" style:--who-ink={agentHue(a.name)}>{a.name}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state)}></span></span></span>
+            <span class="a-name strip-label" style:--who-ink={agentHue(a.name)}>{a.name}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state)}></span></span></span>
             <span class="agent-marks" class:unmarked={!mentioned && !unread.has(a.name)}>
               {#if mentioned}<span class="agent-mention" aria-hidden="true">@</span>{/if}
               {#if unread.has(a.name)}<span class="unread-dot appear-pop" aria-hidden="true"></span>{/if}
@@ -393,7 +393,7 @@
             <span class="avatar-slot">
               {#if backendIcon(backend)}<img class="ava dim" src={backendIcon(backend)} alt={backend} />{:else}<span class="ava dim">{name.slice(0, 1).toUpperCase()}</span>{/if}
             </span>
-            <span class="a-name">{name}</span>
+            <span class="a-name strip-label">{name}</span>
             {#if filterAgent === name}<span class="agent-filter" aria-hidden="true"><Icon name="filter" size={12} /></span>{/if}
           </button>
       {/snippet}
@@ -549,7 +549,7 @@
   /* THE SILHOUETTE IS ONE PATH (owner, 2026-09-27: "这个拐角还是不够连续 感觉
      线错位了…能不能用最标准的方式"): Chrome's own construction — outward foot,
      side, rounded top, side, foot — filled once and stroked once
-     (`hub/tab-shape.ts`). It replaces a bordered box, two radial-gradient
+     (`ui/tab-shape.ts`). It replaces a bordered box, two radial-gradient
      feet, their bordered rings and a join layer, four rasterisations that had
      to meet: the side border snapped to device pixels while the ring's arc
      and the gradient's hard stop did not, so at a fractional scale the arc
@@ -622,7 +622,6 @@
   .agent-select:focus-visible { outline-color: var(--accent-ink); outline-offset: 0; }
   /* Only a live card carries a dot, so only it reserves the Stop's room. */
   .acard:not(.off) .agent-select { padding-inline-end: var(--roster-dot-reserve); }
-  .a-name { font-family: var(--font-display); font-size: var(--fs-ui); font-weight: 600; white-space: nowrap; }
   .cards.expanded .a-name {
     min-width: 0; white-space: normal; overflow-wrap: anywhere;
     padding-block: var(--control-paint-inset);
