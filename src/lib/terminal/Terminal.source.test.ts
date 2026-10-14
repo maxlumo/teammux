@@ -507,3 +507,33 @@ test('a terminal that becomes visible re-asserts its pane size, even when its ow
   assert.match(source, /wasVisible = true;\s*\n(?:\s*\/\/[^\n]*\n)*\s*doResizeRef\?\.\(\{ assert: true \}\);\s*\n\s*if \(!term \|\| lastContent == null\) return;/u,
     'the visible effect asserts before it replays the frame');
 });
+
+// #365 (owner 2026-10-14: "Terminal 上方的 Tab 栏和 Chat 上方的 Tab 栏，样式需要做得
+// 更加一致一些"; orchestrator ruling: the Terminal adopts the Chat tab grammar).
+test('the window strip wears the ONE tab strip atom the Chat roster wears, and paints no tab of its own (#365)', async () => {
+  const roster = await readFile(new URL('../hub/Roster.svelte', import.meta.url), 'utf8');
+  const appCss = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
+  for (const [name, src] of [['Terminal', source], ['Roster', roster]] as const) {
+    assert.match(src, /import \{ tabShape \} from '\.\.\/ui\/tab-shape\.ts';/u, `${name}: the one outline`);
+    assert.match(src, /class="[^"]*\btab-strip\b/u, `${name}: the strip frame`);
+    assert.match(src, /class="[^"]*\btab-group\b[^"]*"[^>]*use:slideIndicator=/u, `${name}: the destinations group carries the one marker`);
+    assert.match(src, /class="[^"]*\bstrip-tab\b/u, `${name}: tabs are .strip-tab`);
+    assert.match(src, /<span class="slide-pill tab"[^>]*aria-hidden="true">\s*<span class="tab-shape" use:tabShape><svg><path class="tab-fill" \/><path class="tab-edge" \/><\/svg><\/span>/u, `${name}: the travelling marker`);
+    const css = src.slice(src.indexOf('<style>'));
+    assert.doesNotMatch(css, /\n\s*\.(?:tab-strip|strip-tab|slide-pill\.tab|tab-shape|tab-fill|tab-edge)(?:::before)?\s*\{/u, `${name}: no local copy of the atom s rules`);
+  }
+  assert.match(appCss, /\.tab-group:not\(\.all-lit\) \.strip-tab:not\(\.sel\):not\(\.off\) \{ color: var\(--text2\); \}/u, 'the dim-inactive rule is the atom s');
+  assert.match(source, /<div class="win-bar page-head tab-strip">/u, 'the expanded bar is the strip');
+  // The marker moves only when slideIndicator re-measures, and it re-measures
+  // on a KEY change (a pick changes no layout a ResizeObserver would see).
+  // jsdom has no layout, so the mount test cannot see a frozen marker; this
+  // pin can: the key is the current window AND the window list (add/close).
+  assert.match(source, /use:slideIndicator=\{\{ key: winMarkerKey, active: '\.strip-tab\.sel' \}\}/u, 'the group re-measures on its key');
+  assert.match(source, /const winMarkerKey = \$derived\(\[currentWindow, windows\.map\(\(w\) => w\.window\)\.join\(','\)\]\.join\('\|'\)\);/u,
+    'the key changes with the current window and with every added or closed window');
+  assert.match(source, /\.win-bar\.tab-strip \{\s*--tab-fill: var\(--bg\); --tab-line: var\(--border\);/u, 'the lit window opens into the terminal (the page --bg), the floor line is the head border it replaces');
+  const scroll = source.slice(source.indexOf('<div class="win-bar-scroll appear">'), source.indexOf('<div class="win-split">'));
+  assert.ok(scroll.length > 0 && /class="strip-tab win-tab"/u.test(scroll), 'the strip region is found');
+  assert.doesNotMatch(scroll, /<AgentChip/u, 'AgentChip leaves the window strip whole');
+  assert.doesNotMatch(source, /\.win-chip\b/u, 'its flip wrapper went with it');
+});

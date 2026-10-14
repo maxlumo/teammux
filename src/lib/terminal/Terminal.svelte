@@ -12,6 +12,8 @@
   import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
   import { anchorOf } from '../ui/placement.ts';
   import { flip } from 'svelte/animate';
+  import { slideIndicator } from '../ui/indicator.ts';
+  import { tabShape } from '../ui/tab-shape.ts';
   import { moveMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import { t } from '../core/i18n.svelte.ts';
@@ -348,6 +350,9 @@
   });
 
   let currentWindow = $derived(target.split(':')[1]?.split('.')[0] || '');
+  /** The window strip's marker re-measures when the current window or the
+   * set of windows changes (#365): a window added or closed moves it. */
+  const winMarkerKey = $derived([currentWindow, windows.map((w) => w.window).join(',')].join('|'));
 
   // A chip's facts for the hover card (motion.md principle 16): the same
   // pane data the strip is built from. Chrome only — the card is a fixed
@@ -1712,7 +1717,7 @@
         Expanded switcher: a top-of-page horizontal tab bar for the current
         session's windows. The session chip opens the all-session picker.
       -->
-      <div class="win-bar page-head">
+      <div class="win-bar page-head tab-strip">
         <!-- Who this bar belongs to, in one of three forms — because the bar
              plays three roles and only one of them is a page header:
              · a split CELL has no sidebar of its own, so its badge stays a
@@ -1764,38 +1769,41 @@
              chip fades in when its window appears and MOVES when tmux
              renumbers or reorders (keyed by window index, animate:flip).
              Nothing here touches .term-wrap — only the chrome moves. -->
+        <!-- The windows are a TAB STRIP (#365, owner 2026-10-14: "Terminal 上方的
+             Tab 栏和 Chat 上方的 Tab 栏，样式需要做得更加一致一些"): the Chat
+             roster's species — app.css `.tab-strip` / `.strip-tab`, one
+             travelling marker (`.slide-pill.tab`, ui/tab-shape.ts) that glides
+             to the current window and opens into the terminal below, the
+             other windows' labels dimmed. Each tab reads `<index>:<name>`, the
+             same coordinate the project drawer's pills use, with the backend's
+             mark before it (an agent window used to be a bare icon, which told
+             you a kiro was there but not WHICH — owner). A shell keeps its
+             command as the name. The hover card (use:hoverInfo) carries the
+             window's facts. A tab MOVES when tmux renumbers or reorders (keyed
+             by window index, animate:flip); nothing here touches .term-wrap. -->
         <div class="win-bar-scroll appear">
+          <div class="tab-group win-tabs" use:slideIndicator={{ key: winMarkerKey, active: '.strip-tab.sel' }}>
           {#each windows as w (w.window)}
             {@const wAgent = paneAgent(w)}
-            <!-- An agent window used to render as a bare icon, which told you
-                 a kiro was there but not WHICH agent — unreadable in a project
-                 with three of them (owner). Now every chip reads
-                 `<index>:<name>`, the same coordinate the project drawer's
-                 pills use; the icon stays as the backend's mark. A shell keeps
-                 its command as the name, which is what identifies it. -->
-            <!-- The hover card (use:hoverInfo) carries the window's facts; the
-                 chip gets title={null}: the card speaks, no native tooltip beside it. -->
-            <div class="win-chip appear" animate:flip={{ duration: moveMs() }} use:hoverInfo={() => windowInfo(w)}>
-              <AgentChip
-                agent={wAgent}
-                title={null}
-                label={`${w.window}:${wAgent ? w.window_name : (w.current_command || w.window_name)}`}
-                variant={String(w.window) === currentWindow ? 'active' : 'default'}
-                onclick={(e) => {
-                  e.stopPropagation();
-                  if (String(w.window) !== currentWindow && onSwitchPane) {
-                    preparePaneSwitch();
-                    onSwitchPane(`${w.session}:${w.window}.${w.pane}`);
-                  }
-                }}
-              />
-            </div>
+            {@const isCurrent = String(w.window) === currentWindow}
+            <button type="button" class="strip-tab win-tab" class:sel={isCurrent} aria-current={isCurrent ? 'page' : undefined}
+              animate:flip={{ duration: moveMs() }} use:hoverInfo={() => windowInfo(w)}
+              onclick={(e) => {
+                e.stopPropagation();
+                if (!isCurrent && onSwitchPane) {
+                  preparePaneSwitch();
+                  onSwitchPane(`${w.session}:${w.window}.${w.pane}`);
+                }
+              }}>
+              {#if wAgent}<img class="win-tab-icon" src={wAgent.icon} alt="" />{/if}
+              <span class="win-tab-name">{`${w.window}:${wAgent ? w.window_name : (w.current_command || w.window_name)}`}</span>
+            </button>
           {/each}
-
-          <AgentChip
-            variant="add"
-            iconName="plus"
-            title="New window"
+          <span class="slide-pill tab" aria-hidden="true">
+            <span class="tab-shape" use:tabShape><svg><path class="tab-fill" /><path class="tab-edge" /></svg></span>
+          </span>
+          </div>
+          <button type="button" class="icon-btn win-add" title={t('newWindow')} aria-label={t('newWindow')}
             onclick={async (e) => {
               e.stopPropagation();
               try {
@@ -1808,9 +1816,9 @@
                   onSwitchPane(`${p.session}:${p.window}.${p.pane}`);
                 }
               } catch {}
-            }}
-          />
-
+            }}>
+            <Icon name="plus" size={14} />
+          </button>
         </div>
 
         {#if !embedded && splitEligible && onSetLayout}
@@ -1966,11 +1974,6 @@
     right: 4px;
     z-index: 10;
   }
-  /* The flip wrapper around a chip: a box for animate:flip to move (the chip
-     itself is a component). Same flex posture as the chip so the strip does
-     not change shape. */
-  .win-chip { display: flex; flex: none; }
-
   /* Expanded: horizontal tab bar pinned to the top of the Terminal view.
      Holds current-session windows; chip visuals live in AgentChip.
      Geometry, border and the h1 dialect come from the shared .page-head
@@ -1985,6 +1988,25 @@
        chips scroll instead of stacking. */
     flex-wrap: nowrap;
   }
+  /* Expanded, the bar is a TAB STRIP (#365): its frame and floor line are the
+     shared `.tab-strip`'s, and the lit tab opens into what is below it — the
+     terminal, so the fill is the page's --bg (the xterm theme's background)
+     and the floor line is the head border it replaces. No bottom padding:
+     a tab stands on the floor. */
+  .win-bar.tab-strip {
+    --tab-fill: var(--bg); --tab-line: var(--border);
+    border-bottom: 0; padding-block-end: 0; align-items: stretch;
+  }
+  .win-bar.tab-strip > :not(.win-bar-scroll) { align-self: center; }
+  .win-tabs { display: flex; align-items: stretch; gap: 2px; flex: none; position: relative; z-index: 0; }
+  .win-tab {
+    gap: 6px; padding: 0 10px; background: none; cursor: pointer;
+    font: 500 var(--fs-body) var(--font-mono); white-space: nowrap;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .win-tab-icon { position: relative; width: 14px; height: 14px; flex: none; }
+  .win-tab-name { position: relative; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
+  .win-add { flex: none; align-self: center; color: var(--text3); }
   /* The title is identity, the chips are navigation: cap the title so a long
      session name never squeezes the window chips off the bar. */
   /* Content-sized, never stretched: the phone's shared `.page-head h1
@@ -2006,6 +2028,11 @@
     overflow-x: auto;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
+    /* The tabs reach the bar's FLOOR (the strip's floor line), so the strip
+       and its group stretch to the bar's full height; the first tab's
+       outward foot needs its radius of room at the start (#365, the
+       roster's `.cards` posture). */
+    align-self: stretch; padding-inline-start: var(--tab-foot);
   }
   .win-bar-scroll::-webkit-scrollbar { display: none; }
   .win-bar-collapse {

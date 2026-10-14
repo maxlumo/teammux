@@ -1,8 +1,10 @@
 <!--
   Unified chip used for every "switchable thing" in the app:
   - MRU chips on the Sessions page
-  - Current-session windows + cross-session chips in the Terminal top bar
-  - Collapsed-state single chip in the Terminal top bar
+  - The split cell's session badge and the collapsed-state single chip in the
+    Terminal top bar (the window STRIP is the shared tab strip since #365 —
+    destinations are tabs; chips are toggles and switches)
+  - The pane picker's chips
 
   One component, one visual language. All size / spacing / color are
   defined here, not in the consuming pages.

@@ -3,16 +3,22 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const source = await readFile(new URL('./Roster.svelte', import.meta.url), 'utf8');
-const rule = (selector: string) =>
-  source.match(new RegExp(`(?:^|\\n)\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'u'))?.[1] ?? '';
+const ruleIn = (text: string, selector: string) =>
+  text.match(new RegExp(`(?:^|\\n)\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'u'))?.[1] ?? '';
+const rule = (selector: string) => ruleIn(source, selector);
+// The tab paint, the travelling marker and the strip's frame are the SHARED
+// tab strip's since #365 (app.css `.tab-strip` / `.strip-tab` / `.slide-pill.tab`):
+// these pins read them there, with the reasons they always had.
+const appCss = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
+const atom = (selector: string) => ruleIn(appCss, selector);
 
 test('cards, Add and disclosure share the strip centre without moving the expanded control (#186)', () => {
   assert.match(rule('.cards'), /align-items: center/u);
   const toggle = rule('.roster-toggle');
   assert.match(toggle, /align-items: center/u);
-  assert.match(toggle, /height: calc\(var\(--roster-paint-height\) \+ 2 \* var\(--control-paint-inset\)\)/u,
+  assert.match(toggle, /height: calc\(var\(--tab-paint-height\) \+ 2 \* var\(--control-paint-inset\)\)/u,
     'the disclosure wrapper matches the card target height, without a spare row above it');
-  assert.match(rule('.cards'), /padding: 0 2px 0 var\(--roster-foot-radius\)/u,
+  assert.match(rule('.cards'), /padding: 0 2px 0 var\(--tab-foot\)/u,
     '#237: no top scrollport inset; the start inset is room for the first enclosure\'s outward foot');
   assert.match(toggle, /align-self: end/u, 'expanding upward keeps the collapse control reachable in place');
   assert.doesNotMatch(toggle, /padding-block-end/u);
@@ -20,19 +26,19 @@ test('cards, Add and disclosure share the strip centre without moving the expand
 
 test('context meters surround equal circular avatars with room inside the card (#180)', () => {
   assert.match(source, /style:--ctx-color=\{ctxColor\(a\.vitals\.context_pct\)\}/u);
-  assert.match(rule('.acard'), /position: relative/u);
+  assert.match(atom('.strip-tab'), /position: relative/u);
   const bar = rule('.ctx-ring');
   assert.match(bar, /position: absolute/u);
   assert.match(bar, /left: 0; top: 0/u, 'the ring is positioned in the same box as the icon, not independently in the card');
   assert.match(rule('.avatar-slot'), /position: relative/u);
   assert.match(bar, /width: var\(--roster-ring-size\); height: var\(--roster-ring-size\)/u);
   assert.match(rule('.roster'), /--roster-ring-size: 24px/u);
-  assert.match(rule('.roster'), /--roster-paint-height: 30px/u);
-  assert.match(source, /\.roster \{ --control-height: 36px; --control-paint-inset: 2px; \}/u,
+  assert.match(atom('.tab-strip'), /--tab-paint-height: 30px/u);
+  assert.match(appCss, /\.tab-strip \{ --tab-paint-height: 32px; --control-height: 36px; --control-paint-inset: 2px; \}/u,
     'the phone strip wears the desktop geometry: a 36px row and 36px commands, not 44 (owner, 2026-09-24)');
   assert.doesNotMatch(source, /padding-block-start: calc\(2 \* var\(--ui-gap\)\)/u, 'no content shove: the paint inset is the desktop\'s, so content sits as on desktop');
   assert.doesNotMatch(source, /\.roster\.compact \.slide-pill\.tab::before/u, 'one paint inset for both pointers');
-  assert.match(source, /\.roster \{ --roster-paint-height: 32px; \}/u,
+  assert.match(appCss, /@media \(any-pointer: coarse\) \{\n\s*\.tab-strip \{ --tab-paint-height: 32px;/u,
     '#237: the phone row is 32px — the 44px touch floor lives on .agent-select, not the paint');
   assert.match(bar, /pointer-events: none/u);
   assert.match(bar, /conic-gradient/u);
@@ -48,8 +54,8 @@ test('everyone leaves the roster whole for the sole Composer command (#180)', as
 });
 
 test('card paint keeps its inset and the single measured scrolling edge (#180)', () => {
-  assert.match(rule('.acard::before'), /inset: var\(--control-paint-inset\) 0/u);
-  assert.match(rule('.acard::before'), /pointer-events: none/u);
+  assert.match(atom('.strip-tab::before'), /inset: var\(--control-paint-inset\) 0/u);
+  assert.match(atom('.strip-tab::before'), /pointer-events: none/u);
   // The tab strip has only its scrollport inset; the field retains its inset.
   assert.match(rule('.roster'), /padding: 0 var\(--composer-inset\) 0 0/u);
   assert.match(rule('.roster'), /gap: 0/u);
@@ -62,7 +68,7 @@ test('no invisible action slots widen the card; Stop stands ON the dot instead (
   assert.match(rule('.agent-stop'), /position: absolute; z-index: 1; left: var\(--dot-x, 50%\); top: var\(--dot-y, 50%\); transform: translate\(-50%, -50%\)/u,
     '#205: placed over the dot by overDot, taking no width — the card never changes size');
   assert.match(rule('.acard.stop-shown .ac-top'), /visibility: hidden/u, 'the dot yields while the Stop stands on it');
-  assert.doesNotMatch(rule('.acard'), /grid-template-columns/u);
+  assert.doesNotMatch(atom('.strip-tab'), /grid-template-columns/u);
   assert.match(source, /icon="stop" variant="danger" iconOnly/u);
 });
 
@@ -181,7 +187,7 @@ test('double-click focuses live agents without delay and uses the existing filte
 });
 
 test('identity, readiness and motion retain their existing authorities', () => {
-  assert.match(source, /\{#if selected\}\s*<div class="roster"/u);
+  assert.match(source, /\{#if selected\}\s*<div class="roster tab-strip"/u);
   assert.match(source, /\{#if !roomReady && !managedAgents\.length && !stopped\.length\}\s*<div class="skel-wrap sk-cards" aria-hidden="true">/u,
     'placeholders only while there is nothing to show — never in front of rendered cards (owner, 2026-09-23)');
   assert.match(source, /class:reveal=\{justLoaded\}/u);
@@ -206,7 +212,7 @@ test('density lives in local tokens; full names and native targets do not shrink
   assert.match(roster, /--roster-avatar-size: 18px/u);
   assert.match(roster, /--roster-expanded-max: min\(240px, calc\(32dvh \/ var\(--ui-zoom, 1\)\)\)/u);
   assert.match(rule('.agent-select'), /min-height: var\(--control-height\)/u);
-  assert.match(rule('.acard'), /width: max-content/u, 'only actual content sets card width');
+  assert.match(atom('.strip-tab'), /width: max-content/u, 'only actual content sets card width');
   assert.match(rule('.cards'), /overflow-x: auto/u);
   assert.match(rule('.cards.expanded'), /overflow-y: auto/u);
   assert.match(rule('.cards.expanded'), /max-height: var\(--roster-expanded-max\)/u);
@@ -265,7 +271,7 @@ test('Everyone is the PINNED tab: always at the head, previewing on hover (board
   // 图案…画成 Agent 类似的 Logo" (people and orbiting dots both failed the
   // glance test — the agents' own bot mark says "the agents"); "按钮有点大" —
   // 16px glyph under the avatars' 20px; "鼠标悬停…所有的 Agent 被选中或者激活".
-  assert.match(source, /<span class="all-choice acard" class:sel=\{recipient === ALL_TARGET\} role="presentation"/u);
+  assert.match(source, /<span class="all-choice acard strip-tab" class:sel=\{recipient === ALL_TARGET\} role="presentation"/u);
   assert.match(source, /<CommandButton variant="icon" icon="bots" label=\{t\('hubEveryone'\)\} pressed=\{recipient === ALL_TARGET\} bare/u,
     '#237: a small CROWD of the bot mark — "可以多画几个机器人"');
   assert.match(rule('.roster'), /--roster-all-icon-size: 20px/u, 'three heads have their own readable icon metric');
@@ -287,7 +293,7 @@ test('Everyone is the PINNED tab: always at the head, previewing on hover (board
   // exactly as clicking would (round 5); touch never previews.
   assert.match(source, /let allPreview = \$state\(false\);/u);
   assert.match(source, /const allLit = \$derived\(recipient === ALL_TARGET \|\| allPreview\);/u);
-  assert.match(source, /<div class="tabs" class:all-lit=\{allLit\} use:slideIndicator=/u);
+  assert.match(source, /<div class="tabs tab-group" class:all-lit=\{allLit\} use:slideIndicator=/u);
   assert.match(source, /onpointerenter=\{\(e\) => \{ if \(e\.pointerType !== 'touch'\) allPreview = true; \}\}/u);
   assert.doesNotMatch(source, /class:preview=/u, 'round 5: no per-card preview paint — the strip is the one enclosure');
 });
@@ -296,9 +302,9 @@ test('a card is a TAB wearing the agent bubble, and multi-select is ONE enclosur
   // Owner: "做成类似 Chrome tab 栏的样式"; round 5 — "会不会有点过亮了？…把其他
   // 地方变得更暗", "和 Agent 返回给我的消息框的亮度色彩差不多就可以", "整体加一个
   // 稍微淡白色的边", "如果是选择多个 Agent，就用一个大的包边…不要有很多线拐来拐去".
-  assert.match(rule('.acard'), /--card-paint: transparent; --card-line: transparent/u, 'at rest a card is a name, not a block');
-  assert.match(source, /\.acard:hover \{ --card-paint: var\(--surface2\); \}/u, 'hover is the one quiet wash');
-  assert.match(source, /\.acard\.sel \{ --card-paint: var\(--bubble-in\); --card-line: var\(--bubble-line\); \}/u,
+  assert.match(atom('.strip-tab'), /--card-paint: transparent; --card-line: transparent/u, 'at rest a card is a name, not a block');
+  assert.match(appCss, /\.strip-tab:hover \{ --card-paint: var\(--surface2\); \}/u, 'hover is the one quiet wash');
+  assert.match(source, /\.cards\.expanded \.acard\.sel \{ --card-paint: var\(--bubble-in\); --card-line: var\(--bubble-line\); \}/u,
     'the lit tab wears the agent bubble: its brightness and its faint edge');
   // ONE HIGHLIGHT THAT TRAVELS (motion principle 14; owner, 2026-09-23:
   // "切换的动画不是很丝滑…先标了一个框，然后又闪过去了"): in the strip the lit
@@ -310,18 +316,18 @@ test('a card is a TAB wearing the agent bubble, and multi-select is ONE enclosur
   assert.doesNotMatch(source, /class="tab-foot|\.tab-foot\b|background: radial-gradient/u, 'no pieced feet: separate rasterisations are what failed to meet');
   assert.match(source, /const markerTarget = \$derived\(rosterMarker\(\{ all: allLit, team: litTeam, groups, addressed: managedAgents\.some\(\(a\) => addressedMembers\.has\(a\.name\)\) \}\)\);/u,
     'All, a team and a card are the same marker at a different width; the rule itself is rosterMarker (hub.test.ts)');
-  assert.match(source, /\.cards:not\(\.expanded\) \.acard\.sel \{ --card-paint: transparent; --card-line: transparent; \}/u,
+  assert.match(appCss, /\.strip-tab\.sel \{ --card-paint: transparent; --card-line: transparent; \}/u,
     'no card lights in place in the strip — that crossfade beside popping feet was the flash');
   assert.doesNotMatch(source, /\n\s*\.cards:not\(\.expanded\) \.acard\.sel::before/u, 'no second enclosure paint on the card');
   assert.match(rule('.tabs'), /position: relative; z-index: 0/u, 'the marker\'s container, and the stacking context it and the baseline sink in');
-  assert.match(rule('.slide-pill.tab'), /z-index: -1/u, 'under the cards; over the baseline by DOM order, so All stays the group\'s first child');
+  assert.match(atom('.slide-pill.tab'), /z-index: -1/u, 'under the cards; over the baseline by DOM order, so All stays the group\'s first child');
   assert.match(source, /\{\/each\}\n\s*<!--[\s\S]{0,600}?-->\n\s*\{#if !expanded && markerTarget\}/u, 'the marker is the last thing in the destinations group');
-  assert.match(rule('.tab-shape'), /--tab-radius: var\(--ui-radius-row\); --tab-foot: var\(--roster-foot-radius\)/u,
+  assert.match(atom('.tab-shape') + atom('.tab-strip'), /--tab-radius: var\(--ui-radius-row\);[\s\S]*--tab-foot: 8px/u,
     'the card tier and the context ring\'s own curvature (the panel radius read as a half-circle, owner 2026-09-23); the 8px foot');
-  assert.match(rule('.tab-shape'), /inset: var\(--control-paint-inset\) calc\(-1 \* var\(--roster-foot-radius\)\) -1px/u,
+  assert.match(atom('.tab-shape'), /inset: var\(--control-paint-inset\) calc\(-1 \* var\(--tab-foot\)\) -1px/u,
     'the paint box widened by a foot each side and one pixel into the band, where the fill overlaps the junction');
-  assert.match(rule('.tab-fill'), /fill: var\(--bubble-in\)/u, 'the marker wears the agent bubble');
-  assert.match(rule('.tab-edge'), /fill: none; stroke: var\(--card-line\); stroke-width: 1px; transition: stroke var\(--t-move\) ease/u,
+  assert.match(atom('.tab-fill') + atom('.tab-strip'), /fill: var\(--tab-fill\)[\s\S]*--tab-fill: var\(--bubble-in\)/u, 'the marker wears the agent bubble');
+  assert.match(atom('.tab-edge'), /fill: none; stroke: var\(--card-line\); stroke-width: 1px; transition: stroke var\(--t-move\) ease/u,
     'the marker MOVES; only its stroke colour crossfades');
   assert.doesNotMatch(source, /\.slide-pill\.tab::(?:before|after)/u, 'no box-and-border paint beside the path');
   assert.doesNotMatch(source, /inset: 0 0 -1px/u, 'no enclosure PAINT reaches into the band: its strokes would tick under the floor line');
@@ -343,16 +349,16 @@ test('a card is a TAB wearing the agent bubble, and multi-select is ONE enclosur
   assert.match(rule('.cards.expanded .tabs'), /flex: 0 1 auto; min-width: 0; flex-wrap: wrap/u,
     'only the wrapped list shrinks the group — there it wraps inside itself');
   assert.doesNotMatch(source, /\.cards\.all-lit/u, 'the row-wide enclosure is gone');
-  assert.match(rule('.acard::before'), /transition: background var\(--t-move\) ease, border-color var\(--t-move\) ease/u,
+  assert.match(atom('.strip-tab::before'), /transition: background var\(--t-move\) ease, border-color var\(--t-move\) ease/u,
     'the hover wash and the wrapped list\'s paint keep the one movement tempo');
-  assert.doesNotMatch(rule('.acard::before'), /transition:[^;]*(?:inset|border-radius)/u,
+  assert.doesNotMatch(atom('.strip-tab::before'), /transition:[^;]*(?:inset|border-radius)/u,
     'geometry never passes through intermediate frames');
   assert.doesNotMatch(source, /linear-gradient\(to top, var\(--bubble-in\) var\(--roster-gap\)/u,
     'the instant opaque floor is gone with the crossfading fill it patched');
   assert.doesNotMatch(source, /\.roster::after/u, 'the floor line is a background layer, never an overlay above the tabs');
-  assert.match(rule('.roster'), /background-image: linear-gradient\(to top, var\(--bubble-line\) 1px, transparent 1px\)/u,
+  assert.match(atom('.tab-strip'), /--tab-line: var\(--bubble-line\);[\s\S]*background-image: linear-gradient\(to top, var\(--tab-line\) 1px, transparent 1px\)/u,
     'the band\'s faint top edge runs the full width and the lit enclosure breaks it (owner, 2026-09-23)');
-  assert.match(rule('.roster'), /background: var\(--hub-tab-frame\)/u, 'the contrast comes from the frame going darker');
+  assert.match(atom('.tab-strip'), /background: var\(--hub-tab-frame\)/u, 'the contrast comes from the frame going darker');
 });
 
 test('team tabs use the reference pill, broken baseline and raised member contour (#238)', () => {
@@ -394,10 +400,10 @@ test('team tabs use the reference pill, broken baseline and raised member contou
 });
 
 test('one outward foot joins every lit enclosure to the floor line (#238 owner corrections)', () => {
-  assert.match(rule('.roster'), /--roster-foot-radius: 8px/u, 'a 4px arc at a 1px stroke read as jagged (owner, 2026-09-23)');
-  assert.match(source, /import \{ tabShape \} from '\.\/tab-shape\.ts';/u,
-    'the feet, sides and top are one path (hub/tab-shape.ts): its joints are geometry, tested there');
-  assert.match(source, /linear-gradient\(to top, var\(--bubble-line\) 1px, transparent 1px\),\n\s*linear-gradient\(to top, var\(--bubble-in\) 1px, transparent 1px\);/u,
+  assert.match(atom('.tab-strip'), /--tab-foot: 8px/u, 'a 4px arc at a 1px stroke read as jagged (owner, 2026-09-23)');
+  assert.match(source, /import \{ tabShape \} from '\.\.\/ui\/tab-shape\.ts';/u,
+    'the feet, sides and top are one path (ui/tab-shape.ts): its joints are geometry, tested there');
+  assert.match(appCss, /linear-gradient\(to top, var\(--tab-line\) 1px, transparent 1px\),\n\s*linear-gradient\(to top, var\(--tab-fill\) 1px, transparent 1px\);/u,
     'the translucent floor line lies on band fill: over the frame it read a third dimmer and thinner than the tab edge');
   assert.match(rule('.cards:not(.expanded) .roster-cluster.team::before'), /inset: auto var\(--roster-gap\) 0/u,
     'the group baseline stays the group\'s own');

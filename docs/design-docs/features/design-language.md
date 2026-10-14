@@ -855,7 +855,34 @@ by the contract above, not extended by new page-local overrides.
   corners `--ui-radius-control`, fill down to the strip's floor in the
   single-row strip; the wrapped expanded list keeps closed rounded boxes. The
   swap animates on `--t-move`. A second wearer of this idiom needs a recorded
-  reason.
+  reason — and has one since #365 (below).
+- THE TAB STRIP (#365, owner 2026-10-14: "Terminal 上方的 Tab 栏和 Chat 上方的
+  Tab 栏，样式需要做得更加一致一些"): the roster TAB above is now ONE atom for
+  every row of mutually exclusive DESTINATIONS — the Chat roster's agents and
+  the Terminal's windows — in app.css: `.tab-strip` (the `--hub-tab-frame`
+  frame and its floor line), `.tab-group` (the destinations group that holds
+  the one marker), `.strip-tab` (a destination: bare name at rest, the
+  `--surface2` wash on hover, label dimmed to `--text2` while another is
+  current), `.slide-pill.tab` + `.tab-shape` (`ui/tab-shape.ts`, the one
+  travelling outline). Height, inset and foot are the strip's tokens
+  (`--tab-paint-height` 30/32px, `--tab-foot` 8px; coarse: 36px targets, the
+  2px paint inset — the owner's 2026-09-24 exception to the 44px floor holds
+  for every tab strip). What a strip opens INTO is its own: `--tab-fill` /
+  `--tab-line` — the Chat composer band (`--bubble-in` / `--bubble-line`), the
+  Terminal's terminal (`--bg` / the head `--border` the floor line replaces).
+  Content is the strip's: avatars, rings, team clusters and Stop in Chat; the
+  backend mark and `index:name` (mono, as the drawer pills read) in the
+  Terminal, with its `+` and split/close/collapse commands after the group.
+  Why tabs and not the old accent pills (orchestrator ruling): one current
+  item among many reads as tabs with ONE marker; accent pills read as
+  toggles, which is what `AgentChip` is kept for (MRU chips, the pane
+  picker, the collapsed and split-cell badges). A page re-declaring the tab
+  paint, a second marker, or a pill strip for destinations is a regression;
+  `Terminal.source.test.ts` pins both wearers to the atom. Measured on the
+  branch: the Chat roster at 1280 is box-for-box identical to main; the
+  Terminal strip is 42px at 1280 (tabs 34px) and 44px at 390 touch (tabs
+  36px), and the marker glides on `--t-move` to the picked, added or
+  remaining window.
 - `.pick` / `.agent-pick` / `.pchip` — stadium toggle chips for MEMBERSHIP
   (skills, roster picks); selected = `--accent-line` border + `--accent-bg`.
 - Inputs — the dense field dialect: `--input-bg`, 1px `--input-border`,

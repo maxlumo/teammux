@@ -13,7 +13,7 @@
   import { moveMs } from '../ui/motion.ts';
   import { scrollEdges } from '../ui/scroll-edges.ts';
   import { slideIndicator } from '../ui/indicator.ts';
-  import { tabShape } from './tab-shape.ts';
+  import { tabShape } from '../ui/tab-shape.ts';
 
   let {
     selected = '', compact = false, managedAgents = [], stopped = [], stoppedTeams = {}, selectedRow = null,
@@ -228,7 +228,7 @@
 </script>
 
 {#if selected}
-  <div class="roster" class:compact>
+  <div class="roster tab-strip" class:compact>
     <div class="cards edge-fade" class:expanded class:filtering={!!filterAgent} class:reveal={justLoaded} id={cardsId} bind:this={cardsEl} use:scrollEdges={{ active: !expanded, wrapped: 'expanded', onoverflow: (over) => { overflowing = over; }, key: markerKey }}
       role="group" aria-label={t('agentsTitle')}
       onpointerenter={(e) => { hovering = e.pointerType !== 'touch'; }}
@@ -251,7 +251,7 @@
            +, a stopped identity and the empty space after them are not
            destinations, and framing them was what made the All enclosure "有点
            过分大了" (owner, 2026-09-22). -->
-      <div class="tabs" class:all-lit={allLit} use:slideIndicator={{ key: markerKey, active: markerTarget, hidden: expanded || !markerTarget }}>
+      <div class="tabs tab-group" class:all-lit={allLit} use:slideIndicator={{ key: markerKey, active: markerTarget, hidden: expanded || !markerTarget }}>
       <!-- Everyone: the PINNED tab at the strip's head (board #236, owner,
            2026-09-22: "不用隐藏，我不展开就看不到吧…都显示全了"). Chrome pins a
            tab as an icon-only tab at the far left; this is that — always in
@@ -265,7 +265,7 @@
            the group-of-people and collab's orbiting dots both failed the glance
            test). `bare`: the tab is the paint, the command adds none (#180:
            never a card — no data-agent, no Stop, no meter). -->
-      <span class="all-choice acard" class:sel={recipient === ALL_TARGET} role="presentation"
+      <span class="all-choice acard strip-tab" class:sel={recipient === ALL_TARGET} role="presentation"
         onpointerenter={(e) => { if (e.pointerType !== 'touch') allPreview = true; }} onpointerleave={() => { allPreview = false; }}
         onfocusin={() => { allPreview = true; }} onfocusout={() => { allPreview = false; }}
         oncontextmenu={(e) => { e.preventDefault(); if (selected && roomReady) onallcontext(cardAnchor(e.currentTarget)); }}
@@ -296,7 +296,7 @@
         {@const mentioned = extras.includes(a.name) || extras.includes(ALL_TARGET)}
         {@const pending = interrupting.includes(a.name)}
         <!-- Selection and interruption are sibling native targets, never nested buttons. -->
-        <div class="acard" role="group" data-agent={a.name} class:sel={isAddressed(a.name)} class:filtered={filterAgent === a.name} class:stop-shown={showStop(a.name)}
+        <div class="acard strip-tab" role="group" data-agent={a.name} class:sel={isAddressed(a.name)} class:filtered={filterAgent === a.name} class:stop-shown={showStop(a.name)}
           class:appear-pop={!!rosterBase && !rosterBase.has(a.name)} animate:flip={{ duration: moveMs() }}
           onpointerenter={(e) => arm(a.name, e.pointerType)} onpointerleave={() => disarm(a.name)}
           onfocusin={() => arm(a.name)} onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) disarm(a.name); }}>
@@ -371,12 +371,12 @@
             <span class="team-name">{group.team}</span>
           </button>
           {#each group.members as name (name)}
-            <div class="acard off" data-agent={name} class:filtered={filterAgent === name} class:appear-pop={!!rosterBase && !rosterBase.has(name)} animate:flip={{ duration: moveMs() }}>{@render offSelect(name)}</div>
+            <div class="acard strip-tab off" data-agent={name} class:filtered={filterAgent === name} class:appear-pop={!!rosterBase && !rosterBase.has(name)} animate:flip={{ duration: moveMs() }}>{@render offSelect(name)}</div>
           {/each}
         </div>
       {/each}
       {#each offLoose as name (name)}
-        <div class="acard off" data-agent={name} class:filtered={filterAgent === name} class:appear-pop={!!rosterBase && !rosterBase.has(name)} animate:flip={{ duration: moveMs() }}>{@render offSelect(name)}</div>
+        <div class="acard strip-tab off" data-agent={name} class:filtered={filterAgent === name} class:appear-pop={!!rosterBase && !rosterBase.has(name)} animate:flip={{ duration: moveMs() }}>{@render offSelect(name)}</div>
       {/each}
       <!-- A stopped identity offers context actions, never a card-wide restart.
            Owner, 2026-09-05: "头像应该使用我们正常设定的 Agent 头像，并且变成灰色".
@@ -417,7 +417,6 @@
     --roster-ring-size: 24px;
     --roster-all-icon-size: 20px;
     --roster-ring-stroke: 2px;
-    --roster-paint-height: 30px;
     --roster-card-inset: 4px;
     /* Room after the dot for the Stop that replaces it (#205): the 28px
        compact-tools slot (its hit box, and the outer edge of its focus ring;
@@ -428,30 +427,21 @@
        好像没有留边距…停止按钮都超出 agent 卡片框了"; board #211). */
     --roster-dot-reserve: 12px;
     --roster-gap: 2px;
-    /* The lit tab's outward foot: Chrome's tangent from the tab side into the
-       floor. 8px, not the 4px gap it first had to fit in — a 4px arc at a 1px
-       stroke is a staircase, not a curve (owner, 2026-09-23: "锯齿比较严重，
-       不是很光滑"). */
-    --roster-foot-radius: 8px;
     --roster-control-gap: 2px;
     --roster-expanded-max: min(240px, calc(32dvh / var(--ui-zoom, 1)));
     position: relative;
     display: grid; grid-template-columns: minmax(0, 1fr) var(--control-height);
     gap: 0; flex: 0 1 auto; min-width: 0; min-height: 0;
     padding: 0 var(--composer-inset) 0 0;
-    background: var(--hub-tab-frame);
-    /* The band's TOP EDGE is the strip's floor pixel: the faint bubble line
-       runs the full width and meets the band's own side edges, and every lit
-       enclosure breaks it with its fill and turns into it through its feet —
-       Chrome's toolbar line (owner, 2026-09-23: "圆弧连接的整个 Agent 框上面的
-       输入区，应该有一条横着的淡淡的白线延伸"). A background layer, not a
-       border or an overlay: it must paint BELOW every tab. The line is
-       translucent, so it lies on a pixel of band fill, as every other stroke
-       of the enclosure does: over the frame it came out a third dimmer than
-       the tab edge it continues (measured lum 46 vs 65, dark) and read as a
-       thinner line ("粗细好像也不一样", owner, 2026-09-23). */
-    background-image: linear-gradient(to top, var(--bubble-line) 1px, transparent 1px),
-      linear-gradient(to top, var(--bubble-in) 1px, transparent 1px);
+    /* The frame and its floor line are the shared strip's (`.tab-strip`,
+       app.css, #365). The band's TOP EDGE is the strip's floor pixel: the
+       faint bubble line runs the full width and meets the band's own side
+       edges, and every lit enclosure breaks it with its fill and turns into
+       it through its feet — Chrome's toolbar line (owner, 2026-09-23: "圆弧
+       连接的整个 Agent 框上面的输入区，应该有一条横着的淡淡的白线延伸"). Over
+       the frame alone the translucent line came out a third dimmer than the
+       tab edge it continues (measured lum 46 vs 65, dark) and read thinner
+       ("粗细好像也不一样", owner, 2026-09-23), hence its row of band fill. */
     container: roster / inline-size;
   }
   /* The strip starts at its scrollport inset; the field keeps its normal inset.
@@ -469,7 +459,7 @@
      暗"). */
   .cards {
     display: flex; align-items: center; gap: var(--roster-gap); overflow-x: auto; scrollbar-width: none;
-    min-width: 0; min-height: 0; padding: 0 2px 0 var(--roster-foot-radius);
+    min-width: 0; min-height: 0; padding: 0 2px 0 var(--tab-foot);
   }
   /* The destinations group: sized to its content, so the multi-select
      enclosure ends after the last tab instead of framing the + and the empty
@@ -556,10 +546,6 @@
      baseline: both are z -1 in the group's stacking context, and the marker
      comes later in the DOM, so the baseline shows exactly where the marker
      is not. */
-  .slide-pill.tab {
-    --card-line: var(--bubble-line);
-    background: none; box-shadow: none; border-radius: 0; z-index: -1;
-  }
   /* THE SILHOUETTE IS ONE PATH (owner, 2026-09-27: "这个拐角还是不够连续 感觉
      线错位了…能不能用最标准的方式"): Chrome's own construction — outward foot,
      side, rounded top, side, foot — filled once and stroked once
@@ -576,14 +562,6 @@
      circle on a 32px tab, owner 2026-09-23) and the 8px foot (a 4px arc at a
      1px stroke was a staircase). Only the stroke colour crossfades; the
      geometry moves with the marker. */
-  .tab-shape {
-    --tab-radius: var(--ui-radius-row); --tab-foot: var(--roster-foot-radius);
-    position: absolute; inset: var(--control-paint-inset) calc(-1 * var(--roster-foot-radius)) -1px;
-  }
-  .tab-shape svg { display: block; width: 100%; height: 100%; overflow: visible; }
-  .tab-fill { fill: var(--bubble-in); }
-  .tab-edge { fill: none; stroke: var(--card-line); stroke-width: 1px; transition: stroke var(--t-move) ease; }
-  @media (prefers-reduced-motion: reduce) { .tab-edge { transition: none; } }
   /* A lit member inside a group wears the raised neutral contour (#238). */
   .slide-pill.tab.raised { --card-line: var(--text2); }
   .cards:not(.expanded)::-webkit-scrollbar { display: none; }
@@ -593,7 +571,7 @@
   }
   .sk-cards { display: flex; gap: var(--roster-gap); flex: none; grid-column: 1 / -1; }
   .sk-card {
-    width: calc(3 * var(--control-height)); height: var(--roster-paint-height);
+    width: calc(3 * var(--control-height)); height: var(--tab-paint-height);
     margin-block: var(--control-paint-inset); border-radius: var(--ui-radius-row);
   }
   /* A card is a TAB (board #236, owner: "做成类似 Chrome tab 栏的样式？选中哪一个，
@@ -601,39 +579,19 @@
      Hover: the quiet wash. Selected: the bubble fill and the bubble edge,
      top corners rounded, reaching the strip's floor where the band begins —
      one enclosure from tab into band. */
-  .acard {
-    --card-paint: transparent; --card-line: transparent;
-    position: relative;
-    display: flex;
-    align-items: center; flex: none; width: max-content; min-width: 0;
-    min-height: calc(var(--roster-paint-height) + 2 * var(--control-paint-inset));
-    border: 0; border-radius: var(--ui-radius-row); color: var(--text);
-  }
-  .acard::before {
-    content: ''; position: absolute; inset: var(--control-paint-inset) 0;
-    border-radius: inherit; pointer-events: none; box-sizing: border-box;
-    background: var(--card-paint); border: 1px solid var(--card-line);
-    /* Crossfade the ink, but switch the joining geometry immediately: an
-       animated bottom inset exposed the group baseline beneath a new tab. */
-    transition: background var(--t-move) ease, border-color var(--t-move) ease;
-  }
-  .acard:hover { --card-paint: var(--surface2); }
-  .acard.sel { --card-paint: var(--bubble-in); --card-line: var(--bubble-line); }
   /* Chrome dims an inactive tab's LABEL as well as its fill — two signals for
      one state, which is what makes the lit tab read at a glance (owner,
      2026-09-22: "选中和没有选中的…差异更明显一点"). The avatar, status dot and
      context ring keep their colours: they are live facts, not chrome. */
-  .tabs:not(.all-lit) .acard:not(.sel):not(.off) { color: var(--text2); }
   /* A live card's name wears its agent ink (agentHue, board #292); an unlit
      tab keeps the dimming above by mixing that ink toward the same --text2. */
   .acard:not(.off) .a-name { color: var(--who-ink, inherit); }
   .tabs:not(.all-lit) .acard:not(.sel):not(.off) .a-name { color: color-mix(in srgb, var(--who-ink) 55%, var(--text2)); }
-  .acard { transition: color var(--t-move) ease; }
   /* In the single-row strip the lit card paints NOTHING of its own — the
      marker carries the enclosure — and the hover wash stays on the unlit
      cards, as in Chrome. The wrapped (expanded) list is a list, so there a
      lit card stays a closed rounded box of its own. */
-  .cards:not(.expanded) .acard.sel { --card-paint: transparent; --card-line: transparent; }
+  .cards.expanded .acard.sel { --card-paint: var(--bubble-in); --card-line: var(--bubble-line); }
   /* The one-agent reading filter is shown IN the strip: the filtered card
      keeps its light and every other destination dims — no banner above the
      feed and no ✕ to find (owner, 2026-09-23: "把当前的卡片直接亮起，其他全部
@@ -690,21 +648,9 @@
      the card (#180's concern) and the dot yields to it while shown. */
   .agent-stop { position: absolute; z-index: 1; left: var(--dot-x, 50%); top: var(--dot-y, 50%); transform: translate(-50%, -50%); display: flex; align-items: center; }
   .acard.stop-shown .ac-top { visibility: hidden; }
-  @media (any-pointer: coarse) {
-    /* 32, not 34: the phone's strip sat taller than it needed and pushed the
-       input down (owner, 2026-09-23: "tab 栏可以高度稍低一些…agent 卡片和下边
-       的消息框之间间距小一点"). */
-    .roster { --roster-paint-height: 32px; }
-    /* The phone strip wears the DESKTOP's geometry (owner, 2026-09-24: "手机对
-       齐一下桌面吧…手机上的 tab 栏高度，甚至比桌面上的预留的还要大；有些按钮，比如
-       '发送给所有人'的那个按钮，预留的都要宽"): the paint inset is the desktop's
-       2px, so the 32px paint makes a 36px row against the desktop's 34, and
-       the All, + and disclosure commands are 36px squares instead of 44. Like
-       `.compact-tools`, a deliberate, scoped exception to the 44px touch
-       floor — the row is a dense strip of tabs, and its targets stay 36px on
-       both axes. The Stop keeps its own compact-tools slot. */
-    .roster { --control-height: 36px; --control-paint-inset: 2px; }
-  }
+  /* Coarse geometry (32px paint, 36px targets, 2px inset) is the shared
+     strip's (`.tab-strip`, app.css): the owner's 2026-09-23/24 rulings for
+     this row now hold for every tab strip. */
   .avatar-slot { position: relative; width: var(--roster-ring-size); height: var(--roster-ring-size); display: grid; place-items: center; flex: none; }
   .ava { width: var(--roster-avatar-size); height: var(--roster-avatar-size); flex: none; border-radius: 50%; object-fit: contain; display: grid; place-items: center; }
   .ctx-value { width: 4ch; flex: none; text-align: right; font: var(--fs-meta)/1 var(--font-mono); color: var(--text2); white-space: nowrap; }
@@ -737,5 +683,5 @@
   .all-choice :global(.command-button.engaged:active:not(:disabled)) { --command-paint: transparent; }
   /* No spare row above the tabs: the disclosure is exactly the card's hit-box
      height, so the coarse strip stops at its 44px touch floor. */
-  .roster-toggle { display: flex; align-self: end; align-items: center; height: calc(var(--roster-paint-height) + 2 * var(--control-paint-inset)); }
+  .roster-toggle { display: flex; align-self: end; align-items: center; height: calc(var(--tab-paint-height) + 2 * var(--control-paint-inset)); }
 </style>

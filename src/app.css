@@ -1035,6 +1035,74 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
   box-shadow: 0 1px 3px var(--control-shadow);
 }
 .slide-pill.ready { transition: transform var(--t-move) ease-out, width var(--t-move) ease-out, height var(--t-move) ease-out; }
+/* THE TAB STRIP (#365): ONE species for a row of mutually exclusive
+   destinations — the Chat roster's agents and the Terminal's windows (owner,
+   2026-10-14: "Terminal 上方的 Tab 栏和 Chat 上方的 Tab 栏，样式需要做得更加一致
+   一些"). Born in the roster (board #236, owner 2026-09-22: "做成类似 Chrome tab
+   栏的样式？选中哪一个，哪一个就是亮的，其他在旁边"); its reasons stay in
+   Roster.svelte and design-language.md § Tab strip. The pieces:
+   · `.tab-strip` — the FRAME the tabs sit on, darker than what they open
+     into, and the floor line along its bottom edge: a background layer (it
+     must paint below every tab), translucent, on one row of the fill so it
+     reads as bright as the tab edge it continues;
+   · `.tab-group` — the destinations group: the slideIndicator container
+     that holds the tabs and the one marker (`all-lit` on it: every tab lit);
+   · `.strip-tab` — one destination: a name on the frame at rest, the quiet
+     wash on hover, the label dimmed while another is current (Chrome dims an
+     inactive tab's label as well as its fill — two signals for one state);
+   · `.slide-pill.tab` + `.tab-shape` (`ui/tab-shape.ts`) — the lit tab is
+     ONE marker that travels (motion principle 14), one filled, once-stroked
+     path: outward foot, side, rounded top, side, foot, joined one pixel into
+     what the strip opens into. A lit `.strip-tab` paints nothing itself.
+   A strip sets what it opens INTO with `--tab-fill`/`--tab-line` (the Chat
+   composer band: the agent bubble; the Terminal: the terminal's own --bg).
+   On coarse the strip keeps the desktop geometry — 36px targets, the 2px
+   paint inset — a deliberate, scoped exception to the 44px floor (owner,
+   2026-09-24: "手机对齐一下桌面吧…手机上的 tab 栏高度，甚至比桌面上的预留的
+   还要大"). */
+.tab-strip {
+  --tab-paint-height: 30px;
+  --tab-foot: 8px;
+  --tab-fill: var(--bubble-in); --tab-line: var(--bubble-line);
+  background: var(--hub-tab-frame);
+  background-image: linear-gradient(to top, var(--tab-line) 1px, transparent 1px),
+    linear-gradient(to top, var(--tab-fill) 1px, transparent 1px);
+}
+@media (any-pointer: coarse) {
+  .tab-strip { --tab-paint-height: 32px; --control-height: 36px; --control-paint-inset: 2px; }
+}
+.strip-tab {
+  --card-paint: transparent; --card-line: transparent;
+  position: relative;
+  display: flex;
+  align-items: center; flex: none; width: max-content; min-width: 0;
+  min-height: calc(var(--tab-paint-height) + 2 * var(--control-paint-inset));
+  border: 0; border-radius: var(--ui-radius-row); color: var(--text);
+  transition: color var(--t-move) ease;
+}
+.strip-tab::before {
+  content: ''; position: absolute; inset: var(--control-paint-inset) 0;
+  border-radius: inherit; pointer-events: none; box-sizing: border-box;
+  background: var(--card-paint); border: 1px solid var(--card-line);
+  /* Crossfade the ink, but switch the joining geometry immediately: an
+     animated bottom inset exposed the group baseline beneath a new tab. */
+  transition: background var(--t-move) ease, border-color var(--t-move) ease;
+}
+.strip-tab:hover { --card-paint: var(--surface2); }
+.strip-tab.sel { --card-paint: transparent; --card-line: transparent; }
+.tab-group:not(.all-lit) .strip-tab:not(.sel):not(.off) { color: var(--text2); }
+.slide-pill.tab {
+  --card-line: var(--tab-line);
+  background: none; box-shadow: none; border-radius: 0; z-index: -1;
+}
+.tab-shape {
+  --tab-radius: var(--ui-radius-row);
+  position: absolute; inset: var(--control-paint-inset) calc(-1 * var(--tab-foot)) -1px;
+}
+.tab-shape svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.tab-fill { fill: var(--tab-fill); }
+.tab-edge { fill: none; stroke: var(--card-line); stroke-width: 1px; transition: stroke var(--t-move) ease; }
+@media (prefers-reduced-motion: reduce) { .tab-edge { transition: none; } }
 .reveal > *, .reveal-tail > * { animation: rise-in var(--t-move) ease-out backwards; }
 .reveal > :nth-child(2), .reveal-tail > :nth-last-child(2) { animation-delay: 30ms; }
 .reveal > :nth-child(3), .reveal-tail > :nth-last-child(3) { animation-delay: 60ms; }
