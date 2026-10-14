@@ -46,6 +46,9 @@ tmm gateway                          ensure this machine's gateway service is in
 tmm gateway start                    the gateway in the foreground (what the service and `server` run)
 tmm gateway install [--replace]      the per-user service for THIS tmm + config root; idempotent
 tmm gateway status [--show-token] · restart · uninstall · logs [-f]
+                                     status names the RUNNING gateway's build (`build  v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`),
+                                     read from its login answer; with this tmm's own after it when they differ (a gateway not
+                                     restarted after an update), and `unknown` for a gateway older than #368
 tmm ui [--open]                      the web UI this machine's gateway serves: its URL, or why none
 tmm send … --image <path|url>        attach an image by REFERENCE (repeatable)
 tmm log [--since <ts>] [--limit N] [-f]      read chat; --since exclusive (ms), -f follows

@@ -9,7 +9,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>", "e2e": 2}                // nonce + newest handshake version
 → {"method": "auth", "params": {"client_nonce": "<hex>", "proof": "<hex>", "e2e": 2}}
-← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2}}>
+← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}}}>
 ```
 - IKM = token, salt = server_nonce ‖ client_nonce (16 + 16 bytes), HKDF-SHA256, 32-byte outputs
 - **v2** (current) derives THREE keys, one per job, by `info` label:
@@ -37,8 +37,12 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>"}
 → {"method": "auth", "params": {"token": "..."}}
-← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac"}}
+← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}}}
 ```
+`build` (board #368) is the build the server runs, `{"version": "1.0.0", "commit": "46392f16", "built": "2026-10-14 07:40"}`:
+the package version, the checkout's 8-character commit (`dev` when git was unavailable) and the UTC minute the build ran
+(`unknown` when the clock was). It rides the login answer, not a new RPC, in both paths. A server older than #368 sends
+none; a client reads that as "unknown", never as a mismatch.
 
 ### Rate Limiting
 - Max auth failures tracked per IP

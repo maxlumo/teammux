@@ -197,6 +197,10 @@ impl Client {
         let resp: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(resp["result"]["authenticated"].as_bool().unwrap_or(false));
         assert_eq!(resp["result"]["e2e"].as_u64(), Some(version), "server echoes the negotiated version");
+        // Board #368: the login answer says which build this server is, in the
+        // encrypted answer too, and a client parses it back whole.
+        assert_eq!(resp["result"]["build"], tmux_mobile::build_info::json(), "the sealed login answer carries the build");
+        assert_eq!(tmux_mobile::build_info::parse(&resp["result"]), Some(tmux_mobile::build_info::Build::ours()));
 
         Self {
             ws,
@@ -661,6 +665,7 @@ impl PlainClient {
         };
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["result"]["authenticated"].as_bool(), Some(true), "plain auth failed: {}", text);
+        assert_eq!(v["result"]["build"], tmux_mobile::build_info::json(), "the plain login answer carries the build");
 
         Self { ws }
     }

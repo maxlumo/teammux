@@ -546,7 +546,7 @@ where
                             // cipher ready. We enqueue it first, then the
                             // auth response.
                             let _ = out_tx.send(Outbound::InitCipher(HalfCipher::new(&send_key)));
-                            let resp = serde_json::to_string(&serde_json::json!({"result":{"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version}})).unwrap();
+                            let resp = serde_json::to_string(&serde_json::json!({"result":{"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version,"build":crate::build_info::json()}})).unwrap();
                             let _ = out_tx.send(Outbound::Encrypted(resp));
                             #[cfg(not(any(target_os = "android", target_os = "ios")))]
                             {
@@ -568,7 +568,7 @@ where
                         // Legacy plain token auth (http:// fallback)
                         authenticated = true;
                         auth_tracker.lock().await.remove(&addr.ip());
-                        let r = Response::ok(req.id, serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname }));
+                        let r = Response::ok(req.id, serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname, "build": crate::build_info::json() }));
                         let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         {

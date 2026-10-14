@@ -21,6 +21,11 @@ fn main() {
         }
     }
 
+    // The build's identity (board #368): the checkout's short commit and the
+    // UTC minute this build ran, baked in for `build_info`. 'dev'/'unknown'
+    // when git or the clock is unavailable; never a failed build.
+    build_identity();
+
     // `embed-ui` (board #323): the web UI's dist/ becomes a sorted
     // (path, include_bytes!) table the gateway serves; nothing is read from
     // disk at run time. Any change under dist/ rebuilds.
@@ -64,4 +69,57 @@ fn embed_ui() {
     out.push_str("];\n");
     let dest = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ui_embed.rs");
     std::fs::write(dest, out).unwrap();
+}
+
+/// `git <args>` in this package's directory, trimmed; None on any failure.
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(std::env::var("CARGO_MANIFEST_DIR").ok()?)
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// Seconds since the epoch as `YYYY-MM-DD HH:MM` UTC (the civil-from-days
+/// algorithm; no date crate for one string).
+fn utc_minute(secs: u64) -> String {
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rem / 3_600, rem % 3_600 / 60)
+}
+
+fn build_identity() {
+    let sha = git(&["rev-parse", "--short=8", "HEAD"]).filter(|s| s.chars().all(|c| c.is_ascii_hexdigit()));
+    println!("cargo:rustc-env=TMM_GIT_SHA={}", sha.as_deref().unwrap_or("dev"));
+    let built = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| utc_minute(d.as_secs()))
+        .unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=TMM_BUILD_TIME={built}");
+    // Declaring any rerun-if-changed turns off cargo's default (any package
+    // file), so say both: a moved HEAD (a new commit) and the sources.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(path) = git(&["rev-parse", "--git-path", &branch]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+        println!("cargo:rerun-if-changed={packed}");
+    }
 }

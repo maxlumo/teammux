@@ -31,7 +31,9 @@ pub const DEADLINE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    Ours { machine_id: String, url: String },
+    /// `build` is the gateway's own, from its login answer; None for a
+    /// gateway older than board #368, which sends none.
+    Ours { machine_id: String, url: String, build: Option<crate::build_info::Build> },
     Occupied(String),
     None,
 }
@@ -51,7 +53,7 @@ pub(crate) fn judge(answer: &serde_json::Value, our_machine: &str, url: &str) ->
     }
     let id = r.and_then(|r| r.get("machine_id")).and_then(|v| v.as_str()).unwrap_or("");
     if id == our_machine && !id.is_empty() {
-        Verdict::Ours { machine_id: id.to_string(), url: url.to_string() }
+        Verdict::Ours { machine_id: id.to_string(), url: url.to_string(), build: r.and_then(crate::build_info::parse) }
     } else {
         Verdict::Occupied(format!("{url} is another machine's gateway"))
     }
@@ -367,6 +369,19 @@ mod tests {
         assert!(local_url(&c).starts_with("wss://"));
     }
 
+    /// Board #368: `tmm gateway status` names the RUNNING gateway's build from
+    /// its login answer; an older gateway sends none and says so.
+    #[test]
+    fn ours_carries_the_gateways_build_when_the_login_answer_has_one() {
+        let url = "ws://127.0.0.1:1";
+        let with = serde_json::json!({ "id": 1, "result": { "authenticated": true, "machine_id": "m", "build": crate::build_info::json() } });
+        let Verdict::Ours { build, .. } = judge(&with, "m", url) else { panic!("ours") };
+        assert_eq!(build, Some(crate::build_info::Build::ours()));
+        let without = serde_json::json!({ "id": 1, "result": { "authenticated": true, "machine_id": "m" } });
+        let Verdict::Ours { build, .. } = judge(&without, "m", url) else { panic!("ours") };
+        assert_eq!(build, None, "an older gateway sends no build");
+    }
+
     #[test]
     fn the_verdict_is_ours_only_for_a_login_with_our_machine_id() {
         let url = "ws://127.0.0.1:1";
@@ -487,6 +502,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(matches!(v, Verdict::Ours { .. }), "{v:?}");
+        // The real sealed login answer carries the server's build (board #368).
+        let Verdict::Ours { build, .. } = &v else { unreachable!() };
+        assert_eq!(build.as_ref(), Some(&crate::build_info::Build::ours()), "the real gateway names its build");
         let mut wrong = cfg(port);
         wrong.token = "tok-else".into();
         assert!(matches!(probe(&wrong).await, Verdict::Occupied(_)), "a refused token is not free");

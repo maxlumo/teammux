@@ -1,4 +1,5 @@
 pub mod agent_notifications;
+pub mod build_info;
 pub mod config;
 pub mod downloads;
 pub mod fs;
@@ -417,7 +418,7 @@ mod server_mode_tests {
     #[test]
     fn the_probe_verdict_decides_the_server_mode() {
         let local = "ws://127.0.0.1:19977";
-        let ours = server_mode_of(&Verdict::Ours { machine_id: "m".into(), url: "ws://127.0.0.1:19977".into() }, local);
+        let ours = server_mode_of(&Verdict::Ours { machine_id: "m".into(), url: "ws://127.0.0.1:19977".into(), build: None }, local);
         assert_eq!((ours.mode, ours.url.as_str(), ours.reason.is_none()), ("gateway", "ws://127.0.0.1:19977", true));
         let none = server_mode_of(&Verdict::None, local);
         assert_eq!((none.mode, none.url.as_str()), ("embedded", local));

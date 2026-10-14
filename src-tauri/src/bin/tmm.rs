@@ -1577,12 +1577,27 @@ fn print_status(sys: &tmux_mobile::gateway::service::Sys, name: &str, show_token
         eprintln!("warning   {w}");
     }
     println!("gateway   {answer}");
+    if let probe::Verdict::Ours { build, .. } = &verdict {
+        println!("build     {}", build_line(build.as_ref(), &tmux_mobile::build_info::Build::ours()));
+    }
     println!("listen    {}:{}{}", cfg.host, cfg.port, if cfg.tls_cert.is_some() { " (TLS)" } else { "" });
     println!("config    {}", tmux_mobile::config::config_dir().display());
     let token = if cfg.token.is_empty() { " (none yet — run tmm setup or tmm gateway)".to_string() }
         else if show_token { format!(" {}", cfg.token) } else { " (tmm gateway status --show-token)".into() };
     println!("connect   from the app: the address of this machine, port {}, and the token{token}", cfg.port);
     matches!(verdict, probe::Verdict::Ours { .. })
+}
+
+/// The running gateway's build, as `tmm gateway status` prints it: its own
+/// words (an older gateway sends none), and — when it is not the build of this
+/// `tmm` — which one this is, because that mismatch is the stale-gateway tell
+/// (board #368).
+fn build_line(gateway: Option<&tmux_mobile::build_info::Build>, ours: &tmux_mobile::build_info::Build) -> String {
+    match gateway {
+        None => "unknown (this gateway predates build identity)".into(),
+        Some(g) if g.commit == ours.commit && g.version == ours.version => g.line(),
+        Some(g) => format!("{} — this tmm is {}", g.line(), ours.line()),
+    }
 }
 
 fn need_project(ctx: &Ctx) -> String {
@@ -2011,6 +2026,23 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use tmux_mobile::build_info::Build;
+
+    /// Board #368: `tmm gateway status` names the running gateway's build, says
+    /// so plainly when an older gateway sends none, and shows which build THIS
+    /// tmm is when the two differ (a gateway not restarted after an update).
+    #[test]
+    fn the_status_build_line_names_the_gateway_and_flags_a_stale_one() {
+        let ours = Build { version: "1.0.0".into(), commit: "46392f16".into(), built: "2026-10-14 07:40".into() };
+        assert_eq!(build_line(Some(&ours), &ours), "v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC");
+        let stale = Build { commit: "0badc0de".into(), built: "2026-10-12 01:00".into(), ..ours.clone() };
+        assert_eq!(
+            build_line(Some(&stale), &ours),
+            "v1.0.0 · 0badc0de · 2026-10-12 01:00 UTC — this tmm is v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC"
+        );
+        assert!(build_line(None, &ours).starts_with("unknown"), "an older gateway sends none");
+    }
+
     use super::*;
 
     /// Board #274 (validator / orchestrator 08:36): the CLI's routing.
