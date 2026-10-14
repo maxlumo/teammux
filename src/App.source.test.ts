@@ -1541,6 +1541,10 @@ test('a switch walks the server\u2019s addresses, and the failed panel offers ea
   assert.match(source, /dialTimeout: \(address\) => dialTimeoutMs\(classifyAddress\(address\)\),/u, 'one dial\u2019s patience is the reconnect machine\u2019s');
   assert.match(source, /unreachable: noteAddressUnreachable,/u, 'a dead address goes into the same cooldown memory');
   assert.match(source, /connect: \(address, token, timeoutMs\) => \{ switchCandidate = openCandidate\(\); return switchCandidate\.connect\(address, token, timeoutMs\); \},/u);
+  // ... and the candidate hands that patience on to the connection itself: without
+  // this hop every dial waits the connection's own 5s, and a stalled LAN address
+  // would use up 5s, not 2s, before the walk goes on (validator P3 on #353).
+  assert.match(source, /connect: \(url, tok, timeoutMs\) => connection\.connect\(url, tok, timeoutMs\),/u, 'openCandidate passes the dial timeout to connection.connect');
   // The panel names the address in flight, lists the set and dials exactly one on a tap.
   assert.match(source, /<span class="switch-addr">\{switching\.address\}<\/span>/u);
   assert.match(source, /\{#if switching\.addresses\.length > 1\}[\s\S]*?\{#each switching\.addresses as address \(address\)\}[\s\S]*?<CommandButton label=\{`\$\{ADDRESS_LABELS\[classifyAddress\(address\)\]\} · \$\{address\}`\} icon="link"\s*onclick=\{\(\) => switchAddress\(address\)\} \/>/u);
