@@ -141,14 +141,16 @@ types the named `Escape` into the pane. Without the reset the newest fact
 stays the `userPromptSubmit` that opened the cancelled turn and the card reads
 `running` for as long as the agent lives (owner, 2026-08-29).
 
-## Status: four states, one rule
+## Status: three states, one rule
 
 ![Status states](agent-status-states.svg)
 
 The rule is "which turn boundary is the newest fact", and `since` is what a
 client counts from — for `running` it is the turn's START, so "running 2m14s" is
 the turn's age. Agents do not declare state; `send --status` is only an ambient
-room message.
+room message. A turn that FAILED still just ENDED (board #354): there is no
+fourth, distress state — the idle it derives carries `last_turn_failed` as its
+detail, and the stop itself stays in the activity log and the feed.
 
 ## What survives what
 

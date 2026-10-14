@@ -120,13 +120,16 @@ composer 的空输入两拍 / `tmm agent interrupt`）会**先**重置派生状�
 打开那个被取消 turn 的 `userPromptSubmit`，卡片会一直显示 `running`
 （owner，2026-08-29）。
 
-## 状态：四个状态，一条规则
+## 状态：三个状态，一条规则
 
 ![状态机](agent-status-states.zh.svg)
 
 规则就是"**哪条回合边界是最新的事实**"，而 `since` 是客户端计时的起点——
 `running` 时它是这一轮的**开始**，所以"running 2m14s"说的是这一轮跑了多久。
 agent 不声明状态；`send --status` 只是一条不打扰其他人的房间进度消息。
+失败的一轮也只是**结束**（board #354）：没有第四个"不妙"状态，派生出来的
+`idle` 用 detail `last_turn_failed` 把这件事说清楚，stop 本身仍然在活动日志
+和 feed 里。
 
 ## 什么能活下来
 

@@ -13,7 +13,7 @@ import { ALL_TARGET, busyTargetsFor, targetMembers, targetTeam, teamRoot } from 
  *                                  lane's pulse already use)
  *   ok (green)     = SUCCESS     — finished well (done)
  *   warn (amber)   = NEEDS YOU   — paused on a person (waiting/blocked)
- *   danger (red)   = FAILED      — the only distress signal
+ *   danger (red)   = FAILED      — a thing that failed and has not recovered
  *   sleep (grey)   = AT REST     — nothing happening, nothing wrong (idle)
  *
  * The progression start → running → done reads accent → green, which matches
@@ -23,6 +23,14 @@ import { ALL_TARGET, busyTargetsFor, targetMembers, targetTeam, teamRoot } from 
  *
  * Derived-state → dot color (theme token values are resolved in CSS; these
  * are the fallback literals used inline for dynamic dots).
+ *
+ * No AGENT state is `failed` any more (board #354): a failed turn end is
+ * rest with the fact in its detail, because the red dot stood for minutes
+ * over an agent that had already recovered from a network timeout. The word
+ * stays in the language for the things that really are still failing — an
+ * unreachable server in `app/ServerList` asks for this colour by that name,
+ * and an agent's own `[tmm status failed]` note wears it through
+ * `noteStateColor` — and that is why it is not a literal red anywhere.
  */
 export function stateDotColor(state: string): string {
   switch (state) {
@@ -30,8 +38,7 @@ export function stateDotColor(state: string): string {
     case 'working': return 'var(--accent)';       // 'working' = pre-2026-08 name
     case 'waiting':
     case 'blocked': return 'var(--status-warn)';  // paused on a person
-    case 'stuck':
-    case 'failed': return 'var(--status-danger)';
+    case 'failed': return 'var(--status-danger)';  // never an agent's state (#354)
     case 'shell': return 'var(--text3)';          // outside the vocabulary
     default: return 'var(--status-sleep)'; // idle
   }
@@ -1421,7 +1428,11 @@ export function statusNote(body: string | null | undefined): { state: string; te
  * accent = in motion, green = done well, amber = needs a person, red =
  * failed, grey = a word we do not know (quiet, never wrong). The only case
  * this reader adds is `done`, which is a note-only state — a roster dot never
- * shows it because a finished agent goes back to idle.
+ * shows it because a finished agent goes back to idle. Here `failed` is a
+ * word the AGENT chose for itself, which is a report and not a derivation,
+ * so it keeps the red the derived dot gave up in board #354. `stuck` was
+ * dropped from both readers with that issue: nothing has produced it since
+ * the Team-supervisor era, and an unknown word is grey by this rule anyway.
  */
 export function noteStateColor(state: string): string {
   switch (state) {
@@ -1429,8 +1440,7 @@ export function noteStateColor(state: string): string {
     case 'running': return 'var(--accent)';
     case 'waiting':
     case 'blocked': return 'var(--status-warn)';
-    case 'failed':
-    case 'stuck': return 'var(--status-danger)';
+    case 'failed': return 'var(--status-danger)';
     case 'done': return 'var(--status-ok)';
     default: return 'var(--text3)';
   }

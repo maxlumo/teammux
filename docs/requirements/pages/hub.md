@@ -46,7 +46,7 @@ completion).
   MCP); a *direct* window (hand-started) is observed but never typed into.
 - **What an agent SAYS** goes through the `tmm` CLI; **what we OBSERVE**
   arrives via hooks (turn open, tool calls, ask, stop) and status is
-  **derived** (`running | waiting | idle | failed`).
+  **derived** (`running | waiting | idle`).
 - **Messages move four ways** (taught to every agent): stamped prompts enter
   its pane (a busy queue-mode agent receives the lines sent meanwhile as one
   combined prompt when its turn ends); the captured final reply is recorded and returned once to each

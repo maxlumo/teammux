@@ -170,6 +170,25 @@ test('every derived state has a dot color and unknown falls back', () => {
   }
 });
 
+test('no agent state is painted as distress: a failed turn end rests (#354)', () => {
+  // Owner, 2026-10-15: the red dot was almost always a network timeout the
+  // agent had already recovered from, so `derive_from` stopped producing
+  // `failed` — a failed end is `idle` with the fact in its detail. These are
+  // every state the server can derive; none of them is danger.
+  for (const s of ['running', 'working', 'waiting', 'blocked', 'idle', 'shell']) {
+    assert.notEqual(stateDotColor(s), 'var(--status-danger)', s);
+  }
+  // The word itself stays in the language for the things that ARE still
+  // failing — ServerList asks for this colour by that name (an unreachable
+  // server), and an agent's own `[tmm status failed]` note keeps it.
+  assert.equal(stateDotColor('failed'), 'var(--status-danger)');
+  assert.equal(noteStateColor('failed'), 'var(--status-danger)');
+  // `stuck` went with it: nothing has produced it since the Team-supervisor
+  // era, so it is an unknown word in both readers — quiet, never wrong.
+  assert.equal(stateDotColor('stuck'), stateDotColor('idle'));
+  assert.equal(noteStateColor('stuck'), noteStateColor('pondering'));
+});
+
 test('the NEEDS-YOU cue is worn by exactly the amber states, and never breathes', () => {
   // The card-level cue for "a person has to act" (review, 2026-09-03) and the
   // dot colour must agree on which states that is — the amber ones.

@@ -326,7 +326,7 @@ who opened a turn and who received a final response. Two definitions of
 one concept will eventually diverge.
 
 **Evidence.**
-- `running | waiting | idle | failed` are derived from hook turn edges.
+- `running | waiting | idle` are derived from hook turn edges.
   `window_activity` once meant working, but TUI redraws after completion
   left every agent permanently working. Claude's `idle_prompt`, appearing
   exactly 60s after completion, was once mistaken for a question.

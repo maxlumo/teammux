@@ -7,8 +7,10 @@
 //! and a backend with poor hook coverage (codex) degrades to pane-activity
 //! granularity instead of lying. A finished turn (Stop) is REST, not distress:
 //! "stuck" detection by stop-without-done was a Team-supervisor-era rule and
-//! mislabeled every long-idle direct agent — the only distress we can honestly
-//! observe is a failed stop. See docs/exec-plans/agents-v2.md §4.1/§4.3.
+//! mislabeled every long-idle direct agent. A turn that FAILED is rest too
+//! (board #354): the end is the end, and the failure is a detail on the idle
+//! state rather than a state of its own. See docs/exec-plans/agents-v2.md
+//! §4.1/§4.3.
 //!
 //! `userPromptSubmit` carries the INPUT half, which nothing else does: a prompt
 //! typed at the keyboard exists nowhere in the room, and a line we typed into a
@@ -1431,20 +1433,34 @@ pub fn all_states() -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// The detail an `idle` carries when the turn that ended FAILED (board #354).
+/// Snake_case like the ask details (`permission_required`), because the UI
+/// shows a detail verbatim and this is the same kind of word: a fact about
+/// the last turn, readable in the hover row and in `tmm agent list`.
+pub const FAILED_DETAIL: &str = "last_turn_failed";
+
 /// The state machine, in one place. A turn is a bracket: `userPromptSubmit`
 /// opens it, `stop` closes it, tool calls happen inside it, and a
 /// permission prompt suspends it. So the rule is simply *which boundary is the
-/// most recent fact*, and the four states fall out of that:
+/// most recent fact*, and the three states fall out of that:
 ///
 /// | newest fact                    | state   | since        |
 /// |--------------------------------|---------|--------------|
-/// | a failed stop                  | failed  | the stop     |
-/// | a turn end (stop)              | idle    | the end      |
+/// | a turn end (stop), however it ended | idle | the end  |
 /// | an ask (permission / input)    | waiting | the ask      |
 /// | a turn start (prompt / tool)   | running | the START    |
 ///
 /// `since` for `running` is the turn's start, not the newest event, so "running
 /// 2m14s" means the turn has been open that long.
+///
+/// A FAILED end is still an end (board #354, 2026-10-15). It used to derive a
+/// fourth state, `failed`, which wore the red dot until the next turn started
+/// — and in practice the failure was a network timeout or a transient model
+/// error the agent had already recovered from, so the card cried distress for
+/// minutes about an agent that was simply resting (owner: 不用显示红点了). The
+/// fact is not lost: the stop is in the activity log and the feed, and the
+/// derived detail says `last_turn_failed` (so `tmm agent list` and the card's
+/// hover row still name it) — it just is not a colour any more.
 ///
 /// Pane activity is NOT a work signal for a window with hooks. It used to be,
 /// and that was the bug: an agent TUI repaints after replying (spinner, status
@@ -1476,15 +1492,12 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
         return AgentStatus { state: state.into(), detail: String::new(), since: activity_ts };
     }
 
-    // A failed stop is the one distress signal we can observe. It stands until
-    // a new turn starts.
-    if end_kind == "failed" && end_k >= start_k && end_k >= ask_k {
-        return AgentStatus { state: "failed".into(), detail: "failed".into(), since: end_ts };
-    }
-
-    // A turn that ended is rest, not distress.
+    // A turn that ended is REST, however it ended. A failed stop names
+    // itself in the detail (board #354) and nowhere else: see the table
+    // above for why it is not a state of its own.
     if end_k >= start_k && end_k >= ask_k {
-        return AgentStatus { state: "idle".into(), detail: String::new(), since: turn_end };
+        let detail = if end_kind == "failed" { FAILED_DETAIL.to_string() } else { String::new() };
+        return AgentStatus { state: "idle".into(), detail, since: turn_end };
     }
 
     // Blocked on the human, and nothing has happened since.
@@ -1854,15 +1867,31 @@ mod tests {
         assert_eq!(derive_from(&r, 0, 1350).state, "idle");
     }
 
+    /// Owner, board #354 (2026-10-15): "我发现在 Agent 的卡片上有时候会显示
+    /// 红色的小点 … 大部分情况下我发现是网络连接超时或者它的一个状态响应 …
+    /// 不用显示红点了". A failed stop is a turn END, so the agent is at REST;
+    /// the failure is named in the detail and lives on in the activity log,
+    /// but it is not a state and not a colour. Before this it derived
+    /// `failed` and stood until the next turn started, so a card cried
+    /// distress for minutes about an agent that had already recovered.
     #[test]
-    fn a_failed_stop_is_the_one_distress_signal() {
+    fn a_failed_stop_ends_the_turn_and_names_itself_in_the_detail() {
         let mut r = rec();
         r.prompt = Some(900);
         r.end = Some(("failed".into(), 1000));
-        assert_eq!(derive_from(&r, 5000, 5000).state, "failed", "and pane noise cannot clear it");
-        // Only a new turn clears it.
+        let s = derive_from(&r, 5000, 5000);
+        assert_eq!(s.state, "idle", "a failed end is an end — no red dot");
+        assert_eq!(s.detail, FAILED_DETAIL, "and the fact is still readable");
+        assert_eq!(s.since, 1000, "at rest since the end, not since the prompt");
+        // A clean end is the same state with nothing to say.
+        r.end = Some(("completed".into(), 1000));
+        let ok = derive_from(&r, 5000, 5000);
+        assert_eq!((ok.state.as_str(), ok.detail.as_str()), ("idle", ""));
+        // A new turn is a new turn, and carries none of it.
+        r.end = Some(("failed".into(), 1000));
         r.prompt = Some(1100);
-        assert_eq!(derive_from(&r, 0, 1200).state, "running");
+        let next = derive_from(&r, 0, 1200);
+        assert_eq!((next.state.as_str(), next.detail.as_str()), ("running", ""));
     }
 
     /// kiro v3 runs its memory auto-capture as `memory` tool calls AFTER the
@@ -2666,8 +2695,9 @@ mod tests {
             ("tool-only", vec![("tool", "src/lib.rs", "Edit")], "running", 0),
             ("ask", vec![("prompt", "do it", ""), ("notif", "permission_required", "")], "waiting", 0),
             ("tool-after-ask", vec![("notif", "permission_required", ""), ("tool", "npm test", "Bash")], "running", 0),
-            // An ended turn is ended: the held line's clock ran from its end.
-            ("failed", vec![("prompt", "do it", ""), ("notif", "failed", "")], "failed", 1),
+            // An ended turn is ended, failure and all (#354): the held
+            // line's clock ran from its end.
+            ("failed", vec![("prompt", "do it", ""), ("notif", "failed", "")], "idle", 1),
         ] {
             let session = format!("rec-{label}-{}", uuid::Uuid::new_v4());
             crate::projects::with_store(|s| {
