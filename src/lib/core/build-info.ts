@@ -10,13 +10,21 @@ export interface BuildInfo {
   built: string;
 }
 
+/** This UI's own build. Under `vite dev` it is NOT a release build (#368
+ * review P1-B): the config is read once at start, so a commit or time frozen
+ * then would keep naming itself after hot reloads and main moving. A dev
+ * server is therefore `dev` + the time it STARTED, flagged, and never compared. */
+export interface UiBuild extends BuildInfo {
+  devServer?: boolean;
+}
+
 /** `dev` / `unknown`: where nothing could say (no git, or no Vite define). */
 export const NO_COMMIT = 'dev';
 export const NO_TIME = 'unknown';
 
 // `__TMM_BUILD__` / `__TMM_LICENSE__` are Vite defines (src/ambient.d.ts).
 /** This UI's own build. Outside Vite (the unit tests) it is the unknown one. */
-export const uiBuild: BuildInfo = typeof __TMM_BUILD__ === 'undefined'
+export const uiBuild: UiBuild = typeof __TMM_BUILD__ === 'undefined'
   ? { version: '0.0.0', commit: NO_COMMIT, built: NO_TIME }
   : __TMM_BUILD__;
 
@@ -45,11 +53,23 @@ export function formatBuild(b: BuildInfo): string {
   return `${id} · ${when}`;
 }
 
+/** The same commit, whichever abbreviation each side got: `git --short=8` is
+ * AT LEAST 8 characters (a collision lengthens it), so one may be a prefix of
+ * the other. */
+export function sameCommit(a: string, b: string): boolean {
+  return a.startsWith(b) || b.startsWith(a);
+}
+
 /** Are these two sides different builds — the stale-PWA tell? Only when BOTH
- * name a real commit: a `dev` build or a server that sent nothing cannot be
- * compared, and saying "mismatch" about it would be a guess. */
-export function buildsDiffer(ui: BuildInfo, server: BuildInfo | null | undefined): boolean {
-  if (!server) return false;
+ * name a real commit: a `dev` build, a dev server or a server that sent
+ * nothing cannot be compared, and saying "mismatch" about it would be a guess. */
+export function buildsDiffer(ui: UiBuild, server: BuildInfo | null | undefined): boolean {
+  if (!server || ui.devServer) return false;
   if (ui.commit === NO_COMMIT || server.commit === NO_COMMIT) return false;
-  return ui.commit !== server.commit;
+  return !sameCommit(ui.commit, server.commit);
+}
+
+/** `HH:MM UTC` of a build's minute (`2026-10-14 15:38`), or `unknown`. */
+export function clockOf(built: string): string {
+  return /^\d{4}-\d\d-\d\d \d\d:\d\d$/u.test(built) ? `${built.slice(11)} UTC` : built;
 }

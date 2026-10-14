@@ -3,7 +3,7 @@
 // two different real commits — that About colours.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NO_COMMIT, NO_TIME, buildParts, buildsDiffer, formatBuild, parseBuild, uiBuild, uiLicense, type BuildInfo } from './build-info.ts';
+import { NO_COMMIT, NO_TIME, buildParts, buildsDiffer, clockOf, formatBuild, parseBuild, sameCommit, uiBuild, uiLicense, type BuildInfo } from './build-info.ts';
 
 const B: BuildInfo = { version: '1.0.0', commit: '46392f16', built: '2026-10-14 07:40' };
 
@@ -34,6 +34,8 @@ test('only two real, different commits are a mismatch', () => {
   assert.equal(buildsDiffer(ui, null), false, 'an older server cannot be compared');
   assert.equal(buildsDiffer(ui, undefined), false, 'no socket cannot be compared');
   assert.equal(buildsDiffer({ ...B, commit: NO_COMMIT }, { ...B, commit: '0badc0de' }), false, 'a dev UI names no commit');
+  assert.equal(buildsDiffer({ ...B, commit: NO_COMMIT, devServer: true }, { ...B, commit: '0badc0de' }), false, 'a dev SERVER is never compared (review P1-B)');
+  assert.equal(buildsDiffer({ ...B, devServer: true }, { ...B, commit: '0badc0de' }), false, 'not even one that carries a commit');
   assert.equal(buildsDiffer(ui, { ...B, commit: NO_COMMIT }), false, 'a dev server names no commit');
 });
 
@@ -42,4 +44,18 @@ test('outside Vite the UI says what it does not know instead of inventing a comm
   assert.equal(uiBuild.commit, NO_COMMIT);
   assert.equal(uiBuild.built, NO_TIME);
   assert.equal(uiLicense, '');
+});
+
+test('the same commit is the same whichever abbreviation each side got: git --short=8 is AT LEAST 8 (#368 review P2-D)', () => {
+  assert.equal(sameCommit('46392f16', '46392f16'), true);
+  assert.equal(sameCommit('46392f16a', '46392f16'), true, 'a collision lengthened one side');
+  assert.equal(sameCommit('46392f16', '46392f16abcdef0'), true);
+  assert.equal(sameCommit('46392f16', '46392f17'), false);
+  assert.equal(buildsDiffer(B, { ...B, commit: '46392f16a' }), false, 'a longer abbreviation of the same commit is not a mismatch');
+  assert.equal(buildsDiffer(B, { ...B, commit: '46392f17a' }), true);
+});
+
+test('a build minute reads as a clock, anything else as itself', () => {
+  assert.equal(clockOf('2026-10-14 15:38'), '15:38 UTC');
+  assert.equal(clockOf(NO_TIME), 'unknown');
 });

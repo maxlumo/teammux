@@ -14,7 +14,7 @@
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { hoverInfo } from '../ui/hover.ts';
   import { t, i18n, setLocale } from '../core/i18n.svelte.ts';
-  import { buildParts, buildsDiffer, uiBuild, uiLicense, type BuildInfo } from '../core/build-info.ts';
+  import { buildParts, buildsDiffer, clockOf, uiBuild, uiLicense, type BuildInfo } from '../core/build-info.ts';
   import { layout } from './layout.svelte.ts';
   import { fonts, uiFont, displayFont, availableFamilies } from './fonts.svelte.ts';
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
@@ -36,7 +36,7 @@
     showUiZoom = false,
     showShortcuts = false,
     shortcutHost = null,
-    serverInfo = { hostname: '', machineId: '', build: null },
+    serverInfo = { hostname: '', machineId: '', build: undefined },
     serverTag = null,
     pendingInputs = null,
     onDiscardPending = null,
@@ -81,9 +81,11 @@
     showShortcuts?: boolean;
     /** App's shortcut host: lets a row say it is unavailable here (board 316). */
     shortcutHost?: ShortcutHost | null;
-    /** `build`: what the focused server said it runs (board #368); null
-     * when it named none, which About says plainly. */
-    serverInfo?: { hostname: string; machineId: string; build: BuildInfo | null };
+    /** `build`: what the focused server's CURRENT socket said it runs (board
+     * #368): null = it named none (an older server), which About says plainly;
+     * undefined = nothing is answering (reconnecting), which it says as that —
+     * never the build from before the drop. */
+    serverInfo?: { hostname: string; machineId: string; build?: BuildInfo | null };
     /** The focused server's name by the ③c-1 tag rule (null = not shown):
      * the Connection section — its copy-link, its addresses, its optimizer —
      * acts on the FOCUSED server (③c-5), and with several included the
@@ -981,7 +983,10 @@
         <!-- About (board #368): which build this app is, which build the
              server is, and the one verdict a stale phone needs — they differ.
              Dim when they agree or cannot be compared; the warn status colour
-             only for two real, different commits. -->
+             only for two real, different commits. A dev server is not a build
+             (it says when it started and is never compared); the server's line
+             says "reconnecting" while nothing is answering, never the build from
+             before the drop (review P1-A/B). -->
         {#snippet buildValue(b: BuildInfo, differ: boolean)}
           {@const p = buildParts(b)}
           <small class="config-note connection-id about-build" class:mismatch={differ}><span>{p.id}</span><span>{p.when}</span></small>
@@ -989,13 +994,19 @@
         <div class="config-section">
           <div class="preference-row">
             <div class="pref-label"><strong class="config-field-label">tmux-mobile</strong><small class="config-note">{t('aboutThisApp')}</small></div>
-            <div class="pref-control">{@render buildValue(uiBuild, false)}</div>
+            <div class="pref-control">
+              {#if uiBuild.devServer}
+                <small class="config-note connection-id about-build">{t('aboutDevServer').replace('{time}', clockOf(uiBuild.built))}</small>
+              {:else}
+                {@render buildValue(uiBuild, false)}
+              {/if}
+            </div>
           </div>
           {#if connected}
             {@const differ = buildsDiffer(uiBuild, serverInfo.build)}
             <div class="preference-row">
               <div class="pref-label"><strong class="config-field-label">{t('aboutServer')}</strong></div>
-              <div class="pref-control">{#if serverInfo.build}{@render buildValue(serverInfo.build, differ)}{:else}<small class="config-note connection-id about-build">{t('buildUnknown')}</small>{/if}</div>
+              <div class="pref-control">{#if serverInfo.build}{@render buildValue(serverInfo.build, differ)}{:else if serverInfo.build === null}<small class="config-note connection-id about-build">{t('buildUnknown')}</small>{:else}<small class="config-note connection-id about-build">{t('reconnecting')}</small>{/if}</div>
             </div>
             {#if differ}<div class="config-note about-mismatch appear" role="status">{t('aboutMismatch')}</div>{/if}
           {/if}

@@ -187,6 +187,21 @@ target are BuildKit cache mounts, so later builds are incremental); a warm
 run is ≈ 45 s. Measured on Docker 25.0.14 / Compose v5.5.0, host
 tmux session count unchanged across every run.
 
+**The image knows what it was built from (board #368).** `.dockerignore` keeps
+`.git` out of the context, on purpose, so inside the image there is no git and
+both the UI (vite) and the gateway (build.rs) would call themselves `dev` — and
+the stale-UI tell on Settings › About (UI commit ≠ server commit) could never
+show. The script hands the image the checkout's PUBLIC source revision as build
+args instead: `SOURCE_COMMIT` (`git rev-parse --short=8 HEAD`) and
+`SOURCE_TIME` (the UTC minute), which vite and build.rs read FIRST, then git,
+then `dev`. A hash and a minute; no path, remote or credential, and no context
+widening. A value already in your environment wins, which is how you build the
+image "as" another commit: `SOURCE_COMMIT=<A> npm run test:e2e:docker -- --keep`.
+To produce the MISMATCH on the kept machines, run the script from the checkout
+at commit A (gateways at A), then serve a `vite build` of a checkout at B against
+one of them and open Settings › About: the server line turns amber and names A.
+A `vite` dev server never shows a commit (it is not a build).
+
 One limit, written down so it is not mistaken for a guarantee: the compose
 network is not `internal` — on Docker 25 published ports do not forward from
 an internal network (measured: the host could not connect at all), and a

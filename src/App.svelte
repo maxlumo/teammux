@@ -945,14 +945,22 @@
   // Apply the persisted custom fonts (if any) before first paint — rewrites
   // --font-mono/--font-ui/--font-display inline; a no-op for the defaults.
   applyFontVars();
-  let serverInfo = $state({ hostname: '', machineId: '', build: null });
+  let serverInfo = $state({ hostname: '', machineId: '', build: undefined });
   /** What the app knows of the server a runtime serves, read in ONE place so
    * every path that (re)binds it says the same things: the hostname and
-   * machine, and the build its socket named at login (board #368; null until
-   * the login answered or when the server named none). `null` = no server. */
+   * machine, and the build its socket named at login (board #368). The build
+   * is a fact of the CURRENT authenticated socket, not a remembered attribute:
+   * `undefined` = nothing answering (no socket, or the login has not been
+   * answered), `null` = the server answered and named none (an older one).
+   * The two are different words on screen, so they stay different here.
+   * `null` runtime = no server. */
   function infoOf(runtime) {
-    return { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '', build: runtime?.build() ?? null };
+    return { hostname: runtime?.hostname() || '', machineId: runtime?.machineId() || '', build: runtime?.build() };
   }
+  /** What a page may SHOW of it (review P1-A): the shell keeps `connected`
+   * true while the socket is being re-dialled, so the build counts only when
+   * the link is really up — the predicate the Connection rows already use. */
+  const serverInfoShown = $derived(connected && !reconnecting ? serverInfo : { ...serverInfo, build: undefined });
   let activeAddress = $state(localStorage.getItem('tmux_address') || '');
   // The address whose row was just tapped and is still dialing (review,
   // 2026-09-03: switching an address gave no feedback on the row itself — the
@@ -1698,6 +1706,9 @@
 
   /** The bound runtime's socket closed under it. */
   function onDrop() {
+    // The socket that named the build is gone: nothing answers until a login
+    // does again (review P1-A), whatever the branches below decide.
+    serverInfo = { ...serverInfo, build: undefined };
     if (switching) return; // the switch is bringing another server up
     // The person chose to stay offline, or the migration is blocked:
     // nothing automatic dials. A drop while blocked is an interrupted
@@ -1940,7 +1951,7 @@
     if (switched) return arriveAt(left);
     return activate({ replace: false, up: () => {
       connected = true;
-      serverInfo = { hostname: live()?.getHostname() || '', machineId: live()?.getMachineId() || '', build: live()?.getBuild() ?? null };
+      serverInfo = infoOf(bound());
       activeAddress = bound()?.entry().address ?? '';
       void keepNavFor(scopeSwap.bound());
       // The device default (Chat), never a hard-coded Terminal (board #333);
@@ -3926,7 +3937,7 @@
          handle like the subtree, so a switch rebuilds the guest too. -->
     {#if (page === 'prefs' || holdPages || prefsKept) && (!switching || prefsKept)}
     <div class="page-layer" class:hidden={page !== 'prefs' || !!switching} inert={!!switching}>
-    <Preferences {connected} {theme} {fontSize} {serverInfo} serverTag={serverTag(tagScope, serverCurId)} {activeAddress} {pendingAddress} addresses={prefAddresses}
+    <Preferences {connected} {theme} {fontSize} serverInfo={serverInfoShown} serverTag={serverTag(tagScope, serverCurId)} {activeAddress} {pendingAddress} addresses={prefAddresses}
       {savedServers}
       connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
       {pendingInputs} onDiscardPending={discardPendingInputs}

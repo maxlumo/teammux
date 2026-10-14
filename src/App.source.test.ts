@@ -916,7 +916,8 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   assert.match(elsewhere, /const run = act\.reload \? arriveAt\(left, 'arrive', chain\) : activate\([\s\S]*?chain \}\);\s*return await run\.done;/u,
     'both kept: arrive at B through the connect page s different-server path');
   // A drop while blocked dials nothing, and is owed to Retry (orchestrator 16:12).
-  assert.match(source, /function onDrop\(\) \{\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(heldOffline\) return;\s*if \(migrationBlocked\) \{ owedActivation = true; return; \}/u);
+  // (#368 review P1-A: the socket that named the server's build is gone before any branch decides anything, so onDrop clears it first.)
+  assert.match(source, /function onDrop\(\) \{\s*(?:\/\/[^\n]*\n\s*)*serverInfo = \{ \.\.\.serverInfo, build: undefined \};\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(heldOffline\) return;\s*if \(migrationBlocked\) \{ owedActivation = true; return; \}/u);
   assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing');
 });

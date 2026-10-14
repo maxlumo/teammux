@@ -40,7 +40,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}}}
 ```
 `build` (board #368) is the build the server runs, `{"version": "1.0.0", "commit": "46392f16", "built": "2026-10-14 07:40"}`:
-the package version, the checkout's 8-character commit (`dev` when git was unavailable) and the UTC minute the build ran
+the package version, the source commit (`git --short=8`: AT LEAST 8 hex characters, so two sides compare by prefix; `dev` when git was unavailable) and the UTC minute the build ran
 (`unknown` when the clock was). It rides the login answer, not a new RPC, in both paths. A server older than #368 sends
 none; a client reads that as "unknown", never as a mismatch.
 

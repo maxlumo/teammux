@@ -50,16 +50,31 @@ where Agents is a page of its own, reads as one plain list):
   single-server keys is
   one-time, idempotent, and never loses the current user.
 - About (board #368, the last category of the app group): the app's name and
-  build (`v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`, baked by Vite from the
-  package version, `git rev-parse --short=8 HEAD` and the clock, `dev` /
-  `unknown` where git or the clock was unavailable), the FOCUSED server's
-  build for comparison, the repository link (here only; the connect form no
-  longer carries it) and the licence from `package.json`. The server line is
-  dim while the two agree or cannot be compared (a `dev` side, a server that
-  named none says `unknown`), and wears the warn status colour with one
-  sentence when both name a real commit and the commits differ: that is the
-  stale-PWA tell (UI from one build, server from another). The same commit
-  built twice is not a mismatch. Not connected: no server row.
+  build (`v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`: the package version, the
+  source commit and the build minute; `dev` / `unknown` where git or the clock
+  was unavailable), the FOCUSED server's build for comparison, the repository
+  link (here only; the connect form no longer carries it) and the licence from
+  `package.json`. **Where the identity comes from.** A `vite build` carries
+  the source revision, read from the ENVIRONMENT first (`SOURCE_COMMIT` /
+  `SOURCE_TIME`: public metadata a build without `.git` is handed, which is
+  how the e2e image gets one), then git, then `dev`; build.rs reads the same
+  two names in the same order. A **dev server is not a build**: it says
+  `dev server (started 15:38 UTC)` and is never compared, because its config is
+  read once at start and a commit frozen then would keep naming itself after
+  hot reloads and main moving (review P1-B). **The server's build is a fact of
+  the CURRENT socket**, not a remembered attribute (review P1-A): while the app
+  re-dials after a drop the line says `Reconnecting...`, never the build from
+  before the drop and never `unknown` (that word is for an older server that
+  answered and named none); the next login's build replaces it. The server
+  line is dim while the two agree or cannot be compared (a `dev` side, a dev
+  server, a server that named none), and wears the warn status colour with one
+  sentence when both name a real commit and the commits differ (compared by
+  prefix, because `--short=8` is at least 8 characters, not exactly 8): that
+  is the stale-PWA tell (UI from one build, server from another). The
+  sentence does not promise a reload fetches the server's UI: it says the UI
+  and the server are different builds, to update the installed app or reload a
+  browser (the UI may come from a cache or a different deployment). The same
+  commit built twice is not a mismatch. Not connected: no server row.
 - Connection mode (board #335 ③): **Connect to: One server / All
   included** (`ui/Segmented`, persisted to `tmux_connection_mode`). In
   Aggregate every INCLUDED saved server is a member: it dials on its own

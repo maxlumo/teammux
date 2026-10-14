@@ -15,12 +15,12 @@ const compiled = compileMount(new URL('./Preferences.test.svelte', import.meta.u
 const SAME = { version: '1.0.0', commit: '46392f16', built: '2026-10-14 07:40' };
 const STALE = { version: '1.0.0', commit: '0badc0de', built: '2026-10-12 01:00' };
 
-async function about(context: TestContext, props: Record<string, unknown>) {
+async function about(context: TestContext, props: Record<string, unknown>, ui: Record<string, unknown> = { version: '1.0.0', commit: '46392f16', built: '2026-10-14 07:40' }) {
   const app = await (await compiled).mount(context, {
     props: { initial: { connected: true, ...props }, register() {} },
     modules: [{ default: () => {} }],
     setup(window) {
-      window.__TMM_BUILD__ = { version: '1.0.0', commit: '46392f16', built: '2026-10-14 07:40' };
+      window.__TMM_BUILD__ = ui;
       window.__TMM_LICENSE__ = 'MIT';
       window.localStorage.setItem('tmux_settings_tab', 'about');
       window.localStorage.setItem('tmux_locale', 'en');
@@ -93,4 +93,35 @@ test('a build value stacks its halves so a narrow column breaks between them, ne
     const value = app.document.querySelector('.pref-control .about-build')!;
     assert.deepEqual([...value.querySelectorAll(':scope > span')].map((x) => x.textContent), ['v1.0.0 · 46392f16', '2026-10-14 07:40 UTC']);
   } finally { await app.close(); }
+});
+
+test('the mismatch note does not promise a reload fetches the server\'s UI: the installed app is updated, a browser reloads (#368 review P2-D)', async context => {
+  const { app } = await about(context, { serverInfo: { hostname: 'h', machineId: 'm', build: STALE } });
+  try {
+    const note = app.document.querySelector('.about-mismatch')?.textContent ?? '';
+    assert.equal(note, 'The UI and the server are different builds. If this is the installed app, update it; if it is a browser, reload.');
+  } finally { await app.close(); }
+});
+
+test('a DEV SERVER is not a build: it says when it started, and it is never compared, whatever the server runs (#368 review P1-B)', async context => {
+  const { app, rows } = await about(context, { serverInfo: { hostname: 'h', machineId: 'm', build: STALE } },
+    { version: '1.0.0', commit: 'dev', built: '2026-10-14 15:38', devServer: true });
+  try {
+    const r = rows();
+    assert.equal(r[0]!.value, 'dev server (started 15:38 UTC)');
+    assert.equal(r[1]!.value, 'v1.0.0 · 0badc0de · 2026-10-12 01:00 UTC', 'the server s build is still shown');
+    assert.equal(app.document.querySelector('.about-build.mismatch'), null, 'no amber');
+    assert.equal(app.document.querySelector('.about-mismatch'), null, 'and no advice');
+  } finally { await app.close(); }
+});
+
+test('while nothing is answering the server line says so — not the old build, not "unknown" (#368 review P1-A)', async context => {
+  // `build` undefined = no current socket answered; `null` = an older server that named none.
+  const waiting = await about(context, { serverInfo: { hostname: 'h', machineId: 'm', build: undefined } });
+  try {
+    assert.equal(waiting.rows()[1]!.value, 'Reconnecting...');
+    assert.equal(waiting.app.document.querySelector('.about-build.mismatch, .about-mismatch'), null);
+  } finally { await waiting.app.close(); }
+  const older = await about(context, { serverInfo: { hostname: 'h', machineId: 'm', build: null } });
+  try { assert.equal(older.rows()[1]!.value, 'unknown'); } finally { await older.app.close(); }
 });

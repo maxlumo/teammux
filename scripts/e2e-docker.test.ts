@@ -7,7 +7,7 @@ import test from 'node:test';
 import {
   AGENT, PORT, PROJECT, SERVICES, composeArgs, composeFile, fetchUi, hostPortOf,
   judgeDistinct, judgeHostOutOfReach, judgeMachine, loginAndList, runE2E, tokenOf,
-  COMPOSE_PROJECT, NETWORK, dockerEnv,
+  COMPOSE_PROJECT, NETWORK, dockerEnv, sourceRevisionEnv,
 } from './e2e-docker.mjs';
 
 const read = (rel: string) => readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
@@ -367,4 +367,41 @@ test('a signal mid-run tears down (unless --keep) and exits 130', async () => {
     '[e2e:docker] compose down -v --remove-orphans (SIGTERM)',
     '[e2e:docker] down exited 1; the environment may be left behind — docker compose -p tmm-e2e -f docker/validator/compose.yaml down -v --remove-orphans',
   ], 'the handler itself logged the down failure and the clean-up command');
+});
+
+// ── Board #368 review P2-C: the image has no .git, so it is handed the revision ──
+
+test('the e2e image is handed the checkout\'s PUBLIC source revision as build args, so a build at commit A can differ from a UI built at B', async () => {
+  const dockerfile = await read('docker/validator/Dockerfile');
+  const yaml = await read(composeFile);
+  // Both stages that bake an identity (vite for the UI, cargo for build.rs) take it.
+  assert.equal(dockerfile.match(/^ARG SOURCE_COMMIT=$/gm)?.length, 2);
+  assert.equal(dockerfile.match(/^ARG SOURCE_TIME=$/gm)?.length, 2);
+  assert.equal(dockerfile.match(/^ENV SOURCE_COMMIT=\$SOURCE_COMMIT SOURCE_TIME=\$SOURCE_TIME$/gm)?.length, 2);
+  assert.ok(dockerfile.indexOf('ENV SOURCE_COMMIT') < dockerfile.indexOf('RUN npx vite build'), 'set before the UI build runs');
+  assert.ok(dockerfile.lastIndexOf('ENV SOURCE_COMMIT') < dockerfile.indexOf('cargo build'), 'and before cargo does');
+  assert.match(yaml, /args:\s*\n\s+SOURCE_COMMIT: \$\{SOURCE_COMMIT:-\}\s*\n\s+SOURCE_TIME: \$\{SOURCE_TIME:-\}/u);
+  // Still no way to carry a .git or a host path in: the context and ignore file are as before.
+  assert.doesNotMatch(dockerfile, /COPY[^\n]*\.git\b/u);
+  const ignore = await read('.dockerignore');
+  assert.match(ignore, /^\.git$/m, '.git stays out of the context');
+});
+
+test('sourceRevisionEnv: the checkout\'s short commit and the UTC minute; the caller\'s own win; git failing adds no commit', () => {
+  const at = new Date('2026-10-14T07:40:59.999Z');
+  const ok = (cmd: string, args: string[]) => ({ status: 0, stdout: '46392f16\n' });
+  assert.deepEqual(sourceRevisionEnv({ PATH: '/bin' }, ok as any, at), { PATH: '/bin', SOURCE_COMMIT: '46392f16', SOURCE_TIME: '2026-10-14 07:40' });
+  // The git call is the plain short-hash one, in the checkout.
+  let seen: unknown[] = [];
+  sourceRevisionEnv({}, ((...a: unknown[]) => { seen = a; return { status: 0, stdout: 'abcdef12' }; }) as any, at);
+  assert.deepEqual(seen.slice(0, 2), ['git', ['rev-parse', '--short=8', 'HEAD']]);
+  // "Build the image as commit A": the caller's value is kept, git is not even asked.
+  const asked: string[] = [];
+  const kept = sourceRevisionEnv({ SOURCE_COMMIT: 'aaaaaaaa', SOURCE_TIME: '2025-01-01 00:00' }, (() => { asked.push('git'); return { status: 0, stdout: 'ffffffff' }; }) as any, at);
+  assert.deepEqual([kept.SOURCE_COMMIT, kept.SOURCE_TIME, asked.length], ['aaaaaaaa', '2025-01-01 00:00', 0]);
+  // git missing/failing: no commit at all (the build says dev), the time is still the clock.
+  const none = sourceRevisionEnv({}, (() => ({ status: 128, stdout: '' })) as any, at);
+  assert.deepEqual(none, { SOURCE_TIME: '2026-10-14 07:40' });
+  const junk = sourceRevisionEnv({ SOURCE_COMMIT: 'not a hash; rm -rf /' }, (() => ({ status: 0, stdout: 'zzz' })) as any, at);
+  assert.equal(junk.SOURCE_COMMIT, undefined, 'a value that is not a hash never reaches a build arg');
 });

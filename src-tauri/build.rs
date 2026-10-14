@@ -98,13 +98,42 @@ fn utc_minute(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rem / 3_600, rem % 3_600 / 60)
 }
 
+/// A source commit: 8 to 40 hex characters (`git --short=8` is AT LEAST 8, a
+/// collision lengthens it), lower-cased. Anything else is ignored.
+fn commit_like(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    if (8..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit()) { Some(s) } else { None }
+}
+
+/// `YYYY-MM-DD HH:MM`, digits and separators only.
+fn minute_like(s: &str) -> Option<String> {
+    let s = s.trim();
+    let ok = s.len() == 16
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b' ',
+            13 => b == b':',
+            _ => b.is_ascii_digit(),
+        });
+    ok.then(|| s.to_string())
+}
+
 fn build_identity() {
-    let sha = git(&["rev-parse", "--short=8", "HEAD"]).filter(|s| s.chars().all(|c| c.is_ascii_hexdigit()));
+    // The source revision comes from the ENVIRONMENT first (`SOURCE_COMMIT`,
+    // `SOURCE_TIME`: public metadata a build without `.git`, such as the e2e
+    // image, is handed), then git, then `dev` / the clock. A bad value is
+    // ignored, never a failed build.
+    println!("cargo:rerun-if-env-changed=SOURCE_COMMIT");
+    println!("cargo:rerun-if-env-changed=SOURCE_TIME");
+    let sha = std::env::var("SOURCE_COMMIT").ok().and_then(|s| commit_like(&s))
+        .or_else(|| git(&["rev-parse", "--short=8", "HEAD"]).and_then(|s| commit_like(&s)));
     println!("cargo:rustc-env=TMM_GIT_SHA={}", sha.as_deref().unwrap_or("dev"));
-    let built = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| utc_minute(d.as_secs()))
-        .unwrap_or_else(|_| "unknown".into());
+    let built = std::env::var("SOURCE_TIME").ok().and_then(|s| minute_like(&s)).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| utc_minute(d.as_secs()))
+            .unwrap_or_else(|_| "unknown".into())
+    });
     println!("cargo:rustc-env=TMM_BUILD_TIME={built}");
     // Declaring any rerun-if-changed turns off cargo's default (any package
     // file), so say both: a moved HEAD (a new commit) and the sources.

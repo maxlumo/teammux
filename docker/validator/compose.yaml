@@ -25,6 +25,12 @@ x-gateway: &gateway
   build:
     context: ../..
     dockerfile: docker/validator/Dockerfile
+    # The checkout's public source revision (scripts/e2e-docker.mjs sets them
+    # from git; empty = `dev`). The image has no .git, so this is how a build
+    # at commit A can differ from a UI built at B (board #368).
+    args:
+      SOURCE_COMMIT: ${SOURCE_COMMIT:-}
+      SOURCE_TIME: ${SOURCE_TIME:-}
   image: tmm-e2e-gateway
   init: true
   networks: [tmm]

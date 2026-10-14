@@ -59,21 +59,41 @@ const AGENT_WORKTREES = fileURLToPath(new URL('./worktree', import.meta.url));
 
 const PACKAGE = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
-/** The UI's own build identity (board #368): the package version, the
- * checkout's short commit and the UTC minute this config ran. The same three
- * words the server's login answer carries (`src-tauri/src/build_info.rs`), so
- * a stale phone is a mismatch someone can read. `dev` when git cannot answer
- * (a source archive), the way build.rs says it; never a failed build. */
-export function buildIdentity(now = new Date(), git = (args) => execFileSync('git', args, { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })) {
-  let commit = 'dev';
-  try {
-    const sha = git(['rev-parse', '--short=8', 'HEAD']).trim();
-    if (/^[0-9a-f]{8}$/.test(sha)) commit = sha;
-  } catch { /* no git: dev */ }
-  return { version: PACKAGE.version, commit, built: now.toISOString().slice(0, 16).replace('T', ' ') };
+const COMMIT = /^[0-9a-f]{8,40}$/;
+const MINUTE = /^\d{4}-\d\d-\d\d \d\d:\d\d$/;
+const minuteOf = (now) => now.toISOString().slice(0, 16).replace('T', ' ');
+const gitHere = (args) => execFileSync('git', args, { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+
+/** The UI's RELEASE build identity (board #368): the package version, the
+ * source commit and the UTC minute. The same three words the server's login
+ * answer carries (`src-tauri/src/build_info.rs`), so a stale phone is a mismatch
+ * someone can read. Order, for the commit and the time alike: the environment
+ * (`SOURCE_COMMIT` / `SOURCE_TIME`, public metadata a build that has no `.git`
+ * is handed: the e2e image), then git, then `dev` / the clock; a bad value is
+ * ignored, never a failed build. `--short=8` is AT LEAST 8 hex characters. */
+export function buildIdentity({ env = process.env, now = new Date(), git = gitHere } = {}) {
+  let commit = String(env.SOURCE_COMMIT ?? '').trim().toLowerCase();
+  if (!COMMIT.test(commit)) {
+    commit = 'dev';
+    try {
+      const sha = git(['rev-parse', '--short=8', 'HEAD']).trim();
+      if (COMMIT.test(sha)) commit = sha;
+    } catch { /* no git: dev */ }
+  }
+  const stamped = String(env.SOURCE_TIME ?? '').trim();
+  return { version: PACKAGE.version, commit, built: MINUTE.test(stamped) ? stamped : minuteOf(now) };
 }
 
-export function createViteConfig(command, env = process.env) {
+/** A DEV SERVER's identity (review P1-B): config is read once at start, so a
+ * commit or time read then would keep naming itself after hot reloads and main
+ * moving, and point a cache hunt at the wrong thing. It is `dev` + the minute
+ * the server STARTED, flagged, and About never compares it. Only `vite build`
+ * output carries a commit. */
+export function devServerIdentity(now = new Date()) {
+  return { version: PACKAGE.version, commit: 'dev', built: minuteOf(now), devServer: true };
+}
+
+export function createViteConfig(command, env = process.env, identityDeps = {}) {
   return {
     plugins: [allowCompactXtermLines(), svelte()],
     // esbuild dep pre-bundling bypasses plugin transforms, so the compact-lines
@@ -85,8 +105,9 @@ export function createViteConfig(command, env = process.env) {
     },
     clearScreen: false,
     // Replaced at build time; read through src/lib/core/build-info.ts only.
+    // A dev server is `dev` + its start time (never a commit): see devServerIdentity.
     define: {
-      __TMM_BUILD__: JSON.stringify(buildIdentity()),
+      __TMM_BUILD__: JSON.stringify(command === 'serve' ? devServerIdentity(identityDeps.now) : buildIdentity({ env, ...identityDeps })),
       __TMM_LICENSE__: JSON.stringify(PACKAGE.license),
     },
     server: {

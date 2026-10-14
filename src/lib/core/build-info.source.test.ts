@@ -53,11 +53,29 @@ test('every place App (re)binds the server in front reads it through ONE functio
   const app = await read('../../App.svelte');
   // The first version assigned the object literally at eight sites; two
   // (the boot bring-up and the address-up) forgot `build`, and About said
-  // "unknown" for a server that had named its build.
-  const assigns = [...app.matchAll(/serverInfo = ([^;\n]*);/gu)].map((m) => m[1]!.trim());
+  // "unknown" for a server that had named its build. Now EVERY assignment is
+  // `infoOf(...)`, except the one that says the socket is gone.
+  const assigns = [...app.matchAll(/(?<!let )serverInfo = ([^;\n]*);/gu)].map((m) => m[1]!.trim());
   assert.ok(assigns.length >= 6, `the sites exist: ${assigns.length}`);
-  for (const a of assigns) {
-    assert.ok(/^infoOf\([^)]*\)$/u.test(a) || /\bbuild:/u.test(a), `serverInfo = ${a}: carries the build or goes through infoOf`);
-  }
-  assert.match(app, /function infoOf\(runtime\) \{\s*return \{ hostname: runtime\?\.hostname\(\) \|\| '', machineId: runtime\?\.machineId\(\) \|\| '', build: runtime\?\.build\(\) \?\? null \};/u);
+  const drop = assigns.filter((a) => !/^infoOf\(.*\)$/u.test(a));
+  assert.deepEqual(drop, ['{ ...serverInfo, build: undefined }'], 'the only other assignment is onDrop clearing the build of the socket that just closed');
+  assert.match(app, /function infoOf\(runtime\) \{\s*return \{ hostname: runtime\?\.hostname\(\) \|\| '', machineId: runtime\?\.machineId\(\) \|\| '', build: runtime\?\.build\(\) \};/u,
+    'undefined (nothing answering) and null (an older server) stay different words: no `?? null` here');
+  // Review P1-A: the build counts only while the link is really up, the predicate
+  // the Connection rows use; onDrop clears it before any branch decides anything.
+  assert.match(app, /const serverInfoShown = \$derived\(connected && !reconnecting \? serverInfo : \{ \.\.\.serverInfo, build: undefined \}\);/u);
+  assert.match(app, /serverInfo=\{serverInfoShown\}/u, 'Preferences is handed the gated one');
+  assert.match(app, /function onDrop\(\) \{[^}]*?serverInfo = \{ \.\.\.serverInfo, build: undefined \};\s*if \(switching\) return;/u);
+});
+
+test('the source revision is read from the environment FIRST in both builds, then git, then dev, and a dev server is not a build (#368 review P1-B, P2-C)', async () => {
+  const build = await read('../../../src-tauri/build.rs');
+  assert.match(build, /cargo:rerun-if-env-changed=SOURCE_COMMIT/u);
+  assert.match(build, /cargo:rerun-if-env-changed=SOURCE_TIME/u);
+  const sha = build.slice(build.indexOf('let sha ='), build.indexOf('let built ='));
+  assert.ok(sha.indexOf('SOURCE_COMMIT') >= 0 && sha.indexOf('SOURCE_COMMIT') < sha.indexOf('"rev-parse"'), 'build.rs: the environment before git');
+  const vite = await read('../../../vite.config.js');
+  const id = vite.slice(vite.indexOf('export function buildIdentity'), vite.indexOf('export function devServerIdentity'));
+  assert.ok(id.indexOf('env.SOURCE_COMMIT') >= 0 && id.indexOf('env.SOURCE_COMMIT') < id.indexOf("git(['rev-parse'"), 'vite: the environment before git');
+  assert.match(vite, /command === 'serve' \? devServerIdentity\(identityDeps\.now\) : buildIdentity\(\{ env, \.\.\.identityDeps \}\)/u, 'serve is the dev identity, only a build carries a commit');
 });

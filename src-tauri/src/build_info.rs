@@ -69,13 +69,26 @@ mod tests {
         assert!(built_ok, "BUILT is `YYYY-MM-DD HH:MM` UTC: {BUILT:?}");
         // The clock is this year or later (the formatter, not just its shape).
         assert!(BUILT == "unknown" || BUILT[..4].parse::<u32>().unwrap() >= 2026, "{BUILT}");
+        // A build handed a time (SOURCE_TIME, like SOURCE_COMMIT) says that one.
+        if let Some(given) = option_env!("SOURCE_TIME") {
+            let ok = given.len() == 16 && given.bytes().enumerate().all(|(i, b)| match i { 4 | 7 => b == b'-', 10 => b == b' ', 13 => b == b':', _ => b.is_ascii_digit() });
+            if ok { assert_eq!(BUILT, given); }
+        }
     }
 
-    /// The commit is the CHECKOUT'S HEAD, read with the same command build.rs
-    /// ran. Skipped only where git cannot answer (a source archive builds as
-    /// `dev`). Without TMM_GIT_SHA in build.rs this reads `dev` and fails.
+    /// The commit is the SOURCE revision: `SOURCE_COMMIT` when the build was
+    /// handed one (the e2e image has no `.git`), else the CHECKOUT'S HEAD, read
+    /// with the same command build.rs ran, else `dev` where git cannot answer (a
+    /// source archive). At least 8 hex characters, as `git --short=8` gives.
+    /// Without TMM_GIT_SHA in build.rs this reads `dev` and fails.
     #[test]
     fn the_commit_is_the_checkouts_head() {
+        if let Some(given) = option_env!("SOURCE_COMMIT").map(|s| s.trim().to_ascii_lowercase()) {
+            if (8..=40).contains(&given.len()) && given.chars().all(|c| c.is_ascii_hexdigit()) {
+                assert_eq!(COMMIT, given, "a build handed a source commit says it, git or not");
+                return;
+            }
+        }
         let head = std::process::Command::new("git")
             .args(["rev-parse", "--short=8", "HEAD"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -86,7 +99,7 @@ mod tests {
             return;
         }
         let head = String::from_utf8(out.stdout).unwrap().trim().to_string();
-        assert!(COMMIT.chars().all(|c| c.is_ascii_hexdigit()) && COMMIT.len() == 8, "{COMMIT}");
+        assert!(COMMIT.chars().all(|c| c.is_ascii_hexdigit()) && (8..=40).contains(&COMMIT.len()), "{COMMIT}");
         // A later commit in this checkout moves HEAD past what a stale test
         // binary baked in; cargo reruns build.rs when HEAD moves, so equal.
         assert_eq!(COMMIT, head);

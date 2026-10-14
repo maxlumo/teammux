@@ -16,6 +16,12 @@ COPY index.html vite.config.js svelte.config.js tsconfig.json ./
 COPY scripts/dev-ports.mjs ./scripts/
 COPY public ./public
 COPY src ./src
+# The image has no `.git` (.dockerignore keeps it out, on purpose), so the
+# source revision arrives as PUBLIC build metadata: vite.config.js reads
+# SOURCE_COMMIT / SOURCE_TIME first (board #368). Empty = `dev`.
+ARG SOURCE_COMMIT=
+ARG SOURCE_TIME=
+ENV SOURCE_COMMIT=$SOURCE_COMMIT SOURCE_TIME=$SOURCE_TIME
 RUN npx vite build
 
 # --- 2. tmm + server, release, no webview, UI embedded -----------------------
@@ -28,6 +34,10 @@ COPY src-tauri ./src-tauri
 # `include_str!`s in src/projects/skills.rs reach the bundled skills.
 COPY assets/skills ./assets/skills
 COPY --from=ui /src/dist ./dist
+# The same revision for build.rs (SOURCE_COMMIT / SOURCE_TIME, then git, then dev).
+ARG SOURCE_COMMIT=
+ARG SOURCE_TIME=
+ENV SOURCE_COMMIT=$SOURCE_COMMIT SOURCE_TIME=$SOURCE_TIME
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/src-tauri/target \
     cargo build --locked --manifest-path src-tauri/Cargo.toml \

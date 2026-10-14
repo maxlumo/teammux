@@ -241,7 +241,8 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
       isConnected: () => connected,
       getMachineId: () => (connected ? machine : ''),
       getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
-      getBuild: () => (connected ? null : undefined),
+      // A login names the build its server runs; `__builds` (machine -> build) says which, absent = an older server.
+      getBuild: () => (connected ? ((m.__builds as Record<string, unknown> | undefined)?.[machine] ?? null) : undefined),
       setOnDisconnect: (fn: () => void) => { onDrop = fn; },
       subscribe: noop, unsubscribe: noop, resubscribeActive: noop,
       addPaneOutputListener: noop, removePaneOutputListener: noop,
@@ -9050,4 +9051,48 @@ test('#357 (Terminal, desktop): the sidebar keeps its "Other servers" group — 
   for (let i = 0; i < 30 && foreignRows(h).length < 2; i++) { await h.app.advance(500); await h.settle(); }
   assert.deepEqual(foreignRows(h), ['beta:work', 'beta:Deploy'], 'the grouped section shows the project NAME too');
   assert.equal(inlineForeign(h).length, 0, 'no inline rows on the desktop');
+});
+
+// ── Board #368 review P1-A: the build is a fact of the CURRENT socket ───────
+
+const UI_BUILD = { version: '1.0.0', commit: '9c1a7a46', built: '2026-10-14 15:21' };
+const aboutServer = (h: Awaited<ReturnType<typeof bootApp>>) => {
+  const row = [...h.app.document.querySelectorAll<HTMLElement>('.preferences .preference-row')].find((r) => r.querySelector('.config-field-label')?.textContent?.trim() === 'Server');
+  return {
+    text: [...(row?.querySelectorAll('.pref-control .about-build > span, .pref-control .about-build:not(:has(span))') ?? [])].map((x) => x.textContent!.trim()).join(' | '),
+    mismatch: !!h.app.document.querySelector('.preferences .about-build.mismatch'),
+    note: !!h.app.document.querySelector('.preferences .about-mismatch'),
+  };
+};
+
+test('#368 (About): the build is a fact of the CURRENT socket — a drop shows no build and no warning, the next login shows its own, an older server says unknown', async (context) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const builds: Record<string, unknown> = { 'm-a': { version: '1.0.0', commit: '0badc0de', built: '2026-10-12 01:00' } };
+  const h = await bootApp(context,
+    { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop', tmux_settings_tab: 'about' },
+    undefined, {
+      rpc: { __builds: builds },
+      gate: (_url, n) => (n === 2 ? held : null),
+      setup(window: any) { window.Element.prototype.getAnimations = () => []; window.__TMM_BUILD__ = UI_BUILD; },
+    });
+  const gear = [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await h.settle();
+  // 1. Up: A's login named a different commit than this UI: the real stale tell.
+  assert.deepEqual(aboutServer(h), { text: 'v1.0.0 · 0badc0de | 2026-10-12 01:00 UTC', mismatch: true, note: true });
+  // 2. The socket drops; the shell keeps `connected` while it re-dials, the dial is out.
+  h.net.drop(); await h.settle(); await h.settle();
+  const waiting = aboutServer(h);
+  assert.deepEqual(waiting, { text: 'Reconnecting...', mismatch: false, note: false }, 'nothing answers: no build from before the drop, and no stale warning');
+  assert.doesNotMatch(h.app.document.querySelector('.preferences')!.textContent!, /0badc0de/u);
+  // 3. A NEW login on the same server, now the same commit as this UI: its build, no warning.
+  builds['m-a'] = { ...UI_BUILD };
+  release(); for (let i = 0; i < 6; i++) await h.settle();
+  assert.deepEqual(aboutServer(h), { text: 'v1.0.0 · 9c1a7a46 | 2026-10-14 15:21 UTC', mismatch: false, note: false }, 'the new login s build, not the old one');
+  // 4. It drops again and the next login is an OLDER server: no field at all -> unknown, never a mismatch.
+  delete builds['m-a'];
+  h.net.drop();
+  for (let i = 0; i < 40 && aboutServer(h).text !== 'unknown'; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.deepEqual(aboutServer(h), { text: 'unknown', mismatch: false, note: false });
 });

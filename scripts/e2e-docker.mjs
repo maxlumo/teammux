@@ -88,6 +88,28 @@ export function dockerEnv(base) {
   return env;
 }
 
+/** The public SOURCE REVISION of the checkout this runs from, as the env the
+ * image build takes (board #368). The image has no `.git` (.dockerignore keeps
+ * it out, on purpose), so without this both sides of the stack would build as
+ * `dev` and a build-A-image-with-a-build-B-UI mismatch could never be produced.
+ * A caller's own SOURCE_COMMIT / SOURCE_TIME wins (build the image "as" some
+ * commit); a git failure adds nothing (`dev`). Public metadata only: a hash and
+ * a minute, never a path, a remote or a credential. */
+export function sourceRevisionEnv(base, run = spawnSync, now = new Date()) {
+  const env = { ...base };
+  if (!/^[0-9a-f]{8,40}$/.test(String(env.SOURCE_COMMIT ?? '').trim().toLowerCase())) {
+    delete env.SOURCE_COMMIT;
+    const r = run('git', ['rev-parse', '--short=8', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+    const sha = String(r?.stdout ?? '').trim();
+    if (r?.status === 0 && /^[0-9a-f]{8,40}$/.test(sha)) env.SOURCE_COMMIT = sha;
+  }
+  if (!/^\d{4}-\d\d-\d\d \d\d:\d\d$/.test(String(env.SOURCE_TIME ?? '').trim())) {
+    delete env.SOURCE_TIME;
+    env.SOURCE_TIME = now.toISOString().slice(0, 16).replace('T', ' ');
+  }
+  return env;
+}
+
 /** The token in a config.toml the entrypoint wrote (`token = "…"`). */
 export function tokenOf(configToml) {
   const m = /^token\s*=\s*"([^"]+)"/m.exec(configToml);
@@ -216,9 +238,10 @@ export async function runE2E({
   onSignal = (handler) => { for (const s of ['SIGINT', 'SIGTERM']) process.once(s, handler); },
   loginAndList: login = loginAndList,
   fetchUi: getUi = fetchUi,
+  revision = (base) => sourceRevisionEnv(base),
 } = {}) {
   const keep = argv.includes('--keep');
-  const denv = dockerEnv(env);
+  const denv = revision(dockerEnv(env));
   const sh = (args, opts = {}) => spawn('docker', composeArgs(args), { cwd: repoRoot, encoding: 'utf8', env: denv, ...opts });
   const must = (args, what) => {
     const r = sh(args);
