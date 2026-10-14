@@ -40,6 +40,10 @@ export interface ScopeNoteSpec {
 {/if}
 
 <style>
-  .scope-note :global(svg) { flex: none; }
-  .scope-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The note WRAPS, never ellipsises (validator at 1280: a 240px desktop
+     column cut it to "…1 more s…" — a hint that hides its own end is the
+     complaint it answers). The glyph stays on the first line. */
+  .scope-note { align-items: flex-start; text-align: left; }
+  .scope-note :global(svg) { flex: none; margin-top: 2px; }
+  .scope-note-text { min-width: 0; white-space: normal; overflow-wrap: break-word; }
 </style>

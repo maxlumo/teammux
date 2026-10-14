@@ -81,3 +81,10 @@ test('the server picker opens ABOVE a phone sidebar sheet — the sheet s ScopeN
   assert.ok(menu > sheet && (!Number.isFinite(strip) || menu > strip), `picker ${menu} above the sheet ${sheet} and its status strip ${strip}`);
   assert.ok(menu < 60, 'and under the Dialog tier (60), so a rename confirm still covers it');
 });
+
+test('the ScopeNote WRAPS, never ellipsises (#364 validator P3 at 1280: "…1 more s…")', async () => {
+  const note = await readFile(new URL('./lib/app/ScopeNote.svelte', import.meta.url), 'utf8');
+  const css = note.slice(note.indexOf('<style>'));
+  assert.doesNotMatch(css, /text-overflow|white-space: nowrap/u, 'no ellipsis, no single-line clamp');
+  assert.match(css, /\.scope-note-text \{ min-width: 0; white-space: normal; overflow-wrap: break-word; \}/u, 'wraps at word boundaries; only an unbreakable word breaks');
+});

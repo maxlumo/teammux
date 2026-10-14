@@ -118,7 +118,8 @@ completion).
   one component, the sidebars' quiet `.side-row.add`); Aggregate has none,
   because its tags and "no list yet" rows already name every server. The
   picker opens above the phone sheet that holds the row (z 40 over the
-  sheet's 26).
+  sheet's 26). The row wraps at a word boundary and never ellipsises (at
+  1280 the desktop column cut it to "…1 more s…", validator).
 
 ## Roster (agent cards)
 - One card per live window; managed agents carry the hook-derived state dot
