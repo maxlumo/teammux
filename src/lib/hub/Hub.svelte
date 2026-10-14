@@ -2300,7 +2300,7 @@
     <div class="track drawer-track" id={drawerId} bind:this={drawerTrackEl}>
     <Drawer {compact} {visible} {fontSize} {selected} {projectPath} {termTarget}
       {drawerView} {drawerFilesReq} {drawerIssueReq} {drawerBoardNew}
-      {agents} {panes} {managedAgents} {winsExpanded} {stateLabel} {stateTone}
+      {agents} {panes} {winsExpanded} {stateLabel} {stateTone}
       bind:drawerFilesDir onpick={pickWindow} onclose={closeDrawer}
       onexpand={() => (winsExpanded = !winsExpanded)}
       onterminal={() => { const m = /^(.+):(\d+)\.(\d+)$/.exec(termTarget); if (m) openTerminal(selected, termTarget); }}

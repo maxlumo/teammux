@@ -16,7 +16,7 @@ test('Drawer renders its original window list, real partitions and single head',
     { name: 'notes', window: 3, agent: null, managed: false, state: 'idle' },
   ];
   const view = (props: Record<string, unknown> = {}) => h.fragment(render(Drawer, { props: {
-    selected: 'fixture', agents, managedAgents: [agents[0]], stateLabel: (state: string) => state,
+    selected: 'fixture', agents, stateLabel: (state: string) => state,
     ...props,
   } }).body as string);
   const empty = view();
@@ -32,16 +32,18 @@ test('Drawer renders its original window list, real partitions and single head',
   assert.equal(empty.querySelector('.win-pill.more')?.textContent?.trim(), '+1');
   assert.equal(empty.querySelector('.direct-tag')?.textContent, 'direct');
   assert.ok(empty.querySelector('.win-pill .live-dot'));
-  // Board #179: the head's running count and the pill's live dot are ONE
-  // definition (stateIsLive). The state is 'running' today ('working' is the
-  // pre-2026-08 name, still accepted); the count read `=== 'working'` and
-  // showed "3 · 0 running" beside a live dot.
-  const live = view({ managedAgents: [
+  // Board #338: the head carries no roster count ("N · M running"); the
+  // pills' live dots are the running cue (stateIsLive, one definition — board
+  // #179). Running, legacy working and waiting agents all render, and none of
+  // them brings the count back.
+  const live = view({ agents: [
     { name: 'devops', window: 5, agent: 'codex', managed: true, state: 'running' },
     { name: 'builder', window: 6, agent: 'claude', managed: true, state: 'waiting' },
     { name: 'legacy', window: 7, agent: 'kiro', managed: true, state: 'working' },
   ] });
-  assert.equal(live.querySelector('.d-count')?.textContent?.trim(), '3 · 2 running', 'running and legacy working both count; waiting does not');
+  assert.equal(live.querySelector('.d-count'), null, 'the head shows no running count');
+  assert.ok(!/running/u.test(live.querySelector('.drawer-head')?.textContent ?? ''), 'and no "N running" text in any form');
+  assert.deepEqual([...live.querySelectorAll('.win-pill .live-dot')].map((d) => d.parentElement?.textContent?.trim()), ['5:devops', '7:legacy'], 'live dots: running and legacy working, not waiting (#179)');
   assert.equal(empty.querySelector('.win-pill')?.getAttribute('aria-pressed'), 'false');
   const commands = empty.querySelectorAll('.drawer-head .command-button');
   assert.equal(commands.length, 2, '#166: maximize and close share the command owner');

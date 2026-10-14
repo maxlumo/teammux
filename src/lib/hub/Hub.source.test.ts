@@ -143,8 +143,8 @@ test('Hub hover surfaces keep the shared status vocabulary (board #87)', () => {
   assert.match(source, /function stateTone\(state\) \{\s*switch \(stateDotColor\(state\)\)/u, 'the hover tone derives from stateDotColor');
   assert.match(source, /\{stateLabel\} \{stateTone\} onselect=\{setRecipient\}/u,
     'Roster consumes the existing shared formatters');
-  assert.match(source, /\{agents\} \{panes\} \{managedAgents\} \{winsExpanded\} \{stateLabel\} \{stateTone\}/u,
-    'Drawer consumes the same formatters without copying them (#136)');
+  assert.match(source, /\{agents\} \{panes\} \{winsExpanded\} \{stateLabel\} \{stateTone\}/u,
+    'Drawer consumes the same formatters without copying them (#136), and is not handed the roster it no longer counts (#338)');
 });
 
 test('Hub keeps selection, Back and consequential actions around the extracted Sidebar (#121)', () => {

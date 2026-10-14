@@ -15,7 +15,7 @@
     projectPath = '',
     termTarget = '', drawerView = 'term',
     drawerFilesReq = null, drawerIssueReq = null, drawerBoardNew = null,
-    agents = [], panes = [], managedAgents = [], winsExpanded = false,
+    agents = [], panes = [], winsExpanded = false,
     stateLabel = (state) => state, stateTone = () => undefined,
     drawerFilesDir = $bindable(''),
     onpick: pickWindow = () => {}, onclose: closeDrawer = () => {},
@@ -28,12 +28,6 @@
     (a) => termTarget.startsWith(`${selected}:${a.window}.`)));
   const winPills = $derived(bar.pills);
   const winsFolded = $derived(bar.folded);
-
-  // ONE definition of "live" (stateIsLive) for the count and the pill dots:
-  // the state is 'running' today ('working' is its pre-2026-08 name), and a
-  // private `=== 'working'` here showed "3 · 0 running" beside a live dot
-  // (board #179).
-  const working = $derived(managedAgents.filter((a) => stateIsLive(a.state)).length);
 
   function pillInfo(a) {
     const lines = [{ label: t('hubHoverCommand'), value: a.command || '—' }];
@@ -71,9 +65,6 @@
         {/if}
       </div>
       <span class="spacer"></span>
-      <!-- The roster count the retired statusline carried. Everything else it
-           showed was a second copy of this bar. -->
-      <span class="d-count">{managedAgents.length} · {working} {t('hubState_running')}</span>
       <CommandButton variant="icon" icon="maximize" label={t('hubOpenFull')} onclick={onterminal} />
     {:else if drawerView === 'files'}
       <!-- Files carries its own path bar and toolbar; the head only says
@@ -156,8 +147,7 @@
      a tmux-style statusline underneath, both listing the same windows and both
      calling pickWindow (owner: "上面和下面有两个 bar…可以把它们合并一下").
      The pills won — they carry the state dot, the direct-window tag and the
-     actions — and the statusline's only unique content, the roster count,
-     moved up here. */
-  .d-count { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--text3); white-space: nowrap; margin-right: 2px; }
-
+     actions. The roster count the statusline left behind ("N · M running")
+     was removed too (board #338, owner: it costs width the pills need): the
+     pill's live dot is the running cue. */
 </style>
