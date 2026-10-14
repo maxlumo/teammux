@@ -71,17 +71,23 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
                 let call: serde_json::Value = serde_json::from_str(&raw).unwrap();
                 let method = call["method"].as_str().unwrap_or_default().to_string();
                 seen.lock().unwrap().push(method.clone());
-                if method == "hub_board_save" {
-                    if let Some(a) = call["params"]["assignee"].as_str() {
-                        *held.lock().unwrap() = a.to_string();
-                    }
-                }
-                let current = held.lock().unwrap().clone();
                 let act = plan
                     .iter()
                     .find(|(m, _)| *m == method)
                     .map(|(_, a)| *a)
                     .unwrap_or(Act::Answer);
+                // The state changes only when the save really HAPPENS
+                // (reviewer's P2 on 0176c02e): an `Act::Error` save must
+                // leave the assignee as it was, or "the save did not happen"
+                // is a claim the fake quietly contradicts. `LoseAnswer` DOES
+                // write — the request was accepted and only its reply is
+                // lost, which is the whole point of that case.
+                if method == "hub_board_save" && act != Act::Error {
+                    if let Some(a) = call["params"]["assignee"].as_str() {
+                        *held.lock().unwrap() = a.to_string();
+                    }
+                }
+                let current = held.lock().unwrap().clone();
                 if act == Act::LoseAnswer {
                     // Accepted, never answered: the request may have run.
                     drop(ws);
@@ -178,11 +184,12 @@ fn the_partial_result_is_machine_readable_in_json_mode() {
 /// not exist.
 #[test]
 fn a_failed_save_posts_nothing() {
-    let f = fake(vec![("hub_board_save", Act::Error)]);
+    let f = fake_with(vec![("hub_board_save", Act::Error)], "dev");
     let (ok, _out, err) = f.run(&["board", "assign", "12", "builder-2"]);
     assert!(!ok);
     assert!(err.contains("boom"), "{err:?}");
     assert!(!f.calls().contains(&"hub_post".to_string()), "{:?}", f.calls());
+    assert_eq!(f.assignee(), "dev", "the save did not happen: nobody was reassigned");
 }
 
 /// A name this project does not run is refused at the door, before any
