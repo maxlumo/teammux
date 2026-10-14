@@ -137,7 +137,7 @@ export function slideIndicator(node: HTMLElement, params: IndicatorParams = {}) 
     // Enable the glide only after the first placement (the next frame, so the
     // first vars are painted without a transition).
     const i = ind();
-    if (i && !i.classList.contains('ready') && !readyFrame) readyFrame = requestAnimationFrame(() => { readyFrame = 0; i.classList.add('ready'); });
+    if (i && !i.classList.contains('ready') && !readyFrame) readyFrame = requestAnimationFrame(() => { readyFrame = 0; if (!ended) i.classList.add('ready'); });
   };
   // One frame answers any number of observer calls, and an `update` frame in
   // flight is that same frame (it measures after every sibling effect landed).

@@ -44,7 +44,8 @@ type Box = { offsetLeft: number; offsetTop: number; offsetWidth: number; offsetH
 function sidebar(rows = 3, active = 1) {
   const cls = (...c: string[]) => ({ contains: (n: string) => c.includes(n) });
   const node: any = { clientLeft: 0, clientTop: 0, offsetLeft: 0, offsetTop: 0, offsetWidth: 240, offsetHeight: 700, offsetParent: null, style: { vars: new Map<string, string>(), setProperty(k: string, v: string) { this.vars.set(k, v); } } };
-  const pill: any = { classList: { ...cls('slide-pill'), add() {} } };
+  const marks = new Set<string>();
+  const pill: any = { marks, classList: { contains: (n: string) => n === 'slide-pill' || marks.has(n), add: (n: string) => { marks.add(n); } } };
   const head: any = { classList: cls('side-head') };
   const list: any[] = Array.from({ length: rows }, (_, i) => ({ classList: cls('proj-row'), offsetParent: node, offsetLeft: 0, offsetTop: 40 + i * 52, offsetWidth: 232, offsetHeight: 51 }));
   node.children = [pill, head, ...list];
@@ -230,5 +231,24 @@ test('slideIndicator: an observer delivery after destroy queues no frame; neithe
     action.update({ key: 'b', active: '.proj-row.open' });
     assert.equal(o.frames.size, 0, 'and so is a late update');
     assert.equal(o.observed.size, 0);
+  } finally { o.restore(); }
+});
+
+test('slideIndicator: the pill\u2019s `ready` mark is made while alive and never by a callback the browser already took after destroy', () => {
+  const o = observers();
+  try {
+    const alive = sidebar();
+    const a = slideIndicator(alive.node, { key: 'a', active: '.proj-row.open' });
+    o.flush();
+    assert.ok(alive.pill.marks.has('ready'), 'alive: the glide is enabled after the first placement');
+    a.destroy();
+    const s = sidebar();
+    const action = slideIndicator(s.node, { key: 'a', active: '.proj-row.open' });
+    o.step(); // the first placement; it queues the `ready` mark
+    const taken = [...o.frames.values()];
+    assert.equal(taken.length, 1);
+    action.destroy();
+    taken.forEach((fn) => fn());
+    assert.equal(s.pill.marks.has('ready'), false, 'a late ready callback touches nothing after the end');
   } finally { o.restore(); }
 });
