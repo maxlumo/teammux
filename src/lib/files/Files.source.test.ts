@@ -361,6 +361,14 @@ test('the door is a small pill at the head of the path line, not a row of its ow
   // branch renders.
   assert.match(source, /const listShown = \$derived\(splitEligible && wideEnough\);/u, 'the list is visible: split AND the 900 the stylesheet needs');
   assert.match(source, /@media \(max-width: 899px\) \{[^}]*\.preview-open \.files-left \{ display: none; \}/u, 'the stylesheet rule that condition mirrors (SPLIT_MIN_WIDTH 900)');
+  // The two numbers are one breakpoint (reviewer calibration on cef81bdd):
+  // the JS width the list needs and the CSS width below which it hides.
+  const split = Number(/const SPLIT_MIN_WIDTH = (\d+);/u.exec(source)?.[1]);
+  assert.ok(Number.isFinite(split), 'SPLIT_MIN_WIDTH is a literal const');
+  assert.match(source, /let wideEnough = \$state\([^)]*window\.innerWidth >= SPLIT_MIN_WIDTH\);/u, 'wideEnough reads it at init');
+  assert.match(source, /wideEnough = window\.innerWidth >= SPLIT_MIN_WIDTH;/u, 'and on every resize');
+  const hides = [...source.matchAll(/@media \(max-width: (\d+)px\) \{[^}]*\.preview-open \.files-left \{ display: none; \}/gu)].map((m) => Number(m[1]));
+  assert.deepEqual(hides, [split - 1], `the one rule hiding the list is max-width: ${split - 1}px — SPLIT_MIN_WIDTH - 1`);
   assert.equal(after.match(/\{#if !listShown\}\{@render serverDoor\(\)\}\{\/if\}/gu)?.length, 4, 'preview, edit, downloads, info');
   assert.equal(source.match(/<GitPanel bind:this=\{gitPanelRef\} \{cwd\} \{fontSize\} lead=\{listShown \? null : serverDoor\}/gu)?.length, 2, 'git, on both layouts chains');
   assert.doesNotMatch(source, /!splitEligible\}\{@render serverDoor|lead=\{splitEligible/u, 'no door decision reads the DOM branch');
