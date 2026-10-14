@@ -187,10 +187,13 @@ impl Backend {
     }
 
     /// Where a backend's Stop payload carries no reply text, the backend may
-    /// know another source: kiro --v3 reads the GLOBAL session store (board
-    /// #207); kimi reads the session wire inside `home`, the agent's managed
-    /// home resolved by name at the call site (board #224) — `None` for a
-    /// window this app did not spawn.
+    /// know another source: kiro --v3 reads the session store, the agent's
+    /// ISOLATED home first and the global `~/.kiro` only as the legacy
+    /// fallback (board #207, order fixed in #376 — a stale global copy of a
+    /// live session id shadowed it and four agents' replies never reached
+    /// the room); kimi reads the session wire inside `home`, the agent's
+    /// managed home resolved by name at the call site (board #224) — `None`
+    /// for a window this app did not spawn.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn reply_fallback(
         self,
@@ -198,7 +201,7 @@ impl Backend {
         home: Option<&std::path::Path>,
     ) -> Option<String> {
         match self {
-            Backend::Kiro => kiro::reply_fallback(payload),
+            Backend::Kiro => kiro::reply_fallback(payload, home),
             Backend::Kimi => kimi::reply_fallback(payload, home?),
             _ => None,
         }

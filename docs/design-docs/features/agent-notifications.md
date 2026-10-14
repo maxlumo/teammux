@@ -73,11 +73,33 @@ runtime worker it stalled every RPC sharing that thread for the duration.
 **kiro payload shapes by engine (kiro-cli 2.22.1, board #207, measured):** v2
 `Stop` carries `assistant_response`/`last_assistant_message`; v3 `Stop` is
 `{session_id: "sess_<uuid>", hook_event_name: "Stop", cwd}` with no text (the
-reply is read from the session file, agents-overview.md); `UserPromptSubmit`
+reply is read from the session file — the agent's ISOLATED home first, see
+below, agents-overview.md); `UserPromptSubmit`
 carries `prompt` + `session_id` on both; v3 never delivers `preToolUse`/
 `postToolUse`. The managed profile's hooks are the 3.0 ARRAY shape
 (`{name, trigger, action:{type:"command", command}, timeout}`), accepted by
 both engines.
+
+**Where that session file is read from, in order** (board #376, 2026-10-15,
+kiro-cli 2.28): `<home>/sessions` — the `KIRO_HOME` the managed agent runs
+with — and only then the global `~/.kiro/sessions`, as the legacy source for
+a window spawned before homes were isolated or one we have no home for.
+`kiro::reply_fallback` is handed that home (`Backend::reply_fallback(payload,
+home)`) and used to drop it, reading the global store alone. The incident:
+owner, 01:35, on laminar-log — "为啥 agent 返回的结果界面上都看不到". The room
+held ZERO replies from four kiro agents (editor/researcher/writer/critic)
+while their panes finished turns normally, because a STALE copy of the live
+session id survived in `~/.kiro/sessions/…` from before that agent's home was
+isolated (mtime 00:03 against the live file's 01:39, 414 assistant rows).
+Every Stop found the stale file first and returned the same old sentence, so
+nothing new was recorded: no room line, and no reply edge either — every
+`@editor` request from the owner was a dead end for the team too. ORDER was
+the defect, not existence; both files were there and the wrong one answered.
+Deleting the stale copy would not have helped before the fix, since the
+fallback never looked in the isolated home at all. The legacy root resolves
+through one function (`legacy_sessions_root`) whose `cfg(test)` form is a
+per-process temp dir, so no test reads the developer's own `~/.kiro` (the
+#216 rule: the isolation door belongs where the path is resolved).
 
 **Where each dialect lives (board #129, 2026-09-09):** every backend's payload
 reading — `normalize_kind`, `is_user_prompt_submit`, claude's `is_idle_nudge`

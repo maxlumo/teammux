@@ -557,11 +557,52 @@ pub(crate) fn session_reply(sessions_root: &Path, session_id: &str) -> Option<St
 
 /// The v3 fallback wired into the notify helper: the kiro Stop payload has no
 /// text, the session file has.
+///
+/// `home` is the agent's ISOLATED home (`<ws>/.tmm/agents/<name>`, the
+/// `KIRO_HOME` it runs with), and it is searched FIRST — because that is
+/// where the running agent writes (board #376, 2026-10-15). The global
+/// `~/.kiro/sessions` is only the legacy fallback, for a window spawned
+/// before homes were isolated and for an unmanaged one we have no home for.
+///
+/// The incident, laminar-log (owner 01:35: "为啥 agent 返回的结果界面上都看
+/// 不到"): the room had ZERO replies from four kiro agents while their panes
+/// finished turns normally. This helper ignored the `home` it was handed and
+/// read the global store, where a STALE COPY of the same session id survived
+/// from before that agent's home was isolated (mtime 00:03 against the live
+/// file's 01:39, 414 assistant rows). Every Stop found the stale file first,
+/// returned the same old sentence, and nothing new was recorded — no room
+/// line and no reply edge, so every `@editor` request from the owner was a
+/// dead end for the team too. Order, not existence, is what was wrong: both
+/// files were there, and the wrong one answered.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn reply_fallback(payload: &serde_json::Map<String, Value>) -> Option<String> {
+pub(crate) fn reply_fallback(
+    payload: &serde_json::Map<String, Value>, home: Option<&Path>,
+) -> Option<String> {
     let id = crate::agent_notifications::string_field(payload, &["session_id", "sessionId"])?;
+    // The isolated home first. `sessions/` sits directly in KIRO_HOME, the
+    // same layout the global store has under `~/.kiro`.
+    if let Some(reply) = home.and_then(|h| session_reply(&h.join("sessions"), &id)) {
+        return Some(reply);
+    }
+    session_reply(&legacy_sessions_root()?, &id)
+}
+
+/// kiro's GLOBAL session store, `~/.kiro/sessions` — the legacy half of
+/// `reply_fallback`.
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+fn legacy_sessions_root() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    session_reply(&home.join(".kiro").join("sessions"), &id)
+    Some(home.join(".kiro").join("sessions"))
+}
+
+/// Under test the global store is a per-process temp dir, like codex's user
+/// home (board #216): the isolation door belongs where the path is resolved,
+/// so no test can read the developer's own `~/.kiro` — and #376's test writes
+/// a STALE session copy into this one on purpose.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+fn legacy_sessions_root() -> Option<std::path::PathBuf> {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    Some(DIR.get_or_init(|| crate::config::fresh_process_dir("tmm-kiro-global")).join("sessions"))
 }
 
 /// Move a `--model <id>` an older build put on the launch line into the agent
@@ -1289,6 +1330,63 @@ mod tests {
         assert_eq!(session_reply(&root, "../etc"), None, "a path is not a session id");
         assert_eq!(session_reply(&root, ""), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Board #376 (owner, 2026-10-15: "luminar-log 这个项目，为啥 agent 返回
+    /// 的结果界面上都看不到"). Four managed kiro agents finished turns in
+    /// their panes while the room showed none of their replies, because this
+    /// fallback ignored the isolated home it was handed and read the GLOBAL
+    /// store — where a STALE copy of the same session id still sat from
+    /// before that agent's home was isolated. Both files existed; the wrong
+    /// one answered, every time, so no room line and no reply edge ever
+    /// appeared and every `@editor` request was a dead end.
+    ///
+    /// The two texts are the real last assistant rows of that incident,
+    /// trimmed: the live file under `KIRO_HOME` (mtime 01:39) and the stale
+    /// global copy (mtime 00:03).
+    #[test]
+    fn the_isolated_home_answers_before_a_stale_global_copy() {
+        let id = "sess_e2c9";
+        let write = |root: &std::path::Path, text: &str| {
+            let dir = root.join("297005da4b9f6bd1").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("messages.jsonl"),
+                format!(
+                    "{{\"payload\":{{\"type\":\"turn_start\"}}}}\n{{\"payload\":{{\"type\":\"assistant\",\"content\":{}}}}}\n{{\"payload\":{{\"type\":\"turn_end\"}}}}",
+                    serde_json::to_string(text).unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        let live = "Done. 用 Gemini 生成了封面。";
+        let stale = "Team already saved; now restart…";
+        let home = crate::config::fresh_process_dir("tmm-kiro-376").join("editor");
+        write(&home.join("sessions"), live);
+        // The global store under test is this process's own temp dir
+        // (`legacy_sessions_root`), so the developer's `~/.kiro` is never
+        // read and never written.
+        let global = legacy_sessions_root().unwrap();
+        write(&global, stale);
+
+        let payload = serde_json::json!({ "session_id": id, "hook_event_name": "Stop" });
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            reply_fallback(payload, Some(home.as_path())).as_deref(),
+            Some(live),
+            "the running agent writes in its isolated home; the global copy is history"
+        );
+        // An agent we have no home for (unmanaged, or spawned before homes
+        // were isolated) still gets the legacy answer — that is the only
+        // source it has.
+        assert_eq!(reply_fallback(payload, None).as_deref(), Some(stale));
+        // A home with no such session falls back rather than going mute.
+        let empty = crate::config::fresh_process_dir("tmm-kiro-376").join("fresh");
+        std::fs::create_dir_all(empty.join("sessions")).unwrap();
+        assert_eq!(reply_fallback(payload, Some(empty.as_path())).as_deref(), Some(stale));
+        // And a payload with no session id reads nothing at all.
+        let bare = serde_json::json!({ "hook_event_name": "Stop" });
+        assert_eq!(reply_fallback(bare.as_object().unwrap(), Some(home.as_path())), None);
     }
 
     /// Board #207: the v3 status line prints the model's DISPLAY name.

@@ -344,7 +344,11 @@ was touched.
   error at the next start rather than a silent fork.
 - **The v3 Stop payload carries no reply text** (`{session_id,
   hook_event_name:"Stop", cwd}`). The reply is the last `assistant` entry of
-  the GLOBAL session file `~/.kiro/sessions/<cwd-hash>/sess_<id>/messages.jsonl`
+  the session file `<KIRO_HOME>/sessions/<cwd-hash>/sess_<id>/messages.jsonl`
+  — the agent's ISOLATED home first, the global `~/.kiro/sessions` only as the
+  legacy fallback (board #376: a stale global copy of a live session id
+  shadowed four agents' replies for a whole evening; everything the hook
+  reads back comes from the isolated home too, like everything it writes)
   — each line `{id, timestamp, payload:{type, content, …}}`, a turn
   `turn_start … turn_end` with possibly several `assistant` entries (text
   between tool calls, then the final text, then — measured on a managed TUI
