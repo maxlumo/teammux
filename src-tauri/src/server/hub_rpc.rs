@@ -1406,7 +1406,14 @@ fn deliver_mentions(
         return Vec::new();
     }
     let ws = crate::projects::project_for_session(session).ok().flatten().map(|p| p.path);
-    let Ok(panes) = crate::tmux::list_panes(session) else { return Vec::new() };
+    // A session we cannot list is a session that typed NOTHING, so every
+    // mention is unreachable and the sender must still hear it (board #347
+    // review P1-B: the whole session being stopped was the one case that
+    // stayed silent). `offline_report` runs with no panes and no deliveries.
+    let panes = match crate::tmux::list_panes(session) {
+        Ok(panes) => panes,
+        Err(_) => return offline_report(session, room, from, &mentions, &[], ws.as_deref()),
+    };
     let managed_names: Vec<String> = panes
         .iter()
         .filter(|pane| crate::projects::is_managed_in(ws.as_deref(), &pane.window_name))
@@ -1435,7 +1442,12 @@ fn deliver_mentions(
         (Vec::new(), false)
     };
     let mut seen = std::collections::HashSet::new();
-    let mut reached: Vec<String> = Vec::new();
+    // What the one delivery path ACCEPTED: typed, or held for a busy
+    // queue-mode agent (#257). A pane that refused the line (copy mode,
+    // #250) is not in here and is not reported as offline either — it has
+    // its own `undelivered` warn, and saying both would be two reports of
+    // one event (review P2).
+    let mut accepted: Vec<String> = Vec::new();
     for p in &panes {
         if !seen.insert(p.window) || !p.active {
             continue;
@@ -1474,8 +1486,9 @@ fn deliver_mentions(
         // deltas abut instead of overlapping. Typed is not confirmed: the
         // agent's userPromptSubmit echo settles it, and a pane that refused
         // it (#250, copy mode) is said in the feed.
-        crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id);
-        reached.push(p.window_name.clone());
+        if crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id) {
+            accepted.push(p.window_name.clone());
+        }
     }
     // A mention no pane received is SAID (board #347, owner: "当这个 agent
     // 不在会话，或者停止什么的时候要返回一个 warning，提示 agent 不在线").
@@ -1487,15 +1500,35 @@ fn deliver_mentions(
     // `declared` half — which of these names this project HAS a managed
     // home for — is what separates a stopped teammate from a name that was
     // never here.
+    offline_report(session, room, from, &mentions, &accepted, ws.as_deref())
+}
+
+/// Say which mentions reached nobody, and return them for the caller's own
+/// answer (board #347). Two channels, because they reach different readers:
+/// one room line per name — the record, which the feed and `tmm log` show —
+/// and ONE line typed into the SENDER's pane, which is the only thing that
+/// reaches an agent sender (the team context drops every `[tmm]` row and a
+/// Team agent's delta excludes its own messages: review P1-A). A human or a
+/// UI sender has no pane, and `deliver_chat_line` is quiet about that.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn offline_report(
+    session: &str, room: &str, from: &str, mentions: &[String], accepted: &[String],
+    ws: Option<&str>,
+) -> Vec<(String, &'static str)> {
     let declared: Vec<String> = mentions
         .iter()
-        .filter(|name| crate::projects::is_managed_in(ws.as_deref(), name))
+        .filter(|name| crate::projects::is_managed_in(ws, name))
         .cloned()
         .collect();
-    let offline = crate::projects::delivery::offline_mentions(&mentions, &reached, &declared, from);
+    let offline = crate::projects::delivery::offline_mentions(mentions, accepted, &declared, from);
+    if offline.is_empty() {
+        return Vec::new();
+    }
     for (name, why) in &offline {
         let _ = crate::projects::rooms::post(room, from, &crate::projects::delivery::offline_line(name, why, from));
     }
+    let notice = crate::projects::delivery::offline_notice(&offline, from);
+    crate::projects::deliver_chat_line(session, from, &notice);
     offline.into_iter().map(|(name, why)| (name.to_string(), why)).collect()
 }
 

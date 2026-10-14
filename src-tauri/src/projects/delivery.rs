@@ -227,6 +227,27 @@ pub fn offline_line(name: &str, why: &str, from: &str) -> String {
     format!("[tmm] offline {name} — {from}'s message was not typed in ({why}); nothing is queued for it")
 }
 
+/// The ONE line the sender's own pane gets when its message reached nobody
+/// (board #347 review P1-A). The room line is the record for the feed and
+/// the log; this is what actually reaches an AGENT sender, because the team
+/// context cannot carry it — `context_noise` drops every `[tmm]` row, and a
+/// Team agent's delta excludes its own messages anyway. One line for all of
+/// them, not one per name: a pane is a conversation, and a burst of
+/// near-identical rows in it is noise.
+///
+/// Quiet by construction for a human or a UI sender: `deliver_chat_line`
+/// types only into a live managed pane and does nothing otherwise, which is
+/// the right answer — the operator reads the feed.
+pub fn offline_notice(offline: &[(&str, &'static str)], from: &str) -> String {
+    let names: Vec<String> = offline.iter().map(|(name, why)| format!("@{name} ({why})")).collect();
+    format!(
+        "[tmm] offline — {}: your message is in the room but was not typed into {} pane; nothing is queued for {}. From {from}.",
+        names.join(", "),
+        if offline.len() == 1 { "its" } else { "their" },
+        if offline.len() == 1 { "it" } else { "them" },
+    )
+}
+
 /// Deliver one line to one managed agent window whose pane is `target`.
 /// True when it was typed or held; false when the pane refused it (said in
 /// the feed as `undelivered`, board #250). `ask_at` is where the stamped
@@ -549,6 +570,18 @@ mod tests {
             line,
             "[tmm] offline reviewer — orchestrator's message was not typed in (stopped); nothing is queued for it"
         );
+
+        // The sender's own pane gets ONE line for all of them (review P1-A:
+        // the team context cannot carry this, so the room line alone never
+        // reaches an agent sender).
+        let notice = offline_notice(&[("reviewer", OFFLINE_STOPPED), ("buildr", OFFLINE_UNKNOWN)], "orchestrator");
+        assert!(notice.starts_with("[tmm] offline — @reviewer (stopped), @buildr (unknown):"), "{notice}");
+        assert!(notice.contains("is in the room"), "what DID happen: {notice}");
+        assert!(notice.contains("their pane") && notice.contains("nothing is queued for them"), "{notice}");
+        assert!(notice.contains("From orchestrator."), "{notice}");
+        // One name reads as one name.
+        let one = offline_notice(&[("reviewer", OFFLINE_STOPPED)], "human");
+        assert!(one.contains("its pane") && one.contains("queued for it"), "{one}");
     }
 
     fn warns(session: &str) -> Vec<String> {
