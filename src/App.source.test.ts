@@ -417,8 +417,8 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
   const mod = await readFile(new URL('./lib/app/server-switch.ts', import.meta.url), 'utf8');
   // The switch is `switchTo` (its refusals and its window lease, P1-B/P2 on
   // e0dafe3c) around `run` (the steps): the order is read across both.
-  const fn = mod.match(/async function switchTo\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}\n  async function run\(target: SwitchTarget\): Promise<void> \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(fn, /begin\(\);\s*try \{ await run\(target\); \} finally \{ end\(\); \}/u, 'the whole switch, confirm walk included, holds the window');
+  const fn = mod.match(/async function switchTo\(target: SwitchTarget, pick\?: string\): Promise<void> \{[\s\S]*?\n  \}\n(?:  \/\*\*[\s\S]*?\*\/\n)?  async function run\(target: SwitchTarget, pick\?: string\): Promise<void> \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(fn, /begin\(\);\s*try \{ await run\(target, pick\); \} finally \{ end\(\); \}/u, 'the whole switch, confirm walk included, holds the window');
   const at = (needle: string) => { const i = fn.indexOf(needle); assert.ok(i >= 0, `switchTo has ${needle}`); return i; };
   const order = [
     'await guard(() => d.confirmLeave())',
