@@ -2424,6 +2424,29 @@ mod tests {
         assert_eq!(offline_lines.len(), 2, "one per name: {offline_lines:?}");
         assert!(offline_lines[0].starts_with("[tmm] offline ghost —") && offline_lines[0].contains("(stopped)"), "{offline_lines:?}");
         assert!(offline_lines[1].starts_with("[tmm] offline nobody —") && offline_lines[1].contains("(unknown)"), "{offline_lines:?}");
+
+        // The SENDER hears it in its own pane (review P2, 02:45: the posts
+        // above come from `lead`, who has no pane, so they prove the room
+        // and the answer and nothing about the notification call). `dev`
+        // is a live managed agent here, so when IT mentions a stopped slot
+        // the server types ONE stamped result line into `dev`'s pane — the
+        // `cat` window echoes what is typed, so the pane shows what arrived.
+        let from_dev = handle_hub_request(
+            &req("hub_post", serde_json::json!({ "session": session, "from": "dev", "body": "@ghost are you back" })),
+            None,
+        );
+        assert!(from_dev.error.is_none());
+        let wanted = "tmm: [reply] offline \u{2014} @ghost (stopped)";
+        let mut pane = String::new();
+        for _ in 0..30 {
+            pane = crate::tmux::capture_pane_plain(&target, Some(0)).unwrap_or_default();
+            if pane.contains(wanted) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(pane.contains(wanted), "the sender's own pane got the notice: {pane:?}");
+        assert!(pane.contains("[tmm chat "), "in the stamped result shape: {pane:?}");
     }
 
     /// Board #347 review P1-A (02:30): when tmux cannot LIST the panes, "the

@@ -428,12 +428,20 @@ The rules behind each surface live next to their design, not here:
 | project lifecycle, restart/resume | [projects.md](projects.md) |
 
 **A mention nobody received is noted, not failed** (board #367's sibling,
-#347, 2026-10-15). `tmm send` exits 0 and prints
+#347, 2026-10-15). `tmm send` exits 0 and prints, once per unreached name on stderr, from the
+`offline` rows the server's answer carries:
 `note: @name is not online (stopped|unknown) — it was not typed to anyone's
-pane and nothing is queued for it` on stderr, once per unreached name, from
-the `offline` rows the server's answer carries. Exit 0 because the message IS
-in the room: being told is not a failure, and there is no retry and no queue
-to promise — the design and the two words are in
+pane and nothing is queued for it`, or — when tmux itself could not be asked
+— `note: @name was not typed to anyone's pane — tmux could not be asked
+whether it is online; nothing is queued for it` (`unchecked`: **not being able
+to check is not the same as having stopped**, and the CLI will not say
+`stopped` for it). The same FACTS reach three readers in three wordings — the
+room row (`[tmm] offline <name> — …`), this stderr note, and the one line
+typed into the sender's pane — so do not match on any of them as if they
+were one string; `--output json` carries the structured rows
+(`{name, why}`) instead. Exit 0 because the message IS in the room: being
+told is not a failure, and there is no retry and no queue to promise — the
+design and the three words are in
 [hub-composer.md](hub-composer.md#a-mention-nobody-received-is-said-board-347-2026-10-15).
 
 ## CLI/UI parity
