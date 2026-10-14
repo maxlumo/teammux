@@ -30,14 +30,26 @@ enum Act {
 struct Fake {
     /// Every method the CLI called, in order.
     calls: Arc<Mutex<Vec<String>>>,
+    /// The issue's assignee, as the fake's own state: a `hub_board_save`
+    /// writes it and the next `hub_board_get` reads it back. Without this a
+    /// "re-run" is only ever `"" → name` and the same-assignee contract is
+    /// untested (reviewer's P2 on c7751e21).
+    assignee: Arc<Mutex<String>>,
     addr: String,
 }
 
 /// Serve `tmm`'s connections until the process is done with us. `plan` maps a
 /// method to what to do with it; anything unlisted is answered `{}`.
 fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
+    fake_with(plan, "")
+}
+
+/// The same fake, with the issue already assigned to `assignee`.
+fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
+    let state: Arc<Mutex<String>> = Arc::new(Mutex::new(assignee.to_string()));
+    let held = state.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
@@ -59,6 +71,12 @@ fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
                 let call: serde_json::Value = serde_json::from_str(&raw).unwrap();
                 let method = call["method"].as_str().unwrap_or_default().to_string();
                 seen.lock().unwrap().push(method.clone());
+                if method == "hub_board_save" {
+                    if let Some(a) = call["params"]["assignee"].as_str() {
+                        *held.lock().unwrap() = a.to_string();
+                    }
+                }
+                let current = held.lock().unwrap().clone();
                 let act = plan
                     .iter()
                     .find(|(m, _)| *m == method)
@@ -73,7 +91,7 @@ fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
                     (_, Act::Error) => serde_json::json!({ "id": 2, "error": { "code": -32603, "message": "boom" } }),
                     ("hub_board_get", _) => serde_json::json!({ "id": 2, "result": {
                         "id": 12, "title": "Fix the login flow", "body": "", "status": "todo",
-                        "assignee": "", "created_by": "human", "notes": []
+                        "assignee": current, "created_by": "human", "notes": []
                     }}),
                     ("hub_agents", _) => serde_json::json!({ "id": 2, "result": {
                         "agents": [{ "name": "builder-2", "managed": true }], "session": "p"
@@ -86,7 +104,7 @@ fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
         });
     });
     let addr = rx.recv().unwrap();
-    Fake { calls, addr: format!("ws://{addr}") }
+    Fake { calls, assignee: state, addr: format!("ws://{addr}") }
 }
 
 impl Fake {
@@ -110,6 +128,9 @@ impl Fake {
     }
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    fn assignee(&self) -> String {
+        self.assignee.lock().unwrap().clone()
     }
 }
 
@@ -197,19 +218,21 @@ fn a_clean_assignment_makes_the_four_calls_in_order() {
 /// "optimised" into a skip, which would leave the only recovery path dead.
 #[test]
 fn re_running_with_the_same_assignee_re_sends_the_hand_off() {
-    let f = fake(vec![]);
-    let (ok, _out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
-    assert!(ok);
+    // ALREADY assigned to the same name, so the second run really is
+    // builder-2 → builder-2 (the fake carries the assignee between calls).
+    let f = fake_with(vec![], "builder-2");
     let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
     assert!(ok, "{out:?}");
+    assert_eq!(f.assignee(), "builder-2", "the save is a no-op on the board");
     assert_eq!(
         f.calls(),
-        vec![
-            "hub_board_get", "hub_agents", "hub_board_save", "hub_post",
-            "hub_board_get", "hub_agents", "hub_board_save", "hub_post",
-        ],
-        "the second run posts again — that is the recovery, not a duplicate by accident"
+        vec!["hub_board_get", "hub_agents", "hub_board_save", "hub_post"],
+        "and the hand-off goes out anyway — that is the recovery path after a lost answer"
     );
+    // The clear-then-same sequence a human would type is the same contract.
+    let (ok, _out, _err) = f.run(&["board", "assign", "12", "-"]);
+    assert!(ok);
+    assert_eq!(f.assignee(), "", "`-` really cleared it in the fake's state");
 }
 
 /// `-` clears, which needs no hand-off: nobody to tell.
