@@ -16,7 +16,7 @@
 //! Without it, a writer that read the recipe before a team move and wrote its
 //! whole snapshot back after would undo the move while the room says it
 //! happened. Every writer PRESERVES the fields it does not own (`team`,
-//! anything a later feature adds): it changes the keys it owns in
+//! `team_rev`, anything a later feature adds): it changes the keys it owns in
 //! the recipe it read, it never rewrites the JSON from a struct of its own.
 //!
 //! The section is per HOME: one agent's restart does not hold up another's.
@@ -70,6 +70,7 @@ fn enter(table: &'static Table, home: &Path) -> Held {
 }
 
 static RECIPES: Table = Table::new();
+static ANNOUNCEMENTS: Table = Table::new();
 
 /// Proof that the caller holds `home`'s recipe section: the only way to
 /// read-for-write or write a recipe.
@@ -130,6 +131,32 @@ pub(crate) fn update_in<R>(section: &RecipeSection, apply: impl FnOnce(&mut Opti
         }
     }
     Ok(out)
+}
+
+/// The runtime membership revision a recipe records (board #384, P1-B): 0
+/// before the first move; every `set_agent_team` that changes the team adds
+/// one. A move's notices carry the revision they announce.
+pub(crate) fn team_rev(recipe: &Value) -> u64 {
+    recipe.get("team_rev").and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// `home`'s current revision, read without the section (the write is
+/// atomic): what a move's announcement checks before each notice.
+pub(crate) fn current_team_rev(home: &Path) -> u64 {
+    std::fs::read_to_string(home.join("launch.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|r| team_rev(&r))
+        .unwrap_or(0)
+}
+
+/// One agent's move announcements, one at a time and in the order their
+/// revisions were committed (board #384, P1-B): the room line and the typed
+/// notices of one move are told before the next move of the SAME agent is,
+/// and each is skipped once a newer revision exists. Separate from the recipe
+/// section, which is never held across the slow multi-pane delivery.
+pub(crate) fn announcement(home: &Path) -> Held {
+    enter(&ANNOUNCEMENTS, home)
 }
 
 #[cfg(test)]

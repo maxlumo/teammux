@@ -244,16 +244,24 @@ pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, ro
 /// CURRENT definition gives that member, which is how a lead or orchestrator
 /// is named, since a definition has no lead field. `team`/`flat` are absent
 /// for a team whose definition is gone. Pure.
+/// The role the definition gives the member at (`path`, `member`): the ONE
+/// reading of a teammate's role off the recipes (board #382; #384's move
+/// notice too). By path AND name, because sub-teams may each have a `dev`;
+/// '' for a joiner (no member) or a member the definition no longer has.
+pub fn member_role(flat: &[Flat], path: &str, member: &str) -> String {
+    flat.iter()
+        .find(|f| f.path == path && !member.is_empty() && f.member.name.trim() == member)
+        .map(|f| f.member.role.trim().to_string())
+        .unwrap_or_default()
+}
+
 pub fn joined_block(root: &str, team: Option<&RegTeam>, flat: &[Flat], window_name: &str, mates: &[(String, String, String)]) -> String {
     let mut block = format!("## Your team: \"{root}\"");
     if let Some(d) = team.map(|t| t.description.trim()).filter(|d| !d.is_empty()) {
         block += &format!("\n{d}");
     }
     block += &format!("\n\nYou are \"{window_name}\". You joined this team when you were started; its definition does not list you.");
-    let role = |path: &str, member: &str| flat.iter()
-        .find(|f| f.path == path && !member.is_empty() && f.member.name.trim() == member)
-        .map(|f| f.member.role.trim().to_string())
-        .unwrap_or_default();
+    let role = |path: &str, member: &str| member_role(flat, path, member);
     let order = |path: &str, member: &str| flat.iter()
         .position(|f| f.path == path && !member.is_empty() && f.member.name.trim() == member)
         .unwrap_or(usize::MAX);
