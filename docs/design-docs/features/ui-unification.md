@@ -161,7 +161,15 @@ the lists) or either (`'xy'`, a 2D drop); the drag state lives in the
 caller's `$state` through `get`/`set`; a release commits; Escape, a resize
 (the snapshotted rects are stale) and `pointercancel` abandon; a window-level
 pointerup releases a drag whose handle stopped existing; and a drag that
-travelled arms a one-shot click guard that every fresh press clears. Touch is
+travelled arms a one-shot click guard that every fresh press clears. The
+travel it hands `track` is in LAYOUT units (client px over the root's CSS
+zoom, `uiZoom`), the units a CSS `translate` speaks, so a carried element
+follows the pointer at 150% or 180% (board #384, reviewer P2-2: the rail,
+the address list and the roster all moved it 1.5× too far); the threshold
+and every hit-test stay in client units. Known, not yet fixed: the rail's
+and the address list's insertion LINE place their `top` from client-px
+rect offsets, so at a root zoom it sits off the drop point by the same
+factor. Touch is
 opt-in (`touch: true` only on the address grip, which takes `touch-action:
 none`); on the rail and in the roster's scrolled strip a finger's
 press-and-drag stays the page's scroll, and the roster's touch form is the

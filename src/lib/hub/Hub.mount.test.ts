@@ -2530,7 +2530,7 @@ const dropBoxes = (window: any) => {
   const boxes: Record<string, [number, number]> = { squad: [0, 200], ops: [210, 400] };
   window.Element.prototype.animate = () => ({ cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() });
   window.HTMLElement.prototype.getBoundingClientRect = function () {
-    const box = boxes[this.dataset.drop ?? ''];
+    const box = this.classList.contains('cards') ? [0, 1000] as [number, number] : boxes[this.dataset.drop ?? ''];
     const [left, right] = box ?? [0, 0];
     return { left, right, top: 0, bottom: box ? 60 : 0, width: right - left, height: box ? 60 : 0, x: left, y: 0, toJSON() {} };
   };

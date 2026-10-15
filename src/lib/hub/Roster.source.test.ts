@@ -471,6 +471,8 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
     'the temporary standalone slot exists only while a card in a team is carried and no standalone card is shown');
   // The card ends its own press, and the click after a drag is no pick.
   assert.match(source, /onpointerdown=\{\(e\) => cardDrags\.down\(e, \{ name: a\.name, scope: moveScope \}\)\}\s*onpointerup=\{\(\) => cardDrags\.up\(\)\} onpointercancel=\{\(\) => cardDrags\.cancel\(\)\}/u);
+  assert.match(source, /onscroll=\{\(\) => \{ if \(cardDrag\) cardDrags\.cancel\(\); \}\}/u, 'the strip scrolling ends a drag (P2-2)');
+  assert.match(source, /const view = cardsEl\?\.getBoundingClientRect\(\);[\s\S]{0,600}Math\.max\(r\.left, view\.left\)[\s\S]{0,200}Math\.min\(r\.right, view\.right\)/u, 'targets are clipped to the strip\'s visible box (P2-2)');
   assert.match(source, /function clickAgent\(event, name\) \{\n {4}if \(cardDrags\.consumeClick\(\)\) return;/u);
   assert.match(source, /if \(!cardDrag\) return;\n {4}return cardDrags\.listen\(\);/u, 'Escape, resize and the window release while carrying');
   // The lift is the strip's own tab paint: the lit tab's OPAQUE fill (a

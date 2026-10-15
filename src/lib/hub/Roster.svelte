@@ -170,10 +170,22 @@
      Hub's current `moveScope`: kept out of `cardDrag`, whose $state would
      hand back a proxy that is never === the original. */
   let dragScope = null;
-  const cardTargets = (from) => [...(cardsEl?.querySelectorAll('.roster-cluster[data-drop]') ?? [])]
-    .map((el) => ({ key: el.dataset.drop === '-' ? '' : el.dataset.drop, r: el.getBoundingClientRect() }))
-    .filter(({ key, r }) => key !== from && r.width > 0)
-    .map(({ key, r }) => ({ key, left: r.left, top: r.top, right: r.right, bottom: r.bottom }));
+  /* Every target's box CLIPPED to the strip's visible box (reviewer P2-2): a
+     group scrolled out of the single-row strip, or past a narrow split
+     pane's edge, is not a target anywhere on the page, and one half out
+     catches only its visible half. */
+  const cardTargets = (from) => {
+    const view = cardsEl?.getBoundingClientRect();
+    if (!view) return [];
+    return [...cardsEl.querySelectorAll('.roster-cluster[data-drop]')]
+      .map((el) => ({ key: el.dataset.drop === '-' ? '' : el.dataset.drop, r: el.getBoundingClientRect() }))
+      .filter(({ key }) => key !== from)
+      .map(({ key, r }) => ({
+        key, left: Math.max(r.left, view.left), top: Math.max(r.top, view.top),
+        right: Math.min(r.right, view.right), bottom: Math.min(r.bottom, view.bottom),
+      }))
+      .filter((r) => r.right > r.left && r.bottom > r.top);
+  };
   const cardDrags = createPressDrag({
     axis: 'xy',
     get: () => cardDrag,
@@ -220,6 +232,14 @@
   $effect(() => {
     if (!cardDrag) return;
     return cardDrags.listen();
+  });
+  // The strip scrolling under a carried card (`.cards` onscroll) moves every
+  // target and the card's own origin: the geometry is stale, the drag ends.
+  // A roster change mid-drag (an agent arrives, stops, moves) changes the
+  // layout: the targets are measured again at the next move.
+  $effect(() => {
+    void managedAgents;
+    untrack(() => { if (cardDrag) cardDrag.rects = null; });
   });
 
   function clickAgent(event, name) {
@@ -312,6 +332,7 @@
       onpointerleave={() => { hovering = false; clearPress(); }}
       onpointerdown={beginPress} onpointerup={clearPress} onlostpointercapture={clearPress}
       onpointermove={(e) => cardDrags.move(e)}
+      onscroll={() => { if (cardDrag) cardDrags.cancel(); }}
       onpointercancel={clearPress} onclickcapture={clearPress}
       onfocusin={() => { focused = true; }}
       onfocusout={(e) => { focused = !!e.relatedTarget && e.currentTarget.contains(e.relatedTarget); if (!focused) clearPress(); }}>

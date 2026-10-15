@@ -18,9 +18,18 @@
 //     GUARD, so the click that follows a drag is never also a pick; every
 //     fresh press clears it, so a stale guard cannot swallow the next click.
 //
+//   - the travel `track` receives is in LAYOUT units, the ones a CSS
+//     `translate` speaks: client px divided by the root's CSS zoom (the
+//     web/Android interface scale, `uiZoom`), so a carried element follows
+//     the pointer at 150% or 180% too (reviewer P2-2: it moved 1.5× too far,
+//     on the rail and the address list as well). The threshold and every
+//     hit-test stay in client units, the ones the pointer and the snapshotted
+//     rects are in.
+//
 // What a drop MEANS (an insertion index, a team under the pointer) stays with
 // the caller and the pure geometry in app/nav-order.ts.
 import { RAIL_DRAG_THRESHOLD } from '../app/nav-order.ts';
+import { uiZoom } from './placement.ts';
 
 /** Where a press started. */
 export interface PressAt {
@@ -36,7 +45,8 @@ export interface PressDragOptions<P, D> {
   /** The press has travelled the threshold: build the drag (snapshot the
    * geometry it will drop on), or null to leave it a press. */
   begin(press: P & PressAt, e: PointerEvent): D | null;
-  /** Each move while dragging, with the travel from the press. */
+  /** Each move while dragging, with the travel from the press in LAYOUT
+   * units (for a CSS translate); hit-test with `e.clientX/Y`. */
   track(drag: D, e: PointerEvent, travel: { dx: number; dy: number }): void;
   /** A release while dragging. */
   commit(drag: D): void;
@@ -47,6 +57,8 @@ export interface PressDragOptions<P, D> {
    * (`touch-action: none`) may; a navigation button or a card in a scrolled
    * strip may not, since there press-and-drag is the page's scroll. */
   touch?: boolean;
+  /** The root's CSS zoom; `uiZoom` (a test passes its own). */
+  zoom?: () => number;
 }
 
 export interface PressDrag<P> {
@@ -67,7 +79,7 @@ export interface PressDrag<P> {
 }
 
 export function createPressDrag<P extends object, D>(options: PressDragOptions<P, D>): PressDrag<P> {
-  const { get, set, begin, track, commit, axis = 'y', touch = false } = options;
+  const { get, set, begin, track, commit, axis = 'y', touch = false, zoom = uiZoom } = options;
   let press: (P & PressAt) | null = null; // pre-threshold bookkeeping; deliberately not reactive
   let guard = false; // a drag must not ALSO click on release
   const drag: PressDrag<P> = {
@@ -95,7 +107,8 @@ export function createPressDrag<P extends object, D>(options: PressDragOptions<P
         live = get();
         if (!live) return;
       }
-      track(live, e, { dx, dy });
+      const z = zoom() || 1;
+      track(live, e, { dx: dx / z, dy: dy / z });
     },
     up() {
       const live = get();

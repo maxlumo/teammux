@@ -52,7 +52,7 @@ test('an overflowing room still expands under the kept pref and offers the chevr
 // no layout, so each drop target's box is supplied by its `data-drop` key
 // ('-' = standalone): one row, squad | standalone | ops.
 const BOXES: Record<string, [number, number]> = { squad: [0, 200], '-': [210, 300], ops: [310, 420] };
-async function dragStrip(context: test.TestContext, agents: Record<string, unknown>[], canMove = true) {
+async function dragStrip(context: test.TestContext, agents: Record<string, unknown>[], canMove = true, strip: [number, number] = [0, 1000]) {
   const moves: [string, string][] = [];
   const scopes: unknown[] = [];
   const picks: string[] = [];
@@ -72,7 +72,8 @@ async function dragStrip(context: test.TestContext, agents: Record<string, unkno
       // move; jsdom has no Web Animations, and the motion is not under test.
       win.Element.prototype.animate = function () { return { cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() } as unknown as Animation; };
       win.HTMLElement.prototype.getBoundingClientRect = function () {
-        const box = BOXES[(this as HTMLElement).dataset.drop ?? ''];
+        // The strip's own visible box; every target is clipped to it.
+        const box = (this as HTMLElement).classList.contains('cards') ? strip : BOXES[(this as HTMLElement).dataset.drop ?? ''];
         const [left, right] = box ?? [0, 0];
         return { left, right, top: 0, bottom: box ? 60 : 0, width: right - left, height: box ? 60 : 0, x: left, y: 0, toJSON() {} } as DOMRect;
       };
@@ -236,4 +237,56 @@ test('a drag belongs to the context it was pressed in: a new one cancels it, and
     assert.deepEqual(moves, [['solo', 'squad']]);
     assert.equal(scopes[0], steady, 'the scope of the press');
   } finally { await app.close(); }
+});
+
+test('a drop target is the part of a group the strip shows: one scrolled or clipped out is no target, and a scroll ends the drag (#384, P2-2)', async (context) => {
+  // The strip shows 0..300: squad whole, the standalone group whole, ops
+  // (310..420) not at all.
+  const { app, moves, card, at } = await dragStrip(context, [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')], true, [0, 300]);
+  try {
+    const solo = card('solo');
+    at('pointerdown', solo, 250);
+    for (const x of [360, 360]) { at('pointermove', solo, x); await app.flush(); }
+    assert.equal(app.document.querySelector('.drop-target'), null, 'over ops, outside the strip: no target');
+    at('pointerup', solo, 360);
+    await app.flush();
+    assert.deepEqual(moves, [], 'and no move');
+
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    assert.equal(app.document.querySelector('.drop-target')?.getAttribute('data-drop'), 'squad');
+    app.document.querySelector('.cards')!.dispatchEvent(new app.window.Event('scroll'));
+    await app.flush();
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'the strip scrolled: the geometry is stale, the drag ends');
+    at('pointerup', solo, 100);
+    await app.flush();
+    assert.deepEqual(moves, [], 'nothing moves');
+
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    at('pointerup', solo, 100);
+    await app.flush();
+    assert.deepEqual(moves, [['solo', 'squad']], 'a visible target still takes the drop');
+  } finally { await app.close(); }
+});
+
+test('a roster change mid-drag measures the targets again (#384, P2-2)', async (context) => {
+  const agents = [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')];
+  const { app, moves, card, at } = await dragStrip(context, agents);
+  try {
+    const solo = card('solo');
+    at('pointerdown', solo, 250);
+    for (const x of [365, 365]) { at('pointermove', solo, x); await app.flush(); }
+    assert.equal(app.document.querySelector('.drop-target')?.getAttribute('data-drop'), 'ops');
+    // ops moves (a member arrives and the layout shifts): its box is now
+    // 430..540, so the point it was under is empty strip.
+    BOXES.ops = [430, 540];
+    await app.setProps({ managedAgents: [...agents, member('ops2', 'ops')] });
+    at('pointermove', solo, 365);
+    await app.flush();
+    assert.equal(app.document.querySelector('.drop-target'), null, 're-measured: no stale target');
+    at('pointerup', solo, 365);
+    await app.flush();
+    assert.deepEqual(moves, [], 'no move to where ops used to be');
+  } finally { BOXES.ops = [310, 420]; await app.close(); }
 });

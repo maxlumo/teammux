@@ -8,7 +8,7 @@ import { RAIL_DRAG_THRESHOLD } from '../app/nav-order.ts';
 
 type Drag = { id: string; dx: number; dy: number };
 
-function harness(opts: { axis?: 'y' | 'xy'; touch?: boolean; refuse?: boolean } = {}) {
+function harness(opts: { axis?: 'y' | 'xy'; touch?: boolean; refuse?: boolean; zoom?: number } = {}) {
   let live: Drag | null = null;
   const log: string[] = [];
   const captured: number[] = [];
@@ -20,6 +20,7 @@ function harness(opts: { axis?: 'y' | 'xy'; touch?: boolean; refuse?: boolean } 
     commit: (d) => log.push(`commit:${d.id}:${d.dx},${d.dy}`),
     axis: opts.axis,
     touch: opts.touch,
+    zoom: () => opts.zoom ?? 1,
   });
   const el = { setPointerCapture: (id: number) => captured.push(id) } as unknown as HTMLElement;
   const ev = (x: number, y: number, extra: Partial<PointerEvent> = {}) =>
@@ -121,4 +122,20 @@ test('while dragging, Escape and a resize abandon it and a window pointerup rele
   fire('pointerup');
   assert.deepEqual(lost.log.filter((l) => l.startsWith('commit')), ['commit:a:0,50'], 'the window pointerup releases a drag whose handle vanished');
   off();
+});
+
+test('the travel a carried element is translated by is in layout units: client px over the root zoom (reviewer P2-2)', () => {
+  // At 150% a 30 px pointer travel is 20 CSS px of translate; the threshold
+  // is still measured in client px, where the pointer is.
+  const h = harness({ zoom: 1.5, axis: 'xy' });
+  h.drag.down(h.ev(0, 0), { id: 'z' });
+  h.drag.move(h.ev(RAIL_DRAG_THRESHOLD - 1, 0));
+  assert.equal(h.live(), null, 'the threshold is in client px, unscaled');
+  h.drag.move(h.ev(30, -15));
+  assert.deepEqual(h.live(), { id: 'z', dx: 20, dy: -10 });
+  // No zoom reading (0, NaN from an unset property) is 1, never a division by zero.
+  const flat = harness({ zoom: 0 });
+  flat.drag.down(flat.ev(0, 0), { id: 'f' });
+  flat.drag.move(flat.ev(0, 30));
+  assert.deepEqual(flat.live(), { id: 'f', dx: 0, dy: 30 });
 });
