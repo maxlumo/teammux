@@ -432,8 +432,9 @@ completion).
   any cut points to `tmm board show <id>` so one giant note cannot flood the
   pane while discussion never disappears. A server too old to do this is said
   so on the picker ("update this server to assign") instead of saving a label
-  nobody acts on; a hand-off that fails after the save is its own line, and
-  the issue stays saved.
+  nobody acts on, and a save held for a login that has not answered keeps its
+  draft; a hand-off that fails or reaches nobody after the save is its own line
+  with a Reassign button, and the issue stays saved.
 - Status changes are recorded in the room (`[tmm] board #N a → b`), and a
   move to review NOTIFIES the reporter (line typed into their pane) — the
   handoff loop: file → assign (delivered) → take → review (delivered) →
