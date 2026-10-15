@@ -60,7 +60,7 @@ Suppression rules (never nag):
 Found by the validator while checking #381: at interface scale 150-180%, and
 in the CSS viewports browser zoom 200% leaves (195x422, 260x563), the fixed
 banner sat on the connect page's Connect / Share, and on narrow windows its
-actions stuck 22-36 px out past the edge. The cause was the banner's own
+"Not now" stuck 22-35 px out past the edge (the validator's measurement). The cause was the banner's own
 layout: the actions were a fixed column beside the text, so a narrow banner
 squeezed the description to one word per line (12 lines, up to 400 px tall)
 and pushed the actions out.
@@ -78,15 +78,18 @@ and pushed the actions out.
   goes. No constant stands for the banner's height. The connect page's
   scroller ends above it (`margin-bottom: var(--install-reserve, 0px)` on
   Settings' `.wrapper`), so Connect and Share scroll into view clear of it.
-  Other pages do not reserve: the banner shows on first run, where the
-  connect page is what is on screen.
+  Only the connect page consumes the reserve (its primary action is at the
+  end of its scroller). The banner can appear over any page: elsewhere it
+  overlays the page as before, and "Not now" dismisses it.
 - Measured in Chromium (the #381 matrix plus the small viewports, a synthetic
   `beforeinstallprompt`): before, Connect/Share were under the banner in 9 of
-  12 cells and it overhung by 24-36 px in 3; after, no overhang in any cell
+  12 cells and "Not now" overhung by 22, 22 and 35 px in 3 (the validator's
+  numbers; my first measurement of the whole action column read 24-36); after, no overhang in any cell
   and both buttons reachable and free in all 12. The reserve the browser
   reported was 87 px on desktop and 128-196 px on a phone, which is the
   measured value, not a number in the code. Where the banner is narrowest
-  (390x560 at 180%, about 190 CSS px wide) the icon takes its own line too;
+  (a 390 px wide window at 180%, 390x844 or 390x560, about 190 CSS px) the
+  icon takes its own line too;
   the text still keeps its measure and the page still ends above it. Pinned by
   `InstallPrompt.source.test.ts` (sizing, wrap, measured reserve, the page
   rule) and `InstallPrompt.mount.test.ts` (the reserve appears with the
