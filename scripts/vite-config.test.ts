@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildIdentity, createViteConfig, devProxy } from '../vite.config.js';
+import { buildIdentity, createViteConfig, devProxy, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, watchIgnored } from '../vite.config.js';
 import { DEV_SERVER_PORT_ENV } from './dev-ports.mjs';
 
 test('Vite proxies WebSocket and downloads to the same internal Rust server', () => {
@@ -18,24 +18,92 @@ test('production build does not parse the development backend port', () => {
   assert.throws(() => createViteConfig('serve', { PORT: 'not-a-port' }), /invalid internal dev server port/);
 });
 
-test('agent worktrees inside the checkout are neither watched nor scanned (#342)', async () => {
-  // Task worktrees live at <repo>/worktree/<agent>-<task>. Without these two
-  // entries the dev server serving the checkout watched every worktree
-  // (measured: 705 inotify watches for one fresh worktree; estimated, not
-  // measured: a Rust-built one would add about the checkout's own target/,
-  // 58,215 entries) and its dependency scan crawled each worktree's
-  // index.html as a second app. Measured on a private Vite with a nested
-  // worktree/: 304 → 0 watches there, and the scan stopped following its import.
+test('what is not the web app is neither watched nor scanned (#342, #393)', async () => {
+  // Task worktrees live at <repo>/worktree/<agent>-<task>. Without the ignore the
+  // dev server serving the checkout watched every worktree (measured: 705 inotify
+  // watches for one fresh worktree) and its dependency scan crawled each
+  // worktree's index.html as a second app. #393 adds the rest of what the checkout
+  // holds that no browser page imports: src-tauri/ (the Android build writes
+  // `.html` files under target/ and gen/android/build/, and Vite answers any
+  // changed `.html` with a full page reload of every open tab), temp/, build/,
+  // dist/ and .tmm/.
   const { fileURLToPath } = await import('node:url');
-  const here = fileURLToPath(new URL('../worktree', import.meta.url));
+  const here = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
   const config = createViteConfig('serve', {});
-  assert.deepEqual(config.server.watch, { ignored: [`${here}/**`] },
-    'the watch ignore is ABSOLUTE and anchored at the config: a worktree’s own Vite ignores only a worktree/ nested inside it');
-  assert.deepEqual(config.optimizeDeps.entries, ['**/*.html', '!worktree/**'],
-    'Vite’s default entry glob, minus the worktrees — an explicit list REPLACES the default, so it must keep **/*.html');
+  assert.deepEqual(config.server.watch, { ignored: [
+    `${here}/worktree/**`, `${here}/src-tauri/**`, `${here}/temp/**`, `${here}/build/**`, `${here}/dist/**`, `${here}/.tmm/**`,
+  ] }, 'the watch ignore is ABSOLUTE and anchored at the config: a worktree’s own Vite ignores only what is nested inside it');
+  assert.deepEqual(config.optimizeDeps.entries, ['**/*.html', '!worktree/**', '!src-tauri/**', '!temp/**', '!build/**', '!dist/**', '!.tmm/**'],
+    'Vite’s default entry glob, minus the same directories — an explicit list REPLACES the default, so it must keep **/*.html');
   assert.deepEqual(config.optimizeDeps.exclude, ['@xterm/xterm'], 'the xterm source-serving rule is untouched');
   // And the build sees the same scan rule (a build never watches).
   assert.deepEqual(createViteConfig('build', {}).optimizeDeps.entries, config.optimizeDeps.entries);
+  assert.deepEqual(scanEntries(), config.optimizeDeps.entries);
+  for (const web of ['src', 'public', 'scripts', 'docs']) assert.ok(!watchIgnored().some((g) => g.includes(`/${web}/`)), `${web}/ is still watched`);
+});
+
+test('a build output file changing does not reload the page; a source html does (#393)', async (context) => {
+  // The incident, with the real watcher: an Android build writes .html files under
+  // src-tauri/target/…/tauri-codegen-assets/ and Vite broadcast a `full-reload`
+  // to every open browser (journal of the supervised dev server, 2026-10-15,
+  // 15:11 and 22:50). A scratch root, the config's own ignore list anchored there.
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer } = await import('vite');
+  const root = mkdtempSync(join(tmpdir(), 'tmm-vite-watch-'));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body>app</body></html>');
+  const quiet = ['src-tauri/target/aarch64-linux-android/release/build/out/tauri-codegen-assets', 'src-tauri/gen/android/build/reports', 'dist', 'temp', 'build', '.tmm/agents/x'];
+  for (const dir of quiet) { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'seed.html'), '<html></html>'); }
+  const server = await createServer({
+    root, configFile: false, logLevel: 'silent', cacheDir: join(root, '.cache'),
+    server: { middlewareMode: true, watch: { ignored: watchIgnored(root) }, hmr: false },
+    optimizeDeps: { noDiscovery: true, entries: [] },
+  });
+  context.after(() => server.close());
+  // What the watcher reports is what Vite turns into an update, and an `.html`
+  // among it into a full page reload.
+  const seen: string[] = [];
+  server.watcher.on('all', (_event: string, file: string) => seen.push(file.slice(root.length + 1)));
+  await new Promise((r) => setTimeout(r, 400));
+  for (const dir of quiet) writeFileSync(join(root, dir, 'seed.html'), `<html>${dir} changed</html>`);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(seen, [], `the watcher reported build output, which reloads every open tab: ${seen.join(', ')}`);
+  // The control: the same change to a page the app serves IS reported (the watcher works).
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body>app changed</body></html>');
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(seen, ['index.html'], 'the index.html control was not reported');
+});
+
+test('a lost HMR socket is reconnected, never reloaded; a restarted server reloads only a loopback page (#393)', async () => {
+  // Vite's dev client ends "Polling for restart..." in location.reload(): the
+  // composer text and scroll position of the owner's browser tab. The patch
+  // reconnects the same socket; the guard below fails the dev server loudly on a
+  // Vite whose client reads differently.
+  const installed = JSON.parse(readFileSync(new URL('../node_modules/vite/package.json', import.meta.url), 'utf8')).version;
+  assert.equal(installed, QUIET_RECONNECT_MEASURED_ON,
+    `the dev-client patch was measured on Vite ${QUIET_RECONNECT_MEASURED_ON}, this is ${installed}: re-check it live and update the stamp (docs/conventions/development.md § The dev server)`);
+  const client = readFileSync(new URL('../node_modules/vite/dist/client/client.mjs', import.meta.url), 'utf8');
+  const plugin = quietDevReconnect();
+  const id = '/x/node_modules/vite/dist/client/client.mjs?v=1';
+  const patched = plugin.transform(client, id) as string;
+  const afterPing = patched.slice(patched.indexOf('await waitForSuccessfulPing(url.href);'));
+  const handler = afterPing.slice(0, afterPing.indexOf('break;'));
+  assert.ok(!/waitForSuccessfulPing\(url\.href\);\s*location\.reload\(\);/u.test(patched), 'the unconditional reload after the ping is gone');
+  assert.ok(handler.includes('vite:ws:connect') && handler.includes('transport.connect(') && handler.includes('transport.disconnect()'), handler);
+  assert.match(handler, /else if \(\["localhost", "127\.0\.0\.1", "\[::1\]"\]\.includes\(location\.hostname\)\) location\.reload\(\)/u, 'the loopback keeps Vite’s answer to a restart');
+  assert.match(handler, /else console\.info\("\[vite\] the dev server restarted; HMR is off until this page is reloaded\."\)/u);
+  // The patched client is still a module (esbuild is Vite’s own parser).
+  const { transformWithEsbuild } = await import('vite');
+  await transformWithEsbuild(patched, 'client.mjs', { loader: 'js', format: 'esm', target: 'esnext' });
+  // Not the Vite client: untouched. A client without the expected text: loud.
+  assert.equal(plugin.transform('location.reload();', '/x/src/lib/other.js'), undefined);
+  assert.throws(() => plugin.transform(client.replace('await waitForSuccessfulPing(url.href);', 'await waitForSuccessfulPing(url.href, 1);'), id), /Unsupported Vite dev client reconnect/);
+  const original = '          await waitForSuccessfulPing(url.href);\n          location.reload();';
+  assert.ok(client.includes(original), 'the text the patch replaces is this Vite’s');
+  assert.throws(() => plugin.transform(`${client}\n${original}`, id), /Unsupported Vite dev client reconnect/, 'two of them is not the client we read');
+  assert.ok(createViteConfig('serve', {}).plugins.some((p: { name?: string }) => p?.name === 'quiet-dev-reconnect'), 'and it is in the config');
 });
 
 // ── Board #368: the UI's build identity ─────────────────────────────────

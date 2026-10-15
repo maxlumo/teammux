@@ -235,6 +235,90 @@ key itself is still the one installed apps trust, so rotating it means users
 reinstall — an owner decision, not a build step. Until it is rotated, treat the
 history as containing a live signing key.
 
+### The dev server: what it watches, and a lost HMR socket (#393)
+
+The owner's browser app is the Vite dev server (`:5173`, through CloudFront →
+Caddy → a reverse SSH tunnel). Two things made its tab reload by itself
+("[vite] server connection lost. Polling for restart…" is Vite's dev client
+about to call `location.reload()`).
+
+**Vite watches the web app, not the checkout.** An `.html` file that changes
+anywhere under the root is answered with a full page reload of EVERY open
+browser, and an Android build writes them into the checkout: the supervised
+server's journal, 2026-10-15, shows `page reload
+src-tauri/target/aarch64-linux-android/release/build/…/tauri-codegen-assets/<hash>.html`
+twice at 15:11 and twice at 22:50, and `src-tauri/gen/android/build/reports/problems/problems-report.html`
+at 15:16. So `vite.config.js` (`watchIgnored`, `scanEntries`) skips everything the
+web app cannot import: `worktree/`, `src-tauri/`, `temp/`, `build/`, `dist/`
+(a `vite build` while the dev server runs would reload every tab too) and `.tmm/`.
+The list is absolute and anchored at the config's directory, and the dependency
+scan's entry glob carries the same exclusions. `scripts/vite-config.test.ts`
+runs a real Vite watcher on a scratch root: a changed `.html` under any of them
+is not even reported, the control `index.html` is. Add a new build-output
+directory to `NOT_THE_WEB_APP` the day one appears.
+
+**A lost HMR socket reconnects; it does not reload the page.** `quietDevReconnect()`
+(a Vite plugin in `vite.config.js`) patches Vite's own dev client, the way
+`allowCompactXtermLines()` patches xterm ([xterm-patch.md](../design-docs/features/xterm-patch.md)),
+at the one place it reloads after the ping: it reconnects the same socket instead.
+If the same dev server is back, HMR resumes and the page is untouched; the
+console says "connection restored; the page was not reloaded". If it cannot
+(the dev server RESTARTED — its HMR token is new and the old client is refused),
+a page on the loopback (`localhost`, `127.0.0.1`, `[::1]`) keeps Vite's reload,
+which is the local dev loop's wanted answer to a restart; a page reached through
+any other host stays as it is, logs once "the dev server restarted; HMR is off
+until this page is reloaded", and the person reloads when they choose to.
+Tabs opened before the supervised server picked the new config up (Vite
+restarts itself when `vite.config.js` changes) keep the old client until
+reloaded once.
+
+*What was measured* (2026-10-15; nothing of the owner's was touched, the real
+URL was only read through, one read-only HMR socket per probe):
+
+- through the real path (`d2s31qhvdzbz3r.cloudfront.net` → Caddy → tunnel → Vite)
+  an HMR WebSocket that carried no frame in either direction was cut at exactly
+  600.2 s (close code 1006, no close frame) — a 10-minute idle timeout, not the
+  distribution's 60 s origin read timeout; with a client frame every 30, 60 or
+  90 s it stayed open for the whole 14 minutes. Vite's own client sends one every
+  `server.hmr.timeout` (30 s), so a live tab never idles that long;
+- a tab FROZEN for 11 minutes and then resumed (headless Chrome, CDP
+  `Page.setWebLifecycleState`, what a sleeping or memory-saved tab does), through
+  the same real URL, two tabs side by side: the owner's Vite client AS SERVED
+  logged "server connection lost. Polling for restart…" at the moment of
+  resume and the page RELOADED (the page's own variable gone, `navigation.type ==
+  "reload"`, a new `timeOrigin`); the same client text with the patch applied
+  (answered through CDP `Fetch`, so the owner's service was not touched — the HMR
+  socket still crossed the real path) logged "connection restored; the page was
+  not reloaded" and the page kept its variable and `timeOrigin` for the 32 s
+  watched afterwards. Even a 5 s freeze closed the socket on resume (patched client:
+  lost, then restored), so this trigger needs no idle timeout at all;
+- on a private Vite behind a TCP hop that drops every connection for 5 s: the
+  unpatched client reloaded the page (`navigation.type == "reload"`, the page's
+  own variable gone); the patched one kept it, with the draft in the composer;
+  restarting that Vite: a loopback page reloaded as before, an `app.localhost`
+  page (not in the loopback list) stayed put and logged once.
+
+*No server heartbeat.* The idle cut is already prevented by Vite's 30 s client
+ping for a live tab, and the reconnect now makes every other drop invisible, so a
+heartbeat would be a second mechanism for a case the first covers.
+
+**The patch edits Vite's code, so it is stamped and it fails loudly.**
+`QUIET_RECONNECT_MEASURED_ON` is the Vite version it was measured on (6.4.2); the
+transform throws "Unsupported Vite dev client reconnect" when the text it replaces
+is not found exactly once, and `scripts/vite-config.test.ts` fails when the
+installed Vite is another version OR the text is gone, so an upgrade can never
+quietly lose the patch (or quietly keep one that no longer does anything).
+Upgrade procedure: run the test; when it fails, read the new
+`node_modules/vite/dist/client/client.mjs` § `vite:ws:disconnect`, adapt the
+patch, re-run the live check (a private Vite with its own `--port` and
+`cacheDir`, a TCP hop you can cut, a headless browser: a 5 s cut must leave the
+page's own variable in place), then update the stamp. Never weaken the guard to
+make the dev server start.
+
+The app's own WebSocket never reloads the page either; how long it retries
+before the connect card is in
+[disconnect-grace.md](../design-docs/features/disconnect-grace.md#the-clients-side-how-long-a-dropped-connection-is-retried-board-393).
+
 ## Workflow
 
 ### Agent worktree isolation
@@ -268,7 +352,9 @@ history as containing a live signing key.
   scan treats every worktree's `index.html` as another app — so
   `vite.config.js` excludes it from both (measured on a private Vite with a
   nested 304-entry `worktree/`: 304 → 0 watches there, and the scan stopped
-  following its imports; `scripts/vite-config.test.ts` pins it). `npm test`'s
+  following its imports; `scripts/vite-config.test.ts` pins it; the same
+  ignore list now covers the rest of what is not the web app, see
+  [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)). `npm test`'s
   globs and tsconfig's `include` are anchored at `src/`/`scripts/`, so they
   never reach it.
 - **Three places say where a worktree goes, and only the first two are the

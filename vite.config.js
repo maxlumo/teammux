@@ -46,16 +46,92 @@ function allowCompactXtermLines() {
   };
 }
 
-// Agent task worktrees live INSIDE the checkout, in its gitignored worktree/
-// (#342, docs/conventions/development.md § Agent worktree isolation). Vite
-// reads the whole root, so without this the dev server serving this checkout
-// also watches every worktree — measured: one fresh worktree cost the
-// supervised server 705 inotify watches; estimated, not measured: one that has
-// built Rust would add roughly what this checkout's own target/ holds (58,215
-// entries) — and its dependency scan crawls each worktree's index.html as
-// another app. Anchored at THIS config's directory, so a worktree's own Vite
-// ignores only a worktree/ nested inside it.
-const AGENT_WORKTREES = fileURLToPath(new URL('./worktree', import.meta.url));
+// A dropped connection never reloads the page (owner, 2026-10-15 23:40, #393:
+// "应该悄悄恢复，最多有个悬浮提示一下重连就行，保证整个页面稳定性").
+//
+// Vite's dev client answers a lost HMR socket with "[vite] server connection
+// lost. Polling for restart..." and, as soon as the server answers a ping,
+// `location.reload()` — the whole page, composer text and scroll position
+// included, whatever dropped it (a proxy's idle timeout, a laptop's wifi, the
+// SSH tunnel behind the CloudFront → Caddy → tunnel path the browser app is
+// reached through). The patch reconnects the SAME socket instead: if the server
+// answers (the same dev server is back), HMR resumes and the page is untouched.
+// If it cannot (the server RESTARTED — its HMR token is new, so this page's
+// client is refused), a page on the loopback keeps Vite's reload, which is the
+// local dev loop's wanted answer to a restart; a page reached through any other
+// host stays as it is and says so once in the console (HMR is off until it is
+// reloaded by hand). Guarded like the xterm patch: a Vite whose client reads
+// differently fails the dev server loudly instead of silently reloading again.
+// The Vite whose dev client this was measured against (live, 2026-10-15, through a
+// proxy that dropped the connection for 5, 30 and 60 s and a dev-server restart).
+// scripts/vite-config.test.ts fails when the installed Vite is another one, so an
+// upgrade re-checks the patch instead of silently keeping or losing it.
+export const QUIET_RECONNECT_MEASURED_ON = '6.4.2';
+
+export function quietDevReconnect() {
+  const original = '          await waitForSuccessfulPing(url.href);\n          location.reload();';
+  const patched = [
+    '          await waitForSuccessfulPing(url.href);',
+    '          let restored = false;',
+    '          for (let attempt = 0; attempt < 3 && !restored; attempt++) {',
+    '            try {',
+    '              await transport.disconnect();',
+    '              await transport.connect(createHMRHandler((next) => {',
+    '                if (next.type === "custom" && next.event === "vite:ws:connect") restored = true;',
+    '                return handleMessage(next);',
+    '              }));',
+    '            } catch {}',
+    '            if (!restored) await wait(1e3);',
+    '          }',
+    '          if (restored) console.info("[vite] connection restored; the page was not reloaded.");',
+    '          else if (["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) location.reload();',
+    '          else console.info("[vite] the dev server restarted; HMR is off until this page is reloaded.");',
+  ].join('\n');
+  return {
+    name: 'quiet-dev-reconnect',
+    enforce: 'post',
+    transform(code, id) {
+      if (!id.split('?')[0].endsWith('/vite/dist/client/client.mjs')) return;
+      if (code.split(original).length !== 2) throw new Error('Unsupported Vite dev client reconnect');
+      for (const name of ['createHMRHandler', 'handleMessage', 'wait(', 'transport.disconnect', 'transport.connect']) {
+        if (!code.includes(name)) throw new Error(`Unsupported Vite dev client: no ${name}`);
+      }
+      return code.replace(original, patched);
+    },
+  };
+}
+
+// Vite reads the whole root, and this checkout holds much that is not the web
+// app (#342, #393; docs/conventions/development.md § Vite watches the web app):
+//
+// - agent task worktrees: they live INSIDE the checkout, in its gitignored
+//   worktree/ (#342, § Agent worktree isolation). Without an ignore one fresh
+//   worktree cost the supervised server 705 inotify watches (measured), its
+//   dependency scan crawled each worktree's index.html as another app, and one
+//   that had built Rust would add roughly this checkout's own target/ (58,215
+//   entries, estimated);
+// - src-tauri/: the Rust crate, its target/ and the Android project's build
+//   output. An Android build writes `.html` files there
+//   (target/<triple>/…/tauri-codegen-assets/<hash>.html, gen/android/build/
+//   reports/problems/problems-report.html), and Vite answers ANY changed `.html`
+//   under the root with a full PAGE RELOAD of every open browser — journal of the
+//   supervised dev server, 2026-10-15: two such reloads at 15:11 and two at 22:50
+//   (+ the problems report at 15:16), the owner's "the browser app restarts by
+//   itself" (#393). Nothing in src/ imports from src-tauri/;
+// - temp/ (agents' gitignored scratch, screenshots and html previews), build/
+//   (the gradle cache symlink), dist/ (`vite build` output: a build while the dev
+//   server runs would reload every tab) and .tmm/ (managed agents' homes).
+//
+// Absolute and anchored at THIS config's directory, so a worktree's own Vite
+// ignores only what is nested inside it.
+const ROOT = fileURLToPath(new URL('.', import.meta.url)).replace(/\/$/, '');
+const NOT_THE_WEB_APP = ['worktree', 'src-tauri', 'temp', 'build', 'dist', '.tmm'];
+
+/** What the dev server's watcher skips (absolute globs). */
+export const watchIgnored = (root = ROOT) => NOT_THE_WEB_APP.map((dir) => `${root}/${dir}/**`);
+
+/** Vite's default dependency-scan entry glob, minus the same directories. */
+export const scanEntries = () => ['**/*.html', ...NOT_THE_WEB_APP.map((dir) => `!${dir}/**`)];
 
 const PACKAGE = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
@@ -95,13 +171,13 @@ export function devServerIdentity(now = new Date()) {
 
 export function createViteConfig(command, env = process.env, identityDeps = {}) {
   return {
-    plugins: [allowCompactXtermLines(), svelte()],
+    plugins: [allowCompactXtermLines(), quietDevReconnect(), svelte()],
     // esbuild dep pre-bundling bypasses plugin transforms, so the compact-lines
     // patch above would never apply in dev. Serve @xterm/xterm from source.
     optimizeDeps: {
       exclude: ['@xterm/xterm'],
-      // Vite's default entry glob, minus the agent worktrees.
-      entries: ['**/*.html', '!worktree/**'],
+      // Vite's default entry glob, minus what is not the web app.
+      entries: scanEntries(),
     },
     clearScreen: false,
     // Replaced at build time; read through src/lib/core/build-info.ts only.
@@ -115,7 +191,7 @@ export function createViteConfig(command, env = process.env, identityDeps = {}) 
       port: DEV_WEB_PORT,
       strictPort: true,
       allowedHosts: ['.ts.net', 'localhost'],
-      watch: { ignored: [`${AGENT_WORKTREES}/**`] },
+      watch: { ignored: watchIgnored() },
       ...(command === 'serve' ? { proxy: devProxy(env) } : {}),
     },
   };
