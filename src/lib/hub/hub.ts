@@ -32,7 +32,11 @@ import { ALL_TARGET, busyTargetsFor, targetMembers, targetTeam, teamRoot } from 
  * and an agent's own `[tmm status failed]` note wears it through
  * `noteStateColor` — and that is why it is not a literal red anywhere.
  */
-export function stateDotColor(state: string): string {
+export function stateDotColor(state: string, detail = ''): string {
+  // An agent at rest that a person must unblock (board #362 c: its CLI
+  // painted an error no `continue` fixes) wears the same amber as one that
+  // asked: the one "a person has to act" colour, not a new one.
+  if (needsPerson(detail)) return 'var(--status-warn)';
   switch (state) {
     case 'running':
     case 'working': return 'var(--accent)';       // 'working' = pre-2026-08 name
@@ -63,8 +67,20 @@ export function stateIsLive(state: string): boolean {
  * being the one that needs the human most (review, 2026-09-03). Static on
  * purpose: `.live-dot`'s breathe says "a turn is open", and a waiting turn
  * is suspended, not running. `blocked` is `tmm status`'s wider word for it. */
-export function stateNeedsYou(state: string): boolean {
-  return state === 'waiting' || state === 'blocked';
+export function stateNeedsYou(state: string, detail = ''): boolean {
+  return state === 'waiting' || state === 'blocked' || needsPerson(detail);
+}
+
+/** The status details that mean a PERSON must act on an agent at rest
+ * (board #362 c), as the server derives them: its CLI's newest paint was an
+ * expired credential (`auth_expired`) or a conversation that fails every
+ * turn (`conversation_blocked`), or auto-continue stopped for its errors
+ * (`recovery_exhausted`). Never auto-continued; each has its remedy in the
+ * hover (`hubDetail_<detail>`). */
+export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted'];
+
+export function needsPerson(detail: string | undefined | null): boolean {
+  return !!detail && PERSON_DETAILS.includes(detail);
 }
 
 /** Four capacity bands, not a colour ramp (#180, owner 2026-09-12).

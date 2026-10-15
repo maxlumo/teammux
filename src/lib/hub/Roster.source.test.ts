@@ -158,7 +158,7 @@ test('native selection owns hover and context; stopped slots never select or res
   assert.match(off, /disabled=\{acting\}/u);
   assert.doesNotMatch(off, /selectTarget|interrupt\(|startAgent|a-start|aria-pressed/u);
   assert.doesNotMatch(source, /role="button"|onkeydown|position:\s*fixed/u);
-  for (const fact of ['runtimeLabel(a)', 'fmtElapsed(a.since, tick)', 'stateTone(a.state)', "t('hubHoverTarget')", "t('hubHoverPath')", "t('hubToDmLong')", "t('hubToAlsoHint')"]) {
+  for (const fact of ['runtimeLabel(a)', 'fmtElapsed(a.since, tick)', 'stateTone(a.state, a.detail)', 'detailLabel(a.detail)', "t('hubHoverTarget')", "t('hubHoverPath')", "t('hubToDmLong')", "t('hubToAlsoHint')"]) {
     assert.ok(source.includes(fact), `retained hover fact: ${fact}`);
   }
 });
@@ -192,7 +192,7 @@ test('identity, readiness and motion retain their existing authorities', () => {
     'placeholders only while there is nothing to show — never in front of rendered cards (owner, 2026-09-23)');
   assert.match(source, /class:reveal=\{justLoaded\}/u);
   assert.match(source, /class:appear-pop=\{!!rosterBase && !rosterBase\.has\(a\.name\)\}/u);
-  assert.match(source, /class:live-dot=\{stateIsLive\(a\.state\)\} style:background=\{stateDotColor\(a\.state\)\}/u);
+  assert.match(source, /class:live-dot=\{stateIsLive\(a\.state\)\} style:background=\{stateDotColor\(a\.state, a\.detail\)\}/u, 'the detail joins the one colour language (board #362 c)');
   assert.doesNotMatch(source, /<span>\{stateLabel\(a\.state\)\}<\/span>|agent-state|stateNeedsYou/u,
     'owner 07:09 retains state wording in accessible/hover facts only');
   assert.match(source, /\{#each groups as group \(group\.key\)\}/u);
@@ -445,7 +445,9 @@ test('a live card name wears agentHue, dimmed toward --text2 when unlit (board #
 test('a failed agent says why on the phone too: the state line carries the detail into the touch facts (#322)', () => {
   // The long-press menu on a touch device renders cardInfo (#223), so the
   // reason of a real CLI failure is reachable without a hover.
-  assert.match(source, /const lines = \[\{ label: t\('hubHoverState'\), value: \[stateLabel\(a\.state\), a\.detail\]\.filter\(Boolean\)\.join\(' · '\)/u);
+  // The detail goes through Hub's `detailLabel` (board #362 c), so one that
+  // needs a person names its remedy; any other reads as the server wrote it.
+  assert.match(source, /const lines = \[\{ label: t\('hubHoverState'\), value: \[stateLabel\(a\.state\), detailLabel\(a\.detail\)\]\.filter\(Boolean\)\.join\(' · '\)/u);
 });
 
 test('a card is dragged onto a team by the ONE press-drag, in the existing tokens (board #384)', () => {

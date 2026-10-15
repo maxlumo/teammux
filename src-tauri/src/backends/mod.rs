@@ -175,16 +175,31 @@ impl Backend {
         }
     }
 
-    /// Every transient-error shape this backend's recovery knows, each with
-    /// the CLI version it was MEASURED on (board #362): a detector tied to a
-    /// CLI's painted text rots silently when the CLI repaints (#346, #361),
-    /// so the version it was last seen on is part of the shape. Empty where
-    /// none was measured.
+    /// Every recovery shape this backend knows (transient ones and the ones
+    /// that need a person), each with the CLI version it was MEASURED on
+    /// (board #362): a detector tied to a CLI's painted text rots silently
+    /// when the CLI repaints (#346, #361), so the version it was last seen on
+    /// is part of the shape. Empty where none was measured.
     pub fn recovery_shapes(self) -> &'static [Measured] {
         match self {
             Backend::Kiro => kiro::RECOVERY_SHAPES,
             Backend::Claude => claude::RECOVERY_SHAPES,
+            Backend::Codex => codex::RECOVERY_SHAPES,
             _ => &[],
+        }
+    }
+
+    /// The NEWEST paint on this backend's screen, when it is one of its
+    /// errors that only a person can clear (board #362 c): its shape (also
+    /// the agent's status detail: `auth_expired`, `conversation_blocked`) and
+    /// the block, de-wrapped. Never continued. Each backend reads its own
+    /// screen grammar in its own file; `None` where none was measured.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn person_paint(self, pane: &str) -> Option<(&'static str, String)> {
+        match self {
+            Backend::Kiro => kiro::person_paint(pane),
+            Backend::Codex => codex::person_paint(pane),
+            _ => None,
         }
     }
 
@@ -195,6 +210,7 @@ impl Backend {
         match self {
             Backend::Kiro => Some(kiro::VERSION_PROGRAM),
             Backend::Claude => Some(claude::VERSION_PROGRAM),
+            Backend::Codex => Some(codex::VERSION_PROGRAM),
             _ => None,
         }
     }
@@ -474,6 +490,14 @@ impl Backend {
 /// Lowercase alphanumerics only: the pane wraps the error blob at arbitrary
 /// points (and pads with box furniture), so whitespace and punctuation carry
 /// no signal.
+/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, hex digits only: the Request ID
+/// every measured error paint ends with (kiro, codex).
+pub(crate) fn is_uuid(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 pub(crate) fn canonical(line: &str) -> String {
     line.chars()
         .filter(|c| c.is_ascii_alphanumeric())

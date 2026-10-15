@@ -86,6 +86,16 @@ struct Rec {
     /// have inherited (review P1-B). Compared with the CURRENT `end_seq`, so a
     /// later end of any kind simply stops matching. 0 = no such end.
     empty_end_seq: u64,
+    /// A turn end the HOOKS never reported, recorded from the screen (board
+    /// #362 c): the CLI painted an error only a person can clear and sat at
+    /// its prompt, so without it the turn stayed `running` for hours. `(seq,
+    /// detail)`: the arrival number that end took, and what the person must
+    /// do (`auth_expired`, `conversation_blocked`, `recovery_exhausted`).
+    /// Like `empty_end_seq`, compared with the CURRENT `end_seq`, so a later
+    /// end of any kind, or a turn starting, simply stops matching. When the
+    /// paint is seen on a turn that had already ended (an interrupt, say), the
+    /// detail is put on that end and no second end is written. (0, "") = none.
+    person_end: (u64, String),
     /// A nudge was DELIVERED in the current run of empty turns. A scheduled one
     /// that was cancelled does not count — the allowance is spent by the line
     /// typed, not by the timer set — and only a turn that ends with a real reply
@@ -630,6 +640,11 @@ fn replay_turn_facts(r: &mut Rec, facts: &super::store::TurnFacts) {
         let kind = if f.text == "failed" { "failed" } else { "completed" };
         r.end = Some((kind.to_string(), f.ts / 1000));
         r.end_seq = recovered_arrival(f.id);
+        // An end the hooks missed carries its detail in the row's `tool`
+        // column (`record_missed_end`); a hook's own end has none.
+        if f.text == "failed" && !f.tool.is_empty() {
+            r.person_end = (r.end_seq, f.tool.clone());
+        }
     }
 }
 
@@ -806,6 +821,13 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64
     if !kind_is_ask {
         end_commands(session, window, turn_had_prompt);
     }
+    drop(order);
+    // A real reply is proof the model answered, as a tool call is: an open
+    // recovery incident is confirmed and a capped stretch is over (board
+    // #362, orchestrator's ruling on the validator's P3).
+    if completed && quality == EndQuality::Said {
+        super::recovery::note_answered(session, window);
+    }
 }
 
 /// Is the window owed a nudge right now: its newest end is an empty one, the
@@ -971,7 +993,7 @@ pub fn record_housekeeping_tool(session: &str, window: &str, tool: &str, detail:
 pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) {
     // A tool call is proof the model answered: whatever transient-error retry
     // budget this window was burning refills (recovery rule 3).
-    super::recovery::note_tool_activity(session, window);
+    super::recovery::note_answered(session, window);
     let line = if detail.is_empty() { tool.to_string() } else { format!("{tool} {detail}") };
     let ts = now();
     // Pre and Post of one call are ONE fact (we subscribe to both because a
@@ -1475,6 +1497,57 @@ pub fn record_recovery(session: &str, window: &str, text: &str) {
     push_event(session, window, "warn", text.to_string());
 }
 
+/// The turn end the HOOKS missed, recorded from the screen (board #362 c,
+/// orchestrator's ruling 2): `projects::recovery` saw the CLI's newest paint
+/// be an error only a person can clear, and the CLI reports no end for that
+/// turn (measured: codex-cli 0.154.0 on a 401, kiro-cli 2.28.0 on an
+/// oversized image), so the turn stayed `running` and a queue-mode agent's
+/// lines stayed held behind it, the person's own message after the fix
+/// included. An END, not a wait (#354: a failed turn is an end): one
+/// `failed` row with the `detail` in its `tool` column (so a restart replays
+/// it, `replay_turn_facts`), the state idle with that detail, and the end
+/// edge's flush.
+///
+/// It carries NO reply: nothing is posted, nothing is returned as the
+/// agent's answer, and the requesters' edge simply closes at this end (the
+/// next turn's members start after it); they learn why from the status
+/// detail. A turn that had ALREADY ended (an interrupt, a hook end) gets the
+/// detail on that end and no second end row. The caller decides "once per
+/// paint" (`recovery`); this writes once per call. Returns whether a row was
+/// written.
+pub fn record_missed_end(session: &str, window: &str, detail: &str) -> bool {
+    recovery_mark(session);
+    let order = turn_order();
+    let recs = store().lock().unwrap();
+    let held = recs.get(&(session.to_string(), window.to_string()));
+    let open = held.is_some_and(|r| matches!(derive_from(r, 0, now()).state.as_str(), "running" | "waiting"));
+    let turn_had_prompt = held.is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
+    drop(recs);
+    if !open {
+        with_rec(session, window, |r| {
+            if r.end.is_some() {
+                r.person_end = (r.end_seq, detail.to_string());
+            }
+        });
+        return false;
+    }
+    let event = ("notif", "failed".to_string(), detail.to_string(), String::new(), Vec::new());
+    let detail = detail.to_string();
+    turn_fact_held(&order, session, window, now(), |_| false, Some(event), |r, ts, seq| {
+        r.end = Some(("failed".to_string(), ts));
+        r.end_seq = seq;
+        r.ask = None; // a finished turn cannot still be asking
+        r.person_end = (seq, detail);
+    }, None);
+    // The end's effect on the window's command rows, as a hook end has it.
+    end_commands(session, window, turn_had_prompt);
+    drop(order);
+    // The end edge's flush (board #257), as a hook end does it: lines held
+    // for this busy queue-mode agent are typed now.
+    super::delivery::flush(session, window);
+    true
+}
+
 /// Did this window produce any turn fact (accepted prompt, turn end, tool
 /// call) at or after `t`? `projects::recovery` asks this to verify that a
 /// typed `continue` actually became a turn: the error text stays painted on
@@ -1660,7 +1733,9 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
     // itself in the detail (board #354) and nowhere else: see the table
     // above for why it is not a state of its own.
     if end_k >= start_k && end_k >= ask_k {
-        let detail = if end_kind == "failed" {
+        let detail = if rec.person_end.0 != 0 && rec.person_end.0 == rec.end_seq {
+            rec.person_end.1.clone()
+        } else if end_kind == "failed" {
             FAILED_DETAIL.to_string()
         } else if rec.empty_end_seq != 0 && rec.empty_end_seq == rec.end_seq {
             EMPTY_DETAIL.to_string()
@@ -2883,6 +2958,50 @@ mod tests {
     /// restart whose newest fact was a tool call (no prompt hook at all) or a
     /// permission ask, with no stop after it, keeps the held lines unswept past
     /// the ack window; a tool after a stop is not an open turn.
+    /// Board #362 c (orchestrator's ruling 2, conditions b and c): the turn
+    /// end the hooks missed ENDS the open turn, once per call, as one `failed`
+    /// row carrying its detail and nothing else (no reply, no message); the
+    /// state is idle with that detail, so the turn no longer holds a
+    /// queue-mode agent's lines. A restart replays it. A turn that had
+    /// already ended gets the detail on that end and no second row; a later
+    /// prompt or hook end supersedes it.
+    #[test]
+    fn a_missed_end_ends_the_open_turn_with_its_detail_and_carries_no_reply() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("missed-{}", uuid::Uuid::new_v4());
+        let rows = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap();
+        let ends = || rows().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
+        record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic G3 review");
+        assert_eq!(derive(&session, "w1", 0).state, "running", "the hooks gave no end: running for hours, as measured");
+        assert!(record_missed_end(&session, "w1", "auth_expired"));
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
+        assert!(!turn_busy(&session, "w1"), "an end: nothing is held behind it");
+        assert_eq!(ends(), [("failed".to_string(), "auth_expired".to_string())], "one end row, the detail in it");
+        assert_eq!(rows().iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(), ["prompt", "notif"], "no reply and no message beside it");
+        // A restart replays the end with its detail.
+        simulate_restart(&session);
+        recovery_mark(&session);
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
+        // The turn has ended: the detail goes on that end, no second row.
+        assert!(!record_missed_end(&session, "w1", "recovery_exhausted"));
+        assert_eq!(derive(&session, "w1", 0).detail, "recovery_exhausted");
+        assert_eq!(ends().len(), 1, "no double end");
+        // A later prompt supersedes it; so does that turn's own hook end.
+        record_prompt(&session, "w1", "[tmm chat 2026-10-15 23:10] human: @critic mwinit done");
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("running", ""));
+        record_notification_with(&session, "w1", "completed", now() + 1, EndQuality::Said);
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""));
+        // A window with no turn at all gets nothing.
+        assert!(!record_missed_end(&session, "w2", "auth_expired"));
+        assert_eq!(derive(&session, "w2", 0).detail, "");
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
     #[test]
     fn a_restart_recovers_a_tool_only_or_asking_turn() {
         crate::projects::tests::use_test_store();

@@ -80,6 +80,16 @@ test('Roster renders the controlled destination strip (#168)', { timeout: RENDER
     assert.equal(card(root, 'waiting').querySelector('.agent-marks')!.classList.contains('unmarked'), true);
     assert.match(card(root, 'waiting').querySelector('.st')!.getAttribute('style')!, /--status-warn/u);
     assert.equal(card(root, 'waiting').querySelector('.st.live-dot'), null);
+    // Board #362 c: an agent at rest that a person must unblock wears the
+    // same amber dot as one that asked, and its remedy is in its ARIA facts.
+    const blocked = view({
+      managedAgents: agents.map((a) => (a.name === 'solo' ? { ...a, detail: 'auth_expired' } : a)),
+      detailLabel: (d: string) => (d === 'auth_expired' ? 'auth expired — run mwinit, then restart it' : d),
+    });
+    assert.match(card(blocked, 'solo').querySelector('.st')!.getAttribute('style')!, /--status-warn/u);
+    assert.equal(card(blocked, 'solo').querySelector('.st.live-dot'), null, 'at rest: no breathe');
+    assert.match(select(blocked, 'solo').getAttribute('aria-label')!, /run mwinit/u);
+    assert.doesNotMatch(card(root, 'solo').querySelector('.st')!.getAttribute('style')!, /--status-warn/u, 'idle with no detail stays at rest');
     // #205: Stop is hidden until the card is hovered/focused (no pointer in SSR) or its interrupt is pending.
     assert.equal(stop(root, 'runner'), null, 'busy but not hovered: the dot, not a Stop');
     const armed = view({ interrupting: ['runner'] });

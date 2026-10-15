@@ -120,16 +120,23 @@ fn toast_mode(line: &str) -> Option<&'static str> {
 /// them, and reading them as whole words is what keeps "the line mentions
 /// steer" from being an answer.
 fn footer_mode(line: &str) -> Option<&'static str> {
+    let rest = working_footer(line)?;
+    let now = mode_word(segment_after(rest, " · Type to ")?)?;
+    let other = mode_word(segment_after(rest, " · Ctrl+S to ")?)?;
+    // A footer that offers the mode it is already in says nothing.
+    (now != other).then_some(now)
+}
+
+/// The line IS the footer kiro paints while a turn runs — `Kiro is working`
+/// right after the stamp at column zero — and what follows the label. One
+/// reading for the mode (`footer_mode`) and for "a turn runs" (`person_paint`).
+fn working_footer(line: &str) -> Option<&str> {
     let body = match line.strip_prefix('›') {
         Some(after) if after.starts_with(' ') => after.trim_start(),
         Some(_) => return None,
         None => line.strip_prefix(' ').unwrap_or(line),
     };
-    let rest = body.strip_prefix("Kiro is working")?;
-    let now = mode_word(segment_after(rest, " · Type to ")?)?;
-    let other = mode_word(segment_after(rest, " · Ctrl+S to ")?)?;
-    // A footer that offers the mode it is already in says nothing.
-    (now != other).then_some(now)
+    body.strip_prefix("Kiro is working")
 }
 
 /// What follows `marker` up to the next ` · ` — one segment of the footer.
@@ -1244,12 +1251,7 @@ const MODEL_NAME_WORDS: usize = 5;
 /// ladder bounds one Request ID only: a fresh id is a fresh incident.
 const TOO_MANY_REQUESTS: &str = "Too many requests, please wait before trying again. (Request ID: ";
 
-/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, hex digits only.
-fn is_uuid(id: &str) -> bool {
-    let parts: Vec<&str> = id.split('-').collect();
-    parts.len() == 5
-        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
-}
+use super::is_uuid;
 
 /// Is this block, its lines joined with spaces, exactly the rate-limit error?
 fn too_many_requests(spaced: &str) -> bool {
@@ -1308,14 +1310,75 @@ pub(crate) fn transient_shape(glued: &str, spaced: &str) -> Option<&'static str>
 /// was written down; the first kiro-cli on record on this host is 2.18.1
 /// (2026-09-03), so both are an upper bound, and neither has been seen since.
 /// `high_traffic` was captured on 2.22.1 (`●`, #267) and 2.28.0 (`•`, #361),
-/// `too_many_requests` on 2.28.0 (#370). Raise a version only with a new
-/// capture as its fixture (`recovery::tests::FIXTURES`).
+/// `too_many_requests` on 2.28.0 (#370). `conversation_blocked` (a person's
+/// error, `person_paint`) on 2.28.0 (#362, video-factory:checker 10-13).
+/// Raise a version only with a new capture as its fixture
+/// (`recovery::tests::FIXTURES`).
 pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
     super::Measured { shape: "stream_error", version: "2.18.1", at_most: true },
     super::Measured { shape: "model_unavailable", version: "2.18.1", at_most: true },
     super::Measured { shape: "high_traffic", version: "2.28.0", at_most: false },
     super::Measured { shape: "too_many_requests", version: "2.28.0", at_most: false },
+    super::Measured { shape: "conversation_blocked", version: "2.28.0", at_most: false },
 ];
+
+/// A kiro error no `continue` can fix (board #362 c): the conversation holds
+/// an image Bedrock refuses, so EVERY later turn, and `/compact`, fails the
+/// same way in seconds (builder, 10-15 11:55 -> 14:13: a 3860-px screenshot
+/// read into the conversation). Only a person clearing the conversation
+/// (after saving its state) ends it. Measured on kiro-cli 2.28.0, at 59
+/// columns: `• At least one of the image dimensions exceed max allowed` /
+/// `  size for many-image requests: 2000 pixels (Request ID:` / `  <uuid>)`.
+/// The limit is 2000 px when a request carries many images and 3000 px
+/// otherwise (kiro's own log, /tmp/kiro-log/kiro-tui.log, has both), so the
+/// number is read as digits, not matched. As strict as `TOO_MANY_REQUESTS`
+/// and for the same reason: letters alone are prose ABOUT the error.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const IMAGE_TOO_LARGE: &str = "At least one of the image dimensions exceed max allowed size for many-image requests: ";
+
+/// Is this block, its lines joined with spaces, exactly the image-size error?
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn image_too_large(spaced: &str) -> bool {
+    let flat = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(rest) = flat
+        .strip_prefix(|c: char| HEAD_GLYPHS.contains(&c))
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|body| body.strip_prefix(IMAGE_TOO_LARGE))
+    else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0
+        && rest[digits..]
+            .strip_prefix(" pixels (Request ID: ")
+            .and_then(|r| r.strip_suffix(')'))
+            .is_some_and(is_uuid)
+}
+
+/// The NEWEST paint on a kiro screen, when it is one of kiro's errors that
+/// needs a person (board #362 c): `(shape, block)`, the block de-wrapped
+/// (lines trimmed, joined without a separator). Newest means the turn ended
+/// with it: it is the last column-zero block kiro heads with one of its own
+/// glyphs (`HEAD_GLYPHS`: its prose, its tool calls and its errors all open
+/// that way), and no turn is running under it (the prompt line is not
+/// `Kiro is working`). Under it there is only kiro's furniture (the credits
+/// line, the rules, the status line, the composer), none of which opens with
+/// those glyphs. The same paint above later work is history and says
+/// nothing (orchestrator's condition a). A quote of the error (a delivery
+/// typed into the pane, an agent's own prose) is indented under its own head
+/// and is never this block.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
+    let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
+    if lines.iter().rev().find(|l| l.starts_with('›')).is_some_and(|l| working_footer(l).is_some()) {
+        return None;
+    }
+    let head = lines.iter().rposition(|l| l.starts_with(HEAD_GLYPHS))?;
+    let body: Vec<&str> = lines[head + 1..].iter().take_while(|l| l.starts_with(' ') && !l.trim().is_empty()).map(|l| l.trim()).collect();
+    let spaced = std::iter::once(lines[head]).chain(body.iter().copied()).collect::<Vec<_>>().join(" ");
+    let glued = std::iter::once(lines[head]).chain(body.iter().copied()).collect::<String>();
+    image_too_large(&spaced).then_some(("conversation_blocked", glued))
+}
 
 /// The program whose `--version` names the kiro-cli a pane runs.
 pub(crate) const VERSION_PROGRAM: &str = "kiro-cli";

@@ -16,7 +16,7 @@
     termTarget = '', drawerView = 'term',
     drawerFilesReq = null, drawerIssueReq = null, drawerBoardNew = null,
     agents = [], panes = [], winsExpanded = false,
-    stateLabel = (state) => state, stateTone = () => undefined,
+    stateLabel = (state) => state, detailLabel = (detail) => detail, stateTone = () => undefined,
     drawerFilesDir = $bindable(''),
     onpick: pickWindow = () => {}, onclose: closeDrawer = () => {},
     onexpand = () => {}, onterminal = () => {}, onfiles = () => {},
@@ -33,7 +33,7 @@
     const lines = [{ label: t('hubHoverCommand'), value: a.command || '—' }];
     const n = panes.filter((p) => p.session === selected && p.window === a.window).length;
     if (n) lines.push({ label: t('hubHoverPanes'), value: String(n) });
-    if (a.agent) lines.push({ label: t('hubHoverState'), value: stateLabel(a.state), tone: stateTone(a.state) });
+    if (a.agent) lines.push({ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) });
     return { title: `${a.window}:${a.name}`, lines };
   }
 </script>
@@ -50,7 +50,7 @@
           <button class="win-pill state-ctl" class:cur={termTarget.startsWith(`${selected}:${a.window}.`)} onclick={() => pickWindow(a)}
             aria-pressed={termTarget.startsWith(`${selected}:${a.window}.`)}
             use:hoverInfo={() => pillInfo(a)}>
-            <span class="st" class:live-dot={!!a.agent && stateIsLive(a.state)} style:background={stateDotColor(a.agent ? a.state : 'shell')}></span>
+            <span class="st" class:live-dot={!!a.agent && stateIsLive(a.state)} style:background={a.agent ? stateDotColor(a.state, a.detail) : stateDotColor('shell')}></span>
             {a.window}:{a.name}{#if a.agent && !a.managed}<span class="direct-tag">{t('hubDirect')}</span>{/if}
           </button>
         {/each}

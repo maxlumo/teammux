@@ -255,6 +255,54 @@ fn codex_content_line(line: &str) -> bool {
         || line.contains("[tmm done]")
 }
 
+/// The CLI version each of codex's recovery shapes was MEASURED on (board
+/// #362): codex has no TRANSIENT shape (capture first, #362 d), only the
+/// one error that needs a person, `auth_expired` (`person_paint`), painted
+/// by codex-cli 0.154.0 in lingting:reviewer and video-factory:critic
+/// (10-14 and 10-15; the version asked of the running binary, which the
+/// installed 0.162.1 had replaced on disk).
+pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
+    super::Measured { shape: "auth_expired", version: "0.154.0", at_most: false },
+];
+
+/// The program whose `--version` names the codex-cli a pane runs.
+pub(crate) const VERSION_PROGRAM: &str = "codex";
+
+/// The NEWEST paint on a codex screen, when it is the error that needs a
+/// person (board #362 c): `(shape, block)`, the block de-wrapped (lines
+/// trimmed, joined without a separator). codex-cli 0.154.0, measured at 80
+/// columns, paints a failed request's 401 as one column-zero block under its
+/// error glyph, hard-wrapped at column zero with no indent, and then sits at
+/// its composer (the hooks report no end for that turn, so the derived state
+/// stayed `running` for hours):
+/// `■ unexpected status 401 Unauthorized: Authentication failed: Please make sure` /
+/// `your API Key is valid., url:` /
+/// `https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/responses, request id:` /
+/// `<uuid>`. The Bedrock credentials expired (Midway); no `continue` can
+/// fix it, `mwinit` and a restart do. A hit is the block that opens with
+/// `■` and those words, names `bedrock-runtime` and ends with a request id.
+/// Newest is positional, as `footer_zone` is: the block is above the LAST
+/// composer line and no content line (`codex_content_line`: a message, a
+/// tool call, a submitted prompt, a `Working` row, another error) sits
+/// between them. The same paint above later work is history (condition a);
+/// a screen with no composer is a screen mid-paint and says nothing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
+    let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
+    let composer = lines.iter().rposition(|l| is_composer_line(l))?;
+    let head = lines[..composer].iter().rposition(|l| codex_content_line(l))?;
+    if !lines[head].starts_with('\u{25a0}') {
+        return None;
+    }
+    let block: String = lines[head..composer].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect();
+    let c = super::canonical(&block);
+    let id_tail = block.rsplit_once("request id:").map(|(_, id)| id.trim());
+    (c.starts_with("unexpectedstatus401unauthorized")
+        && c.contains("bedrockruntime")
+        && id_tail.is_some_and(super::is_uuid))
+    .then_some(("auth_expired", block))
+}
+
 pub(crate) struct CodexFooter {
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,

@@ -3,7 +3,7 @@ import { ALL_TARGET, teamTarget } from './hub-composer.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import type { FeedBlock } from './hub.ts';
-import { wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
+import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
 import type { HubActivityEvent, HubAgent } from '../core/ws.ts';
 import { renderMarkdown } from '../core/markdown.ts';
 import { drawerWindowPills, mentionPalette, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
@@ -187,6 +187,22 @@ test('no agent state is painted as distress: a failed turn end rests (#354)', ()
   // era, so it is an unknown word in both readers — quiet, never wrong.
   assert.equal(stateDotColor('stuck'), stateDotColor('idle'));
   assert.equal(noteStateColor('stuck'), noteStateColor('pondering'));
+});
+
+test('an agent at rest that a person must unblock wears the one amber, by its detail (board #362 c)', () => {
+  for (const d of ['auth_expired', 'conversation_blocked', 'recovery_exhausted']) {
+    assert.ok(needsPerson(d), d);
+    assert.equal(stateDotColor('idle', d), 'var(--status-warn)', d);
+    assert.equal(stateDotColor('idle', d), stateDotColor('waiting'), `${d}: the same amber as an ask, no new colour`);
+    assert.ok(stateNeedsYou('idle', d), d);
+  }
+  assert.deepEqual([...PERSON_DETAILS], ['auth_expired', 'conversation_blocked', 'recovery_exhausted']);
+  // Every other detail leaves the state's own colour alone.
+  for (const d of ['', 'last_turn_failed', 'last_turn_empty', 'permission_required', 'Bash npm test', undefined]) {
+    assert.ok(!needsPerson(d), String(d));
+    assert.equal(stateDotColor('idle', d), stateDotColor('idle'), String(d));
+    assert.equal(stateDotColor('running', d), stateDotColor('running'), String(d));
+  }
 });
 
 test('the NEEDS-YOU cue is worn by exactly the amber states, and never breathes', () => {

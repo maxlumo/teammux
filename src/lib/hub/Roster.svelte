@@ -22,7 +22,7 @@
     recipient = '', filterAgent = '', unread = new Set(), acting = false, tick = Date.now(),
     roomReady = false, justLoaded = false, rosterBase = null,
     composerText = '', managedNames = [], busyNames = [], interrupting = [],
-    stateLabel = (state) => state, stateTone = () => undefined,
+    stateLabel = (state) => state, detailLabel = (detail) => detail, stateTone = () => undefined,
     onselect: setRecipient = () => {}, oninterrupt: interrupt = () => {}, onfilter = () => {},
     expanded: expandPref = false, onexpand = () => {}, onadd = () => {}, oncontext = () => {},
     allMenuOpen = false, onall = (_event) => {},
@@ -304,7 +304,7 @@
   }
 
   function cardInfo(a) {
-    const lines = [{ label: t('hubHoverState'), value: [stateLabel(a.state), a.detail].filter(Boolean).join(' · '), tone: stateTone(a.state) }];
+    const lines = [{ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) }];
     const model = runtimeLabel(a);
     if (model) lines.push({ label: t('hubHoverModel'), value: model });
     if (a.vitals?.context_pct != null) lines.push({ label: t('hubHoverCtx'), value: `${a.vitals.context_pct}%` });
@@ -420,7 +420,7 @@
           onfocusin={() => arm(a.name)} onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) disarm(a.name); }}>
           <button type="button" class="agent-select"
             aria-pressed={isAddressed(a.name)}
-            aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, a.detail, vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
+            aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
             onpointerdown={(e) => cardDrags.down(e, { name: a.name, scope: moveScope })}
@@ -436,7 +436,7 @@
                   style:--ctx-amount={`${pct}%`} style:--ctx-color={ctxColor(a.vitals.context_pct)}></span>
               {/if}
             </span>
-            <span class="a-name strip-label" style:--who-ink={agentHue(a.name)}>{a.name}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state)}></span></span></span>
+            <span class="a-name strip-label" style:--who-ink={agentHue(a.name)}>{a.name}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state, a.detail)}></span></span></span>
             <span class="agent-marks" class:unmarked={!mentioned && !unread.has(a.name)}>
               {#if mentioned}<span class="agent-mention" aria-hidden="true">@</span>{/if}
               {#if unread.has(a.name)}<span class="unread-dot appear-pop" aria-hidden="true"></span>{/if}

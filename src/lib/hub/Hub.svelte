@@ -2188,6 +2188,13 @@
     const label = t('hubState_' + state);
     return label.startsWith('hubState_') ? state : label;
   }
+  /** A status detail in words: the person-needed ones name their remedy
+   * (board #362 c); any other detail reads as the server wrote it. */
+  function detailLabel(detail) {
+    if (!detail) return '';
+    const label = t('hubDetail_' + detail);
+    return label.startsWith('hubDetail_') ? detail : label;
+  }
 
   // ── Hover explains (motion.md principle 16, wave 9). ONE shared card
   // (`use:hoverInfo`, ui/HoverCard) on a pointer device only — the action
@@ -2197,8 +2204,8 @@
   // modelLabel, fmtElapsed for the epoch-seconds `since`, agoShort for ms
   // timestamps) — a second formatter would be a second clock.
   /** The state's tone in the card is the SAME family stateDotColor paints. */
-  function stateTone(state) {
-    switch (stateDotColor(state)) {
+  function stateTone(state, detail = '') {
+    switch (stateDotColor(state, detail)) {
       case 'var(--accent)': return 'accent';
       case 'var(--status-warn)': return 'warn';
       case 'var(--status-danger)': return 'danger';
@@ -2483,7 +2490,7 @@
         expanded={rosterExpanded} onexpand={toggleRoster}
         allMenuOpen={!!ctxAt?.allSession && ctxAt.allSession === selected} onall={activateAll}
         onallcontext={openAllMenu} onteamcontext={openTeamMenu}
-        {stateLabel} {stateTone} onselect={setRecipient} oninterrupt={interrupt}
+        {stateLabel} {detailLabel} {stateTone} onselect={setRecipient} oninterrupt={interrupt}
         onfilter={(name) => { closeCtx(); toggleFilter(name); }}
         onadd={() => openPicker('add')}
         {moveScope} onmove={(name, team, scope) => moveAgent(name, team, scope.session)}
@@ -2521,7 +2528,7 @@
     <div class="track drawer-track" id={drawerId} bind:this={drawerTrackEl}>
     <Drawer {compact} {visible} {fontSize} {selected} {projectPath} {termTarget}
       {drawerView} {drawerFilesReq} {drawerIssueReq} {drawerBoardNew}
-      {agents} {panes} {winsExpanded} {stateLabel} {stateTone}
+      {agents} {panes} {winsExpanded} {stateLabel} {detailLabel} {stateTone}
       bind:drawerFilesDir onpick={pickWindow} onclose={closeDrawer}
       onexpand={() => (winsExpanded = !winsExpanded)}
       onterminal={() => { const m = /^(.+):(\d+)\.(\d+)$/.exec(termTarget); if (m) openTerminal(selected, termTarget); }}

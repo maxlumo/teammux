@@ -140,10 +140,10 @@ test('an uncached room unfolds: skeletons while it loads, then the feed from its
 test('Hub hover surfaces keep the shared status vocabulary (board #87)', () => {
   // The tone of the state row is the SAME family the dot paints — no second
   // colour language (rule 6).
-  assert.match(source, /function stateTone\(state\) \{\s*switch \(stateDotColor\(state\)\)/u, 'the hover tone derives from stateDotColor');
-  assert.match(source, /\{stateLabel\} \{stateTone\} onselect=\{setRecipient\}/u,
+  assert.match(source, /function stateTone\(state, detail = ''\) \{\s*switch \(stateDotColor\(state, detail\)\)/u, 'the hover tone derives from stateDotColor, detail included (board #362 c)');
+  assert.match(source, /\{stateLabel\} \{detailLabel\} \{stateTone\} onselect=\{setRecipient\}/u,
     'Roster consumes the existing shared formatters');
-  assert.match(source, /\{agents\} \{panes\} \{winsExpanded\} \{stateLabel\} \{stateTone\}/u,
+  assert.match(source, /\{agents\} \{panes\} \{winsExpanded\} \{stateLabel\} \{detailLabel\} \{stateTone\}/u,
     'Drawer consumes the same formatters without copying them (#136), and is not handed the roster it no longer counts (#338)');
 });
 

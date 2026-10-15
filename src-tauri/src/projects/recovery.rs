@@ -83,6 +83,23 @@ pub const BASE_BACKOFF_SECS: u64 = 30;
 pub const MAX_INCIDENTS: usize = 3;
 pub const INCIDENT_WINDOW_SECS: u64 = 30 * 60;
 
+/// The status detail of an agent whose recovery stopped (capped or given up,
+/// board #362 c): it needs a person.
+pub const EXHAUSTED: &str = "recovery_exhausted";
+
+/// What a person does about an agent whose status detail says it needs one
+/// (board #362 c), in the words `tmm agent list` prints after the detail;
+/// `None` for every other detail. The UI has the same remedies in its own
+/// strings (`hubDetail_<detail>`).
+pub fn person_remedy(detail: &str) -> Option<&'static str> {
+    match detail {
+        "auth_expired" => Some("run mwinit, then restart it"),
+        "conversation_blocked" => Some("save its state, then clear the conversation"),
+        EXHAUSTED => Some("auto-continue stopped; needs a person"),
+        _ => None,
+    }
+}
+
 /// What is typed into the pane. Plain — an invented stamp would read as a
 /// message the user never wrote.
 const CONTINUE_LINE: &str = "continue";
@@ -306,6 +323,11 @@ pub struct Tracker {
     /// every ~20 s floods the feed. The stretch ends when the window has room
     /// again (a ladder starts) or the agent works again (a tool call).
     capped_said: std::collections::HashSet<(String, String)>,
+    /// The last paint each window's missed turn end was recorded for (board
+    /// #362 c): a person-needed error's signature, or a capped/given-up
+    /// incident's. A paint is recorded ONCE (orchestrator's condition b), on
+    /// every tick it stays the newest nothing more is written.
+    person: HashMap<(String, String), String>,
 }
 
 impl Tracker {
@@ -395,11 +417,24 @@ impl Tracker {
         self.map.remove(&(session.to_string(), window.to_string()));
     }
 
+    /// Is `sig` a paint whose missed end has NOT been recorded for this
+    /// window yet? Marks it recorded (board #362 c, condition b: once per
+    /// signature; the same paint on every later tick writes nothing).
+    pub fn person_once(&mut self, session: &str, window: &str, sig: &str) -> bool {
+        let key = (session.to_string(), window.to_string());
+        if self.person.get(&key).is_some_and(|s| s == sig) {
+            return false;
+        }
+        self.person.insert(key, sig.to_string());
+        true
+    }
+
     /// Housekeeping: drop records for windows that no longer exist.
     pub fn retain_windows(&mut self, session: &str, live: &[String]) {
         self.map.retain(|(s, w), _| s != session || live.contains(w));
         self.starts.retain(|(s, w), _| s != session || live.contains(w));
         self.capped_said.retain(|(s, w)| s != session || live.contains(w));
+        self.person.retain(|(s, w), _| s != session || live.contains(w));
     }
 }
 
@@ -408,10 +443,11 @@ fn tracker() -> &'static Mutex<Tracker> {
     T.get_or_init(|| Mutex::new(Tracker::default()))
 }
 
-/// Called by telemetry on every observed tool call: work is proof the model
-/// answered, so an open incident is CONFIRMED (never erased — see
-/// `Tracker::confirm` for the repeat-send that erasing caused).
-pub fn note_tool_activity(session: &str, window: &str) {
+/// Called by telemetry on every observed tool call and every turn end with a
+/// real reply (board #362: the reply resets a capped stretch too): either is
+/// proof the model answered, so an open incident is CONFIRMED (never erased —
+/// see `Tracker::confirm` for the repeat-send that erasing caused).
+pub fn note_answered(session: &str, window: &str) {
     tracker().lock().unwrap().confirm(session, window);
 }
 
@@ -453,6 +489,17 @@ pub fn check_once() {
             let backend = agent.backend;
             let target = format!("{}:{}.{}", project.session, p.window, p.pane);
             let Ok(tail) = crate::tmux::capture_pane_plain(&target, Some(0)) else { continue };
+            // An error only a person can clear, as the NEWEST paint (board
+            // #362 c): its turn end is recorded once, the hooks having missed
+            // it, and it is never continued. It is read first, so a transient
+            // error still painted above it types nothing either.
+            if let Some((shape, block)) = crate::backends::Backend::parse(backend).and_then(|b| b.person_paint(&tail)) {
+                let sig = format!("{shape}|{}", extract_request_id(&block).unwrap_or_else(|| crate::backends::canonical(&block)));
+                if tracker().lock().unwrap().person_once(&project.session, &p.window_name, &sig) {
+                    super::telemetry::record_missed_end(&project.session, &p.window_name, shape);
+                }
+                continue;
+            }
             // The screen may open MID-BLOCK: a tall error paint plus the
             // prompt redraw pushes the block's header above a short pane's
             // fold, and a headless tail alone is never trusted. ONE deeper
@@ -481,6 +528,14 @@ pub fn check_once() {
                 &sig,
                 |sent_at| super::telemetry::turn_fact_since(&project.session, &p.window_name, sent_at),
             );
+            // Recovery stopped for this incident (capped or given up): the
+            // agent needs a person, and the turn end the hooks never sent is
+            // recorded once for the incident (board #362 c).
+            if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. })
+                && tracker().lock().unwrap().person_once(&project.session, &p.window_name, &format!("{EXHAUSTED}|{sig}"))
+            {
+                super::telemetry::record_missed_end(&project.session, &p.window_name, EXHAUSTED);
+            }
             match decision {
                 Decision::Send { attempt } => {
                     if crate::tmux::send_command(&target, CONTINUE_LINE).is_ok() {
@@ -553,7 +608,7 @@ pub fn drift_warning(backend: crate::backends::Backend, installed: &str) -> Opti
     }
     let measured = by_label.iter().map(|(l, n)| format!("{l} ({})", n.join(", "))).collect::<Vec<_>>().join(" and ");
     Some(format!(
-        "recovery shapes for {} were measured on {measured}, installed {installed} (used at the next launch) — re-measure when a transient error appears",
+        "recovery shapes for {} were measured on {measured}, installed {installed} (used at the next launch) — re-measure when one of them is next seen",
         backend.name()
     ))
 }
@@ -877,6 +932,65 @@ mod tests {
         assert!(!q.contains("\ncontinue"), "a quote gets nothing: {q:?}");
         assert!(!ki.contains("\ncontinue"), "a kiro pane painting claude's block gets nothing: {ki:?}");
         assert_eq!(notes, vec!["auto-continue 1/4 — transient model error in cl".to_string()], "one send, one record, over two ticks");
+    }
+
+    /// Board #362 c, end to end on real managed panes painting the real
+    /// captures: a codex pane whose newest paint is the 401 and a kiro pane
+    /// whose newest paint is the image refusal, both with a turn open (a
+    /// prompt and no end, as measured), get their missed end ONCE over two
+    /// ticks: idle with `auth_expired` / `conversation_blocked`, one `failed`
+    /// row each, and NOTHING typed into either pane. A codex pane showing the
+    /// same 401 above the next prompt (history) keeps its open turn.
+    #[test]
+    fn a_managed_pane_whose_newest_paint_needs_a_person_ends_its_turn_once_and_gets_nothing_typed() {
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-person");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let screens = [
+            ("cx", "codex", CODEX_0154_401.to_string()),
+            ("ki", "kiro", format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}")),
+            ("old", "codex", CODEX_0154_401_THEN_PROMPT.to_string()),
+        ];
+        for (name, backend, screen) in &screens {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": backend, "cmd": backend, "team": "" }).to_string()).unwrap();
+            std::fs::write(ws.join(format!("{name}.txt")), screen).unwrap();
+        }
+        // The pane prints its capture, then reads its input (where a typed line would land).
+        let show = |name: &str| format!("cat {}; cat", ws.join(format!("{name}.txt")).display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "cx", "-c", &ws.to_string_lossy(), &show("cx")])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        for name in ["ki", "old"] {
+            std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), &show(name)]).status().unwrap();
+        }
+        super::super::adopt(&session, Some("rec-person-test")).expect("adopt");
+        for (name, _, _) in &screens {
+            super::super::telemetry::record_prompt(&session, name, &format!("[tmm chat 2026-10-15 12:32] maker: @{name} go"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let typed_before: Vec<String> = screens.iter().map(|(n, _, _)| crate::tmux::capture_pane_plain(&format!("{session}:{n}"), Some(0)).unwrap_or_default()).collect();
+        check_once();
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let st = |w: &str| { let s = super::super::telemetry::derive(&session, w, 0); (s.state, s.detail) };
+        assert_eq!(st("cx"), ("idle".to_string(), "auth_expired".to_string()));
+        assert_eq!(st("ki"), ("idle".to_string(), "conversation_blocked".to_string()));
+        assert_eq!(st("old"), ("running".to_string(), String::new()), "a 401 above the next prompt is history");
+        let ends: Vec<(String, String)> = super::super::telemetry::recent_events(&session, 0).into_iter()
+            .filter(|e| e.kind == "notif").map(|e| (e.window, e.tool)).collect();
+        assert_eq!(ends, [("cx".to_string(), "auth_expired".to_string()), ("ki".to_string(), "conversation_blocked".to_string())], "one end each over two ticks");
+        for ((name, _, _), before) in screens.iter().zip(&typed_before) {
+            let now = crate::tmux::capture_pane_plain(&format!("{session}:{name}"), Some(0)).unwrap_or_default();
+            assert_eq!(&now, before, "{name}: nothing typed");
+        }
+        assert!(super::super::telemetry::recent_events(&session, 0).iter().all(|e| !e.text.starts_with("auto-continue")), "never continued");
     }
 
     #[test]
@@ -1355,7 +1469,7 @@ mod tests {
         let mut t = Tracker::default();
         let t0 = 1_000_000;
         assert_eq!(t.decide("s", "w1", t0, "1|a", silent), Decision::Send { attempt: 1 });
-        // telemetry::record_tool → note_tool_activity → confirm. The record
+        // telemetry::record_tool → note_answered → confirm. The record
         // SURVIVES: erasing it here re-opened the incident on the next tick
         // (the error is still painted) and re-sent `continue` into a working
         // agent — the owner's repeat-send report (2026-08-26).
@@ -1473,6 +1587,30 @@ mod tests {
     /// Every recovery fixture above, with the backend that paints it, the
     /// shape it is, and the CLI version it was captured on (board #362 a).
     /// "≤ 2.18.1" = captured before versions were written down.
+    /// Board #362 c, the person-needed shapes, as painted. kiro-cli 2.28.0,
+    /// video-factory:checker, 10-13 (59 columns; the version asked of the
+    /// pane's running binary): the image-size error as the newest block, the
+    /// tool call above it and the credits line and rule under it, from the
+    /// pane's scrollback (read-only, 10-15). The 3000-px paint of 10-15
+    /// (builder) is no longer in any scrollback; kiro's own log has its
+    /// sentence, `KIRO_IMAGE_3000_LOG`.
+    const KIRO_228_IMAGE: &str = "• Read /local/home/cfu/work/projects/video-factory/producti\n  ons/261013-jpeg-explainer/02_preprod/style-frames/sf_t13.\n  20.png\n    ╰ output:\n      ...+2 lines above\n            ductions/261013-jpeg-explainer/02_preprod/style\n            -frames/sf_t13.20.png\n         2  Format: png\n         3  Size: 170344 bytes\n         4  MediaType: image/png\n    (ctrl+o to toggle)\n\n• At least one of the image dimensions exceed max allowed\n  size for many-image requests: 2000 pixels (Request ID:\n  1336b8d6-2439-48cc-baa1-958338597643)\n\n▸ Credits: turn 19.11 • session 282.96 | Time: 2m 49s\n───────────────────────────────────────────────────────────\n";
+    /// The same pane's later work (the next turn's first blocks, real).
+    const KIRO_228_LATER: &str = "  （用 1280 宽副本、一次一两张）。报告写同目录 check.md。\n\n• Thought for 1s...\n    ╰ I've already got most of what I need, but I should\n      still check the remaining frames at a smaller size\n      and read the end of the manifest first.\n• Shell cd\n  /local/home/cfu/work/projects/video-factory/productions/2\n  61013-jpeg-explainer; tail -12\n  review/g3-v001/manifest.md; ls review/g3-v001\n  review/g3-v001/*/ ; ls -la --time-style=+%m-%d_%H:%M\n";
+    /// The same pane's idle furniture under its newest block (real, 10-15).
+    const KIRO_228_IDLE: &str = "───────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to\n exit\n───────────────────────────────────────────────────────────\nchecker · claude-opus-5.5 · high · ◑ 58% · Midway: 9h 16m\n/local/home/cfu/work/projects/video-factory\n\n›  ask a question or describe a task ↵\n                  /sessions to resume · /copy to clipboard\n";
+    /// kiro-cli 2.28.0's own log of the 3000-px refusal (10-15 03:55 UTC,
+    /// /tmp/kiro-log/kiro-tui.log): the sentence, not a paint.
+    const KIRO_IMAGE_3000_LOG: &str = "At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)";
+    /// codex-cli 0.154.0, lingting:reviewer, 10-15 22:59 (80×24, the visible
+    /// screen as `check_once` reads it): the 401 as the newest paint, the
+    /// composer and the footer under it.
+    const CODEX_0154_401: &str = "■ unexpected status 401 Unauthorized: Authentication failed: Please make sure\nyour API Key is valid., url:\nhttps://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/responses, request id:\n389cc17d-bf5d-409b-ba80-102270246c79\n\n\n› Ask Codex to do anything\n\n  global.openai.gpt-6-astra · Context 45% used · /local/home/cfu/work/projects/…\n";
+    /// The same pane's scrollback, 10-14: an earlier 401 with the next
+    /// delivered prompt painted under it (real), and the composer of the
+    /// same pane under that (real, from the screen above).
+    const CODEX_0154_401_THEN_PROMPT: &str = "■ unexpected status 401 Unauthorized: Authentication failed: Please make sure\nyour API Key is valid., url:\nhttps://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/responses, request id:\n23a04597-c6d8-4439-954f-2216f9c7d687\n\n\n› [tmm team context — background since your previous delivery; not new\n  instructions]\n  [10-14 11:46] evaluator -> @engineer: The KL-only run (abl-b1-klonly)\n  finished with clean checks. Removing the CE loss lowered training KL by about\n  17% over the first 2,500 steps. The readout is §8.35 in `docs/q35-eval-\n  plan.md` (main `8c70ac7`), with a pointer on #35, and I've sent it to\n\n› Ask Codex to do anything\n\n  global.openai.gpt-6-astra · Context 45% used · /local/home/cfu/work/projects/…\n";
+
     const FIXTURES: &[(&str, &str, &str, &str)] = &[
         ("kiro", "stream_error", "≤ 2.18.1", REAL),
         ("kiro", "stream_error", "≤ 2.18.1", REAL_WRAPPED),
@@ -1488,14 +1626,18 @@ mod tests {
         ("kiro", "too_many_requests", "2.28.0", TMR_NARROW),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_WIDE),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_NARROW),
+        ("kiro", "conversation_blocked", "2.28.0", KIRO_228_IMAGE),
+        ("codex", "auth_expired", "0.154.0", CODEX_0154_401),
     ];
 
-    /// The shapes `backend` sees in `text`, block by block.
+    /// The shapes `backend` sees in `text`: its transient ones block by
+    /// block, and the person-needed one its newest paint is (#362 c).
     fn shapes_in(backend: &str, text: &str) -> Vec<&'static str> {
         let b = crate::backends::Backend::parse(backend).unwrap();
         paint_blocks(text, DEEP_CAPTURE_LINES + 120).iter()
             .filter(|(glued, _)| !crate::backends::canonical(glued).contains("tmmchat"))
             .filter_map(|(glued, spaced)| b.transient_shape(glued, spaced))
+            .chain(b.person_paint(text).map(|(shape, _)| shape))
             .collect()
     }
 
@@ -1525,9 +1667,99 @@ mod tests {
             assert!(crate::backends::measured_version(b, shape).is_some(), "{backend} {shape} is not in RECOVERY_SHAPES");
         }
         assert_eq!(crate::backends::measured_version(crate::backends::Backend::Kiro, "nope"), None);
-        for b in [crate::backends::Backend::Codex, crate::backends::Backend::Grok, crate::backends::Backend::Omp, crate::backends::Backend::Kimi] {
+        for b in [crate::backends::Backend::Grok, crate::backends::Backend::Omp, crate::backends::Backend::Kimi] {
             assert!(b.recovery_shapes().is_empty(), "{}: capture first, no guessed shape (board #362 d)", b.name());
         }
+        // codex has only the person-needed shape: no transient one is guessed (d).
+        let codex = crate::backends::Backend::Codex;
+        assert_eq!(codex.recovery_shapes().iter().map(|m| m.shape).collect::<Vec<_>>(), ["auth_expired"]);
+        for (_, _, _, text) in FIXTURES {
+            assert!(paint_blocks(text, 400).iter().all(|(g, sp)| codex.transient_shape(g, sp).is_none()), "codex continues nothing");
+        }
+    }
+
+    /// Board #362 c, condition a: a person-needed paint counts only as the
+    /// NEWEST block on the screen, the turn having ended with it. The real
+    /// paints, as `check_once` reads them, are hits with kiro's idle
+    /// furniture or codex's composer under them; the same paint above later
+    /// work (a submitted prompt, the next turn's tool calls) is history, and
+    /// so is one with a turn running under it. Each shape is its own
+    /// backend's, and the text is strict: a quote, a rewording or another
+    /// status is not it.
+    #[test]
+    fn a_person_needed_paint_counts_only_as_the_newest_block() {
+        use crate::backends::Backend::{Codex, Kiro};
+        let id = |b: crate::backends::Backend, text: &str| b.person_paint(text).and_then(|(shape, block)| extract_request_id(&block).map(|id| format!("{shape}|{id}")));
+        // kiro: newest, alone and with its idle furniture under it.
+        assert_eq!(id(Kiro, KIRO_228_IMAGE).as_deref(), Some("conversation_blocked|1336b8d6-2439-48cc-baa1-958338597643"));
+        assert_eq!(id(Kiro, &format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}")).as_deref(), Some("conversation_blocked|1336b8d6-2439-48cc-baa1-958338597643"));
+        // The limit is read as digits: kiro's log has the 3000-px sentence.
+        assert_eq!(id(Kiro, &format!("• {KIRO_IMAGE_3000_LOG}\n")).as_deref(), Some("conversation_blocked|3c60ad4b-3654-47c8-aeb0-146c2a910433"));
+        // Above later work, or with a turn running under it: history.
+        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}{KIRO_228_LATER}{KIRO_228_IDLE}")), None, "the next turn's blocks are under it");
+        let busy = KIRO_228_IDLE.replace("›  ask a question or describe a task ↵", "›  Kiro is working · 4s · Type to steer · Ctrl+S to queue");
+        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}{busy}")), None, "a turn runs: a prompt was taken after it");
+        // Strict: a quote of it, a rewording, no Request ID, a non-number.
+        assert_eq!(Kiro.person_paint(&format!("• Shell cat log\n  [tmm chat 2026-10-15 14:15] orchestrator: • {KIRO_IMAGE_3000_LOG}\n")), None);
+        assert_eq!(Kiro.person_paint(&format!("  › [tmm chat 2026-10-15 14:15] orchestrator: {KIRO_IMAGE_3000_LOG}\n")), None, "an indented quote has no head of its own");
+        assert_eq!(Kiro.person_paint("• At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels.\n"), None);
+        assert_eq!(Kiro.person_paint("• At least one of the image dimensions exceed max allowed size for many-image requests: many pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)\n"), None);
+        assert_eq!(Kiro.person_paint(&format!("• I saw: {KIRO_IMAGE_3000_LOG}\n")), None, "prose about it");
+        // codex: newest above its composer.
+        assert_eq!(id(Codex, CODEX_0154_401).as_deref(), Some("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79"));
+        // Above the next delivered prompt: history. No composer (mid-paint): nothing.
+        assert_eq!(Codex.person_paint(CODEX_0154_401_THEN_PROMPT), None);
+        let no_composer = CODEX_0154_401.split("› Ask Codex").next().unwrap();
+        assert_eq!(Codex.person_paint(no_composer), None);
+        // A turn running under it ("• Working …"), another status, another host, a quote.
+        let working = CODEX_0154_401.replace("\n\n\n› Ask", "\n\n• Working (3s • esc to interrupt)\n\n› Ask");
+        assert_eq!(Codex.person_paint(&working), None);
+        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("401 Unauthorized", "403 Forbidden")), None);
+        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("bedrock-runtime", "api.example")), None);
+        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("■ unexpected", "• unexpected")), None, "a message bullet is the agent talking");
+        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("■ unexpected", "› [tmm chat 2026-10-14 11:27] orchestrator: ■ unexpected")), None);
+        // A shape is its own backend's.
+        assert_eq!(Kiro.person_paint(CODEX_0154_401), None);
+        assert_eq!(Codex.person_paint(&format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}")), None);
+        assert_eq!(crate::backends::Backend::Claude.person_paint(CODEX_0154_401), None);
+        // And no transient shape reads the person-needed paints.
+        assert_eq!(error_signature("kiro", KIRO_228_IMAGE), None);
+        assert_eq!(error_signature("codex", CODEX_0154_401), None);
+    }
+
+    /// Board #362 c, condition b: a paint's missed end is recorded ONCE.
+    #[test]
+    fn a_person_needed_paint_is_recorded_once_per_signature() {
+        let mut t = Tracker::default();
+        assert!(t.person_once("s", "w", "auth_expired|a"));
+        assert!(!t.person_once("s", "w", "auth_expired|a"), "the same paint on the next tick");
+        assert!(t.person_once("s", "v", "auth_expired|a"), "another window");
+        assert!(t.person_once("s", "w", "auth_expired|b"), "a new paint (a new request id)");
+        t.retain_windows("s", &["v".to_string()]);
+        assert!(t.person_once("s", "w", "auth_expired|b"), "a window that went away took its record");
+    }
+
+    /// Board #362 (orchestrator's ruling on the validator's P3): a REAL reply
+    /// ends a capped stretch as a tool call does, so the next cap is said
+    /// again. A turn end with no usable text, or the CLI's placeholder, is no
+    /// evidence the model answered and changes nothing.
+    #[test]
+    fn a_real_reply_ends_a_capped_stretch_and_an_empty_one_does_not() {
+        use crate::backends::EndQuality;
+        let session = format!("cap-said-{}", uuid::Uuid::new_v4());
+        let t0 = now_secs();
+        let decide = |sig: &str, at: u64| tracker().lock().unwrap().decide(&session, "w", at, sig, |_| false);
+        for (i, sig) in ["1|a", "1|b", "1|c"].iter().enumerate() {
+            assert_eq!(decide(sig, t0 + i as u64), Decision::Send { attempt: 1 });
+        }
+        assert_eq!(decide("1|d", t0 + 3), Decision::Capped { first: true });
+        for quality in [EndQuality::Unknown, EndQuality::Empty] {
+            super::super::telemetry::record_notification_with(&session, "w", "completed", t0 + 4, quality);
+            assert!(matches!(decide(&format!("1|{quality:?}"), t0 + 5), Decision::Capped { first: false }), "{quality:?} is no answer");
+        }
+        super::super::telemetry::record_notification_with(&session, "w", "completed", t0 + 6, EndQuality::Said);
+        assert_eq!(decide("1|e", t0 + 7), Decision::Capped { first: true }, "a real reply: the next cap is a new stretch");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
     }
 
     /// Board #362 b: the warning names every shape measured on an older CLI
@@ -1536,15 +1768,19 @@ mod tests {
     fn a_newer_cli_than_the_shapes_were_measured_on_is_said_once_in_words() {
         use crate::backends::Backend;
         assert_eq!(drift_warning(Backend::Kiro, "2.31.0").as_deref(), Some(
-            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable) and 2.28.0 (high traffic, too many requests), installed 2.31.0 (used at the next launch) — re-measure when a transient error appears"));
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable) and 2.28.0 (high traffic, too many requests, conversation blocked), installed 2.31.0 (used at the next launch) — re-measure when one of them is next seen"));
         assert_eq!(drift_warning(Backend::Kiro, "2.28.0").as_deref(), Some(
-            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable), installed 2.28.0 (used at the next launch) — re-measure when a transient error appears"),
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable), installed 2.28.0 (used at the next launch) — re-measure when one of them is next seen"),
             "the upper-bound shapes are unmeasured on any kiro after 2.18.1");
         assert_eq!(drift_warning(Backend::Kiro, "2.18.1"), None);
         assert_eq!(drift_warning(Backend::Claude, "2.1.284"), None, "running what was measured");
         assert_eq!(drift_warning(Backend::Claude, "2.1.200"), None, "older than measured is not drift");
         assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (bedrock 5xx), installed 2.1.288 (used at the next launch)"));
-        assert_eq!(drift_warning(Backend::Codex, "0.162.1"), None, "no shape, nothing to drift");
+        assert_eq!(drift_warning(Backend::Codex, "0.162.1").as_deref(), Some(
+            "recovery shapes for codex were measured on 0.154.0 (auth expired), installed 0.162.1 (used at the next launch) — re-measure when one of them is next seen"),
+            "codex joins the guard with its one person-needed shape");
+        assert_eq!(drift_warning(Backend::Codex, "0.154.0"), None);
+        assert_eq!(drift_warning(Backend::Grok, "1.0.5"), None, "no shape, nothing to drift");
         assert_eq!(drift_warning(Backend::Kiro, "garbage"), None);
     }
 

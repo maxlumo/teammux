@@ -808,8 +808,7 @@ async fn main() {
                     let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
                     let w = a.get("window").and_then(|v| v.as_u64()).unwrap_or(0);
                     let agent = a.get("agent").and_then(|v| v.as_str());
-                    let detail = s("detail");
-                    let tail = if detail.is_empty() { String::new() } else { format!(" — {detail}") };
+                    let tail = detail_tail(s("detail"));
                     match agent {
                         Some(b) => println!("{w}: {} [{b}] {}{tail}", s("name"), s("state")),
                         None => println!("{w}: {} (shell)", s("name")),
@@ -2068,6 +2067,16 @@ fn wake_shell(name: &str, to: &str, exe: &str, env: &[(String, String)]) -> Stri
     )
 }
 
+/// What `tmm agent list` prints after an agent's state: ` — <detail>`, and
+/// for a detail that needs a person its remedy too (board #362 c).
+fn detail_tail(detail: &str) -> String {
+    match (detail.is_empty(), tmux_mobile::projects::recovery::person_remedy(detail)) {
+        (true, _) => String::new(),
+        (false, Some(remedy)) => format!(" — {detail} ({remedy})"),
+        (false, None) => format!(" — {detail}"),
+    }
+}
+
 /// The wake a finished task sends: who, which task, how it ended, after how
 /// long, and its last lines. An `@` in the output is defused (a zero-width
 /// space after it), so a log line never addresses someone (board #275).
@@ -2334,6 +2343,17 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Board #362 c: a detail that needs a person names what to do; every
+    /// other detail prints as before.
+    #[test]
+    fn agent_list_names_the_remedy_of_a_detail_that_needs_a_person() {
+        assert_eq!(super::detail_tail("auth_expired"), " — auth_expired (run mwinit, then restart it)");
+        assert_eq!(super::detail_tail("conversation_blocked"), " — conversation_blocked (save its state, then clear the conversation)");
+        assert_eq!(super::detail_tail("recovery_exhausted"), " — recovery_exhausted (auto-continue stopped; needs a person)");
+        assert_eq!(super::detail_tail("last_turn_failed"), " — last_turn_failed");
+        assert_eq!(super::detail_tail(""), "");
+    }
+
     use tmux_mobile::build_info::Build;
 
     /// Board #368: `tmm gateway status` names the running gateway's build, says

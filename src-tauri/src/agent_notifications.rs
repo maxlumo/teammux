@@ -786,6 +786,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Board #362 c, condition c: a turn end the hooks missed (recorded from
+    /// the screen) closes the requester's reply edge and returns NOTHING to
+    /// it: no reply is posted, and the edge of the next turn starts after it,
+    /// so a later real end cannot deliver the stale request's answer twice.
+    #[test]
+    fn a_missed_end_closes_the_reply_edge_with_no_reply() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-missed-edge-{}", uuid::Uuid::new_v4());
+        let ask = "[tmm chat 2026-10-15 12:32] maker: @critic G3 review";
+        crate::projects::telemetry::record_prompt(&session, "critic", ask);
+        let (hub, root) = AgentNotificationHub::scratch_with_turn(&session, "critic", ask);
+        assert!(crate::projects::telemetry::record_missed_end(&session, "critic", "auth_expired"));
+        assert!(hub.take_reply_targets(&session, "critic").is_empty(), "the edge closed at the missed end");
+        let posted: Vec<_> = crate::projects::telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "msg" || e.text.contains("[reply]")).collect();
+        assert!(posted.is_empty(), "nothing was returned as the agent's answer: {posted:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A legacy build's unread.json is REMOVED at load (the retired unread
     /// inbox must not leave stale reply summaries on disk for ever), and the
     /// hub stays functional: the inbox dir exists for the helper to write into.
