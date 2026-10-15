@@ -2723,7 +2723,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // (board #388): an unread team is not an empty one.
         let unread_home = agent_home(&ws_str, "unread");
         std::fs::create_dir_all(&unread_home).unwrap();
-        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", input_mode: "" }.write(&unread_home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", from_member: "", input_mode: "" }.write(&unread_home).unwrap();
         let unread_before = read(&unread_home.join("launch.json"));
         let refused = set_agent_team(&ws_str, "unread", "", &|_| Err("tmux could not be asked".into())).unwrap_err();
         assert!(refused.contains("could not read who is in team 'mvteam'") && refused.contains("nothing was changed"), "{refused}");
