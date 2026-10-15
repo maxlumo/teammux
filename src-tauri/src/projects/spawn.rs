@@ -70,6 +70,9 @@ pub struct SpawnRequest<'a> {
     /// the provenance a restart uses to re-resolve the CURRENT def for a
     /// uniquified window. Empty for solo spawns.
     pub member: &'a str,
+    /// A fork of a team member: the member whose definition it copies, without
+    /// holding that member's slot (`LaunchRecipe::from_member`, board #383).
+    pub from_member: &'a str,
     /// The team this spawn belongs to; recorded in the launch recipe so the
     /// Hub can group the cards. With no `member` it is a JOIN (board #382),
     /// whatever made the def: the agent goes into that running team at
@@ -80,13 +83,16 @@ pub struct SpawnRequest<'a> {
     /// restorable. Normal hires start fresh; Start/Restart resumes this
     /// isolated home's newest cwd conversation.
     pub resume: bool,
+    /// The identity claim a caller already made (a fork claims its home before it
+    /// builds its definition): `spawn` uses its name and does not reserve one.
+    pub claim: Option<&'a Claim>,
 }
 
 impl Default for SpawnRequest<'_> {
     fn default() -> Self {
         SpawnRequest {
             session: "", agent: "", brief: "", by: "", def: None,
-            window_name: None, team: None, member: "", resume: false,
+            window_name: None, team: None, member: "", from_member: "", resume: false, claim: None,
         }
     }
 }
@@ -132,10 +138,37 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
 
     // Window name = agent name, uniquified if taken (lead, lead-2, …). The
     // Window name is the agent's identity for telemetry and tmm messages.
+    //
+    // A NEW identity is claimed here, in the ONE launcher, by every caller — a
+    // hire, a team member, a join, a fork (board #383 review P1-A): two spawns
+    // that reach for the same name cannot both get it, and a caller that already
+    // holds a claim (a fork) hands it in. A restart's fallback (`resume`) reuses
+    // its OWN home and is not a new identity.
     let taken: std::collections::HashSet<&str> = panes.iter().map(|p| p.window_name.as_str()).collect();
-    let window_name = match &req.window_name {
-        Some(w) => w.clone(),
-        None => uniquify(&def.name, &taken)?,
+    // The allocation reads the windows AGAIN inside its own critical section
+    // (`live_now`): the panes read above are only for the cap and for a restart's
+    // fallback, and a snapshot taken before another request finished is no
+    // licence to take what that request now runs (reviewer round 3).
+    let live_now = || -> Vec<String> { tmux::list_panes(req.session).unwrap_or_default().into_iter().map(|p| p.window_name).collect() };
+    let starting = Starting { agent_def: if req.def.is_none() { def.name.as_str() } else { "" }, team: req.team.as_deref().unwrap_or(""), member: req.member };
+    let _identity;
+    let window_name = match (req.claim, req.resume) {
+        (Some(claim), _) => {
+            if req.window_name.as_deref().is_some_and(|w| w != claim.name()) {
+                return Err("the window name is not the one this request claimed".to_string());
+            }
+            claim.name().to_string()
+        }
+        (None, true) => match &req.window_name {
+            Some(w) => w.clone(),
+            None => uniquify(&def.name, &taken)?,
+        },
+        (None, false) => {
+            let claim = reserve_name(&workspace, &live_now, &starting, req.window_name.as_deref(), &def.name)?;
+            let name = claim.name().to_string();
+            _identity = claim;
+            name
+        }
     };
     // A def saved before names were validated, or an explicit window name
     // from a caller, still has to be a plain word here: it is about to be a
@@ -148,7 +181,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     let agent_def = if req.def.is_none() { def.name.as_str() } else { "" };
     let m = {
         let section = super::recipe::recipe_section(&agent_home(&workspace, &window_name));
-        materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member)?
+        materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member)?
     };
     let home = m.home;
     let env = m.env;
@@ -234,6 +267,7 @@ fn materialize(
     // team definition for a team spawn. Both empty for pre-#113 recipes.
     agent_def: &str,
     member: &str,
+    from_member: &str,
 ) -> Result<Materialized, String> {
     let home = agent_home(workspace, window_name);
     if !section.is_for(&home) {
@@ -295,7 +329,7 @@ fn materialize(
     // replays it). Written here, before the window exists, so a write failure
     // is a spawn failure with nothing left running — not a live agent that
     // restarts deaf on the generic launch path.
-    LaunchRecipe { backend: &def.backend, env: &env, cmd: &prepared.cmd, spawned_by: by, team, agent_def, member, input_mode: &def.input_mode }.write_in(section)?;
+    LaunchRecipe { backend: &def.backend, env: &env, cmd: &prepared.cmd, spawned_by: by, team, agent_def, member, from_member, input_mode: &def.input_mode }.write_in(section)?;
     Ok(Materialized { home, cmd: prepared.cmd, env, confirmation: prepared.confirmation })
 }
 
@@ -317,21 +351,8 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
     // included, so a team move cannot land in between and be undone.
     let section = super::recipe::recipe_section(&home);
     let Ok(Some(recipe)) = section.read() else { return false };
-    let field = |k: &str| recipe.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let by = field("spawned_by");
-    let team = field("team");
-    let member = field("member");
-    let agent_def = field("agent_def");
-
-    let resolved = if !team.is_empty() && !member.is_empty() {
-        refresh_team_def(project_path, &team, &member, window_name)
-    } else if !agent_def.is_empty() {
-        super::registry_get(&agent_def).ok().flatten()
-    } else {
-        // Pre-#113 recipe: the window name IS the def name or nothing.
-        super::registry_get(window_name).ok().flatten()
-    };
-    let Some(def) = resolved else {
+    let p = provenance_of(&recipe);
+    let Some(def) = effective_def(project_path, window_name, &p) else {
         // The def (or its team/base) is gone. Keep the spawn-time snapshot —
         // the agent keeps working — and say so once per window, not per start.
         static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -339,7 +360,8 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
         let key = format!("{project_path}/{window_name}");
         if WARNED.get_or_init(Default::default).lock().unwrap().insert(key) {
             eprintln!(
-                "projects: definition behind agent '{window_name}' is gone (def '{agent_def}', team '{team}'); restarts keep its spawn-time materials"
+                "projects: definition behind agent '{window_name}' is gone (def '{}', team '{}'); restarts keep its spawn-time materials",
+                p.agent_def, p.team
             );
         }
         return false;
@@ -351,8 +373,361 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
     {
         return false;
     }
-    let team_opt = (!team.is_empty()).then_some(team.as_str());
-    materialize(&section, &def, window_name, session, project_path, "", &by, team_opt, &agent_def, &member).is_ok()
+    let team_opt = (!p.team.is_empty()).then_some(p.team.as_str());
+    materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member).is_ok()
+}
+
+/// Where a managed window's definition comes from: the provenance its launch
+/// recipe records (board #113).
+struct Provenance {
+    by: String,
+    team: String,
+    member: String,
+    agent_def: String,
+    /// Set on a fork of a team member (board #383): `<team path>/<member>`, the
+    /// member whose definition it copies.
+    from_member: String,
+}
+
+/// The provenance a recipe value records.
+fn provenance_of(recipe: &Value) -> Provenance {
+    let field = |k: &str| recipe.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    Provenance { by: field("spawned_by"), team: field("team"), member: field("member"), agent_def: field("agent_def"), from_member: field("from_member") }
+}
+
+/// The window's recipe provenance, read WITHOUT the recipe section (a reader that
+/// takes no section sees a whole recipe, the writer being atomic); `None` when it
+/// has no readable recipe, which is also what "not one of ours" looks like.
+fn recipe_provenance(project_path: &str, window_name: &str) -> Option<Provenance> {
+    let recipe: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(project_path, window_name).join("launch.json")).ok()?).ok()?;
+    Some(provenance_of(&recipe))
+}
+
+/// The window's EFFECTIVE definition: the one it would get on a restart, which is
+/// the one definition function for "what is this running agent" (board #383:
+/// `refresh_agent` replays it, `fork` copies it). Resolved through the recipe's
+/// provenance (board #113): a team member re-derives its def from the current
+/// team (`team` + `member`), a solo spawn follows `agent_def` (so a uniquified
+/// `lead-2` still finds `lead`), and a pre-#113 recipe falls back to the window
+/// name. `None` when the def (or its team/base) is gone.
+fn effective_def(project_path: &str, window_name: &str, p: &Provenance) -> Option<RegAgent> {
+    if !p.team.is_empty() && !p.member.is_empty() {
+        refresh_team_def(project_path, &p.team, &p.member, window_name)
+    } else if let Some((team_path, member)) = p.from_member.rsplit_once('/') {
+        // A joined fork of a team member: the member's CURRENT def, without
+        // holding its slot and without a team section of its own (board #383).
+        fork_member_def(team_path, member, window_name)
+    } else if !p.agent_def.is_empty() {
+        super::registry_get(&p.agent_def).ok().flatten()
+    } else {
+        // Pre-#113 recipe: the window name IS the def name or nothing.
+        super::registry_get(window_name).ok().flatten()
+    }
+}
+
+/// Fork a RUNNING managed agent (board #383, owner #336 (b): "fork 当前已有的一个
+/// 正在运行的 agent 的配置，不需要手动写其他参数了"): a NEW agent whose definition is
+/// the source's EFFECTIVE definition (`effective_def`: what a restart of the
+/// source would give it), launched through the one launcher, `spawn`.
+///
+/// What it copies is a DEFINITION and nothing else: backend, model, effort,
+/// input mode, system prompt, skills and MCP come with the def; the new agent
+/// gets a fresh isolated home and a fresh conversation (`resume: false`, no
+/// session id — never another agent's session, #379), and nothing of the
+/// source's home. A def that is gone refuses the fork rather than falling back
+/// to the home, which holds a conversation and credentials, not a definition.
+/// The source is only READ. A model or effort switched by hand inside the live
+/// CLI is not declared anywhere, so it is not copied.
+///
+/// A fork of a team member JOINS the source's team (recipe `team`, empty
+/// `member`, `from_member` naming the definition) instead of being a second
+/// holder of the member's slot, which the team's roster and restart read as
+/// THE member. The name is the source's, uniquified past every live window and
+/// every existing home (a stopped agent's home must not be clobbered), or the
+/// explicit `as_name`, which is refused when invalid or taken and never
+/// silently changed.
+pub fn fork(session: &str, source: &str, as_name: Option<&str>, by: &str) -> Result<Value, String> {
+    let project = super::project_for_session(session)?
+        .ok_or_else(|| format!("no project for session '{session}'"))?;
+    let live_now = || -> Vec<String> { tmux::list_panes(session).unwrap_or_default().into_iter().map(|p| p.window_name).collect() };
+    let mut plan = plan_fork_with(&project.path, &live_now, source, as_name)?;
+    let outcome = spawn(&plan.request(session, by));
+    // The claim is kept only by a launch that worked; otherwise dropping the plan
+    // gives back the empty home it made and the name it held.
+    let mut result = outcome?;
+    plan.claim.commit();
+    result["forked_from"] = json!(source);
+    result["team"] = json!(plan.team);
+    Ok(result)
+}
+
+/// What a fork will launch, decided before any window opens (so the decision is
+/// testable without starting a CLI).
+struct ForkPlan {
+    /// The claim on the new identity: its name is reserved against every other new
+    /// spawn and its home directory exists, empty. Kept by `fork` once the launch
+    /// worked; dropped (and, if still empty, removed) when it did not.
+    claim: Claim,
+    /// The new window's name, already unique.
+    name: String,
+    /// The definition, derived for `name`.
+    def: RegAgent,
+    /// The team to join: the source's team ROOT, which is what a join records
+    /// (board #382); `None` for a solo agent.
+    team: Option<String>,
+    /// `<team path>/<member>` whose definition `def` is (a fork of a team member,
+    /// or of such a fork); empty for a registry def, which is launched by name.
+    from_member: String,
+    /// The registry def to launch by name when `from_member` is empty.
+    agent: String,
+}
+
+impl ForkPlan {
+    fn request<'a>(&'a self, session: &'a str, by: &'a str) -> SpawnRequest<'a> {
+        if self.from_member.is_empty() {
+            // A registry def (solo, or a joined solo agent): launched by its name,
+            // so the fork's recipe keeps `agent_def` and a restart follows the
+            // registry def.
+            SpawnRequest { session, agent: &self.agent, by, window_name: Some(self.name.clone()), team: self.team.clone(), claim: Some(&self.claim), ..Default::default() }
+        } else {
+            SpawnRequest { session, by, def: Some(self.def.clone()), window_name: Some(self.name.clone()), team: self.team.clone(), from_member: &self.from_member, claim: Some(&self.claim), ..Default::default() }
+        }
+    }
+}
+
+/// The checks and choices of a fork: `source` must be one of ours and RUNNING
+/// (`live` = the project's window names), its definition must still exist, and
+/// the new name must be free among live windows AND existing homes.
+fn plan_fork(workspace: &str, live: &[String], source: &str, as_name: Option<&str>) -> Result<ForkPlan, String> {
+    plan_fork_with(workspace, &|| live.to_vec(), source, as_name)
+}
+
+/// `plan_fork` with the live windows read through `live_now` (fresh, at the moment
+/// of the check and again inside the claim's critical section).
+fn plan_fork_with(workspace: &str, live_now: &dyn Fn() -> Vec<String>, source: &str, as_name: Option<&str>) -> Result<ForkPlan, String> {
+    let live = live_now();
+    if !super::is_managed_in(Some(workspace), source) {
+        return Err(format!("'{source}' is not an agent this app started"));
+    }
+    if !live.iter().any(|w| w == source) {
+        return Err(format!("'{source}' is not running — start it first; a fork copies a running agent"));
+    }
+    let prov = recipe_provenance(workspace, source)
+        .ok_or_else(|| format!("'{source}' has no launch recipe, so there is no definition to fork"))?;
+
+    // The source's definition, resolved by the SOURCE's identity: a pre-#113
+    // recipe names its definition by its window name, which is the source's, not
+    // the new agent's (reviewer P1-B). A team member (or a fork of one) yields the
+    // member's definition and role WITHOUT a team section: the fork is a joined
+    // agent, and its one team section is built by `materialize`.
+    let member_ref: Option<(String, String)> = if !prov.member.is_empty() {
+        Some((prov.team.clone(), prov.member.clone()))
+    } else {
+        prov.from_member.rsplit_once('/').map(|(t, m)| (t.to_string(), m.to_string()))
+    };
+    let mut def = match &member_ref {
+        Some((team_path, member)) => fork_member_def(team_path, member, source),
+        None => effective_def(workspace, source, &prov),
+    }
+    .ok_or_else(|| {
+        format!("the definition behind '{source}' no longer exists (its agent or team was deleted) — there is nothing to fork, and its home is never copied instead")
+    })?;
+    // The new identity, claimed atomically; the prompt's identity is the NEW name.
+    let claim = claim_home(workspace, live_now, as_name, source)?;
+    let name = claim.name().to_string();
+    def.name = name.clone();
+    let from_member = member_ref.map(|(t, m)| format!("{t}/{m}")).unwrap_or_default();
+    let agent = if prov.agent_def.is_empty() { source.to_string() } else { prov.agent_def.clone() };
+    let root = prov.team.split('/').next().unwrap_or("").to_string();
+    Ok(ForkPlan { claim, name, def, team: (!root.is_empty()).then_some(root), from_member, agent })
+}
+
+/// The (workspace, name) pairs some NEW spawn is creating right now. One set for
+/// the whole process, because every hub request that creates an agent runs in
+/// this process (connection.rs handles them concurrently): a name in it is taken
+/// even though no window or home shows it yet.
+fn in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<(String, String)>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> = std::sync::OnceLock::new();
+    SET.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A claim on a NEW agent identity (board #383 review P1-A): its name is reserved
+/// against every other new spawn in `in_flight` until the claim is dropped, so
+/// the name check and the taking of the name are one step. A fork's claim also
+/// made the home directory (exclusively, so a name whose home exists is never
+/// reused) and gives it back if the launch did not work — but only by
+/// `remove_dir`, which refuses a directory that is not empty: whatever another
+/// request wrote there is never deleted on this one's behalf.
+#[derive(Debug)]
+pub struct Claim {
+    workspace: String,
+    name: String,
+    made_home: bool,
+    committed: bool,
+}
+
+impl Claim {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// The launch worked: the home it made is a real slot now and stays.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        // The cleanup of a failed claim's own EMPTY home happens BEFORE the name
+        // leaves the in-flight set, in the same critical section: otherwise another
+        // request could reserve the name, reach the old empty directory, and have
+        // it removed from under it (reviewer round 3, P2).
+        let mut flight = in_flight();
+        let key = (self.workspace.clone(), self.name.clone());
+        let home = agent_home(&self.workspace, &self.name);
+        let clean_up = self.made_home && !self.committed;
+        give_back(&mut flight, &key, |_| {
+            if clean_up {
+                let _ = std::fs::remove_dir(&home);
+            }
+        });
+    }
+}
+
+/// Give a claimed name back: `cleanup` runs FIRST, while the name is still in the
+/// in-flight set (it is handed the set so a test can see that), and only then does
+/// the name leave it — in the one critical section the caller holds.
+fn give_back(
+    flight: &mut std::collections::HashSet<(String, String)>,
+    key: &(String, String),
+    cleanup: impl FnOnce(&std::collections::HashSet<(String, String)>),
+) {
+    cleanup(flight);
+    flight.remove(key);
+}
+
+/// What an ordinary spawn is starting, which decides whose a home with a given
+/// name is: a registry agent by its definition name, a team member by its team
+/// path and member name (board #383 review). Empty strings mean "not that kind".
+struct Starting<'a> {
+    agent_def: &'a str,
+    team: &'a str,
+    member: &'a str,
+}
+
+/// May this request start in the home named `name`? A name with NO home is free.
+/// A home is the request's OWN stopped slot — and so reusable, which is how a hire
+/// or `tmm spawn --team` starts a stopped slot again — only when its recipe names
+/// the very agent or team member being started; anything else (another agent's
+/// home, a fork's, a directory with no recipe yet) is someone else's. A home that
+/// cannot be inspected is "cannot tell" and refuses.
+fn may_start_in(workspace: &str, name: &str, who: &Starting) -> Result<bool, String> {
+    match std::fs::metadata(agent_home(workspace, name)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!("cannot tell whether the name '{name}' is free ({e}); nothing was started")),
+        Ok(meta) if !meta.is_dir() => Ok(false),
+        Ok(_) => Ok(recipe_provenance(workspace, name).is_some_and(|p| {
+            if !who.member.is_empty() {
+                p.member == who.member && p.team == who.team
+            } else {
+                !who.agent_def.is_empty() && p.agent_def == who.agent_def && p.member.is_empty()
+            }
+        })),
+    }
+}
+
+/// The name for an ordinary NEW spawn (a hire, a team member, a join), reserved
+/// against every other new spawn (reviewer rounds 2–3). The decision is made INSIDE
+/// the allocation lock with a FRESH read of the windows (`live_now`), never from a
+/// snapshot taken when the request began — a fork that finished in between is
+/// live now, and a snapshot would hand its home to this request:
+/// - an automatic name skips what is live, in flight, or a home that is not this
+///   request's own stopped slot (`may_start_in`);
+/// - an explicit name (a team member's planned window) is taken only if it is not
+///   live, not in flight and not someone else's home; if it was taken meanwhile
+///   the request is REFUSED — the team spawn reports that member — never written
+///   over.
+/// The reservation is held until the spawn returns, which is after the window
+/// exists, so a completed request hands its name over to "live", never to "free".
+fn reserve_name(workspace: &str, live_now: &dyn Fn() -> Vec<String>, who: &Starting, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
+    let mut flight = in_flight();
+    let live = live_now();
+    let key = |n: &str| (workspace.to_string(), n.to_string());
+    let candidates: Vec<String> = match explicit {
+        Some(n) => vec![n.to_string()],
+        None => std::iter::once(base.to_string()).chain((2..10).map(|i| format!("{base}-{i}"))).collect(),
+    };
+    for name in &candidates {
+        let busy = live.iter().any(|w| w == name);
+        if busy || flight.contains(&key(name)) {
+            if explicit.is_some() {
+                return Err(if busy {
+                    format!("the name '{name}' is already running — taken by another agent, not started")
+                } else {
+                    format!("the name '{name}' is being created by another request — try again, or pick another")
+                });
+            }
+            continue;
+        }
+        if !may_start_in(workspace, name, who)? {
+            if explicit.is_some() {
+                return Err(format!("the name '{name}' is another agent's home — taken by it, not started"));
+            }
+            continue;
+        }
+        flight.insert(key(name));
+        return Ok(Claim { workspace: workspace.to_string(), name: name.clone(), made_home: false, committed: true });
+    }
+    Err("too many windows with this agent's name".to_string())
+}
+
+/// Make a fork's identity: pick the name and create its home as ONE atomic step.
+/// The home directory is created EXCLUSIVELY — `create_dir` fails if it exists —
+/// under the same in-flight set every new spawn reserves in, so two requests that
+/// reach the same candidate, a fork and a hire included, cannot both get it: an
+/// auto-picked name that collides picks the next, an explicit name that collides
+/// is refused, and a directory that cannot be inspected or created is "cannot
+/// tell", which refuses and never reads as free. A refresh or a restart reuses
+/// its OWN home and never comes through here.
+fn claim_home(workspace: &str, live_now: &dyn Fn() -> Vec<String>, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
+    let candidates: Vec<String> = match explicit {
+        Some(n) => vec![n.trim().to_string()],
+        None => (2..10).map(|i| format!("{base}-{i}")).collect(),
+    };
+    claim_first(workspace, live_now, &candidates, explicit.is_some())
+}
+
+/// `claim_home` over candidates the caller fixed (the seam the deterministic
+/// tests use to make two requests reach the same one).
+fn claim_first(workspace: &str, live_now: &dyn Fn() -> Vec<String>, candidates: &[String], explicit: bool) -> Result<Claim, String> {
+    let agents = Path::new(workspace).join(".tmm").join("agents");
+    std::fs::create_dir_all(&agents).map_err(|e| format!("cannot tell which agent names are free ({}: {e}); nothing was created", agents.display()))?;
+    let taken = |name: &str| format!("the name '{name}' is taken — a window, an agent home or another request already has it");
+    let mut flight = in_flight();
+    let live = live_now(); // fresh, inside the allocation lock
+    for name in candidates {
+        super::agents::valid_name(name)?;
+        let key = (workspace.to_string(), name.clone());
+        if live.iter().any(|w| w == name) || flight.contains(&key) {
+            if explicit {
+                return Err(taken(name));
+            }
+            continue;
+        }
+        match std::fs::create_dir(agent_home(workspace, name)) {
+            Ok(()) => {
+                flight.insert(key);
+                return Ok(Claim { workspace: workspace.to_string(), name: name.clone(), made_home: true, committed: false });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if explicit {
+                    return Err(taken(name));
+                }
+            }
+            Err(e) => return Err(format!("cannot tell whether the name '{name}' is free ({e}); nothing was created")),
+        }
+    }
+    Err("too many agents are already named like this one — pick a name with --as".to_string())
 }
 
 /// Re-derive a team member's effective def from the CURRENT team definition
@@ -383,6 +758,18 @@ fn refresh_team_def(workspace: &str, team_path: &str, member: &str, window_name:
         super::registry_get(f.member.base.trim()).ok().flatten()
     };
     super::teams::effective_def(f, base.as_ref(), window_name, &roster).ok()
+}
+
+/// A fork's definition of a team member (board #383): the member's CURRENT
+/// definition and role from the team (`teams::forked_def`), with no team section
+/// — the joined block is built once, by `materialize`.
+fn fork_member_def(team_path: &str, member: &str, window_name: &str) -> Option<RegAgent> {
+    let root = team_path.split('/').next()?;
+    let team = super::team_get(root).ok().flatten()?;
+    let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).ok()?;
+    let f = flat.iter().find(|f| f.path == team_path && f.member.name.trim() == member)?;
+    let base = if f.member.base.trim().is_empty() { None } else { super::registry_get(f.member.base.trim()).ok().flatten() };
+    super::teams::forked_def(f, base.as_ref(), window_name).ok()
 }
 
 /// (team path, member name) -> window name, read off every recipe under
@@ -681,7 +1068,9 @@ pub fn spawn_team_members(session: &str, team_name: &str, brief: &str, by: &str,
                 window_name: Some(w.clone()),
                 team: Some(path.clone()),
                 member: m.name.trim(),
+                from_member: "",
                 resume: false,
+                claim: None,
             })
         });
         match result {
@@ -724,6 +1113,15 @@ pub(crate) struct LaunchRecipe<'a> {
     /// column — the recipe is the declaration, one place (tenet 7).
     pub agent_def: &'a str,
     pub member: &'a str,
+    /// A JOINED window's definition source (board #383): the team member whose
+    /// effective definition a fork copied, as `<team path>/<member>` (the path
+    /// of a nested team is part of finding the member). `team` + `member` would make the
+    /// window a second holder of that member's slot, which the team's roster
+    /// and restart read as THE member; `from_member` names the same definition
+    /// without taking the slot, so a restart re-derives the member's current
+    /// def for it and a team restart still leaves it alone. Written only when
+    /// set, so every other recipe stays byte for byte as it was. '' = none.
+    pub from_member: &'a str,
     /// `queue` | `steer` — the input mode THIS process was started with
     /// (board #257: whether a line for it is held while it is busy). ''
     /// for a backfilled recipe, which the reader takes as `queue`.
@@ -740,7 +1138,7 @@ impl LaunchRecipe<'_> {
     /// keys it does not own (anything a later feature adds) are kept from the
     /// recipe it replaces.
     pub(crate) fn write_in(&self, section: &super::recipe::RecipeSection) -> Result<(), String> {
-        let fresh = json!({
+        let mut fresh = json!({
             "backend": self.backend,
             "env": self.env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "cmd": self.cmd.trim_end(),
@@ -750,6 +1148,11 @@ impl LaunchRecipe<'_> {
             "member": self.member,
             "input_mode": self.input_mode,
         });
+        // A fork of a team member names the definition it copies (board #383);
+        // written only when set, so every other recipe keeps its keys.
+        if !self.from_member.is_empty() {
+            fresh["from_member"] = json!(self.from_member);
+        }
         super::recipe::update_in(section, |slot| {
             let mut next = fresh;
             if let (Some(Value::Object(old)), Value::Object(new)) = (slot.as_ref(), &mut next) {
@@ -875,7 +1278,7 @@ mod relaunch_tests {
             backend: "kiro",
             env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())],
             cmd: "command kiro-cli chat --agent lead --trust-all-tools --agent-engine v3",
-            spawned_by: "", team: None, agent_def: "", member: "", input_mode: "",
+            spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "",
         }
         .write(&home)
         .unwrap();
@@ -929,7 +1332,7 @@ mod relaunch_tests {
         // A solo spawn records the registry def's name beside the (possibly
         // uniquified) window name, exactly as `spawn` does — so a comparison
         // against the DEF name would genuinely differ from the window name here.
-        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &cmd, spawned_by: "", team: None, agent_def: def_name, member: "", input_mode: "" }
+        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &cmd, spawned_by: "", team: None, agent_def: def_name, member: "", from_member: "", input_mode: "" }
             .write(&home)
             .unwrap();
         let id = "sess_e58968b6-0000-4000-8000-000000000001".to_string();
@@ -1014,7 +1417,7 @@ mod relaunch_tests {
         let ws = std::env::temp_dir().join(format!("tmm-relaunch-{}", uuid::Uuid::new_v4()));
         let home = agent_home(ws.to_str().unwrap(), "lead");
         std::fs::create_dir_all(&home).unwrap();
-        LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent lead --model m --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }
+        LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent lead --model m --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&home)
             .unwrap();
         let line = relaunch_line(ws.to_str().unwrap(), "lead", Some("id-1")).unwrap();
@@ -1046,7 +1449,7 @@ mod relaunch_tests {
         ] {
             let ahome = agent_home(ws.to_str().unwrap(), name);
             std::fs::create_dir_all(&ahome).unwrap();
-            LaunchRecipe { backend: backend, env: &[], cmd: cmd, spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&ahome).unwrap();
+            LaunchRecipe { backend: backend, env: &[], cmd: cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&ahome).unwrap();
             let exact = relaunch_line(ws.to_str().unwrap(), name, Some("conv-1")).unwrap();
             assert!(exact.ends_with("--resume conv-1"), "{backend} exact resume: {exact}");
             let recent = relaunch_line(ws.to_str().unwrap(), name, None).unwrap();
@@ -1059,7 +1462,7 @@ mod relaunch_tests {
         // would hand `resume` to the interactive CLI as a prompt.
         let chome = agent_home(ws.to_str().unwrap(), "cx");
         std::fs::create_dir_all(&chome).unwrap();
-        LaunchRecipe { backend: "codex", env: &[("CODEX_HOME".to_string(), chome.to_string_lossy().to_string())], cmd: "command codex -c a=b --dangerously-bypass-approvals-and-sandbox", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }
+        LaunchRecipe { backend: "codex", env: &[("CODEX_HOME".to_string(), chome.to_string_lossy().to_string())], cmd: "command codex -c a=b --dangerously-bypass-approvals-and-sandbox", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&chome)
             .unwrap();
         let cx = relaunch_line(ws.to_str().unwrap(), "cx", Some("01a0-abc")).unwrap();
@@ -1409,7 +1812,7 @@ mod tests {
         // A restart must replay the FULL identity, not the bare backend line:
         // the user-space config's hooks never fire (measured), so losing
         // KIRO_HOME/--agent makes a restarted agent observably deaf.
-        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &r.cmd, spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&dir).unwrap();
+        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &r.cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&dir).unwrap();
         let line = relaunch_line(
             dir.parent().unwrap().parent().unwrap().to_str().unwrap(),
             "tester", Some("abc-123"),
@@ -1720,7 +2123,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             "prompt": "You are dev.",
             "hooks": {}
         })).unwrap()).unwrap();
-        LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent dev --model claude-haiku-4.5 --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }
+        LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent dev --model claude-haiku-4.5 --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&home)
             .unwrap();
 
@@ -1753,7 +2156,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let cfg = home.join("agents").join("dev.json");
         std::fs::write(&cfg, serde_json::to_string_pretty(&json!({ "name": "dev", "hooks": {} })).unwrap()).unwrap();
         LaunchRecipe { backend: "kiro", env: &[], cmd: // The owner's real value: one character off `claude-sonnet-4.5`.
-            "command kiro-cli chat --agent dev --model claude-sonnet-4-5 --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&home).unwrap();
+            "command kiro-cli chat --agent dev --model claude-sonnet-4-5 --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
 
         refresh_hooks(&ws.to_string_lossy(), "dev");
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
@@ -2129,7 +2532,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let ws = std::env::temp_dir().join(format!("tmm-spawnedby-{}", std::process::id()));
         let home = ws.join(".tmm").join("agents").join("b");
         std::fs::create_dir_all(&home).unwrap();
-        LaunchRecipe { backend: "kiro", env: &[], cmd: "command kiro-cli chat --agent b", spawned_by: "lead", team: None, agent_def: "", member: "", input_mode: "" }.write(&home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "command kiro-cli chat --agent b", spawned_by: "lead", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
         let recipe: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
         assert_eq!(recipe["spawned_by"], "lead");
@@ -2164,7 +2567,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("jnbase").unwrap();
         for (f, w) in flat.iter().zip(["lead", "dev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("jnteam"), "", f.member.name.trim()).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("jnteam"), "", f.member.name.trim(), "").unwrap();
         }
         check_join(&ws_str, "jnteam").unwrap();
         assert!(check_join(&ws_str, "other").is_err(), "a team with nobody here");
@@ -2172,7 +2575,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         // The join: a registry def, the team, no member — what hub_spawn hands spawn.
         let helper = super::super::registry_get("jnhelper").unwrap().unwrap();
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "jnhelper")), &helper, "jnhelper", "proj", &ws_str, "", "lead", Some("jnteam"), "jnhelper", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "jnhelper")), &helper, "jnhelper", "proj", &ws_str, "", "lead", Some("jnteam"), "jnhelper", "", "").unwrap();
         let recipe = read(&agent_home(&ws_str, "jnhelper").join("launch.json"));
         assert_eq!((recipe["team"].as_str(), recipe["member"].as_str(), recipe["agent_def"].as_str()), (Some("jnteam"), Some(""), Some("jnhelper")));
         assert_eq!(super::super::team_of(Some(&ws_str), "jnhelper").as_deref(), Some("jnteam"), "Hub's team tabs and team context read it as in the team");
@@ -2247,9 +2650,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("mvbase").unwrap();
         let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "mvteam".into())];
         let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead", "").unwrap();
         let solo = super::super::registry_get("mvsolo").unwrap().unwrap();
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo")), &solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo")), &solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "", "").unwrap();
         let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
         let before = recipe();
 
@@ -2281,7 +2684,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // agent's old team, and that team's live members as `seed` reads them.
         let seeded_home = agent_home(&ws_str, "seeded");
         std::fs::create_dir_all(&seeded_home).unwrap();
-        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", from_member: "", input_mode: "" }.write(&seeded_home).unwrap();
         assert_eq!(set_agent_team(&ws_str, "seeded", "", &|t| Ok(if t == "mvteam" { vec!["lead".to_string()] } else { Vec::new() })).unwrap(), ("mvteam".to_string(), true, 1));
         assert_eq!(read(&seeded_home.join("launch.json"))["team_told"], json!({ "mover": "mvteam", "members": { "lead": "mvteam" } }));
         assert_eq!(set_agent_team(&ws_str, "seeded", "mvteam", &|_| Ok(vec!["nobody".to_string()])).unwrap().1, true);
@@ -2296,7 +2699,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(refused.contains("could not read who is in team 'mvteam'") && refused.contains("nothing was changed"), "{refused}");
         assert_eq!(read(&unread_home.join("launch.json")), unread_before, "the recipe is unchanged: no team, no revision, no ledger");
         // A fresh recipe in another team (a reused home) drops the ledger.
-        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&seeded_home).unwrap();
         assert!(read(&seeded_home.join("launch.json")).get("team_told").is_none());
         assert_eq!(read(&seeded_home.join("launch.json"))["team_rev"], 2, "the revision stays");
         assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
@@ -2313,7 +2716,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         for (w, path) in [("dev", "mvroot/mvbuild"), ("dev-2", "mvroot/mvreview")] {
             let h = agent_home(&ws_str, w);
             std::fs::create_dir_all(&h).unwrap();
-            LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some(path), agent_def: "", member: "dev", input_mode: "" }.write(&h).unwrap();
+            LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some(path), agent_def: "", member: "dev", from_member: "", input_mode: "" }.write(&h).unwrap();
         }
         let mut mates = team_mates(&ws_str, "mvroot", "mvsolo");
         mates.sort();
@@ -2371,7 +2774,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         };
         save("Old persona.");
         let def = super::super::registry_get(name).unwrap().expect("saved def");
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, name)), &def, name, "proj", &ws_str, "fix the login bug", "lead", None, name, "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, name)), &def, name, "proj", &ws_str, "fix the login bug", "lead", None, name, "", "").unwrap();
         let cfg = agent_home(&ws_str, name).join("agents").join(format!("{name}.json"));
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         assert!(read(&cfg)["prompt"].as_str().unwrap().contains("Old persona."));
@@ -2430,7 +2833,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             ];
             for (f, w) in flat.iter().zip(["st", "in"]) {
                 let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-                materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("mmteam"), "", f.member.name.trim()).unwrap();
+                materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("mmteam"), "", f.member.name.trim(), "").unwrap();
             }
         };
         let mode = |w: &str| -> String {
@@ -2473,7 +2876,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let ws = std::env::temp_dir().join(format!("tmm-default-mode-{}", uuid::Uuid::new_v4()));
         let ws_str = ws.to_string_lossy().to_string();
         let d = super::super::registry_get("dmkiro").unwrap().unwrap();
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dmkiro")), &d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dmkiro")), &d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "", "").unwrap();
         let cli: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(&ws_str, "dmkiro").join("settings/cli.json")).unwrap()).unwrap();
         assert_eq!(cli["chat.defaultInterruptBehavior"], "steer", "and it spawns steering");
         let _ = std::fs::remove_dir_all(&ws);
@@ -2553,7 +2956,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // recipe's agent_def is what finds it.
         save("rfuniq", "Uniq old.");
         let def = super::super::registry_get("rfuniq").unwrap().unwrap();
-        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rfuniq-2")), &def, "rfuniq-2", "proj", &ws_str, "", "", None, "rfuniq", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rfuniq-2")), &def, "rfuniq-2", "proj", &ws_str, "", "", None, "rfuniq", "", "").unwrap();
         save("rfuniq", "Uniq new.");
         assert!(refresh_agent(&ws_str, "proj", "rfuniq-2"), "the uniquified window refreshes via agent_def");
         let cfg = agent_home(&ws_str, "rfuniq-2").join("agents").join("rfuniq-2.json");
@@ -2579,7 +2982,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("rfbase").unwrap();
         for (f, w) in flat.iter().zip(["dev-2", "rev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rfteam"), "", f.member.name.trim()).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rfteam"), "", f.member.name.trim(), "").unwrap();
         }
         save("rfbase", "Base new.");
         assert!(refresh_agent(&ws_str, "proj", "dev-2"), "the team member refreshes via team+member");
@@ -2634,7 +3037,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("tpbase").unwrap();
         for f in &flat {
             let d = super::super::teams::effective_def(f, base.as_ref(), &f.member.name, &roster).unwrap();
-            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, &f.member.name)), &d, &f.member.name, &session, &ws_str, "", "", Some("tpteam"), "", &f.member.name).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, &f.member.name)), &d, &f.member.name, &session, &ws_str, "", "", Some("tpteam"), "", &f.member.name, "").unwrap();
         }
         save_team(r#"[{"name":"dev","base":"tpbase","role":"implement"},{"name":"rev","base":"tpbase","role":"review"}]"#);
 
@@ -2693,4 +3096,576 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    // ── board #383: fork a running agent ────────────────────────────────
+
+    fn fk_save(name: &str, persona: &str, mode: &str) {
+        super::super::registry_save(&json!({
+            "name": name, "backend": "kiro", "model": "", "effort": "", "input_mode": mode,
+            "system": persona, "skills": "[]", "mcp": "[]"
+        }))
+        .unwrap();
+    }
+
+    /// What `spawn` records for a request, without opening a window: the same
+    /// `materialize` call it makes (the recipe's `agent_def` is the def name for
+    /// a registry launch and empty for a def handed in).
+    fn fk_materialize(req: &SpawnRequest, ws: &str) -> Value {
+        let def = match &req.def {
+            Some(d) => d.clone(),
+            None => super::super::registry_get(req.agent).unwrap().unwrap(),
+        };
+        let agent_def = if req.def.is_none() { def.name.as_str() } else { "" };
+        let name = req.window_name.clone().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(ws, &name)), &def, &name, "proj", ws, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(agent_home(ws, &name).join("launch.json")).unwrap()).unwrap()
+    }
+
+    /// A fork of a SOLO agent: the registry def it runs, launched by name into a
+    /// fresh home with a fresh conversation; the source is not touched.
+    #[test]
+    fn a_fork_of_a_solo_agent_launches_its_def_in_a_fresh_home() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-solo-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fksolo", "Fork persona.", "steer");
+        let def = super::super::registry_get("fksolo").unwrap().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "fksolo")), &def, "fksolo", "proj", &ws_str, "", "lead", None, "fksolo", "", "").unwrap();
+        // The source's own conversation and files: none of it may travel.
+        let source_home = agent_home(&ws_str, "fksolo");
+        std::fs::create_dir_all(source_home.join("sessions")).unwrap();
+        std::fs::write(source_home.join("sessions").join("sess_secret.jsonl"), "the source conversation").unwrap();
+        let recipe_before = std::fs::read(source_home.join("launch.json")).unwrap();
+
+        let live = vec!["fksolo".to_string(), "shell".to_string()];
+        let plan = plan_fork(&ws_str, &live, "fksolo", None).unwrap();
+        assert_eq!(plan.name, "fksolo-2", "the source's name, uniquified");
+        assert_eq!((plan.agent.as_str(), plan.from_member.as_str(), plan.team.clone()), ("fksolo", "", None));
+        let req = plan.request("proj", "lead");
+        assert!(req.def.is_none(), "a registry def is launched by name, so a restart follows it");
+        assert_eq!((req.agent, req.brief, req.resume), ("fksolo", "", false), "no brief, no resume");
+
+        let recipe = fk_materialize(&req, &ws_str);
+        let new_home = agent_home(&ws_str, "fksolo-2");
+        assert_ne!(new_home, source_home);
+        assert_eq!((recipe["agent_def"].as_str(), recipe["input_mode"].as_str(), recipe["team"].as_str()), (Some("fksolo"), Some("steer"), Some("")));
+        let cmd = recipe["cmd"].as_str().unwrap();
+        assert!(!cmd.contains("--resume"), "a fork starts a fresh conversation, never another agent's session: {cmd}");
+        let prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(new_home.join("agents").join("fksolo-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
+        assert!(prompt.contains("Fork persona."), "{prompt}");
+        assert!(!new_home.join("sessions").exists(), "nothing of the source's home is copied");
+        assert_eq!(std::fs::read(source_home.join("launch.json")).unwrap(), recipe_before, "the source is only read");
+        assert!(source_home.join("sessions").join("sess_secret.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A fork of a TEAM MEMBER copies the member's effective def and JOINS the
+    /// team; it does not become a second holder of the member's slot, so the
+    /// roster the siblings are built from is unchanged, and it can be forked
+    /// again and refreshed through `from_member`.
+    #[test]
+    fn a_fork_of_a_team_member_copies_its_def_and_joins_the_team_without_its_slot() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-team-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
+        fk_save("fkbase", "Base persona.", "steer");
+        super::super::teams_save(&json!({
+            "name": "fkteam", "description": "",
+            "members": r#"[{"name":"dev","base":"fkbase","role":"implement the change"},{"name":"rev","base":"fkbase","role":"review the diff"}]"#
+        }))
+        .unwrap();
+        let team = super::super::team_get("fkteam").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![
+            ("dev".into(), "implement the change".into(), "fkteam".into()),
+            ("rev".into(), "review the diff".into(), "fkteam".into()),
+        ];
+        let base = super::super::registry_get("fkbase").unwrap();
+        for f in &flat {
+            let w = f.member.name.trim();
+            let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("fkteam"), "", w, "").unwrap();
+        }
+        let roster_before = team_windows_from_recipes(&ws_str, "fkteam");
+
+        let live: Vec<String> = ["dev", "rev"].iter().map(|s| s.to_string()).collect();
+        let plan = plan_fork(&ws_str, &live, "dev", None).unwrap();
+        assert_eq!(plan.name, "dev-2");
+        assert_eq!((plan.from_member.as_str(), plan.team.as_deref()), ("fkteam/dev", Some("fkteam")));
+        let source_def = effective_def(&ws_str, "dev", &recipe_provenance(&ws_str, "dev").unwrap()).unwrap();
+        assert_eq!(
+            (plan.def.backend.as_str(), plan.def.model.as_str(), plan.def.effort.as_str(), plan.def.input_mode.as_str(), plan.def.skills.as_str(), plan.def.mcp.as_str()),
+            (source_def.backend.as_str(), source_def.model.as_str(), source_def.effort.as_str(), source_def.input_mode.as_str(), source_def.skills.as_str(), source_def.mcp.as_str()),
+            "the same definition fields as the source"
+        );
+        assert_eq!(plan.def.input_mode, "steer");
+        let req = plan.request("proj", "lead");
+        assert!(req.def.is_some() && req.member.is_empty() && req.from_member == "fkteam/dev" && !req.resume);
+
+        let recipe = fk_materialize(&req, &ws_str);
+        assert_eq!((recipe["team"].as_str(), recipe["member"].as_str(), recipe["from_member"].as_str()), (Some("fkteam"), Some(""), Some("fkteam/dev")));
+        assert!(!recipe["cmd"].as_str().unwrap().contains("--resume"));
+        let prompt = read(&agent_home(&ws_str, "dev-2").join("agents").join("dev-2.json"))["prompt"].as_str().unwrap().to_string();
+        assert!(prompt.contains("Base persona.") && prompt.contains("Your role: implement the change"), "{prompt}");
+        assert_eq!(prompt.matches("## Your team:").count(), 1, "exactly ONE team section (the joined block, built once): {prompt}");
+        assert!(prompt.contains("You are \"dev-2\".") && !prompt.contains("You are \"dev\"."), "written for its OWN window name, not the source's: {prompt}");
+        assert!(prompt.contains("- @dev — implement the change") && prompt.contains("- @rev — review the diff"), "the source is one of its teammates, with its role: {prompt}");
+        assert_eq!(team_windows_from_recipes(&ws_str, "fkteam"), roster_before, "the member slot still belongs to the original window");
+
+        // It restarts on the member's CURRENT def, and can itself be forked.
+        fk_save("fkbase", "Base newer.", "steer");
+        assert!(refresh_agent(&ws_str, "proj", "dev-2"));
+        let prompt = read(&agent_home(&ws_str, "dev-2").join("agents").join("dev-2.json"))["prompt"].as_str().unwrap().to_string();
+        assert!(prompt.contains("Base newer.") && prompt.contains("Your role: implement the change"), "{prompt}");
+        let live: Vec<String> = ["dev", "rev", "dev-2"].iter().map(|s| s.to_string()).collect();
+        let again = plan_fork(&ws_str, &live, "dev-2", None).unwrap();
+        assert_eq!((again.name.as_str(), again.from_member.as_str(), again.team.as_deref()), ("dev-2-2", "fkteam/dev", Some("fkteam")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The refusals, by name; and the name rules.
+    #[test]
+    fn a_fork_is_refused_for_a_stopped_unknown_or_defless_source_and_names_are_never_clobbered() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-refuse-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fkref", "Persona.", "queue");
+        let def = super::super::registry_get("fkref").unwrap().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "fkref")), &def, "fkref", "proj", &ws_str, "", "", None, "fkref", "", "").unwrap();
+        let err = |live: &[&str], source: &str, as_name: Option<&str>| {
+            let live: Vec<String> = live.iter().map(|s| s.to_string()).collect();
+            plan_fork(&ws_str, &live, source, as_name).err().unwrap_or_else(|| "NO ERROR".into())
+        };
+        assert!(err(&["fkref"], "nobody", None).contains("is not an agent this app started"));
+        assert!(err(&["shell"], "shell", None).contains("is not an agent this app started"), "a plain window is not ours");
+        assert!(err(&[], "fkref", None).contains("is not running"), "a stopped agent is not forked");
+        // Names: explicit is refused when taken (live window or an existing home) or invalid.
+        assert!(err(&["fkref", "taken"], "fkref", Some("taken")).contains("is taken"));
+        std::fs::create_dir_all(agent_home(&ws_str, "stopped-one")).unwrap();
+        assert!(err(&["fkref"], "fkref", Some("stopped-one")).contains("is taken"), "a stopped agent's home is not reused");
+        assert!(err(&["fkref"], "fkref", Some("bad name")).contains("cannot contain"));
+        let ok = plan_fork(&ws_str, &["fkref".to_string()], "fkref", Some("  mine ")).unwrap();
+        assert_eq!(ok.name, "mine", "an explicit name is used as given (trimmed)");
+        // The default name steps past live windows AND existing homes.
+        std::fs::create_dir_all(agent_home(&ws_str, "fkref-2")).unwrap();
+        let plan = plan_fork(&ws_str, &["fkref".to_string(), "fkref-3".to_string()], "fkref", None).unwrap();
+        assert_eq!(plan.name, "fkref-4");
+        // The definition behind the source is gone: refused, never a home copy.
+        super::super::registry_delete("fkref").unwrap();
+        let gone = err(&["fkref"], "fkref", None);
+        assert!(gone.contains("no longer exists") && gone.contains("never copied"), "{gone}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A fork of a member of a NESTED team joins the ROOT team (what a join
+    /// records) yet still finds the member's definition on restart, because
+    /// `from_member` carries the member's team path.
+    #[test]
+    fn a_fork_of_a_nested_team_member_joins_the_root_and_keeps_the_member_path() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-nested-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fnbase", "Nested base.", "queue");
+        super::super::teams_save(&json!({ "name": "fninner", "description": "", "members": r#"[{"name":"rev","base":"fnbase","role":"review the diff"}]"# })).unwrap();
+        super::super::teams_save(&json!({ "name": "fnouter", "description": "", "members": r#"[{"team":"fninner"}]"# })).unwrap();
+        let team = super::super::team_get("fnouter").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let f = flat.iter().find(|f| f.member.name.trim() == "rev").unwrap();
+        assert_eq!(f.path, "fnouter/fninner");
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone())];
+        let base = super::super::registry_get("fnbase").unwrap();
+        let d = super::super::teams::effective_def(f, base.as_ref(), "rev", &roster).unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rev")), &d, "rev", "proj", &ws_str, "", "lead", Some(&f.path), "", "rev", "").unwrap();
+
+        let plan = plan_fork(&ws_str, &["rev".to_string()], "rev", None).unwrap();
+        assert_eq!((plan.team.as_deref(), plan.from_member.as_str()), (Some("fnouter"), "fnouter/fninner/rev"));
+        let recipe = fk_materialize(&plan.request("proj", "lead"), &ws_str);
+        assert_eq!((recipe["team"].as_str(), recipe["member"].as_str()), (Some("fnouter"), Some("")));
+        fk_save("fnbase", "Nested newer.", "queue");
+        assert!(refresh_agent(&ws_str, "proj", "rev-2"), "the member is found through the recorded path");
+        let prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(agent_home(&ws_str, "rev-2").join("agents").join("rev-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
+        assert!(prompt.contains("Nested newer.") && prompt.contains("Your role: review the diff"), "{prompt}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-A: a NEW identity is an atomic claim. Two requests that
+    /// reach the same candidate — here made to arrive together at a barrier, with
+    /// the SAME candidate list — get different names and homes; an explicit name
+    /// both ask for goes to exactly one.
+    #[test]
+    fn two_forks_that_reach_the_same_candidate_get_different_names_and_homes() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-claim-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let race = |candidates: Vec<String>, explicit: bool| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let (b, w, c) = (barrier.clone(), ws_str.clone(), candidates.clone());
+                    std::thread::spawn(move || {
+                        b.wait();
+                        claim_first(&w, &|| vec!["dev".to_string()], &c, explicit)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        };
+        for round in 0..20 {
+            let (a, b) = (format!("auto-a{round}-2"), format!("auto-a{round}-3"));
+            let got = race(vec![a.clone(), b.clone()], false);
+            let mut names: Vec<String> = got.iter().map(|r| r.as_ref().expect("an auto name that collides picks the next").name().to_string()).collect();
+            names.sort();
+            assert_eq!(names, vec![a.clone(), b.clone()], "round {round}: two different names");
+            assert!(agent_home(&ws_str, &a).is_dir() && agent_home(&ws_str, &b).is_dir(), "and two different homes");
+            drop(got);
+
+            let mine = format!("explicit-{round}");
+            let got = race(vec![mine.clone()], true);
+            assert_eq!(got.iter().filter(|r| r.is_ok()).count(), 1, "round {round}: an explicit name goes to exactly one: {got:?}");
+            assert!(got.iter().any(|r| r.as_ref().is_err_and(|e| e.contains("is taken"))), "{got:?}");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-A, the shared entry: a fork's claim and an ORDINARY new
+    /// spawn (a hire, a team member, a join) reaching for the same name — at a
+    /// barrier, many rounds — never both get it. The fork's claim holds `dev-2`
+    /// before any window exists; the hire is handed `dev-3`; an explicit `dev-2`
+    /// (what a team spawn passes) is refused, not silently written over.
+    #[test]
+    fn a_fork_and_an_ordinary_spawn_reaching_for_the_same_name_never_share_it() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-shared-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let live = vec!["dev".to_string()];
+
+        // Deterministic: the fork's claim is HELD (its window is not open yet).
+        let fork_claim = claim_home(&ws_str, &|| live.clone(), None, "dev").unwrap();
+        assert_eq!(fork_claim.name(), "dev-2");
+        let hire = reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, None, "dev").unwrap();
+        assert_eq!(hire.name(), "dev-3", "an ordinary hire steps past the name a fork holds");
+        assert!(reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap_err().contains("being created by another request"), "an explicit team-spawn name is refused");
+        assert!(agent_home(&ws_str, "dev-2").is_dir() && !agent_home(&ws_str, "dev-3").exists(), "the hire made no home of the fork's, and the fork wrote none of the hire's");
+        // When the fork's launch fails and its (empty) claim is dropped, the name is free again.
+        drop(fork_claim);
+        assert!(!agent_home(&ws_str, "dev-2").exists(), "an empty claimed home is given back");
+        drop(hire);
+        let again = reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap();
+        assert_eq!(again.name(), "dev-2");
+        drop(again);
+
+        // At a barrier, both ways round.
+        for round in 0..30 {
+            let base = format!("race{round}");
+            let live = vec![base.clone()];
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (b1, w1, l1, n1) = (barrier.clone(), ws_str.clone(), live.clone(), base.clone());
+            let (b2, w2, l2, n2) = (barrier, ws_str.clone(), live, base);
+            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| l1.clone(), None, &n1) });
+            let hire = std::thread::spawn(move || { b2.wait(); reserve_name(&w2, &|| l2.clone(), &Starting { agent_def: "", team: "", member: "" }, None, &n2) });
+            let (fork, hire) = (fork.join().unwrap().unwrap(), hire.join().unwrap().unwrap());
+            assert_ne!(fork.name(), hire.name(), "round {round}: one name, one request");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-A, cleanup: a failed request gives back only what is
+    /// still its own and EMPTY. Material another request wrote into the claimed
+    /// directory is never deleted on this one's behalf, and a launch that worked
+    /// keeps its home.
+    #[test]
+    fn a_claim_that_is_dropped_removes_only_an_empty_home_it_made() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-drop-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let live: Vec<String> = Vec::new();
+        let written = claim_first(&ws_str, &|| live.clone(), &["w-2".to_string()], true).unwrap();
+        std::fs::write(agent_home(&ws_str, "w-2").join("launch.json"), "{\"someone\":\"else\"}").unwrap();
+        std::fs::write(agent_home(&ws_str, "w-2").join("half-written"), "x").unwrap();
+        drop(written); // uncommitted, but not empty any more
+        assert_eq!(std::fs::read_to_string(agent_home(&ws_str, "w-2").join("launch.json")).unwrap(), "{\"someone\":\"else\"}", "another request's material survives a failed one");
+        assert!(agent_home(&ws_str, "w-2").join("half-written").exists());
+
+        let empty = claim_first(&ws_str, &|| live.clone(), &["w-3".to_string()], true).unwrap();
+        assert!(agent_home(&ws_str, "w-3").is_dir());
+        drop(empty);
+        assert!(!agent_home(&ws_str, "w-3").exists(), "an empty claimed home goes back");
+
+        let mut kept = claim_first(&ws_str, &|| live.clone(), &["w-4".to_string()], true).unwrap();
+        kept.commit();
+        drop(kept);
+        assert!(agent_home(&ws_str, "w-4").is_dir(), "a launch that worked keeps its home");
+        assert!(claim_first(&ws_str, &|| live.clone(), &["w-4".to_string()], true).unwrap_err().contains("is taken"), "and the name stays taken");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-A: a home that appears AFTER the candidates were chosen is
+    /// never overwritten (its bytes stay), and a homes directory that cannot be
+    /// inspected is "cannot tell", which refuses — it is never read as free.
+    #[test]
+    fn a_home_that_appears_after_the_plan_survives_and_an_unreadable_homes_dir_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = std::env::temp_dir().join(format!("tmm-fork-late-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let candidates = vec!["late-2".to_string(), "late-3".to_string()];
+        // Between choosing the candidates and claiming, somebody else made late-2.
+        let theirs = agent_home(&ws_str, "late-2");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("launch.json"), "{\"theirs\":true}").unwrap();
+        let third = claim_first(&ws_str, &|| Vec::new(), &candidates, false).unwrap();
+        assert_eq!(third.name(), "late-3", "an auto name steps past it");
+        assert!(claim_first(&ws_str, &|| Vec::new(), &["late-2".to_string()], true).unwrap_err().contains("is taken"), "an explicit one is refused");
+        assert_eq!(std::fs::read_to_string(theirs.join("launch.json")).unwrap(), "{\"theirs\":true}", "the other home is byte for byte as it was");
+
+        // A homes directory nobody can look into: not free, refused, nothing created.
+        let agents = ws.join(".tmm").join("agents");
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = claim_first(&ws_str, &|| Vec::new(), &["late-4".to_string()], true);
+        let denied_auto = claim_first(&ws_str, &|| Vec::new(), &["late-5".to_string()], false);
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(denied.as_ref().is_err_and(|e| e.contains("cannot tell")), "{denied:?}");
+        assert!(denied_auto.as_ref().is_err_and(|e| e.contains("cannot tell")), "an auto name does not read the failure as free either: {denied_auto:?}");
+        assert!(!agent_home(&ws_str, "late-4").exists() && !agent_home(&ws_str, "late-5").exists(), "nothing was created");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-B: the source's definition is found by the SOURCE's
+    /// identity, the new prompt is written for the NEW name. A pre-#113 recipe names
+    /// its definition by its window name only; the registry holds `dev` and no
+    /// `dev-2`, and the fork must still work.
+    #[test]
+    fn a_fork_of_a_pre_113_agent_finds_its_def_by_the_source_name_and_renders_the_new_one() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-old-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fkold", "Old persona.", "queue");
+        let def = super::super::registry_get("fkold").unwrap().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "fkold")), &def, "fkold", "proj", &ws_str, "", "", None, "fkold", "", "").unwrap();
+        // Strip the provenance the way a recipe from before #113 never had it.
+        let recipe_path = agent_home(&ws_str, "fkold").join("launch.json");
+        let mut recipe: Value = serde_json::from_str(&std::fs::read_to_string(&recipe_path).unwrap()).unwrap();
+        for key in ["agent_def", "member", "from_member", "team"] {
+            recipe.as_object_mut().unwrap().remove(key);
+        }
+        std::fs::write(&recipe_path, serde_json::to_string_pretty(&recipe).unwrap()).unwrap();
+        assert!(super::super::registry_get("fkold-2").unwrap().is_none(), "the registry has fkold and no fkold-2");
+
+        let plan = plan_fork(&ws_str, &["fkold".to_string()], "fkold", None).expect("a live agent with a valid definition forks");
+        assert_eq!((plan.name.as_str(), plan.agent.as_str()), ("fkold-2", "fkold"));
+        let recipe = fk_materialize(&plan.request("proj", "lead"), &ws_str);
+        assert_eq!(recipe["agent_def"].as_str(), Some("fkold"), "the new recipe follows the registry def");
+        let prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(agent_home(&ws_str, "fkold-2").join("agents").join("fkold-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
+        assert!(prompt.contains("Old persona.") && prompt.contains("fkold-2"), "written for its own name: {prompt}");
+
+        super::super::registry_delete("fkold").unwrap();
+        let err = plan_fork(&ws_str, &["fkold".to_string()], "fkold", None).err().unwrap();
+        assert!(err.contains("no longer exists"), "only a deleted definition refuses: {err}");
+        assert!(!agent_home(&ws_str, "fkold-3").exists(), "and a refusal claims nothing");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-C: a fork of a member of a SUB-team keeps the sub-team's
+    /// own rules (its description), the enclosing team's brief and the member's role,
+    /// while the new root membership is the ONE team section (with the ROOT's
+    /// description); restart keeps all of it.
+    #[test]
+    fn a_nested_fork_keeps_the_sub_teams_rules_and_has_one_team_section() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-rules-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fgbase", "Rules base.", "queue");
+        super::super::teams_save(&json!({ "name": "fgchild", "description": "Review only: never edit files.", "members": r#"[{"name":"rev","base":"fgbase","role":"review the diff"}]"# })).unwrap();
+        super::super::teams_save(&json!({ "name": "fgroot", "description": "Ship it quietly.", "members": r#"[{"team":"fgchild","role":"Report to lead."}]"# })).unwrap();
+        let team = super::super::team_get("fgroot").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let f = flat.iter().find(|f| f.member.name.trim() == "rev").unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone())];
+        let base = super::super::registry_get("fgbase").unwrap();
+        let d = super::super::teams::effective_def(f, base.as_ref(), "rev", &roster).unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rev")), &d, "rev", "proj", &ws_str, "", "lead", Some(&f.path), "", "rev", "").unwrap();
+        let source_prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(agent_home(&ws_str, "rev").join("agents").join("rev.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
+        assert!(source_prompt.contains("Review only: never edit files."), "the source carries its sub-team rules: {source_prompt}");
+
+        let plan = plan_fork(&ws_str, &["rev".to_string()], "rev", None).unwrap();
+        let recipe = fk_materialize(&plan.request("proj", "lead"), &ws_str);
+        assert_eq!(recipe["team"].as_str(), Some("fgroot"));
+        let prompt_of = || serde_json::from_str::<Value>(&std::fs::read_to_string(agent_home(&ws_str, "rev-2").join("agents").join("rev-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
+        let check = |prompt: &str| {
+            assert!(prompt.contains("Review only: never edit files."), "the sub-team's rules survive the fork: {prompt}");
+            assert!(prompt.contains("From the enclosing team: Report to lead.") && prompt.contains("Your role: review the diff"), "{prompt}");
+            assert_eq!(prompt.matches("## Your team:").count(), 1, "one team section: {prompt}");
+            assert_eq!(prompt.matches("Ship it quietly.").count(), 1, "the root's description once, from the new membership: {prompt}");
+            assert_eq!(prompt.matches("Review only: never edit files.").count(), 1, "the child's once: {prompt}");
+        };
+        check(&prompt_of());
+        assert!(refresh_agent(&ws_str, "proj", "rev-2"));
+        check(&prompt_of());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review P1-A: `spawn` cannot be driven without a real tmux and CLI,
+    /// so the one thing the claim tests cannot see — that the launcher itself
+    /// reserves the name of every NEW spawn, takes a caller's claim as is, and
+    /// leaves only a restart's fallback (`resume`) to reuse its own home — is pinned
+    /// at the source. Swapping `reserve_name` back for the live-panes `uniquify`
+    /// would pass every other test.
+    #[test]
+    fn the_one_launcher_claims_every_new_identity() {
+        let src = include_str!("spawn.rs");
+        let spawn_fn = &src[src.find("pub fn spawn(req: &SpawnRequest)").unwrap()..];
+        let spawn_fn = &spawn_fn[..spawn_fn.find("\n}\n").unwrap()];
+        let names = &spawn_fn[spawn_fn.find("let _identity;").unwrap()..spawn_fn.find("super::agents::valid_name(&window_name)?;").unwrap()];
+        assert!(names.contains("(Some(claim), _) =>") && names.contains("claim.name().to_string()"), "a caller's claim is used as is: {names}");
+        assert!(names.contains("(None, true) =>") && names.contains("uniquify(&def.name, &taken)"), "only a restart's fallback reuses its own home: {names}");
+        assert!(names.contains("(None, false) =>") && names.contains("reserve_name(&workspace, &live_now, &starting, req.window_name.as_deref(), &def.name)?"), "every other new spawn reserves its name: {names}");
+        assert!(!names.contains("(None, false) => match"), "no new spawn picks a name by live panes alone");
+    }
+
+    fn write_recipe(ws: &str, name: &str, json: &str) {
+        let home = agent_home(ws, name);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), json).unwrap();
+    }
+
+    /// Board #383 round 3, timing 1: an ordinary spawn that had read the windows
+    /// BEFORE a fork finished must not take the fork's home afterwards. The fork
+    /// claimed `dev-2`, opened its window, committed and released its reservation;
+    /// the late hire decides inside the allocation lock with a FRESH read of the
+    /// windows and goes to `dev-3`. The fork's home is byte for byte as it was.
+    /// (By its recipe the fork's home is the same agent's, so only liveness keeps
+    /// it out of reach — the stale read shown at the end is what the old code did.)
+    #[test]
+    fn a_late_ordinary_spawn_skips_a_fork_that_has_completed_and_is_running() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-late-hire-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let live = std::sync::Arc::new(std::sync::Mutex::new(vec!["dev".to_string()]));
+        let fresh = { let live = live.clone(); move || live.lock().unwrap().clone() };
+        let hire = Starting { agent_def: "dev", team: "", member: "" };
+
+        let mut fork = claim_home(&ws_str, &fresh, None, "dev").unwrap();
+        assert_eq!(fork.name(), "dev-2");
+        // The fork materializes, opens its window, and returns.
+        write_recipe(&ws_str, "dev-2", r#"{"agent_def":"dev","member":"","team":""}"#);
+        std::fs::write(agent_home(&ws_str, "dev-2").join("session.log"), "the fork's conversation").unwrap();
+        let before = std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap();
+        live.lock().unwrap().push("dev-2".to_string());
+        fork.commit();
+        drop(fork); // its reservation is released: the name is now handed over to LIVE
+
+        let late = reserve_name(&ws_str, &fresh, &hire, None, "dev").unwrap();
+        assert_eq!(late.name(), "dev-3", "the late hire skips the running fork");
+        assert_eq!(std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap(), before, "the running fork's recipe is untouched");
+        assert_eq!(std::fs::read_to_string(agent_home(&ws_str, "dev-2").join("session.log")).unwrap(), "the fork's conversation");
+        // What a snapshot taken before the fork finished would have done:
+        let stale = reserve_name(&ws_str, &|| vec!["dev".to_string()], &hire, None, "dev").unwrap();
+        assert_eq!(stale.name(), "dev-2", "the stale read is the bug: it reuses the running fork's home");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 round 3, timing 2: a team spawn planned `dev-2` for a member
+    /// before a fork completed `dev-2`. When its turn comes the explicit name is
+    /// REFUSED (the team spawn reports that member), the fork's home and window
+    /// are untouched — while a member's OWN stopped slot, named by its recipe, is
+    /// still started again.
+    #[test]
+    fn a_team_member_whose_planned_name_a_fork_took_is_refused_but_its_own_stopped_slot_is_started() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-team-plan-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let member = Starting { agent_def: "", team: "squad", member: "dev" };
+        // The fork of a squad member: a joined agent, team root, no member.
+        write_recipe(&ws_str, "dev-2", r#"{"agent_def":"","member":"","team":"squad","from_member":"squad/dev"}"#);
+        let fork_recipe = std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap();
+        let running = || vec!["lead".to_string(), "dev".to_string(), "dev-2".to_string()];
+        let err = reserve_name(&ws_str, &running, &member, Some("dev-2"), "dev").unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        // Even once it is no longer live, it is the fork's home, not this member's.
+        let err = reserve_name(&ws_str, &|| vec!["lead".to_string()], &member, Some("dev-2"), "dev").unwrap_err();
+        assert!(err.contains("another agent's home"), "{err}");
+        assert_eq!(std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap(), fork_recipe, "the fork's home is untouched");
+        // The member's own stopped slot (recipe: this team, this member) starts again.
+        write_recipe(&ws_str, "dev", r#"{"agent_def":"","member":"dev","team":"squad"}"#);
+        let own = reserve_name(&ws_str, &|| vec!["lead".to_string()], &member, Some("dev"), "dev").unwrap();
+        assert_eq!(own.name(), "dev", "a stopped slot named by its recipe is the request's own");
+        drop(own);
+        // Another team's member with the same name is not.
+        let other = Starting { agent_def: "", team: "other", member: "dev" };
+        assert!(reserve_name(&ws_str, &|| Vec::new(), &other, Some("dev"), "dev").unwrap_err().contains("another agent's home"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Whose home is it: none is free, the request's own stopped slot is reusable,
+    /// everything else — another agent, a directory with no recipe, a plain file —
+    /// is someone else's, and a directory that cannot be inspected is refused.
+    #[test]
+    fn a_home_is_the_requests_own_only_when_its_recipe_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = std::env::temp_dir().join(format!("tmm-own-slot-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let lead = Starting { agent_def: "lead", team: "", member: "" };
+        assert_eq!(may_start_in(&ws_str, "lead", &lead), Ok(true), "no home: free");
+        write_recipe(&ws_str, "lead", r#"{"agent_def":"lead"}"#);
+        assert_eq!(may_start_in(&ws_str, "lead", &lead), Ok(true), "its own stopped slot");
+        write_recipe(&ws_str, "other", r#"{"agent_def":"reviewer"}"#);
+        assert_eq!(may_start_in(&ws_str, "other", &lead), Ok(false), "another agent's home");
+        std::fs::create_dir_all(agent_home(&ws_str, "norecipe")).unwrap();
+        assert_eq!(may_start_in(&ws_str, "norecipe", &lead), Ok(false), "a directory with no recipe yet is somebody's in-progress");
+        std::fs::write(agent_home(&ws_str, "afile"), "x").unwrap();
+        assert_eq!(may_start_in(&ws_str, "afile", &lead), Ok(false), "a plain file");
+        let nobody = Starting { agent_def: "", team: "", member: "" };
+        assert_eq!(may_start_in(&ws_str, "lead", &nobody), Ok(false), "a request that names nothing owns no slot");
+        let agents = ws.join(".tmm").join("agents");
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = may_start_in(&ws_str, "lead", &lead);
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(denied.is_err_and(|e| e.contains("cannot tell")), "an uninspectable home is refused, not free");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 round 3, P2: a failed claim removes its own empty home BEFORE its name
+    /// leaves the in-flight set. A second request that reserves the name the moment
+    /// it is released must find no old directory about to be removed from under
+    /// it: it makes its home and writes into it, and the write survives.
+    #[test]
+    fn an_old_claims_cleanup_finishes_before_a_new_claim_can_use_the_name() {
+        let ws = std::env::temp_dir().join(format!("tmm-claim-order-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let nobody = || Starting { agent_def: "", team: "", member: "" };
+        for round in 0..300 {
+            let name = format!("order-{round}");
+            let old = claim_first(&ws_str, &|| Vec::new(), &[name.clone()], true).unwrap(); // uncommitted, empty home
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (b, w, n) = (barrier.clone(), ws_str.clone(), name.clone());
+            let newer = std::thread::spawn(move || {
+                b.wait();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    assert!(std::time::Instant::now() < deadline, "the claimed name never left the in-flight set");
+                    // The same name, as an explicit team-spawn would ask for it.
+                    if let Ok(claim) = reserve_name(&w, &|| Vec::new(), &Starting { agent_def: "", team: "", member: "" }, Some(&n), &n) {
+                        let home = agent_home(&w, &n);
+                        let made = std::fs::create_dir_all(&home);
+                        let wrote = made.and_then(|_| std::fs::write(home.join("launch.json"), "{}"));
+                        drop(claim);
+                        return wrote;
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            barrier.wait();
+            drop(old);
+            newer.join().unwrap().unwrap_or_else(|e| panic!("round {round}: the new claim's home was removed from under it: {e}"));
+            assert!(agent_home(&ws_str, &name).join("launch.json").exists(), "round {round}");
+        }
+        let _ = nobody;
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The ordering the stress test above can only sample: `give_back` runs the
+    /// cleanup while the name is STILL reserved, and releases it afterwards.
+    #[test]
+    fn a_claimed_name_is_given_back_only_after_its_cleanup() {
+        let key = ("ws".to_string(), "dev-2".to_string());
+        let mut flight: std::collections::HashSet<(String, String)> = [key.clone()].into_iter().collect();
+        let mut seen_reserved = None;
+        give_back(&mut flight, &key, |during| seen_reserved = Some(during.contains(&key)));
+        assert_eq!(seen_reserved, Some(true), "the cleanup runs while the name is still reserved");
+        assert!(!flight.contains(&key), "and the name is released after it");
+    }
 }

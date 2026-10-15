@@ -1016,6 +1016,7 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
                 team: None,
                 agent_def: "",
                 member: "",
+                from_member: "",
                 input_mode: "",
             }
             .write_in(&section)

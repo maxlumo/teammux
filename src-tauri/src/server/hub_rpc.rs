@@ -745,6 +745,35 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             Ok(v)
         }
 
+        // Fork a RUNNING managed agent (board #383): a new agent with the source's
+        // effective definition, a fresh home and a fresh conversation. The
+        // source is only read. The room shows who it was forked from.
+        "hub_agent_fork" => {
+            let agent = param(p, "agent")?;
+            if crate::projects::managed_home(session, agent).is_none() {
+                return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
+            }
+            let as_name = fork_as(p)?;
+            let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
+            let result = crate::projects::spawn::fork(session, agent, as_name, by).map_err(RpcError::InvalidParams)?;
+            let who = if by.is_empty() { "human" } else { by };
+            let win = result.get("window_name").and_then(|v| v.as_str()).unwrap_or(agent).to_string();
+            // A fork of a team member JOINED the team (board #382): the room line says
+            // so, and the team's members hear it in their panes, through the same
+            // helper a join by `hub_spawn` uses.
+            let team = result.get("team").and_then(|v| v.as_str()).map(str::to_string);
+            let line = match &team {
+                Some(t) => format!("[tmm] forked {win} from {agent} — joined team {t}"),
+                None => format!("[tmm] forked {win} from {agent}"),
+            };
+            let _ = rooms::post(&room, who, &line);
+            if let Some(t) = &team {
+                let backend = result.get("backend").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                tell_team_of_join(session, t, &win, &backend, by, "");
+            }
+            Ok(result)
+        }
+
         "hub_agent_stop" | "hub_agent_restart" => {
             let agent = param(p, "agent")?;
             if crate::projects::managed_home(session, agent).is_none() {
@@ -1161,6 +1190,19 @@ fn move_line(agent: &str, team: &str, left: &str) -> String {
         (false, true) => format!("[tmm] moved {agent} — to team {team}"),
         (false, false) => format!("[tmm] moved {agent} — to team {team}, from team {left}"),
         (true, _) => format!("[tmm] left {agent} — team {left}, now standalone"),
+    }
+}
+
+/// The explicit name of a fork (board #383, reviewer P2): ABSENT or `null` is "not
+/// given" (the name is picked); anything else must be a non-empty string — an
+/// empty or non-string `as` is a request for a name that cannot be used, and is
+/// refused, not quietly replaced by an automatic one.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn fork_as(p: &serde_json::Value) -> Result<Option<&str>, RpcError> {
+    match p.get("as") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim())),
+        Some(_) => Err(RpcError::InvalidParams("as must be a non-empty agent name".into())),
     }
 }
 
@@ -4940,5 +4982,19 @@ mod tests {
             }
         }
         (checked, ungated)
+    }
+
+    /// Board #383 (reviewer P2): an absent or null `as` is "not given"; an empty,
+    /// blank or non-string one is refused, never answered with an automatic name.
+    #[test]
+    fn fork_as_is_absent_a_name_or_refused() {
+        use serde_json::json;
+        assert_eq!(fork_as(&json!({ "agent": "dev" })).unwrap(), None);
+        assert_eq!(fork_as(&json!({ "as": null })).unwrap(), None);
+        assert_eq!(fork_as(&json!({ "as": " mine " })).unwrap(), Some("mine"));
+        for bad in [json!(""), json!("   "), json!(7), json!(["x"]), json!(true)] {
+            let err = fork_as(&json!({ "as": bad.clone() })).unwrap_err();
+            assert!(matches!(&err, RpcError::InvalidParams(m) if m.contains("as must be a non-empty agent name")), "{bad}: {err:?}");
+        }
     }
 }

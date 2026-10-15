@@ -67,6 +67,7 @@ tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
 tmm agent list                       windows + agent detection + derived state
 tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
+tmm agent fork <name> [--as <new>]   a NEW agent from a running one's definition (#383)
 tmm agent team <name> <team|->       move a running agent into a team of this project, or out (-), at runtime
                                      (#384; needs the server's agent_team cap; a definition member is refused;
                                      its prompt follows at its next start; a teammate the notice did not reach
@@ -460,6 +461,7 @@ a teammate:
 | | CLI | UI |
 |---|---|---|
 | Agent | `tmm agent interrupt\|stop\|restart\|remove <name>` | roster card/context menu: Watch / Interrupt / Restart / Stop / Remove |
+| Fork | `tmm agent fork <name> [--as <new>]` | agent card/context menu: Fork (zh 复制一个), running agents only, one tap (#383) |
 | Input mode | `tmm agent mode <name> queue\|steer` | kiro card context menu: Switch to Steer / Switch to Queue (#271) |
 | Runtime team | `tmm agent team <name> <team\|->` | drag the card onto a team (mouse/pen); card menu: Move to team t / Leave team t (#384) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |

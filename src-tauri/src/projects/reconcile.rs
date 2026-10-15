@@ -394,6 +394,7 @@ mod tests {
                 team: None,
                 agent_def: "",
                 member: "",
+                from_member: "",
                 input_mode: "",
             }
             .write(&home)

@@ -372,7 +372,7 @@ mod golden_errors {
         check("unknown hub method", hub("hub_nope", serde_json::json!({})), ERR_METHOD_NOT_FOUND, "unknown hub method: hub_nope");
         // Two multi-line literals the first census missed (found by the c2
         // conversion): the agent-control arms' identity checks.
-        for m in ["hub_agent_interrupt", "hub_agent_stop", "hub_agent_restart"] {
+        for m in ["hub_agent_interrupt", "hub_agent_stop", "hub_agent_restart", "hub_agent_fork"] {
             check(m, hub(m, serde_json::json!({"agent": "nobody-such"})),
                 ERR_INVALID_PARAMS, "'nobody-such' is not an agent this app started");
         }

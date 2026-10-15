@@ -115,6 +115,9 @@ USAGE (human or agent — self-management):
   tmm agent stop|restart <name>       stop it, or bring it back resuming its conversation
   tmm agent restart --team <team>     align a team with its CURRENT definition: restart who
                                       it still has, start who it gained, stop who it dropped
+  tmm agent fork <name> [--as <new>]  start a NEW agent from a running one's definition (backend,
+                                      model, effort, mode, prompt, skills, MCP, team): fresh home,
+                                      fresh conversation; the source is untouched
   tmm agent remove <name>             eject it: stop + forget its slot + delete its home
   tmm project list                    all projects
   tmm project create <path> [--name n] [--session s] [--with-agent {backends}]
@@ -839,6 +842,24 @@ async fn main() {
                 if !errors.is_empty() {
                     std::process::exit(1);
                 }
+            }
+        }
+        // Board #383: a new agent from a running one, no parameters (CLI/UI parity
+        // with the card's Fork). `--as` names it; otherwise the source's name,
+        // uniquified.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("fork") => {
+            let session = need_project(&ctx);
+            let Some(name) = rest.get(1).cloned() else {
+                fail(EXIT_USAGE, "agent fork needs a name: tmm agent fork <name> [--as <new>]");
+            };
+            let by = ctx.agent.clone().unwrap_or_default();
+            let as_name = fork_as_flag(&flags).unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+            let r = rpc(&ctx, "hub_agent_fork", json!({ "session": session, "agent": name, "as": as_name, "by": by })).await;
+            if ctx.json {
+                println!("{r}");
+            } else {
+                let win = r.get("window_name").and_then(|v| v.as_str()).unwrap_or(&name);
+                println!("✓ forked {name} → {win}");
             }
         }
         ("agent", rest)
@@ -1763,6 +1784,18 @@ fn has_address(body: &str) -> bool {
 }
 
 /// `--flag value` / `--flag` / `-f` → map; the rest are positionals.
+/// `--as` of `tmm agent fork` (board #383, reviewer P2): ABSENT means the name is
+/// picked; present, it must carry a non-empty name. `--as` with no value, or an
+/// empty one, asks for a name that cannot be used and is refused here, not read
+/// as "not given" and answered with an automatic name.
+fn fork_as_flag(flags: &std::collections::HashMap<String, Option<String>>) -> Result<Option<String>, String> {
+    match flags.get("as") {
+        None => Ok(None),
+        Some(Some(name)) if !name.trim().is_empty() => Ok(Some(name.trim().to_string())),
+        Some(_) => Err("--as needs a name: tmm agent fork <name> --as <new>".to_string()),
+    }
+}
+
 /// Flags known to take a value consume the next arg; boolean flags don't.
 /// The third return is every valued occurrence in order, so a flag that may be
 /// REPEATED (`--image a.png --image b.png`) does not lose all but the last —
@@ -1771,7 +1804,7 @@ fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<Str
     const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re"];
+                          "in", "at", "to", "code", "signal", "re", "as"];
     let mut flags = std::collections::HashMap::new();
     let mut pos = Vec::new();
     let mut repeats: Vec<(String, String)> = Vec::new();
@@ -2454,7 +2487,7 @@ mod tests {
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "--re ", "--join ", "tmm agent team"] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }
@@ -2688,6 +2721,22 @@ mod tests {
                 absolutize_ref("~/shot.png"),
                 std::path::Path::new(&home).join("shot.png").to_string_lossy().to_string()
             );
+        }
+    }
+
+    /// Board #383 (reviewer P2): `--as` through the real argument splitter. Not
+    /// given = the name is picked; given empty or without a value = refused.
+    #[test]
+    fn fork_as_is_absent_a_name_or_refused() {
+        let flags_of = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            split_flags(&args).0
+        };
+        assert_eq!(fork_as_flag(&flags_of(&["agent", "fork", "dev"])), Ok(None));
+        assert_eq!(fork_as_flag(&flags_of(&["agent", "fork", "dev", "--as", " mine "])), Ok(Some("mine".to_string())));
+        for bad in [&["agent", "fork", "dev", "--as"][..], &["agent", "fork", "dev", "--as", ""], &["agent", "fork", "dev", "--as", "  "]] {
+            let err = fork_as_flag(&flags_of(bad)).unwrap_err();
+            assert!(err.contains("--as needs a name"), "{bad:?}: {err}");
         }
     }
 }

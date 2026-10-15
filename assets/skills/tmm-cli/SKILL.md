@@ -178,6 +178,12 @@ tmm agent restart <name>            # bring it back, resuming its conversation
 tmm agent restart --team <team>     # align a team with its current definition:
                                     #   restart who it still has, start who it
                                     #   gained, stop who it dropped (home kept)
+tmm agent fork <name> [--as <new>]  # a NEW agent from a RUNNING one: its backend,
+                                    #   model, effort, mode, prompt, skills, MCP
+                                    #   and team, in a fresh home with a fresh
+                                    #   conversation; the source is untouched.
+                                    #   Name = <name>-2 (or --as); a stopped
+                                    #   agent or a deleted definition is refused
 tmm agent team <name> <team|->      # move a running agent into a team of this
                                     #   project, or out (-), at runtime; its
                                     #   prompt follows at its next start; a

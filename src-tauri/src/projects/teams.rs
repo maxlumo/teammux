@@ -172,13 +172,17 @@ pub fn expand(root: &RegTeam, lookup: &dyn Fn(&str) -> Result<Option<RegTeam>, S
 /// One roster line's raw material: final window name, role, nesting path.
 pub type RosterEntry = (String, String, String);
 
-/// The definition a member actually spawns with: the base (or inline) def,
-/// renamed to the member, with the role and the team roster appended to its
-/// persona. `roster` is every member's FINAL window name + role, in order —
-/// computed by the caller after uniquifying, so the names in the prompt are
-/// the names that exist.
-pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, roster: &[RosterEntry]) -> Result<RegAgent, String> {
-    let team = &flat.team;
+/// A team's description as instructions, if it has any: the ONE rule for what a
+/// team's text is, shared by a member's own block, a fork's sub-team line and a
+/// joiner's block.
+fn description_of(team: &RegTeam) -> Option<&str> {
+    let d = team.description.trim();
+    (!d.is_empty()).then_some(d)
+}
+
+/// A member's definition before any team text: its base (or inline) agent, named
+/// `window_name`, with the member's own model / effort / input-mode overrides.
+fn member_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str) -> Result<RegAgent, String> {
     let member = &flat.member;
     let mut def = match (member.base.trim().is_empty(), base, &member.agent) {
         (false, Some(b), _) => b.clone(),
@@ -196,14 +200,54 @@ pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, ro
     if !member.input_mode.trim().is_empty() {
         def.input_mode = member.input_mode.trim().to_string();
     }
+    Ok(def)
+}
+
+/// A FORK of a team member (board #383): the member's definition — its base, its
+/// overrides, its role and the briefs of the enclosing teams — WITHOUT a team
+/// section. The fork is a joined agent, and the one team section (the team, its
+/// teammates, "you joined") is built by `joined_block` when it is materialized
+/// (board #382); `effective_def`'s own block would make a second one.
+pub fn forked_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str) -> Result<RegAgent, String> {
+    let mut def = member_def(flat, base, window_name)?;
+    let mut extra = Vec::new();
+    // The member's OWN (sub-)team's rules travel with it. The root's description is
+    // the new team section's (`joined_block`), so it is not repeated here.
+    let root = flat.path.split('/').next().unwrap_or(&flat.team.name);
+    if flat.team.name != root {
+        if let Some(d) = description_of(&flat.team) {
+            extra.push(format!("Your sub-team \"{}\" (within \"{root}\"): {d}", flat.team.name));
+        }
+    }
+    if !flat.member.role.trim().is_empty() {
+        extra.push(format!("Your role: {}", flat.member.role.trim()));
+    }
+    extra.extend(flat.briefs.iter().map(|b| format!("From the enclosing team: {b}")));
+    if !extra.is_empty() {
+        let system = def.system.trim();
+        let extra = extra.join("\n");
+        def.system = if system.is_empty() { extra } else { format!("{system}\n\n{extra}") };
+    }
+    Ok(def)
+}
+
+/// The definition a member actually spawns with: the base (or inline) def,
+/// renamed to the member, with the role and the team roster appended to its
+/// persona. `roster` is every member's FINAL window name + role, in order —
+/// computed by the caller after uniquifying, so the names in the prompt are
+/// the names that exist.
+pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, roster: &[RosterEntry]) -> Result<RegAgent, String> {
+    let team = &flat.team;
+    let member = &flat.member;
+    let mut def = member_def(flat, base, window_name)?;
     let mut system = def.system.trim().to_string();
     let mut block = format!("## Your team: \"{}\"", team.name);
     let root = flat.path.split('/').next().unwrap_or(&team.name);
     if root != team.name {
         block += &format!(" (a sub-team within \"{root}\": {})", flat.path);
     }
-    if !team.description.trim().is_empty() {
-        block += &format!("\n{}", team.description.trim());
+    if let Some(d) = description_of(team) {
+        block += &format!("\n{d}");
     }
     block += &format!("\n\nYou are \"{window_name}\".");
     if !member.role.trim().is_empty() {
@@ -257,7 +301,7 @@ pub fn member_role(flat: &[Flat], path: &str, member: &str) -> String {
 
 pub fn joined_block(root: &str, team: Option<&RegTeam>, flat: &[Flat], window_name: &str, mates: &[(String, String, String)]) -> String {
     let mut block = format!("## Your team: \"{root}\"");
-    if let Some(d) = team.map(|t| t.description.trim()).filter(|d| !d.is_empty()) {
+    if let Some(d) = team.and_then(description_of) {
         block += &format!("\n{d}");
     }
     block += &format!("\n\nYou are \"{window_name}\". You joined this team when you were started; its definition does not list you.");

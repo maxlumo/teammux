@@ -475,6 +475,11 @@ export function createWsApi(connection: Connection) {
    * conversation because the project declaration did not have it yet. */
   const hubAgentRestart = (session: string, agent: string) =>
     call<{ restarted: string; resumed: boolean }>('hub_agent_restart', { session, agent }, 60000);
+  /** Fork a RUNNING agent (board #383): a new agent with its effective
+   * definition, a fresh home and conversation; the source is untouched.
+   * `as` names it, otherwise the source's name is uniquified. */
+  const hubAgentFork = (session: string, agent: string, as?: string) =>
+    call<{ window_name: string; pane: string; backend: string; forked_from: string }>('hub_agent_fork', { session, agent, ...(as ? { as } : {}) }, 60000);
   /** Align a team with its CURRENT definition (board #286): restart the
    * members it still has, spawn those it gained, stop those it dropped. */
   const hubTeamRestart = (session: string, team: string, only?: string[]) =>
@@ -538,7 +543,7 @@ export function createWsApi(connection: Connection) {
     hubCommand, hubLog, hubLogAround, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
-    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart,
+    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork,
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
@@ -585,7 +590,7 @@ export const RPC_KIND = {
   boardSave: 'write', boardNote: 'write', boardDelete: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',
-  hubAgentRestart: 'write', hubTeamRestart: 'write',
+  hubAgentRestart: 'write', hubAgentFork: 'write', hubTeamRestart: 'write',
   registryList: 'read', registrySave: 'write', registryDelete: 'write',
   globalPromptGet: 'read', globalPromptSet: 'write',
   teamsList: 'read', teamsSave: 'write', teamsDelete: 'write',
