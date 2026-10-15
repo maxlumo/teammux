@@ -479,7 +479,18 @@ fn claude_bedrock_5xx(spaced: &str) -> bool {
 }
 
 
-/// Is this reassembled paint block Claude Code's OWN transient-error shape?
-pub(crate) fn transient_error(_glued: &str, spaced: &str) -> bool {
-    claude_bedrock_5xx(spaced)
+/// Which of Claude Code's OWN transient-error shapes this block is (#362:
+/// by name), or `None`.
+pub(crate) fn transient_shape(_glued: &str, spaced: &str) -> Option<&'static str> {
+    claude_bedrock_5xx(spaced).then_some("bedrock_5xx")
 }
+
+/// The Claude Code version each shape above was MEASURED on (board #362):
+/// `bedrock_5xx` on 2.1.284 (#280). Raise it only with a new capture as its
+/// fixture (`recovery::tests::FIXTURES`).
+pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
+    super::Measured { shape: "bedrock_5xx", version: "2.1.284", at_most: false },
+];
+
+/// The program whose `--version` names the Claude Code a pane runs.
+pub(crate) const VERSION_PROGRAM: &str = "claude";

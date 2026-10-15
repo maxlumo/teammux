@@ -160,10 +160,42 @@ impl Backend {
     /// CLI's text inside another's pane is never a hit. `false` where none
     /// was measured.
     pub fn transient_error(self, glued: &str, spaced: &str) -> bool {
+        self.transient_shape(glued, spaced).is_some()
+    }
+
+    /// Which of this backend's transient-error shapes the block is, by the
+    /// name its `recovery_shapes` row carries (board #362), or `None`.
+    pub fn transient_shape(self, glued: &str, spaced: &str) -> Option<&'static str> {
         match self {
-            Backend::Kiro => kiro::transient_error(glued, spaced),
-            Backend::Claude => claude::transient_error(glued, spaced),
-            _ => false,
+            Backend::Kiro => kiro::transient_shape(glued, spaced),
+            Backend::Claude => claude::transient_shape(glued, spaced),
+            // Capture first (board #362 d): no shape is guessed for a CLI
+            // whose error paint was never captured on this host.
+            _ => None,
+        }
+    }
+
+    /// Every transient-error shape this backend's recovery knows, each with
+    /// the CLI version it was MEASURED on (board #362): a detector tied to a
+    /// CLI's painted text rots silently when the CLI repaints (#346, #361),
+    /// so the version it was last seen on is part of the shape. Empty where
+    /// none was measured.
+    pub fn recovery_shapes(self) -> &'static [Measured] {
+        match self {
+            Backend::Kiro => kiro::RECOVERY_SHAPES,
+            Backend::Claude => claude::RECOVERY_SHAPES,
+            _ => &[],
+        }
+    }
+
+    /// The program whose `--version` names the CLI version a pane of this
+    /// backend runs, for the recovery drift guard; `None` where recovery
+    /// has no shape to compare (board #362).
+    pub fn version_program(self) -> Option<&'static str> {
+        match self {
+            Backend::Kiro => Some(kiro::VERSION_PROGRAM),
+            Backend::Claude => Some(claude::VERSION_PROGRAM),
+            _ => None,
         }
     }
 
@@ -450,8 +482,76 @@ pub(crate) fn canonical(line: &str) -> String {
 }
 
 
+/// One recovery shape and the CLI version it was measured on (board #362).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Measured {
+    /// The shape's name, as `transient_shape` answers it.
+    pub shape: &'static str,
+    /// The newest CLI version a real paint of it was captured on.
+    pub version: &'static str,
+    /// `true` when the capture's version was not recorded and only an upper
+    /// bound is known (the two oldest kiro shapes: captured 2026-08-22/26,
+    /// before versions were written down; the first version on record on
+    /// this host is 2.18.1, 2026-09-03).
+    pub at_most: bool,
+}
+
+impl Measured {
+    /// `2.28.0`, or `≤ 2.18.1` for an upper bound.
+    pub fn label(&self) -> String {
+        if self.at_most { format!("≤ {}", self.version) } else { self.version.to_string() }
+    }
+}
+
+/// The version `shape` of `backend` was measured on (board #362 a).
+pub fn measured_version(backend: Backend, shape: &str) -> Option<&'static Measured> {
+    backend.recovery_shapes().iter().find(|m| m.shape == shape)
+}
+
+/// The first dotted number in a `--version` answer: `kiro-cli 2.31.0`,
+/// `2.1.288 (Claude Code)`, `codex-cli 0.162.1` → `[2, 31, 0]` … Pure.
+pub fn parse_version(text: &str) -> Option<Vec<u64>> {
+    text.split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
+        .map(|t| t.trim_start_matches('v'))
+        .find(|t| t.contains('.') && t.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())))
+        .map(|t| t.split('.').map(|p| p.parse().unwrap_or(0)).collect())
+}
+
+/// Is `running` newer than what `m` was measured on? An upper bound counts
+/// as its bound: anything after 2.18.1 is unmeasured for `≤ 2.18.1`. Pure.
+pub fn newer_than_measured(running: &[u64], m: &Measured) -> bool {
+    let Some(measured) = parse_version(m.version) else { return false };
+    let n = running.len().max(measured.len());
+    let at = |v: &[u64], i: usize| v.get(i).copied().unwrap_or(0);
+    (0..n).map(|i| at(running, i).cmp(&at(&measured, i))).find(|o| o.is_ne()) == Some(std::cmp::Ordering::Greater)
+}
+
 #[cfg(test)]
 mod tests {
+    /// Board #362: the `--version` answers as each CLI prints them on this
+    /// host (2026-10-15), and the comparison the drift guard makes.
+    #[test]
+    fn versions_are_read_from_each_clis_own_answer_and_compared_by_number() {
+        use super::*;
+        assert_eq!(parse_version("kiro-cli 2.31.0\n"), Some(vec![2, 31, 0]));
+        assert_eq!(parse_version("kiro-cli-chat 2.28.0"), Some(vec![2, 28, 0]));
+        assert_eq!(parse_version("2.1.288 (Claude Code)"), Some(vec![2, 1, 288]));
+        assert_eq!(parse_version("codex-cli 0.162.1"), Some(vec![0, 162, 1]));
+        assert_eq!(parse_version("v1.2"), Some(vec![1, 2]));
+        assert_eq!(parse_version("no version here"), None);
+        assert_eq!(parse_version("build 42"), None, "a lone number is not a version");
+        let m = |v: &'static str, at_most| Measured { shape: "s", version: v, at_most };
+        assert!(newer_than_measured(&[2, 31, 0], &m("2.28.0", false)));
+        assert!(newer_than_measured(&[2, 28, 1], &m("2.28.0", false)));
+        assert!(newer_than_measured(&[2, 100, 0], &m("2.28.0", false)), "by number, not by text");
+        assert!(!newer_than_measured(&[2, 28, 0], &m("2.28.0", false)));
+        assert!(!newer_than_measured(&[2, 28], &m("2.28.0", false)), "2.28 is 2.28.0");
+        assert!(!newer_than_measured(&[2, 9, 9], &m("2.28.0", false)));
+        assert!(newer_than_measured(&[2, 18, 2], &m("2.18.1", true)), "an upper bound counts as its bound");
+        assert_eq!(m("2.18.1", true).label(), "≤ 2.18.1");
+        assert_eq!(m("2.28.0", false).label(), "2.28.0");
+    }
+
     /// Board #264, measured 2026-09-28: what each CLI's prompt hook reports
     /// after a slash command, one shape per backend file.
     #[test]

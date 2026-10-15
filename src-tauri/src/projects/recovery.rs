@@ -112,6 +112,36 @@ fn is_backend_error(backend: &str, glued: &str, spaced: &str) -> bool {
 }
 
 fn signature_within(backend: &str, text: &str, window: usize) -> Option<String> {
+    let blocks = paint_blocks(text, window);
+    let mut hits = 0u32;
+    let mut ids: Vec<String> = Vec::new();
+    for (block, spaced) in &blocks {
+        let c = crate::backends::canonical(block);
+        // A block QUOTING the error (a chat delivery typed into the pane, or
+        // its echo in the conversation) is not the agent having one — and a
+        // quote's id must not pollute the signature either.
+        if c.contains("tmmchat") {
+            continue;
+        }
+        if !is_backend_error(backend, block, spaced) {
+            continue;
+        }
+        hits += 1;
+        if let Some(id) = extract_request_id(block) {
+            ids.push(id);
+        }
+    }
+    if hits == 0 {
+        return None;
+    }
+    ids.sort();
+    ids.dedup();
+    Some(format!("{}|{}", hits, ids.join(",")))
+}
+
+/// The last `window` lines of `text` reassembled into paint blocks, each as
+/// (glued, spaced).
+fn paint_blocks(text: &str, window: usize) -> Vec<(String, String)> {
     let lines: Vec<&str> = {
         let mut v: Vec<&str> = text.lines().rev().take(window).collect();
         v.reverse();
@@ -146,30 +176,7 @@ fn signature_within(backend: &str, text: &str, window: usize) -> Option<String> 
             open = true;
         }
     }
-    let mut hits = 0u32;
-    let mut ids: Vec<String> = Vec::new();
-    for (block, spaced) in &blocks {
-        let c = crate::backends::canonical(block);
-        // A block QUOTING the error (a chat delivery typed into the pane, or
-        // its echo in the conversation) is not the agent having one — and a
-        // quote's id must not pollute the signature either.
-        if c.contains("tmmchat") {
-            continue;
-        }
-        if !is_backend_error(backend, block, spaced) {
-            continue;
-        }
-        hits += 1;
-        if let Some(id) = extract_request_id(block) {
-            ids.push(id);
-        }
-    }
-    if hits == 0 {
-        return None;
-    }
-    ids.sort();
-    ids.dedup();
-    Some(format!("{}|{}", hits, ids.join(",")))
+    blocks
 }
 
 /// `… (request_id: 30010907-33c4-…)` or v3's `(Request ID: …)` → the id token.
@@ -453,6 +460,130 @@ pub fn check_once() {
                 | Decision::GiveUp { first: false } => {}
             }
         }
+    }
+}
+
+/// The recovery drift warning for `backend` running `running` (board #362 b),
+/// or `None` when every shape it knows was measured on that version or a
+/// newer one. A detector tied to a CLI's painted text rots silently when the
+/// CLI repaints (#346, #361 were found by the owner noticing a stalled
+/// agent), so a newer CLI than the one a shape was measured on is said out
+/// loud. No action follows from it. Pure.
+pub fn drift_warning(backend: crate::backends::Backend, running: &str) -> Option<String> {
+    let version = crate::backends::parse_version(running)?;
+    let mut by_label: Vec<(String, Vec<String>)> = Vec::new();
+    for m in backend.recovery_shapes().iter().filter(|m| crate::backends::newer_than_measured(&version, m)) {
+        let name = m.shape.replace('_', " ");
+        match by_label.iter_mut().find(|(l, _)| *l == m.label()) {
+            Some((_, names)) => names.push(name),
+            None => by_label.push((m.label(), vec![name])),
+        }
+    }
+    if by_label.is_empty() {
+        return None;
+    }
+    let measured = by_label.iter().map(|(l, n)| format!("{l} ({})", n.join(", "))).collect::<Vec<_>>().join(" and ");
+    Some(format!(
+        "recovery shapes for {} were measured on {measured}, running {running} — re-measure when a transient error appears",
+        backend.name()
+    ))
+}
+
+/// The version of `backend`'s CLI a NEW pane would run: its `--version`
+/// answer, with the PATH managed agents launch with (`agent_launch_path`),
+/// bounded to ten seconds. A pane started before an upgrade may still run the
+/// old binary; this is the one the next start gets.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn installed_version(backend: crate::backends::Backend) -> Option<String> {
+    let program = backend.version_program()?;
+    let path = crate::backends::shared::agent_launch_path(None, &std::env::var("PATH").unwrap_or_default());
+    let mut child = std::process::Command::new(program)
+        .arg("--version")
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+        }
+    }
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+    let v = crate::backends::parse_version(&out)?;
+    Some(v.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
+}
+
+/// The drift guard (board #362 b): for each backend recovery has shapes for,
+/// compare the installed CLI with the versions its shapes were measured on,
+/// and when it is newer post ONE `[tmm]` line in the room of every live
+/// project that runs a managed agent of that backend — once per installed
+/// version (`meta` `recovery_drift:<backend>`), so neither a gateway restart
+/// nor the daily check repeats it. Nothing else follows: no auto-action, no
+/// retry. Fail-soft throughout.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn check_drift() {
+    check_drift_with(&installed_version, &|project, backend| {
+        let Ok(panes) = crate::tmux::list_panes(&project.session) else { return false };
+        panes.iter().any(|p| {
+            super::is_managed_in(Some(project.path.as_str()), &p.window_name)
+                && super::agents::detect_pane(Some(project.path.as_str()), p).is_some_and(|a| a.backend == backend.name())
+        })
+    });
+}
+
+/// `check_drift` with what it asks of the machine injected: the installed
+/// version, and whether a project runs a managed agent of a backend. Returns
+/// how many rooms were told.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn check_drift_with(
+    installed: &dyn Fn(crate::backends::Backend) -> Option<String>,
+    runs: &dyn Fn(&super::Project, crate::backends::Backend) -> bool,
+) -> usize {
+    let projects = match super::with_store(|s| s.list_projects(false)) {
+        Ok(list) => list,
+        Err(_) => return 0,
+    };
+    let mut total = 0;
+    for backend in crate::backends::Backend::ALL {
+        if backend.recovery_shapes().is_empty() {
+            continue;
+        }
+        let Some(running) = installed(backend) else { continue };
+        let Some(warning) = drift_warning(backend, &running) else { continue };
+        let key = format!("recovery_drift:{}", backend.name());
+        if super::with_store(|s| s.meta_get(&key)).ok().flatten().as_deref() == Some(running.as_str()) {
+            continue;
+        }
+        let mut told = 0;
+        for project in projects.iter().filter(|p| runs(p, backend)) {
+            let room = if project.room.is_empty() { format!("proj:{}", project.session) } else { project.room.clone() };
+            if super::rooms::post(&room, "tmm", &format!("[tmm] {warning}")).is_ok() {
+                told += 1;
+            }
+        }
+        if told > 0 {
+            let _ = super::with_store(|s| s.meta_set(&key, &running));
+            eprintln!("projects: {warning} (told {told} project room(s))");
+        }
+        total += told;
+    }
+    total
+}
+
+/// At gateway start (after the first capture ticks have adopted the live
+/// sessions) and then once a day.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub async fn drift_loop() {
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    loop {
+        let _ = tokio::task::spawn_blocking(check_drift).await;
+        tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
     }
 }
 
@@ -1180,5 +1311,117 @@ mod tests {
         // Window 7 and the other session were untouched.
         assert_eq!(t.decide("s", "w7", 1_001, "1|a", silent), Decision::Wait);
         assert_eq!(t.decide("other", "w1", 1_001, "1|a", silent), Decision::Wait);
+    }
+
+    // ---- board #362: version-stamped fixtures, the drift guard, the cap ----
+
+    /// Every recovery fixture above, with the backend that paints it, the
+    /// shape it is, and the CLI version it was captured on (board #362 a).
+    /// "≤ 2.18.1" = captured before versions were written down.
+    const FIXTURES: &[(&str, &str, &str, &str)] = &[
+        ("kiro", "stream_error", "≤ 2.18.1", REAL),
+        ("kiro", "stream_error", "≤ 2.18.1", REAL_WRAPPED),
+        ("kiro", "model_unavailable", "≤ 2.18.1", MODEL_ERR),
+        ("kiro", "high_traffic", "2.22.1", HIGH_TRAFFIC_SCREEN),
+        ("kiro", "high_traffic", "2.28.0", KIRO_228_WIDE),
+        ("kiro", "high_traffic", "2.28.0", KIRO_228_NARROW),
+        ("kiro", "high_traffic", "2.28.0", KIRO_228_OPUS),
+        ("kiro", "too_many_requests", "2.28.0", TMR_RESEARCHER),
+        ("kiro", "too_many_requests", "2.28.0", TMR_WRITER_SHORT),
+        ("kiro", "too_many_requests", "2.28.0", TMR_WRITER_CREDITS),
+        ("kiro", "too_many_requests", "2.28.0", TMR_BUILDER),
+        ("kiro", "too_many_requests", "2.28.0", TMR_NARROW),
+        ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_WIDE),
+        ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_NARROW),
+    ];
+
+    /// The shapes `backend` sees in `text`, block by block.
+    fn shapes_in(backend: &str, text: &str) -> Vec<&'static str> {
+        let b = crate::backends::Backend::parse(backend).unwrap();
+        paint_blocks(text, DEEP_CAPTURE_LINES + 120).iter()
+            .filter(|(glued, _)| !crate::backends::canonical(glued).contains("tmmchat"))
+            .filter_map(|(glued, spaced)| b.transient_shape(glued, spaced))
+            .collect()
+    }
+
+    /// Board #362 a: every fixture is exactly its shape; every shape has a
+    /// fixture; and the version a shape says it was measured on is the newest
+    /// of its fixtures' stamps, an upper bound exactly when they all are. A
+    /// shape's version can only move with a captured fixture beside it.
+    #[test]
+    fn every_shape_is_stamped_with_the_version_its_fixtures_were_captured_on() {
+        for (backend, shape, stamp, text) in FIXTURES {
+            assert_eq!(shapes_in(backend, text), [*shape], "{backend} {shape} ({stamp})");
+        }
+        for backend in crate::backends::Backend::ALL {
+            for m in backend.recovery_shapes() {
+                let stamps: Vec<&str> = FIXTURES.iter().filter(|f| f.0 == backend.name() && f.1 == m.shape).map(|f| f.2).collect();
+                assert!(!stamps.is_empty(), "{} {} has no captured fixture", backend.name(), m.shape);
+                let newest = stamps.iter().max_by_key(|s| crate::backends::parse_version(s)).unwrap();
+                assert_eq!(m.label(), *newest, "{} {}: measured on the newest capture", backend.name(), m.shape);
+                assert_eq!(m.at_most, stamps.iter().all(|s| s.starts_with('≤')), "{} {}", backend.name(), m.shape);
+                assert_eq!(crate::backends::measured_version(backend, m.shape), Some(m));
+            }
+        }
+        assert_eq!(crate::backends::measured_version(crate::backends::Backend::Kiro, "nope"), None);
+        for b in [crate::backends::Backend::Codex, crate::backends::Backend::Grok, crate::backends::Backend::Omp, crate::backends::Backend::Kimi] {
+            assert!(b.recovery_shapes().is_empty(), "{}: capture first, no guessed shape (board #362 d)", b.name());
+        }
+    }
+
+    /// Board #362 b: the warning names every shape measured on an older CLI
+    /// than the one running, grouped by version, and nothing when none is.
+    #[test]
+    fn a_newer_cli_than_the_shapes_were_measured_on_is_said_once_in_words() {
+        use crate::backends::Backend;
+        assert_eq!(drift_warning(Backend::Kiro, "2.31.0").as_deref(), Some(
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable) and 2.28.0 (high traffic, too many requests), running 2.31.0 — re-measure when a transient error appears"));
+        assert_eq!(drift_warning(Backend::Kiro, "2.28.0").as_deref(), Some(
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable), running 2.28.0 — re-measure when a transient error appears"),
+            "the upper-bound shapes are unmeasured on any kiro after 2.18.1");
+        assert_eq!(drift_warning(Backend::Kiro, "2.18.1"), None);
+        assert_eq!(drift_warning(Backend::Claude, "2.1.284"), None, "running what was measured");
+        assert_eq!(drift_warning(Backend::Claude, "2.1.200"), None, "older than measured is not drift");
+        assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (bedrock 5xx), running 2.1.288"));
+        assert_eq!(drift_warning(Backend::Codex, "0.162.1"), None, "no shape, nothing to drift");
+        assert_eq!(drift_warning(Backend::Kiro, "garbage"), None);
+    }
+
+    /// Board #362 b, the posting: one `[tmm]` line in each room of a project
+    /// that runs the backend, once per installed version; a restart (a second
+    /// call) repeats nothing, a newer version is said again, a project that
+    /// does not run it hears nothing, and a CLI that cannot be asked says
+    /// nothing and is asked again next time.
+    #[test]
+    fn the_drift_warning_is_posted_once_per_version_in_the_rooms_that_run_it() {
+        use crate::backends::Backend;
+        super::super::tests::use_test_store();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let mk = |name: &str| super::super::Project {
+            id: format!("{name}-{tag}"), name: format!("{name}-{tag}"), path: format!("/tmp/drift-{name}-{tag}"), icon: None,
+            session: format!("drift-{name}-{tag}"), adopted: false, autostart: false, created_at: 1_000,
+            last_up_at: None, last_seen_at: None, archived: false, room: format!("room:{name}-{tag}"),
+        };
+        let (with_kiro, without) = (mk("kiro"), mk("none"));
+        for p in [&with_kiro, &without] { super::super::with_store(|s| s.insert_project(p)).unwrap(); }
+        let lines = |p: &super::super::Project| -> Vec<String> {
+            super::super::rooms::history_page(&p.room, None, 50)["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] recovery shapes")).collect()
+        };
+        let version = std::cell::RefCell::new(None::<&str>);
+        let installed = |b: Backend| (b == Backend::Kiro).then(|| version.borrow().map(str::to_string)).flatten();
+        let runs = |p: &super::super::Project, b: Backend| b == Backend::Kiro && p.id == with_kiro.id;
+        assert_eq!(check_drift_with(&installed, &runs), 0, "kiro cannot be asked: nothing said");
+        *version.borrow_mut() = Some("2.31.0");
+        assert_eq!(check_drift_with(&installed, &runs), 1);
+        assert_eq!(lines(&with_kiro).len(), 1);
+        assert!(lines(&with_kiro)[0].contains("running 2.31.0"));
+        assert!(lines(&without).is_empty(), "a project that does not run kiro hears nothing");
+        assert_eq!(check_drift_with(&installed, &runs), 0, "a restart or the daily check repeats nothing");
+        *version.borrow_mut() = Some("2.32.1");
+        assert_eq!(check_drift_with(&installed, &runs), 1, "a newer CLI is said again");
+        assert_eq!(lines(&with_kiro).len(), 2);
+        for p in [&with_kiro, &without] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
+        let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
     }
 }

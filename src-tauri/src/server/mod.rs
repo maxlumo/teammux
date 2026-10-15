@@ -218,6 +218,10 @@ pub async fn start_with_socket_ready(
     {
         crate::projects::set_agent_sessions(notifications.clone());
         tokio::spawn(crate::projects::capture_loop());
+        // The recovery drift guard (board #362): at start and daily, a CLI
+        // newer than the one recovery's error shapes were measured on is
+        // said in the rooms that run it, once per version.
+        tokio::spawn(crate::projects::recovery::drift_loop());
         // Pull any pre-#107 chat history out of the legacy team.db, exactly
         // once. Blocking SQLite work, so it runs before the listener loop.
         crate::projects::rooms::import_legacy();

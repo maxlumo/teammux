@@ -1283,16 +1283,42 @@ fn high_traffic(spaced: &str) -> bool {
 }
 
 
-/// Is this reassembled paint block one of kiro's OWN transient-error shapes
-/// (board #280: each backend owns its shapes)? `glued` is the block with its
-/// lines joined without separators, `spaced` with spaces.
-pub(crate) fn transient_error(glued: &str, spaced: &str) -> bool {
+/// Which of kiro's OWN transient-error shapes this reassembled paint block is
+/// (board #280: each backend owns its shapes; #362: by name), or `None`.
+/// `glued` is the block with its lines joined without separators, `spaced`
+/// with spaces.
+pub(crate) fn transient_shape(glued: &str, spaced: &str) -> Option<&'static str> {
     let c = super::canonical(glued);
-    (c.starts_with(HEADER) && TRANSIENT.iter().any(|m| c.contains(m)))
-        || c.starts_with(MODEL_UNAVAILABLE)
-        || high_traffic(spaced)
-        || too_many_requests(spaced)
+    if c.starts_with(HEADER) && TRANSIENT.iter().any(|m| c.contains(m)) {
+        Some("stream_error")
+    } else if c.starts_with(MODEL_UNAVAILABLE) {
+        Some("model_unavailable")
+    } else if high_traffic(spaced) {
+        Some("high_traffic")
+    } else if too_many_requests(spaced) {
+        Some("too_many_requests")
+    } else {
+        None
+    }
 }
+
+/// The CLI version each shape above was MEASURED on (board #362): the newest
+/// kiro-cli a real paint of it was captured on. `stream_error` and
+/// `model_unavailable` were captured 2026-08-22 and 08-26, before a version
+/// was written down; the first kiro-cli on record on this host is 2.18.1
+/// (2026-09-03), so both are an upper bound, and neither has been seen since.
+/// `high_traffic` was captured on 2.22.1 (`●`, #267) and 2.28.0 (`•`, #361),
+/// `too_many_requests` on 2.28.0 (#370). Raise a version only with a new
+/// capture as its fixture (`recovery::tests::FIXTURES`).
+pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
+    super::Measured { shape: "stream_error", version: "2.18.1", at_most: true },
+    super::Measured { shape: "model_unavailable", version: "2.18.1", at_most: true },
+    super::Measured { shape: "high_traffic", version: "2.28.0", at_most: false },
+    super::Measured { shape: "too_many_requests", version: "2.28.0", at_most: false },
+];
+
+/// The program whose `--version` names the kiro-cli a pane runs.
+pub(crate) const VERSION_PROGRAM: &str = "kiro-cli";
 
 #[cfg(test)]
 mod tests {
@@ -1477,7 +1503,7 @@ mod tests {
         assert!(!too_many_requests(&format!("• Auto is experiencing high traffic. Try again, or select another model. (Request ID: {id})")));
         // transient_error is the one door: the glued form is canonicalised for
         // the older shapes, and this one reads the spaced form.
-        assert!(transient_error(&format!("• {sentence}").replace(' ', ""), &format!("• {sentence}")));
+        assert_eq!(transient_shape(&format!("• {sentence}").replace(" ", ""), &format!("• {sentence}")), Some("too_many_requests"));
     }
 
     #[test]

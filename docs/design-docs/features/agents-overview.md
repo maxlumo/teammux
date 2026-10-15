@@ -292,7 +292,7 @@ A fixed prefix asserts every byte before the part that matters, so any repaint b
 | `kiro::high_traffic` (via `transient_error`) | column-zero bullet + the sentence | **was blind, fixed** |
 | `kiro::live_input_mode` (`toast_mode`, `footer_mode`; used by `delivery::input_mode_seen`, `hub_agents`) | toast bullet, busy footer | handled (#346, `TOAST_BULLETS`) |
 | `kiro::too_many_requests` (via `transient_error`, #370) | column-zero bullet from `HEAD_GLYPHS` + the rate-limit sentence | written for both glyphs; measured on `•` only |
-| `kiro::transient_error`, the stream-error and model-unavailable shapes | `canonical(block)`, ASCII letters and digits only | glyph-agnostic by construction; no instance of either shape in this host's scrollbacks, so their 2.28 paint is unmeasured |
+| `kiro::transient_error`, the stream-error and model-unavailable shapes | `canonical(block)`, ASCII letters and digits only | glyph-agnostic by construction; no instance of either shape in this host's scrollbacks, so their 2.28 paint is unmeasured (stamped `≤ 2.18.1`, board #362: the recovery drift guard says so in the room on any newer kiro, agent-status.md) |
 | `recovery.rs` block splitter, `headless_error_tail`, `extract_request_id` | column zero vs indent, blank line, `tmmchat`, `requestid` | glyph-agnostic (they never look at the head) |
 | `kiro::sniff_kiro` / `vitals` | the status line: agent name, `·` segments, pie `○◔◑◕●◯` | no bullet; the 2.28 line `builder · claude-sonnet-5.5 · high · ◑ 29% · …` reads |
 | `tmux::file_picker_open` | footer text `esc to cancel` + `to select` | no glyph |
