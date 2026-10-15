@@ -7,6 +7,13 @@ third environment, Docker, with its own smoke `npm run test:e2e:docker`
 (below). This file governs the frontend side, the one Rust rule below, and
 that environment.
 
+A change to Rust the phone compiles (the `backends/` leaf, anything not behind
+`cfg(not(any(target_os = "android", target_os = "ios")))`) also runs the
+Android compile check, `cargo check … --lib` for `aarch64-linux-android`. Always
+with `--lib`: `build:android` builds only the lib, and the bins do not compile
+for Android. The command and the reason are in
+[android-platform.md](../design-docs/features/android-platform.md#the-android-compile-check-is-the-lib-never-the-bins-board-378).
+
 ## The Rust suite runs SEQUENTIALLY and ISOLATED, and never kills a server it did not make (board #349)
 
 Incident 2026-10-12 05:51: a bare `cargo test … --lib` — no `--test-threads=1`

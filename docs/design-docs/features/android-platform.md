@@ -222,6 +222,40 @@ APK: `find ~/.cache/builds -name '*.apk' -newermt '-10 minutes'`.
 - JDK 17 (`JAVA_HOME` → openjdk@17) and the `aarch64-linux-android`
   rustup target are present.
 
+## The Android compile check is the lib, never the bins (board #378)
+
+`npm run build:android` compiles ONE crate target for the phone: the `[lib]`
+(`libtmux_mobile.so`, the cdylib the Gradle `rustBuild` task asks Tauri for).
+The three `[[bin]]`s (`tmm`, `server`, the desktop `tmux-mobile`) are host
+programs and are never built for Android: a real build leaves only
+`libtmux_mobile.{a,rlib,so}` in the cargo target's `aarch64-linux-android/release`
+(no bin artifact, in `deps/` either), and the APK's `arm64-v8a/` holds that one
+`.so`. So the check that matches the build is
+`cargo check` on the lib alone:
+
+```bash
+export NDK_HOME="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"
+TC="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang" \
+AR_aarch64_linux_android="$TC/llvm-ar" \
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android24-clang" \
+  cargo check --manifest-path src-tauri/Cargo.toml --features gui \
+    --target aarch64-linux-android --lib
+```
+
+Without `--lib`, cargo also checks the bins for Android and fails on main
+(`tmm` 28 errors, `server` 1): `chrono` and the desktop-only modules are
+compiled out for the target, and those programs use them. Measured 2026-10-15
+on main `29277a55`: exit 101 without `--lib`, exit 0 with it (80 warnings, the
+desktop-only items that are unused on the phone). The bins are not gated out of
+the Android target: nothing builds them there, and a stub `main` per bin would
+be scaffolding for a command nobody needs.
+
+Run it when a change touches code the phone compiles — the `backends/` leaf and
+anything not behind `cfg(not(any(target_os = "android", target_os = "ios")))`.
+The desktop gate (`test:rust`, Linux) never compiles the phone's `cfg` set, so a
+desktop-only import in shared code passes it and breaks the first APK (#207).
+
 ## Native Notifications (board #72)
 
 `tauri-plugin-notification` is part of the `gui` Cargo feature and registered
@@ -233,10 +267,9 @@ creates the default notification channel on first use. The webview receives a
 notification code (`src/lib/hub/notifications.ts`) needs no plugin import —
 see `docs/design-docs/features/notifications.md` for the two shim facts it
 has to respect (permission reads `denied` before the first ask; the shim
-settles asynchronously). Verified here with
-`cargo check --features gui --target aarch64-linux-android` under the NDK
-toolchain env (`CC_aarch64_linux_android` etc. — `aws-lc-sys` needs the
-NDK clang, which `tauri android build` exports itself).
+settles asynchronously). Verified here with the Android compile check above
+(the toolchain env it sets — `CC_aarch64_linux_android` etc. — is what
+`aws-lc-sys` needs: the NDK clang, which `tauri android build` exports itself).
 
 ## Fixed shell elements carry the status-bar inset themselves (board #332)
 
