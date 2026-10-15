@@ -29,8 +29,14 @@ enum Act {
     /// not describe as success.
     LoseAnswer,
     /// Answer a save the way the server does when the hand-off reached no
-    /// pane (`offline`, board #347): the board is right, nobody was typed to.
+    /// pane (`dispatch: "offline"` with hub_post's `offline` rows, board
+    /// #347): the board is right, nobody was typed to.
     Offline,
+    /// The server saved but names a name it does not declare: nothing posted.
+    NotManaged,
+    /// The save landed and the telling failed (board #377 review P1-A): an
+    /// ANSWER, not an error.
+    Failed,
 }
 
 struct Fake {
@@ -52,8 +58,17 @@ fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
     fake_with(plan, "")
 }
 
+/// A server that predates `board_dispatch`: its login answer carries no `caps`.
+fn old_fake() -> Fake {
+    fake_opts(vec![], "", false)
+}
+
 /// The same fake, with the issue already assigned to `assignee`.
 fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
+    fake_opts(plan, assignee, true)
+}
+
+fn fake_opts(plan: Vec<(&'static str, Act)>, assignee: &str, caps: bool) -> Fake {
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
     let sent: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -74,9 +89,12 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
                 // id 1: auth.
                 let Some(Ok(Message::Text(_))) = ws.next().await else { continue };
-                let _ = ws
-                    .send(Message::Text(r#"{"id":1,"result":{"ok":true}}"#.to_string().into()))
-                    .await;
+                let login = if caps {
+                    r#"{"id":1,"result":{"ok":true,"authenticated":true,"caps":["board_dispatch"]}}"#
+                } else {
+                    r#"{"id":1,"result":{"ok":true,"authenticated":true}}"#
+                };
+                let _ = ws.send(Message::Text(login.to_string().into())).await;
                 // id 2: the one call.
                 let Some(Ok(Message::Text(raw))) = ws.next().await else { continue };
                 let call: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -115,8 +133,19 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
                         "agents": [{ "name": "builder-2", "managed": true }], "session": "p"
                     }}),
                     ("hub_board_save", Act::Offline) => serde_json::json!({ "id": 2, "result": {
-                        "ok": true, "id": 12, "offline": [{ "name": "builder-2", "why": "stopped" }]
+                        "ok": true, "id": 12, "dispatch": "offline", "offline": [{ "name": "builder-2", "why": "stopped" }]
                     }}),
+                    ("hub_board_save", Act::NotManaged) => serde_json::json!({ "id": 2, "result": {
+                        "ok": true, "id": 12, "dispatch": "offline",
+                        "dispatch_error": "builder-2 is not a managed agent of this project, so nothing was posted"
+                    }}),
+                    ("hub_board_save", Act::Failed) => serde_json::json!({ "id": 2, "result": {
+                        "ok": true, "id": 12, "dispatch": "failed", "dispatch_error": "the room is full"
+                    }}),
+                    // The real server answers `dispatch` only when the request
+                    // asked and there was somebody to tell.
+                    ("hub_board_save", _) if call["params"]["dispatch"] == true && call["params"]["assignee"].as_str().is_some_and(|a| !a.is_empty()) =>
+                        serde_json::json!({ "id": 2, "result": { "ok": true, "id": 12, "dispatch": "sent" } }),
                     _ => serde_json::json!({ "id": 2, "result": { "ok": true, "id": 12 } }),
                 };
                 let _ = ws.send(Message::Text(body.to_string().into())).await;
@@ -173,19 +202,20 @@ fn a_clean_assignment_is_one_save_and_posts_nothing_itself() {
     assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save"]);
     assert_eq!(err, "", "nothing to warn about: {err:?}");
     // What the write carries is what makes the server hand the issue over:
-    // the assignee, and WHO is handing it (the brief says "by orchestrator").
+    // the assignee, WHO is handing it (the brief says "orchestrator assigned
+    // this to you"), and the request to tell the agent.
     assert_eq!(
         f.params_of("hub_board_save"),
-        serde_json::json!({ "session": "p", "id": 12, "assignee": "builder-2", "who": "orchestrator" })
+        serde_json::json!({ "session": "p", "id": 12, "assignee": "builder-2", "who": "orchestrator", "dispatch": true })
     );
 }
 
 /// Naming the SAME assignee again still sends the save. The server hands the
-/// issue over whenever a save names an assignee, and that is how a person
-/// re-sends a hand-off to an agent that was offline the first time or whose
-/// answer was lost (tmm-cli.md says so, and says it may duplicate). A CLI
-/// that skipped the save when the board already says `builder-2` would kill
-/// that recovery path without a sound.
+/// issue over whenever a flagged save names an assignee, and that is how a
+/// person re-sends a hand-off to an agent that was offline the first time or
+/// whose answer was lost (tmm-cli.md says so, and says it may duplicate). A
+/// CLI that skipped the save when the board already says `builder-2` would
+/// kill that recovery path without a sound.
 #[test]
 fn naming_the_same_assignee_again_still_sends_the_save() {
     // ALREADY assigned to the same name (the fake carries the assignee
@@ -202,6 +232,45 @@ fn naming_the_same_assignee_again_still_sends_the_save() {
     assert_eq!(f.assignee(), "", "`-` really cleared it in the fake's state");
 }
 
+/// Board #377 review P1-B. A server that predates `board_dispatch` would save
+/// a label no agent is ever told about and let the CLI print a success line.
+/// The login answer is read BEFORE the save is sent: the command refuses with
+/// nothing written.
+#[test]
+fn a_server_without_the_capability_is_refused_before_anything_is_saved() {
+    let f = old_fake();
+    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(!ok, "{out:?}");
+    assert!(!out.contains('✓'), "no success line: {out:?}");
+    assert!(err.contains("update the server") && err.contains("Nothing was saved"), "{err:?}");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents"], "the save was never sent");
+    assert_eq!(f.assignee(), "", "and the board is untouched");
+
+    // `add --assignee` is the same door; `add` without one needs no capability.
+    let (ok, _out, err) = f.run(&["board", "add", "Ship it", "--assignee", "builder-2"]);
+    assert!(!ok && err.contains("update the server"), "{err:?}");
+    assert!(!f.calls().contains(&"hub_board_save".to_string()), "{:?}", f.calls());
+    let (ok, out, _err) = f.run(&["board", "add", "Ship it"]);
+    assert!(ok && out.contains("✓ #12 on the board"), "{out:?}");
+    assert_eq!(f.calls().last().map(String::as_str), Some("hub_board_save"));
+    assert!(f.params_of("hub_board_save").get("dispatch").is_none(), "an unassigned add asks for no hand-off");
+}
+
+/// Board #377. An issue filed with an assignee hands it over at birth — one
+/// save, asking the server to tell the agent.
+#[test]
+fn add_with_an_assignee_asks_for_the_hand_off_in_the_same_save() {
+    let f = fake(vec![]);
+    let (ok, out, err) = f.run(&["board", "add", "Ship it", "--body", "Today", "--assignee", "builder-2"]);
+    assert!(ok, "{out:?} {err:?}");
+    assert!(out.contains("✓ #12 on the board"), "{out:?}");
+    assert_eq!(f.calls(), vec!["hub_board_save"]);
+    assert_eq!(
+        f.params_of("hub_board_save"),
+        serde_json::json!({ "session": "p", "title": "Ship it", "body": "Today", "who": "orchestrator", "assignee": "builder-2", "dispatch": true })
+    );
+}
+
 /// The save landed (the fake writes it) and its ANSWER was lost. The CLI
 /// cannot know whether the server also handed the issue over, so it does not
 /// say "✓": it fails, with the transport's own words, and a re-run is the
@@ -215,6 +284,28 @@ fn a_lost_answer_is_a_failure_not_a_success() {
     assert!(!err.trim().is_empty(), "it says why: {err:?}");
     assert_eq!(f.assignee(), "builder-2", "and the save did land, which is why a re-run is safe");
     assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save"]);
+}
+
+/// Board #377 review P1-A. The server SAVED and the post failed: that is an
+/// answer, and the CLI tells it apart from a failed save. The assignment is
+/// said (it is on the board), the agent not being told is said, and the exit
+/// is non-zero because the command did not finish what it was asked.
+#[test]
+fn a_failed_hand_off_is_saved_but_not_told_and_exits_non_zero() {
+    let f = fake(vec![("hub_board_save", Act::Failed)]);
+    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(!ok);
+    assert!(out.contains("✓ #12 → builder-2"), "the assignment landed and is said: {out:?}");
+    assert!(err.contains("could not be posted: the room is full"), "{err:?}");
+    assert!(err.contains("IS assigned to builder-2") && err.contains("was not told"), "{err:?}");
+    assert!(err.contains("tmm board assign 12 builder-2"), "the way to send it again is named: {err:?}");
+    assert_eq!(f.assignee(), "builder-2");
+
+    // A machine caller reads the same facts from the answer it was printed.
+    let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2", "--output", "json"]);
+    assert!(!ok);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| panic!("stdout must be JSON: {out:?}"));
+    assert_eq!((v["id"].as_i64(), v["dispatch"].as_str()), (Some(12), Some("failed")));
 }
 
 /// A save that really failed is a failure with nothing else done.
@@ -239,20 +330,22 @@ fn an_unknown_name_writes_nothing() {
     assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents"], "read and checked, never saved");
 }
 
-/// `-` clears: one save, no name to check.
+/// `-` clears: one save, no name to check, nothing to wait for.
 #[test]
 fn clearing_is_one_save_and_checks_no_name() {
     let f = fake(vec![]);
-    let (ok, out, _err) = f.run(&["board", "assign", "12", "-"]);
+    let (ok, out, err) = f.run(&["board", "assign", "12", "-"]);
     assert!(ok, "{out:?}");
     assert!(out.contains("unassigned"), "{out:?}");
+    assert_eq!(err, "", "{err:?}");
     assert_eq!(f.calls(), vec!["hub_board_get", "hub_board_save"]);
     assert_eq!(f.params_of("hub_board_save")["assignee"], "");
 }
 
 /// The server's answer says the hand-off reached no pane (the agent is
 /// stopped): the board is right, and the person at the keyboard is told, in
-/// the words `tmm send` uses, where they are looking (board #347).
+/// the words `tmm send` uses, where they are looking (board #347). Both entry
+/// points say it (reviewer's P2 on `add --assignee`).
 #[test]
 fn an_absent_assignee_is_said_on_stderr_and_the_command_still_succeeds() {
     let f = fake(vec![("hub_board_save", Act::Offline)]);
@@ -261,4 +354,15 @@ fn an_absent_assignee_is_said_on_stderr_and_the_command_still_succeeds() {
     assert!(out.contains("✓ #12 → builder-2"), "{out:?}");
     assert!(err.contains("@builder-2 is not online (stopped)"), "{err:?}");
     assert!(err.contains("nothing is queued for it"), "{err:?}");
+
+    let (ok, out, err) = f.run(&["board", "add", "Ship it", "--assignee", "builder-2"]);
+    assert!(ok, "{out:?} {err:?}");
+    assert!(err.contains("@builder-2 is not online (stopped)"), "add says it too: {err:?}");
+
+    // A name the project never declared: nothing was posted at all, and the
+    // note says why.
+    let f = fake(vec![("hub_board_save", Act::NotManaged)]);
+    let (ok, _out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(ok);
+    assert!(err.contains("not a managed agent of this project") && err.contains("nothing is queued for it"), "{err:?}");
 }

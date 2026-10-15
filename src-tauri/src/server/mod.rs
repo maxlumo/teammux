@@ -19,6 +19,17 @@ use connection::enable_tcp_keepalive;
 
 pub type NotificationHub = Arc<AgentNotificationHub>;
 
+/// What this server can do that a client may need to know BEFORE it writes,
+/// announced in the login answer as `caps` (board #377). `board_dispatch`: a
+/// `hub_board_save` that carries `dispatch: true` hands the issue to its
+/// assignee. An older server announces no `caps` at all, and a client that
+/// needs one refuses the write instead of saving a label nobody acts on. The
+/// phone's server has no Hub, so it announces none.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch"];
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) const LOGIN_CAPS: &[&str] = &[];
+
 // ─── RoomPoster implementation ───────────────────────────────────────────────
 // The notification hub needs to post into project rooms from the hook consumer
 // (a background task without a per-request context). This adapter bridges the

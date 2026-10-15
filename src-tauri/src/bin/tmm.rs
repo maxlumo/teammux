@@ -577,9 +577,21 @@ async fn main() {
                     }
                     let mut params = json!({ "session": session, "title": title, "who": who });
                     if !body.is_empty() { params["body"] = json!(body); }
-                    if let Some(Some(a)) = flags.get("assignee") { params["assignee"] = json!(a); }
-                    let r = rpc(&ctx, "hub_board_save", params).await;
-                    if ctx.json { println!("{r}"); } else { println!("✓ #{} on the board", r.get("id").and_then(|v| v.as_i64()).unwrap_or(0)); }
+                    // An issue filed WITH an assignee hands it over at birth,
+                    // like the page's create dialog (board #377): the save
+                    // asks the server to tell the agent, and refuses before
+                    // writing when this server cannot.
+                    let assignee = match flags.get("assignee") { Some(Some(a)) => Some(assign_target(a).to_string()), _ => None };
+                    let r = if let Some(a) = &assignee {
+                        params["assignee"] = json!(a);
+                        params["dispatch"] = json!(true);
+                        rpc_needing(&ctx, "board_dispatch", "hub_board_save", params).await
+                    } else {
+                        rpc(&ctx, "hub_board_save", params).await
+                    };
+                    let id = r.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if ctx.json { println!("{r}"); } else { println!("✓ #{id} on the board"); }
+                    if let Some(a) = assignee { settle_dispatch(id, &a, &r); }
                 }
                 "delete" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
@@ -622,14 +634,17 @@ async fn main() {
                             ));
                         }
                     }
-                    // ONE request saves the assignee AND tells the agent. A
+                    // ONE request saves the assignee AND asks the server to
+                    // tell the agent (`dispatch: true`). The save is
+                    // committed first, so how the telling went is read from
+                    // the ANSWER (`settle_dispatch`), not from an error. A
                     // lost answer leaves it unknown which half ran, and the
                     // recovery is the same either way: naming the assignee
                     // again saves the same value and sends the hand-off
                     // again (it may duplicate it; `tmm log --grep "board
                     // #N"` shows whether it was posted).
-                    let r = rpc(&ctx, "hub_board_save", json!({
-                        "session": session, "id": id, "assignee": name, "who": who
+                    let r = rpc_needing(&ctx, "board_dispatch", "hub_board_save", json!({
+                        "session": session, "id": id, "assignee": name, "who": who, "dispatch": true
                     })).await;
                     if ctx.json {
                         println!("{r}");
@@ -639,7 +654,7 @@ async fn main() {
                     } else {
                         println!("✓ #{id} → {name}");
                     }
-                    say_offline(&r);
+                    settle_dispatch(id, name, &r);
                 }
                 "take" | "move" | "note" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
@@ -1760,6 +1775,22 @@ async fn rpc(ctx: &Ctx, method: &str, params: Value) -> Value {
 }
 
 async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, String)> {
+    try_rpc_with(ctx, method, params, None).await
+}
+
+/// `rpc` for a call that only an up-to-date server can do (board #377): the
+/// login answer's `caps` is read BEFORE the call is sent, so a server that
+/// lacks `need` is refused with nothing written. Without this a `tmm board
+/// assign` against an older gateway would save a label no agent is ever told
+/// about and print a success line.
+async fn rpc_needing(ctx: &Ctx, need: &str, method: &str, params: Value) -> Value {
+    match try_rpc_with(ctx, method, params, Some(need)).await {
+        Ok(v) => v,
+        Err((code, msg)) => fail(code, &msg),
+    }
+}
+
+async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>) -> Result<Value, (i32, String)> {
     let connect = tokio_tungstenite::connect_async(&ctx.server);
     let (mut ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
@@ -1774,6 +1805,18 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
     let auth_reply = read_reply(&mut ws, 1).await?;
     if auth_reply.get("error").is_some() {
         return Err((EXIT_AUTH, "auth rejected — check token in config.toml or $TMM_TOKEN".into()));
+    }
+    if let Some(need) = need {
+        let has = auth_reply
+            .pointer("/result/caps")
+            .and_then(|c| c.as_array())
+            .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(need)));
+        if !has {
+            let _ = ws.close(None).await;
+            return Err((EXIT_NOT_FOUND, format!(
+                "this server cannot hand an assignment over (its login answer lacks `{need}`) — update the server to assign. Nothing was saved."
+            )));
+        }
     }
 
     let call = json!({ "id": 2, "method": method, "params": params });
@@ -2101,6 +2144,32 @@ fn say_offline(r: &Value) {
         } else {
             eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
         }
+    }
+}
+
+/// How the telling went after a save that asked for a hand-off (board #377),
+/// said where the person at the keyboard is looking. The save is already
+/// committed, so none of this undoes it: `offline` is a note (the assignment
+/// is on the board, nothing was typed to anyone, nothing is queued) and exits
+/// 0; only `failed` is a failure, because the agent was not told and the
+/// command did not finish what it was asked. Nothing to say when the save
+/// handed nothing over (a clear, `human`, the actor itself).
+fn settle_dispatch(id: i64, name: &str, r: &Value) {
+    let error = r.get("dispatch_error").and_then(|v| v.as_str()).unwrap_or("");
+    match r.get("dispatch").and_then(|v| v.as_str()) {
+        Some("failed") => fail(EXIT_ERR, &format!(
+            "the hand-off could not be posted: {error}\n\
+             #{id} IS assigned to {name} on the board, but {name} was not told. Re-running \
+             `tmm board assign {id} {name}` sends it again."
+        )),
+        Some("offline") => {
+            if r.get("offline").and_then(|v| v.as_array()).is_some_and(|rows| !rows.is_empty()) {
+                say_offline(r);
+            } else if !error.is_empty() {
+                eprintln!("note: {error}; nothing is queued for it");
+            }
+        }
+        _ => {}
     }
 }
 
