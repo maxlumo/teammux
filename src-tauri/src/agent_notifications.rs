@@ -330,9 +330,10 @@ impl AgentNotificationHub {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             // How a completion ended (board #355: its whole reply was the CLI's
-            // placeholder) is written WITH the end, in one step: a separate
-            // "and it was empty" write could land on a different end.
-            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, timestamp, normalized.empty);
+            // placeholder, real text, or nothing usable) is written WITH the
+            // end, in one step: a separate "and it was empty" write could land
+            // on a different end.
+            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, timestamp, normalized.quality);
             // A turn edge (stop, ask) means the CLI just repainted its footer —
             // the context-usage number is at its freshest right here.
             crate::projects::vitals::sniff_window_soon(&session, &window);
@@ -341,7 +342,7 @@ impl AgentNotificationHub {
         // A completion that said nothing may leave the agent in the middle of its
         // work; `stalls` answers it once (see there).
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if normalized.kind == "completed" && normalized.empty {
+        if normalized.kind == "completed" && normalized.quality == crate::backends::EndQuality::Empty {
             crate::projects::stalls::on_empty_end(&session, &window);
         }
 
@@ -552,11 +553,12 @@ struct Normalized {
     /// for non-stop events. Used by the auto-post path, which applies the
     /// larger `MAX_REPLY_CHARS` budget instead of the notification summary cap.
     full_reply: Option<String>,
-    /// The turn ended and its whole reply is the CLI's own placeholder for "no
-    /// assistant message" (board #355): a completion that said nothing. Read by
-    /// the desktop consumer only; the phone never consumes the inbox.
+    /// How a completion ended (board #355): its whole reply was the CLI's own
+    /// placeholder (`Empty`), real text (`Said`), or nothing usable (`Unknown`:
+    /// no body, blank, session file unreadable). Read by the desktop consumer
+    /// only; the phone never consumes the inbox.
     #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
-    empty: bool,
+    quality: crate::backends::EndQuality,
 }
 
 /// `normalize_in` without a managed home — the shape every test and the
@@ -597,12 +599,16 @@ fn normalize_in(envelope: &InboxEnvelope, home: Option<&Path>) -> Result<Normali
     // Preserve the untruncated text for the auto-post path only when this is
     // a stop/completion event — other events have no reply body worth posting.
     let full_reply = if kind == "completed" { raw_reply } else { None };
-    let empty = full_reply.as_deref().is_some_and(|r| backend.is_empty_reply(r));
+    let quality = if kind == "completed" {
+        backend.reply_quality(full_reply.as_deref())
+    } else {
+        crate::backends::EndQuality::Unknown
+    };
     Ok(Normalized {
         kind: kind.into(),
         agent_session_id: string_field(payload, &["session_id", "sessionId"]),
         full_reply,
-        empty,
+        quality,
     })
 }
 
@@ -870,18 +876,20 @@ mod tests {
         // #355) said nothing: `empty`. The same words from another backend, or
         // inside a real reply, are not the CLI talking.
         let placeholder = "(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)";
+        use crate::backends::EndQuality as Q;
         let stop = |backend: &str, text: &str| {
             let event = if backend == "claude" { "Stop" } else { "stop" };
             normalize(&envelope(backend, json!({"hook_event_name":event,"assistant_response":text}))).unwrap()
         };
-        assert!(stop("kiro", placeholder).empty, "the CLI's stand-in is an empty turn");
-        assert!(stop("kiro", &format!("  {placeholder}")).empty);
-        assert!(!stop("kiro", "Done: the gate is green.").empty);
-        assert!(!stop("kiro", &format!("I saw this line in the log: {placeholder}")).empty, "a real reply that quotes it is a reply");
-        assert!(!stop("kiro", &format!("{placeholder} Then the result: green.")).empty, "the placeholder followed by real text is a reply");
-        assert!(!stop("kiro", "(No assistant response was recorded for the preceding turn").empty, "half the sentence is not the CLI's text");
-        assert!(!stop("claude", placeholder).empty, "only kiro-cli writes it");
-        assert!(!normalize(&envelope("kiro", json!({"hook_event_name":"stop"}))).unwrap().empty, "no reply at all is not the placeholder");
+        assert_eq!(stop("kiro", placeholder).quality, Q::Empty, "the CLI's stand-in is an empty turn");
+        assert_eq!(stop("kiro", &format!("  {placeholder}")).quality, Q::Empty);
+        assert_eq!(stop("kiro", "Done: the gate is green.").quality, Q::Said);
+        assert_eq!(stop("kiro", &format!("I saw this line in the log: {placeholder}")).quality, Q::Said, "a real reply that quotes it is a reply");
+        assert_eq!(stop("kiro", &format!("{placeholder} Then the result: green.")).quality, Q::Said, "the placeholder followed by real text is a reply");
+        assert_eq!(stop("kiro", "(No assistant response was recorded for the preceding turn").quality, Q::Said, "half the sentence is not the CLI's text");
+        assert_eq!(stop("claude", placeholder).quality, Q::Said, "only kiro-cli writes it");
+        assert_eq!(normalize(&envelope("kiro", json!({"hook_event_name":"stop"}))).unwrap().quality, Q::Unknown, "no reply at all is neither the placeholder nor speech");
+        assert_eq!(stop("kiro", "  \n ").quality, Q::Unknown, "a blank reply is not speech either");
         // grok (1.0.5, payloads measured live): camelCase keys, snake_case
         // event values. A turn's true end is stop + reason end_turn, and it
         // carries the reply in lastAssistantMessage.
@@ -1535,6 +1543,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Board #355 review P1-2, through the REAL normalize and no-body fallback:
+    /// only a real reply reopens the nudge allowance. A Stop whose reply could not
+    /// be had — no session file, a blank body, a session whose file is unreadable
+    /// — is no evidence that the agent spoke, so after a nudge was spent it
+    /// neither reopens the allowance nor owes a nudge itself; a Stop with real text
+    /// does reopen it. Each Stop is read exactly as the consumer reads one
+    /// (`normalize_in` over the agent's isolated home, then
+    /// `record_notification_with` with the quality it returned).
+    #[test]
+    fn only_a_real_reply_reopens_a_spent_nudge_through_the_real_fallback() {
+        crate::projects::tests::use_test_store();
+        use crate::projects::telemetry::{arm_nudge, disarm_nudge, nudge_wait, record_notification_with, record_prompt, NudgeWait};
+        let home = std::env::temp_dir().join(format!("tmm-quality-home-{}", uuid::Uuid::new_v4()));
+        let session_file = |id: &str, rows: Option<&str>| {
+            let dir = home.join("sessions").join("297005da4b9f6bd1").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(rows) = rows {
+                std::fs::write(dir.join("messages.jsonl"), rows).unwrap();
+            }
+        };
+        session_file("sess_empty", Some(r#"{"id":"1","payload":{"type":"assistant","content":"(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)","operationType":"Say"}}"#));
+        session_file("sess_real", Some(r#"{"id":"2","payload":{"type":"assistant","content":"Posted #48; waiting on the critic.","operationType":"Say"}}"#));
+        session_file("sess_unreadable", None); // the directory is there, its messages.jsonl is not
+        let (s, w) = (format!("quality-{}", uuid::Uuid::new_v4()), "dev");
+        let stop = |payload: Value| {
+            record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
+            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload };
+            let n = normalize_in(&envelope, Some(&home)).unwrap();
+            record_notification_with(&s, w, &n.kind, crate::projects::now(), n.quality);
+            n.quality
+        };
+        let body_less = |id: &str| json!({"hook_event_name": "stop", "session_id": id});
+        use crate::backends::EndQuality as Q;
+
+        // A nudge was owed, delivered, and spent.
+        assert_eq!(stop(body_less("sess_empty")), Q::Empty);
+        let token = arm_nudge(&s, w).expect("the first empty end is owed a nudge");
+        let NudgeWait::Due(due) = nudge_wait(&s, w, token, 0, 0) else { panic!("due") };
+        crate::projects::telemetry::spend_nudge(&s, w, due.run);
+        disarm_nudge(&s, w, token);
+
+        // Stops with nothing usable in between: they do not forgive it.
+        assert_eq!(stop(body_less("sess_not_there")), Q::Unknown, "no session file at all");
+        assert_eq!(stop(json!({"hook_event_name": "stop", "assistant_response": " \n "})), Q::Unknown, "a blank body");
+        assert_eq!(stop(body_less("sess_unreadable")), Q::Unknown, "a session whose file cannot be read");
+        assert_eq!(stop(body_less("sess_empty")), Q::Empty);
+        assert!(arm_nudge(&s, w).is_none(), "spent -> unavailable -> placeholder: no second nudge");
+
+        // A real reply forgives it.
+        assert_eq!(stop(body_less("sess_real")), Q::Said);
+        assert_eq!(stop(body_less("sess_empty")), Q::Empty);
+        assert!(arm_nudge(&s, w).is_some(), "spent -> real reply -> placeholder: one nudge");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     /// Board #355, end to end through the consumer: a kiro Stop whose whole reply
     /// is the CLI's placeholder is recorded on the status (`last_turn_empty`) and
     /// arms the one timer it is owed — that is how the test sees the consumer
@@ -1587,7 +1650,7 @@ mod tests {
         feed(stop(placeholder));
         let empty = status();
         assert_eq!((empty.state.as_str(), empty.detail.as_str()), ("idle", crate::projects::telemetry::EMPTY_DETAIL), "at rest, and it says the turn said nothing");
-        assert!(!crate::projects::telemetry::arm_nudge(&session, &win), "the consumer already armed the one timer this empty end is owed");
+        assert!(crate::projects::telemetry::arm_nudge(&session, &win).is_none(), "the consumer already armed the one timer this empty end is owed");
 
         feed(prompt("[tmm chat 2026-10-15 13:10] lead: @v ok?"));
         feed(stop("Done: the gate is green."));

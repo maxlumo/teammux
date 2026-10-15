@@ -22,8 +22,9 @@
 //!   empty turns, spent by a line DELIVERED and not by a timer set: a nudge
 //!   that itself ends empty earns no second (that would be a retry loop), two
 //!   empty turns before any nudge send one for the latest, and only a turn
-//!   that ends with something to say forgives it. ONE timer per agent, so the
-//!   sleepers are bounded by the windows. Nothing here resumes arbitrary work,
+//!   that ends with a REAL reply forgives it (a Stop with no usable text
+//!   neither forgives nor nudges). ONE timer per agent, held by a lease only
+//!   its holder can release, so the sleepers are bounded by the windows. Nothing here resumes arbitrary work,
 //!   and nothing is persisted — a restart forgets a pending nudge, which is the
 //!   right amount of memory for a safety net (tenet 7: the running state is a
 //!   disposable projection).
@@ -35,6 +36,8 @@
 
 use std::time::Duration;
 
+use super::telemetry::{Due, NudgeWait};
+
 /// How long an agent may sit at rest after an empty turn before it is nudged.
 /// Long enough that the agent that simply started something and stopped has
 /// started again, short enough to save the half hour the incidents lost.
@@ -45,51 +48,55 @@ pub fn on_empty_end(session: &str, window: &str) {
     watch(session, window, NUDGE_AFTER, fire);
 }
 
-/// Start the window's nudge timer unless one is already waiting. ONE per agent:
-/// a second empty end before it fires does not start a second, it becomes the
-/// end the same timer answers (see `telemetry::nudge_wait`), so the sleepers
-/// are bounded by the number of windows and two empty turns before any nudge
-/// send exactly one — for the latest. The allowance is spent only when a line
-/// is delivered (`fire_with`), not when a timer is set.
+/// Start the window's nudge timer unless one already holds its lease. ONE per
+/// agent: a second empty end before it fires does not start a second, it
+/// becomes the end the same timer answers (see `telemetry::nudge_wait`), so the
+/// sleepers are bounded by the number of windows and two empty turns before any
+/// nudge send exactly one — for the latest. The allowance is spent only when a
+/// line is delivered (`fire_with`), not when a timer is set.
+///
+/// The lease is a TOKEN, and only its holder releases it: the timer frees it
+/// when it decides it is done (`NudgeWait::Gone`, so an empty end arriving at
+/// once finds it free and is not lost) and again when its thread ends for any
+/// reason — and that second release must not free a LATER timer's lease, which
+/// a plain flag did (review P1-1).
 ///
 /// This is a thread and not `wakes::schedule` on purpose: a wake is a persisted
 /// room message that fires unconditionally, and what makes this nudge due is
 /// memory only — which end was empty, whether the agent has moved on since. A
 /// wake that outlived a restart could not re-check any of it, and one that
 /// could not be cancelled would type "continue" into an agent that already had.
-fn watch(session: &str, window: &str, after: Duration, act: impl Fn(&str, &str, u64) + Send + 'static) {
-    if !super::telemetry::arm_nudge(session, window) {
-        return;
-    }
+fn watch(session: &str, window: &str, after: Duration, act: impl Fn(&str, &str, Due) + Send + 'static) {
+    let Some(token) = super::telemetry::arm_nudge(session, window) else { return };
     let (session, window) = (session.to_string(), window.to_string());
     std::thread::spawn(move || {
-        // The timer is released however it ends, a panic included.
-        struct Release<'a>(&'a str, &'a str);
+        // The lease is released however the thread ends, a panic included.
+        struct Release<'a>(&'a str, &'a str, u64);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
-                super::telemetry::disarm_nudge(self.0, self.1);
+                super::telemetry::disarm_nudge(self.0, self.1, self.2);
             }
         }
-        let _release = Release(&session, &window);
+        let _release = Release(&session, &window, token);
         let mut answered = 0;
         loop {
-            match super::telemetry::nudge_wait(&session, &window, after.as_secs(), answered) {
-                super::telemetry::NudgeWait::Wait(secs) => std::thread::sleep(Duration::from_secs(secs)),
-                super::telemetry::NudgeWait::Due(end_seq) => {
-                    act(&session, &window, end_seq);
-                    answered = end_seq;
+            match super::telemetry::nudge_wait(&session, &window, token, after.as_secs(), answered) {
+                NudgeWait::Wait(secs) => std::thread::sleep(Duration::from_secs(secs)),
+                NudgeWait::Due(due) => {
+                    act(&session, &window, due);
+                    answered = due.end_seq;
                 }
-                super::telemetry::NudgeWait::Gone => return,
+                NudgeWait::Gone => return,
             }
         }
     });
 }
 
-fn fire(session: &str, window: &str, end_seq: u64) {
+fn fire(session: &str, window: &str, due: Due) {
     fire_with(
         session,
         window,
-        end_seq,
+        due,
         &|| open_items(session, window),
         &|| waiting_on_purpose(session, window),
         &|line, still_due| match super::delivery::agent_target(session, window) {
@@ -109,16 +116,17 @@ fn fire(session: &str, window: &str, end_seq: u64) {
 /// the typing (`delivery::deliver_if` does, inside the window's lock). The check
 /// below is only the cheap early exit before the queries; the queries take
 /// time, and a prompt, an ask or an interrupt can arrive while they run. The
-/// allowance is spent only by a line that was actually delivered.
+/// allowance is spent only by a line that was actually delivered, and against
+/// the run the nudge was decided in.
 fn fire_with(
     session: &str,
     window: &str,
-    end_seq: u64,
+    due: Due,
     open_items: &dyn Fn() -> Vec<(i64, String)>,
     waiting: &dyn Fn() -> Option<bool>,
     deliver: &dyn Fn(&str, &dyn Fn() -> bool) -> bool,
 ) {
-    let still_due = || super::telemetry::nudge_still_due(session, window, end_seq);
+    let still_due = || super::telemetry::nudge_still_due(session, window, due.end_seq);
     if !still_due() {
         return;
     }
@@ -128,7 +136,7 @@ fn fire_with(
     }
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
     if deliver(&nudge_line(&stamp, &open), &still_due) {
-        super::telemetry::spend_nudge(session, window);
+        super::telemetry::spend_nudge(session, window, due.run);
     }
 }
 
@@ -192,9 +200,10 @@ fn task_running_in(session: &str, tasks: &[crate::tasks::Task]) -> bool {
 mod tests {
     use super::super::telemetry::{
         arm_nudge, disarm_nudge, nudge_still_due, nudge_wait, record_held, record_interrupt,
-        record_notification_with, record_prompt, record_typed, spend_nudge, NudgeWait,
+        record_notification_with, record_prompt, record_typed, spend_nudge,
     };
     use super::*;
+    use crate::backends::EndQuality;
     use std::sync::{Arc, Mutex};
 
     fn unique() -> String {
@@ -204,13 +213,29 @@ mod tests {
     /// An empty end, recorded the way the consumer does: ONE write, the end
     /// and how it ended. Returns the arrival number of that end.
     fn empty_end(session: &str, window: &str) -> u64 {
-        record_notification_with(session, window, "completed", super::super::now(), true);
+        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Empty);
         super::super::telemetry::turn_epoch(session, window)
     }
 
     /// An end with something to say.
     fn real_end(session: &str, window: &str) {
-        record_notification_with(session, window, "completed", super::super::now(), false);
+        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Said);
+    }
+
+    /// An end whose reply was unavailable (no body, blank, unreadable).
+    fn unknown_end(session: &str, window: &str) {
+        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Unknown);
+    }
+
+    /// The nudge the window is owed now, read the way a timer reads it.
+    fn due_of(session: &str, window: &str) -> Due {
+        let token = arm_nudge(session, window).expect("an empty end is owed a nudge");
+        let due = match nudge_wait(session, window, token, 0, 0) {
+            NudgeWait::Due(due) => due,
+            other => panic!("expected Due, got {other:?}"),
+        };
+        disarm_nudge(session, window, token);
+        due
     }
 
     #[test]
@@ -227,33 +252,33 @@ mod tests {
 
     /// The run of empty turns is owed ONE nudge, and the allowance is spent by a
     /// nudge DELIVERED — not by a timer set. A nudge that itself ends empty earns
-    /// none (that is a retry loop); a turn that ends with something to say
-    /// forgives it.
+    /// none (that is a retry loop); a turn that ends with a real reply forgives it.
     #[test]
     fn one_nudge_per_run_of_empty_turns() {
         crate::projects::tests::use_test_store();
         let (s, w) = (unique(), "dev");
-        assert!(!arm_nudge(&s, w), "no turn, nothing owed");
+        assert!(arm_nudge(&s, w).is_none(), "no turn, nothing owed");
         empty_end(&s, w);
-        assert!(arm_nudge(&s, w), "the first empty end is owed a nudge");
-        assert!(!arm_nudge(&s, w), "one timer, not two");
+        let token = arm_nudge(&s, w).expect("the first empty end is owed a nudge");
+        assert!(arm_nudge(&s, w).is_none(), "one timer, not two");
         // Cancelled before it sent anything (the timer is released): the
         // allowance is NOT spent, the next empty end is owed it still.
-        disarm_nudge(&s, w);
+        disarm_nudge(&s, w, token);
         record_prompt(&s, w, "[tmm chat 10:00] human: continue");
         empty_end(&s, w);
-        assert!(arm_nudge(&s, w), "a timer that never delivered spent nothing");
-        disarm_nudge(&s, w);
+        let due = due_of(&s, w);
+        let token = arm_nudge(&s, w).expect("a timer that never delivered spent nothing");
+        disarm_nudge(&s, w, token);
         // Delivered: spent. The nudge starts a turn that ends empty AGAIN: no second.
-        spend_nudge(&s, w);
+        spend_nudge(&s, w, due.run);
         record_prompt(&s, w, "[tmm chat 10:05] tmm: [reply] nudge");
         empty_end(&s, w);
-        assert!(!arm_nudge(&s, w), "an empty answer to a nudge is not a reason for another");
+        assert!(arm_nudge(&s, w).is_none(), "an empty answer to a nudge is not a reason for another");
         // A turn that says something forgives it.
         record_prompt(&s, w, "[tmm chat 10:10] human: continue");
         real_end(&s, w);
         empty_end(&s, w);
-        assert!(arm_nudge(&s, w), "after the agent spoke, the next empty turn is owed one again");
+        assert!(arm_nudge(&s, w).is_some(), "after the agent spoke, the next empty turn is owed one again");
     }
 
     /// Two empty turns before any nudge: exactly ONE nudge, for the latest, from
@@ -266,12 +291,12 @@ mod tests {
         let first = empty_end(&s, w);
         let acted = Arc::new(Mutex::new(Vec::new()));
         let (log, s2, w2) = (acted.clone(), s.clone(), w.to_string());
-        watch(&s, w, Duration::from_secs(1), move |_, _, end| {
-            log.lock().unwrap().push(end);
+        watch(&s, w, Duration::from_secs(1), move |_, _, due| {
+            log.lock().unwrap().push(due.end_seq);
             // Delivering it spends the allowance, as `fire_with` does.
-            spend_nudge(&s2, &w2);
+            spend_nudge(&s2, &w2, due.run);
         });
-        // A second timer for the same window is refused while the first waits.
+        // A second timer for the same window is refused while the first holds the lease.
         let log2 = acted.clone();
         watch(&s, w, Duration::from_secs(1), move |_, _, _| log2.lock().unwrap().push(u64::MAX));
         record_prompt(&s, w, "[tmm chat 10:00] human: continue");
@@ -279,7 +304,7 @@ mod tests {
         assert!(second > first);
         std::thread::sleep(Duration::from_millis(3500));
         assert_eq!(*acted.lock().unwrap(), vec![second], "one timer, one nudge, for the end that is still the newest");
-        assert!(!arm_nudge(&s, w), "and the allowance is spent");
+        assert!(arm_nudge(&s, w).is_none(), "and the allowance is spent");
     }
 
     /// A timer that finds the agent moved on says nothing and releases itself.
@@ -288,16 +313,76 @@ mod tests {
         crate::projects::tests::use_test_store();
         let (s, w) = (unique(), "dev");
         let end = empty_end(&s, w);
-        assert_eq!(nudge_wait(&s, w, 0, end), NudgeWait::Gone, "an end it already answered is not looked at again");
+        let token = arm_nudge(&s, w).unwrap();
+        assert_eq!(nudge_wait(&s, w, token, 0, end), NudgeWait::Gone, "an end it already answered is not looked at again");
+        assert!(arm_nudge(&s, w).is_some(), "and the Gone step released the lease");
+        let (s, w) = (unique(), "dev");
+        let end = empty_end(&s, w);
+        let token = arm_nudge(&s, w).unwrap();
         empty_end(&s, w);
-        assert!(arm_nudge(&s, w));
-        assert!(matches!(nudge_wait(&s, w, 600, 0), NudgeWait::Wait(secs) if secs > 0 && secs <= 600), "a fresh end has not aged");
-        assert!(matches!(nudge_wait(&s, w, 0, 0), NudgeWait::Due(seq) if seq > end), "aged: due, for the NEWEST end");
+        assert!(matches!(nudge_wait(&s, w, token, 600, 0), NudgeWait::Wait(secs) if secs > 0 && secs <= 600), "a fresh end has not aged");
+        assert!(matches!(nudge_wait(&s, w, token, 0, 0), NudgeWait::Due(due) if due.end_seq > end), "aged: due, for the NEWEST end");
         record_prompt(&s, w, "[tmm chat 10:00] human: continue");
-        assert_eq!(nudge_wait(&s, w, 0, 0), NudgeWait::Gone);
-        assert!(!arm_nudge(&s, w), "no empty end is newest any more");
+        assert_eq!(nudge_wait(&s, w, token, 0, 0), NudgeWait::Gone);
+        assert!(arm_nudge(&s, w).is_none(), "no empty end is newest any more");
         empty_end(&s, w);
-        assert!(arm_nudge(&s, w), "released in the same step as Gone: a new empty end finds the timer free");
+        assert!(arm_nudge(&s, w).is_some(), "released in the same step as Gone: a new empty end finds the lease free");
+    }
+
+    /// Review P1-1, with no sleeps: the interleaving that broke the bool. The old
+    /// timer reaches Gone and frees the lease; a new empty end arms a new timer;
+    /// THEN the old thread ends and its drop guard releases. That release must be
+    /// the old timer's own and find nothing to free — a third empty end must not
+    /// get a second live timer. Dropping the Gone-step release instead would
+    /// reopen the gap it closes, so the new end is also shown to find the lease
+    /// free the moment the old timer decides.
+    #[test]
+    fn an_old_timers_release_cannot_free_a_newer_timers_lease() {
+        crate::projects::tests::use_test_store();
+        let (s, w) = (unique(), "dev");
+        empty_end(&s, w);
+        let old = arm_nudge(&s, w).expect("the first timer");
+        record_prompt(&s, w, "[tmm chat 10:00] human: continue");
+        assert_eq!(nudge_wait(&s, w, old, 0, 0), NudgeWait::Gone, "the old timer finds the agent moved on and releases");
+
+        empty_end(&s, w);
+        let new = arm_nudge(&s, w).expect("a new empty end finds the lease free: not lost in the Gone-to-drop gap");
+        assert_ne!(old, new);
+
+        disarm_nudge(&s, w, old); // the old thread ends: its drop guard runs AFTER the new timer armed
+        record_prompt(&s, w, "[tmm chat 10:05] human: more");
+        empty_end(&s, w);
+        assert!(arm_nudge(&s, w).is_none(), "a third empty end gets no second timer: the new owner still holds the lease");
+        assert_eq!(nudge_wait(&s, w, old, 0, 0), NudgeWait::Gone, "a stale timer is Gone and does not touch it either");
+        assert!(arm_nudge(&s, w).is_none());
+
+        disarm_nudge(&s, w, new);
+        assert!(arm_nudge(&s, w).is_some(), "only the holder can release it");
+    }
+
+    /// Review P1-2 and P2: only a REAL reply forgives the spent allowance, and a
+    /// spend lands on the run it was decided in.
+    #[test]
+    fn only_a_real_reply_reopens_the_allowance_and_a_late_spend_cannot_charge_a_newer_run() {
+        crate::projects::tests::use_test_store();
+        let (s, w) = (unique(), "dev");
+        empty_end(&s, w);
+        let first = due_of(&s, w);
+        spend_nudge(&s, w, first.run);
+        // Stops with no usable text neither mark the end empty nor reopen the allowance.
+        record_prompt(&s, w, "[tmm chat 10:00] human: continue");
+        unknown_end(&s, w);
+        empty_end(&s, w);
+        assert!(arm_nudge(&s, w).is_none(), "spent -> unavailable -> placeholder: no second nudge");
+        // A real reply does.
+        record_prompt(&s, w, "[tmm chat 10:05] human: continue");
+        real_end(&s, w);
+        empty_end(&s, w);
+        let second = due_of(&s, w);
+        assert!(second.run > first.run, "a real reply starts a newer run");
+        // The first nudge's spend arrives late: it must not charge the new run.
+        spend_nudge(&s, w, first.run);
+        assert!(arm_nudge(&s, w).is_some(), "spent -> real reply -> placeholder: one nudge");
     }
 
     /// Review P1-B(1): how a turn ended belongs to THAT end. A human's interrupt
@@ -312,7 +397,7 @@ mod tests {
         record_interrupt(&s, w);
         let after = super::super::telemetry::derive(&s, w, 0);
         assert_eq!((after.state.as_str(), after.detail.as_str()), ("idle", ""), "the interrupt is a plain rest");
-        assert!(!arm_nudge(&s, w), "and owes nobody a nudge");
+        assert!(arm_nudge(&s, w).is_none(), "and owes nobody a nudge");
     }
 
     #[test]
@@ -355,13 +440,14 @@ mod tests {
     ) -> (Vec<String>, bool) {
         crate::projects::tests::use_test_store();
         let (s, w) = (unique(), "dev");
-        let end = empty_end(&s, w);
+        empty_end(&s, w);
+        let due = due_of(&s, w);
         let sent = Arc::new(Mutex::new(Vec::new()));
         let out = sent.clone();
         fire_with(
             &s,
             w,
-            end,
+            due,
             &|| {
                 during(&s, w);
                 open.clone()
@@ -380,7 +466,7 @@ mod tests {
         // the nudged turn would be owed one again, so ask the record.
         record_prompt(&s, w, "[tmm chat 10:30] tmm: [reply] x");
         empty_end(&s, w);
-        (got, !arm_nudge(&s, w))
+        (got, arm_nudge(&s, w).is_none())
     }
 
     fn run(open: Vec<(i64, String)>, waiting: bool, moved_on: bool, delivered: bool) -> (Vec<String>, bool) {
@@ -491,6 +577,28 @@ mod tests {
             assert!(sent.is_empty(), "{what} arrived after the early check: the nudge is dropped, not typed over it");
             assert!(!spent, "{what}: a dropped nudge spends nothing");
         }
+    }
+
+    /// Review P2: the unit tests drive `fire_with` with a stub delivery, so the
+    /// last line of defence — `fire` handing the gate to `delivery::deliver_if` —
+    /// is not exercised by them (swapping in the ordinary `deliver` would pass).
+    /// It cannot be driven without a real pane, so it is pinned at the source,
+    /// the way this repo pins markup it cannot render: the production `fire`
+    /// delivers through `deliver_if` and nothing else, and `fire_with` gives the
+    /// delivery the same `still_due` it checked early. A live pane is what the
+    /// validator's timing rows add on top.
+    #[test]
+    fn the_production_fire_path_delivers_through_the_gated_entry() {
+        let src = include_str!("stalls.rs");
+        let fire = &src[src.find("fn fire(session: &str, window: &str, due: Due) {").unwrap()..];
+        let fire = &fire[..fire.find("/// The decision and its one effect").unwrap()];
+        assert!(fire.contains("super::delivery::deliver_if(session, window, &target, line, still_due)"), "{fire}");
+        for plain in ["deliver_chat_line", "delivery::deliver(", "deliver_as(", "deliver_with("] {
+            assert!(!fire.contains(plain), "the nudge must not take the ungated path ({plain}): {fire}");
+        }
+        let with = &src[src.find("fn fire_with(").unwrap()..];
+        let with = &with[..with.find("/// The one line.").unwrap()];
+        assert!(with.contains("deliver(&nudge_line(&stamp, &open), &still_due)"), "fire_with must hand over the gate it checked early: {with}");
     }
 
     /// A `Task` does not record who started it, so a running task anywhere in the

@@ -1436,7 +1436,7 @@ mod tests {
     #[test]
     fn a_gated_delivery_is_checked_and_typed_in_one_step_against_the_prompt_edge() {
         let s = setup("gate");
-        crate::projects::telemetry::record_notification_with(&s, "dev", "completed", crate::projects::now(), true);
+        crate::projects::telemetry::record_notification_with(&s, "dev", "completed", crate::projects::now(), crate::backends::EndQuality::Empty);
         let end_seq = telemetry::turn_epoch(&s, "dev");
         let nudge = "[tmm chat 10:00] tmm: [reply] your previous turn ended without a response";
 

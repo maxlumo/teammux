@@ -27,6 +27,7 @@
 //! because the agent that will echo them is a separate process that outlives our
 //! restarts — see the delivery block below (board #249).
 
+use crate::backends::EndQuality;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,14 +88,23 @@ struct Rec {
     empty_end_seq: u64,
     /// A nudge was DELIVERED in the current run of empty turns. A scheduled one
     /// that was cancelled does not count — the allowance is spent by the line
-    /// typed, not by the timer set — and only a turn that ends with something
-    /// to say forgives it.
+    /// typed, not by the timer set — and only a turn that ends with a real reply
+    /// forgives it (a Stop with no usable text neither spends nor forgives).
     nudge_spent: bool,
-    /// A timer is waiting on this window's nudge: at most one per agent, so the
-    /// number of sleepers is bounded by the number of windows, not by how many
-    /// empty turns come before it fires.
-    nudge_armed: bool,
+    /// Which run of empty turns the allowance belongs to: bumped each time a
+    /// real reply forgives it. A nudge records its spend against the run it was
+    /// decided in, so a write that arrives late cannot charge a newer run.
+    nudge_run: u64,
+    /// The lease on this window's nudge timer: 0 = free, else the token of the
+    /// ONE timer that holds it. At most one per agent, so the number of sleepers
+    /// is bounded by the number of windows; and only the holder can release it,
+    /// so an old timer finishing after a new one took over cannot free the new
+    /// one's lease (review P1-1: a bool could not tell whose it was).
+    nudge_owner: u64,
 }
+
+/// Source of timer lease tokens: never 0, never reused.
+static NEXT_NUDGE_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 static NEXT_ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -739,18 +749,21 @@ fn turn_fact_held(
 /// permission/input prompt means the agent is blocked on the human while the
 /// turn stays open.
 pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
-    record_notification_with(session, window, kind, ts, false);
+    record_notification_with(session, window, kind, ts, EndQuality::Unknown);
 }
 
 /// `record_notification` for a stop whose reply the caller has already read
-/// (board #355): `empty` = the whole reply was the CLI's placeholder, so the
+/// (board #355): `Empty` = the whole reply was the CLI's placeholder, so the
 /// turn said nothing. How a turn ended is part of THE END'S OWN WRITE — the
 /// mark is the arrival number this very end takes, inside the one critical
 /// section — so it can never land on a different end: a human's interrupt
 /// written between a stop and a separate "and it was empty" step used to
-/// inherit the mark and be nudged for it (review P1-B). A completion that
-/// says something forgives the nudge a run of empty turns had spent.
-pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64, empty: bool) {
+/// inherit the mark and be nudged for it (review P1-B). Only a `Said` reply —
+/// real text — forgives the nudge a run of empty turns had spent; an `Unknown`
+/// one (no body, blank, unreadable session file) is no evidence that anyone
+/// spoke, so it neither marks the end empty nor reopens the allowance (review
+/// P1-2).
+pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64, quality: EndQuality) {
     let completed = kind == "completed";
     let kind_is_ask = matches!(kind, "permission_required" | "input_required");
     // ONE critical section (board #264, orchestrator 11:57): whether the
@@ -774,10 +787,15 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64
             r.end = Some((kind, ts));
             r.end_seq = seq;
             r.ask = None; // a finished turn cannot still be asking
-            if completed && empty {
-                r.empty_end_seq = seq;
-            } else if completed {
-                r.nudge_spent = false;
+            if completed {
+                match quality {
+                    EndQuality::Empty => r.empty_end_seq = seq,
+                    EndQuality::Said => {
+                        r.nudge_spent = false;
+                        r.nudge_run += 1;
+                    }
+                    EndQuality::Unknown => {}
+                }
             }
         }
     }, None);
@@ -801,18 +819,21 @@ fn nudge_owed(rec: &Rec) -> bool {
         && derive_from(rec, 0, now()).detail == EMPTY_DETAIL
 }
 
-/// Claim the window's ONE nudge timer (board #355): true when an empty end is
-/// owed a nudge and no timer is already waiting for this window. A timer that
-/// is waiting re-reads the window when it wakes, so a second empty end before
-/// it fires needs no second timer — it simply becomes the end that is answered.
-pub fn arm_nudge(session: &str, window: &str) -> bool {
+/// Take the window's ONE nudge timer lease (board #355): `Some(token)` when an
+/// empty end is owed a nudge and no timer holds the lease. The holder passes its
+/// token to `nudge_wait` and `disarm_nudge`; nobody else can release it. A timer
+/// that is waiting re-reads the window when it wakes, so a second empty end
+/// before it fires needs no second timer — it simply becomes the end that is
+/// answered.
+pub fn arm_nudge(session: &str, window: &str) -> Option<u64> {
     let mut map = store().lock().unwrap();
-    let Some(rec) = map.get_mut(&(session.to_string(), window.to_string())) else { return false };
-    if rec.nudge_armed || !nudge_owed(rec) {
-        return false;
+    let rec = map.get_mut(&(session.to_string(), window.to_string()))?;
+    if rec.nudge_owner != 0 || !nudge_owed(rec) {
+        return None;
     }
-    rec.nudge_armed = true;
-    true
+    let token = NEXT_NUDGE_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rec.nudge_owner = token;
+    Some(token)
 }
 
 /// What the window's timer should do next.
@@ -821,30 +842,48 @@ pub enum NudgeWait {
     /// The owed end has not aged enough: sleep this many seconds, then ask again.
     Wait(u64),
     /// The newest end is empty, unanswered, and `after` seconds old: answer it.
-    Due(u64),
-    /// Nothing is owed (or the end was already answered): the timer is released
-    /// IN THIS STEP, so an empty end that arrives right after finds it free.
+    Due(Due),
+    /// Nothing is owed, the end was already answered, or the lease is no longer
+    /// this timer's: the timer is released IN THIS STEP (only if the lease is
+    /// still its own), so an empty end that arrives right after finds it free.
     Gone,
 }
 
-/// The window's timer asks what to do. `answered` is the end it has already
-/// looked at, so an end it declined (nothing open, told to wait) is not looked
-/// at again. The decision and the release are one step under the record lock.
-pub fn nudge_wait(session: &str, window: &str, after: u64, answered: u64) -> NudgeWait {
+/// The nudge a timer is to decide: the empty end it answers and the run of empty
+/// turns the allowance belongs to (see `Rec::nudge_run`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Due {
+    pub end_seq: u64,
+    pub run: u64,
+}
+
+/// The timer holding lease `token` asks what to do. `answered` is the end it has
+/// already looked at, so an end it declined (nothing open, told to wait) is not
+/// looked at again. The decision and the release are one step under the record
+/// lock. A timer whose lease was taken over by a later one is `Gone` without
+/// touching it.
+pub fn nudge_wait(session: &str, window: &str, token: u64, after: u64, answered: u64) -> NudgeWait {
     let mut map = store().lock().unwrap();
     let Some(rec) = map.get_mut(&(session.to_string(), window.to_string())) else { return NudgeWait::Gone };
+    if rec.nudge_owner != token {
+        return NudgeWait::Gone;
+    }
     if !nudge_owed(rec) || rec.end_seq == answered {
-        rec.nudge_armed = false;
+        rec.nudge_owner = 0;
         return NudgeWait::Gone;
     }
     let age = now().saturating_sub(rec.end.as_ref().map(|(_, t)| *t).unwrap_or(0));
-    if age >= after { NudgeWait::Due(rec.end_seq) } else { NudgeWait::Wait(after - age) }
+    if age >= after { NudgeWait::Due(Due { end_seq: rec.end_seq, run: rec.nudge_run }) } else { NudgeWait::Wait(after - age) }
 }
 
-/// Release the window's timer (the timer's own exit, even a panicking one).
-pub fn disarm_nudge(session: &str, window: &str) {
+/// Release the lease `token` holds (the timer's own exit, even a panicking one).
+/// A no-op when the lease is free or another timer's: the Gone step has usually
+/// released it already, and a new timer may hold it by now.
+pub fn disarm_nudge(session: &str, window: &str, token: u64) {
     if let Some(rec) = store().lock().unwrap().get_mut(&(session.to_string(), window.to_string())) {
-        rec.nudge_armed = false;
+        if rec.nudge_owner == token {
+            rec.nudge_owner = 0;
+        }
     }
 }
 
@@ -863,10 +902,14 @@ pub fn nudge_still_due(session: &str, window: &str, end_seq: u64) -> bool {
     at_rest && !line_in_flight(session, window) && held_rows(session, window).is_empty()
 }
 
-/// A nudge was delivered: the run of empty turns has had its one.
-pub fn spend_nudge(session: &str, window: &str) {
+/// A nudge decided in `run` was delivered: that run of empty turns has had its
+/// one. Conditional on the run — a real reply since has started a newer run, and
+/// a write that arrives late must not charge it (review P2).
+pub fn spend_nudge(session: &str, window: &str, run: u64) {
     if let Some(rec) = store().lock().unwrap().get_mut(&(session.to_string(), window.to_string())) {
-        rec.nudge_spent = true;
+        if rec.nudge_run == run {
+            rec.nudge_spent = true;
+        }
     }
 }
 

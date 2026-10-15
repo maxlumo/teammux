@@ -14,6 +14,17 @@ pub(crate) mod kiro;
 pub(crate) mod omp;
 pub(crate) mod shared;
 
+/// How a completed turn ended, as far as its reply tells (board #355).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndQuality {
+    /// The reply is real text: the agent said something.
+    Said,
+    /// The reply is the CLI's own placeholder: the turn said nothing.
+    Empty,
+    /// No usable reply (none, blank, unreadable): nothing is known either way.
+    Unknown,
+}
+
 /// The closed set of agent CLIs this app can spawn (board #101/#127). An enum
 /// rather than a trait object on purpose: the set is closed, and every
 /// per-concern method below is an EXHAUSTIVE match with one-line arms into
@@ -214,6 +225,20 @@ impl Backend {
         match self {
             Backend::Kiro => kiro::is_empty_turn_reply(text),
             _ => false,
+        }
+    }
+
+    /// What a completed turn's reply says about how the turn ended (board #355).
+    /// THREE answers, because "not the placeholder" is not "said something": a
+    /// Stop with no body, a blank one, or a session file that could not be read
+    /// all arrive here as no usable text, and none of them is evidence that the
+    /// agent spoke (review P2-2: reading them as speech reopened the nudge
+    /// allowance with nobody having said anything).
+    pub fn reply_quality(self, reply: Option<&str>) -> EndQuality {
+        match reply {
+            Some(text) if self.is_empty_reply(text) => EndQuality::Empty,
+            Some(text) if !text.trim().is_empty() => EndQuality::Said,
+            _ => EndQuality::Unknown,
         }
     }
 
