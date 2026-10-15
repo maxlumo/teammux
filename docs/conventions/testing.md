@@ -392,8 +392,8 @@ flaky wall-clock assertions in the test.
   full gate and 36 of 640 runs (two loops of 8 parallel runners under ~2x CPU
   oversubscription), always at that late assertion; its sibling
   `an_end_racing_an_echo_waits_and_keeps_the_next_command` has the same shape
-  but did not fail in 320 runs (its racer does more work after the release),
-  and was fixed for the same reason, not because it was seen to flake.
+  and flakes too, less often: 0 of 320 runs in the first investigation, 2 of
+  640 in the validator's own loop on the old code. The same fix covers it.
   Looping the one test under load can reproduce a suspected race and show a
   fix holds; #386 did it with 8 parallel runners and 96 busy-loop processes on
   a 48-core host (~2x oversubscription), before and after. That is the
