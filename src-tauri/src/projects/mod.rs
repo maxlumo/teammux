@@ -25,6 +25,7 @@ pub mod global_prompt;
 pub mod managed;
 pub mod models;
 pub mod projects;
+pub(crate) mod recipe;
 pub mod reconcile;
 pub mod recovery;
 pub mod registry;

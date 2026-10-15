@@ -146,7 +146,10 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     // the DEF name (the window may be uniquified past it); a team member
     // records team+member instead and its def is re-derived on refresh.
     let agent_def = if req.def.is_none() { def.name.as_str() } else { "" };
-    let m = materialize(&def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member)?;
+    let m = {
+        let section = super::recipe::recipe_section(&agent_home(&workspace, &window_name));
+        materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member)?
+    };
     let home = m.home;
     let env = m.env;
 
@@ -216,6 +219,9 @@ struct Materialized {
 /// launches the CURRENT definition and app-wide instructions instead of the
 /// spawn-time snapshot.
 fn materialize(
+    // Inside the home's recipe section (`recipe::recipe_section`): its
+    // recipe write goes through the one door.
+    section: &super::recipe::RecipeSection,
     def: &RegAgent,
     window_name: &str,
     session: &str,
@@ -230,6 +236,9 @@ fn materialize(
     member: &str,
 ) -> Result<Materialized, String> {
     let home = agent_home(workspace, window_name);
+    if !section.is_for(&home) {
+        return Err(format!("internal: materialize '{window_name}' outside its recipe section"));
+    }
     std::fs::create_dir_all(&home).map_err(|e| format!("create agent home: {e}"))?;
     ensure_gitignore(workspace);
     // A JOINED agent (board #382: a team and no member, however its def was
@@ -286,7 +295,7 @@ fn materialize(
     // replays it). Written here, before the window exists, so a write failure
     // is a spawn failure with nothing left running — not a live agent that
     // restarts deaf on the generic launch path.
-    LaunchRecipe { backend: &def.backend, env: &env, cmd: &prepared.cmd, spawned_by: by, team, agent_def, member, input_mode: &def.input_mode }.write(&home)?;
+    LaunchRecipe { backend: &def.backend, env: &env, cmd: &prepared.cmd, spawned_by: by, team, agent_def, member, input_mode: &def.input_mode }.write_in(section)?;
     Ok(Materialized { home, cmd: prepared.cmd, env, confirmation: prepared.confirmation })
 }
 
@@ -302,15 +311,12 @@ fn materialize(
 /// window), or a def edited into an invalid model (a config the backend
 /// would refuse must not brick the restart).
 pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bool {
-    // It reads the recipe and `materialize` writes it back: one section with
-    // a runtime team move (`set_agent_team`), so neither undoes the other.
-    let _recipe = recipe_lock();
     let home = agent_home(project_path, window_name);
-    let Ok(recipe) = std::fs::read_to_string(home.join("launch.json")) else { return false };
-    let recipe: Value = match serde_json::from_str(&recipe) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
+    // The recipe's section from this read to materialize's write: the whole
+    // read-modify-write, registry/team resolution and the backend's render
+    // included, so a team move cannot land in between and be undone.
+    let section = super::recipe::recipe_section(&home);
+    let Ok(Some(recipe)) = section.read() else { return false };
     let field = |k: &str| recipe.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let by = field("spawned_by");
     let team = field("team");
@@ -346,7 +352,7 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
         return false;
     }
     let team_opt = (!team.is_empty()).then_some(team.as_str());
-    materialize(&def, window_name, session, project_path, "", &by, team_opt, &agent_def, &member).is_ok()
+    materialize(&section, &def, window_name, session, project_path, "", &by, team_opt, &agent_def, &member).is_ok()
 }
 
 /// Re-derive a team member's effective def from the CURRENT team definition
@@ -428,45 +434,28 @@ fn team_homes(workspace: &str, root: &str) -> Vec<(String, String, String)> {
 /// is not present in this project (`check_join`). Returns the team it left
 /// ('' when it was standalone) and whether anything changed.
 pub fn set_agent_team(workspace: &str, window_name: &str, team: &str) -> Result<(String, bool), String> {
-    let _recipe = recipe_lock();
-    let home = agent_home(workspace, window_name);
-    let path = home.join("launch.json");
-    let text = std::fs::read_to_string(&path).map_err(|_| format!("'{window_name}' is not an agent this app started"))?;
-    let mut recipe: Value = serde_json::from_str(&text).map_err(|e| format!("launch recipe of '{window_name}' is not readable: {e}"))?;
-    let field = |k: &str| recipe.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-    let (old, member) = (field("team"), field("member"));
-    let old_root = old.split('/').next().unwrap_or("").to_string();
-    if !member.is_empty() {
-        return Err(format!(
-            "'{window_name}' is member '{member}' of team '{old_root}' by the team's definition — change it in Agents > Teams"
-        ));
-    }
     let team = team.trim();
-    if team == old_root {
-        return Ok((old_root, false));
-    }
+    // Judged before the section (it reads OTHER homes' recipes, and a
+    // section is a leaf): a team that is here now is here a moment later.
     if !team.is_empty() {
         check_join(workspace, team)?;
     }
-    recipe["team"] = json!(team);
-    // Written whole through a temp file and a rename: a reader never sees a
-    // half-written recipe (the restart path replays it verbatim).
-    let tmp = home.join("launch.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&recipe).unwrap())
-        .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("write launch recipe {}: {e}", path.display()))?;
-    Ok((old_root, true))
-}
-
-/// The one section for a read-modify-write of an EXISTING agent's recipe
-/// (board #384): a restart's `refresh_agent` reads the recipe and rewrites it
-/// through `materialize`; a runtime team move rewrites its `team`. Without
-/// one section a move landing between a restart's read and its write would be
-/// undone while the room says it happened. Process-wide (both are short file
-/// writes); a poisoned lock is still a lock.
-fn recipe_lock() -> std::sync::MutexGuard<'static, ()> {
-    static RECIPE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    RECIPE.lock().unwrap_or_else(|e| e.into_inner())
+    super::recipe::update_recipe(&agent_home(workspace, window_name), |slot| {
+        let Some(recipe) = slot.as_mut() else { return Err(format!("'{window_name}' is not an agent this app started")) };
+        let field = |k: &str| recipe.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let (old, member) = (field("team"), field("member"));
+        let old_root = old.split('/').next().unwrap_or("").to_string();
+        if !member.is_empty() {
+            return Err(format!(
+                "'{window_name}' is member '{member}' of team '{old_root}' by the team's definition — change it in Agents > Teams"
+            ));
+        }
+        if team == old_root {
+            return Ok((old_root, false));
+        }
+        recipe["team"] = json!(team);
+        Ok((old_root, true))
+    })?
 }
 
 /// The other members of team `root` in this workspace, by window, for the
@@ -715,8 +704,12 @@ impl LaunchRecipe<'_> {
     /// `write_launch_recipe` produced (same keys, same order, same pretty
     /// printer) — proven by diff on a solo spawn, a team member and the
     /// pre-recipe backfill (board #153).
-    pub(crate) fn write(&self, home: &Path) -> Result<(), String> {
-        let recipe = json!({
+    ///
+    /// A fresh recipe of these keys, through the one door (board #384): the
+    /// keys it does not own (anything a later feature adds) are kept from the
+    /// recipe it replaces.
+    pub(crate) fn write_in(&self, section: &super::recipe::RecipeSection) -> Result<(), String> {
+        let fresh = json!({
             "backend": self.backend,
             "env": self.env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "cmd": self.cmd.trim_end(),
@@ -726,11 +719,22 @@ impl LaunchRecipe<'_> {
             "member": self.member,
             "input_mode": self.input_mode,
         });
-        std::fs::write(
-            home.join("launch.json"),
-            serde_json::to_string_pretty(&recipe).unwrap(),
-        )
-        .map_err(|e| format!("write launch recipe {}: {e}", home.join("launch.json").display()))
+        super::recipe::update_in(section, |slot| {
+            let mut next = fresh;
+            if let (Some(Value::Object(old)), Value::Object(new)) = (slot.as_ref(), &mut next) {
+                for (k, v) in old {
+                    new.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            *slot = Some(next);
+        })
+    }
+
+    /// `write_in` from outside a section, for a fixture: enters `home`'s
+    /// section for this one write.
+    #[cfg(test)]
+    pub(crate) fn write(&self, home: &Path) -> Result<(), String> {
+        self.write_in(&super::recipe::recipe_section(home))
     }
 }
 
@@ -2124,7 +2128,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("jnbase").unwrap();
         for (f, w) in flat.iter().zip(["lead", "dev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-            materialize(&d, w, "proj", &ws_str, "", "", Some("jnteam"), "", f.member.name.trim()).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("jnteam"), "", f.member.name.trim()).unwrap();
         }
         check_join(&ws_str, "jnteam").unwrap();
         assert!(check_join(&ws_str, "other").is_err(), "a team with nobody here");
@@ -2132,7 +2136,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         // The join: a registry def, the team, no member — what hub_spawn hands spawn.
         let helper = super::super::registry_get("jnhelper").unwrap().unwrap();
-        materialize(&helper, "jnhelper", "proj", &ws_str, "", "lead", Some("jnteam"), "jnhelper", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "jnhelper")), &helper, "jnhelper", "proj", &ws_str, "", "lead", Some("jnteam"), "jnhelper", "").unwrap();
         let recipe = read(&agent_home(&ws_str, "jnhelper").join("launch.json"));
         assert_eq!((recipe["team"].as_str(), recipe["member"].as_str(), recipe["agent_def"].as_str()), (Some("jnteam"), Some(""), Some("jnhelper")));
         assert_eq!(super::super::team_of(Some(&ws_str), "jnhelper").as_deref(), Some("jnteam"), "Hub's team tabs and team context read it as in the team");
@@ -2207,9 +2211,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("mvbase").unwrap();
         let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "mvteam".into())];
         let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
-        materialize(&d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead").unwrap();
         let solo = super::super::registry_get("mvsolo").unwrap().unwrap();
-        materialize(&solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo")), &solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "").unwrap();
         let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
         let before = recipe();
 
@@ -2236,22 +2240,29 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!prompt().contains("## Your team"), "and its next start drops the block");
         assert!(set_agent_team(&ws_str, "nobody", "mvteam").unwrap_err().contains("is not an agent this app started"));
 
-        // One section with a restart's read-and-rewrite: while it is held, a
-        // move waits, and lands after it.
-        let held = recipe_lock();
+        // One per-home section with a restart's read-and-rewrite: while it is
+        // held, a move of THIS agent waits and lands after it; a restart
+        // takes the same section; another agent's home is not held up.
+        let held = super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo"));
         let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam")) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(recipe()["team"], "", "the move waits for the section");
+        assert!(refresh_agent(&ws_str, "proj", "lead"), "another home's restart is not held up");
         drop(held);
         assert_eq!(mover.join().unwrap().unwrap(), (String::new(), true));
         assert_eq!(recipe()["team"], "mvteam");
-        let held = recipe_lock();
+        let held = super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo"));
         let restart = { let ws = ws_str.clone(); std::thread::spawn(move || refresh_agent(&ws, "proj", "mvsolo")) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(!restart.is_finished(), "a restart's refresh takes the same section");
         drop(held);
         assert!(restart.join().unwrap());
         assert_eq!(recipe()["team"], "mvteam", "and keeps the move");
+        // A spawn-time rewrite of the recipe (materialize) keeps a key it does
+        // not own: a later feature's field survives a restart.
+        super::super::recipe::update_recipe(&agent_home(&ws_str, "mvsolo"), |r| r.as_mut().unwrap()["later"] = json!(7)).unwrap();
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert_eq!(recipe()["later"], 7, "materialize preserves what it does not own");
 
         super::super::teams_delete("mvteam").ok();
         for n in ["mvbase", "mvsolo"] { super::super::registry_delete(n).ok(); }
@@ -2278,7 +2289,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         };
         save("Old persona.");
         let def = super::super::registry_get(name).unwrap().expect("saved def");
-        materialize(&def, name, "proj", &ws_str, "fix the login bug", "lead", None, name, "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, name)), &def, name, "proj", &ws_str, "fix the login bug", "lead", None, name, "").unwrap();
         let cfg = agent_home(&ws_str, name).join("agents").join(format!("{name}.json"));
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         assert!(read(&cfg)["prompt"].as_str().unwrap().contains("Old persona."));
@@ -2337,7 +2348,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             ];
             for (f, w) in flat.iter().zip(["st", "in"]) {
                 let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-                materialize(&d, w, "proj", &ws_str, "", "", Some("mmteam"), "", f.member.name.trim()).unwrap();
+                materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "", Some("mmteam"), "", f.member.name.trim()).unwrap();
             }
         };
         let mode = |w: &str| -> String {
@@ -2380,7 +2391,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let ws = std::env::temp_dir().join(format!("tmm-default-mode-{}", uuid::Uuid::new_v4()));
         let ws_str = ws.to_string_lossy().to_string();
         let d = super::super::registry_get("dmkiro").unwrap().unwrap();
-        materialize(&d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dmkiro")), &d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "").unwrap();
         let cli: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(&ws_str, "dmkiro").join("settings/cli.json")).unwrap()).unwrap();
         assert_eq!(cli["chat.defaultInterruptBehavior"], "steer", "and it spawns steering");
         let _ = std::fs::remove_dir_all(&ws);
@@ -2460,7 +2471,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // recipe's agent_def is what finds it.
         save("rfuniq", "Uniq old.");
         let def = super::super::registry_get("rfuniq").unwrap().unwrap();
-        materialize(&def, "rfuniq-2", "proj", &ws_str, "", "", None, "rfuniq", "").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rfuniq-2")), &def, "rfuniq-2", "proj", &ws_str, "", "", None, "rfuniq", "").unwrap();
         save("rfuniq", "Uniq new.");
         assert!(refresh_agent(&ws_str, "proj", "rfuniq-2"), "the uniquified window refreshes via agent_def");
         let cfg = agent_home(&ws_str, "rfuniq-2").join("agents").join("rfuniq-2.json");
@@ -2486,7 +2497,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("rfbase").unwrap();
         for (f, w) in flat.iter().zip(["dev-2", "rev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
-            materialize(&d, w, "proj", &ws_str, "", "lead", Some("rfteam"), "", f.member.name.trim()).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rfteam"), "", f.member.name.trim()).unwrap();
         }
         save("rfbase", "Base new.");
         assert!(refresh_agent(&ws_str, "proj", "dev-2"), "the team member refreshes via team+member");
@@ -2541,7 +2552,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let base = super::super::registry_get("tpbase").unwrap();
         for f in &flat {
             let d = super::super::teams::effective_def(f, base.as_ref(), &f.member.name, &roster).unwrap();
-            materialize(&d, &f.member.name, &session, &ws_str, "", "", Some("tpteam"), "", &f.member.name).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, &f.member.name)), &d, &f.member.name, &session, &ws_str, "", "", Some("tpteam"), "", &f.member.name).unwrap();
         }
         save_team(r#"[{"name":"dev","base":"tpbase","role":"implement"},{"name":"rev","base":"tpbase","role":"review"}]"#);
 

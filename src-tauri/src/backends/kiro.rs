@@ -471,13 +471,17 @@ pub(crate) fn engine_flag() -> String {
 /// token surgery on the recorded line, like `migrate_launch_model`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn reconcile_recipe_engine(home: &Path) -> bool {
-    let recipe_path = home.join("launch.json");
-    let Ok(text) = std::fs::read_to_string(&recipe_path) else { return false };
-    let Ok(mut recipe) = serde_json::from_str::<Value>(&text) else { return false };
-    let Some(cmd) = recipe.get("cmd").and_then(Value::as_str).map(str::to_string) else { return false };
-    let Some(next) = reconcile_engine_in(&cmd, &engine_flag()) else { return false };
-    recipe["cmd"] = json!(next);
-    std::fs::write(&recipe_path, serde_json::to_string_pretty(&recipe).unwrap_or(text)).is_ok()
+    // Through the recipe's one door (board #384): the read is inside the
+    // home's section and only `cmd` changes, so a team move is never undone.
+    let flag = engine_flag();
+    crate::projects::recipe::update_recipe(home, |slot| {
+        let Some(recipe) = slot.as_mut() else { return false };
+        let Some(cmd) = recipe.get("cmd").and_then(Value::as_str) else { return false };
+        let Some(next) = reconcile_engine_in(cmd, &flag) else { return false };
+        recipe["cmd"] = json!(next);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The pure half: `Some(new line)` when the engine segment has to change.
@@ -727,26 +731,25 @@ fn legacy_sessions_root() -> Option<std::path::PathBuf> {
 /// pass `--agent`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> bool {
-    let recipe_path = home.join("launch.json");
-    let Ok(text) = std::fs::read_to_string(&recipe_path) else { return false };
-    let Ok(mut recipe) = serde_json::from_str::<Value>(&text) else { return false };
-    let Some(cmd) = recipe.get("cmd").and_then(Value::as_str).map(str::to_string) else {
-        return false;
-    };
-    // Model ids never contain whitespace, so token splitting is exact here.
-    let mut tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let Some(at) = tokens.iter().position(|t| *t == "--model") else { return false };
-    let model = tokens
-        .get(at + 1)
-        .map(|m| m.trim_matches('\'').trim_matches('"').to_string())
-        .filter(|m| !m.is_empty() && !m.starts_with('-'));
-    tokens.drain(at..(at + 2).min(tokens.len()));
-    recipe["cmd"] = json!(tokens.join(" "));
-    let recipe_written = std::fs::write(
-        &recipe_path,
-        serde_json::to_string_pretty(&recipe).unwrap_or(text),
-    )
-    .is_ok();
+    // Through the recipe's one door (board #384): the read is inside the
+    // home's section and only `cmd` changes, so a team move is never undone.
+    // `None` = nothing to migrate; `Some(model)` = the line was rewritten.
+    let migrated = crate::projects::recipe::update_recipe(home, |slot| {
+        let recipe = slot.as_mut()?;
+        let cmd = recipe.get("cmd").and_then(Value::as_str)?.to_string();
+        // Model ids never contain whitespace, so token splitting is exact here.
+        let mut tokens: Vec<&str> = cmd.split_whitespace().collect();
+        let at = tokens.iter().position(|t| *t == "--model")?;
+        let model = tokens
+            .get(at + 1)
+            .map(|m| m.trim_matches('\'').trim_matches('"').to_string())
+            .filter(|m| !m.is_empty() && !m.starts_with('-'));
+        tokens.drain(at..(at + 2).min(tokens.len()));
+        recipe["cmd"] = json!(tokens.join(" "));
+        Some(model)
+    });
+    let Ok(Some(model)) = migrated else { return false };
+    let recipe_written = true;
     // Only fill a config that has no model of its own: a value already there
     // came from a newer spawn (or the user) and outranks the old launch line.
     let Some(model) = model else { return recipe_written };
@@ -991,7 +994,11 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
         changed |= ensure_kiro_settings(home, &profile_model(&config));
         // The engine door is read at every start (board #207).
         changed |= reconcile_recipe_engine(home);
-        if !home.join("launch.json").exists() {
+        // The pre-recipe backfill, decided INSIDE the home's recipe section
+        // (board #384): "no recipe yet" is read and acted on in one step, so
+        // a spawn writing one meanwhile is never overwritten.
+        let section = crate::projects::recipe::recipe_section(home);
+        if matches!(section.read(), Ok(None)) {
             // Best effort: a backfill that cannot be written changes nothing,
             // and the restart then takes the generic launch path.
             changed |= crate::projects::spawn::LaunchRecipe {
@@ -1011,7 +1018,7 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
                 member: "",
                 input_mode: "",
             }
-            .write(home)
+            .write_in(&section)
             .is_ok();
         }
     }
@@ -1289,6 +1296,43 @@ pub(crate) fn transient_error(glued: &str, spaced: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #384 (reviewer P1-C): kiro's two recipe migrations go through
+    /// the recipe's one door, the read INSIDE the home's section. Each starts
+    /// while a team move holds the section; the move lands; the migration's
+    /// own change lands after it, and the move survives (a migration that read
+    /// the recipe before the section would write the old team back).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_recipe_migration_waits_for_a_team_move_and_keeps_it() {
+        use crate::projects::recipe::{recipe_section, update_in};
+        let home = std::env::temp_dir().join(format!("tmm-kiro-mig-{}", uuid::Uuid::new_v4())).join(".tmm/agents/dev");
+        std::fs::create_dir_all(home.join("agents")).unwrap();
+        let cfg = home.join("agents").join("dev.json");
+        std::fs::write(&cfg, r#"{"name":"dev","prompt":"p","hooks":{}}"#).unwrap();
+        let read = || -> Value { serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap() };
+        let race = |cmd: &str, migrate: fn(&Path, &Path) -> bool| {
+            std::fs::write(home.join("launch.json"), json!({ "backend": "kiro", "cmd": cmd, "team": "" }).to_string()).unwrap();
+            let held = recipe_section(&home);
+            let worker = { let (h, c) = (home.clone(), cfg.clone()); std::thread::spawn(move || migrate(&h, &c)) };
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(!worker.is_finished(), "the migration waits for the section");
+            update_in(&held, |r| r.as_mut().unwrap()["team"] = json!("squad")).unwrap();
+            drop(held);
+            assert!(worker.join().unwrap(), "and then migrates");
+            read()
+        };
+        let after = race("command kiro-cli chat --agent dev --model claude-haiku-4.5 --trust-all-tools", migrate_launch_model);
+        assert_eq!(after["team"], "squad", "the move survives the model migration");
+        assert!(!after["cmd"].as_str().unwrap().contains("--model"), "{after}");
+        // The engine line: whichever way the door is set, make it change.
+        let flag = engine_flag();
+        let start = if flag.is_empty() { "command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3" } else { "command kiro-cli chat --agent dev --trust-all-tools" };
+        let after = race(start, |h, _| reconcile_recipe_engine(h));
+        assert_eq!(after["team"], "squad", "the move survives the engine reconcile");
+        assert_eq!(after["cmd"].as_str(), reconcile_engine_in(start, &flag).as_deref());
+        let _ = std::fs::remove_dir_all(home.parent().unwrap().parent().unwrap().parent().unwrap());
+    }
 
     /// Board #271: panes captured on kiro-cli 2.22.1 v3 (capture-pane -p).
     #[test]
