@@ -49,7 +49,7 @@ function socketClass(win: DOMWindow, windows: number[]) {
   };
 }
 
-async function mount(context: TestContext) {
+async function mount(context: TestContext, opts: { tag?: string; phone?: boolean } = {}) {
   const windows = [0, 1];
   const app = await (await compiled).mount(context, {
     modules: [],
@@ -63,7 +63,9 @@ async function mount(context: TestContext) {
       (win as unknown as { WebSocket: unknown }).WebSocket = socketClass(win, windows);
     },
   });
-  const host = (app.window as unknown as { __strip: { dial(): Promise<{ ok: boolean }>; show(): void; retarget(t: string): void; target: string; switches: string[] } }).__strip;
+  const host = (app.window as unknown as { __strip: { dial(): Promise<{ ok: boolean }>; show(): void; retarget(t: string): void; setTag(n: string | null): void; setPhone(on: boolean): void; target: string; switches: string[] } }).__strip;
+  host.setTag(opts.tag ?? null);
+  host.setPhone(opts.phone ?? false);
   const flushAll = async () => { for (let i = 0; i < 12; i++) await app.flush(); };
   const dialled = host.dial();
   await flushAll();
@@ -126,3 +128,43 @@ test('#365: tapping the CURRENT tab switches nothing — only another window s t
   await flushAll();
   assert.deepEqual([...host.switches], ['app:1.0'], 'and tapping it again, now current, does nothing');
 });
+
+// ── The head names its server the way Chat and Board do (board #390) ──
+//
+// Owner, multi-server mode: the tag sat to the right of the name and was drawn very large. It was a
+// bare <ServerTag> in the strip's flex row: this page's scoped `align-self: center` does not reach a
+// child component's span, so in the tab strip it stretched to the strip's height (34px against its
+// own 14px, measured in a browser), and nothing ever put it under the name. jsdom has no layout, so
+// what can be held here is the STRUCTURE the browser then draws: the tag lives in the shared
+// `.title-stack` (app.css; the Hub's and the Board's atom) and is no longer a child of the strip.
+const stackShape = (stack: Element) => [...stack.children].map((c) => (c.classList.contains('name-line') ? 'name-line' : c.classList.contains('server-tag') ? 'server-tag' : c.tagName));
+
+test('#390 (phone, several servers): the tag is the second item of the head\'s Name + tag stack, stacked under the name, and no bare tag is left in the strip', async (context) => {
+  const { strip } = await mount(context, { tag: 'alpha', phone: true });
+  const stack = strip().querySelector<HTMLElement>(':scope > .title-stack')!;
+  assert.ok(stack, 'the name and tag share one stack, a direct child of the head');
+  assert.ok(stack.classList.contains('stacked'), 'phone: stacked unconditionally, like Chat');
+  assert.deepEqual(stackShape(stack), ['name-line', 'server-tag'], 'name line on top, the tag after it');
+  assert.equal(stack.querySelector('.name-line > h1.win-title')?.textContent, 'app');
+  assert.equal(stack.querySelector('.server-tag')?.textContent, 'alpha');
+  assert.equal(strip().querySelector(':scope > .server-tag'), null, 'the tag is not a flex child of the strip (that is what stretched it to the strip\'s height)');
+  assert.ok(strip().querySelector('.ham'), 'the phone lead-in is the hamburger, then the stack');
+});
+
+test('#390 (desktop, several servers): the same stack, not forced into its column form — the fit action decides, as on Chat', async (context) => {
+  const { strip } = await mount(context, { tag: 'alpha', phone: false });
+  const stack = strip().querySelector<HTMLElement>(':scope > .title-stack')!;
+  assert.ok(stack && !stack.classList.contains('stacked'), 'desktop: no mode class');
+  assert.deepEqual(stackShape(stack), ['name-line', 'server-tag']);
+  assert.equal(strip().querySelector(':scope > .server-tag'), null);
+});
+
+for (const phone of [true, false]) {
+  test(`#390 (Single, ${phone ? 'phone' : 'desktop'}): no tag, and the stack is the name alone — the head reads as it did`, async (context) => {
+    const { strip } = await mount(context, { phone });
+    const stack = strip().querySelector<HTMLElement>(':scope > .title-stack')!;
+    assert.deepEqual(stackShape(stack), ['name-line'], 'the name line only');
+    assert.equal(strip().querySelector('.server-tag'), null, 'no tag');
+    assert.equal(stack.querySelector('h1.win-title')?.textContent, 'app');
+  });
+}

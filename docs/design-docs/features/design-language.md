@@ -1382,6 +1382,26 @@ measures the stack, or a stored width, is a
 regression. Verified in a real browser at 1280 (85-char name whole, tag below;
 short name inline) and 700 (tag wraps first, the name ellipsises after).
 
+**The Terminal head wears the same stack (2026-10-16, board #390).** Owner, in several-server
+mode: "位置不对：现在显示在右边，应该和 chat 页面一样显示在它的下方。样式不对：现在显示得非常大。"
+The Terminal head had been given a bare `ServerTag` next to its `<h1>` — the "as they gain one"
+above, done without the stack. In the expanded window strip (`.win-bar.tab-strip`, which stretches
+its children) that tag, a child component's span that this page's scoped `align-self: center`
+does not reach, stretched to the strip's height: **34px against its own 14px, measured in Chrome at
+390×844** (the 9px text sat at the top of a grey capsule, to the right of the name). It now goes
+where Chat and Board put it: the head's one `.title-stack` — a name line (`h1.win-title`) and the
+tag — as one `{#snippet nameStack()}` rendered at the three places the page names itself (the
+phone's lead-in after the hamburger, the desktop title, the collapsed desktop head). Stacked
+unconditionally on a phone or a narrow viewport (`stackedHead`: the session-drawer door is present
+or ≤760px, Hub's `compact` rule), fit-decided by `ui/title-fit.ts` otherwise. Measured after, same
+rig: the tag is 35×14 at 9px with the pill radius and `--surface2` wash — the numbers Chat's tag
+has, 2px under the name — and the strip grows by 1px (43px against 42px) only while a tag is
+shown; Single has no tag and the stack is the name alone. The page keeps no paint of its own for
+the stack or the tag. Pinned: `Terminal.source.test.ts` (one snippet, three renders, the shape
+compared with the Hub's and the Board's, no flat h1 + tag pair, no private copy in the page's
+style) and `Terminal.strip.mount.test.ts` (phone: stacked, the tag second in the stack and not a
+child of the strip; desktop: not forced; Single: name only).
+
 ### One server tag, shown by the source set (2026-10-12, board #335 ③c-1)
 
 Where several servers can show in one place — a page head, a union row, the

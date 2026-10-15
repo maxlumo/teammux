@@ -372,7 +372,9 @@ Adoption:
     CELL keeps its chip (it opens the cross-session pane picker), a PHONE keeps
     its chip (it opens the session sheet, that layout's sidebar), and the
     DESKTOP shows the title — there the sidebar is already on screen, so a chip
-    would be the second door the owner cut. `flex-wrap: nowrap` is required:
+    would be the second door the owner cut. (In several-server mode the title is the Hub's
+    Name + tag stack, one `.title-stack` — design-language.md § "A name never ellipsises…",
+    board #390.) `flex-wrap: nowrap` is required:
     the phone `.page-head` rule wraps head actions, and this head is a scroll
     strip.
   - *A different New Project button.* A full-width bordered `.new-btn` in a

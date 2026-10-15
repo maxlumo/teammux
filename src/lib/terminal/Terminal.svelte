@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { useServerScope } from '../app/server-context.ts';
   import ServerTag from '../ui/ServerTag.svelte';
+  import { titleFit } from '../ui/title-fit.ts';
   import { Terminal } from '@xterm/xterm';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import Icon from '../ui/Icon.svelte';
@@ -147,6 +148,17 @@
     connectionFeedbackLifetime.dispose();
   });
   const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  // The page head's Name + tag stack stacks UNCONDITIONALLY on a phone and wherever the viewport
+  // is narrow, and otherwise lets `ui/title-fit.ts` decide — the Hub's and the Board's rule
+  // (Hub `compact`, Board `narrowVp`): the tag sits under the name when the two do not fit.
+  let narrowVp = $state(typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 760px)');
+    const onChange = () => { narrowVp = mq.matches; };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  });
+  const stackedHead = $derived(!!onOpenSessions || narrowVp);
   // Visual width of xterm's overlay scrollbar (passed to the Terminal ctor
   // below). It floats ON TOP of the content's right edge and does NOT
   // reserve layout space — calcFit deliberately uses the full width so the
@@ -1712,6 +1724,17 @@
       <OperationFeedback value={copyFeedback} ondismiss={copyFeedback?.kind === 'error' ? copyFeedbackLifetime.clear : undefined} />
     </div>
   {/if}
+  <!-- The head's Name + server tag: the Hub's and the Board's stack (app.css `.title-stack` /
+       `.name-line`, `ui/title-fit.ts`), the ONE atom — no local paint. Beside the name while the two
+       fit, a line under it when they do not and always under it on a phone, exactly as Chat does.
+       Rendered at the three places this page names itself. Without a tag (Single) the stack is the
+       name alone. -->
+  {#snippet nameStack()}
+    <div class="title-stack" class:stacked={stackedHead} use:titleFit={{ active: !stackedHead, key: `${session}|${scope?.tag ?? ''}` }}>
+      <div class="name-line"><h1 class="win-title" title={session}>{session}</h1></div>
+      <ServerTag name={scope?.tag} />
+    </div>
+  {/snippet}
   {#if showSwitcher}
     {#if showWindowCmd || embedded}
       <!--
@@ -1749,9 +1772,9 @@
             onclick={(e) => { e.stopPropagation(); onOpenSessions(); }}>
             <Icon name="menu" size={16} />
           </button>
-          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
+          {@render nameStack()}
         {:else}
-          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
+          {@render nameStack()}
         {/if}
         {#if showPanePicker}
           <PanePicker
@@ -1871,7 +1894,7 @@
         </div>
       {:else}
         <div class="win-bar page-head">
-          <h1 class="win-title" title={session}>{session}</h1><ServerTag name={scope?.tag} />
+          {@render nameStack()}
           <span class="win-bar-spacer"></span>
           <AgentChip
             agent={curAgent}

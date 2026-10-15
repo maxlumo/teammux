@@ -15,18 +15,24 @@
   const serverState = createServerState(createServerStore(localStorage, runtime.id));
   let target = $state('app:0.0');
   let shown = $state(false);
+  // The head's Name + tag stack (board #390): the server tag ServerScope hands the pages (null = Single),
+  // and whether this is the phone's layout (the host passes Terminal the session-drawer door).
+  let tag = $state(null);
+  let phone = $state(false);
   const switches = [];
   globalThis.__strip = {
     dial: () => runtime.dial(),
     show() { shown = true; },
     retarget(t) { target = t; },
+    setTag(name) { tag = name; },
+    setPhone(on) { phone = on; },
     get target() { return target; },
     switches,
   };
 </script>
 
 {#if shown}
-  <ServerScope {runtime} state={serverState}>
-    <Terminal {target} session="app" visible active onSwitchPane={(t) => { switches.push(t); target = t; }} />
+  <ServerScope {runtime} state={serverState} {tag}>
+    <Terminal {target} session="app" visible active onSwitchPane={(t) => { switches.push(t); target = t; }} onOpenSessions={phone ? () => {} : null} />
   </ServerScope>
 {/if}

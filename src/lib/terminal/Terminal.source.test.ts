@@ -207,7 +207,7 @@ test('the win-bar IS the page head, and carries a title on the desktop', () => {
   const branch = /\{#if embedded\}([\s\S]*?)\{:else\}([\s\S]*?)\{\/if\}/u.exec(source);
   assert.ok(branch, 'the identity branch must exist');
   assert.match(branch[0], /\{:else if onOpenSessions\}/u);
-  assert.match(branch[0], /<h1 class="win-title"/u);
+  assert.match(branch[0], /\{@render nameStack\(\)\}/u, 'the page title is the head\'s one Name + tag stack');
   // A cell's chip opens the picker; it must not fall through to a null call.
   assert.match(branch[1] ?? '', /showPanePicker = !showPanePicker/u);
 });
@@ -218,7 +218,7 @@ test('collapsing the switcher hides the chips, not the desktop page head', () =>
   // with no header (measured 2026-08-19: no .win-bar, xterm at top 0).
   assert.match(source, /\{#if isMobile\}\s*<div class="win-collapsed-anchor appear">/u);
   const desktopCollapsed = /\{:else\}\s*<div class="win-bar page-head">[\s\S]*?<\/div>/u.exec(source)?.[0] ?? '';
-  assert.match(desktopCollapsed, /<h1 class="win-title"/u);
+  assert.match(desktopCollapsed, /\{@render nameStack\(\)\}/u);
   assert.match(desktopCollapsed, /chevron="left"/u, 'the chip stays the expand control');
   assert.match(desktopCollapsed, /tmux_winswitcher', '1'/u);
 });
@@ -230,7 +230,7 @@ test('the phone bar leads with hamburger + name, chips unchanged (board #19)', (
   const bar = source.slice(source.indexOf('{:else if onOpenSessions}'), source.indexOf('{:else}', source.indexOf('{:else if onOpenSessions}')));
   assert.match(bar, /class="icon-btn ham"[\s\S]{0,120}?onOpenSessions\(\)/u, 'the hamburger opens the drawer');
   assert.match(bar, /<Icon name="menu"/u, 'three lines, like Chat and Board');
-  assert.match(bar, /<h1 class="win-title" title=\{session\}>\{session\}<\/h1>/u, 'the name is the title');
+  assert.match(bar, /\{@render nameStack\(\)\}/u, 'the name is the title');
   assert.ok(!bar.includes('<AgentChip'), 'the session chip is retired from the lead-in');
   // The window chips keep their switch handler.
   assert.match(source, /onSwitchPane\(`\$\{w\.session\}:\$\{w\.window\}\.\$\{w\.pane\}`\);/u,
@@ -243,6 +243,32 @@ test('the title never stretches the bar apart — chips follow the name (owner, 
   // right. The scoped win-title opts out.
   assert.match(source, /\.win-title \{ max-width: 22ch; flex: 0 1 auto; \}/u,
     'content-sized title — the chips strip takes the leftover space');
+});
+
+test('the head names its server the way Chat and Board do: ONE Name + tag stack, rendered at the three places the page names itself, no flat h1 + tag pair (board #390)', async () => {
+  // Owner, multi-server mode: the tag sat to the RIGHT of the project name and was drawn very
+  // large. It was a bare <ServerTag> next to the <h1> in a flex row: a child component's span is
+  // not reached by this page's scoped `.win-bar.tab-strip > :not(.win-bar-scroll) { align-self:
+  // center }`, so in the tab strip it stretched to the strip's whole height (34px against its own
+  // 14px, measured), and nothing ever put it UNDER the name. The fix is not a second rule: it is
+  // the Hub's and the Board's stack — app.css `.title-stack` / `.name-line` + ui/title-fit.ts.
+  assert.doesNotMatch(source, /<\/h1>\s*<ServerTag/u, 'no flat <h1><ServerTag> sibling pair: the tag lives in the stack');
+  const snippet = /\{#snippet nameStack\(\)\}([\s\S]*?)\{\/snippet\}/u.exec(source)?.[1] ?? '';
+  assert.match(snippet, /<div class="title-stack" class:stacked=\{stackedHead\} use:titleFit=\{\{ active: !stackedHead, key: `\$\{session\}\|\$\{scope\?\.tag \?\? ''\}` \}\}>\s*<div class="name-line"><h1 class="win-title" title=\{session\}>\{session\}<\/h1><\/div>\s*<ServerTag name=\{scope\?\.tag\} \/>\s*<\/div>/u,
+    'the stack: a name line with the h1, then the tag — the markup Hub and Board wear');
+  assert.equal((source.match(/\{@render nameStack\(\)\}/gu) ?? []).length, 3, 'the phone lead-in, the desktop title and the collapsed desktop head all render it');
+  assert.match(source, /import \{ titleFit \} from '\.\.\/ui\/title-fit\.ts';/u);
+  // The stack's mode is the Hub's rule: stacked unconditionally on a phone / a narrow viewport,
+  // and the fit action decides otherwise.
+  assert.match(source, /const stackedHead = \$derived\(!!onOpenSessions \|\| narrowVp\);/u);
+  // The atom is app.css's: this page keeps no private copy of it, and no paint for the tag.
+  const style = /<style>([\s\S]*)<\/style>/u.exec(source)?.[1] ?? '';
+  assert.doesNotMatch(style, /title-stack|name-line|server-tag/u, 'the stack and the tag are not re-declared here');
+  // One markup across the three pages that name a project/session beside a server tag.
+  const hub = await readFile(new URL('../hub/Hub.svelte', import.meta.url), 'utf8');
+  const board = await readFile(new URL('../hub/Board.svelte', import.meta.url), 'utf8');
+  const shape = (text: string) => /<div class="title-stack" class:stacked=\{[^}]+\} use:titleFit=\{\{[\s\S]*?\}\}>\s*<div class="name-line">[\s\S]*?<\/div>\s*(?:\{#if !renaming\})?<ServerTag name=\{scope\?\.tag\} \/>/u.test(text);
+  assert.deepEqual([shape(hub), shape(board), shape(snippet)], [true, true, true], 'Chat, Board and Terminal wear the same stack');
 });
 
 test('a font, theme or active change is a live option update, never an xterm rebuild (review 2026-09-03)', () => {
