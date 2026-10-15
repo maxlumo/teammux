@@ -19,6 +19,7 @@
 
 import { parseBuild, type BuildInfo } from './build-info.ts';
 import { parseCaps } from './login-caps.ts';
+import { ERR_AUTH } from './rpc-codes.ts';
 
 // Cursor: x/y position, width, height, trailing trimmed lines.
 export interface Cursor { x: number; y: number; w: number; h: number; t: number }
@@ -38,6 +39,10 @@ export type PaneClosedCb = (target: string) => void;
 // code (number) for definitive server answers, or 'DISCONNECTED' (string)
 // for transport-level failures.
 export type RpcClientError = Error & { code?: number | string; data?: unknown };
+
+/** The server's explicit refusal of the credentials, as a login failure: an Error that
+ * carries the wire code the reconnect loop stops on (`isAuthRefusal`, app/dial-order.ts). */
+const refusal = (message: unknown): RpcClientError => Object.assign(new Error(typeof message === 'string' && message ? message : 'auth failed'), { code: ERR_AUTH });
 
 // One key per direction. Under the v1 handshake both fields hold the same key
 // (kept for old servers); under v2 they are distinct HKDF outputs, so the two
@@ -620,7 +625,15 @@ export function createConnection(): Connection {
             // Encrypted auth response — must arrive as a binary frame.
             if (!isBinary) {
               clearTimeout(timeout); cipher = null;
-              reject(new Error('auth failed: expected binary auth response'));
+              // ONE plain frame is expected here and it is a refusal: the server has no
+              // session key for a proof it just rejected, so its `invalid proof`
+              // (ERR_AUTH) comes as text (connection.rs). It is kept as such — the
+              // reconnect loop stops on it instead of dialling for three minutes — and
+              // it is ONLY ever a refusal: a plain frame is never read as a login that
+              // succeeded (no downgrade), and any other unexpected frame stays the
+              // protocol error it always was (board #393).
+              if (data?.error?.code === ERR_AUTH) reject(refusal(data.error.message));
+              else reject(new Error('auth failed: expected binary auth response'));
               return;
             }
             try {
@@ -633,7 +646,9 @@ export function createConnection(): Connection {
           } else {
             // Plain (token) response — text frame.
             if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); caps = parseCaps(data.result.caps); authSuccess(); return; }
-            clearTimeout(timeout); reject(new Error(data?.error?.message || 'auth failed')); return;
+            clearTimeout(timeout);
+            reject(data?.error?.code === ERR_AUTH ? refusal(data.error.message) : new Error(data?.error?.message || 'auth failed'));
+            return;
           }
         }
 

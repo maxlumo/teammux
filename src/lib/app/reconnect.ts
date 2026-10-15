@@ -71,7 +71,7 @@ export const RETRY_GAP_CAP_MS = 3000;
  * disconnect-grace.md § The client's side). There is no attempt count: a count
  * has to be sized from the backoff sequence (0.5 + 1 + 1.5 + 2 + 2.5 s, then
  * 3 s gaps) and any rounding ends the loop early — the first cut, 180 s over
- * the 3 s cap = 60 attempts, gave up at 169.5 s — so the clock decides, and
+ * the 3 s cap = 60 attempts, calculated by the reviewer to give up at 169.5 s — so the clock decides, and
  * `maxAttempts` stays only as an optional bound a caller may add. (Board #393:
  * a fixed 10 attempts gave up after ~25 s, measured live.)
  */

@@ -9,6 +9,8 @@
 // the next address is tried when the dial itself fails, not only when the
 // probe does.
 
+import { ERR_AUTH } from '../core/rpc-codes.ts';
+
 /** A dial that got nowhere because the address cannot be reached: a timeout,
  * a refusal, a socket that closed during auth. An AUTH refusal is not one:
  * the server answered, and another address of it would answer the same. */
@@ -17,13 +19,16 @@ export function isReachabilityFailure(e: unknown): boolean {
   return /timeout|connection failed|closed during auth/i.test(message);
 }
 
-/** The server ANSWERED and refused the credentials (its "invalid token", or the
- * encrypted handshake failing to decrypt: the wrong token). Not a drop and not
- * a reachability failure: the reconnect loop stops at once instead of retrying
- * the same answer for its whole window (board #393). */
+/** The server ANSWERED and refused the credentials: the login failed with its
+ * ERR_AUTH (`invalid proof` on the encrypted path, `invalid token` on the plain
+ * one — core/connection.ts keeps the code on the error). Not a drop and not a
+ * reachability failure: the reconnect loop stops at once instead of retrying the
+ * same answer for its whole window, and instead of feeding the server's lockout
+ * (board #393). By the CODE, never by the message: a protocol surprise such as
+ * "expected binary auth response", a timeout and a socket closed during auth are
+ * not a bad token. */
 export function isAuthRefusal(e: unknown): boolean {
-  const message = typeof e === 'string' ? e : String((e as { message?: unknown } | null)?.message ?? '');
-  return /^(?:auth failed$|invalid token)/i.test(message.trim());
+  return (e as { code?: unknown } | null)?.code === ERR_AUTH;
 }
 
 /** How long ONE dial of an address of class 0 (LAN), 1 (Tailscale) or 2

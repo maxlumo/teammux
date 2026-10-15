@@ -164,11 +164,12 @@ test('a 60 s and a 175 s outage both recover under the default budget; the old 1
 });
 
 test('an auth refusal stops the loop at once: the server answered, and retrying would repeat the answer for the whole window (#393 P2-2)', async () => {
-  for (const message of ['invalid token', 'auth failed']) {
+  const refused = (message: string) => Object.assign(new Error(message), { code: -32000 });
+  for (const message of ['invalid proof', 'invalid token']) {
     let dials = 0;
     const h = harness({
       storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 'bad' }),
-      connectImpl: async () => { dials++; throw new Error(message); },
+      connectImpl: async () => { dials++; throw refused(message); },
       appBudget: true,
     });
     h.machine.start();
@@ -178,22 +179,26 @@ test('an auth refusal stops the loop at once: the server answered, and retrying 
     assert.equal(h.machine.isActive(), false);
     assert.equal(h.unreachable.length, 0, `${message}: the address is not marked unreachable`);
   }
-  // A network failure is NOT a refusal: it keeps retrying.
-  let dials = 0;
-  const h = harness({
-    storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
-    connectImpl: async () => { dials++; throw new Error('connection failed'); },
-    appBudget: true,
-  });
-  h.machine.start();
-  for (let t = 0; t < 20000; t += 500) await h.timers.advance(500);
-  assert.ok(dials > 5 && !h.events.some((e) => e.gaveUp), `a drop keeps retrying (${dials} dials)`);
+  // Anything that is not the server's coded refusal keeps retrying: a drop, and also an
+  // unexpected frame in the login ("auth failed: expected binary auth response") or a bare
+  // "auth failed" — a protocol surprise is not a bad token.
+  for (const message of ['connection failed', 'connection closed during auth', 'auth failed: expected binary auth response', 'auth failed']) {
+    let dials = 0;
+    const h = harness({
+      storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
+      connectImpl: async () => { dials++; throw new Error(message); },
+      appBudget: true,
+    });
+    h.machine.start();
+    for (let t = 0; t < 20000; t += 500) await h.timers.advance(500);
+    assert.ok(dials > 5 && !h.events.some((e) => e.gaveUp), `${message}: keeps retrying (${dials} dials)`);
+  }
 });
 
 test('auth errors do NOT mark the address unreachable', async () => {
   const h = harness({
     storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 'bad' }),
-    connectImpl: async () => { throw new Error('auth failed'); },
+    connectImpl: async () => { throw Object.assign(new Error('invalid proof'), { code: -32000 }); },
     appBudget: true,
   });
   h.machine.start();

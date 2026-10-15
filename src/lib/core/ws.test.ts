@@ -365,9 +365,11 @@ test('the documented error codes are the server\'s, and the client keys on one o
   // And the ones the client acts on are the same numbers on both sides.
   assert.equal(codes.get('ERR_SCRATCH_HELD'), '-32010');
   assert.equal(codes.get('ERR_SCRATCH_STALE'), '-32011');
+  assert.equal(codes.get('ERR_AUTH'), '-32000');
   const client = await readFile(new URL('./rpc-codes.ts', import.meta.url), 'utf8');
   assert.match(client, /export const ERR_SCRATCH_HELD = -32010;/u, 'rpc-codes.ts mirrors it for the panel');
   assert.match(client, /export const ERR_SCRATCH_STALE = -32011;/u, 'and the one the panel RECOVERS from');
+  assert.match(client, /export const ERR_AUTH = -32000;/u, 'and the refusal the reconnect loop stops on (#393)');
   // And it is NOT in ws.ts itself: every mount fixture mocks that module, so
   // a code defined there reads as undefined in a test and the feature keyed
   // on it looks disabled (#337 — this is how the release action first failed).

@@ -28,14 +28,21 @@ test('dialOrder keeps the asked order, drops repeats and puts distrusted address
   assert.deepEqual(dialOrder([], () => true), []);
 });
 
-test('only the server SAYING no is an auth refusal; a drop, a timeout and a protocol hiccup are not (board #393)', () => {
-  for (const m of ['invalid token', 'Invalid token', 'auth failed']) assert.equal(isAuthRefusal(new Error(m)), true, m);
-  assert.equal(isAuthRefusal('invalid token'), true, 'a bare string reads the same');
-  for (const m of ['connection timeout', 'connection failed', 'closed during auth', 'superseded', 'auth failed: expected binary auth response', 'not an invalid token']) {
+test('only the server SAYING no is an auth refusal, by its ERR_AUTH code: a drop, a timeout and a protocol surprise are not (board #393)', () => {
+  const coded = (message: string, code: number) => Object.assign(new Error(message), { code });
+  // What core/connection.ts rejects with when the server answers the login with ERR_AUTH.
+  for (const m of ['invalid proof', 'invalid token', '']) assert.equal(isAuthRefusal(coded(m, -32000)), true, `-32000 "${m}"`);
+  // The same words WITHOUT the code are not a refusal: the message is the server's sentence, not a contract.
+  for (const m of ['invalid token', 'auth failed', 'invalid proof']) assert.equal(isAuthRefusal(new Error(m)), false, `no code: ${m}`);
+  // Other ways a login fails, and other wire codes, are not.
+  for (const m of ['connection timeout', 'connection failed', 'closed during auth', 'superseded', 'auth failed: expected binary auth response']) {
     assert.equal(isAuthRefusal(new Error(m)), false, m);
   }
+  assert.equal(isAuthRefusal(coded('scratch held', -32010)), false);
+  assert.equal(isAuthRefusal(coded('internal', -32603)), false);
+  assert.equal(isAuthRefusal('invalid token'), false, 'a bare string is not an error with a code');
   assert.equal(isAuthRefusal(undefined), false);
   assert.equal(isAuthRefusal(null), false);
   // The two kinds never overlap: an auth refusal is not a reachability failure.
-  for (const m of ['invalid token', 'auth failed']) assert.equal(isReachabilityFailure(new Error(m)), false, m);
+  assert.equal(isReachabilityFailure(coded('invalid proof', -32000)), false);
 });

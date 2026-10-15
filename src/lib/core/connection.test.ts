@@ -22,6 +22,8 @@ const { createConnection } = await import('./connection.ts');
 const { createWsApi } = await import('./ws-api.ts');
 const { createConnectionRegistry } = await import('./connection-registry.ts');
 const { createServerRuntime } = await import('../app/server-runtime.ts');
+const { createReconnectMachine } = await import('../app/reconnect.ts');
+const { isAuthRefusal } = await import('../app/dial-order.ts');
 
 const A_URL = 'ws://a.test/ws';
 const B_URL = 'ws://b.test/ws';
@@ -869,3 +871,178 @@ test('a flagged save that waited for the login is sent only if its runtime may s
     }
   }
 });
+
+// ── Board #393 (reviewer P1-B): the server's refusal is kept through the encrypted gate ──
+//
+// connection.rs answers a wrong proof with a PLAIN `{id, error:{code:-32000, message:"invalid
+// proof"}}` — it has no session key for a proof it just rejected. The client used to read any
+// text frame on the encrypted path as "expected binary auth response", which the reconnect loop
+// could not tell from a protocol accident, so a wrong token was dialled for the whole 180 s
+// window (and each dial counts against the server's per-address lockout).
+
+/** Dial with the wrong token, play the server's half exactly as connection.rs does, and hand
+ * back the socket to answer on. */
+async function wrongTokenDial(conn: ReturnType<typeof createConnection>, url: string) {
+  const server = new FakeE2eServer('the-right-token', 2, 'machine-r', 'right');
+  const dialing = conn.connect(url, 'a-wrong-token');
+  dialing.catch(() => {}); // asserted below; never an unhandled rejection in between
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message(server.nonceFrame());
+  await until(() => socket.sent.length >= 1);
+  const auth = JSON.parse(socket.sent[0] as string);
+  assert.equal(await server.accept(auth), false, 'the server verifies the proof the way connection.rs does: it is wrong');
+  return { dialing, socket };
+}
+
+test('the server’s plain invalid-proof frame on the ENCRYPTED path is kept as a refusal (#393 P1-B)', (t) => withWebCrypto(async () => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const { dialing, socket } = await wrongTokenDial(conn, 'ws://refuse.test/ws');
+  socket.message({ id: 0, error: { code: -32000, message: 'invalid proof' } });
+  const error = await dialing.then(() => null, (e: unknown) => e) as Error & { code?: number };
+  assert.ok(error, 'the dial failed');
+  assert.equal(error.message, 'invalid proof', 'with the server’s own sentence, not "expected binary auth response"');
+  assert.equal(error.code, -32000);
+  assert.equal(isAuthRefusal(error), true, 'and the reconnect loop’s one check calls it a refusal');
+  assert.equal(conn.getMachineId() ?? null, null, 'nothing was authenticated');
+}));
+
+test('a plain frame on the encrypted path is NEVER a login: no downgrade, and a surprise is not a refusal (#393 P1-B)', (t) => withWebCrypto(async () => {
+  // A plain SUCCESS where the encrypted answer belongs (a middlebox, a downgrade attempt):
+  // refused as the protocol error it is, never authenticated, never a "bad token".
+  const a = createConnection();
+  t.after(() => a.dispose());
+  const sentA = await wrongTokenDial(a, 'ws://downgrade.test/ws');
+  sentA.socket.message({ id: 0, result: { authenticated: true, machine_id: 'evil', hostname: 'evil' } });
+  const downgrade = await sentA.dialing.then(() => null, (e: unknown) => e) as Error;
+  assert.match(downgrade.message, /auth failed: expected binary auth response/u);
+  assert.equal(isAuthRefusal(downgrade), false);
+  assert.equal(a.getMachineId() ?? null, null, 'it took nothing from the plain success: not authenticated, no identity');
+  assert.equal(a.getCaps(), undefined, 'and no capabilities: the login is unanswered');
+  // An error frame with another code, or none: a protocol error, not a bad token.
+  for (const frame of [{ id: 0, error: { code: -32603, message: 'internal' } }, { error: { message: 'bad token' } }, { id: 0 }]) {
+    const c = createConnection();
+    t.after(() => c.dispose());
+    const sent = await wrongTokenDial(c, 'ws://surprise.test/ws');
+    sent.socket.message(frame);
+    const error = await sent.dialing.then(() => null, (e: unknown) => e) as Error;
+    assert.match(error.message, /auth failed: expected binary auth response/u, JSON.stringify(frame));
+    assert.equal(isAuthRefusal(error), false, JSON.stringify(frame));
+  }
+}));
+
+test('only the server’s explicit PLAIN ERR_AUTH is a refusal: a failed decrypt, a JSON error, a binary frame that is no auth answer and a text frame that is no JSON all fail THIS dial and leave the loop retrying (#393 P1-B)', (t) => withWebCrypto(async () => {
+  // The right token, so the keys exist and the server can seal real frames; then the answer to
+  // the login is each of the things that is NOT the server saying no.
+  const cases: Array<[string, (server: InstanceType<typeof FakeE2eServer>) => Promise<unknown>]> = [
+    ['a binary frame that does not decrypt', async () => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]).buffer],
+    ['a sealed frame that is not JSON', (server) => server.seal('this is not json')],
+    ['a sealed frame that is JSON but no authentication', (server) => server.seal(JSON.stringify({ id: 0, result: { authenticated: false } }))],
+    ['a sealed ERR_AUTH error (the refusal is plain; an encrypted one is not what the server sends)', (server) => server.seal(JSON.stringify({ id: 0, error: { code: -32000, message: 'invalid proof' } }))],
+  ];
+  for (const [what, frame] of cases) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const server = new FakeE2eServer('the-right-token', 2, 'machine-r', 'right');
+    const dialing = conn.connect('ws://negative.test/ws', 'the-right-token');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message(server.nonceFrame());
+    await until(() => socket.sent.length >= 1);
+    assert.equal(await server.accept(JSON.parse(socket.sent[0] as string)), true, 'the proof is right');
+    socket.binary((await frame(server)) as ArrayBuffer);
+    const error = await dialing.then(() => null, (e: unknown) => e) as Error;
+    assert.ok(error, `${what}: the dial failed`);
+    assert.match(error.message, /^auth failed/u, what);
+    assert.equal(isAuthRefusal(error), false, `${what}: NOT a refusal — the loop retries`);
+    assert.equal(conn.getMachineId() ?? null, null, `${what}: nothing was authenticated`);
+  }
+  // A text frame that is no JSON at all.
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const server = new FakeE2eServer('the-right-token', 2, 'machine-r', 'right');
+  const dialing = conn.connect('ws://negative.test/ws', 'the-right-token');
+  dialing.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message(server.nonceFrame());
+  await until(() => socket.sent.length >= 1);
+  socket.onmessage?.({ data: 'not json {' });
+  const error = await dialing.then(() => null, (e: unknown) => e) as Error;
+  assert.match(error.message, /auth failed: expected binary auth response/u);
+  assert.equal(isAuthRefusal(error), false);
+}));
+
+test('the PLAIN-token path keeps the server’s invalid-token refusal too (#393 P1-B)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const dialing = conn.connect('ws://plain-refuse.test/ws', 'wrong');
+  dialing.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  await until(() => socket.sent.length >= 1);
+  socket.message({ id: 0, error: { code: -32000, message: 'invalid token' } });
+  const error = await dialing.then(() => null, (e: unknown) => e) as Error & { code?: number };
+  assert.equal(error.message, 'invalid token');
+  assert.equal(isAuthRefusal(error), true);
+});
+
+test('the default reconnect budget dials ONCE on a real refusal, marks nothing unreachable, and still retries a socket closed during auth (#393 P1-B)', (t) => withWebCrypto(async () => {
+  const dial = (script: (conn: ReturnType<typeof createConnection>) => Promise<void>) => {
+    const log = { dials: 0, unreachable: [] as string[], gaveUp: 0, succeeded: 0 };
+    const machine = createReconnectMachine({
+      // App passes the machine no budget of its own: the defaults decide (reconnect.ts).
+      connect: async (url, token) => {
+        log.dials++;
+        const conn = createConnection();
+        t.after(() => conn.dispose());
+        const dialing = conn.connect(url, token);
+        dialing.catch(() => {});
+        await script(conn);
+        return dialing;
+      },
+      findBestAddress: async (addresses) => addresses[0] ?? null,
+      isAddressViable: () => true,
+      noteAddressUnreachable: (address) => log.unreachable.push(address),
+      classifyAddress: () => 2,
+      addressLabels: ['LAN', 'Tailscale', 'WAN'],
+      target: () => ({ address: 'ws://loop.test/ws', token: 'a-wrong-token', machineId: '', alternates: [] }),
+      onStateChange: () => {},
+      onSuccess: () => { log.succeeded++; },
+      onGiveUp: () => { log.gaveUp++; },
+    });
+    return { log, machine };
+  };
+
+  // A real refusal: the server sends its plain invalid-proof frame. One dial, then the card.
+  const refused = dial(async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    const server = new FakeE2eServer('the-right-token', 2, 'machine-r', 'right');
+    socket.message(server.nonceFrame());
+    await until(() => socket.sent.length >= 1);
+    socket.message({ id: 0, error: { code: -32000, message: 'invalid proof' } });
+  });
+  refused.machine.start();
+  await until(() => refused.log.gaveUp === 1);
+  await settle(60);
+  assert.deepEqual({ dials: refused.log.dials, gaveUp: refused.log.gaveUp, unreachable: refused.log.unreachable, active: refused.machine.isActive() },
+    { dials: 1, gaveUp: 1, unreachable: [], active: false }, 'one dial, no cooldown, the loop is over');
+
+  // A socket that closes during auth is a reachability failure: it is retried (the first gap is 0.5 s).
+  const dropped = dial(async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message(new FakeE2eServer('x', 2, 'm', 'h').nonceFrame());
+    await until(() => socket.sent.length >= 1);
+    socket.onclose?.({ code: 1006, reason: '', wasClean: false });
+  });
+  dropped.machine.start();
+  await until(() => dropped.log.dials >= 2, 1500);
+  dropped.machine.cancel();
+  assert.ok(dropped.log.dials >= 2 && dropped.log.gaveUp === 0, `retried (${dropped.log.dials} dials)`);
+  assert.ok(dropped.log.unreachable.length >= 1, 'and the address is remembered as unreachable');
+}));

@@ -137,7 +137,7 @@ test pins it) and its only cue is the existing floating reconnect bar
 BY THE CLOCK, and only then does the person land on the connect card.** The
 window is `RECONNECT_WATCHDOG_MS` (180 s) in `app/reconnect.ts`; there is no
 attempt count to size from the backoff and get wrong. (The first cut derived one
-— 180 s over the 3 s retry cap = 60 attempts — and the reviewer measured it: with
+— 180 s over the 3 s retry cap = 60 attempts — and the reviewer calculated it from the source: with
 the gap growing 0.5, 1, 1.5, 2, 2.5 s and then 3 s, 60 attempts have 59 gaps and
 give up at 169.5 s, ~10 s early. A count rounds; the clock does not.) App.svelte
 passes the machine no budget of its own and the bar shows the attempt number only,
@@ -158,15 +158,29 @@ on a fake clock — instant refusals keep the view at 179 s and give up at 180 s
 the whole App: no connect card, the existing bar as the only cue, the same editor
 with the same unsaved text and the same scroll position.
 
-**An authentication refusal is not a drop.** When the server ANSWERS and says no
-(its "invalid token", or the encrypted handshake failing to decrypt: the wrong
-token) retrying for three minutes would repeat the same answer, so the loop stops
-at once and shows the connect card with the stored address and token to correct
-(`isAuthRefusal` in `app/dial-order.ts`, tested with the default budget: one dial,
-no window of them). A timeout, a refused connection or a socket that closed during
-auth are reachability failures and keep retrying. (The first cut of this document
-said an authentication refusal "is reported at once" while the machine retried it
-like any other failure; with the longer window that would have taken three minutes.)
+**An authentication refusal is not a drop.** When the server ANSWERS the login and
+says no, retrying for three minutes would repeat the same answer — and each dial
+counts against the server's per-address lockout — so the loop stops at once and
+shows the connect card with the stored address and token to correct. What counts as
+"the server said no" is ONE thing, and it is narrow: the server's plain `ERR_AUTH`
+(-32000) error frame in reply to the auth message (`invalid proof` on the encrypted
+path, `invalid token` on the plain one). On the encrypted path it arrives as TEXT,
+because the server has no session key for a proof it just rejected;
+`core/connection.ts` keeps it as an error carrying that code (the first cut of this
+rule read every text frame there as "expected binary auth response", so the most
+common real refusal — a wrong token over https or on localhost — was retried for the
+whole window). The reconnect loop's single check, `isAuthRefusal` in
+`app/dial-order.ts`, looks at the CODE and nothing else. Everything else that goes
+wrong in a login fails THAT dial and leaves the loop retrying inside its window: a
+frame that does not decrypt, a sealed frame that is not JSON or not an
+authentication, a binary frame that is no answer, a text frame that is no JSON, a
+sealed `ERR_AUTH` (the refusal is plain; an encrypted one is not what the server
+sends), a socket closed during auth, a timeout. A plain authenticated-SUCCESS frame
+is never accepted on the encrypted path (no downgrade): it is the protocol error
+"expected binary auth response", not a login and not a refusal. Tested on the real
+`createConnection` with the frames connection.rs sends and the ones it does not
+(`connection.test.ts`), and through the reconnect machine with its default budget:
+one dial, no unreachable cooldown; a socket closed during auth is still retried.
 
 **What does NOT change.** Beyond the window (3 minutes) the loop still gives
 up and shows the connect card, so a server that is really gone does not keep

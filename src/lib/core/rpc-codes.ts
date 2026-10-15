@@ -13,6 +13,17 @@
  * the three disagree.
  */
 
+/** The server REFUSED the credentials (board #393). In reply to the login
+ * message it is the server's explicit "no": `invalid proof` on the encrypted
+ * path, `invalid token` on the plain one — and on the encrypted path it arrives
+ * as a PLAIN frame, because the server has no session key for a proof it just
+ * rejected. The reconnect loop stops on this code and on nothing else: the
+ * server answered, and asking again for three minutes would only repeat the
+ * answer (and feed the server's per-address lockout). Every other way a login
+ * can fail — a socket closed during auth, a timeout, a frame we did not expect
+ * — is not a refusal. */
+export const ERR_AUTH = -32000;
+
 /** `scratch_session` refused because a PROJECT holds the scratch terminal's
  * reserved session name. The refusal carries `{projectId, projectName,
  * session}` as its error data, and the panel offers "Release the name" on
