@@ -131,7 +131,8 @@ test('ping answers, the FIRST HMR dial fails, the same server comes back: it rec
 
   // A module registered BEFORE the drop listens for a hot event.
   const seen: unknown[] = [];
-  client.createHotContext('/m.js').on('app:event', (data: unknown) => seen.push(data));
+  const hot = client.createHotContext('/m.js');
+  hot.on('app:event', (data: unknown) => seen.push(data));
   newest(world).serverMessage({ type: 'custom', event: 'app:event', data: 1 });
   await settle();
   assert.deepEqual(seen, [1], 'baseline: the event reaches the module');
@@ -156,6 +157,10 @@ test('ping answers, the FIRST HMR dial fails, the same server comes back: it rec
   newest(world).serverMessage({ type: 'custom', event: 'app:event', data: 2 });
   await settle();
   assert.deepEqual(seen, [1, 2], 'a hot update after the reconnect still reaches the module');
+  // And the module can SEND again: the HMRClient talks through the NEW transport.
+  hot.send('app:ping', { n: 1 });
+  await settle();
+  assert.ok(newest(world).sent.some((m: string) => m.includes('app:ping')), 'a module’s hot.send goes out on the live socket');
 
   // A second drop recovers too, straight away.
   const before = hmrUrls(world).length;
