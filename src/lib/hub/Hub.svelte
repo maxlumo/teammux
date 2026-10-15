@@ -80,6 +80,17 @@
     return () => { if (typeof off === 'function') off(); };
   });
   const moveBlocked = $derived(lacksCap(loginCaps, AGENT_TEAM));
+  /* The context a card drag belongs to (board #384, reviewer P1-A): a NEW
+     object whenever the project, the page's visibility, the room's readiness
+     or the server's capability changes (a $derived re-runs on any input
+     change, so A → B → A is two new objects, never the first one back). The
+     roster captures it at the press, cancels a press or drag the moment it
+     changes, and commits only while the one it captured is still this one,
+     so a release after a project switch moves nothing in either project. */
+  const moveScope = $derived({
+    session: selected,
+    ok: visible && roomReady && !moveBlocked && loginCaps !== undefined,
+  });
   // This server's backend catalog (②b-3): the avatars and whether a running
   // agent can switch its input mode are its answer.
   const catalog = scope.state.backends;
@@ -2442,7 +2453,7 @@
         {stateLabel} {stateTone} onselect={setRecipient} oninterrupt={interrupt}
         onfilter={(name) => { closeCtx(); toggleFilter(name); }}
         onadd={() => openPicker('add')}
-        canMove={roomReady && !moveBlocked && loginCaps !== undefined} onmove={(name, team) => moveAgent(name, team)}
+        {moveScope} onmove={(name, team, scope) => moveAgent(name, team, scope.session)}
         oncontext={(at, name, info) => openCtx(at, name, agentItems(name), info)} />
 
       {#if filterNote}

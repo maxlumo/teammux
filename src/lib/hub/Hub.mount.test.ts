@@ -2645,6 +2645,68 @@ test('a card dragged onto a team moves it; a definition member\'s drop says wher
   } finally { await app.close(); }
 });
 
+test('a drag belongs to the project and page it was pressed in: released after a switch (or A -> B -> A, a hidden page, a lost cap) it moves nothing (#384, P1-A)', { timeout: 60000 }, async (context) => {
+  let capsCb: ((caps: string[] | undefined) => void) | undefined;
+  const { app, moves } = await moveFixture(context, ['board_dispatch', 'spawn_join', 'agent_team'], {
+    projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({
+      project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [],
+    })) }),
+    onCaps: (cb: (caps: string[] | undefined) => void) => { capsCb = cb; },
+  }, dropBoxes);
+  const settle = async (n = 8) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const card = () => stripCard(app.document, 'solo').querySelector<HTMLElement>('.agent-select')!;
+  const at = (el: EventTarget, type: string, x: number) => el.dispatchEvent(new app.window.PointerEvent(type,
+    { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: x, clientY: 30 }));
+  const carry = async () => {
+    for (let i = 0; i < 20 && !stripCard(app.document, 'solo'); i++) await app.flush();
+    await settle();
+    const el = card();
+    at(el, 'pointerdown', 450);
+    for (const x of [100, 100]) { at(el, 'pointermove', x); await app.flush(); }
+    assert.equal(app.document.querySelector('.roster-cluster.drop-target')?.getAttribute('data-drop'), 'squad', 'carried over squad');
+    return el;
+  };
+  const room = async (name: string) => {
+    app.document.querySelector<HTMLElement>(`[aria-label="${name}"] .proj-pick`)!.click();
+    for (let i = 0; i < 20 && app.document.querySelector('.h1-text')?.textContent !== name; i++) await app.flush();
+    assert.equal(app.document.querySelector('.h1-text')?.textContent, name);
+  };
+  const release = async () => { at(app.window, 'pointerup', 100); await settle(); };
+  try {
+    // The fixture can move at all: a steady drag lands.
+    const el = await carry();
+    at(el, 'pointerup', 100);
+    await settle();
+    assert.deepEqual(moves, [['fixture', 'solo', 'squad']], 'a steady drag moves');
+    moves.length = 0;
+
+    await carry();
+    await room('other');
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'the switch cancels the drag');
+    await release();
+    assert.deepEqual(moves, [], 'a release after a switch moves nothing in B');
+
+    await room('fixture');
+    await carry();
+    await room('other');
+    await room('fixture');
+    at(card(), 'pointermove', 100);
+    await release();
+    assert.deepEqual(moves, [], 'nor after A -> B -> A: the old gesture is not revived');
+
+    await carry();
+    await app.setProps({ visible: false });
+    await release();
+    await app.setProps({ visible: true });
+    assert.deepEqual(moves, [], 'nor from a hidden page');
+
+    await carry();
+    capsCb!(['board_dispatch', 'spawn_join']);
+    await release();
+    assert.deepEqual(moves, [], 'nor once the server lost agent_team');
+  } finally { await app.close(); }
+});
+
 test('a server refusal of a move is said in the composer feedback slot (#384)', { timeout: 60000 }, async (context) => {
   const { app } = await moveFixture(context, ['agent_team'], {
     hubAgentSetTeam: async () => { throw new Error("team 'squad' has no member in this project — start the team first, or spawn the agent standalone"); },

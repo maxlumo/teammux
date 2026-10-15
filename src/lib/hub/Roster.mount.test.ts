@@ -54,13 +54,15 @@ test('an overflowing room still expands under the kept pref and offers the chevr
 const BOXES: Record<string, [number, number]> = { squad: [0, 200], '-': [210, 300], ops: [310, 420] };
 async function dragStrip(context: test.TestContext, agents: Record<string, unknown>[], canMove = true) {
   const moves: [string, string][] = [];
+  const scopes: unknown[] = [];
   const picks: string[] = [];
   const names = agents.map((a) => String(a.name));
   const app = await (await compiled).mount(context, {
     props: {
       selected: 'room', roomReady: true, managedAgents: agents, managedNames: names,
       recipient: names[0], selectedRow: { project: { path: '/room' }, slots: [] },
-      canMove, onmove: (name: string, team: string) => { moves.push([name, team]); },
+      moveScope: { session: 'room', epoch: 0, ok: canMove },
+      onmove: (name: string, team: string, scope: unknown) => { moves.push([name, team]); scopes.push(scope); },
       onselect: (name: string) => { picks.push(name); },
     },
     modules: [],
@@ -79,7 +81,7 @@ async function dragStrip(context: test.TestContext, agents: Record<string, unkno
   const card = (name: string) => app.document.querySelector<HTMLElement>(`.acard[data-agent="${name}"] .agent-select`)!;
   const at = (type: string, el: Element, x: number, y = 30) => el.dispatchEvent(new app.window.PointerEvent(type,
     { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: x, clientY: y }));
-  return { app, moves, picks, card, at };
+  return { app, moves, scopes, picks, card, at };
 }
 const member = (name: string, team: string | null, joined = false) =>
   ({ ...agent(name), team, joined });
@@ -161,5 +163,80 @@ test('a server that cannot move an agent carries no card, and a click stays a cl
     await app.flush();
     assert.deepEqual(moves, []);
     assert.deepEqual(picks, ['solo'], 'no drag ran, so its click guard is not armed');
+  } finally { await app.close(); }
+});
+
+test('a drag belongs to the context it was pressed in: a new one cancels it, and a press from the old one starts nothing (#384, P1-A)', async (context) => {
+  const { app, moves, scopes, card, at } = await dragStrip(context, [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')]);
+  // Scopes are made in the CLIENT realm, as Hub's are: Svelte proxies only
+  // its own realm's plain objects, and a scope kept in $state would then
+  // never be === the current one (the trap the first cut fell into).
+  const scope = (session: string, n: number, ok = true) => app.window.JSON.parse(JSON.stringify({ session, n, ok }));
+  try {
+    const solo = card('solo');
+    const pressed = scope('room', 0);
+    await app.setProps({ moveScope: pressed });
+    at('pointerdown', solo, 250);
+    at('pointermove', solo, 100);
+    await app.flush();
+    at('pointermove', solo, 100);
+    await app.flush();
+    assert.equal(app.document.querySelector('.roster-cluster.drop-target')?.getAttribute('data-drop'), 'squad', 'carried, with a target');
+    // Another project is selected and back again (A -> B -> A): a NEW scope
+    // object each time, so the old gesture is gone, not revived.
+    await app.setProps({ moveScope: scope('other', 1) });
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'a new context cancels the drag at once');
+    await app.setProps({ moveScope: scope('room', 2) });
+    at('pointermove', solo, 100);
+    app.window.dispatchEvent(new app.window.PointerEvent('pointerup', { bubbles: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: 100, clientY: 30 }));
+    await app.flush();
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'and the old press is not revived by the next move');
+    assert.deepEqual(moves, [], 'the window release after the switch moves nothing');
+
+    // A press made in one context and dragged after it changed starts nothing.
+    at('pointerdown', solo, 250);
+    await app.setProps({ moveScope: scope('room', 3) });
+    at('pointermove', solo, 100);
+    await app.flush();
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'a press from an old context is not a drag');
+    at('pointerup', solo, 100);
+
+    // The checks hold on their own, before the cancel can run: a context
+    // change and the next pointer event in ONE task (effects run later).
+    await app.setProps({ moveScope: scope('room', 5) });
+    at('pointerdown', solo, 250);
+    void app.setProps({ moveScope: scope('room', 6) }); // its props are set now; its effects later
+    at('pointermove', solo, 100);
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'begin refuses a press of an older context');
+    at('pointerup', solo, 100);
+    await app.flush();
+    await app.setProps({ moveScope: scope('room', 7) });
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    void app.setProps({ moveScope: scope('room', 8) });
+    at('pointerup', solo, 100);
+    await app.flush();
+    assert.deepEqual(moves, [], 'the commit refuses a drag of an older context');
+
+    // The page hidden (or the cap lost) mid-drag: ok goes false, the drag ends.
+    const now = scope('room', 3);
+    await app.setProps({ moveScope: now });
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    assert.ok(app.document.querySelector('.acard.lifted'));
+    await app.setProps({ moveScope: scope('room', 3, false) });
+    app.window.dispatchEvent(new app.window.PointerEvent('pointerup', { bubbles: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: 100, clientY: 30 }));
+    await app.flush();
+    assert.deepEqual(moves, [], 'nothing moves from a hidden page or a server that lost the cap');
+
+    // In a steady context the move goes, and hands over the scope it was pressed in.
+    const steady = scope('room', 4);
+    await app.setProps({ moveScope: steady });
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    at('pointerup', solo, 100);
+    await app.flush();
+    assert.deepEqual(moves, [['solo', 'squad']]);
+    assert.equal(scopes[0], steady, 'the scope of the press');
   } finally { await app.close(); }
 });

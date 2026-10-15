@@ -28,9 +28,11 @@
     allMenuOpen = false, onall = (_event) => {},
     onallcontext = (_at) => {}, onteamcontext = (_at, _team) => {},
     /** Board #384: drag a live card onto a team to move it there at runtime,
-     * or onto the standalone area to leave its team. `canMove` = this server
-     * can (`agent_team`); `onmove(name, team)` with team '' = leave. */
-    canMove = false, onmove = (_name, _team) => {},
+     * or onto the standalone area to leave its team. `moveScope` is the
+     * context a drag belongs to (Hub's: its project and `ok` = it may move
+     * here now); null or not ok = no drag. `onmove(name, team, scope)` with
+     * team '' = leave, and the scope the drag was pressed in. */
+    moveScope = null, onmove = (_name, _team, _scope) => {},
   } = $props();
   // This server's backend catalog (board #335 ②b-3): the avatars are its
   // answer. From the Hub's scope, read once at init.
@@ -164,6 +166,10 @@
   // scrolled out of the single-row strip is not a target: the expand toggle
   // and the card menu's Move items reach it.
   let cardDrag = $state(null);
+  /* The context the carried card was pressed in, compared by IDENTITY with
+     Hub's current `moveScope`: kept out of `cardDrag`, whose $state would
+     hand back a proxy that is never === the original. */
+  let dragScope = null;
   const cardTargets = (from) => [...(cardsEl?.querySelectorAll('.roster-cluster[data-drop]') ?? [])]
     .map((el) => ({ key: el.dataset.drop === '-' ? '' : el.dataset.drop, r: el.getBoundingClientRect() }))
     .filter(({ key, r }) => key !== from && r.width > 0)
@@ -173,10 +179,14 @@
     get: () => cardDrag,
     set: (drag) => { cardDrag = drag; },
     begin: (press) => {
-      if (!canMove) return null;
+      // The context is the one the PRESS was made in (reviewer P1-A): a
+      // press that outlived a project switch, a hidden page or a lost cap
+      // starts nothing.
+      if (!press.scope?.ok || press.scope !== moveScope) return null;
       const a = managedAgents.find((x) => x.name === press.name);
       if (!a) return null;
       const from = rosterTeam(a);
+      dragScope = press.scope;
       // The temporary slot renders after this; it is measured on the next move.
       return { name: a.name, from, dx: 0, dy: 0, rects: null, target: null };
     },
@@ -188,7 +198,15 @@
       if (!drag.rects?.length || (drag.from && !drag.rects.some((r) => r.key === ''))) cardDrag.rects = cardTargets(drag.from);
       cardDrag.target = groupDropAt(cardDrag.rects, e.clientX, e.clientY);
     },
-    commit: (drag) => { if (drag.target !== null) onmove(drag.name, drag.target); },
+    // Re-checked in the step that commits: only a drag of the context that
+    // is still current asks for a move, and it hands that context over.
+    commit: (drag) => { if (drag.target !== null && dragScope === moveScope && moveScope?.ok) onmove(drag.name, drag.target, dragScope); },
+  });
+  // A new context (project switch, page hidden, cap lost) ends a press or a
+  // drag at once: its targets belong to the old one.
+  $effect(() => {
+    void moveScope;
+    return () => cardDrags.cancel();
   });
   /** The team a card is in, by root; '' standalone. */
   const rosterTeam = (a) => (a.team ? a.team.split('/')[0] : '');
@@ -365,7 +383,7 @@
             aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, a.detail, vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
-            onpointerdown={(e) => cardDrags.down(e, { name: a.name })}
+            onpointerdown={(e) => cardDrags.down(e, { name: a.name, scope: moveScope })}
             onpointerup={() => cardDrags.up()} onpointercancel={() => cardDrags.cancel()}
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), a.name, touchInfo(() => cardInfo(a))); }}
             use:longpress={{ onlongpress: (at) => oncontext(at, a.name, touchInfo(() => cardInfo(a))) }}>

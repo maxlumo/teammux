@@ -457,9 +457,11 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
   const drags = source.match(/const cardDrags = createPressDrag\(\{[\s\S]*?\n {2}\}\);/u)?.[0] ?? '';
   assert.match(drags, /axis: 'xy'/u, 'a drop onto a group is 2D');
   assert.doesNotMatch(drags, /touch: true/u, 'a finger drags the strip\'s scroll; touch moves through the card menu');
-  assert.match(drags, /if \(!canMove\) return null;/u, 'a server without agent_team carries nothing');
+  assert.match(drags, /if \(!press\.scope\?\.ok \|\| press\.scope !== moveScope\) return null;/u, 'a press of another context, or one that may not move, carries nothing (P1-A)');
   assert.match(drags, /groupDropAt\(cardDrag\.rects, e\.clientX, e\.clientY\)/u);
-  assert.match(drags, /commit: \(drag\) => \{ if \(drag\.target !== null\) onmove\(drag\.name, drag\.target\); \}/u);
+  assert.match(drags, /commit: \(drag\) => \{ if \(drag\.target !== null && dragScope === moveScope && moveScope\?\.ok\) onmove\(drag\.name, drag\.target, dragScope\); \}/u, 'the commit re-checks the context in the same step');
+  assert.match(source, /\n {2}let dragScope = null;/u, 'the pressed scope is kept out of $state (a proxy is never === the original)');
+  assert.match(source, /\$effect\(\(\) => \{\n {4}void moveScope;\n {4}return \(\) => cardDrags\.cancel\(\);\n {2}\}\);/u, 'a new context cancels a press or drag at once');
   // Targets are keyed by TEAM, whatever the drawing ('-' = standalone): a team
   // down to one live member is drawn as a plain card and is still a target.
   assert.match(source, /data-drop=\{cardDrag \? \(group\.team \?\? '-'\) : undefined\}/u);
@@ -467,7 +469,7 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
   assert.match(source, /\{#if cardDrag\?\.from && !looseShown\}\s*<!--[\s\S]*?-->\s*<div class="roster-cluster standalone-slot appear" data-drop="-"/u,
     'the temporary standalone slot exists only while a card in a team is carried and no standalone card is shown');
   // The card ends its own press, and the click after a drag is no pick.
-  assert.match(source, /onpointerdown=\{\(e\) => cardDrags\.down\(e, \{ name: a\.name \}\)\}\s*onpointerup=\{\(\) => cardDrags\.up\(\)\} onpointercancel=\{\(\) => cardDrags\.cancel\(\)\}/u);
+  assert.match(source, /onpointerdown=\{\(e\) => cardDrags\.down\(e, \{ name: a\.name, scope: moveScope \}\)\}\s*onpointerup=\{\(\) => cardDrags\.up\(\)\} onpointercancel=\{\(\) => cardDrags\.cancel\(\)\}/u);
   assert.match(source, /function clickAgent\(event, name\) \{\n {4}if \(cardDrags\.consumeClick\(\)\) return;/u);
   assert.match(source, /if \(!cardDrag\) return;\n {4}return cardDrags\.listen\(\);/u, 'Escape, resize and the window release while carrying');
   // The lift is the strip's own tab paint: the lit tab's OPAQUE fill (a
