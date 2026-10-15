@@ -132,6 +132,15 @@ test('what is not the web app is not SERVED either: a watch ignore is not access
   assert.equal(await status(`/@fs${join(root, 'src', 'app.js')}`), 200, 'by /@fs too');
 });
 
+test('package-lock.json pins the Vite the dev-client patch was measured on: a fresh npm ci installs the stamped version, not only a checkout whose node_modules had drifted (#396)', () => {
+  // The stamp test below reads node_modules, so a checkout whose node_modules had been updated
+  // past the lock stayed green while every fresh `npm ci` (6.4.1 from the lock) failed it.
+  // Reading the lock makes the drift fail HERE, on every machine, in the commit that causes it.
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  assert.equal(lock.packages['node_modules/vite'].version, QUIET_RECONNECT_MEASURED_ON,
+    `package-lock.json pins Vite ${lock.packages['node_modules/vite'].version} but the dev-client patch was measured on ${QUIET_RECONNECT_MEASURED_ON}: upgrade the lock, the stamp and the patch together (docs/conventions/development.md § The dev server)`);
+});
+
 test('the dev-client patch is stamped with its Vite, lands on every piece of text it replaces, and fails loudly when one is gone (#393)', async () => {
   // Vite’s dev client ends "Polling for restart..." in location.reload(): the composer
   // text and scroll position of the owner’s browser tab. The patch (run against a fake

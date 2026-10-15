@@ -372,6 +372,11 @@ transform throws "Unsupported Vite dev client: … not found exactly once" when 
 the four pieces of text it replaces is gone or doubled, and `scripts/vite-config.test.ts`
 fails when the installed Vite is another version OR any piece is gone, so an upgrade
 can never quietly lose the patch (or quietly keep one that no longer does anything).
+`package-lock.json` pins the same version and a second test compares the lock with the
+stamp (board #396: the first test reads `node_modules`, so a checkout whose
+`node_modules` had been updated past the lock stayed green while every fresh `npm ci` —
+6.4.1 from the lock — failed it): an upgrade moves the lock, the stamp and the patch
+in one commit.
 `scripts/vite-client-reconnect.test.ts` RUNS the patched client of the installed Vite
 in Node against a fake WebSocket, fetch, document and location with mocked timers: ping
 answers → the first HMR dial fails → the same server comes back must re-dial the page's
