@@ -207,6 +207,13 @@ pub async fn start_with_socket_ready(
     let resize_tracker: ResizeTracker = Arc::new(std::sync::Mutex::new(ResizeTrackerInner::default()));
     let notifications = Arc::new(AgentNotificationHub::load());
     notifications.ensure_helper().map_err(|error| format!("Failed to prepare agent notification helper: {error}"))?;
+    // Board #394: every session's turn facts are replayed from the activity
+    // log BEFORE the hook inbox is read and before the first accept, so the
+    // first read after a restart derives from the log and no live fact lands
+    // on an empty record first. Blocking SQLite work, so it runs here, before
+    // the listener loop.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::projects::telemetry::recover_on_start();
     tokio::spawn(notifications.clone().run());
 
     // Fold live tmux state back into the project declarations. Nobody
@@ -318,6 +325,25 @@ pub(super) mod test_util {
 
     pub(super) fn req(method: &str, params: serde_json::Value) -> Request {
         Request { id: Some(1), method: method.to_string(), params }
+    }
+}
+
+/// Board #394: the turn-fact replay runs at start, BEFORE the hook inbox is
+/// read and before the first connection is accepted. The regression test
+/// (`the_first_agent_read_after_a_restart_derives_from_the_log`) calls the
+/// replay itself, so the one line that orders it in the start sequence is
+/// pinned here.
+#[cfg(test)]
+mod start_order {
+    #[test]
+    fn the_turn_facts_are_replayed_before_the_inbox_and_the_first_accept() {
+        let src = include_str!("mod.rs");
+        let start = &src[src.find("pub async fn start_with_socket_ready(").unwrap()..];
+        let start = &start[..start.find("\n}\n").unwrap()];
+        let at = |needle: &str| start.find(needle).unwrap_or_else(|| panic!("{needle} missing from the start sequence"));
+        let replay = at("crate::projects::telemetry::recover_on_start();");
+        assert!(replay < at("tokio::spawn(notifications.clone().run());"), "replay before the hook inbox is read");
+        assert!(replay < at("listener.accept()"), "replay before the first accept");
     }
 }
 

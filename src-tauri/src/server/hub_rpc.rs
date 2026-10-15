@@ -4787,6 +4787,71 @@ mod tests {
         }
     }
 
+    /// Board #394: the FIRST read after a restart derives from the log. One
+    /// managed agent has an open turn (a prompt, no end), another a turn the
+    /// hooks missed and the screen ended (`auth_expired`). The process forgets
+    /// everything, as a restart does; the server start's one replay
+    /// (`recover_on_start`) runs, and the very first `hub_agents` and
+    /// `hub_rooms` answer running, and idle with its detail. Before #394
+    /// nothing replayed until a writer or a delivery question touched the
+    /// session: an old pane read idle with no detail, a fresh one running
+    /// from pane activity, and the sidebar had no state for either.
+    #[test]
+    fn the_first_agent_read_after_a_restart_derives_from_the_log() {
+        use telemetry::PERSIST_IN_TEST;
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-394-{}", uuid::Uuid::new_v4().simple());
+        let ws = std::env::temp_dir().join(format!("tmm-394-ws-{}", uuid::Uuid::new_v4()));
+        for name in ["dev", "aux"] {
+            std::fs::create_dir_all(ws.join(format!(".tmm/agents/{name}"))).unwrap();
+            std::fs::write(ws.join(format!(".tmm/agents/{name}/launch.json")),
+                r#"{"backend":"kiro","cmd":"kiro-cli chat --agent x","team":""}"#).unwrap();
+        }
+        let dir = ws.to_string_lossy().to_string();
+        let tmux = |args: &[&str]| std::process::Command::new("tmux").args(args).status().map(|s| s.success()).unwrap_or(false);
+        if !tmux(&["new-session", "-d", "-s", &session, "-n", "dev", "-c", &dir, "sleep 120"]) {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        assert!(tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "aux", "-c", &dir, "sleep 120"]));
+        crate::projects::adopt(&session, Some(&format!("r394-{}", &session[8..16]))).expect("adopt");
+
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        telemetry::record_prompt(&session, "dev", "[tmm chat 2026-10-16 03:40] lead: @dev the long thing");
+        telemetry::record_tool(&session, "dev", "Read", "/w/src/lib.rs");
+        telemetry::record_prompt(&session, "aux", "[tmm chat 2026-10-16 03:40] lead: @aux review");
+        let seen = telemetry::turn_version(&session, "aux");
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let missed = telemetry::record_missed_end(&session, "aux", "auth_expired", telemetry::Identity::Paint("auth_expired|394"), seen, ts);
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        assert_eq!(missed, telemetry::Missed::Ended);
+
+        // The restart: memory and recovery marks gone, the log kept.
+        telemetry::forget_process_state(&session);
+        telemetry::recover_on_start();
+
+        let r = handle_hub_request(&req("hub_agents", serde_json::json!({ "session": session })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let agents = r.result.unwrap()["agents"].as_array().cloned().unwrap();
+        let row = |name: &str| {
+            let a = agents.iter().find(|a| a["name"] == name).unwrap_or_else(|| panic!("no {name} in {agents:?}"));
+            (a["state"].as_str().unwrap_or("").to_string(), a["detail"].as_str().unwrap_or("").to_string())
+        };
+        // A fresh pane reads `running` from pane activity alone when no fact
+        // is in memory, so the open turn is told apart by its replayed tool
+        // line, and the missed end by its state and detail.
+        assert_eq!(row("dev"), ("running".to_string(), "Read /w/src/lib.rs".to_string()), "the open turn, on the first read");
+        assert_eq!(row("aux"), ("idle".to_string(), "auth_expired".to_string()), "the missed end and its detail, on the first read");
+
+        telemetry::forget_process_state(&session);
+        telemetry::recover_on_start();
+        let r = handle_hub_request(&req("hub_rooms", serde_json::json!({})), None);
+        let states = r.result.unwrap()["states"].clone();
+        assert_eq!(states[format!("{session}:dev")], "running", "the sidebar's first read too");
+        assert_eq!(states[format!("{session}:aux")], "idle");
+    }
+
     #[test]
     fn hub_log_since_ts_filters_older_messages() {
         crate::projects::tests::use_test_store();

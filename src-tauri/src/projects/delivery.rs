@@ -526,9 +526,10 @@ pub fn flush_idle(session: &str) {
 /// The fourth trigger (orchestrator, #257 decision 3): at server start, every
 /// window that holds lines and is idle once its turn is RECOVERED is flushed
 /// at once, so held lines never wait for a client to read the feed. The
-/// recovery is `turn_busy`'s own first step (`recovery_mark` →
-/// `recover_open_turns`), per session, before the question is asked; a window
-/// still running keeps its lines for its stop.
+/// recovery ran at start, before this (`telemetry::recover_on_start`, board
+/// #394), and `turn_busy` takes the same per-session step (`recovery_mark` →
+/// `recover_open_turns`) before the question is asked; a window still
+/// running keeps its lines for its stop.
 pub fn flush_on_start() {
     for session in telemetry::held_sessions() {
         flush_idle(&session);

@@ -613,6 +613,28 @@ fn recovery_mark(session: &str) -> (i64, u64) {
     mark
 }
 
+/// Recover EVERY session the activity log knows, once, at server start
+/// (board #394). `recovery_mark` used to run only on a session's first
+/// touch by a writer or a delivery question, and `derive` reads memory
+/// alone, so the first `hub_agents` and `hub_rooms` after a restart showed
+/// every agent idle with no detail (an open turn, a missed end's
+/// `auth_expired`) until some other call happened to touch the session.
+/// `server::start_with_socket_ready` calls this before the hook inbox is
+/// read and before the first connection is accepted, so no answer and no
+/// live fact comes before the replay. It is the same per-session step the
+/// lazy calls take, so a session first seen later is recovered as before. An
+/// unreadable log is said and left to those lazy calls.
+pub fn recover_on_start() {
+    match queue(|s| s.activity_sessions()) {
+        Ok(sessions) => {
+            for session in &sessions {
+                recovery_mark(session);
+            }
+        }
+        Err(e) => eprintln!("⚠  turn facts not replayed at start ({e}); each session is recovered when first touched"),
+    }
+}
+
 /// A window's turn state survives OUR restart (board #249, validator): a
 /// restart in the middle of a 20-minute turn left the window with no facts,
 /// it derived idle, and 45 s later the sweep reported every line the running

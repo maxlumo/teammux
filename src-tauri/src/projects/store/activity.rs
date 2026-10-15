@@ -283,6 +283,20 @@ impl Store {
             .map_err(|e| format!("forget person paints: {e}"))
     }
 
+    /// Every session the activity log holds a row for (board #394: the
+    /// sessions a server start replays, `telemetry::recover_on_start`). Read
+    /// off the `(session, ts)` index.
+    pub fn activity_sessions(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT session FROM activity ORDER BY session")
+            .map_err(|e| format!("prepare activity sessions: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| format!("query activity sessions: {e}"))?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(|e| format!("read activity sessions: {e}"))
+    }
+
     /// The newest persisted TURN FACT of each kind, per window (board #249):
     /// the latest `prompt`, `tool` call, `permission_required`/`input_required`
     /// ask and turn end (`completed`/`failed`/`interrupted`). Deciding whether
