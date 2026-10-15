@@ -67,6 +67,19 @@ pub const MAX_ATTEMPTS: u32 = 4;
 /// `BASE_BACKOFF_SECS * 2^(n-1)` after attempt n (rule 1): 30s, 60s, 120s.
 pub const BASE_BACKOFF_SECS: u64 = 30;
 
+/// At most this many incidents START a ladder per agent in any rolling
+/// `INCIDENT_WINDOW_SECS` (board #362 e, orchestrator's ruling). The ladder
+/// bounds ONE error (`MAX_ATTEMPTS` sends); what was unbounded live (#361
+/// deploy, 10-14 02:3x) was a fresh error every ~20 s, a new Request ID
+/// each, every one a new incident with a full ladder: under a sustained
+/// overload, one `continue` per ~20 s per agent forever. With this cap the
+/// worst case is `MAX_INCIDENTS * MAX_ATTEMPTS` = 3 × 4 = 12 sends in 30
+/// minutes; the next fresh incident in the window is not continued, and the
+/// agent needs a person. Incidents are counted, not sends: counting every
+/// send would quietly retire the ladder's last step.
+pub const MAX_INCIDENTS: usize = 3;
+pub const INCIDENT_WINDOW_SECS: u64 = 30 * 60;
+
 /// What is typed into the pane. Plain — an invented stamp would read as a
 /// message the user never wrote.
 const CONTINUE_LINE: &str = "continue";
@@ -249,6 +262,11 @@ struct Rec {
     confirmed: bool,
     /// The give-up warning is emitted once per incident, not once per tick.
     gave_up_reported: bool,
+    /// This incident arrived with the window's cross-incident cap reached
+    /// (board #362 e): it is never continued, even after older ladders age
+    /// out of the window while it is still on the screen.
+    capped: bool,
+    capped_reported: bool,
 }
 
 /// What the tracker decided for one (window, tick) with the error visible.
@@ -264,6 +282,10 @@ pub enum Decision {
     Confirmed { first: bool },
     /// The budget is spent with nothing verified. `true` exactly once.
     GiveUp { first: bool },
+    /// A fresh incident with `MAX_INCIDENTS` ladders already started in the
+    /// window (board #362 e): not continued; the agent needs a person.
+    /// `true` exactly once per incident.
+    Capped { first: bool },
 }
 
 /// Pure bookkeeping, `now` and the hook check injected so every path is
@@ -271,6 +293,10 @@ pub enum Decision {
 #[derive(Default)]
 pub struct Tracker {
     map: HashMap<(String, String), Rec>,
+    /// When each recent incident STARTED a ladder (its first send), per
+    /// window: the cross-incident cap reads it. It outlives the incident
+    /// records, which go when their error leaves the screen.
+    starts: HashMap<(String, String), Vec<u64>>,
 }
 
 impl Tracker {
@@ -312,8 +338,23 @@ impl Tracker {
             rec.gave_up_reported = true;
             return Decision::GiveUp { first };
         }
+        if rec.capped {
+            return Decision::Capped { first: false };
+        }
         if now < rec.next_at {
             return Decision::Wait;
+        }
+        if rec.attempts == 0 {
+            // A ladder would START: the cross-incident cap decides.
+            let starts = self.starts.entry((session.to_string(), window.to_string())).or_default();
+            starts.retain(|&t| t + INCIDENT_WINDOW_SECS > now);
+            if starts.len() >= MAX_INCIDENTS {
+                rec.capped = true;
+                let first = !rec.capped_reported;
+                rec.capped_reported = true;
+                return Decision::Capped { first };
+            }
+            starts.push(now);
         }
         rec.attempts += 1;
         rec.sent_at = now;
@@ -344,6 +385,7 @@ impl Tracker {
     /// Housekeeping: drop records for windows that no longer exist.
     pub fn retain_windows(&mut self, session: &str, live: &[String]) {
         self.map.retain(|(s, w), _| s != session || live.contains(w));
+        self.starts.retain(|(s, w), _| s != session || live.contains(w));
     }
 }
 
@@ -455,9 +497,21 @@ pub fn check_once() {
                         ),
                     );
                 }
+                Decision::Capped { first: true } => {
+                    super::telemetry::record_recovery(
+                        &project.session,
+                        &p.window_name,
+                        &format!(
+                            "auto-continue paused — {MAX_INCIDENTS} errors in {} min were already continued; {} needs a person",
+                            INCIDENT_WINDOW_SECS / 60,
+                            p.window_name
+                        ),
+                    );
+                }
                 Decision::Wait
                 | Decision::Confirmed { first: false }
-                | Decision::GiveUp { first: false } => {}
+                | Decision::GiveUp { first: false }
+                | Decision::Capped { first: false } => {}
             }
         }
     }
@@ -1423,5 +1477,38 @@ mod tests {
         assert_eq!(lines(&with_kiro).len(), 2);
         for p in [&with_kiro, &without] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
         let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
+    }
+
+    /// Board #362 e: at most `MAX_INCIDENTS` incidents START a ladder per
+    /// window in `INCIDENT_WINDOW_SECS`. One incident's own retries are not
+    /// incidents; the next fresh one in the window is not continued (said
+    /// once) and stays so while it shows; a fresh one after the window is.
+    #[test]
+    fn fresh_incidents_are_capped_per_window_and_one_incidents_retries_are_not() {
+        let mut t = Tracker::default();
+        let t0 = 1_000_000;
+        // Incident 1 runs its whole ladder: four sends, one incident.
+        assert_eq!(t.decide("s", "w", t0, "1|a", silent), Decision::Send { attempt: 1 });
+        assert_eq!(t.decide("s", "w", t0 + 30, "1|a", silent), Decision::Send { attempt: 2 });
+        assert_eq!(t.decide("s", "w", t0 + 90, "1|a", silent), Decision::Send { attempt: 3 });
+        assert_eq!(t.decide("s", "w", t0 + 210, "1|a", silent), Decision::Send { attempt: 4 });
+        // Incidents 2 and 3: a fresh Request ID each, ~20 s apart (the live loop).
+        assert_eq!(t.decide("s", "w", t0 + 230, "1|b", silent), Decision::Send { attempt: 1 });
+        assert_eq!(t.decide("s", "w", t0 + 250, "1|c", |_| true), Decision::Send { attempt: 1 });
+        // The 4th fresh incident in the window is not continued.
+        assert_eq!(t.decide("s", "w", t0 + 270, "1|d", silent), Decision::Capped { first: true });
+        assert_eq!(t.decide("s", "w", t0 + 290, "1|d", silent), Decision::Capped { first: false }, "said once");
+        // Still showing after the window frees: still a person's.
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 300, "1|d", silent), Decision::Capped { first: false });
+        // Leaving the screen does not reset the window's count.
+        t.clear("s", "w");
+        assert_eq!(t.decide("s", "w", t0 + 300, "1|e", silent), Decision::Capped { first: true }, "the count outlives the record");
+        // A fresh incident once the oldest ladder has aged out is continued.
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 1, "1|f", silent), Decision::Send { attempt: 1 });
+        // Another window has its own count.
+        assert_eq!(t.decide("s", "other", t0 + 300, "1|z", silent), Decision::Send { attempt: 1 });
+        // A window that goes away takes its count with it.
+        t.retain_windows("s", &["other".to_string()]);
+        assert_eq!(t.decide("s", "w", t0 + 301, "1|g", silent), Decision::Send { attempt: 1 });
     }
 }
