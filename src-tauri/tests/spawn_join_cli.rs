@@ -78,6 +78,18 @@ impl Fake {
     }
 }
 
+/// Board #384: `tmm agent team` needs `agent_team` on its own connection: a
+/// server with only `spawn_join` (built between #382 and #384) has no
+/// `hub_agent_set_team` and gets no call.
+#[test]
+fn a_team_move_needs_agent_team_and_sends_nothing_without_it() {
+    let between = fake(Some(&["board_dispatch", "spawn_join"]));
+    let (ok, _, err) = between.run(&["agent", "team", "helper", "squad"]);
+    assert!(!ok);
+    assert!(err.contains("lacks `agent_team`") && err.contains("Nothing was changed."), "{err}");
+    assert!(between.calls.lock().unwrap().is_empty(), "no call at all");
+}
+
 #[test]
 fn a_join_against_a_server_without_spawn_join_spawns_nothing() {
     let old = fake(None);

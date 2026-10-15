@@ -14,7 +14,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { BOARD_DISPATCH, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
+import { AGENT_TEAM, BOARD_DISPATCH, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -457,6 +457,18 @@ export function createWsApi(connection: Connection) {
   /** Switch a running agent's queue|steer mode for THIS session (board #271):
    * its CLI's own live toggle; a restart returns to the configured mode.
    * `changed` is false when it already ran `mode`. */
+  /** Move a running agent's RUNTIME team (board #384): `team` = a team of
+   * this project, '' to leave. Needs `agent_team` on the current socket's
+   * login (the #377 gate: the runtime waits for an unanswered login, the
+   * check is synchronous in the block that sends); an older server has no
+   * such verb. */
+  const hubAgentSetTeam = Object.assign(
+    async (session: string, agent: string, team: string) => {
+      requireCap(connection, AGENT_TEAM);
+      return call<{ agent: string; team: string | null; left: string | null; changed: boolean }>('hub_agent_set_team', { session, agent, team });
+    },
+    { hold: (): Promise<void> | undefined => holdForLogin(connection) },
+  );
   const hubAgentInputMode = (session: string, agent: string, mode: 'queue' | 'steer') =>
     call<{ agent: string; mode: 'queue' | 'steer'; changed: boolean }>('hub_agent_input_mode', { session, agent, mode });
   /** Kill and bring back. `resumed` is false when the agent had to start a fresh
@@ -526,7 +538,7 @@ export function createWsApi(connection: Connection) {
     hubCommand, hubLog, hubLogAround, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
-    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentRestart,
+    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart,
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
@@ -572,7 +584,7 @@ export const RPC_KIND = {
   boardList: 'read', boardCounts: 'read', boardGet: 'read',
   boardSave: 'write', boardNote: 'write', boardDelete: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
-  hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write',
+  hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',
   hubAgentRestart: 'write', hubTeamRestart: 'write',
   registryList: 'read', registrySave: 'write', registryDelete: 'write',
   globalPromptGet: 'read', globalPromptSet: 'write',

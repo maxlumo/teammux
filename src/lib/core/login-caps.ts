@@ -11,11 +11,16 @@ export const BOARD_DISPATCH = 'board_dispatch';
  * An older server ignores `join` and spawns the agent standalone, which reads
  * as a success; so a join is refused unless the server says it can. */
 export const SPAWN_JOIN = 'spawn_join';
+/** `hub_agent_set_team` exists (board #384): a running agent can be moved
+ * into a team, or out, at runtime. An older server has no such verb, so the
+ * Hub offers no move (drag targets and menu items disabled, with why). */
+export const AGENT_TEAM = 'agent_team';
 
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
   [SPAWN_JOIN]: 'This server is older than the app. Update the server to start an agent inside a team.',
+  [AGENT_TEAM]: 'This server is older than the app. Update the server to move an agent between teams.',
 };
 
 /** A login answer's `caps`: the plain, non-empty strings in it, or `[]` for an

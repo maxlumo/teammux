@@ -14,6 +14,8 @@
   import { scrollEdges } from '../ui/scroll-edges.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { tabShape } from '../ui/tab-shape.ts';
+  import { createPressDrag } from '../ui/press-drag.ts';
+  import { groupDropAt } from '../app/nav-order.ts';
 
   let {
     selected = '', compact = false, managedAgents = [], stopped = [], stoppedTeams = {}, selectedRow = null,
@@ -25,6 +27,10 @@
     expanded: expandPref = false, onexpand = () => {}, onadd = () => {}, oncontext = () => {},
     allMenuOpen = false, onall = (_event) => {},
     onallcontext = (_at) => {}, onteamcontext = (_at, _team) => {},
+    /** Board #384: drag a live card onto a team to move it there at runtime,
+     * or onto the standalone area to leave its team. `canMove` = this server
+     * can (`agent_team`); `onmove(name, team)` with team '' = leave. */
+    canMove = false, onmove = (_name, _team) => {},
   } = $props();
   // This server's backend catalog (board #335 ②b-3): the avatars are its
   // answer. From the Hub's scope, read once at init.
@@ -146,7 +152,58 @@
      (board #223: "手机上因为没有悬停窗口 所以选项卡里给我展示一下agent信息").
      A pointer menu stays verbs-only — the hover card already answered. */
   const touchInfo = (get) => (coarsePointer() ? get() : null);
+  // ── Drag a card onto a team (board #384) ─────────────────────────────
+  // The ONE press-drag (ui/press-drag.ts): a mouse or pen press on a live
+  // card that travels the threshold, in any direction, carries the card; the
+  // drop targets are the live NAMED team groups other than its own (a team
+  // root) and, for a card in a team, the standalone area: a standalone card's
+  // group, or (when there is none) a temporary "Standalone" slot shown only
+  // while such a card is carried. Their boxes are snapshotted at drag start
+  // (the carried card moves by transform), the point decides the target
+  // (`groupDropAt`), and a release on one asks Hub to move it. A team
+  // scrolled out of the single-row strip is not a target: the expand toggle
+  // and the card menu's Move items reach it.
+  let cardDrag = $state(null);
+  const cardTargets = (from) => [...(cardsEl?.querySelectorAll('.roster-cluster[data-drop]') ?? [])]
+    .map((el) => ({ key: el.dataset.drop === '-' ? '' : el.dataset.drop, r: el.getBoundingClientRect() }))
+    .filter(({ key, r }) => key !== from && r.width > 0)
+    .map(({ key, r }) => ({ key, left: r.left, top: r.top, right: r.right, bottom: r.bottom }));
+  const cardDrags = createPressDrag({
+    axis: 'xy',
+    get: () => cardDrag,
+    set: (drag) => { cardDrag = drag; },
+    begin: (press) => {
+      if (!canMove) return null;
+      const a = managedAgents.find((x) => x.name === press.name);
+      if (!a) return null;
+      const from = rosterTeam(a);
+      // The temporary slot renders after this; it is measured on the next move.
+      return { name: a.name, from, dx: 0, dy: 0, rects: null, target: null };
+    },
+    track: (drag, e, { dx, dy }) => {
+      cardDrag.dx = dx;
+      cardDrag.dy = dy;
+      // Measured once the targets have rendered (they appear with the drag),
+      // and again until the temporary slot is in, for a card in a team.
+      if (!drag.rects?.length || (drag.from && !drag.rects.some((r) => r.key === ''))) cardDrag.rects = cardTargets(drag.from);
+      cardDrag.target = groupDropAt(cardDrag.rects, e.clientX, e.clientY);
+    },
+    commit: (drag) => { if (drag.target !== null) onmove(drag.name, drag.target); },
+  });
+  /** The team a card is in, by root; '' standalone. */
+  const rosterTeam = (a) => (a.team ? a.team.split('/')[0] : '');
+  /** Where a carried team card may go standalone: a standalone card's group
+   * when one is shown, else the temporary slot. By the group's TEAM, not by
+   * how it is drawn: a team down to one live member is drawn as a plain card
+   * (`namedGroup`), and it is still that team's drop target. */
+  const looseShown = $derived(groups.some((g) => !g.team));
+  $effect(() => {
+    if (!cardDrag) return;
+    return cardDrags.listen();
+  });
+
   function clickAgent(event, name) {
+    if (cardDrags.consumeClick()) return;
     if (!coarsePointer() && event.detail > 1) return;
     // The recipient's own card: a second click opens its menu (Record only
     // leads), it does not deselect (owner, 2026-09-13: "agent选中卡片时，再次点击
@@ -229,11 +286,12 @@
 
 {#if selected}
   <div class="roster tab-strip" class:compact>
-    <div class="cards edge-fade" class:expanded class:filtering={!!filterAgent} class:reveal={justLoaded} id={cardsId} bind:this={cardsEl} use:scrollEdges={{ active: !expanded, wrapped: 'expanded', onoverflow: (over) => { overflowing = over; }, key: markerKey }}
+    <div class="cards edge-fade" class:expanded class:filtering={!!filterAgent} class:reveal={justLoaded} class:reordering={!!cardDrag} id={cardsId} bind:this={cardsEl} use:scrollEdges={{ active: !expanded, wrapped: 'expanded', onoverflow: (over) => { overflowing = over; }, key: markerKey }}
       role="group" aria-label={t('agentsTitle')}
       onpointerenter={(e) => { hovering = e.pointerType !== 'touch'; }}
       onpointerleave={() => { hovering = false; clearPress(); }}
       onpointerdown={beginPress} onpointerup={clearPress} onlostpointercapture={clearPress}
+      onpointermove={(e) => cardDrags.move(e)}
       onpointercancel={clearPress} onclickcapture={clearPress}
       onfocusin={() => { focused = true; }}
       onfocusout={(e) => { focused = !!e.relatedTarget && e.currentTarget.contains(e.relatedTarget); if (!focused) clearPress(); }}>
@@ -278,6 +336,7 @@
       {#each groups as group (group.key)}
       {@const named = namedGroup(group)}
       <div class="roster-cluster" class:team={named} class:team-lit={named && recipient === teamTarget(group.team)} data-team={named ? group.team : undefined}
+        data-drop={cardDrag ? (group.team ?? '-') : undefined} class:drop-target={!!cardDrag && cardDrag.target === (group.team ?? '')}
         role={named ? 'group' : undefined} aria-label={named ? `${t('teamsTitle')} ${group.team}` : undefined}
         animate:flip={{ duration: moveMs() }}>
         {#if named}
@@ -297,6 +356,7 @@
         {@const pending = interrupting.includes(a.name)}
         <!-- Selection and interruption are sibling native targets, never nested buttons. -->
         <div class="acard strip-tab" role="group" data-agent={a.name} class:sel={isAddressed(a.name)} class:filtered={filterAgent === a.name} class:stop-shown={showStop(a.name)}
+          class:lifted={cardDrag?.name === a.name} style:transform={cardDrag?.name === a.name ? `translate(${cardDrag.dx}px, ${cardDrag.dy}px)` : null}
           class:appear-pop={!!rosterBase && !rosterBase.has(a.name)} animate:flip={{ duration: moveMs() }}
           onpointerenter={(e) => arm(a.name, e.pointerType)} onpointerleave={() => disarm(a.name)}
           onfocusin={() => arm(a.name)} onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) disarm(a.name); }}>
@@ -305,6 +365,8 @@
             aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, a.detail, vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
+            onpointerdown={(e) => cardDrags.down(e, { name: a.name })}
+            onpointerup={() => cardDrags.up()} onpointercancel={() => cardDrags.cancel()}
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), a.name, touchInfo(() => cardInfo(a))); }}
             use:longpress={{ onlongpress: (at) => oncontext(at, a.name, touchInfo(() => cardInfo(a))) }}>
             <span class="avatar-slot">
@@ -356,6 +418,14 @@
       <!-- The measurement box for All: the group's own extent. -->
       <span class="tabs-extent" aria-hidden="true"></span>
       </div>
+      {#if cardDrag?.from && !looseShown}
+        <!-- The standalone drop target when no standalone card is shown
+             (board #384): only while a card in a team is carried, outside
+             the destinations group (it is a place to drop, not a tab). -->
+        <div class="roster-cluster standalone-slot appear" data-drop="-" class:drop-target={cardDrag.target === ''}>
+          <span class="team-label">{t('hubMoveStandalone')}</span>
+        </div>
+      {/if}
       {#each offTeams as group (group.team)}
         <!-- A stopped team (board #287): its name opens the team menu, whose
              Start brings the team back from its current definition. Not a
@@ -518,6 +588,23 @@
     content: ''; position: absolute; inset: 0; border: 1px solid var(--bubble-line);
     border-radius: inherit; pointer-events: none;
   }
+  /* Dragging a card onto a team (board #384), in the rail's drag grammar:
+     the carried card is LIFTED (the address row's look: accent line, accent
+     wash, menu shadow) and follows the pointer by transform; the group under
+     it is enclosed in the accent line; nothing else hovers while carrying. */
+  .cards.reordering { cursor: grabbing; user-select: none; }
+  .cards.reordering .acard:not(.lifted) .agent-select { pointer-events: none; }
+  .acard.lifted { position: relative; z-index: 2; }
+  .acard.lifted .agent-select {
+    border-color: var(--accent-line); background: var(--accent-bg); color: var(--accent-ink);
+    box-shadow: var(--menu-shadow);
+  }
+  .roster-cluster.drop-target::after {
+    content: ''; position: absolute; inset: 0; border: 1px solid var(--accent);
+    border-radius: var(--ui-radius-panel); pointer-events: none;
+  }
+  .cards:not(.expanded) .roster-cluster.team.drop-target::before { background: var(--accent); }
+  .standalone-slot .team-label { cursor: inherit; }
   .cards.expanded .roster-cluster.team-lit .acard::before { background: transparent; border-color: transparent; }
   .tabs.all-lit .roster-cluster.team::before { display: none; }
   .cards.expanded .roster-cluster.team { flex: 0 1 100%; min-width: 0; flex-wrap: wrap; }

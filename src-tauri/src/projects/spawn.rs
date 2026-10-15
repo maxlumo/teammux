@@ -302,6 +302,9 @@ fn materialize(
 /// window), or a def edited into an invalid model (a config the backend
 /// would refuse must not brick the restart).
 pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bool {
+    // It reads the recipe and `materialize` writes it back: one section with
+    // a runtime team move (`set_agent_team`), so neither undoes the other.
+    let _recipe = recipe_lock();
     let home = agent_home(project_path, window_name);
     let Ok(recipe) = std::fs::read_to_string(home.join("launch.json")) else { return false };
     let recipe: Value = match serde_json::from_str(&recipe) {
@@ -411,6 +414,66 @@ fn team_homes(workspace: &str, root: &str) -> Vec<(String, String, String)> {
     }
     out.sort();
     out
+}
+
+/// Move an EXISTING managed agent's runtime membership (board #384: the
+/// Hub's drag of a card onto a team, "Move to team" / "Leave team", `tmm agent
+/// team`): `team` = a team root to join, or "" to leave its team. The same
+/// membership a join at spawn has (#382): the recipe's `team`, with `member`
+/// empty; the team's DEFINITION is never edited. Only the recipe's `team`
+/// field changes, so its prompt follows at its next start (`refresh_agent`
+/// builds the joined block, or none after a leave) and nothing running is
+/// rewritten or restarted. Refused by name: an agent the team's definition
+/// places (its member is not empty; the Teams editor owns that), a team that
+/// is not present in this project (`check_join`). Returns the team it left
+/// ('' when it was standalone) and whether anything changed.
+pub fn set_agent_team(workspace: &str, window_name: &str, team: &str) -> Result<(String, bool), String> {
+    let _recipe = recipe_lock();
+    let home = agent_home(workspace, window_name);
+    let path = home.join("launch.json");
+    let text = std::fs::read_to_string(&path).map_err(|_| format!("'{window_name}' is not an agent this app started"))?;
+    let mut recipe: Value = serde_json::from_str(&text).map_err(|e| format!("launch recipe of '{window_name}' is not readable: {e}"))?;
+    let field = |k: &str| recipe.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let (old, member) = (field("team"), field("member"));
+    let old_root = old.split('/').next().unwrap_or("").to_string();
+    if !member.is_empty() {
+        return Err(format!(
+            "'{window_name}' is member '{member}' of team '{old_root}' by the team's definition — change it in Agents > Teams"
+        ));
+    }
+    let team = team.trim();
+    if team == old_root {
+        return Ok((old_root, false));
+    }
+    if !team.is_empty() {
+        check_join(workspace, team)?;
+    }
+    recipe["team"] = json!(team);
+    // Written whole through a temp file and a rename: a reader never sees a
+    // half-written recipe (the restart path replays it verbatim).
+    let tmp = home.join("launch.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&recipe).unwrap())
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("write launch recipe {}: {e}", path.display()))?;
+    Ok((old_root, true))
+}
+
+/// The one section for a read-modify-write of an EXISTING agent's recipe
+/// (board #384): a restart's `refresh_agent` reads the recipe and rewrites it
+/// through `materialize`; a runtime team move rewrites its `team`. Without
+/// one section a move landing between a restart's read and its write would be
+/// undone while the room says it happened. Process-wide (both are short file
+/// writes); a poisoned lock is still a lock.
+fn recipe_lock() -> std::sync::MutexGuard<'static, ()> {
+    static RECIPE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    RECIPE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The other members of team `root` in this workspace, by window, for the
+/// moved agent's notice (board #384): every home whose recipe puts it in the
+/// team, other than `window_name`, live or stopped.
+pub fn team_mates(workspace: &str, root: &str, window_name: &str) -> Vec<String> {
+    team_homes(workspace, root).into_iter().map(|(w, _, _)| w).filter(|w| w != window_name).collect()
 }
 
 /// The agents that joined `root` at runtime (board #382), by window: the
@@ -2123,6 +2186,75 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         super::super::teams_delete("jnteam").ok();
         for n in ["jnbase", "jnhelper"] { super::super::registry_delete(n).ok(); }
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #384: moving an existing agent's runtime membership edits the
+    /// recipe's `team` and nothing else; joining checks the team like a join
+    /// at spawn; a definition member cannot be moved; the restart then builds
+    /// (or drops) the team block.
+    #[test]
+    fn an_agent_moves_in_and_out_of_a_team_by_its_recipe_alone() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-move-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
+        super::super::registry_save(&json!({ "name": "mvbase", "backend": "kiro", "system": "Base.", "skills": "[]", "mcp": "[]" })).unwrap();
+        super::super::registry_save(&json!({ "name": "mvsolo", "backend": "kiro", "system": "Solo persona.", "skills": "[]", "mcp": "[]" })).unwrap();
+        super::super::teams_save(&json!({ "name": "mvteam", "description": "Moves.", "members": r#"[{"name":"lead","base":"mvbase","role":"leads"}]"#.to_string() })).unwrap();
+        let team = super::super::team_get("mvteam").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let base = super::super::registry_get("mvbase").unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "mvteam".into())];
+        let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
+        materialize(&d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead").unwrap();
+        let solo = super::super::registry_get("mvsolo").unwrap().unwrap();
+        materialize(&solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "").unwrap();
+        let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
+        let before = recipe();
+
+        assert!(set_agent_team(&ws_str, "mvsolo", "ghost").unwrap_err().contains("team 'ghost' has no member in this project"));
+        assert_eq!(recipe(), before, "a refused move writes nothing");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "").unwrap(), (String::new(), false), "standalone already");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam").unwrap(), (String::new(), true));
+        let mut expected = before.clone();
+        expected["team"] = json!("mvteam");
+        assert_eq!(recipe(), expected, "only the team field changed");
+        assert!(!agent_home(&ws_str, "mvsolo").join("launch.json.tmp").exists(), "no temp file left");
+        assert_eq!(super::super::joined_team(Some(&ws_str), "mvsolo").as_deref(), Some("mvteam"));
+        assert_eq!(team_mates(&ws_str, "mvteam", "mvsolo"), ["lead"]);
+        let prompt = || read(&agent_home(&ws_str, "mvsolo").join("agents").join("mvsolo.json"))["prompt"].as_str().unwrap().to_string();
+        assert!(!prompt().contains("## Your team"), "the running agent's config is not rewritten");
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert!(prompt().contains("## Your team: \"mvteam\"") && prompt().contains("- @lead — leads"), "its next start carries the block: {}", prompt());
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam").unwrap(), ("mvteam".to_string(), false), "already there");
+
+        assert!(set_agent_team(&ws_str, "lead", "").unwrap_err().contains("by the team's definition — change it in Agents > Teams"), "a definition member stays");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "").unwrap(), ("mvteam".to_string(), true));
+        assert_eq!(recipe(), before, "left: the recipe is what it was");
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert!(!prompt().contains("## Your team"), "and its next start drops the block");
+        assert!(set_agent_team(&ws_str, "nobody", "mvteam").unwrap_err().contains("is not an agent this app started"));
+
+        // One section with a restart's read-and-rewrite: while it is held, a
+        // move waits, and lands after it.
+        let held = recipe_lock();
+        let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam")) };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(recipe()["team"], "", "the move waits for the section");
+        drop(held);
+        assert_eq!(mover.join().unwrap().unwrap(), (String::new(), true));
+        assert_eq!(recipe()["team"], "mvteam");
+        let held = recipe_lock();
+        let restart = { let ws = ws_str.clone(); std::thread::spawn(move || refresh_agent(&ws, "proj", "mvsolo")) };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!restart.is_finished(), "a restart's refresh takes the same section");
+        drop(held);
+        assert!(restart.join().unwrap());
+        assert_eq!(recipe()["team"], "mvteam", "and keeps the move");
+
+        super::super::teams_delete("mvteam").ok();
+        for n in ["mvbase", "mvsolo"] { super::super::registry_delete(n).ok(); }
         std::fs::remove_dir_all(&ws).ok();
     }
 

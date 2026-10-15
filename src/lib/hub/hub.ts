@@ -1345,7 +1345,7 @@ export function systemLine(body: string | null | undefined): string | null {
 /** The lifecycle verbs the server narrates (`hub_rpc.rs`). A line that does not
  * start with one of them is left whole — an unknown shape must render as its own
  * text, never as a guessed verb plus a truncated remainder. */
-const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'kept', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
+const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'kept', 'moved', 'left', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
 
 /**
  * ONE structure for every line the app narrates: WHO it is about, WHAT
@@ -1475,7 +1475,11 @@ export function sysVerbColor(verb: string): string {
     case 'switched':
     // A board hand-off (#367) starts work moving, like a spawn; handing the
     // issue back to nobody leaves it at rest, like a stop.
-    case 'assigned': return 'var(--accent)';
+    case 'assigned':
+    // A runtime move into a team (#384) starts something, like a spawn; a
+    // leave puts the agent back at rest, like a kept joiner.
+    case 'moved': return 'var(--accent)';
+    case 'left':
     case 'unassigned': return 'var(--text3)';
     // A team restart that left a joined agent as it was (#382): nothing
     // happened to it, so it is at rest.

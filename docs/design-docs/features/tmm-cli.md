@@ -67,6 +67,9 @@ tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
 tmm agent list                       windows + agent detection + derived state
 tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
+tmm agent team <name> <team|->       move a running agent into a team of this project, or out (-), at runtime
+                                     (#384; needs the server's agent_team cap; a definition member is refused;
+                                     its prompt follows at its next start)
 tmm spawn <agent> [--brief <text>]   spawn a registry agent into this project (standalone)
 tmm spawn <agent> --join <team>      …into a team of this project, at runtime (#382; needs the server's spawn_join cap;
                                      the team must have a member home here, live or stopped)
@@ -457,6 +460,7 @@ a teammate:
 |---|---|---|
 | Agent | `tmm agent interrupt\|stop\|restart\|remove <name>` | roster card/context menu: Watch / Interrupt / Restart / Stop / Remove |
 | Input mode | `tmm agent mode <name> queue\|steer` | kiro card context menu: Switch to Steer / Switch to Queue (#271) |
+| Runtime team | `tmm agent team <name> <team\|->` | drag the card onto a team (mouse/pen); card menu: Move to team t / Leave team t (#384) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |
 | Project | `tmm project up\|down\|archive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action) |
 | Board hand-off | `tmm board assign <id> <name\|->` | Board detail: the assignee picker (its first row clears it) |

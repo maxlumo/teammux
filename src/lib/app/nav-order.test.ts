@@ -5,6 +5,7 @@ import {
   RAIL_DRAG_THRESHOLD,
   RAIL_GAP,
   RAIL_PAGES,
+  groupDropAt,
   isDefaultRailOrder,
   listDropAt,
   moveBefore,
@@ -264,4 +265,20 @@ test('the generic list drop is the same drag the rail speaks (board #222)', () =
   // it — both mean UNCHANGED, said explicitly rather than falling out of the move.
   assert.deepEqual(listDropAt(list, 'ws://tail:2', rects, 1), list);
   assert.deepEqual(listDropAt(list, 'ws://tail:2', rects, 2), list);
+});
+
+test('a group drop is the box under the pointer, edges included, else nothing (board #384)', () => {
+  // The roster's team clusters on one row, snapshotted at drag start; the
+  // keys are what the drop means ('' = standalone).
+  const rects = [
+    { key: 'squad', left: 0, top: 0, right: 200, bottom: 60 },
+    { key: '', left: 210, top: 0, right: 300, bottom: 60 },
+    { key: 'ops', left: 310, top: 0, right: 420, bottom: 60 },
+  ];
+  assert.equal(groupDropAt(rects, 100, 30), 'squad');
+  assert.equal(groupDropAt(rects, 250, 59), '', 'the standalone key is a target, not "nothing"');
+  assert.equal(groupDropAt(rects, 420, 0), 'ops', 'an edge belongs to its box');
+  assert.equal(groupDropAt(rects, 205, 30), null, 'the gap between two boxes drops nowhere');
+  assert.equal(groupDropAt(rects, 100, 61), null, 'below the strip drops nowhere');
+  assert.equal(groupDropAt([], 0, 0), null);
 });

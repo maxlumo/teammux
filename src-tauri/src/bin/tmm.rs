@@ -108,6 +108,10 @@ USAGE (human or agent — self-management):
   tmm agent interrupt <name>          cancel the turn it is running (Escape into its pane)
   tmm agent mode <name> queue|steer   switch a kiro agent's queue/steer mode for this session
                                       (its Ctrl+S; a restart returns to the configured mode)
+  tmm agent team <name> <team|->      move a running agent into a team of this project, or out
+                                      (-), at runtime: the team's definition is not changed, a
+                                      definition member cannot be moved, its prompt follows at
+                                      its next start (#384)
   tmm agent stop|restart <name>       stop it, or bring it back resuming its conversation
   tmm agent restart --team <team>     align a team with its CURRENT definition: restart who
                                       it still has, start who it gained, stop who it dropped
@@ -872,6 +876,29 @@ async fn main() {
                 println!("✓ {name} → {mode} mode (this session; a restart returns to its configured mode)");
             }
         }
+        // Board #384: an existing agent's RUNTIME team, the CLI form of the
+        // Hub's drag / "Move to team" / "Leave team". `-` leaves its team.
+        // Needs the server to say it can (`agent_team`), checked on this
+        // connection's login before the call.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("team") => {
+            let session = need_project(&ctx);
+            let (Some(name), Some(team)) = (rest.get(1).cloned(), rest.get(2).cloned()) else {
+                fail(EXIT_USAGE, "agent team needs a name and a team: tmm agent team <name> <team|->");
+            };
+            let by = ctx.agent.clone().unwrap_or_default();
+            let r = rpc_needing(&ctx, "agent_team", "hub_agent_set_team", set_team_params(&session, &name, &team, &by)).await;
+            if ctx.json {
+                println!("{r}");
+            } else {
+                let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                match (r.get("changed").and_then(|v| v.as_bool()) == Some(true), s("team"), s("left")) {
+                    (false, t, _) if !t.is_empty() => println!("✓ {name} is already in team {t}"),
+                    (false, _, _) => println!("✓ {name} is already standalone"),
+                    (true, t, _) if !t.is_empty() => println!("✓ moved {name} to team {t} (its prompt follows at its next start)"),
+                    (true, _, l) => println!("✓ {name} left team {l} (standalone; its prompt follows at its next start)"),
+                }
+            }
+        }
         ("project", rest) if rest.first().map(String::as_str) == Some("list") => {
             let r = rpc(&ctx, "project_list", json!({})).await;
             if ctx.json {
@@ -1082,6 +1109,13 @@ async fn main() {
 }
 
 type Flags = std::collections::HashMap<String, Option<String>>;
+
+/// The params `tmm agent team <name> <team|->` sends (board #384): `-`
+/// is how a shell spells "no team"; `by` is the calling agent, named to the
+/// new team the way a spawn names who started it.
+fn set_team_params(session: &str, agent: &str, team: &str, by: &str) -> Value {
+    json!({ "session": session, "agent": agent, "team": if team == "-" { "" } else { team }, "by": by })
+}
 
 /// The params `tmm spawn <agent>` sends. Standalone unless `--join <team>`
 /// names a team (board #382): explicit even when the caller is itself a
@@ -1825,6 +1859,9 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// nothing was written.
 fn cap_refusal(need: &str) -> String {
     match need {
+        "agent_team" => format!(
+            "this server cannot move an agent between teams (its login answer lacks `{need}`) — update the server. Nothing was changed."
+        ),
         "spawn_join" => format!(
             "this server cannot start an agent inside a team (its login answer lacks `{need}`; an older server would start it standalone) — update the server to join. Nothing was spawned."
         ),
@@ -2394,7 +2431,7 @@ mod tests {
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "--re ", "--join "] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "--re ", "--join ", "tmm agent team"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }
@@ -2498,6 +2535,14 @@ mod tests {
         assert_eq!(spawn_params("p", "kiro", "go", "lead", &flags), json!({ "session": "p", "agent": "kiro", "brief": "go", "by": "lead", "join": "dev-squad" }));
         let (flags, _, _) = parse(&["spawn", "kiro"]);
         assert!(spawn_params("p", "kiro", "", "lead", &flags).get("join").is_none(), "standalone, even when the caller is a team member");
+    }
+
+    /// Board #384: `-` leaves the team; anything else names one.
+    #[test]
+    fn agent_team_sends_the_team_or_none() {
+        assert_eq!(set_team_params("p", "helper", "squad", "lead"), json!({ "session": "p", "agent": "helper", "team": "squad", "by": "lead" }));
+        assert_eq!(set_team_params("p", "helper", "-", ""), json!({ "session": "p", "agent": "helper", "team": "", "by": "" }));
+        assert!(cap_refusal("agent_team").contains("lacks `agent_team`") && cap_refusal("agent_team").ends_with("Nothing was changed."));
     }
 
     /// Board #336 reviewer P1-A: without `--input-mode` the key is OMITTED,

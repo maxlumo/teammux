@@ -24,11 +24,12 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// `hub_board_save` that carries `dispatch: true` hands the issue to its
 /// assignee. `spawn_join` (board #382): a `hub_spawn` with `join` puts the
 /// agent in that running team (an older server ignores the key and spawns it
-/// standalone). An older server announces no `caps` at all, and a client that
+/// standalone). `agent_team` (board #384): `hub_agent_set_team` exists, so the
+/// Hub may offer moving a running agent between teams. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

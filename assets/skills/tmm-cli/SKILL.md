@@ -178,6 +178,10 @@ tmm agent restart <name>            # bring it back, resuming its conversation
 tmm agent restart --team <team>     # align a team with its current definition:
                                     #   restart who it still has, start who it
                                     #   gained, stop who it dropped (home kept)
+tmm agent team <name> <team|->      # move a running agent into a team of this
+                                    #   project, or out (-), at runtime; its
+                                    #   prompt follows at its next start; a
+                                    #   definition member cannot be moved
 tmm agent remove <name>             # eject: stop + forget slot + delete home
 tmm spawn <registry-name> [--brief "<text>"]   # hire a teammate into this
                                     #   project; no brief = it waits silently;

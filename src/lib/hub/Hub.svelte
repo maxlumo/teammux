@@ -36,6 +36,7 @@
   import { alertOf } from './notify-centre.svelte.ts';
   import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
   import { issueRef } from './board.ts';
+  import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
   import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
@@ -66,9 +67,19 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, boardList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
+  // What this server's login says it can do (board #377 caps). Moving a
+  // running agent between teams needs `agent_team` (#384): without it the
+  // drag has no targets and the Move items are disabled, saying why.
+  let loginCaps = $state(scope.runtime.connection.getCaps?.());
+  $effect(() => {
+    loginCaps = scope.runtime.connection.getCaps?.();
+    const off = scope.runtime.connection.onCaps?.((caps) => { loginCaps = caps; });
+    return () => { if (typeof off === 'function') off(); };
+  });
+  const moveBlocked = $derived(lacksCap(loginCaps, AGENT_TEAM));
   // This server's backend catalog (②b-3): the avatars and whether a running
   // agent can switch its input mode are its answer.
   const catalog = scope.state.backends;
@@ -1427,6 +1438,33 @@
       if (current() && pickerOpening === opening) { startPick = []; startBrief = ''; }
     }
   }
+  /** Move a running agent into a team of this project, or out ('' = leave),
+   * at runtime (board #384): the drag and the Move/Leave items both land
+   * here. A member its team's DEFINITION places is not moved; the person is
+   * told where that lives. Every refusal is said in the composer's feedback
+   * slot. Frozen to the project it was asked in. */
+  async function moveAgent(name, team, session = selected) {
+    if (!session || session !== selected) return;
+    const a = managedAgents.find((x) => x.name === name);
+    const from = teamRoot(a?.team);
+    const feedbackToken = commandFeedbackLifetime.begin();
+    commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+    if (a && from && !a.joined) {
+      commandFeedbackLifetime.update(feedbackToken, { kind: 'error', message: t('hubMoveDefMember').replace('{name}', name).replace('{team}', from) });
+      return;
+    }
+    if ((team || '') === from) { commandFeedbackLifetime.clear(); return; }
+    const gen = selectionGeneration;
+    try {
+      await hubAgentSetTeam(session, name, team);
+      if (alive && selectionGeneration === gen && selected === session) await Promise.all([loadAgents(), loadFeed()]);
+    } catch (e) {
+      if (alive && selectionGeneration === gen && selected === session) commandFeedbackLifetime.update(feedbackToken, {
+        kind: 'error',
+        message: t('hubMoveFailed').replace('{name}', name).replace('{why}', e?.code === 'server_too_old' ? t('hubMoveOldServer') : spawnRefusal(e)),
+      });
+    }
+  }
   /** Why a spawn did not go, in this page's words: the gate's two refusals
    * (#377, #382) have their own copy; anything else is the server's message
    * (`check_join` names the team it refused). */
@@ -1954,6 +1992,24 @@
   /** An agent's verbs — shared by its card and context menus. */
   /** One order for every agent menu — rising consequence, destructive last
    * (owner, 2026-08-25: "停止删除应该靠后"), interrupt in the warn tone. */
+  /** "Move to team t" per other running team and, for a JOINED agent,
+   * "Leave team t" (board #384): the drag's form for touch and keyboard, flat
+   * items in the one menu. None for a member its team's definition places.
+   * On a server without `agent_team` they are shown disabled, with why. */
+  function moveItems(a, session) {
+    if (!a) return [];
+    const from = teamRoot(a.team);
+    if (from && !a.joined) return [];
+    const hint = moveBlocked ? t('hubMoveOldServer') : undefined;
+    return [
+      ...runningTeams.filter((team) => team !== from).map((team) => ({
+        label: t('hubMoveToTeam').replace('{name}', team), icon: 'bots', disabled: moveBlocked, title: hint,
+        onselect: () => moveAgent(a.name, team, session),
+      })),
+      ...(from ? [{ label: t('hubLeaveTeam').replace('{name}', from), icon: 'bots', disabled: moveBlocked, title: hint,
+        onselect: () => moveAgent(a.name, '', session) }] : []),
+    ];
+  }
   function agentItems(name) {
     const session = selected;
     const config = openAgentConfig
@@ -1987,6 +2043,7 @@
         ? [{ label: t(modeSwitch.label), icon: 'zap',
             onselect: () => switchInputMode(name, modeSwitch.next, session) }]
         : []),
+      ...moveItems(a, session),
       { label: t('hubRestart'), icon: 'refresh', onselect: () => restartAgent(name) },
       { label: t('hubStop'), icon: 'stop', danger: true, onselect: () => askAction('stop', name) },
       { label: t('hubRemove'), icon: 'trash', danger: true, onselect: () => askAction('remove', name) },
@@ -2385,6 +2442,7 @@
         {stateLabel} {stateTone} onselect={setRecipient} oninterrupt={interrupt}
         onfilter={(name) => { closeCtx(); toggleFilter(name); }}
         onadd={() => openPicker('add')}
+        canMove={roomReady && !moveBlocked && loginCaps !== undefined} onmove={(name, team) => moveAgent(name, team)}
         oncontext={(at, name, info) => openCtx(at, name, agentItems(name), info)} />
 
       {#if filterNote}

@@ -673,6 +673,50 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             Ok(serde_json::json!({ "id": id, "cancelled": true }))
         }
 
+        // An existing agent's RUNTIME team (board #384): the Hub's drag of a
+        // card onto a team, "Move to team" / "Leave team", `tmm agent team`.
+        // `team` = a team present in this project, or "" to leave. Only the
+        // recipe changes (`spawn::set_agent_team`); the team's definition is
+        // never edited, the running CLI is neither rewritten nor restarted.
+        // The moved agent, the new team's live members (#382's join notice)
+        // and the old team's live members are told in their panes.
+        "hub_agent_set_team" => {
+            let agent = param(p, "agent")?;
+            let team = p.get("team").and_then(|v| v.as_str()).map(str::trim)
+                .ok_or_else(|| RpcError::InvalidParams("missing required param: team (a team, or \"\" to leave)".into()))?;
+            let Some(project) = crate::projects::project_for_session(session).map_err(RpcError::InvalidParams)? else {
+                return Err(RpcError::InvalidParams(format!("no project for session '{session}'")));
+            };
+            if crate::projects::managed_home(session, agent).is_none() {
+                return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
+            }
+            let (left, changed) = crate::projects::spawn::set_agent_team(&project.path, agent, team)
+                .map_err(RpcError::InvalidParams)?;
+            if changed {
+                let _ = rooms::post(&room, agent, &move_line(agent, team, &left));
+                let stamp = stamp_now();
+                let ws = project.path.as_str();
+                if !left.is_empty() {
+                    tell_team(session, &left, agent, &crate::projects::delivery::left_notice(agent, &left, &stamp));
+                }
+                if !team.is_empty() {
+                    let backend = agent_backend(session, agent).map(|b| b.name()).unwrap_or("");
+                    let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
+                    tell_team(session, team, agent, &crate::projects::delivery::moved_in_notice(agent, team, backend, by, &stamp));
+                }
+                let mates: Vec<(String, String)> = if team.is_empty() { Vec::new() } else {
+                    let def = crate::projects::team_get(team).ok().flatten();
+                    let flat = def.as_ref().and_then(|t| crate::projects::teams::expand(t, &|n| crate::projects::team_get(n), crate::projects::spawn::SPAWN_CAP).ok()).unwrap_or_default();
+                    crate::projects::spawn::team_mates(ws, team, agent).into_iter().map(|w| {
+                        let member = crate::projects::member_of(Some(ws), &w);
+                        let role = flat.iter().find(|f| !member.is_empty() && f.member.name.trim() == member).map(|f| f.member.role.trim().to_string()).unwrap_or_default();
+                        (w, role)
+                    }).collect()
+                };
+                crate::projects::deliver_chat_line(session, agent, &crate::projects::delivery::moved_notice(agent, team, &left, &mates, &stamp));
+            }
+            Ok(serde_json::json!({ "agent": agent, "team": if team.is_empty() { serde_json::Value::Null } else { serde_json::json!(team) }, "left": if left.is_empty() { serde_json::Value::Null } else { serde_json::json!(left) }, "changed": changed }))
+        }
         "hub_agent_input_mode" => {
             let agent = param(p, "agent")?;
             let mode = param(p, "mode")?;
@@ -950,19 +994,39 @@ fn spawn_line(win: &str, join: Option<&str>, brief: &str) -> String {
 /// at its turn's end like any other line. Returns who it was typed to.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn tell_team_of_join(session: &str, root: &str, joiner: &str, backend: &str, by: &str, brief: &str) -> Vec<String> {
+    let notice = crate::projects::delivery::join_notice(joiner, root, backend, by, brief, &stamp_now());
+    tell_team(session, root, joiner, &notice)
+}
+
+/// Type `notice` into the pane of every CURRENT live member of team `root`
+/// in this session other than `except` (board #382/#384): the one reading of
+/// "the team's live members" the join, move and leave notices share. Returns
+/// who it was typed to.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn tell_team(session: &str, root: &str, except: &str, notice: &str) -> Vec<String> {
     let Ok(Some(project)) = crate::projects::project_for_session(session) else { return Vec::new() };
     let ws = Some(project.path.as_str());
     let mut members: Vec<String> = crate::tmux::list_panes(session)
         .unwrap_or_default()
         .into_iter()
         .map(|p| p.window_name)
-        .filter(|name| name != joiner && crate::projects::is_managed_in(ws, name))
+        .filter(|name| name != except && crate::projects::is_managed_in(ws, name))
         .filter(|name| crate::projects::team_of(ws, name).is_some_and(|t| t.split('/').next() == Some(root)))
         .collect();
     members.sort();
     members.dedup();
-    let notice = crate::projects::delivery::join_notice(joiner, root, backend, by, brief, &stamp_now());
-    members.into_iter().filter(|name| crate::projects::deliver_chat_line(session, name, &notice)).collect()
+    members.into_iter().filter(|name| crate::projects::deliver_chat_line(session, name, notice)).collect()
+}
+
+/// The room line of a runtime team move (board #384), in the lifecycle
+/// grammar `sysParts` reads, verb first.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn move_line(agent: &str, team: &str, left: &str) -> String {
+    match (team.is_empty(), left.is_empty()) {
+        (false, true) => format!("[tmm] moved {agent} — to team {team}"),
+        (false, false) => format!("[tmm] moved {agent} — to team {team}, from team {left}"),
+        (true, _) => format!("[tmm] left {agent} — team {left}, now standalone"),
+    }
 }
 
 /// What a team restart says about an agent that JOINED the team at runtime
@@ -2269,6 +2333,90 @@ mod tests {
         for name in ["helper", "solo", "other"] {
             assert!(!pane(name).contains("joined your team"), "{name} is not told: {:?}", pane(name));
         }
+        let after: Vec<String> = windows.iter().map(|(n, _, _)| pid(n)).collect();
+        assert_eq!(before, after, "nobody was restarted");
+    }
+
+    /// Board #384: a runtime move is recorded in the lifecycle grammar.
+    #[test]
+    fn a_move_leaves_one_room_line_in_the_lifecycle_grammar() {
+        assert_eq!(super::move_line("helper", "squad", ""), "[tmm] moved helper — to team squad");
+        assert_eq!(super::move_line("helper", "squad", "ops"), "[tmm] moved helper — to team squad, from team ops");
+        assert_eq!(super::move_line("helper", "", "squad"), "[tmm] left helper — team squad, now standalone");
+    }
+
+    /// Board #384, on REAL panes: moving a running agent into a team edits
+    /// its recipe only; the moved agent, the new team's live members and (on
+    /// a leave) the old team's live members are told; a solo bystander and
+    /// another team's member are not; nobody restarts; a definition member
+    /// cannot be moved; a team not here is refused before anything changes.
+    #[test]
+    fn a_move_is_told_to_the_mover_and_both_teams_and_restarts_nobody() {
+        crate::projects::tests::use_test_store();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let session = format!("tmm-move-{tag}");
+        let ws = std::env::temp_dir().join(format!("tmm-move-ws-{tag}"));
+        let windows = [("lead", "squad", "lead"), ("helper", "", ""), ("solo", "", ""), ("other", "ops", "dev")];
+        for (name, team, member) in windows {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            let recipe = serde_json::json!({ "backend": "kiro", "cmd": format!("kiro-cli chat --agent {name}"), "team": team, "member": member, "agent_def": name });
+            std::fs::write(home.join("launch.json"), recipe.to_string()).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        for (name, _, _) in &windows[1..] {
+            assert!(std::process::Command::new("tmux").args(["new-window", "-d", "-t", &format!("={session}:"), "-n", name, "-c", &ws.to_string_lossy(), "cat"]).status().unwrap().success());
+        }
+        crate::projects::adopt(&session, Some("move-live-test")).expect("adopt project");
+        let pid = |name: &str| crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("{session}:{name}"), "#{pane_pid}"]).unwrap_or_default();
+        let before: Vec<String> = windows.iter().map(|(n, _, _)| pid(n)).collect();
+        let pane = |name: &str| crate::tmux::capture_pane_plain(&format!("{session}:{name}"), Some(0)).unwrap_or_default();
+        let wait_for = |name: &str, text: &str| {
+            for _ in 0..30 {
+                if pane(name).contains(text) { return true; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        };
+        let set = |agent: &str, team: &str| handle_hub_request(&req("hub_agent_set_team", serde_json::json!({ "session": session, "agent": agent, "team": team })), None);
+        let recipe = |name: &str| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(ws.join(".tmm/agents").join(name).join("launch.json")).unwrap()).unwrap() };
+
+        let refused = set("helper", "ghost");
+        assert!(refused.error.unwrap().message.contains("team 'ghost' has no member in this project"));
+        assert_eq!(recipe("helper")["team"], "", "nothing changed");
+        assert!(set("lead", "").error.unwrap().message.contains("change it in Agents > Teams"), "a definition member stays");
+
+        let moved = set("helper", "squad");
+        assert!(moved.error.is_none(), "{:?}", moved.error.map(|e| e.message));
+        assert_eq!(moved.result.unwrap(), serde_json::json!({ "agent": "helper", "team": "squad", "left": null, "changed": true }));
+        assert_eq!(recipe("helper")["team"], "squad");
+        assert_eq!(recipe("helper")["member"], "", "a joined member");
+        assert!(wait_for("lead", "tmm: [reply] @helper joined your team squad"), "the team's member is told: {:?}", pane("lead"));
+        assert!(pane("lead").contains("agent moved in by human"), "who moved it, not who started it: {:?}", pane("lead"));
+        assert!(wait_for("helper", "tmm: [reply] @helper: you were moved into team squad at runtime"), "the mover is told: {:?}", pane("helper"));
+        assert!(pane("helper").contains("Your prompt changes at your next start"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for name in ["solo", "other"] {
+            assert!(!pane(name).contains("[reply]"), "{name} is not told: {:?}", pane(name));
+        }
+
+        let again = set("helper", "squad");
+        assert_eq!(again.result.unwrap()["changed"], false, "already there: nothing typed, nothing posted");
+
+        let out = set("helper", "");
+        assert_eq!(out.result.unwrap(), serde_json::json!({ "agent": "helper", "team": null, "left": "squad", "changed": true }));
+        assert!(wait_for("lead", "tmm: [reply] @helper left your team squad"), "{:?}", pane("lead"));
+        assert!(wait_for("helper", "you left team squad and are standalone now"), "{:?}", pane("helper"));
+        let lines: Vec<String> = room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] moved") || b.starts_with("[tmm] left")).collect();
+        assert_eq!(lines, ["[tmm] moved helper — to team squad", "[tmm] left helper — team squad, now standalone"]);
         let after: Vec<String> = windows.iter().map(|(n, _, _)| pid(n)).collect();
         assert_eq!(before, after, "nobody was restarted");
     }

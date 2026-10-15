@@ -147,6 +147,31 @@ keyboard. Negative controls: a re-grown `.dlg-backdrop` rule, the dialog
 peeled after the page layers, and an Escape without `isComposing` each fail
 exactly one test.
 
+## One press-drag (board #384, 2026-10-15)
+
+`ui/press-drag.ts` is THE press-to-drag: the desktop rail's icon reorder
+(App), the Connection page's failover-address reorder (Preferences, #222) and
+the Hub roster's drag of an agent card onto a team (#384) all use it. The
+first two had written the same pattern inline twice; the roster would have
+been the third copy, so it was extracted first, as a mechanical commit with
+no behaviour change (the live rail drag measured the same before and after).
+It owns the PRESS: the pointer is captured on the press; a press becomes a
+drag only after `RAIL_DRAG_THRESHOLD` (6 px) of travel, on one axis (`'y'`,
+the lists) or either (`'xy'`, a 2D drop); the drag state lives in the
+caller's `$state` through `get`/`set`; a release commits; Escape, a resize
+(the snapshotted rects are stale) and `pointercancel` abandon; a window-level
+pointerup releases a drag whose handle stopped existing; and a drag that
+travelled arms a one-shot click guard that every fresh press clears. Touch is
+opt-in (`touch: true` only on the address grip, which takes `touch-action:
+none`); on the rail and in the roster's scrolled strip a finger's
+press-and-drag stays the page's scroll, and the roster's touch form is the
+card menu. What a drop MEANS stays with the caller and the pure geometry in
+`app/nav-order.ts` (`railDropAt`, `listDropAt`, `groupDropAt`). Rejected:
+HTML5 `draggable`/`dragstart` (a second species with its own ghost image and
+no touch). `ui/press-drag.test.ts` executes the mechanism; the callers'
+source pins assert their wiring (`App.source`, `preferences.source`,
+`Roster.source`).
+
 ## One "New Project" surface
 
 `CreateProjectDialog.svelte` (src/lib/projects/) is THE way a project is

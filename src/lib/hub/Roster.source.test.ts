@@ -447,3 +447,39 @@ test('a failed agent says why on the phone too: the state line carries the detai
   // reason of a real CLI failure is reachable without a hover.
   assert.match(source, /const lines = \[\{ label: t\('hubHoverState'\), value: \[stateLabel\(a\.state\), a\.detail\]\.filter\(Boolean\)\.join\(' · '\)/u);
 });
+
+test('a card is dragged onto a team by the ONE press-drag, in the existing tokens (board #384)', () => {
+  // One mechanism per job: the rail's and the address list's press-drag, not
+  // an HTML5 draggable (a second species, and dead on touch) or a third copy.
+  assert.match(source, /import \{ createPressDrag \} from '\.\.\/ui\/press-drag\.ts';/u);
+  assert.match(source, /import \{ groupDropAt \} from '\.\.\/app\/nav-order\.ts';/u);
+  assert.doesNotMatch(source, /draggable|ondragstart|setPointerCapture|RAIL_DRAG_THRESHOLD/u, 'the press, capture and threshold are press-drag\'s');
+  const drags = source.match(/const cardDrags = createPressDrag\(\{[\s\S]*?\n {2}\}\);/u)?.[0] ?? '';
+  assert.match(drags, /axis: 'xy'/u, 'a drop onto a group is 2D');
+  assert.doesNotMatch(drags, /touch: true/u, 'a finger drags the strip\'s scroll; touch moves through the card menu');
+  assert.match(drags, /if \(!canMove\) return null;/u, 'a server without agent_team carries nothing');
+  assert.match(drags, /groupDropAt\(cardDrag\.rects, e\.clientX, e\.clientY\)/u);
+  assert.match(drags, /commit: \(drag\) => \{ if \(drag\.target !== null\) onmove\(drag\.name, drag\.target\); \}/u);
+  // Targets are keyed by TEAM, whatever the drawing ('-' = standalone): a team
+  // down to one live member is drawn as a plain card and is still a target.
+  assert.match(source, /data-drop=\{cardDrag \? \(group\.team \?\? '-'\) : undefined\}/u);
+  assert.match(source, /const looseShown = \$derived\(groups\.some\(\(g\) => !g\.team\)\);/u);
+  assert.match(source, /\{#if cardDrag\?\.from && !looseShown\}\s*<!--[\s\S]*?-->\s*<div class="roster-cluster standalone-slot appear" data-drop="-"/u,
+    'the temporary standalone slot exists only while a card in a team is carried and no standalone card is shown');
+  // The card ends its own press, and the click after a drag is no pick.
+  assert.match(source, /onpointerdown=\{\(e\) => cardDrags\.down\(e, \{ name: a\.name \}\)\}\s*onpointerup=\{\(\) => cardDrags\.up\(\)\} onpointercancel=\{\(\) => cardDrags\.cancel\(\)\}/u);
+  assert.match(source, /function clickAgent\(event, name\) \{\n {4}if \(cardDrags\.consumeClick\(\)\) return;/u);
+  assert.match(source, /if \(!cardDrag\) return;\n {4}return cardDrags\.listen\(\);/u, 'Escape, resize and the window release while carrying');
+  // The lifted look is the address row's (accent line, wash, menu shadow);
+  // the target's enclosure is the accent line. Tokens only.
+  const lifted = rule('.acard.lifted .agent-select');
+  assert.match(lifted, /border-color: var\(--accent-line\)/u);
+  assert.match(lifted, /background: var\(--accent-bg\)/u);
+  assert.match(lifted, /box-shadow: var\(--menu-shadow\)/u);
+  const target = rule('.roster-cluster.drop-target::after');
+  assert.match(target, /border: 1px solid var\(--accent\)/u);
+  assert.match(target, /border-radius: var\(--ui-radius-panel\)/u);
+  for (const css of [lifted, target, rule('.cards.reordering')]) {
+    assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|\b(?!1px)\d+px/iu, 'no literal colour or raw px');
+  }
+});

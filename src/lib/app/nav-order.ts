@@ -236,6 +236,18 @@ export function listDropAt<T>(
   return moveBefore(order, item, anchor);
 }
 
+/** A drop TARGET under the pointer (board #384: an agent card dropped on a
+ *  team group), from rects snapshotted at drag start: the first whose box
+ *  holds the point, else null (nothing happens). 2D where the list drops
+ *  above are 1D insertion points. Pure. */
+export function groupDropAt<K>(
+  rects: readonly { key: K; left: number; top: number; right: number; bottom: number }[],
+  x: number,
+  y: number,
+): K | null {
+  return rects.find((r) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)?.key ?? null;
+}
+
 /**
  * The rail's drop commit: `listDropAt` plus the rail-only rules — the gap is
  * never a draggable, and `rects` are the RENDERED slots (hidden pages have

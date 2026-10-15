@@ -760,6 +760,38 @@ test('a join waits for the login, is refused unsent by a server without spawn_jo
   assert.equal('join' in spawns(old)[0].params, false);
 });
 
+test('a team move waits for the login and is refused unsent by a server without agent_team (board #384)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const api = runtimeOver(conn).api;
+  const moves = (socket: InstanceType<typeof MockWebSocket>) => socket.sent.map((f) => JSON.parse(String(f))).filter((f) => f.method === 'hub_agent_set_team');
+
+  const first = conn.connect(A_URL, 'tok');
+  first.catch(() => {});
+  const modern = MockWebSocket.instances.at(-1)!;
+  modern.readyState = MockWebSocket.OPEN;
+  modern.message({ server_nonce: '00'.repeat(16) });
+  const held = api.hubAgentSetTeam('s', 'helper', 'squad');
+  held.catch(() => {});
+  await settle();
+  assert.equal(moves(modern).length, 0, 'held while the login is unanswered');
+  login(modern, ['board_dispatch', 'spawn_join', 'agent_team']);
+  await first;
+  await settle();
+  assert.deepEqual(moves(modern).map((f) => f.params), [{ session: 's', agent: 'helper', team: 'squad' }], 'one move, once the login said it can');
+
+  const second = conn.connect(A_URL, 'tok');
+  second.catch(() => {});
+  const old = MockWebSocket.instances.at(-1)!;
+  old.readyState = MockWebSocket.OPEN;
+  old.message({ server_nonce: '11'.repeat(16) });
+  login(old, ['board_dispatch', 'spawn_join']);
+  await second;
+  await assert.rejects(api.hubAgentSetTeam('s', 'helper', ''),
+    (e: any) => e.code === 'server_too_old' && /move an agent between teams/.test(e.message));
+  assert.equal(moves(old).length, 0, 'refused BEFORE anything was sent');
+});
+
 test('disposing a connection ends a parked whenCaps now, not at its timer (board #377)', async (t) => {
   const conn = createConnection();
   const dial = conn.connect(A_URL, 'tok');

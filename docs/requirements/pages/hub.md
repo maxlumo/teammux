@@ -130,8 +130,8 @@ completion).
   bottom edge line), and a context menu reached from the card itself or from
   right-click/long-press — no dedicated dots control taking roster space
   (Message / Watch / Only its messages — the one-agent feed filter, also a
-  double-click on the card / configure agent / Interrupt / Restart / Stop /
-  Remove — rising consequence order). The card TAP menu
+  double-click on the card / configure agent / Interrupt / Move to team /
+  Leave team / Restart / Stop / Remove — rising consequence order). The card TAP menu
   aligns to the card's LEFT edge (board #47 — the card reads name-first
   from its left edge; same shared placement flip/clamp as the title menu);
   right-click/long-press keeps the pointer placement.
@@ -174,6 +174,24 @@ completion).
   stops it), and a refusal (team not running, server too old) is shown in
   the composer's feedback slot. A team stop stops a joined agent; a team
   restart leaves it running and says so (`kept`).
+- **Moving a running agent between teams** (board #384, owner's #336(d):
+  "类似浏览器拖动 tab 一样"): with a mouse or pen, drag a live card onto a
+  team's group to move it into that team, or onto the standalone area to
+  take it out of its team (when no standalone card is shown, a "Standalone"
+  slot appears at the end of the strip while a card in a team is carried).
+  The carried card lifts and follows the pointer, the group under it is
+  outlined, Escape cancels, and the release is not also a tap. On the phone
+  and by keyboard, the card menu has the same verb as flat items before
+  Restart: "Move to team t" for every other running team and, for an agent
+  that joined, "Leave team t". The move is runtime-only (the team's
+  definition is unchanged; a member its definition places has no Move item
+  and its drag is answered "change it in Agents > Teams"), the agent keeps
+  running, and its prompt follows at its next start; the room records
+  `moved` / `left`, and the agent and both teams are told. On a server too
+  old for it the drag carries nothing and the items are disabled with
+  "Update the server…". A refusal is shown in the composer's feedback slot.
+  Known limit: a team scrolled out of the single-row strip is not a drop
+  target (expand the strip, or use the menu).
   Every row of that picker is three columns (board #341, owner's screenshot:
   empty team icons and an action that wrapped to two lines at a different
   place in each row): the avatar, ONE name column that wraps, and the

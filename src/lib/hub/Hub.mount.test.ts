@@ -42,6 +42,11 @@ function roomFixture() {
       hubActivity: async () => ({ events: [], has_more: false }),
       addTeamMessageListener: (fn: unknown) => { pushed.add(fn); },
       removeTeamMessageListener: (fn: unknown) => { pushed.delete(fn); },
+      // The login answer of a server that can do everything the Hub asks of
+      // one (board #384: the Move items read it); a test of an older server
+      // overrides it.
+      getCaps: () => ['board_dispatch', 'spawn_join', 'agent_team'],
+      onCaps: () => undefined,
     },
   };
 }
@@ -2512,6 +2517,142 @@ test('a team started from the empty room leads with its first member, though the
     release();
     await settle();
     assert.equal(selectedCard(app.document), 'lead', 'the started team\'s first member leads, not the stored lead the roster would pick');
+  } finally { await app.close(); }
+});
+
+// Board #384: moving a running agent between teams at runtime. The card
+// menu carries the drag's form for touch and keyboard; a member its team's
+// definition places has none; a server without agent_team shows them
+// disabled; a drag on a fine pointer lands in the same verb.
+// The drag end to end, Roster -> Hub: jsdom has no layout, so each drop
+// target's box is given by its `data-drop` key, one row: squad | ops.
+const dropBoxes = (window: any) => {
+  const boxes: Record<string, [number, number]> = { squad: [0, 200], ops: [210, 400] };
+  window.Element.prototype.animate = () => ({ cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() });
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const box = boxes[this.dataset.drop ?? ''];
+    const [left, right] = box ?? [0, 0];
+    return { left, right, top: 0, bottom: box ? 60 : 0, width: right - left, height: box ? 60 : 0, x: left, y: 0, toJSON() {} };
+  };
+};
+function moveFixture(context: TestContext, caps: string[] | undefined, extra: Record<string, (...args: any[]) => unknown> = {}, layout?: (window: any) => void) {
+  const { rpc } = roomFixture();
+  const moves: unknown[][] = [];
+  const roster = [
+    { name: 'lead', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad', joined: false },
+    { name: 'helper', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'squad', joined: true },
+    { name: 'solo', window: 2, managed: true, agent: 'codex', state: 'idle', team: null },
+    { name: 'ops1', window: 3, managed: true, agent: 'kiro', state: 'idle', team: 'ops', joined: false },
+  ];
+  return compiledHub().then((fixture) => fixture.mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      layout?.(window);
+    },
+    modules: [{
+      ...rpc,
+      getCaps: () => caps,
+      onCaps: () => undefined,
+      hubAgents: async () => ({ agents: roster }),
+      hubAgentSetTeam: async (...args: unknown[]) => { moves.push(args); return { agent: args[1], team: args[2] || null, left: null, changed: true }; },
+      ...extra,
+    }],
+  })).then((app) => ({ app, moves }));
+}
+async function cardMenu(app: { document: Document; window: any; flush: () => Promise<void> }, name: string) {
+  for (let i = 0; i < 20 && !stripCard(app.document, name); i++) await app.flush();
+  stripCard(app.document, name).querySelector('.agent-select')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true }));
+  await app.flush();
+  return [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')];
+}
+const closeMenu = async (app: { window: any; flush: () => Promise<void> }) => {
+  app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await app.flush();
+};
+
+test('the card menu moves a solo or joined agent between running teams; a definition member has no Move item (#384)', { timeout: 60000 }, async (context) => {
+  const { app, moves } = await moveFixture(context, ['board_dispatch', 'spawn_join', 'agent_team']);
+  const labels = (items: HTMLButtonElement[]) => items.map((b) => b.textContent?.trim()).filter((l) => /team/u.test(l ?? ''));
+  try {
+    assert.deepEqual(labels(await cardMenu(app, 'solo')), ['Move to team ops', 'Move to team squad'], 'a solo agent: every running team');
+    await closeMenu(app);
+    assert.deepEqual(labels(await cardMenu(app, 'helper')), ['Move to team ops', 'Leave team squad'], 'a joiner: the other teams, and leave its own');
+    await closeMenu(app);
+    assert.deepEqual(labels(await cardMenu(app, 'lead')), [], 'a member its team\'s definition places: none (Teams editor)');
+    await closeMenu(app);
+    const items = await cardMenu(app, 'helper');
+    items.find((b) => b.textContent?.trim() === 'Leave team squad')!.click();
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(moves, [['fixture', 'helper', '']], 'leave = team ""');
+    (await cardMenu(app, 'solo')).find((b) => b.textContent?.trim() === 'Move to team squad')!.click();
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(moves.at(-1), ['fixture', 'solo', 'squad']);
+  } finally { await app.close(); }
+});
+
+test('on a server without agent_team the Move items are disabled and say why, a drag carries nothing, and nothing is sent (#384)', { timeout: 60000 }, async (context) => {
+  const { app, moves } = await moveFixture(context, ['board_dispatch', 'spawn_join'], {}, dropBoxes);
+  try {
+    for (let i = 0; i < 20 && !stripCard(app.document, 'solo'); i++) await app.flush();
+    for (let i = 0; i < 8; i++) await app.flush();
+    const card = stripCard(app.document, 'solo').querySelector('.agent-select')!;
+    const at = (type: string, x: number) => card.dispatchEvent(new app.window.PointerEvent(type,
+      { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: x, clientY: 30 }));
+    at('pointerdown', 450);
+    for (const x of [100, 100]) { at('pointermove', x); await app.flush(); }
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'the card is not carried');
+    at('pointerup', 100);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(moves, [], 'the drag sent nothing');
+    const items = (await cardMenu(app, 'solo')).filter((b) => /Move to team/u.test(b.textContent ?? ''));
+    assert.equal(items.length, 2);
+    for (const item of items) {
+      assert.equal(item.disabled || item.getAttribute('aria-disabled') === 'true', true, 'disabled');
+      assert.match(item.getAttribute('title') ?? '', /Update the server to move an agent between teams/u);
+    }
+    items[0]!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(moves, [], 'nothing sent');
+  } finally { await app.close(); }
+});
+
+test('a card dragged onto a team moves it; a definition member\'s drop says where to change it and sends nothing (#384)', { timeout: 60000 }, async (context) => {
+  const { app, moves } = await moveFixture(context, ['board_dispatch', 'spawn_join', 'agent_team'], {}, dropBoxes);
+  const drag = async (name: string, from: number, to: number) => {
+    for (let i = 0; i < 20 && !stripCard(app.document, name); i++) await app.flush();
+    for (let i = 0; i < 8; i++) await app.flush(); // the room is ready (canMove) a few turns after its cards
+    const el = stripCard(app.document, name).querySelector('.agent-select')!;
+    const at = (type: string, x: number) => el.dispatchEvent(new app.window.PointerEvent(type,
+      { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse', pointerId: 1, clientX: x, clientY: 30 }));
+    at('pointerdown', from);
+    at('pointermove', to);
+    await app.flush();
+    at('pointermove', to);
+    await app.flush();
+    at('pointerup', to);
+    for (let i = 0; i < 8; i++) await app.flush();
+  };
+  try {
+    await drag('lead', 100, 300);
+    assert.deepEqual(moves, [], 'a definition member is not sent');
+    assert.match(app.document.querySelector('.composer-feedback [role="alert"]')?.textContent ?? '',
+      /lead is in team squad by its definition\. Change it in Agents > Teams\./u);
+    await drag('solo', 450, 100);
+    assert.deepEqual(moves, [['fixture', 'solo', 'squad']], 'the drop lands in the menu\'s one verb');
+  } finally { await app.close(); }
+});
+
+test('a server refusal of a move is said in the composer feedback slot (#384)', { timeout: 60000 }, async (context) => {
+  const { app } = await moveFixture(context, ['agent_team'], {
+    hubAgentSetTeam: async () => { throw new Error("team 'squad' has no member in this project — start the team first, or spawn the agent standalone"); },
+  });
+  try {
+    (await cardMenu(app, 'solo')).find((b) => b.textContent?.trim() === 'Move to team squad')!.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.match(app.document.querySelector('.composer-feedback [role="alert"]')?.textContent ?? '', /Could not move solo: team 'squad' has no member/u);
   } finally { await app.close(); }
 });
 

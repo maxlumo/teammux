@@ -300,9 +300,20 @@ pub fn offline_notice(offline: &[(&str, &'static str)], stamp: &str) -> String {
 /// joiner, its backend, who started it, that the team's definition does not
 /// list it, and how to address it; its brief, if any, on one line.
 pub fn join_notice(joiner: &str, team: &str, backend: &str, by: &str, brief: &str, stamp: &str) -> String {
+    joined_notice(joiner, team, backend, "started", by, brief, stamp)
+}
+
+/// `join_notice` for an agent that was already running and was MOVED into
+/// the team (board #384): the same line, saying who moved it, not who
+/// started it (it may have been started long before, by someone else).
+pub fn moved_in_notice(joiner: &str, team: &str, backend: &str, by: &str, stamp: &str) -> String {
+    joined_notice(joiner, team, backend, "moved in", by, "", stamp)
+}
+
+fn joined_notice(joiner: &str, team: &str, backend: &str, how: &str, by: &str, brief: &str, stamp: &str) -> String {
     let who = if by.trim().is_empty() { "human" } else { by.trim() };
     let mut line = format!(
-        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{joiner} joined your team {team}: a {backend} agent started by {who}; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@{joiner} …\"."
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{joiner} joined your team {team}: a {backend} agent {how} by {who}; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@{joiner} …\"."
     );
     let flat = brief.split_whitespace().collect::<Vec<_>>().join(" ");
     if !flat.is_empty() {
@@ -311,6 +322,39 @@ pub fn join_notice(joiner: &str, team: &str, backend: &str, by: &str, brief: &st
         line += &format!(" Its brief: {cut}{more}");
     }
     line
+}
+
+/// What the MOVED agent is told when its runtime team changes (board #384,
+/// the Hub's drag / "Move to team" / `tmm agent team`): where it is now, who
+/// its teammates are (each with its role in the team's definition, if any),
+/// and, plainly, that its prompt changes at its next start, not now (its
+/// running CLI is neither rewritten nor restarted). The stamped result shape
+/// of `join_notice`: it asks nothing. `team` "" = it left `left` and is
+/// standalone; `mates` are (window, role).
+pub fn moved_notice(agent: &str, team: &str, left: &str, mates: &[(String, String)], stamp: &str) -> String {
+    let head = format!("[tmm chat {stamp}] {NOTICE_SENDER}: [reply]");
+    if team.is_empty() {
+        return format!(
+            "{head} @{agent}: you left team {left} and are standalone now. Your prompt still describes the team until your next start, when its team section is dropped."
+        );
+    }
+    let list = if mates.is_empty() {
+        "nobody else yet".to_string()
+    } else {
+        mates.iter().map(|(w, r)| {
+            let r = r.split_whitespace().collect::<Vec<_>>().join(" ");
+            if r.is_empty() { format!("@{w}") } else { format!("@{w} ({})", r.chars().take(60).collect::<String>()) }
+        }).collect::<Vec<_>>().join(", ")
+    };
+    format!(
+        "{head} @{agent}: you were moved into team {team} at runtime (its definition does not list you). Your teammates: {list}. Your prompt changes at your next start; until then this is how you know the team."
+    )
+}
+
+/// What a team's CURRENT members are told when an agent LEAVES their team at
+/// runtime (board #384): the counterpart of `join_notice`, same shape.
+pub fn left_notice(agent: &str, team: &str, stamp: &str) -> String {
+    format!("[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{agent} left your team {team}; it is no longer your teammate.")
 }
 
 /// Deliver one line to one managed agent window whose pane is `target`.
@@ -727,6 +771,28 @@ mod tests {
         assert!(briefed.contains("a codex agent started by lead;"), "{briefed}");
         assert!(briefed.contains(" Its brief: Port the parser. xxx") && briefed.ends_with("x…") && !briefed.contains('\n'), "one line, clipped: {briefed}");
         assert!(crate::address::requesters(&briefed).is_empty(), "{briefed}");
+    }
+
+    /// Board #384: the move notices ask nothing, and the moved agent's says
+    /// plainly that its prompt changes at its next start.
+    #[test]
+    fn the_move_notices_ask_nothing_and_say_when_the_prompt_changes() {
+        let stamp = "2026-10-15 17:10";
+        let into = moved_notice("helper", "squad", "", &[("lead".into(), "Splits the work.\nOwns merges.".into()), ("dev".into(), String::new())], stamp);
+        assert_eq!(into, "[tmm chat 2026-10-15 17:10] tmm: [reply] @helper: you were moved into team squad at runtime (its definition does not list you). Your teammates: @lead (Splits the work. Owns merges.), @dev. Your prompt changes at your next start; until then this is how you know the team.");
+        let out = moved_notice("helper", "", "squad", &[], stamp);
+        assert!(out.ends_with("you left team squad and are standalone now. Your prompt still describes the team until your next start, when its team section is dropped."), "{out}");
+        assert!(moved_notice("helper", "ops", "", &[], stamp).contains("Your teammates: nobody else yet."));
+        let left = left_notice("helper", "squad", stamp);
+        assert_eq!(left, "[tmm chat 2026-10-15 17:10] tmm: [reply] @helper left your team squad; it is no longer your teammate.");
+        // The new team hears the join notice, saying who MOVED it, not who
+        // started it; a move carries no brief.
+        let moved_in = moved_in_notice("helper", "squad", "kiro", "lead", stamp);
+        assert_eq!(moved_in, "[tmm chat 2026-10-15 17:10] tmm: [reply] @helper joined your team squad: a kiro agent moved in by lead; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@helper …\".");
+        assert!(moved_in_notice("helper", "squad", "kiro", "", stamp).contains("moved in by human;"));
+        for n in [&into, &out, &left, &moved_in] {
+            assert!(crate::address::requesters(n).is_empty(), "{n}");
+        }
     }
 
     fn warns(session: &str) -> Vec<String> {

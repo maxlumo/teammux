@@ -1025,12 +1025,20 @@ test('a lifecycle verb speaks the one status colour language', () => {
   // A hand-off starts work moving; handing it back to nobody is rest (#367).
   assert.equal(sysVerbColor('assigned'), 'var(--accent)');
   assert.equal(sysVerbColor('unassigned'), sysVerbColor('stopped'));
+  // #384: a runtime move into a team is motion, like a spawn; leaving one puts
+  // the agent back at rest, like a kept joiner. The lines `move_line` writes.
+  assert.deepEqual(sysParts('moved helper — to team ops, from team squad'),
+    { verb: 'moved', who: 'helper', text: 'to team ops, from team squad', cmd: false });
+  assert.deepEqual(sysParts('left helper — team squad, now standalone'),
+    { verb: 'left', who: 'helper', text: 'team squad, now standalone', cmd: false });
+  assert.equal(sysVerbColor('moved'), 'var(--accent)');
+  assert.equal(sysVerbColor('left'), sysVerbColor('kept'));
   // Nobody received it, so somebody has to notice: the amber the language
   // already keeps for "paused on a human", never red (#347).
   assert.equal(sysVerbColor('offline'), sysVerbColor('interrupted'));
   assert.equal(sysVerbColor('offline'), 'var(--status-warn)');
   // Never a literal colour: both themes read the same tokens.
-  for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'assigned', 'unassigned', 'wat', '']) {
+  for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'assigned', 'unassigned', 'moved', 'left', 'wat', '']) {
     assert.match(sysVerbColor(v), /^var\(--|^color-mix\(/u, `${v} must resolve through a token`);
   }
 });
