@@ -1144,7 +1144,9 @@ mod tests {
     /// B: a newer prompt already painted under the error (the turn running,
     ///    as kiro 2.31.0 paints it): no end. B': a later turn's work painted
     ///    under it and that turn ended by its hook: its end keeps its own
-    ///    detail (the newest block must be the error's own shape).
+    ///    detail (the newest block must be the error's own shape). B'': the
+    ///    newest block is the agent's reply QUOTING the error with a chat
+    ///    stamp: not the agent having it, no detail on its end.
     /// E: no measured grammar (claude) or a half-drawn kiro screen: no end;
     ///    the paused row is still said. D again: a later independent
     ///    incident on a new turn is its own.
@@ -1164,12 +1166,18 @@ mod tests {
         // video-factory:checker's next turn), its turn ended by its hook: the
         // newest block is not the error.
         let later = HIGH_TRAFFIC_SCREEN.replace("\n \n▸ Credits", &format!("\n \n{}\n▸ Credits", KIRO_228_LATER.trim_end()));
+        // The agent's own reply as the newest block, opening with the stream
+        // error's header and quoting a chat stamp (the owner pasted the error
+        // into the chat): the stream-error shape is matched by its header, so
+        // only the quote exclusion says this block is not the agent having it.
+        let quoted = HIGH_TRAFFIC_SCREEN.replace("\n \n▸ Credits", "\n \n• An unexpected error occurred during the response stream (ModelTemporarilyUnavailable),\n  as [tmm chat 2026-10-16 02:50] human: @kq pasted it\n▸ Credits");
         let screens = [
             ("ki", "kiro", HIGH_TRAFFIC_SCREEN.to_string()),
             ("kp", "kiro", painted_after),
             ("kh", "kiro", half),
             ("cl", "claude", CLAUDE_503_NARROW.to_string()),
             ("kr", "kiro", later),
+            ("kq", "kiro", quoted),
         ];
         for (name, backend, screen) in &screens {
             let home = ws.join(".tmm/agents").join(name);
@@ -1185,7 +1193,7 @@ mod tests {
             eprintln!("no tmux server — skipping");
             return;
         }
-        for name in ["kp", "kh", "cl", "kr"] {
+        for name in ["kp", "kh", "cl", "kr", "kq"] {
             std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), &show(name)]).status().unwrap();
         }
         super::super::adopt(&session, Some("rec-capped-test")).expect("adopt");
@@ -1196,7 +1204,9 @@ mod tests {
                 assert!(matches!(tracker().lock().unwrap().decide(&session, name, now_secs(), sig, |_| false), Decision::Send { .. }));
             }
         }
-        tm::record_notification_with(&session, "kr", "completed", now_secs(), crate::backends::EndQuality::Said);
+        for w in ["kr", "kq"] {
+            tm::record_notification_with(&session, w, "completed", now_secs(), crate::backends::EndQuality::Said);
+        }
         std::thread::sleep(std::time::Duration::from_millis(300));
         let st = |w: &str| { let s = tm::derive(&session, w, 0); (s.state, s.detail) };
         let ends = |w: &str| tm::recent_events(&session, 0).into_iter().filter(|e| e.window == w && e.kind == "notif" && e.text == "failed").count();
@@ -1215,7 +1225,10 @@ mod tests {
         // its own (empty) detail, no end is written.
         assert_eq!(st("kr"), ("idle".to_string(), String::new()), "B': a later turn's end is not the error's");
         assert_eq!(ends("kr"), 0, "B'");
-        for w in ["ki", "kp", "kh", "cl", "kr"] {
+        // B'': the newest block QUOTES the error: not the agent having it.
+        assert_eq!(st("kq"), ("idle".to_string(), String::new()), "B'': a quote is not the error's turn");
+        assert_eq!(ends("kq"), 0, "B''");
+        for w in ["ki", "kp", "kh", "cl", "kr", "kq"] {
             assert_eq!(paused(w), 1, "{w}: the cap is still said");
         }
         // A: a new prompt to ki, the screen unchanged (a cat pane never repaints).
@@ -1234,7 +1247,7 @@ mod tests {
         check_once();
         assert_eq!(st("ki"), ("idle".to_string(), EXHAUSTED.to_string()), "D again: its own end");
         assert_eq!(ends("ki"), 2);
-        for w in ["ki", "kp", "kh", "cl", "kr"] {
+        for w in ["ki", "kp", "kh", "cl", "kr", "kq"] {
             tracker().lock().unwrap().retain_windows(&session, &[w.to_string()]);
         }
     }
