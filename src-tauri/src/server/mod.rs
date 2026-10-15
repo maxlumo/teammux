@@ -210,10 +210,16 @@ pub async fn start_with_socket_ready(
     // Board #394: every session's turn facts are replayed from the activity
     // log BEFORE the hook inbox is read and before the first accept, so the
     // first read after a restart derives from the log and no live fact lands
-    // on an empty record first. Blocking SQLite work, so it runs here, before
-    // the listener loop.
+    // on an empty record first. Blocking SQLite work: it runs on the blocking
+    // pool and is AWAITED here (review P2), so no runtime worker is held and
+    // nothing below starts until it is done. A replay that panicked is said
+    // and the start goes on; its sessions are recovered at their first touch.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    crate::projects::telemetry::recover_on_start();
+    {
+        if let Err(e) = tokio::task::spawn_blocking(crate::projects::telemetry::recover_on_start).await {
+            eprintln!("⚠  the turn-fact replay at start did not finish ({e}); each session is recovered when first touched");
+        }
+    }
     tokio::spawn(notifications.clone().run());
 
     // Fold live tmux state back into the project declarations. Nobody
@@ -328,11 +334,11 @@ pub(super) mod test_util {
     }
 }
 
-/// Board #394: the turn-fact replay runs at start, BEFORE the hook inbox is
-/// read and before the first connection is accepted. The regression test
-/// (`the_first_agent_read_after_a_restart_derives_from_the_log`) calls the
-/// replay itself, so the one line that orders it in the start sequence is
-/// pinned here.
+/// Board #394: the turn-fact replay runs at start on the blocking pool and
+/// is AWAITED before the hook inbox is read, before the capture, drift,
+/// flush and wake loops start, before `ready` is told and before the first
+/// connection is accepted (review P2). The regression tests call the replay
+/// themselves, so the order of the start sequence is pinned here.
 #[cfg(test)]
 mod start_order {
     #[test]
@@ -341,9 +347,19 @@ mod start_order {
         let start = &src[src.find("pub async fn start_with_socket_ready(").unwrap()..];
         let start = &start[..start.find("\n}\n").unwrap()];
         let at = |needle: &str| start.find(needle).unwrap_or_else(|| panic!("{needle} missing from the start sequence"));
-        let replay = at("crate::projects::telemetry::recover_on_start();");
-        assert!(replay < at("tokio::spawn(notifications.clone().run());"), "replay before the hook inbox is read");
-        assert!(replay < at("listener.accept()"), "replay before the first accept");
+        let replay = at("tokio::task::spawn_blocking(crate::projects::telemetry::recover_on_start).await");
+        for later in [
+            "tokio::spawn(notifications.clone().run());",
+            "tokio::spawn(crate::projects::capture_loop());",
+            "tokio::spawn(crate::projects::recovery::drift_loop());",
+            "crate::projects::delivery::flush_on_start",
+            "tokio::spawn(crate::projects::wakes::run(",
+            "tx.send(())",
+            "listener.accept()",
+        ] {
+            assert!(replay < at(later), "the replay is awaited before {later}");
+        }
+        assert_eq!(start.matches("recover_on_start").count(), 1, "one replay, awaited, nowhere else in the start");
     }
 }
 

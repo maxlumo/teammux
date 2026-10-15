@@ -539,6 +539,13 @@ pub fn flush_on_start() {
 fn flush_at(session: &str, window: &str, target: &str) {
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
+    // A window whose turn is unknown (its log could not be read, board #394)
+    // keeps its lines, however long held: the overdue rule below is for a
+    // turn that READS busy, and an unread log reads nothing. Its next
+    // trigger after the log is read, or a turn fact of its own, decides.
+    if !telemetry::turn_known(session, window) {
+        return;
+    }
     let busy = telemetry::turn_busy(session, window);
     if busy && !overdue(&telemetry::held_rows(session, window)) {
         return;
@@ -1386,6 +1393,83 @@ mod tests {
         }
         assert_eq!(typed(), vec!["[tmm chat 03:00] lead: @dev idle one".to_string()]);
         assert_eq!((held(&s, "dev"), held(&r, "dev")), (0, 1), "the recovered running turn keeps its line");
+    }
+
+    /// Board #394 review P1: a session whose turn facts cannot be read is
+    /// UNKNOWN. It is never cached as replayed, and nothing that acts on it
+    /// reads it as idle. Two sessions in the throwaway store: A's log cannot
+    /// be decoded (its window names stored as blobs, so the head rows fail),
+    /// B's is fine. After the start's replay, B reads from its log and its
+    /// ended window gets its held line; A has its error recorded, every
+    /// window is unknown and busy, its line held past HOLD_MAX_SECS stays
+    /// held, and the sweep reports no line this process typed into its open
+    /// window. A live end on one of A's windows makes that window known.
+    /// Then A's log is repaired in the same process: the next touch replays
+    /// it, the held line goes out by the ordinary rule, and the live end is
+    /// not overwritten by the older log's open prompt.
+    #[test]
+    fn a_session_whose_log_cannot_be_read_stays_unknown_and_holds_until_it_is_read() {
+        let a = setup("unread-a");
+        let b = setup("unread-b");
+        let t = crate::projects::now();
+        let old = t - HOLD_MAX_SECS - 60;
+        let line_a = "[tmm chat 03:00] lead: @idle for a";
+        let line_b = "[tmm chat 03:00] lead: @done for b";
+        crate::projects::with_store(|st| {
+            // B: an open turn with a tool call; an ended one holding a line.
+            st.insert_activity(&b, "w", t * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_activity(&b, "w", t * 1000, "tool", "/w/x.rs", "Read", "", "", "")?;
+            st.insert_activity(&b, "done", t * 1000, "prompt", "short", "", "app", "", "")?;
+            st.insert_activity(&b, "done", t * 1000, "notif", "completed", "", "", "", "")?;
+            st.insert_held_delivery(&b, "done", line_b, 0, t, "")?;
+            // A: "idle" ended, holding a line past HOLD_MAX_SECS; "dev" and
+            // "aux" open.
+            st.insert_activity(&a, "idle", old * 1000, "prompt", "short", "", "app", "", "")?;
+            st.insert_activity(&a, "idle", old * 1000, "notif", "completed", "", "", "", "")?;
+            st.insert_held_delivery(&a, "idle", line_a, 0, old, "")?;
+            st.insert_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "").map(|_| ())
+        })
+        .unwrap();
+        telemetry::forget_process_state(&a);
+        telemetry::forget_process_state(&b);
+        telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{a}'"));
+
+        telemetry::recover_on_start();
+        let st = telemetry::derive(&b, "w", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("running", "Read /w/x.rs"), "B: read from its log at the start");
+        assert!(telemetry::replay_error(&a).is_some_and(|e| e.contains("turn facts")), "A: the failure is recorded: {:?}", telemetry::replay_error(&a));
+        for w in ["idle", "dev", "aux"] {
+            assert!(!telemetry::turn_known(&a, w), "A:{w} is unknown");
+            assert!(telemetry::turn_busy(&a, w), "A:{w}: unknown is busy, never idle");
+        }
+        // flush_on_start's per-window step, with the test's fake pane.
+        for session in [&a, &b] {
+            for w in telemetry::held_windows(session) {
+                flush_at(session, &w, "t");
+            }
+        }
+        assert_eq!(typed(), vec![line_b.to_string()], "B's ended window gets its line; A's stays held");
+        assert_eq!(held(&a, "idle"), 1, "unknown: held, however old");
+        // A line this process typed into A's open window, never echoed.
+        crate::projects::with_store(|st| st.insert_delivery(&a, "dev", "[tmm chat 03:00] lead: @dev typed", 0, old, "")).unwrap();
+        telemetry::sweep_deliveries(&a);
+        assert!(warns(&a).is_empty(), "the sweep reports nothing for an unknown window: {:?}", warns(&a));
+        // A live end on aux is aux's own fact: aux is known, and at rest.
+        record_notification(&a, "aux", "completed", crate::projects::now());
+        assert!(telemetry::turn_known(&a, "aux") && !telemetry::turn_busy(&a, "aux"));
+        assert!(!telemetry::turn_known(&a, "dev"), "still asked again, still failing: nothing cached as a success");
+
+        // Repair A's log in the same process: the next touch replays it.
+        telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS TEXT) WHERE session = '{a}'"));
+        assert!(telemetry::turn_known(&a, "dev"), "the next touch reads the repaired log");
+        assert_eq!(telemetry::replay_error(&a), None);
+        assert_eq!(telemetry::derive(&a, "dev", 0).state, "running", "the log's open turn");
+        assert_eq!(telemetry::derive(&a, "aux", 0).state, "idle", "the live end is not overwritten by the older log's open prompt");
+        flush_at(&a, "idle", "t");
+        assert_eq!(typed(), vec![line_b.to_string(), line_a.to_string()], "known and ended: the held line goes out");
+        telemetry::sweep_deliveries(&a);
+        assert!(warns(&a).is_empty(), "dev's turn is open: its line is still owed, not reported");
     }
 
     /// kiro-cli 2.22.1 measured: an Escape typed IN the pane cancels the turn

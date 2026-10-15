@@ -315,11 +315,14 @@ impl Store {
                  GROUP BY w",
             )
             .map_err(|e| format!("prepare turn facts: {e}"))?;
+        // A head row that cannot be decoded fails the whole read (board #394
+        // review P1): dropping it would replay the session without that
+        // window and call the replay complete.
         let heads: Vec<(String, [Option<i64>; 4])> = stmt
             .query_map(rusqlite::params![session], |r| Ok((r.get(0)?, [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?])))
             .map_err(|e| format!("query turn facts: {e}"))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("read turn facts: {e}"))?;
         let fact = |id: Option<i64>| -> Result<Option<TurnFact>, String> {
             let Some(id) = id else { return Ok(None) };
             self.conn

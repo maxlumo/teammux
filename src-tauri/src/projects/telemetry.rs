@@ -485,9 +485,13 @@ pub fn recent_events(session: &str, since_ts: u64) -> Vec<ActivityEvent> {
 /// status reads? Asked by the reply edge (#256) and before typing at a
 /// queue-mode agent (#257). Never pane activity, never a second query. Reads the
 /// recovery mark first, so the first question after a restart is asked of
-/// the turn the log replays (`recover_open_turns`), not an empty record.
+/// the turn the log replays (`recover_open_turns`), not an empty record. A
+/// window whose turn is UNKNOWN (its log could not be read, `turn_known`)
+/// is busy: its lines are held, never typed on a guess (board #394).
 pub fn turn_busy(session: &str, window: &str) -> bool {
-    recovery_mark(session);
+    if !turn_known(session, window) {
+        return true;
+    }
     matches!(derive(session, window, 0).state.as_str(), "running" | "waiting")
 }
 
@@ -596,7 +600,25 @@ fn recovery_marks() -> &'static Mutex<HashMap<String, (i64, u64)>> {
     MARKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// A session's recovery: its delivery mark, and whether its persisted turn
+/// facts are in memory. Every lazy entry (a writer, `turn_busy`, the sweep, a
+/// delivery question) and the server start take this one step.
 fn recovery_mark(session: &str) -> (i64, u64) {
+    recover(session).0
+}
+
+/// `recovery_mark` plus whether the session's turn facts were replayed
+/// (board #394 review P1): the two are separate facts. The delivery mark is
+/// set ONCE, whatever the replay did, so a retry never restarts the ack
+/// grace of rows an earlier process typed. The replay is recorded only when
+/// it succeeded (`replays`), so a session whose log could not be read is
+/// asked again at its next entry, and nothing caches an unknown as "no
+/// facts".
+fn recover(session: &str) -> ((i64, u64), bool) {
+    (delivery_mark(session), replay_turns(session))
+}
+
+fn delivery_mark(session: &str) -> (i64, u64) {
     if let Some(m) = recovery_marks().lock().unwrap().get(session) {
         return *m;
     }
@@ -608,9 +630,61 @@ fn recovery_mark(session: &str) -> (i64, u64) {
         let _ = queue(|s| s.prune_deliveries(cutoff));
     });
     let top = queue(|s| s.max_delivery_id(session)).unwrap_or(0);
-    let mark = *recovery_marks().lock().unwrap().entry(session.to_string()).or_insert((top, now()));
-    recover_open_turns(session);
-    mark
+    *recovery_marks().lock().unwrap().entry(session.to_string()).or_insert((top, now()))
+}
+
+/// Per session, the outcome of its last turn-fact replay: `Ok` once the log
+/// is in memory (asked no more), the error otherwise (asked again at the
+/// next entry; said once per distinct error). Absent: never asked.
+fn replays() -> &'static Mutex<HashMap<String, Result<(), String>>> {
+    static REPLAYS: OnceLock<Mutex<HashMap<String, Result<(), String>>>> = OnceLock::new();
+    REPLAYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Replay the session's turn facts unless that already succeeded. True when
+/// they are in memory. A failure is said once per session and error, and its
+/// recovery once; the lock is not held across the read, and two concurrent
+/// replays of one session are harmless (a window already observed is left
+/// alone).
+fn replay_turns(session: &str) -> bool {
+    if matches!(replays().lock().unwrap().get(session), Some(Ok(()))) {
+        return true;
+    }
+    let result = recover_open_turns(session);
+    let mut map = replays().lock().unwrap();
+    match (&result, map.get(session)) {
+        (Ok(()), Some(Err(_))) => eprintln!("turn facts of {session} replayed after an earlier failure"),
+        (Err(e), before) if before != Some(&result) => {
+            eprintln!("⚠  turn facts of {session} could not be replayed ({e}); its windows count as busy until a later touch replays them")
+        }
+        _ => {}
+    }
+    let ok = result.is_ok();
+    map.insert(session.to_string(), result);
+    ok
+}
+
+/// Has this process observed a turn fact of the window itself?
+fn observed(r: &Rec) -> bool {
+    r.prompt.is_some() || r.end.is_some() || r.tool.is_some() || r.ask.is_some()
+}
+
+/// Is this window's turn KNOWN (board #394 review P1)? Its session's log is
+/// in memory, or this process observed a turn fact of the window itself,
+/// which sorts after anything the log holds. An UNKNOWN window is never read
+/// as idle by a decision that acts on it: `turn_busy` says busy (a queue-mode
+/// line is held), the flush leaves its held lines alone however old, and the
+/// sweep reports none of its lines. A status read (`derive`) still shows what
+/// memory has; the diagnostic is in the server log.
+pub fn turn_known(session: &str, window: &str) -> bool {
+    let (_, replayed) = recover(session);
+    replayed || store().lock().unwrap().get(&(session.to_string(), window.to_string())).is_some_and(observed)
+}
+
+/// Test-only: the error of the session's last failed replay, if any.
+#[cfg(test)]
+pub fn replay_error(session: &str) -> Option<String> {
+    replays().lock().unwrap().get(session).and_then(|r| r.clone().err())
 }
 
 /// Recover EVERY session the activity log knows, once, at server start
@@ -619,11 +693,14 @@ fn recovery_mark(session: &str) -> (i64, u64) {
 /// alone, so the first `hub_agents` and `hub_rooms` after a restart showed
 /// every agent idle with no detail (an open turn, a missed end's
 /// `auth_expired`) until some other call happened to touch the session.
-/// `server::start_with_socket_ready` calls this before the hook inbox is
-/// read and before the first connection is accepted, so no answer and no
-/// live fact comes before the replay. It is the same per-session step the
-/// lazy calls take, so a session first seen later is recovered as before. An
-/// unreadable log is said and left to those lazy calls.
+/// `server::start_with_socket_ready` awaits this (on the blocking pool)
+/// before the hook inbox is read and before the first connection is
+/// accepted, so no answer and no live fact comes before the replay. It is
+/// the same per-session step the lazy calls take. A session whose log
+/// cannot be read is said, stays unknown (`turn_known`) and is asked again
+/// at its next entry; the others are replayed and the start goes on. A
+/// session list that cannot be read is said too, and every session is then
+/// recovered at its first touch.
 pub fn recover_on_start() {
     match queue(|s| s.activity_sessions()) {
         Ok(sessions) => {
@@ -644,16 +721,18 @@ pub fn recover_on_start() {
 /// `derive_from` — the one turn rule (tenet 8) — decides: open, waiting,
 /// failed or idle. Never pane activity. An interrupt is an end
 /// (`record_interrupt` logs it); a stop that fired while we were down is in
-/// the hook inbox and ends the turn when it is read.
-fn recover_open_turns(session: &str) {
-    for facts in queue(|s| s.turn_facts(session)).unwrap_or_default() {
+/// the hook inbox and ends the turn when it is read. A read that fails is
+/// returned, never read as "no facts" (board #394 review P1).
+fn recover_open_turns(session: &str) -> Result<(), String> {
+    for facts in queue(|s| s.turn_facts(session))? {
         with_rec(session, &facts.window, |r| {
-            if r.prompt.is_some() || r.end.is_some() || r.tool.is_some() || r.ask.is_some() {
+            if observed(r) {
                 return; // this process already observed the window
             }
             replay_turn_facts(r, &facts);
         });
     }
+    Ok(())
 }
 
 /// Put a window's persisted turn facts into a record, each ordered by its
@@ -1490,9 +1569,10 @@ fn overdue_rows(rec: &Rec, rows: &[super::store::DeliveryRow], mark: (i64, u64),
 /// and a late real echo must still find it and settle it as ours, retracting
 /// the warn by its row id. The persisted `warned` mark makes the report
 /// happen once per row, across sweeps and restarts; the 24 h prune bounds the
-/// rows that never echo.
+/// rows that never echo. A window whose turn is unknown (board #394) reports
+/// nothing: an unread log is not an idle window.
 pub fn sweep_deliveries(session: &str) {
-    let mark = recovery_mark(session);
+    let (mark, replayed) = recover(session);
     let rows = queue(|s| s.pending_deliveries(session, None)).unwrap_or_default();
     if rows.is_empty() {
         return;
@@ -1509,6 +1589,9 @@ pub fn sweep_deliveries(session: &str) {
             .get(&(session.to_string(), window.clone()))
             .cloned()
             .unwrap_or_default();
+        if !replayed && !observed(&rec) {
+            continue;
+        }
         for id in overdue_rows(&rec, &rows, mark, now) {
             if !queue(|s| s.mark_delivery_warned(id)).unwrap_or(false) {
                 continue; // settled, or reported by another sweep, meanwhile
@@ -1834,6 +1917,7 @@ pub fn test_exec_sql(sql: &str) {
 pub fn forget_process_state(session: &str) {
     store().lock().unwrap().retain(|(s, _), _| s != session);
     recovery_marks().lock().unwrap().remove(session);
+    replays().lock().unwrap().remove(session);
 }
 
 /// Derive the current status for (session, window). `activity_ts` is tmux's
@@ -2931,6 +3015,27 @@ mod tests {
         simulate_restart(&session);
         sweep_deliveries(&session);
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 2, "twice more, across a restart: still once each");
+    }
+
+    /// Board #394 review P1: a replay that failed is asked again, and the
+    /// retry never moves the delivery mark, so the ack grace of rows an
+    /// earlier process typed starts once, at the first touch.
+    #[test]
+    fn a_failed_replay_is_retried_without_moving_the_delivery_mark() {
+        crate::projects::tests::use_test_store();
+        let session = format!("mark-{}", uuid::Uuid::new_v4());
+        crate::projects::with_store(|s| s.insert_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{session}'"));
+        let first = recovery_mark(&session);
+        assert!(replay_error(&session).is_some());
+        queue(|s| s.insert_delivery(&session, "w", "[tmm chat 03:00] lead: @w x", 0, now(), "")).unwrap();
+        let second = recovery_mark(&session);
+        assert!(replay_error(&session).is_some(), "asked again, still failing");
+        assert_eq!(first, second, "a retry does not restart the ack grace");
+        test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS TEXT) WHERE session = '{session}'"));
+        assert_eq!(recovery_mark(&session), first);
+        assert_eq!(replay_error(&session), None, "repaired: replayed at the next touch");
+        assert_eq!(derive(&session, "w", 0).state, "running");
     }
 
     /// A row typed by an earlier process waits from the recovery mark, a row
