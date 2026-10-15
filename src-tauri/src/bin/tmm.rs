@@ -1954,10 +1954,14 @@ fn task_end_body(to: &str, name: &str, code: &str, signal: &str, age: Option<u64
     let after = age.map(|a| format!(" after {}", tasks::fmt_age(Some(a)))).unwrap_or_default();
     let lines: Vec<String> = tail.lines().map(|l| l.chars().take(200).collect::<String>().replace('@', "@\u{200b}")).collect();
     let tail = lines.join("\n");
+    // The line ends with what to DO about it (board #355): an agent that had ended
+    // its turn to wait read a bare "task X exited:0" as news and did not act on it
+    // for hours (builder, 10-14 12:37 -> 15:36, the wake delivered the whole time).
+    let next = "Continue the work this task was for: read the output and post the result.";
     if tail.trim().is_empty() {
-        format!("@{to} task {name} {how}{after}")
+        format!("@{to} task {name} {how}{after}. {next}")
     } else {
-        format!("@{to} task {name} {how}{after}; last lines:\n```\n{tail}\n```")
+        format!("@{to} task {name} {how}{after}; last lines:\n```\n{tail}\n```\n{next}")
     }
 }
 
@@ -2323,7 +2327,8 @@ mod tests {
         let body = task_end_body("lead", "build", "7", "", Some(125), "ok\nmail dev@x and @all please\n");
         assert!(body.starts_with("@lead task build exited:7 after 2m; last lines:\n```\n"), "{body}");
         assert_eq!(tmux_mobile::address::mention_names(&body), vec!["lead".to_string()], "the log's @all addresses nobody: {body}");
-        assert_eq!(task_end_body("dev", "t", "", "15", None, ""), "@dev task t killed:15");
+        assert_eq!(task_end_body("dev", "t", "", "15", None, ""), "@dev task t killed:15. Continue the work this task was for: read the output and post the result.");
+        assert!(body.ends_with("```\nContinue the work this task was for: read the output and post the result."), "the instruction rides last, after the log: {body}");
         let shell = wake_shell("build", "lead", "/bin/tmm", &tasks::starter_env(Some("my proj"), Some("dev"), None, None));
         assert_eq!(shell, "TMM_PROJECT='my proj' TMM_AGENT='dev' '/bin/tmm' task wake 'build' --to 'lead' --code '#{pane_dead_status}' --signal '#{pane_dead_signal}' >/dev/null 2>&1");
         let human = wake_shell("a#b", "x", "/t", &tasks::starter_env(Some("p"), None, Some("/c"), Some("ws://s")));
