@@ -297,6 +297,18 @@ pub fn deliver(session: &str, window: &str, target: &str, line: &str, ask_at: us
     deliver_with(session, window, target, line, ask_at, msg_id, || input_mode(session, window))
 }
 
+/// `deliver` for a line that is only worth typing if something is STILL true
+/// (board #355: the stall nudge, "this empty end is still the newest and the
+/// agent is still at rest"). `still_due` runs INSIDE the window's lock and the
+/// turn-fact lock, in the same step as the decision and the typing, so a prompt
+/// or an interrupt cannot fall between the check and the line — a check made
+/// before a slow query and a delivery made after it did exactly that (review
+/// P1-B). False = dropped silently: nothing typed, held or recorded, and the
+/// result is false.
+pub fn deliver_if(session: &str, window: &str, target: &str, line: &str, still_due: &dyn Fn() -> bool) -> bool {
+    deliver_gated(session, window, target, line, 0, "", || input_mode(session, window), still_due)
+}
+
 /// Tests' shorthand: deliver with the mode decided up front (`true` = a
 /// queue-mode session, `false` = a backend without the choice).
 #[cfg(test)]
@@ -318,6 +330,22 @@ fn deliver_as(session: &str, window: &str, target: &str, line: &str, msg_id: &st
 /// a steered line fires no `userPromptSubmit`, so a pending row could only
 /// ever be swept `unconfirmed`); no choice types it as before.
 fn deliver_with(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, mode: impl FnOnce() -> Option<&'static str>) -> bool {
+    deliver_gated(session, window, target, line, ask_at, msg_id, mode, &|| true)
+}
+
+/// `deliver_with` plus a gate evaluated inside the critical section (see
+/// `deliver_if`); every ordinary delivery passes the gate that is always open.
+#[allow(clippy::too_many_arguments)]
+fn deliver_gated(
+    session: &str,
+    window: &str,
+    target: &str,
+    line: &str,
+    ask_at: usize,
+    msg_id: &str,
+    mode: impl FnOnce() -> Option<&'static str>,
+    gate: &dyn Fn() -> bool,
+) -> bool {
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
     let held = telemetry::held_rows(session, window);
@@ -328,6 +356,9 @@ fn deliver_with(session: &str, window: &str, target: &str, line: &str, ask_at: u
     // `turn_busy` and `line_in_flight` are never read in between. Order:
     // window lock → this → pane send lock (typing).
     let _order = telemetry::delivery_decision();
+    if !gate() {
+        return false;
+    }
     // A steer window whose last line was typed idle but has not echoed yet
     // is already IN that turn (board #281): kiro took the first line, so a
     // second one lands in the running turn — steered, no hook. The owed
@@ -1394,6 +1425,50 @@ mod tests {
         assert_eq!(typed(), vec![line.to_string()], "typed at once");
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (1, 0), "no pending row for a steered line; the earlier one stays held");
         assert!(telemetry::recent_events(&s, 0).iter().any(|e| e.kind == "steered" && e.deliveries.iter().any(|d| d.msg == "m1")));
+    }
+
+    /// Board #355 review P1-B(2). A delivery that is only worth making while
+    /// something is still true asks it INSIDE the step that decides and types:
+    /// a closed gate types, holds and records nothing; an open one types — and a
+    /// prompt that arrives while the gate is being asked waits for the whole
+    /// step (the turn-fact lock), so it cannot land between the check and the
+    /// line. The check-then-deliver it replaces let it.
+    #[test]
+    fn a_gated_delivery_is_checked_and_typed_in_one_step_against_the_prompt_edge() {
+        let s = setup("gate");
+        crate::projects::telemetry::record_notification_with(&s, "dev", "completed", crate::projects::now(), true);
+        let end_seq = telemetry::turn_epoch(&s, "dev");
+        let nudge = "[tmm chat 10:00] tmm: [reply] your previous turn ended without a response";
+
+        assert!(!deliver_if(&s, "dev", "t", nudge, &|| false), "a closed gate delivers nothing");
+        assert!(typed().is_empty());
+        assert_eq!((held(&s, "dev"), pending(&s, "dev")), (0, 0), "and records nothing");
+
+        let racer = Mutex::new(None);
+        let gate = || {
+            *racer.lock().unwrap() = Some(std::thread::spawn({
+                let s = s.clone();
+                move || {
+                    record_prompt(&s, "dev", "[tmm chat 10:01] human: continue");
+                }
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!telemetry::turn_busy(&s, "dev"), "the prompt edge waits while the gate is asked");
+            telemetry::nudge_still_due(&s, "dev", end_seq)
+        };
+        assert!(deliver_if(&s, "dev", "t", nudge, &gate), "still due when asked, so typed in the same step");
+        racer.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(typed(), vec![nudge.to_string()]);
+        assert!(telemetry::turn_busy(&s, "dev"), "the prompt landed after the line, as its own turn");
+    }
+
+    /// The gate does not change an ordinary delivery: the always-open one is what
+    /// `deliver_with` passes.
+    #[test]
+    fn an_ordinary_delivery_passes_the_open_gate() {
+        let s = setup("open-gate");
+        assert!(deliver_with(&s, "dev", "t", "[tmm chat 10:00] lead: @dev hi", 0, "m1", || None));
+        assert_eq!(typed().len(), 1);
     }
 
     /// The bound: whole lines, oldest first, the rest wait for the next end;

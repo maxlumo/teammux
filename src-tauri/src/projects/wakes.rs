@@ -81,9 +81,24 @@ pub fn cancel(session: &str, id: i64, by: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Pending wakes, soonest first: one project's, or every project's.
+/// Pending wakes, soonest first: one project's, or every project's. A store
+/// that cannot be read reads as none — right for a list a person looks at; a
+/// caller that ACTS on "there is none" asks `try_pending`.
 pub fn pending(session: Option<&str>) -> Vec<Wake> {
-    super::with_store(|s| s.pending_wakes(session)).unwrap_or_default()
+    try_pending(session).unwrap_or_default()
+}
+
+/// `pending`, but "could not read the store" is an error and not "no wakes".
+pub fn try_pending(session: Option<&str>) -> Result<Vec<Wake>, String> {
+    super::with_store(|s| s.pending_wakes(session))
+}
+
+/// Does wake `w` address `name`? The ONE reading of a wake's recipients: a
+/// `@name` that names it, or `@all` (`schedule` accepts `@all`, and a fired
+/// wake reaches every managed agent). The card's "next wake" and the stall
+/// nudge both ask this, so neither keeps a narrower second definition.
+pub fn addressed_to(w: &Wake, name: &str) -> bool {
+    crate::address::mention_names(&w.body).iter().any(|m| m == name || m == "all")
 }
 
 /// The body a fired wake posts: the `[wake]` marker in the `[reply]` shape
@@ -234,6 +249,16 @@ mod tests {
         let mine: Vec<i64> = FIRED.lock().unwrap().iter().copied().filter(|id| [late_a, late_b, soon.id, gone.id].contains(id)).collect();
         assert_eq!(mine, vec![late_a, late_b, soon.id], "missed ones once in due order, then the new one; never the cancelled one");
         assert!(pending(Some(&s)).is_empty());
+    }
+
+    #[test]
+    fn a_wake_addresses_its_names_and_everyone_for_all() {
+        let wake = |body: &str| Wake { id: 1, session: "s".into(), sender: "lead".into(), body: body.into(), due_at: 0, created_at: 0 };
+        assert!(addressed_to(&wake("@dev check the build"), "dev"));
+        assert!(!addressed_to(&wake("@dev check the build"), "qa"));
+        assert!(addressed_to(&wake("@all stand-up"), "qa"), "@all reaches every agent");
+        assert!(addressed_to(&wake("@qa @dev both"), "dev"));
+        assert!(!addressed_to(&wake("mail dev@qa.example"), "qa"), "an address is not a mention");
     }
 
     #[test]

@@ -1863,7 +1863,7 @@ fn offline_report(
 fn next_wake(wakes: &[crate::projects::store::Wake], name: &str) -> serde_json::Value {
     let mut mine = wakes
         .iter()
-        .filter(|w| crate::address::mention_names(&w.body).iter().any(|m| m == name || m == "all"));
+        .filter(|w| crate::projects::wakes::addressed_to(w, name));
     match mine.next() {
         Some(w) => serde_json::json!({ "due_at": w.due_at, "from": w.sender, "more": mine.count() }),
         None => serde_json::Value::Null,

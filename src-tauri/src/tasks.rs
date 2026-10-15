@@ -150,10 +150,13 @@ impl Task {
 
 /// Every task in every session. Never fails: no tmux server means no tasks.
 pub fn list() -> Vec<Task> {
-    match tmux::run_tmux(&["list-windows", "-a", "-F", &list_format()]) {
-        Ok(out) => out.lines().filter_map(parse_line).collect(),
-        Err(_) => Vec::new(),
-    }
+    try_list().unwrap_or_default()
+}
+
+/// `list`, but "tmux could not be asked" is an error and not "no tasks": a
+/// caller that acts on the absence of a running task must tell the two apart.
+pub fn try_list() -> std::result::Result<Vec<Task>, String> {
+    tmux::run_tmux(&["list-windows", "-a", "-F", &list_format()]).map(|out| out.lines().filter_map(parse_line).collect())
 }
 
 /// Field order here is the field order `parse_line` reads. `@tmm_cmd` goes last
