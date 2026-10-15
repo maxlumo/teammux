@@ -1886,6 +1886,12 @@ mod tests {
     /// The rule that closes the submitted prompt, and the rest of the screen
     /// as an idle kiro paints it (the same pane's furniture).
     const KIRO_228_RULE: &str = "───────────────────────────────────────────────────────────\n";
+    /// kiro-cli 2.31.0, a real idle screen after one finished reply (own
+    /// tmux, scratch workspace, 80 columns, 2026-10-16; /tmp/gw362 kiro-idle.sh):
+    /// the newest block `• pong`, then the same furniture as 2.28.0 with the
+    /// Trust banner on one line. Pins that today's kiro is still read by
+    /// `newest_block`, so a repaint fails here and not silently in the field.
+    const KIRO_231_IDLE_REPLY: &str = "  › Reply with exactly the word: pong\n\n• pong\n\n▸ Credits: turn 0.59 • session 0.59 | Time: 3s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nDefault · claude-opus-5.5 · medium · ◔ 5% · Midway: 5h 31m      /tmp/gw362/latws\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
     /// kiro-cli 2.28.0's own log of the 3000-px refusal (10-15 03:55 UTC,
     /// /tmp/kiro-log/kiro-tui.log): the sentence, not a paint.
     const KIRO_IMAGE_3000_LOG: &str = "At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)";
@@ -2027,6 +2033,12 @@ mod tests {
         assert_eq!(Codex.person_paint(&working), None);
         assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("401 Unauthorized", "403 Forbidden")), None);
         assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("■ unexpected", "› [tmm chat 2026-10-14 11:27] orchestrator: ■ unexpected")), None);
+        // kiro-cli 2.31.0 (installed today) is read by the same grammar: its
+        // real idle screen's newest block is the reply, and the image refusal
+        // put in that place is read as the newest paint.
+        assert_eq!(Kiro.newest_block(KIRO_231_IDLE_REPLY).map(|(g, _)| g).as_deref(), Some("• pong"));
+        let refusal_231 = KIRO_231_IDLE_REPLY.replace("• pong", &format!("• {KIRO_IMAGE_3000_LOG}"));
+        assert_eq!(id(Kiro, &refusal_231).as_deref(), Some("conversation_blocked|3c60ad4b-3654-47c8-aeb0-146c2a910433"), "2.31.0");
         // A shape is its own backend's.
         assert_eq!(Kiro.person_paint(CODEX_0154_401), None);
         assert_eq!(Codex.person_paint(&screen), None);
