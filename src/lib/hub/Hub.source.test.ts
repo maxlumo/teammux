@@ -852,3 +852,16 @@ test('send DETACHES the staged set, never clears it: the thumbs live until the p
   assert.match(sendFn, /stager\.pending = \[\];/u, 'then detached');
   assert.match(sendFn, /for \(const a of atts\) if \(a\.thumb\) URL\.revokeObjectURL\(a\.thumb\);\s*if \(selected !== room\) return;/u, 'revoked only after success');
 });
+
+test('the Start-a-team picker is three columns and its action never wraps (board #341)', () => {
+  // The owner's screenshot: the action ("Start team") wrapped to two lines in
+  // the long rows and sat at a different place in each, and the team avatars
+  // were empty boxes. A row is the avatar, ONE name column that wraps, and an
+  // action that does not.
+  assert.match(source, /\.ap-name \{ flex: 1; min-width: 0; overflow-wrap: anywhere; \}/u, 'the name column is the one that wraps');
+  assert.match(source, /\.ap-go \{ flex: none; white-space: nowrap;/u, 'the action keeps one line and its place');
+  assert.match(source, /\.agent-pick > :global\(svg\) \{ flex: none; color: var\(--accent\); \}/u, 'only the row\u2019s own check is the trailing icon, not the glyph inside an avatar');
+  assert.doesNotMatch(source, /\.agent-pick :global\(svg\)/u, 'a descendant rule would push the avatar\u2019s glyph to the edge');
+  assert.equal([...source.matchAll(/<span class="ava tava"><Icon name="bots" size=\{12\} \/><\/span>/gu)].length, 2, 'both team avatars (the picker and the empty room) use the drawn team glyph');
+  assert.doesNotMatch(source, /name="collab"/u, 'collab was never drawn');
+});

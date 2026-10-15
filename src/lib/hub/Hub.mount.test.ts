@@ -2047,6 +2047,42 @@ test('Chat picker commands retain choice, disabled start and the original spawn 
   } finally { await app.close(); }
 });
 
+test('Start a team: every row is avatar, name, action; the team avatar draws a glyph and the action holds one line (#341)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    modules: [{
+      ...rpc,
+      registryList: async () => ({ agents: [{ name: 'helper', backend: 'kiro' }] }),
+      teamsList: async () => ({ teams: [
+        { name: 'content-creator-team', description: '', members: JSON.stringify([{ name: 'lead' }, { name: 'writer' }, { name: 'researcher' }, { name: 'review-reader' }, { team: 'review' }]) },
+        { name: 'dev', description: '', members: JSON.stringify([{ name: 'lead' }, { name: 'rust-dev' }]) },
+      ] }),
+    }],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.roster-add > button'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    for (let i = 0; i < 6; i++) await app.flush();
+    const rows = [...app.document.querySelectorAll<HTMLElement>('.dlg-agents .agent-pick')];
+    assert.equal(rows.length, 3, 'two teams and one agent');
+    for (const row of rows) {
+      assert.ok(row.children[0]!.classList.contains('ava'), `${row.textContent?.trim().slice(0, 20)}: the avatar leads`);
+      assert.ok(row.children[1]!.classList.contains('ap-name'), 'then the one name column');
+      assert.ok(row.children[1]!.textContent!.trim().length > 2, 'which holds the text');
+    }
+    const teams = rows.filter((r) => r.classList.contains('team'));
+    assert.equal(teams.length, 2);
+    for (const row of teams) {
+      const glyph = row.querySelector('.ava svg');
+      assert.ok(glyph?.children.length, 'the team avatar draws an icon; an unknown name renders an empty box (the owner\u2019s screenshot)');
+      assert.deepEqual([...row.children].map((c) => c.classList.contains('ap-go') ? 'go' : c.classList.contains('ap-name') ? 'name' : 'avatar'), ['avatar', 'name', 'go'], 'avatar, name, action: the action is the last column and never inside the name');
+      assert.equal(row.querySelector('.ap-go')!.textContent!.trim(), 'Start team');
+    }
+    assert.equal(rows.at(-1)!.querySelector('.ap-go'), null, 'an agent row has no action column');
+  } finally { await app.close(); }
+});
+
 test('Feed observes its box once across data updates and releases the observer on unmount', { timeout: 60000 }, async (context) => {
   const fixture = await compiledHub();
   const { rpc, pushed } = roomFixture();

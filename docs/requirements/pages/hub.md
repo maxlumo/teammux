@@ -165,6 +165,12 @@ completion).
   The empty-room preset lists configured teams as
   one-tap starts beside the single agents, and the "Start a team" picker
   offers them above the ad-hoc pick (the brief applies to every member).
+  Every row of that picker is three columns (board #341, owner's screenshot:
+  empty team icons and an action that wrapped to two lines at a different
+  place in each row): the avatar, ONE name column that wraps, and the
+  action ("Start team") on one line at the row's right edge; a team's
+  avatar is the drawn `bots` glyph, and an icon name that Icon.svelte does
+  not draw fails a source test instead of rendering a blank box.
   On the desktop the Agents page is a category page like Settings: the
   sidebar lists Instructions for every agent · Agents · Teams · Skills · MCP
   servers (with counts), the main column shows the chosen category's rows

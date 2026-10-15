@@ -2231,7 +2231,7 @@
                      with its role. -->
                 {#each teams as tm (tm.name)}
                   <button class="start-row team" disabled={starting} onclick={() => startTeam(tm.name)}>
-                    <span class="ava tava"><Icon name="collab" size={12} /></span>
+                    <span class="ava tava"><Icon name="bots" size={12} /></span>
                     <span class="sr-name">{tm.name}</span>
                     <span class="sr-backend">{teamMembers(tm).join(' · ')}</span>
                   </button>
@@ -2344,8 +2344,8 @@
         <div class="dlg-agents" class:touch={compact}>
           {#each teams as tm (tm.name)}
             <button class="agent-pick team" disabled={starting} onclick={() => startTeam(tm.name, startBrief.trim())}>
-              <span class="ava tava"><Icon name="collab" size={12} /></span>
-              {tm.name} · {teamMembers(tm).join(', ')}
+              <span class="ava tava"><Icon name="bots" size={12} /></span>
+              <span class="ap-name">{tm.name} · {teamMembers(tm).join(', ')}</span>
               <span class="ap-go">{t('hubStartTeamNamed')}</span>
             </button>
           {/each}
@@ -2356,7 +2356,7 @@
           <button class="agent-pick" class:sel={startPick.includes(r.name)} aria-pressed={startPick.includes(r.name)}
             onclick={() => { startPick = startPick.includes(r.name) ? startPick.filter((n) => n !== r.name) : [...startPick, r.name]; }}>
             {#if backendIcon(r.backend)}<img class="ava" src={backendIcon(r.backend)} alt={r.backend} />{:else}<span class="ava" style:background={backendColor(r.backend)}>{r.name.slice(0, 1).toUpperCase()}</span>{/if}
-            {r.name} · {r.backend}
+            <span class="ap-name">{r.name} · {r.backend}</span>
             {#if startPick.includes(r.name)}<Icon name="check" size={13} />{/if}
           </button>
         {/each}
@@ -2516,7 +2516,11 @@
   }
   .path::-webkit-scrollbar { display: none; }
   .tava { display: inline-grid; place-items: center; background: var(--accent-bg); color: var(--accent); }
-  .ap-go { margin-left: auto; font-size: var(--fs-micro); color: var(--accent); }
+  /* A picker row is three columns (board #341): the avatar, the name (the one
+     column that wraps) and the action, which never does, so every action's
+     right edge is the row's and every name starts where the avatar ends. */
+  .ap-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .ap-go { flex: none; white-space: nowrap; font-size: var(--fs-micro); color: var(--accent); }
 
 
 
@@ -2546,6 +2550,6 @@
   .dlg-agents.touch .agent-pick { min-height: 44px; }
   .agent-pick { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--ui-radius-control); color: var(--text2); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer; text-align: left; }
   .agent-pick.sel { border-color: var(--accent); color: var(--text); background: var(--accent-bg); }
-  .agent-pick :global(svg) { margin-left: auto; color: var(--accent); }
+  .agent-pick > :global(svg) { flex: none; color: var(--accent); }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 </style>
