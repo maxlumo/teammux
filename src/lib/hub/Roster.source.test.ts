@@ -470,16 +470,23 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
   assert.match(source, /onpointerdown=\{\(e\) => cardDrags\.down\(e, \{ name: a\.name \}\)\}\s*onpointerup=\{\(\) => cardDrags\.up\(\)\} onpointercancel=\{\(\) => cardDrags\.cancel\(\)\}/u);
   assert.match(source, /function clickAgent\(event, name\) \{\n {4}if \(cardDrags\.consumeClick\(\)\) return;/u);
   assert.match(source, /if \(!cardDrag\) return;\n {4}return cardDrags\.listen\(\);/u, 'Escape, resize and the window release while carrying');
-  // The lifted look is the address row's (accent line, wash, menu shadow);
-  // the target's enclosure is the accent line. Tokens only.
-  const lifted = rule('.acard.lifted .agent-select');
-  assert.match(lifted, /border-color: var\(--accent-line\)/u);
-  assert.match(lifted, /background: var\(--accent-bg\)/u);
-  assert.match(lifted, /box-shadow: var\(--menu-shadow\)/u);
+  // The lift is the strip's own tab paint: the lit tab's OPAQUE fill (a
+  // translucent wash let the card underneath read through it, live proof),
+  // the accent line, the menu shadow; the target's enclosure is the accent
+  // line. Tokens only.
+  const lifted = rule('.acard.lifted');
+  assert.match(lifted, /--card-paint: var\(--tab-fill\)/u);
+  assert.match(lifted, /--card-line: var\(--accent-line\)/u);
+  assert.doesNotMatch(lifted, /accent-bg/u, 'no translucent wash');
+  assert.match(rule('.acard.lifted::before'), /box-shadow: var\(--menu-shadow\)/u);
+  // The group is a stacking context of its own: while carrying it rises
+  // above the slot and the stopped teams that follow it in the strip.
+  assert.match(rule('.tabs'), /z-index: 0/u);
+  assert.match(rule('.cards.reordering .tabs'), /z-index: 1/u);
   const target = rule('.roster-cluster.drop-target::after');
   assert.match(target, /border: 1px solid var\(--accent\)/u);
   assert.match(target, /border-radius: var\(--ui-radius-panel\)/u);
-  for (const css of [lifted, target, rule('.cards.reordering')]) {
+  for (const css of [lifted, rule('.acard.lifted::before'), target, rule('.cards.reordering')]) {
     assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|\b(?!1px)\d+px/iu, 'no literal colour or raw px');
   }
 });

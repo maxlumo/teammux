@@ -312,8 +312,11 @@ pub fn moved_in_notice(joiner: &str, team: &str, backend: &str, by: &str, stamp:
 
 fn joined_notice(joiner: &str, team: &str, backend: &str, how: &str, by: &str, brief: &str, stamp: &str) -> String {
     let who = if by.trim().is_empty() { "human" } else { by.trim() };
+    // An agent whose backend is not known (a stopped one moved by the CLI has
+    // no pane to read) is "an agent", never "a  agent".
+    let what = if backend.trim().is_empty() { "an agent".to_string() } else { format!("a {} agent", backend.trim()) };
     let mut line = format!(
-        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{joiner} joined your team {team}: a {backend} agent {how} by {who}; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@{joiner} …\"."
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{joiner} joined your team {team}: {what} {how} by {who}; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@{joiner} …\"."
     );
     let flat = brief.split_whitespace().collect::<Vec<_>>().join(" ");
     if !flat.is_empty() {
@@ -790,6 +793,7 @@ mod tests {
         let moved_in = moved_in_notice("helper", "squad", "kiro", "lead", stamp);
         assert_eq!(moved_in, "[tmm chat 2026-10-15 17:10] tmm: [reply] @helper joined your team squad: a kiro agent moved in by lead; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@helper …\".");
         assert!(moved_in_notice("helper", "squad", "kiro", "", stamp).contains("moved in by human;"));
+        assert!(moved_in_notice("helper", "squad", "", "", stamp).contains("joined your team squad: an agent moved in by human;"), "an unknown backend reads as a sentence");
         for n in [&into, &out, &left, &moved_in] {
             assert!(crate::address::requesters(n).is_empty(), "{n}");
         }

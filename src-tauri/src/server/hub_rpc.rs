@@ -700,7 +700,12 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     tell_team(session, &left, agent, &crate::projects::delivery::left_notice(agent, &left, &stamp));
                 }
                 if !team.is_empty() {
-                    let backend = agent_backend(session, agent).map(|b| b.name()).unwrap_or("");
+                    // The one reading of a pane's agent, recipe first: a
+                    // managed window that fell back to a shell is still kiro.
+                    let backend = crate::tmux::list_panes(session).unwrap_or_default().iter()
+                        .find(|p| p.window_name == agent && p.active)
+                        .and_then(|p| crate::projects::agents::detect_pane(Some(ws), p))
+                        .map(|a| a.backend).unwrap_or("");
                     let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
                     tell_team(session, team, agent, &crate::projects::delivery::moved_in_notice(agent, team, backend, by, &stamp));
                 }
@@ -2400,7 +2405,10 @@ mod tests {
         assert_eq!(recipe("helper")["team"], "squad");
         assert_eq!(recipe("helper")["member"], "", "a joined member");
         assert!(wait_for("lead", "tmm: [reply] @helper joined your team squad"), "the team's member is told: {:?}", pane("lead"));
-        assert!(pane("lead").contains("agent moved in by human"), "who moved it, not who started it: {:?}", pane("lead"));
+        // The backend is the recipe's (`detect_pane`), not only a sniff of the
+        // process: these panes run `cat`, as a managed window that fell back
+        // to a shell does (live proof, 2026-10-15: "a  agent moved in").
+        assert!(pane("lead").contains("a kiro agent moved in by human"), "its backend, and who moved it, not who started it: {:?}", pane("lead"));
         assert!(wait_for("helper", "tmm: [reply] @helper: you were moved into team squad at runtime"), "the mover is told: {:?}", pane("helper"));
         assert!(pane("helper").contains("Your prompt changes at your next start"));
         std::thread::sleep(std::time::Duration::from_millis(300));

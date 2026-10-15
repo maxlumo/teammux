@@ -589,16 +589,22 @@
     border-radius: inherit; pointer-events: none;
   }
   /* Dragging a card onto a team (board #384), in the rail's drag grammar:
-     the carried card is LIFTED (the address row's look: accent line, accent
-     wash, menu shadow) and follows the pointer by transform; the group under
-     it is enclosed in the accent line; nothing else hovers while carrying. */
+     the carried card is LIFTED and follows the pointer by transform; the
+     group under it is enclosed in the accent line; nothing else hovers while
+     carrying. The lift is the strip's own tab paint (`::before`): the lit
+     tab's OPAQUE fill, the accent line, the menu shadow. The address row's
+     translucent accent wash let the card it passed over read through it
+     (live proof, 2026-10-15: "o[ps1] solo"), and the select button has no
+     border to colour. */
   .cards.reordering { cursor: grabbing; user-select: none; }
   .cards.reordering .acard:not(.lifted) .agent-select { pointer-events: none; }
-  .acard.lifted { position: relative; z-index: 2; }
-  .acard.lifted .agent-select {
-    border-color: var(--accent-line); background: var(--accent-bg); color: var(--accent-ink);
-    box-shadow: var(--menu-shadow);
-  }
+  .acard.lifted { position: relative; z-index: 2; --card-paint: var(--tab-fill); --card-line: var(--accent-line); }
+  /* The tab group is its own stacking context (z-index 0, so the marker stays
+     beneath the cards); while carrying it rises above its siblings, or the
+     Standalone slot and the stopped teams after it would paint over the
+     carried card (live proof, 2026-10-15). */
+  .cards.reordering .tabs { z-index: 1; }
+  .acard.lifted::before { box-shadow: var(--menu-shadow); }
   .roster-cluster.drop-target::after {
     content: ''; position: absolute; inset: 0; border: 1px solid var(--accent);
     border-radius: var(--ui-radius-panel); pointer-events: none;
