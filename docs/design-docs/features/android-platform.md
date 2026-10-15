@@ -204,9 +204,11 @@ warnings — Kotlin 2.x wants the `compilerOptions` DSL; non-blocking).
 Tauri prints the APK path as the in-project
 `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
 Where that file PHYSICALLY lands depends on what `app/build` is in the checkout
-you build in (re-measured 2026-10-15 with real builds in a fresh worktree and in
-the launch checkout; there is no `~/.gradle/init.d`, environment variable or
-Gradle config on this host that relocates anything):
+you build in (measured 2026-10-15 by the validator with two real builds, both in
+its own fresh worktree — the second with `app/build` made a symlink into the
+cache to reproduce the launch checkout's layout; nothing was built IN the launch
+checkout. There is no `~/.gradle/init.d`, environment variable or Gradle config
+on this host that relocates anything):
 
 - **A fresh git worktree** (where agents build): `app/build` is a real
   directory, Gradle builds IN-TREE, and the APK is at the in-project path.
