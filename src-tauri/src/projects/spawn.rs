@@ -126,18 +126,8 @@ impl Default for SpawnRequest<'_> {
 
 /// Spawn `agent` into `session`. Returns `{ window_name, pane }`.
 pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
-    let def = match &req.def {
-        Some(d) => d.clone(),
-        None => super::registry_get(req.agent)?
-            .ok_or_else(|| format!("no agent named '{}' in the registry", req.agent))?,
-    };
-    // A model the backend does not know is not a runtime hiccup: kiro answers
-    // the first turn with "not available, use /model" and the agent is alive but
-    // mute — no reply, no auto-post, nothing for the app to notice. Registry
-    // defs saved before validation existed can still carry one, so refuse here
-    // too rather than open a window that cannot work.
-    super::models::validate(&def.backend, &def.model)?;
-    super::models::validate_effort(&def.backend, &def.effort)?;
+    let def = resolve_def(req)?;
+    check_def(&def)?;
 
     // No hiring gate: spawning is an ability every agent already has through
     // its shell and `tmm`, so a registry grant added no authority (owner,
@@ -156,12 +146,8 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
         check_join(&workspace, team)?;
     }
 
-    // The cap counts MANAGED agents only (board #126) — see managed_window_count.
     let panes = panes_now(req.session)?;
-    let agent_windows = managed_window_count(&workspace, &panes);
-    if agent_windows >= SPAWN_CAP {
-        return Err(format!("project already has {agent_windows} agents (cap {SPAWN_CAP}) — finish or close one first"));
-    }
+    check_cap(&workspace, &panes)?;
 
     // Window name = agent name, uniquified if taken (lead, lead-2, …). The
     // Window name is the agent's identity for telemetry and tmm messages.
@@ -210,11 +196,45 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
         let section = super::recipe::recipe_section(&agent_home(&workspace, &window_name));
         materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member)?
     };
+    launch_window(req, &workspace, &def, &window_name, m)
+}
+
+/// The definition a request launches: the one handed in, else the registry's by name.
+fn resolve_def(req: &SpawnRequest) -> Result<RegAgent, String> {
+    match &req.def {
+        Some(d) => Ok(d.clone()),
+        None => super::registry_get(req.agent)?.ok_or_else(|| format!("no agent named '{}' in the registry", req.agent)),
+    }
+}
+
+/// A model the backend does not know is not a runtime hiccup: kiro answers
+/// the first turn with "not available, use /model" and the agent is alive but
+/// mute — no reply, no auto-post, nothing for the app to notice. Registry
+/// defs saved before validation existed can still carry one, so refuse here
+/// too rather than open a window that cannot work.
+fn check_def(def: &RegAgent) -> Result<(), String> {
+    super::models::validate(&def.backend, &def.model)?;
+    super::models::validate_effort(&def.backend, &def.effort)
+}
+
+/// The cap counts MANAGED agents only (board #126) — see managed_window_count.
+fn check_cap(workspace: &str, panes: &[tmux::TmuxPane]) -> Result<(), String> {
+    let agent_windows = managed_window_count(workspace, panes);
+    if agent_windows >= SPAWN_CAP {
+        return Err(format!("project already has {agent_windows} agents (cap {SPAWN_CAP}) — finish or close one first"));
+    }
+    Ok(())
+}
+
+/// Open the window and start the CLI in it: everything AFTER an agent has been
+/// materialized (its recipe is written and its section released — the lock is
+/// never held across the slow tmux launch). `spawn` and `respawn` both end here.
+fn launch_window(req: &SpawnRequest, workspace: &str, def: &RegAgent, window_name: &str, m: Materialized) -> Result<Value, String> {
     let home = m.home;
     let env = m.env;
 
-    tmux::ensure_session(req.session, &workspace)?;
-    let pane = tmux::new_named_window(req.session, &window_name, &workspace)?;
+    tmux::ensure_session(req.session, workspace)?;
+    let pane = tmux::new_named_window(req.session, window_name, workspace)?;
     // Type only once the shell shows its prompt (board #325), never on a timer.
     tmux::wait_for_shell(&pane, tmux::SHELL_READY);
 
@@ -232,7 +252,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     let full = format!("{} {}", prefix, launch_cmd);
     // NEVER send the full line via send-keys — see team/launch.rs: tty shims
     // swallow bursts ≳2KB. Source a script instead.
-    let script = shared::write_launch_script(&home, &window_name, &full)?;
+    let script = shared::write_launch_script(&home, window_name, &full)?;
     tmux::send_command(&pane, &format!(". {}", crate::shell::quote(&script.to_string_lossy())))?;
     // A backend without a positional prompt (kimi, board #224) gets its brief
     // TYPED once the composer is up — through `deliver_chat_line`, the same
@@ -245,7 +265,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
         crate::backends::FirstPrompt::LaunchLine => None,
     };
     let on_ready: Option<Box<dyn FnOnce() + Send + 'static>> = typed_brief.map(|line| {
-        let (session, window) = (req.session.to_string(), window_name.clone());
+        let (session, window) = (req.session.to_string(), window_name.to_string());
         Box::new(move || {
             if !super::deliver_chat_line(&session, &window, &line) {
                 eprintln!("projects: the brief for {session}:{window} could not be typed into its pane");
@@ -416,8 +436,37 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
 pub fn respawn(session: &str, window_name: &str) -> Result<Value, String> {
     let project = super::project_for_session(session)?
         .ok_or_else(|| format!("no project for session '{session}'"))?;
-    let plan = plan_respawn(&project.path, window_name)?;
-    spawn(&plan.request(session))
+    let panes = panes_now(session)?;
+    let (plan, def, m) = respawn_materialize(&project.path, session, window_name, &panes)?;
+    launch_window(&plan.request(session), &project.path, &def, window_name, m)
+}
+
+/// `respawn` up to the end of the window's materialization — everything that reads
+/// or writes its recipe, as ONE read-modify-write of the home's recipe section
+/// (board #389, reviewer P1): the recipe is read INSIDE the section, the definition
+/// is resolved from that read, and `materialize` writes under the same hold, so a
+/// team move that commits meanwhile is waited for and kept, never overwritten by a
+/// plan made before it (the read-before-lock class #384 closed for the writers).
+/// The section is released here, before the window is opened: the lock is not held
+/// across the slow tmux launch. A recipe that EXISTS but cannot be read is not a
+/// missing one: it refuses before anything is rendered or written.
+fn respawn_materialize(workspace: &str, session: &str, window_name: &str, panes: &[tmux::TmuxPane]) -> Result<(Respawn, RegAgent, Materialized), String> {
+    check_cap(workspace, panes)?;
+    let section = super::recipe::recipe_section(&agent_home(workspace, window_name));
+    let recipe = section.read().map_err(|e| format!("'{window_name}' cannot be started again: {e}; nothing was changed"))?;
+    let plan = plan_respawn(workspace, window_name, recipe.as_ref())?;
+    let (def, m) = {
+        let req = plan.request(session);
+        let def = resolve_def(&req)?;
+        check_def(&def)?;
+        if let Some(team) = join_of(req.team.as_deref(), req.member) {
+            check_join(workspace, team)?;
+        }
+        let agent_def = if req.def.is_none() { def.name.as_str() } else { "" };
+        let m = materialize(&section, &def, window_name, session, workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member)?;
+        (def, m)
+    };
+    Ok((plan, def, m))
 }
 
 /// What a respawn launches, decided before any window opens.
@@ -445,14 +494,17 @@ impl Respawn {
     }
 }
 
-/// `respawn`'s decision: the window's recipe says what it is. A window with no
-/// readable recipe has nothing to follow and keeps the plain registry lookup by
-/// its name (what a restart did before provenance existed); one whose
-/// definition is gone is refused by name, its home kept.
-fn plan_respawn(workspace: &str, window_name: &str) -> Result<Respawn, String> {
-    let Some(p) = recipe_provenance(workspace, window_name) else {
+/// `respawn`'s decision, from the recipe as read inside the section (`None` = there
+/// is none): the window's recipe says what it is. A window with NO recipe has
+/// nothing to follow and keeps the plain registry lookup by its name (what a
+/// restart did before provenance existed); one whose definition is gone is
+/// refused by name, its home kept. (A recipe that exists but cannot be read
+/// never gets here: `respawn_materialize` refuses it.)
+fn plan_respawn(workspace: &str, window_name: &str, recipe: Option<&Value>) -> Result<Respawn, String> {
+    let Some(recipe) = recipe else {
         return Ok(Respawn { name: window_name.to_string(), by: String::new(), team: None, member: String::new(), from_member: String::new(), agent: window_name.to_string(), def: None });
     };
+    let p = provenance_of(recipe);
     let def = effective_def(workspace, window_name, &p).ok_or_else(|| {
         format!("the definition behind '{window_name}' no longer exists (its agent or team was deleted) — it cannot be started again; its home is kept")
     })?;
@@ -3616,6 +3668,12 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!names.contains("(None, false) => match"), "no new spawn picks a name by live panes alone");
     }
 
+    /// The recipe as it is on disk, the way `respawn_materialize` reads it inside
+    /// its section: `None` when there is none.
+    fn on_disk(ws: &str, name: &str) -> Option<Value> {
+        std::fs::read_to_string(agent_home(ws, name).join("launch.json")).ok().and_then(|t| serde_json::from_str(&t).ok())
+    }
+
     fn write_recipe(ws: &str, name: &str, json: &str) {
         let home = agent_home(ws, name);
         std::fs::create_dir_all(&home).unwrap();
@@ -3952,14 +4010,14 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // What the fallback used to ask for: the window name, as a registry name.
         let old = spawn(&SpawnRequest { session: "proj", agent: "rpsolo-2", resume: true, ..Default::default() }).unwrap_err();
         assert!(old.contains("no agent named 'rpsolo-2' in the registry"), "the failure the validator saw: {old}");
-        let plan = plan_respawn(&ws_str, "rpsolo-2").unwrap();
+        let plan = plan_respawn(&ws_str, "rpsolo-2", on_disk(&ws_str, "rpsolo-2").as_ref()).unwrap();
         let req = plan.request("proj");
         assert_eq!((req.agent, req.window_name.as_deref(), req.by, req.resume), ("rpsolo", Some("rpsolo-2"), "lead", true), "its own definition by name, its own window, its own spawner");
         assert!(req.def.is_none() && req.team.is_none() && req.member.is_empty() && req.from_member.is_empty(), "a solo agent stays a registry launch");
 
         // A solo agent that JOINED a team keeps it.
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rpjoin")), &def, "rpjoin", "proj", &ws_str, "", "", Some("rpteam"), "rpsolo", "", "").unwrap();
-        let plan = plan_respawn(&ws_str, "rpjoin").unwrap();
+        let plan = plan_respawn(&ws_str, "rpjoin", on_disk(&ws_str, "rpjoin").as_ref()).unwrap();
         assert_eq!((plan.agent.as_str(), plan.team.as_deref(), plan.member.as_str()), ("rpsolo", Some("rpteam"), ""));
 
         // A team member spawned as "dev-2": the team's definition for it, the member's slot.
@@ -3978,7 +4036,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
             materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rpteam"), "", f.member.name.trim(), "").unwrap();
         }
-        let plan = plan_respawn(&ws_str, "dev-2").unwrap();
+        let plan = plan_respawn(&ws_str, "dev-2", on_disk(&ws_str, "dev-2").as_ref()).unwrap();
         let req = plan.request("proj");
         assert_eq!((req.team.as_deref(), req.member, req.from_member, req.window_name.as_deref(), req.by, req.resume), (Some("rpteam"), "dev", "", Some("dev-2"), "lead", true));
         let d = req.def.expect("a team member is started from its team's definition");
@@ -3987,7 +4045,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // A fork of that member: a joined agent in the team ROOT, the member's definition, no slot.
         let fork_def = fork_member_def("rpteam", "dev", "rpteam-fork").unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dev-3")), &fork_def, "dev-3", "proj", &ws_str, "", "lead", Some("rpteam"), "", "", "rpteam/dev").unwrap();
-        let plan = plan_respawn(&ws_str, "dev-3").unwrap();
+        let plan = plan_respawn(&ws_str, "dev-3", on_disk(&ws_str, "dev-3").as_ref()).unwrap();
         let req = plan.request("proj");
         assert_eq!((req.team.as_deref(), req.member, req.from_member, req.window_name.as_deref()), (Some("rpteam"), "", "rpteam/dev", Some("dev-3")));
         assert!(req.def.is_some() && req.agent.is_empty(), "a fork of a member is started from the member's definition, not by a registry name");
@@ -3995,13 +4053,13 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // A pre-#113 recipe names no definition: the window name IS the definition's. No recipe at
         // all has nothing to follow: the same plain lookup as before.
         write_recipe(&ws_str, "rpsolo", r#"{"backend":"kiro","cmd":"x"}"#);
-        assert_eq!(plan_respawn(&ws_str, "rpsolo").unwrap().agent, "rpsolo");
-        let bare = plan_respawn(&ws_str, "stranger").unwrap();
+        assert_eq!(plan_respawn(&ws_str, "rpsolo", on_disk(&ws_str, "rpsolo").as_ref()).unwrap().agent, "rpsolo");
+        let bare = plan_respawn(&ws_str, "stranger", on_disk(&ws_str, "stranger").as_ref()).unwrap();
         assert_eq!((bare.agent.as_str(), bare.def.is_none(), bare.name.as_str()), ("stranger", true, "stranger"));
 
         // The definition behind it is gone: refused by name, the home kept, never a different agent.
         super::super::registry_delete("rpsolo").unwrap();
-        let gone = plan_respawn(&ws_str, "rpsolo-2").err().expect("a deleted definition is not started again");
+        let gone = plan_respawn(&ws_str, "rpsolo-2", on_disk(&ws_str, "rpsolo-2").as_ref()).err().expect("a deleted definition is not started again");
         assert!(gone.contains("'rpsolo-2'") && gone.contains("no longer exists"), "{gone}");
         assert!(agent_home(&ws_str, "rpsolo-2").join("launch.json").exists(), "its home is kept");
 
@@ -4022,5 +4080,131 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let hub = &hub_src[..hub_src.find("#[cfg(test)]").expect("a test module")];
         assert!(hub.contains("crate::projects::spawn::respawn(session, agent)?"), "start_agent's fallback is respawn");
         assert!(!hub.contains("resume: true"), "the server builds no resuming request of its own");
+        // The recipe is read, planned from and written inside ONE hold of its section
+        // (#389 review): no section-less reader in between, and the hold ends before tmux.
+        let body = &production[production.find("fn respawn_materialize").expect("respawn_materialize")..];
+        let body = &body[body.find("{\n").expect("its body")..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        assert!(body.contains("recipe_section(") && body.contains("section.read()") && body.contains("materialize(&section"), "{body}");
+        assert!(!body.contains("recipe_provenance(") && !body.contains("launch_window(") && !body.contains("tmux::"), "no read outside the section, no launch inside it: {body}");
+    }
+
+    /// Board #389, reviewer P1 (read-before-lock): `respawn` planned from a recipe it
+    /// read OUTSIDE the home's section and wrote those values back, so a team move
+    /// that committed in between was undone — `team` back to the old team with
+    /// `team_rev` / `team_told` still describing the new one. Now the read, the plan
+    /// and the write are one hold of the section. Here a mover's commit lands after
+    /// the respawn has started and while it waits for the section: the respawn must
+    /// take the moved recipe, whichever of the two it would have been before.
+    #[test]
+    fn a_respawn_waits_for_a_move_that_holds_the_recipe_and_keeps_it() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-respawn-barrier-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("rbbase", "Base.", "steer");
+        fk_save("rbsolo", "Solo persona.", "steer");
+        super::super::teams_save(&json!({ "name": "rbteam", "description": "Moves.", "members": r#"[{"name":"lead","base":"rbbase","role":"leads"}]"#.to_string() })).unwrap();
+        let team = super::super::team_get("rbteam").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let base = super::super::registry_get("rbbase").unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "rbteam".into())];
+        let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("rbteam"), "", "lead", "").unwrap();
+        let solo = super::super::registry_get("rbsolo").unwrap().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rbsolo-2")), &solo, "rbsolo-2", "proj", &ws_str, "", "human", None, "rbsolo", "", "").unwrap();
+        let home = agent_home(&ws_str, "rbsolo-2");
+
+        let hold = super::super::recipe::recipe_section(&home);
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let respawn = {
+            let (w, released) = (ws_str.clone(), released.clone());
+            std::thread::spawn(move || {
+                let out = respawn_materialize(&w, "proj", "rbsolo-2", &[]);
+                (out, released.load(std::sync::atomic::Ordering::SeqCst))
+            })
+        };
+        // The respawn is under way (it read nothing it may use: the section is held)...
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // ...and the move commits: the team, a revision, the seeded ledger (what set_agent_team writes).
+        super::super::recipe::update_in(&hold, |slot| {
+            let recipe = slot.as_mut().expect("a recipe");
+            recipe["team"] = json!("rbteam");
+            recipe["team_rev"] = json!(1);
+            recipe["team_told"] = json!({ "mover": "", "members": {} });
+        })
+        .unwrap();
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(hold);
+
+        let (out, after_release) = respawn.join().unwrap();
+        let (plan, _def, _m) = out.expect("the respawn completes");
+        assert!(after_release, "the respawn did not run inside the mover's hold");
+        assert_eq!(plan.team.as_deref(), Some("rbteam"), "it planned from the moved recipe, not from one it read before");
+        let recipe: Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
+        assert_eq!((recipe["team"].as_str(), recipe["team_rev"].as_u64()), (Some("rbteam"), Some(1)), "the move survives: {recipe}");
+        assert_eq!(recipe["team_told"], json!({ "mover": "", "members": {} }), "and its ledger is the one that goes with that team");
+        assert_eq!(recipe["spawned_by"], "human");
+        super::super::registry_delete("rbsolo").ok();
+        super::super::registry_delete("rbbase").ok();
+        super::super::teams_delete("rbteam").ok();
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #389, reviewer P1 (absent vs unreadable): only a home with NO recipe
+    /// (a pre-#113 agent) may be started by its window name. A recipe that exists but
+    /// cannot be read — malformed, or not a file we can read — is refused before
+    /// anything is rendered or written, and the home is byte for byte as it was:
+    /// asking the registry for the window name there would rebuild the agent from
+    /// whatever other definition happens to carry that name.
+    #[test]
+    fn only_a_missing_recipe_falls_back_to_the_window_name_and_an_unreadable_one_refuses() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-respawn-unreadable-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("ab1", "Legacy persona.", "steer");
+        fk_save("bad1", "Another agent's persona.", "steer");
+        fk_save("bad2", "Another agent's persona.", "steer");
+        // A tree of the home: every path with its bytes, so "untouched" is exact.
+        let tree = |name: &str| -> Vec<(String, Option<Vec<u8>>)> {
+            fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, Option<Vec<u8>>)>) {
+                let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+                entries.sort();
+                for p in entries {
+                    let rel = p.strip_prefix(base).unwrap().to_string_lossy().to_string();
+                    if p.is_dir() { out.push((rel, None)); walk(&p, base, out); } else { out.push((rel, Some(std::fs::read(&p).unwrap()))); }
+                }
+            }
+            let home = agent_home(&ws_str, name);
+            let mut out = Vec::new();
+            walk(&home, &home, &mut out);
+            out
+        };
+
+        // Absent: a pre-#113 home (no recipe at all) is started by its window name, as before.
+        std::fs::create_dir_all(agent_home(&ws_str, "ab1")).unwrap();
+        let (plan, def, _m) = respawn_materialize(&ws_str, "proj", "ab1", &[]).expect("a home with no recipe falls back to the window name");
+        assert_eq!((plan.agent.as_str(), def.name.as_str()), ("ab1", "ab1"));
+        assert!(agent_home(&ws_str, "ab1").join("launch.json").exists(), "and it now has a recipe");
+        // Absent and no such definition: the plain registry refusal, nothing invented.
+        std::fs::create_dir_all(agent_home(&ws_str, "ab2")).unwrap();
+        let err = respawn_materialize(&ws_str, "proj", "ab2", &[]).err().expect("no recipe and no definition");
+        assert!(err.contains("no agent named 'ab2'"), "{err}");
+        assert!(!agent_home(&ws_str, "ab2").join("launch.json").exists());
+
+        // Unreadable: malformed JSON, with a definition of the same name on file.
+        write_recipe(&ws_str, "bad1", "{ this is not json");
+        let before = tree("bad1");
+        let err = respawn_materialize(&ws_str, "proj", "bad1", &[]).err().expect("a recipe that cannot be parsed is not a missing one");
+        assert!(err.contains("cannot be started again") && err.contains("not readable") && err.contains("nothing was changed"), "{err}");
+        assert_eq!(tree("bad1"), before, "the home is byte for byte as it was");
+        // Unreadable: the recipe path is something that cannot be read as a file.
+        std::fs::create_dir_all(agent_home(&ws_str, "bad2").join("launch.json")).unwrap();
+        let before = tree("bad2");
+        let err = respawn_materialize(&ws_str, "proj", "bad2", &[]).err().expect("an I/O error is not a missing recipe");
+        assert!(err.contains("cannot be started again") && err.contains("nothing was changed"), "{err}");
+        assert_eq!(tree("bad2"), before, "and so is this one");
+
+        for n in ["ab1", "bad1", "bad2"] { super::super::registry_delete(n).ok(); }
+        std::fs::remove_dir_all(&ws).ok();
     }
 }
