@@ -322,10 +322,13 @@ impl Backend {
         }
     }
 
-    /// The backend's resume dialect on one persisted identity command.
-    pub fn resume_command(self, cmd: &str, id: Option<&str>) -> String {
+    /// The backend's resume dialect on one persisted identity command. `home`
+    /// is the agent's isolated home, which only kiro reads: its v3 store is
+    /// that home, and an id the home does not hold must not be resumed
+    /// (board #379).
+    pub fn resume_command(self, cmd: &str, id: Option<&str>, home: Option<&std::path::Path>) -> String {
         match self {
-            Backend::Kiro => kiro::resume_command(cmd, id),
+            Backend::Kiro => kiro::resume_command(cmd, id, home),
             Backend::Claude => claude::resume_command(cmd, id),
             Backend::Codex => codex::resume_command(cmd, id),
             Backend::Grok => grok::resume_command(cmd, id),

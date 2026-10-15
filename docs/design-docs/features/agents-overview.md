@@ -362,15 +362,21 @@ was touched.
   segment; `relaunch_line` appends the backend's dialect at restart, so
   `kiro::resume_command` reads the engine off the (already reconciled)
   launch line. v2 ids live in the isolated home's own store; v3 ids are
-  `sess_<uuid>` in the GLOBAL `~/.kiro/sessions/<cwd-hash>/`, which every
-  managed agent of a project SHARES. Measured on kiro-cli 2.22.1: v3 given a
+  `sess_<uuid>`, and **where they live depends on the kiro-cli build**: the
+  GLOBAL `~/.kiro/sessions/<cwd-hash>/` on 2.22.1 (when this rule was written,
+  shared by every managed agent of a project), but the ISOLATED home's own
+  `<KIRO_HOME>/sessions/<cwd-hash>/<id>/` by 2.28 (measured by the orchestrator
+  in the incident below) and for a live managed agent on this host on
+  2026-10-15, where `kiro-cli --version` reports 2.31.0 — which build wrote that
+  particular file was not recorded. Ids minted in the first era outlive it,
+  which is the next paragraph. Measured on kiro-cli 2.22.1: v3 given a
   v2 id came up `Default · Auto` with no session file, so the reply never
   reached the room (claude's rollout attempt); v2 given a v3 id came up
   `agent "kiro" not found, using "default"`; v3 `--resume-id sess_…` resumes
   the same session with agentMode, model and context intact; v3 `--resume`
   would take the newest session of the DIRECTORY, possibly a teammate's or
-  the human's. Rule: v3 + `sess_` id → `--resume-id`; v3 + anything else →
-  fresh (no `--resume`); v2 + non-`sess_` id → `--resume-id`; v2 + `sess_`
+  the human's. Rule: v3 + `sess_` id **that this agent's own home holds and that belongs to it** →
+  `--resume-id`; v3 + anything else → fresh (no `--resume`); v2 + non-`sess_` id → `--resume-id`; v2 + `sess_`
   id or none → `--resume` (this home's own newest thread — after a rollback
   that is the pre-switch conversation). Losing the v2 thread once at the
   first switch is the owner's accepted trade ("没关系，我可以重新再开",
@@ -381,6 +387,33 @@ was touched.
   again with a v2 id recorded → no resume segment, `kiro · …`, reply posts;
   the slot's `agent_session_id` follows the engine (the hook records
   whichever id the CLI reports).
+
+  **A resumed id the home does not hold silently becomes the Default agent**
+  (board #379, owner 2026-10-15 10:17, learn-english and laminar-log: "agent 的
+  回复没有正确 hook，单独的 agent 好着，team 里的不行"; measured by the
+  orchestrator on kiro-cli 2.28). A slot's recorded `agent_session_id`
+  was minted when sessions lived in the global store; with `KIRO_HOME` set,
+  kiro-cli reads ONLY the isolated home, cannot find the id, and does NOT fail:
+  `ACP session/load … messages=0` silently CREATES an empty session under that
+  id with `agentMode: "vibe"` and IGNORES `--agent`. The footer then reads
+  `Default · auto` instead of `<name> · <model>`, and the Default agent carries
+  none of our hooks (they live in `agents/<name>.json`): no prompt, tool or
+  stop row is ever written, so no reply reaches the room, no reply edge forms
+  and the status freezes. Every later restart resumed that same vibe session,
+  so the agent stayed broken for good. A fresh spawn has no resume id, which is
+  why solo agents worked and restarted team members did not. So
+  `kiro::v3_session_resumable` hands `--resume-id` only when
+  `<home>/sessions/*/<id>/session.json` exists and its `agentMode` equals the
+  launch line's `--agent` name; a missing session, a global-only copy, a `vibe`
+  session, another agent's session, malformed or unreadable files, and a launch
+  line with no `--agent` all start FRESH — a fresh agent with its hooks beats a
+  resumed one without. Never a fallback to `~/.kiro` (kiro-cli under `KIRO_HOME`
+  cannot load it anyway), and nothing clears the slot's recorded id: it is
+  re-judged on every restart and the next Stop hook overwrites it. Pinned by
+  `a_v3_id_resumes_only_when_the_agents_own_home_holds_it` and, through the real
+  restart path, `a_restart_resumes_a_v3_session_only_if_the_agents_own_home_holds_it`.
+  Restarting an agent that is ALREADY on a vibe session starts it fresh (its
+  conversation is lost; it could not be resumed correctly anyway).
 - **The v3 status line prints the model's DISPLAY name** (`probe · Claude
   Sonnet 5 · high · ◔ 4% · Midway: 19h 19m   /ws · (branch)`; v2 prints the
   slug). `sniff_kiro` accepts a display name (`looks_like_model_name`: words

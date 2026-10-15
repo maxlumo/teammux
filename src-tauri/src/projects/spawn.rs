@@ -601,10 +601,10 @@ impl LaunchRecipe<'_> {
 /// Add the backend's exact or safe-recent resume dialect to one persisted
 /// identity command (the dialects live on the backend files, board #128).
 /// An unknown backend relaunches verbatim, as before.
-fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>) -> String {
+fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Option<&Path>) -> String {
     let exact = session_id.filter(|s| !s.is_empty());
     match crate::backends::Backend::parse(backend) {
-        Some(b) => b.resume_command(cmd, exact),
+        Some(b) => b.resume_command(cmd, exact, home),
         None => cmd.to_string(),
     }
 }
@@ -616,7 +616,7 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
     let recipe: Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).ok()?).ok()?;
     let cmd = recipe.get("cmd")?.as_str()?;
     let backend = recipe.get("backend").and_then(|b| b.as_str()).unwrap_or("");
-    let cmd = resume_command(cmd, backend, session_id);
+    let cmd = resume_command(cmd, backend, session_id, Some(&home));
     let env = recipe.get("env").and_then(|e| e.as_array()).map(|arr| {
         arr.iter()
             .filter_map(|kv| Some((kv.get(0)?.as_str()?, kv.get(1)?.as_str()?)))
@@ -666,7 +666,8 @@ fn first_prompt(brief: &str, by: &str) -> Option<String> {
 /// is ready.
 fn launch_command(identity_cmd: &str, backend: &str, brief: &str, by: &str, resume: bool) -> String {
     let identity_cmd = if resume {
-        resume_command(identity_cmd, backend, None)
+        // No recorded id here, so there is nothing for a home to vouch for.
+        resume_command(identity_cmd, backend, None, None)
     } else {
         identity_cmd.to_string()
     };
@@ -681,6 +682,49 @@ fn launch_command(identity_cmd: &str, backend: &str, brief: &str, by: &str, resu
 #[cfg(test)]
 mod relaunch_tests {
     use super::*;
+
+    /// Board #379, through the REAL restart path: `relaunch_line` is what a
+    /// restart runs, and it must hand the kiro helper the agent's own home. A
+    /// helper test cannot see a caller that passes the wrong one (or none),
+    /// and then every restarted team member silently comes back as the
+    /// hookless Default agent again. Real layout: `agent_home` is
+    /// `<ws>/.tmm/agents/<name>` and kiro keeps its sessions in
+    /// `<home>/sessions/<cwd-hash>/<id>/session.json`.
+    #[test]
+    fn a_restart_resumes_a_v3_session_only_if_the_agents_own_home_holds_it() {
+        let ws = std::env::temp_dir().join(format!("tmm-relaunch-379-{}", uuid::Uuid::new_v4()));
+        let home = agent_home(ws.to_str().unwrap(), "lead");
+        std::fs::create_dir_all(&home).unwrap();
+        LaunchRecipe {
+            backend: "kiro",
+            env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())],
+            cmd: "command kiro-cli chat --agent lead --trust-all-tools --agent-engine v3",
+            spawned_by: "", team: None, agent_def: "", member: "", input_mode: "",
+        }
+        .write(&home)
+        .unwrap();
+        let id = "sess_e58968b6-0000-4000-8000-000000000001";
+        let plant = |mode: &str| {
+            let dir = home.join("sessions").join("13c0722d7b097be1").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.json"), format!(r#"{{"id":"{id}","agentMode":"{mode}"}}"#)).unwrap();
+        };
+        let line = || relaunch_line(ws.to_str().unwrap(), "lead", Some(id)).unwrap();
+
+        // Recorded id, nothing in the home (the id lives only in ~/.kiro): fresh.
+        assert!(!line().contains("--resume"), "global-only id must not resume: {}", line());
+        assert!(line().contains("--agent lead"), "and it is still the full identity: {}", line());
+        // The home holds a session kiro made up when it could not find the
+        // real one: fresh.
+        plant("vibe");
+        assert!(!line().contains("--resume"), "a vibe session must not resume: {}", line());
+        // The agent's own session: resumes, with the isolated home first.
+        plant("lead");
+        let ok = line();
+        assert!(ok.starts_with("KIRO_HOME="), "isolated home first: {ok}");
+        assert!(ok.ends_with(&format!("--resume-id {id}")), "its own session resumes: {ok}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
 
     #[test]
     fn restart_spawn_resumes_but_a_new_hire_starts_fresh() {
