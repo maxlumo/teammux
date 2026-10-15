@@ -168,9 +168,47 @@ effect (which already replays the newest frame) calls `doResize({ assert:
 true })`, which sends `resizePane` even when fit equals dims. Symmetric for the
 drawer on the way back. Measured after: maximize with an unchanged target →
 144×53 (that session's metrics); back to the Hub → the drawer's 64×53. The
-equation above holds for whichever instance is on screen; the hidden one stays
-silent (its observer does not fire, and it never asserts). `Terminal.source.test.ts`
+equation above holds for whichever instance is on screen. `Terminal.source.test.ts`
 pins the signature, the assert branch and the call in the visible effect.
+
+### A hidden terminal never sizes the pane (2026-10-16, board #395)
+
+Owner: "还有一个bug就是terminal侧边栏经常没有刷新 我点放大到全屏可能会好". #198's
+last sentence assumed the hidden instance stays silent because "its observer
+does not fire". It does fire: `visibility: hidden` keeps the page's box in
+the layout, so the box follows every window resize, sidebar fold or drawer
+drag, and each change ran `doResize` and sent the HIDDEN box's size. Measured
+in a real browser (own gateway, Vite preview of main 0d8e56f4, Chromium,
+1280×800): the pane opened once in the Terminal tab, then shown in the Chat
+drawer (519 px box, tmux 64×47); narrowing the window to 1200 px made tmux
+114×46, the hidden page's box. The drawer's xterm took that size too and
+drew the left 512 px of a 912 px screen, so the right side and the bottom
+rows were outside its box: a right-aligned status line (what agent CLIs
+paint) was never seen to change, 1 of 5 one-second samples of the drawer's
+bottom rows distinct, while the pane ticked every second. Toggling the
+Terminal tab or "open in Terminal tab" put a box of that size on screen,
+which is why it looked like fullscreen fixed it. A gateway restart did the
+same through `onReconnected`, which re-sent every instance's size.
+
+The rule: **only the instance on screen sizes the pane.** `doResize` returns
+before measuring while `visible` is false (it still records the keyboard-free
+height), and `onReconnected` re-sends the size of a shown terminal only; its
+capture of a hidden one is recorded, not drawn. Coming back on screen asserts
+the current size (#198), which is the only moment a hidden instance's size
+matters. Same probe after the fix: tmux stays 64×47 while the hidden page's
+box changes, and the drawer's bottom rows changed in 5 of 5 samples.
+
+Two instances that are BOTH on screen (two split cells, or another client on
+the same pane) still share one tmux size; the last to size it wins. That is
+unchanged, and outside this rule. On the phone the Hub has no terminal drawer
+(compact opens the Terminal tab), so the case does not arise there; a hidden
+Terminal page is silent there too and asserts when shown.
+
+Pinned by `Terminal.shared.mount.test.ts` (one real connection, the page's
+and the drawer's Terminal on one pane, boxes and observers owned by the test:
+the hidden page's box change sends nothing, the visible drawer's sends its
+size, a reconnect re-sends the drawer's only, showing the page asserts its
+current box) and `Terminal.source.test.ts` (the three gates where they live).
 
 ## Implementation sketch
 

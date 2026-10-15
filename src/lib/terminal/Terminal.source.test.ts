@@ -534,6 +534,17 @@ test('a terminal that becomes visible re-asserts its pane size, even when its ow
     'the visible effect asserts before it replays the frame');
 });
 
+test('a hidden terminal neither sizes nor paints the pane it shares; its reconnect capture is recorded only (board #395)', () => {
+  // The behaviour is driven in Terminal.shared.mount.test.ts; here the three
+  // gates are pinned where they live, so a refactor cannot move one silently.
+  assert.match(source, /--kb-locked-h[^\n]*\n\s*\}\n\s*if \(!visible\) return;\n\s*const fit = calcFit\(\);/u,
+    'doResize returns before measuring a fit while hidden');
+  assert.match(source, /const onReconnected = [\s\S]*?if \(term && visible\) \{\s*\n\s*const fit = calcFit\(\);/u,
+    'a reconnect re-sends the size of a shown terminal only');
+  assert.match(source, /const onReconnected = [\s\S]*?lastContent = c;\s*\n\s*\/\/[^\n]*\n\s*if \(!visible\) return;\s*\n\s*if \(termAtBottom\) writeToXterm\(c, lastCursor\);/u,
+    'the reconnect capture is recorded, not drawn, while hidden');
+});
+
 // #365 (owner 2026-10-14: "Terminal 上方的 Tab 栏和 Chat 上方的 Tab 栏，样式需要做得
 // 更加一致一些"; orchestrator ruling: the Terminal adopts the Chat tab grammar).
 test('the window strip wears the ONE tab strip atom the Chat roster wears, and paints no tab of its own (#365)', async () => {

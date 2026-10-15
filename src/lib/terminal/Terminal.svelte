@@ -1364,6 +1364,18 @@
     // `assert`: send the size even when it equals ours — another instance of
     // this pane (the Hub drawer's / the page's) may have sized tmux to ITS box
     // while we were hidden and our box never changed (board #198).
+    //
+    // A HIDDEN terminal never sizes the pane (board #395). Its box keeps
+    // changing under `visibility: hidden` — the window narrows, the sidebar
+    // folds — and every change used to send ITS size for a pane another,
+    // visible instance is showing: tmux took the hidden page's 114 columns,
+    // the Hub drawer's 519 px box drew the left part of them, and the
+    // newest output (a right-aligned status line, the far end of a wrapped
+    // line) sat outside the box, so the drawer looked frozen until a resize
+    // or "open in Terminal tab" put a box of that size back on screen
+    // (owner: "terminal侧边栏经常没有刷新 我点放大到全屏可能会好"). The
+    // repaint-on-show effect asserts our size when we come back, which is
+    // the only moment it matters (terminal-sizing.md).
     function doResize({ assert = false } = {}) {
       syncCompactLineGeometry();
       // Remember the height the terminal has with NO keyboard. While the
@@ -1373,6 +1385,7 @@
       if (!document.documentElement.classList.contains('keyboard-open')) {
         termEl.style.setProperty('--kb-locked-h', `${termEl.clientHeight}px`);
       }
+      if (!visible) return;
       const fit = calcFit();
       if (!fit) return;
       if (fit.cols === term.cols && fit.rows === term.rows) {
@@ -1475,7 +1488,10 @@
       pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
       // Force doResize to actually send by invalidating the cur===fit check.
       // We do this by momentarily pretending term has different dims.
-      if (term) {
+      // Only while shown (board #395): a hidden instance re-sending its size
+      // here took the pane from the visible one after every gateway restart;
+      // it asserts its own size when it is shown again.
+      if (term && visible) {
         const fit = calcFit();
         if (fit) {
           queuePaneResize(fit.cols, fit.rows);
@@ -1492,6 +1508,8 @@
         const c = r.output || r.content;
         if (c && c !== lastContent) {
           lastContent = c;
+          // Hidden: recorded only; the repaint-on-show effect draws it.
+          if (!visible) return;
           if (termAtBottom) writeToXterm(c, lastCursor);
           else hasNewContent = true;
         }
