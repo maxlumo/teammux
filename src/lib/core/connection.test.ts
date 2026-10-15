@@ -1331,6 +1331,9 @@ for (const mode of ['encrypted', 'plain-token'] as const) {
       send(socket);
       socket.message(new FakeE2eServer('tok', 2, 'm', 'h').nonceFrame());   // the nonce arrives, too late to matter
       const error = await rejection(dialing);
+      // First, the dispatch itself: whatever else is wrong, no listener may have heard the frame.
+      assert.deepEqual(seen.pushes, [], `${why}: no push reached a listener`);
+      assert.deepEqual(seen.team, [], `${why}: no team message reached a listener`);
       assert.ok(error, `${why}: the login did not resolve`);
       assert.match(error.message, /not a valid server nonce/u, why);
       assert.equal(isAuthRefusal(error), false, why);
