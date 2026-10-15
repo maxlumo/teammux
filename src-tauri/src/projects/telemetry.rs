@@ -96,6 +96,10 @@ struct Rec {
     /// paint is seen on a turn that had already ended (an interrupt, say), the
     /// detail is put on that end and no second end is written. (0, "") = none.
     person_end: (u64, String),
+    /// `end_seq` of an end recorded from the screen (`record_missed_end`),
+    /// not reported by the CLI: never evidence that the model answered
+    /// (board #362 review P2-1). 0 = none.
+    missed_end_seq: u64,
     /// A nudge was DELIVERED in the current run of empty turns. A scheduled one
     /// that was cancelled does not count — the allowance is spent by the line
     /// typed, not by the timer set — and only a turn that ends with a real reply
@@ -644,6 +648,7 @@ fn replay_turn_facts(r: &mut Rec, facts: &super::store::TurnFacts) {
         // column (`record_missed_end`); a hook's own end has none.
         if f.text == "failed" && !f.tool.is_empty() {
             r.person_end = (r.end_seq, f.tool.clone());
+            r.missed_end_seq = r.end_seq;
         }
     }
 }
@@ -1497,6 +1502,36 @@ pub fn record_recovery(session: &str, window: &str, text: &str) {
     push_event(session, window, "warn", text.to_string());
 }
 
+/// The window's turn-fact VERSION: the arrival number of its newest turn
+/// fact of any kind (prompt, tool call, ask, end, interrupt), 0 before any.
+/// It moves exactly when a turn fact lands, so a screen read after asking it
+/// describes the turn at that version (board #362 review P1-A): an
+/// observation is only ever committed against the version it was taken at.
+/// Recovery first, like `turn_busy`.
+pub fn turn_version(session: &str, window: &str) -> u64 {
+    recovery_mark(session);
+    store().lock().unwrap().get(&(session.to_string(), window.to_string())).map_or(0, rec_version)
+}
+
+fn rec_version(r: &Rec) -> u64 {
+    r.prompt_seq.max(r.tool_seq).max(r.ask_seq).max(r.end_seq)
+}
+
+/// What `record_missed_end` did with one screen observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missed {
+    /// The open turn was ended: one `failed` row, the detail with it.
+    Ended,
+    /// The turn had already ended (a hook end, an interrupt): the detail went
+    /// on that end, in memory, and no row was written.
+    Attached,
+    /// A turn fact landed after the screen was read: the observation is about
+    /// an older turn and changes nothing (board #362 review P1-A).
+    Stale,
+    /// The window has no turn to end or describe.
+    NoTurn,
+}
+
 /// The turn end the HOOKS missed, recorded from the screen (board #362 c,
 /// orchestrator's ruling 2): `projects::recovery` saw the CLI's newest paint
 /// be an error only a person can clear, and the CLI reports no end for that
@@ -1508,36 +1543,53 @@ pub fn record_recovery(session: &str, window: &str, text: &str) {
 /// it, `replay_turn_facts`), the state idle with that detail, and the end
 /// edge's flush.
 ///
+/// The observation is BOUND to the turn it was taken in (board #362 review
+/// P1-A): `seen` is `turn_version` read before the screen was captured, and
+/// it is checked again here, inside the one turn-fact lock every prompt,
+/// tool call, ask, end and interrupt is recorded under, so nothing can land
+/// between the check and the write. Any newer fact makes the observation
+/// `Stale`: it never ends a newer turn, never puts its detail on a newer
+/// end, never flushes a newer turn's held lines. The capture itself runs
+/// with no lock held.
+///
 /// It carries NO reply: nothing is posted, nothing is returned as the
 /// agent's answer, and the requesters' edge simply closes at this end (the
 /// next turn's members start after it); they learn why from the status
-/// detail. A turn that had ALREADY ended (an interrupt, a hook end) gets the
-/// detail on that end and no second end row. The caller decides "once per
-/// paint" (`recovery`); this writes once per call. Returns whether a row was
-/// written.
-pub fn record_missed_end(session: &str, window: &str, detail: &str) -> bool {
+/// detail. Nor is it evidence that the model answered: `turn_fact_since`
+/// does not count it (review P2-1).
+///
+/// A turn that had ALREADY ended gets the detail on that end and no second
+/// end row (`Attached`). That detail lives in memory only (review P2-2, the
+/// contract): the end's own row is the hook's and stays as it was, so after
+/// a gateway restart the replay restores the end without it, and the next
+/// capture tick that still sees the paint as the newest attaches it again.
+/// The running state is a projection of the screen and the log (tenet 7);
+/// a paint the person has cleared meanwhile is simply not re-attached.
+pub fn record_missed_end(session: &str, window: &str, detail: &str, seen: u64, ts: u64) -> Missed {
     recovery_mark(session);
     let order = turn_order();
-    let recs = store().lock().unwrap();
-    let held = recs.get(&(session.to_string(), window.to_string()));
-    let open = held.is_some_and(|r| matches!(derive_from(r, 0, now()).state.as_str(), "running" | "waiting"));
-    let turn_had_prompt = held.is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
-    drop(recs);
-    if !open {
-        with_rec(session, window, |r| {
-            if r.end.is_some() {
-                r.person_end = (r.end_seq, detail.to_string());
-            }
-        });
-        return false;
+    let held = store().lock().unwrap().get(&(session.to_string(), window.to_string())).cloned();
+    let Some(held) = held else { return Missed::NoTurn };
+    if rec_version(&held) != seen {
+        return Missed::Stale;
     }
+    let open = matches!(derive_from(&held, 0, now()).state.as_str(), "running" | "waiting");
+    if !open {
+        if held.end.is_none() {
+            return Missed::NoTurn;
+        }
+        with_rec(session, window, |r| r.person_end = (r.end_seq, detail.to_string()));
+        return Missed::Attached;
+    }
+    let turn_had_prompt = held.prompt.is_some() && held.prompt_seq > held.end_seq;
     let event = ("notif", "failed".to_string(), detail.to_string(), String::new(), Vec::new());
     let detail = detail.to_string();
-    turn_fact_held(&order, session, window, now(), |_| false, Some(event), |r, ts, seq| {
+    turn_fact_held(&order, session, window, ts, |_| false, Some(event), |r, ts, seq| {
         r.end = Some(("failed".to_string(), ts));
         r.end_seq = seq;
         r.ask = None; // a finished turn cannot still be asking
         r.person_end = (seq, detail);
+        r.missed_end_seq = seq;
     }, None);
     // The end's effect on the window's command rows, as a hook end has it.
     end_commands(session, window, turn_had_prompt);
@@ -1545,7 +1597,7 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str) -> bool {
     // The end edge's flush (board #257), as a hook end does it: lines held
     // for this busy queue-mode agent are typed now.
     super::delivery::flush(session, window);
-    true
+    Missed::Ended
 }
 
 /// Did this window produce any turn fact (accepted prompt, turn end, tool
@@ -1558,7 +1610,10 @@ pub fn turn_fact_since(session: &str, window: &str, t: u64) -> bool {
     let map = store().lock().unwrap();
     map.get(&(session.to_string(), window.to_string())).is_some_and(|r| {
         r.prompt.is_some_and(|p| p >= t)
-            || r.end.as_ref().is_some_and(|(_, ts)| *ts >= t)
+            // An end WE recorded from the screen (`record_missed_end`) is our
+            // own bookkeeping, not the CLI answering: it never proves that a
+            // `continue` took effect (board #362 review P2-1).
+            || r.end.as_ref().is_some_and(|(_, ts)| *ts >= t) && r.end_seq != r.missed_end_seq
             || r.tool.as_ref().is_some_and(|(_, ts)| *ts >= t)
     })
 }
@@ -2974,7 +3029,7 @@ mod tests {
         let ends = || rows().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic G3 review");
         assert_eq!(derive(&session, "w1", 0).state, "running", "the hooks gave no end: running for hours, as measured");
-        assert!(record_missed_end(&session, "w1", "auth_expired"));
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Ended);
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         assert!(!turn_busy(&session, "w1"), "an end: nothing is held behind it");
@@ -2986,7 +3041,7 @@ mod tests {
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         // The turn has ended: the detail goes on that end, no second row.
-        assert!(!record_missed_end(&session, "w1", "recovery_exhausted"));
+        assert_eq!(record_missed_end(&session, "w1", "recovery_exhausted", turn_version(&session, "w1"), now()), Missed::Attached);
         assert_eq!(derive(&session, "w1", 0).detail, "recovery_exhausted");
         assert_eq!(ends().len(), 1, "no double end");
         // A later prompt supersedes it; so does that turn's own hook end.
@@ -2997,8 +3052,42 @@ mod tests {
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""));
         // A window with no turn at all gets nothing.
-        assert!(!record_missed_end(&session, "w2", "auth_expired"));
+        assert_eq!(record_missed_end(&session, "w2", "auth_expired", turn_version(&session, "w2"), now()), Missed::NoTurn);
         assert_eq!(derive(&session, "w2", 0).detail, "");
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #362 review P2-2, the contract of a detail put on a turn that had
+    /// ALREADY ended (an interrupt, a real hook end): it is written to memory
+    /// only, and the end's own row stays the hook's. So a restart replays the
+    /// end WITHOUT it, and no second end exists; the next capture tick that
+    /// still sees the paint attaches it again (tested here as the same
+    /// commit at the replayed version), still with no row.
+    #[test]
+    fn a_detail_on_an_ended_turn_is_memory_and_is_attached_again_after_a_restart() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        for (what, end) in [
+            ("an interrupt", &(|s: &str| record_interrupt(s, "w1")) as &dyn Fn(&str)),
+            ("a hook end", &|s: &str| record_notification_with(s, "w1", "completed", now(), EndQuality::Said)),
+        ] {
+            let session = format!("attached-{}", uuid::Uuid::new_v4());
+            let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
+            record_prompt(&session, "w1", "[tmm chat 2026-10-15 09:36] architect: @reviewer go");
+            end(&session);
+            let hook_end = ends();
+            assert_eq!(hook_end.len(), 1, "{what}");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Attached, "{what}");
+            assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
+            assert_eq!(ends(), hook_end, "{what}: the end's row is the hook's, unchanged; no second end");
+            simulate_restart(&session);
+            recovery_mark(&session);
+            let st = derive(&session, "w1", 0);
+            assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""), "{what}: memory only, by contract");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Attached, "{what}: the next tick");
+            assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
+            assert_eq!(ends(), hook_end, "{what}: still one end");
+        }
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
 

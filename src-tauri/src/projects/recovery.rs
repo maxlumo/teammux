@@ -418,15 +418,18 @@ impl Tracker {
     }
 
     /// Is `sig` a paint whose missed end has NOT been recorded for this
-    /// window yet? Marks it recorded (board #362 c, condition b: once per
-    /// signature; the same paint on every later tick writes nothing).
-    pub fn person_once(&mut self, session: &str, window: &str, sig: &str) -> bool {
-        let key = (session.to_string(), window.to_string());
-        if self.person.get(&key).is_some_and(|s| s == sig) {
-            return false;
-        }
-        self.person.insert(key, sig.to_string());
-        true
+    /// window yet (board #362 c, condition b: once per signature)? Asking
+    /// marks nothing: the mark is committed by `person_accept`, only once the
+    /// observation was accepted (review P1-A), so one rejected as stale, or
+    /// one with no turn to end, is looked at again on the next tick.
+    pub fn person_new(&self, session: &str, window: &str, sig: &str) -> bool {
+        self.person.get(&(session.to_string(), window.to_string())).is_none_or(|s| s != sig)
+    }
+
+    /// The paint `sig`'s missed end was recorded: later ticks that see the
+    /// same paint write nothing.
+    pub fn person_accept(&mut self, session: &str, window: &str, sig: &str) {
+        self.person.insert((session.to_string(), window.to_string()), sig.to_string());
     }
 
     /// Housekeeping: drop records for windows that no longer exist.
@@ -449,6 +452,26 @@ fn tracker() -> &'static Mutex<Tracker> {
 /// see `Tracker::confirm` for the repeat-send that erasing caused).
 pub fn note_answered(session: &str, window: &str) {
     tracker().lock().unwrap().confirm(session, window);
+}
+
+/// Record the turn end the hooks missed for one screen observation (board
+/// #362 c): `sig` names the paint, `detail` what the person must do, and
+/// `seen` the turn-fact version read BEFORE the screen was captured. The
+/// once mark is committed only when telemetry accepted the observation
+/// (ended the open turn, or put the detail on the turn's own end): a stale
+/// observation, one a newer prompt, tool call, end or interrupt overtook,
+/// changes nothing and spends nothing (review P1-A). True when accepted.
+fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64, ts: u64) -> bool {
+    if !tracker().lock().unwrap().person_new(session, window, sig) {
+        return false;
+    }
+    match super::telemetry::record_missed_end(session, window, detail, seen, ts) {
+        super::telemetry::Missed::Ended | super::telemetry::Missed::Attached => {
+            tracker().lock().unwrap().person_accept(session, window, sig);
+            true
+        }
+        super::telemetry::Missed::Stale | super::telemetry::Missed::NoTurn => false,
+    }
 }
 
 fn now_secs() -> u64 {
@@ -488,6 +511,10 @@ pub fn check_once() {
             }
             let backend = agent.backend;
             let target = format!("{}:{}.{}", project.session, p.window, p.pane);
+            // The turn this screen is about: read BEFORE the capture, so a
+            // fact that lands while it runs makes the observation stale
+            // (board #362 review P1-A). No lock is held across the capture.
+            let seen = super::telemetry::turn_version(&project.session, &p.window_name);
             let Ok(tail) = crate::tmux::capture_pane_plain(&target, Some(0)) else { continue };
             // An error only a person can clear, as the NEWEST paint (board
             // #362 c): its turn end is recorded once, the hooks having missed
@@ -495,9 +522,7 @@ pub fn check_once() {
             // error still painted above it types nothing either.
             if let Some((shape, block)) = crate::backends::Backend::parse(backend).and_then(|b| b.person_paint(&tail)) {
                 let sig = format!("{shape}|{}", extract_request_id(&block).unwrap_or_else(|| crate::backends::canonical(&block)));
-                if tracker().lock().unwrap().person_once(&project.session, &p.window_name, &sig) {
-                    super::telemetry::record_missed_end(&project.session, &p.window_name, shape);
-                }
+                commit_person(&project.session, &p.window_name, &sig, shape, seen, now_secs());
                 continue;
             }
             // The screen may open MID-BLOCK: a tall error paint plus the
@@ -531,10 +556,8 @@ pub fn check_once() {
             // Recovery stopped for this incident (capped or given up): the
             // agent needs a person, and the turn end the hooks never sent is
             // recorded once for the incident (board #362 c).
-            if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. })
-                && tracker().lock().unwrap().person_once(&project.session, &p.window_name, &format!("{EXHAUSTED}|{sig}"))
-            {
-                super::telemetry::record_missed_end(&project.session, &p.window_name, EXHAUSTED);
+            if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. }) {
+                commit_person(&project.session, &p.window_name, &format!("{EXHAUSTED}|{sig}"), EXHAUSTED, seen, now_secs());
             }
             match decision {
                 Decision::Send { attempt } => {
@@ -1731,12 +1754,88 @@ mod tests {
     #[test]
     fn a_person_needed_paint_is_recorded_once_per_signature() {
         let mut t = Tracker::default();
-        assert!(t.person_once("s", "w", "auth_expired|a"));
-        assert!(!t.person_once("s", "w", "auth_expired|a"), "the same paint on the next tick");
-        assert!(t.person_once("s", "v", "auth_expired|a"), "another window");
-        assert!(t.person_once("s", "w", "auth_expired|b"), "a new paint (a new request id)");
+        assert!(t.person_new("s", "w", "auth_expired|a"));
+        assert!(t.person_new("s", "w", "auth_expired|a"), "asking marks nothing");
+        t.person_accept("s", "w", "auth_expired|a");
+        assert!(!t.person_new("s", "w", "auth_expired|a"), "the same paint on the next tick");
+        assert!(t.person_new("s", "v", "auth_expired|a"), "another window");
+        assert!(t.person_new("s", "w", "auth_expired|b"), "a new paint (a new request id)");
+        t.person_accept("s", "w", "auth_expired|b");
         t.retain_windows("s", &["v".to_string()]);
-        assert!(t.person_once("s", "w", "auth_expired|b"), "a window that went away took its record");
+        assert!(t.person_new("s", "w", "auth_expired|b"), "a window that went away took its record");
+    }
+
+    /// Board #362 review P1-A, the two barriers, through the commit path the
+    /// capture tick takes: the screen is read at a version, then a turn fact
+    /// lands, then the observation is committed. A newer prompt, tool call,
+    /// ask, hook end or interrupt makes it stale: the newer turn keeps its
+    /// state and its end keeps its own detail, nothing is written or
+    /// flushed, a held queue-mode line stays held, and the once mark is not
+    /// spent (the next tick looks again, at the new version). Without a
+    /// barrier the same observation is accepted.
+    #[test]
+    fn an_observation_overtaken_by_a_newer_turn_fact_changes_nothing() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let barriers: [(&str, &dyn Fn(&str)); 5] = [
+            ("a new prompt", &|s| { tm::record_prompt(s, "w", "[tmm chat 2026-10-16 00:10] human: @w next"); }),
+            ("a tool call", &|s| tm::record_tool(s, "w", "Bash", "npm test")),
+            ("an ask", &|s| tm::record_notification(s, "w", "permission_required", now_secs())),
+            ("a real hook end", &|s| tm::record_notification_with(s, "w", "completed", now_secs(), crate::backends::EndQuality::Said)),
+            ("an interrupt", &|s| tm::record_interrupt(s, "w")),
+        ];
+        for (what, barrier) in barriers {
+            let session = format!("p1a-{}", uuid::Uuid::new_v4());
+            tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:09] maker: @w go");
+            tm::record_held(&session, "w", "[tmm chat 2026-10-16 00:09] human: @w held", 0, "m1").unwrap();
+            let seen = tm::turn_version(&session, "w");
+            barrier(&session);
+            let before = tm::derive(&session, "w", 0);
+            let rows = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif").count();
+            let ends = rows();
+            assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()), "{what}: stale");
+            let after = tm::derive(&session, "w", 0);
+            assert_eq!((after.state.as_str(), after.detail.as_str()), (before.state.as_str(), before.detail.as_str()), "{what}: the newer turn is untouched");
+            assert_ne!(after.detail, "auth_expired", "{what}");
+            assert_eq!(rows(), ends, "{what}: no end written");
+            assert_eq!(tm::held_rows(&session, "w").len(), 1, "{what}: the held line is not flushed by a stale observation");
+            assert!(tracker().lock().unwrap().person_new(&session, "w", "auth_expired|x"), "{what}: the once mark is not spent");
+            tracker().lock().unwrap().retain_windows(&session, &[]);
+        }
+        // Control: the same observation with no fact after it is accepted.
+        let session = format!("p1a-ok-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:09] maker: @w go");
+        let seen = tm::turn_version(&session, "w");
+        assert!(commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()));
+        assert_eq!(tm::derive(&session, "w", 0).detail, "auth_expired");
+        assert!(!tracker().lock().unwrap().person_new(&session, "w", "auth_expired|x"), "accepted: spent");
+        assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// Board #362 review P2-1: an end recorded from the screen is our own
+    /// bookkeeping, never proof that a `continue` took effect. Four unverified
+    /// sends give up, the missed end is recorded (recovery_exhausted), and the
+    /// next tick still gives up, it does not report "took effect". A real
+    /// hook end afterwards is evidence again.
+    #[test]
+    fn a_missed_end_is_not_evidence_that_a_continue_took_effect() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let session = format!("p21-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:09] maker: @w go");
+        let t0 = now_secs();
+        let mut t = Tracker::default();
+        let verified = |at: u64| tm::turn_fact_since(&session, "w", at);
+        for (n, at) in [(1, t0 + 10), (2, t0 + 40), (3, t0 + 100), (4, t0 + 220)] {
+            assert_eq!(t.decide(&session, "w", at, "1|a", verified), Decision::Send { attempt: n });
+        }
+        assert_eq!(t.decide(&session, "w", t0 + 300, "1|a", verified), Decision::GiveUp { first: true });
+        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
+        assert_eq!(t.decide(&session, "w", t0 + 320, "1|a", verified), Decision::GiveUp { first: false }, "our own end proves nothing");
+        tm::record_notification_with(&session, "w", "completed", t0 + 330, crate::backends::EndQuality::Said);
+        assert_eq!(t.decide(&session, "w", t0 + 340, "1|a", verified), Decision::Confirmed { first: true }, "the CLI's own end is evidence");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
     }
 
     /// Board #362 (orchestrator's ruling on the validator's P3): a REAL reply
