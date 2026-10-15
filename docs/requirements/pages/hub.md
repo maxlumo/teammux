@@ -189,7 +189,8 @@ completion).
   running, and its prompt follows at its next start; the room records
   `moved` / `left`, and the agent and both teams are told. On a server too
   old for it the drag carries nothing and the items are disabled with
-  "Update the server…". A refusal is shown in the composer's feedback slot. Only the part of a group the strip shows is a
+  "update the server", shown on the item itself. A refusal is shown in the
+  composer's feedback slot. Only the part of a group the strip shows is a
   drop target; scrolling the strip while carrying cancels the drag (expand
   the strip, or use the menu, to reach a team out of view).
   Every row of that picker is three columns (board #341, owner's screenshot:

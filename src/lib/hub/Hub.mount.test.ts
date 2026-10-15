@@ -2612,6 +2612,7 @@ test('on a server without agent_team the Move items are disabled and say why, a 
     for (const item of items) {
       assert.equal(item.disabled || item.getAttribute('aria-disabled') === 'true', true, 'disabled');
       assert.match(item.getAttribute('title') ?? '', /Update the server to move an agent between teams/u);
+      assert.equal(item.querySelector('.ctx-hint')?.textContent, 'update the server', 'the reason is on the item, not only in a tooltip');
     }
     items[0]!.click();
     for (let i = 0; i < 4; i++) await app.flush();
@@ -2642,6 +2643,31 @@ test('a card dragged onto a team moves it; a definition member\'s drop says wher
       /lead is in team squad by its definition\. Change it in Agents > Teams\./u);
     await drag('solo', 450, 100);
     assert.deepEqual(moves, [['fixture', 'solo', 'squad']], 'the drop lands in the menu\'s one verb');
+  } finally { await app.close(); }
+});
+
+test('on a phone the disabled Move items say why on the item itself: a touch screen has no tooltip (#384, validator F1)', { timeout: 60000 }, async (context) => {
+  const { rpc } = roomFixture();
+  const roster = [
+    { name: 'lead', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad', joined: false },
+    { name: 'solo', window: 2, managed: true, agent: 'codex', state: 'idle', team: null },
+  ];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true, mobile: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      const media = window.matchMedia.bind(window);
+      window.matchMedia = (query: string) => Object.assign(media(query), { matches: query === '(max-width: 760px)' || query === '(any-pointer: coarse)' || query === '(pointer: coarse)' });
+    },
+    modules: [{ ...rpc, getCaps: () => ['board_dispatch', 'spawn_join'], hubAgents: async () => ({ agents: roster }), hubAgentSetTeam: async () => { throw new Error('must not be sent'); } }],
+  });
+  try {
+    for (let i = 0; i < 20 && !stripCard(app.document, 'solo'); i++) await app.flush();
+    const items = (await cardMenu(app, 'solo')).filter((b) => /Move to team/u.test(b.textContent ?? ''));
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.disabled, true);
+    assert.equal(items[0]!.querySelector('.ctx-hint')?.textContent, 'update the server', 'a visible reason');
   } finally { await app.close(); }
 });
 

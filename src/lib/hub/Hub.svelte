@@ -2006,18 +2006,20 @@
   /** "Move to team t" per other running team and, for a JOINED agent,
    * "Leave team t" (board #384): the drag's form for touch and keyboard, flat
    * items in the one menu. None for a member its team's definition places.
-   * On a server without `agent_team` they are shown disabled, with why. */
+   * On a server without `agent_team` they are shown disabled, with why: a
+   * VISIBLE hint on the item ("update the server"; a phone has no hover,
+   * validator F1) and the full sentence as its title on a pointer. */
   function moveItems(a, session) {
     if (!a) return [];
     const from = teamRoot(a.team);
     if (from && !a.joined) return [];
-    const hint = moveBlocked ? t('hubMoveOldServer') : undefined;
+    const why = moveBlocked ? { hint: t('hubMoveOldServerShort'), title: t('hubMoveOldServer') } : {};
     return [
       ...runningTeams.filter((team) => team !== from).map((team) => ({
-        label: t('hubMoveToTeam').replace('{name}', team), icon: 'bots', disabled: moveBlocked, title: hint,
+        label: t('hubMoveToTeam').replace('{name}', team), icon: 'bots', disabled: moveBlocked, ...why,
         onselect: () => moveAgent(a.name, team, session),
       })),
-      ...(from ? [{ label: t('hubLeaveTeam').replace('{name}', from), icon: 'bots', disabled: moveBlocked, title: hint,
+      ...(from ? [{ label: t('hubLeaveTeam').replace('{name}', from), icon: 'bots', disabled: moveBlocked, ...why,
         onselect: () => moveAgent(a.name, '', session) }] : []),
     ];
   }
