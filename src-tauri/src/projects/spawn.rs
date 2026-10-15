@@ -601,10 +601,10 @@ impl LaunchRecipe<'_> {
 /// Add the backend's exact or safe-recent resume dialect to one persisted
 /// identity command (the dialects live on the backend files, board #128).
 /// An unknown backend relaunches verbatim, as before.
-fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Option<&Path>) -> String {
+fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Option<&Path>, agent: &str) -> String {
     let exact = session_id.filter(|s| !s.is_empty());
     match crate::backends::Backend::parse(backend) {
-        Some(b) => b.resume_command(cmd, exact, home),
+        Some(b) => b.resume_command(cmd, exact, home, agent),
         None => cmd.to_string(),
     }
 }
@@ -616,7 +616,7 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
     let recipe: Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).ok()?).ok()?;
     let cmd = recipe.get("cmd")?.as_str()?;
     let backend = recipe.get("backend").and_then(|b| b.as_str()).unwrap_or("");
-    let cmd = resume_command(cmd, backend, session_id, Some(&home));
+    let cmd = resume_command(cmd, backend, session_id, Some(&home), window_name);
     let env = recipe.get("env").and_then(|e| e.as_array()).map(|arr| {
         arr.iter()
             .filter_map(|kv| Some((kv.get(0)?.as_str()?, kv.get(1)?.as_str()?)))
@@ -667,7 +667,7 @@ fn first_prompt(brief: &str, by: &str) -> Option<String> {
 fn launch_command(identity_cmd: &str, backend: &str, brief: &str, by: &str, resume: bool) -> String {
     let identity_cmd = if resume {
         // No recorded id here, so there is nothing for a home to vouch for.
-        resume_command(identity_cmd, backend, None, None)
+        resume_command(identity_cmd, backend, None, None, "")
     } else {
         identity_cmd.to_string()
     };
@@ -724,6 +724,83 @@ mod relaunch_tests {
         assert!(ok.starts_with("KIRO_HOME="), "isolated home first: {ok}");
         assert!(ok.ends_with(&format!("--resume-id {id}")), "its own session resumes: {ok}");
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Render a managed kiro agent named `window_name` through the REAL
+    /// `render_kiro` (so `--agent` goes through `shell::quote` exactly as in
+    /// production), persist its recipe, and plant a session of the given mode
+    /// in its isolated home. Returns the workspace and the id.
+    fn v3_agent_with_session(window_name: &str, def_name: &str, mode: &str) -> (std::path::PathBuf, String) {
+        let ws = std::env::temp_dir().join(format!("tmm-relaunch-379-{}", uuid::Uuid::new_v4()));
+        let home = agent_home(ws.to_str().unwrap(), window_name);
+        std::fs::create_dir_all(&home).unwrap();
+        // Central-asset resolution touches the process-global store: never the
+        // user's real state.db (the same guard `tests::def` takes).
+        super::super::tests::use_test_store();
+        let d = RegAgent {
+            name: def_name.into(),
+            backend: "kiro".into(),
+            model: String::new(),
+            effort: String::new(),
+            input_mode: "queue".into(),
+            system: "Persona text.".into(),
+            skills: "[]".into(),
+            mcp: "[]".into(),
+        };
+        let r = render_kiro(&d, window_name, &home, &ws, "p", &[]).unwrap();
+        // The same step spawn runs next: the v3 engine on the recorded line.
+        let cmd = crate::backends::kiro::reconcile_engine_in(&r.cmd, " --agent-engine v3").unwrap_or(r.cmd.clone());
+        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &cmd, spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }
+            .write(&home)
+            .unwrap();
+        let id = "sess_e58968b6-0000-4000-8000-000000000001".to_string();
+        let dir = home.join("sessions").join("13c0722d7b097be1").join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session.json"), format!(r#"{{"id":"{id}","agentMode":"{mode}"}}"#)).unwrap();
+        (ws, id)
+    }
+
+    /// Board #379 review P1 (reviewer, 10:37). `render_kiro` writes
+    /// `--agent` through `shell::quote`, which wraps a valid non-ASCII name
+    /// (`翻译` → `'翻译'`). The first cut compared that raw token with the
+    /// `agentMode` kiro stored, so every restart of such an agent started
+    /// fresh and threw away a good conversation. The fixture goes through the
+    /// real renderer and asserts the line IS quoted — a fixture that never
+    /// quoted would pass against the bug too — and the session must still
+    /// resume, because the name is the caller's, not parsed out of the line.
+    #[test]
+    fn a_restart_resumes_a_quoted_non_ascii_agent_name() {
+        let (ws, id) = v3_agent_with_session("翻译", "翻译", "翻译");
+        let line = relaunch_line(ws.to_str().unwrap(), "翻译", Some(&id)).unwrap();
+        assert!(line.contains("--agent '翻译'"), "the fixture really is quoted: {line}");
+        assert!(line.ends_with(&format!("--resume-id {id}")), "its own session resumes despite the quotes: {line}");
+        // And a vibe session under the same quoted name is still the incident.
+        let (ws2, id2) = v3_agent_with_session("翻译", "翻译", "vibe");
+        let vibe = relaunch_line(ws2.to_str().unwrap(), "翻译", Some(&id2)).unwrap();
+        assert!(vibe.contains("--agent '翻译'") && !vibe.contains("--resume"), "vibe stays fresh: {vibe}");
+        std::fs::remove_dir_all(&ws).ok();
+        std::fs::remove_dir_all(&ws2).ok();
+    }
+
+    /// Board #379, reviewer's precision (10:37): the name compared is the slot's
+    /// final WINDOW name — `builder-2` — not the registry def's `builder`.
+    /// A team member (or a second hire from the same def) runs `--agent
+    /// builder-2`, and kiro stores that as `agentMode`; comparing against the
+    /// def name would never match, and a session of the BASE agent sitting in
+    /// the same home must not be resumed by its uniquified sibling either.
+    #[test]
+    fn the_name_compared_is_the_window_name_not_the_registry_def_name() {
+        let (ws, id) = v3_agent_with_session("builder-2", "builder", "builder-2");
+        let line = relaunch_line(ws.to_str().unwrap(), "builder-2", Some(&id)).unwrap();
+        assert!(line.contains("--agent builder-2"), "the window name is what --agent carries: {line}");
+        assert!(line.ends_with(&format!("--resume-id {id}")), "agentMode builder-2 resumes as builder-2: {line}");
+        // A session whose mode is the BASE def's name belongs to `builder`, not
+        // to this window: fresh, even though the registry def is `builder`.
+        let (ws2, id2) = v3_agent_with_session("builder-2", "builder", "builder");
+        let other = relaunch_line(ws2.to_str().unwrap(), "builder-2", Some(&id2)).unwrap();
+        assert!(!other.contains("--resume"), "a session of the def name is not this window's: {other}");
+        std::fs::remove_dir_all(&ws).ok();
+        std::fs::remove_dir_all(&ws2).ok();
     }
 
     #[test]

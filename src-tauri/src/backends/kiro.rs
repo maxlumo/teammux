@@ -1020,13 +1020,21 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
 /// it; v2 given a v3 id (the rollback case) falls back to `--resume`, which is
 /// the pre-switch v2 thread of this home.
 ///
-/// `home` is the agent's isolated home (`<ws>/.tmm/agents/<name>`); `None` —
-/// a caller with no home to check against — cannot verify, so it starts fresh.
-pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::path::Path>) -> String {
+/// `agent` is the managed window's own name and `home` its isolated home
+/// (`<ws>/.tmm/agents/<agent>`): the identity the caller already holds. It is
+/// NOT read back out of the launch line. `render_kiro` writes `--agent` through
+/// `shell::quote`, which wraps any valid non-ASCII name (`翻译` → `'翻译'`), so
+/// the raw token never equals the `agentMode` kiro stored — every restart of
+/// such an agent compared a quoted string with a plain one and started fresh,
+/// losing a perfectly good conversation (board #379 review P1). The name is the
+/// slot's final WINDOW name, the one `--agent` was rendered from — `builder-2`,
+/// not the registry def's `builder`. Without a home or a name there is nothing
+/// to vouch for the id, so it starts fresh.
+pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::path::Path>, agent: &str) -> String {
     let v3_id = id.is_some_and(|i| i.starts_with(V3_SESSION_PREFIX));
     if launch_engine_is_v3(cmd) {
-        let resumable = match (id, home, launch_agent(cmd)) {
-            (Some(id), Some(home), Some(agent)) if v3_id => v3_session_resumable(home, agent, id),
+        let resumable = match (id, home) {
+            (Some(id), Some(home)) if v3_id => v3_session_resumable(home, agent, id),
             _ => false,
         };
         return match id {
@@ -1038,13 +1046,6 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
         Some(id) if !v3_id => format!("{cmd} --resume-id {}", crate::shell::quote(id)),
         _ => format!("{cmd} --resume"),
     }
-}
-
-/// The agent a launch line runs: the token after `--agent`. kiro records it
-/// as the session's `agentMode`, which is what makes the two comparable.
-fn launch_agent(cmd: &str) -> Option<&str> {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    tokens.windows(2).find(|w| w[0] == "--agent").map(|w| w[1]).filter(|a| !a.is_empty())
 }
 
 /// Whether `<home>/sessions/<cwd-hash>/<id>/session.json` exists and says the
@@ -1641,23 +1642,23 @@ mod tests {
     #[test]
     fn resume_dialect_follows_the_engine_on_the_launch_line() {
         let v2 = "command kiro-cli chat --agent dev --trust-all-tools";
-        assert_eq!(resume_command(v2, Some("0d1b8e2a-1111"), None), format!("{v2} --resume-id 0d1b8e2a-1111"));
-        assert_eq!(resume_command(v2, Some("sess_abc"), None), format!("{v2} --resume"), "a v3 id never reaches the v2 engine: its own recent thread");
-        assert_eq!(resume_command(v2, None, None), format!("{v2} --resume"));
+        assert_eq!(resume_command(v2, Some("0d1b8e2a-1111"), None, "dev"), format!("{v2} --resume-id 0d1b8e2a-1111"));
+        assert_eq!(resume_command(v2, Some("sess_abc"), None, "dev"), format!("{v2} --resume"), "a v3 id never reaches the v2 engine: its own recent thread");
+        assert_eq!(resume_command(v2, None, None, "dev"), format!("{v2} --resume"));
 
         let v3 = format!("{v2} --agent-engine v3");
         // An exact v3 id used to resume on its own. It resumes only when the
         // agent's OWN home holds it (board #379, `v3_session_resumable`, tested
         // below with real fixture homes); with no home to check, or nothing in
         // it, the answer is fresh.
-        assert_eq!(resume_command(&v3, Some("sess_abc"), None), v3, "no home to vouch for the id: fresh");
-        assert_eq!(resume_command(&v3, Some("0d1b8e2a-1111"), None), v3, "a v2 id never reaches the v3 engine: fresh");
-        assert_eq!(resume_command(&v3, None, None), v3, "no --resume under v3: the store is per directory, not per agent");
+        assert_eq!(resume_command(&v3, Some("sess_abc"), None, "dev"), v3, "no home to vouch for the id: fresh");
+        assert_eq!(resume_command(&v3, Some("0d1b8e2a-1111"), None, "dev"), v3, "a v2 id never reaches the v3 engine: fresh");
+        assert_eq!(resume_command(&v3, None, None, "dev"), v3, "no --resume under v3: the store is per directory, not per agent");
         assert!(launch_engine_is_v3("kiro-cli chat --v3"));
         assert!(!launch_engine_is_v3("kiro-cli chat --agent-engine v2"));
         // Flipping the door back (reconcile drops the segment) restores the v2 dialect untouched.
         let back = reconcile_engine_in(&v3, "").unwrap();
-        assert_eq!(resume_command(&back, Some("0d1b8e2a-1111"), None), format!("{v2} --resume-id 0d1b8e2a-1111"));
+        assert_eq!(resume_command(&back, Some("0d1b8e2a-1111"), None, "dev"), format!("{v2} --resume-id 0d1b8e2a-1111"));
     }
 
     /// Board #379 (owner, 2026-10-15, learn-english and laminar-log: "agent 的
@@ -1688,60 +1689,62 @@ mod tests {
         // The session is in the agent's own home and is this agent's: resumes.
         let own = root.join("own");
         session(&own, "13c0722d7b097be1", id, &mode("dev"));
-        assert_eq!(resume_command(v3, Some(id), Some(&own)), resume, "the agent's own session resumes");
+        assert_eq!(resume_command(v3, Some(id), Some(&own), "dev"), resume, "the agent's own session resumes");
 
         // The id lives ONLY in the global store (what the slots recorded): the
         // agent's home holds nothing, so FRESH. This is the incident.
         let empty = root.join("empty");
         std::fs::create_dir_all(empty.join("sessions")).unwrap();
-        assert_eq!(resume_command(v3, Some(id), Some(&empty)), v3, "global-only copy: fresh, never ~/.kiro");
+        assert_eq!(resume_command(v3, Some(id), Some(&empty), "dev"), v3, "global-only copy: fresh, never ~/.kiro");
 
         // The home holds the id but kiro made the session up (`vibe`, the
         // Default agent): every later restart would resume it and stay
         // hookless for good. FRESH.
         let vibe = root.join("vibe");
         session(&vibe, "13c0722d7b097be1", id, &mode("vibe"));
-        assert_eq!(resume_command(v3, Some(id), Some(&vibe)), v3, "a vibe session is the incident, not a conversation");
+        assert_eq!(resume_command(v3, Some(id), Some(&vibe), "dev"), v3, "a vibe session is the incident, not a conversation");
 
         // Another agent's session under the same id is not this agent's.
         let other = root.join("other");
         session(&other, "13c0722d7b097be1", id, &mode("reviewer"));
-        assert_eq!(resume_command(v3, Some(id), Some(&other)), v3, "agentMode must equal the launch line's --agent");
+        assert_eq!(resume_command(v3, Some(id), Some(&other), "dev"), v3, "agentMode must equal the agent's window name");
 
         // Anything unreadable is "cannot vouch for it": fresh. A fresh agent
         // with hooks beats a resumed one without.
         let bad = root.join("bad");
         session(&bad, "13c0722d7b097be1", id, "{ this is not json");
-        assert_eq!(resume_command(v3, Some(id), Some(&bad)), v3, "malformed session.json");
+        assert_eq!(resume_command(v3, Some(id), Some(&bad), "dev"), v3, "malformed session.json");
         let noagent = root.join("noagent");
         session(&noagent, "13c0722d7b097be1", id, r#"{"id":"x"}"#);
-        assert_eq!(resume_command(v3, Some(id), Some(&noagent)), v3, "no agentMode at all");
+        assert_eq!(resume_command(v3, Some(id), Some(&noagent), "dev"), v3, "no agentMode at all");
         let notdir = root.join("notdir");
         std::fs::write(&notdir, "a file where the home should be").unwrap();
-        assert_eq!(resume_command(v3, Some(id), Some(&notdir)), v3, "an unreadable store");
-        assert_eq!(resume_command(v3, Some(id), None), v3, "no home to check against");
+        assert_eq!(resume_command(v3, Some(id), Some(&notdir), "dev"), v3, "an unreadable store");
+        assert_eq!(resume_command(v3, Some(id), None, "dev"), v3, "no home to check against");
 
         // The id is found under whichever cwd-hash bucket holds it, and a
         // bucket that does not is skipped rather than ending the search.
         let many = root.join("many");
         std::fs::create_dir_all(many.join("sessions").join("aaaa")).unwrap();
         session(&many, "zzzz", id, &mode("dev"));
-        assert_eq!(resume_command(v3, Some(id), Some(&many)), resume, "found in a later bucket");
+        assert_eq!(resume_command(v3, Some(id), Some(&many), "dev"), resume, "found in a later bucket");
 
         // An id that is not an id never becomes a path (the #376 guard, shared).
         for evil in ["../x", "a/b", ".hidden", ""] {
             assert!(!v3_session_resumable(&own, "dev", evil), "{evil:?}");
         }
-        // A launch line without --agent has nothing to compare against.
+        // The name comes from the CALLER, not from the launch line: an empty
+        // name vouches for nothing, and the line's own `--agent` is never read.
+        assert_eq!(resume_command(v3, Some(id), Some(&own), ""), v3, "no agent name: fresh");
         assert_eq!(
-            resume_command("command kiro-cli chat --agent-engine v3", Some(id), Some(&own)),
-            "command kiro-cli chat --agent-engine v3",
-            "no --agent on the line: cannot compare, so fresh"
+            resume_command("command kiro-cli chat --agent-engine v3", Some(id), Some(&own), "dev"),
+            "command kiro-cli chat --agent-engine v3 --resume-id sess_e58968b6-0000-4000-8000-000000000001",
+            "a line with no --agent still resumes: the name is not parsed from it"
         );
         // And v2 is untouched by all of this: its store is per-home and its
         // ids are not `sess_…`.
         let v2 = "command kiro-cli chat --agent dev --trust-all-tools";
-        assert_eq!(resume_command(v2, Some("0d1b8e2a-1111"), Some(&vibe)), format!("{v2} --resume-id 0d1b8e2a-1111"));
+        assert_eq!(resume_command(v2, Some("0d1b8e2a-1111"), Some(&vibe), "dev"), format!("{v2} --resume-id 0d1b8e2a-1111"));
     }
 
     /// Board #207: the exact 3.0 hooks we write — no `matcher` anywhere (the

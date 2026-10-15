@@ -404,14 +404,21 @@ was touched.
   why solo agents worked and restarted team members did not. So
   `kiro::v3_session_resumable` hands `--resume-id` only when
   `<home>/sessions/*/<id>/session.json` exists and its `agentMode` equals the
-  launch line's `--agent` name; a missing session, a global-only copy, a `vibe`
-  session, another agent's session, malformed or unreadable files, and a launch
-  line with no `--agent` all start FRESH — a fresh agent with its hooks beats a
+  agent's WINDOW name (the one `--agent` was rendered from — `builder-2`, not the
+  registry def's `builder`; passed in by `relaunch_line`, never parsed back out
+  of the rendered line, because `shell::quote` wraps a valid non-ASCII name as
+  `'翻译'` and the raw token then never equals the stored `agentMode`: reviewer's
+  P1, confirmed live by the validator on 15d1e0aa — every restart of such an agent
+  started fresh and lost its conversation); a missing session, a global-only copy, a `vibe`
+  session, another agent's session, malformed or unreadable files, and an
+  empty agent name all start FRESH — a fresh agent with its hooks beats a
   resumed one without. Never a fallback to `~/.kiro` (kiro-cli under `KIRO_HOME`
   cannot load it anyway), and nothing clears the slot's recorded id: it is
   re-judged on every restart and the next Stop hook overwrites it. Pinned by
   `a_v3_id_resumes_only_when_the_agents_own_home_holds_it` and, through the real
-  restart path, `a_restart_resumes_a_v3_session_only_if_the_agents_own_home_holds_it`.
+  restart path, `a_restart_resumes_a_v3_session_only_if_the_agents_own_home_holds_it`, with the quoted-name and
+  window-name-differs-from-def cases (`a_restart_resumes_a_quoted_non_ascii_agent_name`,
+  `the_name_compared_is_the_window_name_not_the_registry_def_name`) rendered by the real `render_kiro`.
   Restarting an agent that is ALREADY on a vibe session starts it fresh (its
   conversation is lost; it could not be resumed correctly anyway).
 - **The v3 status line prints the model's DISPLAY name** (`probe · Claude
