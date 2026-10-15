@@ -67,16 +67,19 @@ pub const MAX_ATTEMPTS: u32 = 4;
 /// `BASE_BACKOFF_SECS * 2^(n-1)` after attempt n (rule 1): 30s, 60s, 120s.
 pub const BASE_BACKOFF_SECS: u64 = 30;
 
-/// At most this many incidents START a ladder per agent in any rolling
+/// At most this many NEW incidents START a ladder per agent in any rolling
 /// `INCIDENT_WINDOW_SECS` (board #362 e, orchestrator's ruling). The ladder
 /// bounds ONE error (`MAX_ATTEMPTS` sends); what was unbounded live (#361
 /// deploy, 10-14 02:3x) was a fresh error every ~20 s, a new Request ID
 /// each, every one a new incident with a full ladder: under a sustained
-/// overload, one `continue` per ~20 s per agent forever. With this cap the
-/// worst case is `MAX_INCIDENTS * MAX_ATTEMPTS` = 3 × 4 = 12 sends in 30
-/// minutes; the next fresh incident in the window is not continued, and the
-/// agent needs a person. Incidents are counted, not sends: counting every
-/// send would quietly retire the ladder's last step.
+/// overload, one `continue` per ~20 s per agent forever. This cap bounds the
+/// incidents, each with its own ladder of at most `MAX_ATTEMPTS` sends; it is
+/// NOT a hard send-rate ceiling (reviewer P2-1): an older incident's ladder
+/// can still finish inside a later window, so a 30-minute span can hold a
+/// few more sends than 3 × 4. The next fresh incident in the window is not
+/// continued, and the agent needs a person. Incidents are counted, not
+/// sends: counting every send would quietly retire the ladder's last step.
+/// The window lives in the gateway's memory and starts empty after a restart.
 pub const MAX_INCIDENTS: usize = 3;
 pub const INCIDENT_WINDOW_SECS: u64 = 30 * 60;
 
@@ -517,14 +520,15 @@ pub fn check_once() {
     }
 }
 
-/// The recovery drift warning for `backend` running `running` (board #362 b),
-/// or `None` when every shape it knows was measured on that version or a
-/// newer one. A detector tied to a CLI's painted text rots silently when the
+/// The recovery drift warning for `backend` with `installed` installed
+/// (board #362 b), or `None` when every shape it knows was measured on that
+/// version or a newer one. "Installed", not "running": a pane started before
+/// an upgrade still runs the old binary (reviewer P2-3). A detector tied to a CLI's painted text rots silently when the
 /// CLI repaints (#346, #361 were found by the owner noticing a stalled
 /// agent), so a newer CLI than the one a shape was measured on is said out
 /// loud. No action follows from it. Pure.
-pub fn drift_warning(backend: crate::backends::Backend, running: &str) -> Option<String> {
-    let version = crate::backends::parse_version(running)?;
+pub fn drift_warning(backend: crate::backends::Backend, installed: &str) -> Option<String> {
+    let version = crate::backends::parse_version(installed)?;
     let mut by_label: Vec<(String, Vec<String>)> = Vec::new();
     for m in backend.recovery_shapes().iter().filter(|m| crate::backends::newer_than_measured(&version, m)) {
         let name = m.shape.replace('_', " ");
@@ -538,48 +542,71 @@ pub fn drift_warning(backend: crate::backends::Backend, running: &str) -> Option
     }
     let measured = by_label.iter().map(|(l, n)| format!("{l} ({})", n.join(", "))).collect::<Vec<_>>().join(" and ");
     Some(format!(
-        "recovery shapes for {} were measured on {measured}, running {running} — re-measure when a transient error appears",
+        "recovery shapes for {} were measured on {measured}, installed {installed} (used at the next launch) — re-measure when a transient error appears",
         backend.name()
     ))
 }
 
 /// The version of `backend`'s CLI a NEW pane would run: its `--version`
-/// answer, with the PATH managed agents launch with (`agent_launch_path`),
-/// bounded to ten seconds. A pane started before an upgrade may still run the
-/// old binary; this is the one the next start gets.
+/// answer, with the PATH managed agents launch with (`agent_launch_path`). A
+/// pane started before an upgrade may still run the old binary; this is the
+/// one the next start gets, so it is said as "installed".
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn installed_version(backend: crate::backends::Backend) -> Option<String> {
     let program = backend.version_program()?;
     let path = crate::backends::shared::agent_launch_path(None, &std::env::var("PATH").unwrap_or_default());
-    let mut child = std::process::Command::new(program)
-        .arg("--version")
-        .env("PATH", path)
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("--version").env("PATH", path);
+    let out = version_output(cmd, std::time::Duration::from_secs(10))?;
+    let v = crate::backends::parse_version(&out)?;
+    Some(v.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
+}
+
+/// Run `cmd` and return its stdout, within ONE total `limit` for the start,
+/// the exit and the read (reviewer P2-2, #362): a wrapper that exits while a
+/// child it forked keeps stdout open would otherwise block the read, and the
+/// drift loop with it, forever. stdout is read on its own thread; the caller
+/// waits for the exit and then for that thread, both against the same
+/// deadline, and gives up (killing the process) when it passes. Only a
+/// SUCCESSFUL exit's output is used. A thread left blocked on a pipe that a
+/// stray child holds ends when that child closes it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn version_output(mut cmd: std::process::Command, limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    let deadline = std::time::Instant::now() + limit;
+    let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = tx.send(stdout.read_to_string(&mut out).ok().map(|_| out));
+    });
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
             _ => { let _ = child.kill(); let _ = child.wait(); return None; }
         }
+    };
+    if !status.success() {
+        return None;
     }
-    let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    let v = crate::backends::parse_version(&out)?;
-    Some(v.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
+    rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).ok().flatten()
 }
 
 /// The drift guard (board #362 b): for each backend recovery has shapes for,
 /// compare the installed CLI with the versions its shapes were measured on,
 /// and when it is newer post ONE `[tmm]` line in the room of every live
-/// project that runs a managed agent of that backend — once per installed
-/// version (`meta` `recovery_drift:<backend>`), so neither a gateway restart
-/// nor the daily check repeats it. Nothing else follows: no auto-action, no
-/// retry. Fail-soft throughout.
+/// project that runs a managed agent of that backend — once per room and
+/// installed version (`meta` `recovery_drift:<backend>:<room>`, set only on a
+/// successful post), so neither a gateway restart nor the daily check repeats
+/// it, and a room missed once is told at the next pass. Nothing else
+/// follows: no auto-action, no retry loop. Fail-soft throughout.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn check_drift() {
     check_drift_with(&installed_version, &|project, backend| {
@@ -609,21 +636,29 @@ pub fn check_drift_with(
         if backend.recovery_shapes().is_empty() {
             continue;
         }
-        let Some(running) = installed(backend) else { continue };
-        let Some(warning) = drift_warning(backend, &running) else { continue };
-        let key = format!("recovery_drift:{}", backend.name());
-        if super::with_store(|s| s.meta_get(&key)).ok().flatten().as_deref() == Some(running.as_str()) {
-            continue;
-        }
+        let Some(installed) = installed(backend) else { continue };
+        let Some(warning) = drift_warning(backend, &installed) else { continue };
         let mut told = 0;
-        for project in projects.iter().filter(|p| runs(p, backend)) {
+        for project in &projects {
+            // Per ROOM (reviewer P1): the record is "this room was told this
+            // version", set only when its post succeeded, so a room whose post
+            // failed or whose panes could not be read, and a room that starts
+            // running the backend later, are told at the next pass, and a
+            // room already told is never told again. The room is the
+            // project's stable identity (a session rename keeps it).
             let room = if project.room.is_empty() { format!("proj:{}", project.session) } else { project.room.clone() };
-            if post(&room, &format!("[tmm] {warning}")) {
+            let key = format!("recovery_drift:{}:{room}", backend.name());
+            if super::with_store(|s| s.meta_get(&key)).ok().flatten().as_deref() == Some(installed.as_str()) {
+                continue;
+            }
+            if !runs(project, backend) {
+                continue;
+            }
+            if post(&room, &format!("[tmm] {warning}")) && super::with_store(|s| s.meta_set(&key, &installed)).is_ok() {
                 told += 1;
             }
         }
         if told > 0 {
-            let _ = super::with_store(|s| s.meta_set(&key, &running));
             eprintln!("projects: {warning} (told {told} project room(s))");
         }
         total += told;
@@ -1436,28 +1471,29 @@ mod tests {
     fn a_newer_cli_than_the_shapes_were_measured_on_is_said_once_in_words() {
         use crate::backends::Backend;
         assert_eq!(drift_warning(Backend::Kiro, "2.31.0").as_deref(), Some(
-            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable) and 2.28.0 (high traffic, too many requests), running 2.31.0 — re-measure when a transient error appears"));
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable) and 2.28.0 (high traffic, too many requests), installed 2.31.0 (used at the next launch) — re-measure when a transient error appears"));
         assert_eq!(drift_warning(Backend::Kiro, "2.28.0").as_deref(), Some(
-            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable), running 2.28.0 — re-measure when a transient error appears"),
+            "recovery shapes for kiro were measured on ≤ 2.18.1 (stream error, model unavailable), installed 2.28.0 (used at the next launch) — re-measure when a transient error appears"),
             "the upper-bound shapes are unmeasured on any kiro after 2.18.1");
         assert_eq!(drift_warning(Backend::Kiro, "2.18.1"), None);
         assert_eq!(drift_warning(Backend::Claude, "2.1.284"), None, "running what was measured");
         assert_eq!(drift_warning(Backend::Claude, "2.1.200"), None, "older than measured is not drift");
-        assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (bedrock 5xx), running 2.1.288"));
+        assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (bedrock 5xx), installed 2.1.288 (used at the next launch)"));
         assert_eq!(drift_warning(Backend::Codex, "0.162.1"), None, "no shape, nothing to drift");
         assert_eq!(drift_warning(Backend::Kiro, "garbage"), None);
     }
 
-    /// Board #362 b, the posting: one `[tmm]` line in each room of a project
-    /// that runs the backend, once per installed version; a restart (a second
-    /// call) repeats nothing, a newer version is said again, a project that
-    /// does not run it hears nothing, a CLI that cannot be asked says nothing
-    /// and is asked again next time, and a drift nobody runs is not marked as
-    /// said (it is said when a project starts running it). The posts are
-    /// recorded, not written to the shared test room log (a real post there
-    /// took seq 1 from the legacy-import test running beside it).
+    /// Board #362 b, the posting, once per ROOM and installed version
+    /// (reviewer P1): each room running the backend gets one line; a room
+    /// whose post fails is told at the next pass and the room already told
+    /// gets nothing extra; a room that starts running the backend later is
+    /// told at the next pass; a restart (another pass) repeats nothing; a
+    /// newer version is said again in every room; a project that does not run
+    /// it hears nothing; a CLI that cannot be asked says nothing. The posts
+    /// are recorded, not written to the shared test room log (a real post
+    /// there took seq 1 from the legacy-import test running beside it).
     #[test]
-    fn the_drift_warning_is_posted_once_per_version_in_the_rooms_that_run_it() {
+    fn the_drift_warning_is_posted_once_per_room_and_version_and_a_missed_room_is_told_later() {
         use crate::backends::Backend;
         use std::cell::RefCell;
         super::super::tests::use_test_store();
@@ -1467,32 +1503,54 @@ mod tests {
             session: format!("drift-{name}-{tag}"), adopted: false, autostart: false, created_at: 1_000,
             last_up_at: None, last_seen_at: None, archived: false, room: format!("room:{name}-{tag}"),
         };
-        let (with_kiro, without) = (mk("kiro"), mk("none"));
-        for p in [&with_kiro, &without] { super::super::with_store(|s| s.insert_project(p)).unwrap(); }
-        let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
+        let (a, b, later, none) = (mk("a"), mk("b"), mk("later"), mk("none"));
+        for p in [&a, &b, &later, &none] { super::super::with_store(|s| s.insert_project(p)).unwrap(); }
         let posted = RefCell::new(Vec::<(String, String)>::new());
-        let post = |room: &str, line: &str| { posted.borrow_mut().push((room.to_string(), line.to_string())); true };
+        let failing = RefCell::new(vec![b.room.clone()]);
+        let post = |room: &str, line: &str| {
+            if failing.borrow().iter().any(|r| r == room) { return false; }
+            posted.borrow_mut().push((room.to_string(), line.to_string()));
+            true
+        };
         let lines = |p: &super::super::Project| posted.borrow().iter().filter(|(r, _)| *r == p.room).map(|(_, l)| l.clone()).collect::<Vec<_>>();
         let version = RefCell::new(None::<&str>);
-        let installed = |b: Backend| (b == Backend::Kiro).then(|| version.borrow().map(str::to_string)).flatten();
-        let running = RefCell::new(true);
-        let runs = |p: &super::super::Project, b: Backend| *running.borrow() && b == Backend::Kiro && p.id == with_kiro.id;
+        let installed = |k: Backend| (k == Backend::Kiro).then(|| version.borrow().map(str::to_string)).flatten();
+        let running = RefCell::new(vec![a.id.clone(), b.id.clone()]);
+        let runs = |p: &super::super::Project, k: Backend| k == Backend::Kiro && running.borrow().contains(&p.id);
         assert_eq!(check_drift_with(&installed, &runs, &post), 0, "kiro cannot be asked: nothing said");
         *version.borrow_mut() = Some("2.31.0");
-        // Nobody runs kiro yet: nothing is said, and nothing is marked said.
-        *running.borrow_mut() = false;
-        assert_eq!(check_drift_with(&installed, &runs, &post), 0);
-        *running.borrow_mut() = true;
-        assert_eq!(check_drift_with(&installed, &runs, &post), 1, "said once a project runs it");
-        assert_eq!(lines(&with_kiro).len(), 1);
-        assert!(lines(&with_kiro)[0].starts_with("[tmm] recovery shapes for kiro") && lines(&with_kiro)[0].contains("running 2.31.0"));
-        assert!(lines(&without).is_empty(), "a project that does not run kiro hears nothing");
+        assert_eq!(check_drift_with(&installed, &runs, &post), 1, "a is told; b's post fails");
+        assert_eq!((lines(&a).len(), lines(&b).len()), (1, 0));
+        assert!(lines(&a)[0].starts_with("[tmm] recovery shapes for kiro") && lines(&a)[0].contains("installed 2.31.0 (used at the next launch)"));
+        // b recovers, and `later` starts running kiro: both are told at the next pass; a is not told again.
+        failing.borrow_mut().clear();
+        running.borrow_mut().push(later.id.clone());
+        assert_eq!(check_drift_with(&installed, &runs, &post), 2);
+        assert_eq!((lines(&a).len(), lines(&b).len(), lines(&later).len()), (1, 1, 1));
+        assert!(lines(&none).is_empty(), "a project that does not run kiro hears nothing");
         assert_eq!(check_drift_with(&installed, &runs, &post), 0, "a restart or the daily check repeats nothing");
         *version.borrow_mut() = Some("2.32.1");
-        assert_eq!(check_drift_with(&installed, &runs, &post), 1, "a newer CLI is said again");
-        assert_eq!(lines(&with_kiro).len(), 2);
-        for p in [&with_kiro, &without] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
-        let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
+        assert_eq!(check_drift_with(&installed, &runs, &post), 3, "a newer CLI is said again in every room that runs it");
+        for p in [&a, &b, &later, &none] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
+    }
+
+    /// Board #362, reviewer P2-2: ONE deadline for the start, the exit and
+    /// the read. Controllable wrappers, never a real CLI: a plain answer is
+    /// read; a hang is cut at the limit; a wrapper that exits at once while a
+    /// child it forked keeps stdout open is cut at the limit too (the read
+    /// alone would wait for the child); a failing exit is not read.
+    #[test]
+    fn the_version_probe_is_bounded_end_to_end_and_reads_only_a_success() {
+        let sh = |script: &str| { let mut c = std::process::Command::new("sh"); c.args(["-c", script]); c };
+        let limit = std::time::Duration::from_millis(800);
+        assert_eq!(version_output(sh("echo 'kiro-cli 2.31.0'"), limit).as_deref(), Some("kiro-cli 2.31.0\n"));
+        for (what, script) in [("a hang", "sleep 30"), ("a parent that exits while its child holds stdout", "(sleep 30; echo late) & echo early")] {
+            let t0 = std::time::Instant::now();
+            assert_eq!(version_output(sh(script), limit), None, "{what}");
+            assert!(t0.elapsed() < limit + std::time::Duration::from_millis(700), "{what}: cut at the limit, took {:?}", t0.elapsed());
+        }
+        assert_eq!(version_output(sh("echo 'kiro-cli 2.31.0'; exit 3"), limit), None, "a failing exit is not read");
+        assert_eq!(version_output(std::process::Command::new("/nonexistent/tmm-no-such-cli"), limit), None, "not installed");
     }
 
     /// Board #362 e: at most `MAX_INCIDENTS` incidents START a ladder per
