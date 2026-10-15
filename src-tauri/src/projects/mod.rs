@@ -32,6 +32,7 @@ pub mod rooms;
 pub mod scratch;
 pub(crate) mod skills;
 pub mod spawn;
+pub mod stalls;
 pub mod store;
 pub mod teams;
 pub mod telemetry;

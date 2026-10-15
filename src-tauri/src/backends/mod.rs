@@ -207,6 +207,16 @@ impl Backend {
         }
     }
 
+    /// Is this reply text the CLI's own stand-in for a turn that said nothing
+    /// (board #355)? Only kiro-cli v3 writes one; every other backend's reply
+    /// is the agent's words or nothing.
+    pub fn is_empty_reply(self, text: &str) -> bool {
+        match self {
+            Backend::Kiro => kiro::is_empty_turn_reply(text),
+            _ => false,
+        }
+    }
+
     /// The kind ("completed"/"failed"/"permission_required"/"input_required")
     /// carried by one hook payload, read with this backend's own key spelling
     /// and screening rules — each arm lives on the backend's file (board

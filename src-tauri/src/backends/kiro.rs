@@ -533,6 +533,16 @@ pub(crate) fn kiro_reply_from_session(jsonl: &str) -> Option<String> {
     reply
 }
 
+/// kiro-cli v3 closes a turn that produced NO assistant message with a
+/// placeholder row so message alternation holds, and the Stop hook hands that
+/// text over as the turn's reply (board #355; measured on the room log: 27
+/// such lines between 2026-10-12 and 10-15 across eight agents). It is the
+/// CLI's own sentence, not the agent's: a turn whose whole reply is this
+/// ended without saying anything, whatever it was in the middle of.
+pub(crate) fn is_empty_turn_reply(text: &str) -> bool {
+    text.trim_start().starts_with("(No assistant response was recorded for the preceding turn")
+}
+
 /// A session id is one path component: never empty, never a path, never a
 /// dotfile. The ONE guard for every place an id from outside becomes part of a
 /// path under a sessions root (the reply lookup, board #376, and the resume

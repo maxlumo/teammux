@@ -335,6 +335,18 @@ impl AgentNotificationHub {
             crate::projects::vitals::sniff_window_soon(&session, &window);
         }
 
+        // How the turn ended is a fact of its own (board #355): a completion
+        // whose whole reply is the CLI's placeholder said nothing, and the
+        // agent may have been in the middle of its work. Recorded beside the
+        // end, and answered once by `stalls` (see there).
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if normalized.kind == "completed" {
+            crate::projects::telemetry::record_end_quality(&session, &window, normalized.empty);
+            if normalized.empty {
+                crate::projects::stalls::on_empty_end(&session, &window);
+            }
+        }
+
         // Stop hook final: record the answer and deliver it to every sender
         // whose addressed request this turn carried:
         //   1. Only managed windows (constraint 3): a .tmm/agents/<name> dir
@@ -542,6 +554,11 @@ struct Normalized {
     /// for non-stop events. Used by the auto-post path, which applies the
     /// larger `MAX_REPLY_CHARS` budget instead of the notification summary cap.
     full_reply: Option<String>,
+    /// The turn ended and its whole reply is the CLI's own placeholder for "no
+    /// assistant message" (board #355): a completion that said nothing. Read by
+    /// the desktop consumer only; the phone never consumes the inbox.
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+    empty: bool,
 }
 
 /// `normalize_in` without a managed home — the shape every test and the
@@ -582,10 +599,12 @@ fn normalize_in(envelope: &InboxEnvelope, home: Option<&Path>) -> Result<Normali
     // Preserve the untruncated text for the auto-post path only when this is
     // a stop/completion event — other events have no reply body worth posting.
     let full_reply = if kind == "completed" { raw_reply } else { None };
+    let empty = full_reply.as_deref().is_some_and(|r| backend.is_empty_reply(r));
     Ok(Normalized {
         kind: kind.into(),
         agent_session_id: string_field(payload, &["session_id", "sessionId"]),
         full_reply,
+        empty,
     })
 }
 
@@ -849,6 +868,20 @@ mod tests {
                 .kind,
             "completed"
         );
+        // A kiro completion whose WHOLE reply is the CLI's own placeholder (board
+        // #355) said nothing: `empty`. The same words from another backend, or
+        // inside a real reply, are not the CLI talking.
+        let placeholder = "(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)";
+        let stop = |backend: &str, text: &str| {
+            let event = if backend == "claude" { "Stop" } else { "stop" };
+            normalize(&envelope(backend, json!({"hook_event_name":event,"assistant_response":text}))).unwrap()
+        };
+        assert!(stop("kiro", placeholder).empty, "the CLI's stand-in is an empty turn");
+        assert!(stop("kiro", &format!("  {placeholder}")).empty);
+        assert!(!stop("kiro", "Done: the gate is green.").empty);
+        assert!(!stop("kiro", &format!("I saw this line in the log: {placeholder}")).empty, "a real reply that quotes it is a reply");
+        assert!(!stop("claude", placeholder).empty, "only kiro-cli writes it");
+        assert!(!normalize(&envelope("kiro", json!({"hook_event_name":"stop"}))).unwrap().empty, "no reply at all is not the placeholder");
         // grok (1.0.5, payloads measured live): camelCase keys, snake_case
         // event values. A turn's true end is stop + reason end_turn, and it
         // carries the reply in lastAssistantMessage.
@@ -1499,6 +1532,67 @@ mod tests {
         } else {
             eprintln!("could not adopt a project — skipped the assertions");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #355, end to end through the consumer: a kiro Stop whose whole reply
+    /// is the CLI's placeholder is recorded on the status (`last_turn_empty`) and
+    /// claims the one nudge it is owed — the claim is how the test sees that the
+    /// consumer reached `stalls`, since an empty end nobody claimed would still
+    /// be claimable — and a Stop with something to say names nothing.
+    #[test]
+    fn an_empty_stop_reaches_the_status_and_owes_one_nudge() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-empty-turn-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-empty-turn-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(ws.join(".tmm/agents/v")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/v/launch.json"), "{}").unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "v", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        struct KillOnDrop(String, std::path::PathBuf);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={}", self.0)]).stderr(std::process::Stdio::null()).status();
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        let _ = crate::projects::adopt(&session, Some("empty-turn-test"));
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"])
+                .output().unwrap().stdout,
+        ).unwrap().trim().to_string();
+        let root = std::env::temp_dir().join(format!("tmm-empty-turn-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let mut seq = 0;
+        let mut feed = |payload: Value| {
+            seq += 1;
+            let envelope = json!({ "backend": "kiro", "pane_id": pane_id, "payload": payload });
+            std::fs::write(root.join("inbox").join(format!("{seq:03}.json")), serde_json::to_vec(&envelope).unwrap()).unwrap();
+            hub.consume_inbox();
+        };
+        let prompt = |text: &str| json!({ "hook_event_name": "userPromptSubmit", "cwd": ws.to_string_lossy(), "session_id": "c", "prompt": text });
+        let stop = |text: &str| json!({ "hook_event_name": "stop", "cwd": ws.to_string_lossy(), "session_id": "c", "assistant_response": text });
+        let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
+        let placeholder = "(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)";
+        let status = || crate::projects::telemetry::derive(&session, &win, 0);
+
+        feed(prompt("[tmm chat 2026-10-15 13:00] lead: @v keep going"));
+        feed(stop(placeholder));
+        let empty = status();
+        assert_eq!((empty.state.as_str(), empty.detail.as_str()), ("idle", crate::projects::telemetry::EMPTY_DETAIL), "at rest, and it says the turn said nothing");
+        assert_eq!(crate::projects::telemetry::claim_nudge(&session, &win), None, "the consumer already claimed the one nudge this empty end is owed");
+
+        feed(prompt("[tmm chat 2026-10-15 13:10] lead: @v ok?"));
+        feed(stop("Done: the gate is green."));
+        let said = status();
+        assert_eq!((said.state.as_str(), said.detail.as_str()), ("idle", ""), "a turn with something to say names nothing");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -78,6 +78,14 @@ struct Rec {
     end_seq: u64,
     ask_seq: u64,
     tool_seq: u64,
+    /// `end_seq` of a turn end whose whole reply was the CLI's placeholder
+    /// (board #355): the turn said nothing. Compared with the CURRENT `end_seq`,
+    /// so a later real end simply stops matching — nothing needs to clear it.
+    /// 0 = no such end.
+    empty_end_seq: u64,
+    /// A nudge has already been owed for the current run of empty turns; it is
+    /// forgiven only by a turn that ends with something to say.
+    nudged: bool,
 }
 
 static NEXT_ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -754,6 +762,46 @@ pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
     if !kind_is_ask {
         end_commands(session, window, turn_had_prompt);
     }
+}
+
+/// How the turn that JUST ended ended (board #355), recorded beside the end
+/// `record_notification` wrote: `empty` = its whole reply was the CLI's
+/// placeholder. A turn that ends with something to say forgives an earlier
+/// nudge, so the next empty turn can be answered once more.
+pub fn record_end_quality(session: &str, window: &str, empty: bool) {
+    let mut map = store().lock().unwrap();
+    let rec = map.entry((session.to_string(), window.to_string())).or_default();
+    if empty {
+        rec.empty_end_seq = rec.end_seq;
+    } else {
+        rec.nudged = false;
+    }
+}
+
+/// Claim the one nudge a run of empty turns is owed (board #355): `Some(end_seq)`
+/// of the empty end to answer, or `None` when one was already claimed since the
+/// agent last said something. A nudge that itself ends empty must not earn
+/// another: that is a retry loop.
+pub fn claim_nudge(session: &str, window: &str) -> Option<u64> {
+    let mut map = store().lock().unwrap();
+    let rec = map.get_mut(&(session.to_string(), window.to_string()))?;
+    if rec.nudged || rec.empty_end_seq == 0 || rec.empty_end_seq != rec.end_seq {
+        return None;
+    }
+    rec.nudged = true;
+    Some(rec.end_seq)
+}
+
+/// Is the window STILL at rest after the empty end `end_seq` — no turn has
+/// started since, and nothing else ended — as the delay of a nudge runs out?
+pub fn still_stalled(session: &str, window: &str, end_seq: u64) -> bool {
+    let map = store().lock().unwrap();
+    map.get(&(session.to_string(), window.to_string())).is_some_and(|rec| {
+        rec.end_seq == end_seq && rec.empty_end_seq == end_seq && {
+            let status = derive_from(rec, 0, now());
+            status.state == "idle" && status.detail == EMPTY_DETAIL
+        }
+    })
 }
 
 /// A human interrupted the turn (`hub_agent_interrupt` / `tmm agent
@@ -1439,6 +1487,13 @@ pub fn all_states() -> Vec<(String, String, String)> {
 /// the last turn, readable in the hover row and in `tmm agent list`.
 pub const FAILED_DETAIL: &str = "last_turn_failed";
 
+/// The detail an `idle` carries when the turn that ended said NOTHING (board
+/// #355): the CLI closed it with its own placeholder instead of a reply. Same
+/// kind of word as `last_turn_failed` — a fact about the last turn, readable in
+/// the hover row and in `tmm agent list` — and likewise not a state or a colour:
+/// the agent is at rest, and `stalls` decides whether anyone needs telling.
+pub const EMPTY_DETAIL: &str = "last_turn_empty";
+
 /// The state machine, in one place. A turn is a bracket: `userPromptSubmit`
 /// opens it, `stop` closes it, tool calls happen inside it, and a
 /// permission prompt suspends it. So the rule is simply *which boundary is the
@@ -1496,7 +1551,13 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
     // itself in the detail (board #354) and nowhere else: see the table
     // above for why it is not a state of its own.
     if end_k >= start_k && end_k >= ask_k {
-        let detail = if end_kind == "failed" { FAILED_DETAIL.to_string() } else { String::new() };
+        let detail = if end_kind == "failed" {
+            FAILED_DETAIL.to_string()
+        } else if rec.empty_end_seq != 0 && rec.empty_end_seq == rec.end_seq {
+            EMPTY_DETAIL.to_string()
+        } else {
+            String::new()
+        };
         return AgentStatus { state: "idle".into(), detail, since: turn_end };
     }
 
@@ -1892,6 +1953,32 @@ mod tests {
         r.prompt = Some(1100);
         let next = derive_from(&r, 0, 1200);
         assert_eq!((next.state.as_str(), next.detail.as_str()), ("running", ""));
+    }
+
+    /// Board #355: a turn that ended with the CLI's placeholder instead of a
+    /// reply is REST like any end, and names itself in the detail — the same
+    /// kind of fact as `last_turn_failed`, no state and no colour. It names
+    /// ITSELF only: a later real end stops matching, and a new turn carries
+    /// nothing of it.
+    #[test]
+    fn an_empty_end_is_rest_and_names_itself_in_the_detail() {
+        let mut r = rec();
+        r.prompt = Some(900);
+        r.end = Some(("completed".into(), 1000));
+        r.end_seq = 7;
+        r.empty_end_seq = 7;
+        let s = derive_from(&r, 5000, 5000);
+        assert_eq!((s.state.as_str(), s.detail.as_str(), s.since), ("idle", EMPTY_DETAIL, 1000));
+        r.end_seq = 9; // a later end, which was not empty
+        assert_eq!(derive_from(&r, 5000, 5000).detail, "");
+        r.end_seq = 7; // …and the empty one again, then a new turn
+        r.prompt = Some(1100);
+        let next = derive_from(&r, 0, 1200);
+        assert_eq!((next.state.as_str(), next.detail.as_str()), ("running", ""));
+        // No end was ever marked: the zero never matches the zero.
+        let mut fresh = rec();
+        fresh.end = Some(("completed".into(), 1000));
+        assert_eq!(derive_from(&fresh, 5000, 5000).detail, "");
     }
 
     /// kiro v3 runs its memory auto-capture as `memory` tool calls AFTER the
