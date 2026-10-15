@@ -227,6 +227,58 @@ test('a card shows its assignee\u2019s backend icon, lit only in doing while tha
   } finally { await app.close(); }
 });
 
+test('a column label folds its column: the caret and aria-expanded say so, the count stays, the device remembers (board #391)', async context => {
+  const issues = [issue, { ...issue, id: 2, title: 'Second todo' }, { ...issue, id: 3, title: 'Shipped', status: 'done' }];
+  const open = async (stored: string | null) => {
+    const app = await (await compiled).mount(context, {
+      props: { session: 'fixture', visible: true },
+      setup(window) {
+        window.Element.prototype.getAnimations = () => [];
+        if (stored !== null) window.localStorage.setItem('tmux_hub_board_folded', stored);
+      },
+      modules: [rpc({ boardList: async () => ({ issues }) })],
+    });
+    await flush(app);
+    return app;
+  };
+  const head = (app: App, n: number) => app.document.querySelectorAll<HTMLButtonElement>('.colm .col-h')[n]!;
+  const cards = (app: App, n: number) => app.document.querySelectorAll('.colm')[n]!.querySelectorAll('.card').length;
+  let app = await open(null);
+  try {
+    const todo = head(app, 0);
+    assert.equal(todo.tagName, 'BUTTON');
+    assert.equal(todo.type, 'button');
+    assert.equal(todo.getAttribute('aria-expanded'), 'true', 'open by default');
+    assert.ok(todo.querySelector('.chev.open'), 'the caret points down');
+    assert.equal(todo.querySelector('.col-n')?.textContent, '2');
+    assert.equal(cards(app, 0), 2);
+    todo.click(); await flush(app);
+    assert.equal(head(app, 0).getAttribute('aria-expanded'), 'false');
+    assert.ok(head(app, 0).querySelector('.chev:not(.open)'), 'the caret turns back');
+    assert.equal(head(app, 0).querySelector('.col-n')?.textContent, '2', 'the count stays when folded');
+    assert.equal(cards(app, 0), 0, 'the cards are cut');
+    assert.equal(app.document.querySelectorAll('.colm')[0]!.querySelector('.col-scroll'), null);
+    assert.ok(app.document.querySelectorAll('.colm')[0]!.classList.contains('sparse'), 'a folded area hugs its label');
+    assert.equal(cards(app, 3), 1, 'another column is untouched');
+    assert.equal(app.window.localStorage.getItem('tmux_hub_board_folded'), '["todo"]', 'remembered on this device');
+    // Keyboard: Enter or Space on a native button is its click; jsdom does
+    // not synthesise that, so the button's own semantics are the contract.
+    head(app, 3).focus();
+    assert.equal(app.document.activeElement, head(app, 3), 'the label takes focus');
+  } finally { await app.close(); }
+
+  app = await open('["todo","done"]');
+  try {
+    assert.equal(head(app, 0).getAttribute('aria-expanded'), 'false', 'a reload keeps the fold');
+    assert.equal(head(app, 3).getAttribute('aria-expanded'), 'false');
+    assert.equal(head(app, 1).getAttribute('aria-expanded'), 'true');
+    assert.equal(cards(app, 0) + cards(app, 3), 0);
+    head(app, 3).click(); await flush(app);
+    assert.equal(cards(app, 3), 1, 'unfolding brings the cards back');
+    assert.equal(app.window.localStorage.getItem('tmux_hub_board_folded'), '["todo"]');
+  } finally { await app.close(); }
+});
+
 test('a done card keeps the face and never the working dot (board #327)', async context => {
   const done = { ...issue, assignee: 'builder', status: 'done' };
   const app = await (await compiled).mount(context, {

@@ -42,6 +42,7 @@
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
   import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
+  import { appPrefs } from './hub-prefs.svelte.ts';
 
   // The scope whose subtree holds this board, read once at init: its runtime
   // for the leave guard (#335 ②b-2-3) and the RPCs (②b-3), its state for that
@@ -1340,12 +1341,22 @@
     <div class="cols">
       {#each STATUSES as s (s)}
         {@const items = col(s)}
+        {@const folded = appPrefs.boardFolded.includes(s)}
         <!-- SPARSE (0–1 cards) vs DENSE (2+) drives the 1-column layout
              (board #33): a sparse area takes header+content height only,
              dense areas flex-share what remains — the class is inert in the
-             2/4-column grids (flex properties do nothing for grid items). -->
-        <div class="colm" class:sparse={items.length <= 1}>
-          <div class="col-h">{statusLabel(s)}<span class="col-n">{items.length}</span></div>
+             2/4-column grids (flex properties do nothing for grid items).
+             A FOLDED area (board #391) holds nothing, so it is sparse by the
+             same rule: its label alone, the others share the height. -->
+        <div class="colm" class:sparse={items.length <= 1 || folded}>
+          <!-- The label is the disclosure (board #391): its caret and
+               aria-expanded say the state, the count stays visible folded,
+               and the fold is the device's (appPrefs). A fold is a turned
+               caret plus a cut (motion.md principle 10). -->
+          <button type="button" class="col-h" aria-expanded={!folded} onclick={() => appPrefs.setBoardFolded(s, !folded)}>
+            <span class="chev" class:open={!folded}><Icon name="chevron-right" size={10} /></span>{statusLabel(s)}<span class="col-n">{items.length}</span>
+          </button>
+          {#if !folded}
           <div class="col-scroll subtle-scroll" class:reveal={justLoaded}>
           {#each items as i (i.id)}
             <button class="card" animate:flip={{ duration: moveMs() }} onclick={() => openIssue(i.id)} use:hoverInfo={() => cardInfo(i)}>
@@ -1372,6 +1383,7 @@
             </button>
           {/each}
           </div>
+          {/if}
         </div>
       {/each}
     </div>
@@ -1554,15 +1566,25 @@
     display: flex; flex-direction: column; gap: 6px;
     padding-bottom: 6px;
   }
+  /* The column label is its disclosure (board #391): a borderless button in
+     the label's own voice. Hover turns the ink (the Feed tool-lane head's
+     idiom), never a wash, so nothing is painted around it; the hit box is
+     the control height (28/44px) across the column. */
   .col-h {
+    font: inherit;
     font-size: var(--fs-meta);
     font-weight: 600;
     color: var(--text2);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: 2px 2px 6px;
-    display: flex; gap: 6px; align-items: baseline;
+    background: none; border: 0; border-radius: 0;
+    padding: 0 2px;
+    width: 100%; min-height: var(--control-height);
+    text-align: left; cursor: pointer;
+    display: flex; gap: 6px; align-items: center;
+    transition: color var(--t-fast);
   }
+  .col-h:hover { color: var(--text); }
   .col-n { color: var(--text3); font-weight: 400; }
   .colm { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
 

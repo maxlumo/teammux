@@ -149,3 +149,26 @@ test('the read mark is a seq + ts; a legacy bare ts reads as seq 0 (#322)', asyn
   assert.deepEqual(JSON.parse(store.get('tmux_hub_seen')!), { old: { seq: 42, ts: 600 } });
   assert.deepEqual(prefs.seen('old'), { seq: 42, ts: 600 });
 });
+
+test('the board folds are one set per device, read at the door and kept in board order (board #391)', async () => {
+  const fresh = await import(new URL(`./hub-prefs.svelte.ts?folds=${++moduleVersion}`, import.meta.url).href);
+  const { readBoardFolded, createAppPrefs } = fresh;
+  assert.deepEqual(readBoardFolded(null), [], 'nothing folded by default');
+  assert.deepEqual(readBoardFolded('not json'), []);
+  assert.deepEqual(readBoardFolded('{"done":true}'), [], 'a list, or the default');
+  assert.deepEqual(readBoardFolded('["done","bogus","todo","done",3]'), ['todo', 'done'], 'known statuses, once, in board order');
+  store.clear();
+  const prefs = createAppPrefs(localStorage);
+  writes.length = 0;
+  prefs.setBoardFolded('done', true);
+  prefs.setBoardFolded('todo', true);
+  prefs.setBoardFolded('todo', true);
+  assert.deepEqual(prefs.boardFolded, ['todo', 'done']);
+  assert.equal(store.get('tmux_hub_board_folded'), '["todo","done"]');
+  assert.deepEqual([...new Set(writes)], ['tmux_hub_board_folded'], 'no other key');
+  assert.deepEqual(createAppPrefs(localStorage).boardFolded, ['todo', 'done'], 'survives a reload');
+  prefs.setBoardFolded('todo', false);
+  assert.equal(store.get('tmux_hub_board_folded'), '["done"]');
+  // A server's prefs carry no copy: it is not one of the per-server keys.
+  assert.ok(!fresh.HUB_SERVER_KEYS.includes('tmux_hub_board_folded'));
+});

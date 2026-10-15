@@ -83,7 +83,7 @@ test('the store scopes exactly the resident set', () => {
   }
   // The person's and the window's preferences are not.
   for (const key of [
-    'tmux_hub_feed_level', 'tmux_hub_sidebar', 'tmux_hub_steps_rows', 'tmux_theme', 'tmux_font_size',
+    'tmux_hub_feed_level', 'tmux_hub_sidebar', 'tmux_hub_steps_rows', 'tmux_hub_board_folded', 'tmux_theme', 'tmux_font_size',
     'tmux_servers', 'tmux_server_current', 'tmux_machines', 'tmux_address', 'tmux_token', 'tmux_socket',
   ]) {
     assert.equal(isResidentKey(key), false, `${key} must not become per-server`);

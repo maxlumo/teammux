@@ -434,7 +434,7 @@ test('the 1-column base sizes areas by their CONTENT class — sparse hugs, dens
   // quarter-screen while empty ones stood stretched. The mechanism is ONE
   // class computed from the data, no fixed card heights, no JS measuring.
   assert.match(source, /\{@const items = col\(s\)\}/u, 'each area computes its items ONCE');
-  assert.match(source, /class:sparse=\{items\.length <= 1\}/u, '0 or 1 card marks the area sparse');
+  assert.match(source, /class:sparse=\{items\.length <= 1 \|\| folded\}/u, '0 or 1 card, or a folded area (#391), marks the area sparse');
   // The two flex behaviors, and only in the base (grid items ignore flex):
   assert.match(source, /\.colm\.sparse \{ flex: none; \}/u, 'sparse: header + content, nothing stretched');
   assert.match(source, /\.colm:not\(\.sparse\) \{ flex: 1 1 0; \}/u, 'dense areas share the leftover equally');
@@ -444,6 +444,25 @@ test('the 1-column base sizes areas by their CONTENT class — sparse hugs, dens
   assert.match(source, /\{#each items as i \(i\.id\)\}/u, 'the cards read items');
   // Every column keeps its own scroller in all shapes (#27's rule survives).
   assert.match(source, /\.col-scroll \{\s*overflow-y: auto;/su, 'the internal scroller stays');
+});
+
+test('a column label is its disclosure: a button, the caret atom, a cut, the device s fold (board #391)', () => {
+  // Owner: "点击分类标签名，就可以把它折叠起来，这样方便我浏览". ONE control per
+  // column — the label itself — no second toggle beside it.
+  assert.match(source, /<button type="button" class="col-h" aria-expanded=\{!folded\} onclick=\{\(\) => appPrefs\.setBoardFolded\(s, !folded\)\}>/u,
+    'the label is a native button (Enter/Space) that says its state');
+  assert.match(source, /<span class="chev" class:open=\{!folded\}><Icon name="chevron-right" size=\{10\} \/><\/span>\{statusLabel\(s\)\}<span class="col-n">\{items\.length\}<\/span>/u,
+    'the shared caret atom, then the label, then the count, which stays when folded');
+  assert.match(source, /\{@const folded = appPrefs\.boardFolded\.includes\(s\)\}/u, 'the fold is read from its one owner');
+  assert.match(source, /\{#if !folded\}\s*<div class="col-scroll/u, 'a fold is a cut (motion.md 10): the cards are not rendered');
+  assert.equal([...source.matchAll(/class="col-h"/g)].length, 1, 'one label per column');
+  // The ink turns on hover; nothing is painted (the label is not a row).
+  const rule = (sel: string) => new RegExp(`\\n  ${sel.replace(/\./g, '\\.')} \\{([^}]*)\\}`, 'u').exec(source)?.[1] ?? '';
+  assert.match(rule('.col-h'), /background: none; border: 0;/u);
+  assert.match(rule('.col-h'), /min-height: var\(--control-height\);/u, 'the 28/44px hit box from the token');
+  assert.match(source, /\n  \.col-h:hover \{ color: var\(--text\); \}/u);
+  assert.ok(!/\n  \.col-h:hover \{[^}]*background/u.test(source), 'no hover wash');
+  assert.ok(!/\n  \.chev/u.test(source), 'the caret turns by the app.css atom only');
 });
 
 test('in one column every card is compact, so a lone card cannot take the screen (board #328)', () => {

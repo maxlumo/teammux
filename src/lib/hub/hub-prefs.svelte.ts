@@ -30,6 +30,7 @@
 // per-server half any more, and each runtime's store is its server's own
 // (②b-4).
 import { draftUpdate, STEPS_ROWS, clampStepsRows, type SeenMark } from './hub.ts';
+import { BOARD_STATUSES } from './board.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -58,6 +59,10 @@ const DRAWER_KEY = 'tmux_hub_drawer';
 // The desktop sidebar's collapse (board #174): ONE app-wide switch, not a
 // per-project one — where the project list is, is a property of the window.
 const SIDEBAR_KEY = 'tmux_hub_sidebar';
+// The board columns folded to their label (board #391, owner: "点击分类标签名，
+// 就可以把它折叠起来，这样方便我浏览"): a JSON list of statuses, ONE set for every
+// board on this device — how a person reads a board, not a fact of a project.
+const BOARD_FOLDED_KEY = 'tmux_hub_board_folded';
 // Roster disclosure belongs to the project, like its drawer view (#168).
 const ROSTER_EXPANDED_KEY = 'tmux_hub_roster_expanded';
 export type FeedLevel = 'chat' | 'status' | 'tools';
@@ -80,8 +85,9 @@ export const HUB_SERVER_KEYS = [PROJECT_KEY, DRAFT_KEY, SEEN_KEY, LEAD_KEY, DRAW
  * A test that creates B after A's writes cannot see that, which is how it got
  * through.
  *
- * So these three live here, and `createHubPrefs` delegates to this owner
- * rather than keeping a copy. The per-project maps stay per instance: those
+ * So these live here, and `createHubPrefs` delegates to this owner
+ * rather than keeping a copy (the board's column folds, #391, are read here
+ * directly by every Board). The per-project maps stay per instance: those
  * ARE per server.
  */
 export interface AppPrefs {
@@ -95,6 +101,19 @@ export interface AppPrefs {
   /** Tool-lane cap: how many rows a folded tool group shows before it scrolls. */
   readonly stepsRows: number;
   setStepsRows(v: number): void;
+  /** The board columns shown as their label only (board #391), in status
+   * order; every board on this device reads the same set. */
+  readonly boardFolded: readonly string[];
+  setBoardFolded(status: string, folded: boolean): void;
+}
+
+/** A stored fold set, read at the door: a JSON list, known statuses only,
+ * each once, in board order. Anything else is the default, nothing folded. */
+export function readBoardFolded(raw: string | null): string[] {
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(raw ?? '[]'); } catch { /* the default */ }
+  const list: unknown[] = Array.isArray(parsed) ? parsed : [];
+  return BOARD_STATUSES.filter((s) => list.includes(s));
 }
 
 export function createAppPrefs(storage: Store): AppPrefs {
@@ -107,6 +126,7 @@ export function createAppPrefs(storage: Store): AppPrefs {
     // Tool-lane cap in rows; the stored value passes the same clamp as the
     // setter so an old or hand-edited entry cannot render a broken lane.
     stepsRows: clampStepsRows(storage.getItem(STEPS_ROWS_KEY) ?? STEPS_ROWS),
+    boardFolded: readBoardFolded(storage.getItem(BOARD_FOLDED_KEY)),
   });
   return {
     get feedLevel() { return state.feedLevel; },
@@ -123,6 +143,13 @@ export function createAppPrefs(storage: Store): AppPrefs {
     setStepsRows(v) {
       state.stepsRows = clampStepsRows(v);
       storage.setItem(STEPS_ROWS_KEY, String(state.stepsRows));
+    },
+    get boardFolded() { return state.boardFolded; },
+    setBoardFolded(status, folded) {
+      const next = new Set(state.boardFolded);
+      if (folded) next.add(status); else next.delete(status);
+      state.boardFolded = BOARD_STATUSES.filter((s) => next.has(s));
+      storage.setItem(BOARD_FOLDED_KEY, JSON.stringify(state.boardFolded));
     },
   };
 }

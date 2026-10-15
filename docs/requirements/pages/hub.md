@@ -58,7 +58,9 @@ completion).
   alone.
 - **The task board** is the project's plan of record: the human writes
   issues here, agents keep them current via `tmm board`
-  (todo/doing/review/done, fixed vocabulary).
+  (todo/doing/review/done, fixed vocabulary). Tapping or clicking a column's
+  label folds or unfolds that column; the label keeps its count, and the
+  folds are remembered on this device for every board (board #391).
 - **Board detail is a selectable history, not a mutable chat log** (board
   #43): note bodies and a locked issue's original title/body explicitly allow
   text selection. The original brief is editable only while the issue is
