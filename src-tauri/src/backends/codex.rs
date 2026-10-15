@@ -289,6 +289,18 @@ pub(crate) const VERSION_PROGRAM: &str = "codex";
 /// its continuation under it, is a screen mid-paint and says nothing.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
+    let (block, _) = newest_block(pane)?;
+    bedrock_401(&block).then_some(("auth_expired", block))
+}
+
+/// The NEWEST content block on a codex screen, by the positional reading
+/// above (`person_paint`'s grammar, generalised for board #362: the
+/// orchestrator's ruling on the builder's 02:30 finding), as `(glued,
+/// spaced)`. codex has no transient shape (capture first, #362 d), so today
+/// only the person paint reads it; a transient shape added later is newest
+/// by this same reading.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn newest_block(pane: &str) -> Option<(String, String)> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
     let composer = lines.iter().rposition(|l| is_composer_line(l))?;
     // The composer is codex's own furniture only at the BOTTOM, with at most
@@ -299,11 +311,8 @@ pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
         return None;
     }
     let head = lines[..composer].iter().rposition(|l| codex_content_line(l))?;
-    if !lines[head].starts_with('\u{25a0}') {
-        return None;
-    }
-    let block: String = lines[head..composer].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect();
-    bedrock_401(&block).then_some(("auth_expired", block))
+    let block: Vec<&str> = lines[head..composer].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect();
+    Some((block.concat(), block.join(" ")))
 }
 
 /// Is this de-wrapped codex block exactly the expired-credential error: the

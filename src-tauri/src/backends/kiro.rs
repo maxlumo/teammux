@@ -1354,9 +1354,12 @@ fn image_too_large(spaced: &str) -> bool {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const IDLE_COMPOSER: &str = "›  ask a question or describe a task";
 
-/// The NEWEST paint on a kiro screen, when it is one of kiro's errors that
-/// needs a person (board #362 c): `(shape, block)`, the block de-wrapped
-/// (lines trimmed, joined without a separator).
+/// The NEWEST block on a kiro screen, by kiro's own measured grammar, as
+/// `(glued, spaced)`: its lines trimmed and joined without a separator, and
+/// with spaces (board #362 c). One reading for the person-needed paints
+/// (`person_paint`) and for a capped recovery incident (`recovery`,
+/// orchestrator's ruling on the builder's 02:30 finding: an error that is
+/// not the newest paint is about an older turn).
 ///
 /// Newest means the turn ended with it, and that is read by kiro's own
 /// measured screen grammar, not by "the last bullet" (review P1-B on
@@ -1372,7 +1375,7 @@ const IDLE_COMPOSER: &str = "›  ask a question or describe a task";
 /// history. When in doubt, nothing: a missed stall costs a person one look,
 /// a false one ends a working turn.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
+pub(crate) fn newest_block(pane: &str) -> Option<(String, String)> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
     let composer = lines.iter().rposition(|l| l.starts_with('›'))?;
     if !lines[composer].starts_with(IDLE_COMPOSER) {
@@ -1386,8 +1389,15 @@ pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
         return None;
     }
     let block = &lines[head..end];
-    let spaced = block.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-    let glued = block.iter().map(|l| l.trim()).collect::<String>();
+    Some((block.iter().map(|l| l.trim()).collect(), block.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")))
+}
+
+/// The NEWEST paint on a kiro screen (`newest_block`), when it is one of
+/// kiro's errors that needs a person (board #362 c): `(shape, block)`, the
+/// block de-wrapped.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
+    let (glued, spaced) = newest_block(pane)?;
     image_too_large(&spaced).then_some(("conversation_blocked", glued))
 }
 

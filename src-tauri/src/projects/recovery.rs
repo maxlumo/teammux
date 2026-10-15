@@ -292,6 +292,13 @@ struct Rec {
     /// so it lives and dies with this record: once per continuous incident,
     /// and a later independent incident is recorded again.
     exhausted_recorded: bool,
+    /// The turn-fact version (`telemetry::turn_version`) at the tick this
+    /// incident's error was FIRST seen as the newest block on the screen
+    /// (board #362, the builder's 02:30 finding): its attribution point. A
+    /// capped decision ends a turn only while no turn fact has landed since:
+    /// a prompt accepted after it, painted or not, makes the error another
+    /// turn's past. `None` until it is seen as the newest block.
+    newest_at: Option<u64>,
 }
 
 /// What the tracker decided for one (window, tick) with the error visible.
@@ -425,6 +432,19 @@ impl Tracker {
         self.map.get(&(session.to_string(), window.to_string())).is_some_and(|r| !r.exhausted_recorded)
     }
 
+    /// May the window's current incident record its exhausted decision as
+    /// the end of the turn at version `now_version`? Only when its error is
+    /// the newest block NOW (`newest`, by the backend's own grammar) and was
+    /// first seen so at this very version: nothing landed since (board
+    /// #362, the builder's 02:30 finding). Records the first sighting.
+    pub fn exhausted_attributable(&mut self, session: &str, window: &str, newest: bool, now_version: u64) -> bool {
+        let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) else { return false };
+        if !newest {
+            return false;
+        }
+        *r.newest_at.get_or_insert(now_version) == now_version
+    }
+
     /// The current incident's exhausted decision was recorded.
     pub fn exhausted_accept(&mut self, session: &str, window: &str) {
         if let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) {
@@ -472,11 +492,22 @@ fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64
 
 /// Record the turn end the hooks missed for an EXHAUSTED recovery decision
 /// (capped or given up): once per incident (`Identity::Incident`, review
-/// P1-D), the mark committed only when telemetry accepted it. True when
-/// accepted.
-fn commit_exhausted(session: &str, window: &str, seen: u64, ts: u64) -> bool {
+/// P1-D), the mark committed only when telemetry accepted it. `seen` is the
+/// turn version read before the capture. A GIVE-UP's sends were verified
+/// against the hooks, so its turn is the one the sends went to. A CAPPED
+/// incident sent nothing, so its error is attributed by the screen and the
+/// hooks together (board #362, the builder's 02:30 finding): `newest` says
+/// its error is the newest block by the backend's own grammar, and nothing
+/// may have landed since it was first seen so (`exhausted_attributable`);
+/// otherwise nothing is recorded. True when accepted.
+fn commit_exhausted(session: &str, window: &str, capped: bool, newest: bool, seen: u64, ts: u64) -> bool {
     use super::telemetry::{record_missed_end, Identity, Missed};
+    // Once per incident: defence in depth under the attribution rule, which
+    // already refuses a second commit after our own end (a fact).
     if !tracker().lock().unwrap().exhausted_new(session, window) {
+        return false;
+    }
+    if capped && !tracker().lock().unwrap().exhausted_attributable(session, window, newest, seen) {
         return false;
     }
     let accepted = matches!(record_missed_end(session, window, EXHAUSTED, Identity::Incident, seen, ts), Missed::Ended | Missed::Attached);
@@ -484,6 +515,16 @@ fn commit_exhausted(session: &str, window: &str, seen: u64, ts: u64) -> bool {
         tracker().lock().unwrap().exhausted_accept(session, window);
     }
     accepted
+}
+
+/// Is the error `sig` names the NEWEST block of `tail`, by `backend`'s own
+/// measured grammar (`Backend::newest_block`) and its own transient shape?
+/// `false` where no grammar was measured (claude): unattributable.
+fn error_is_newest(backend: &str, tail: &str) -> bool {
+    let Some(b) = crate::backends::Backend::parse(backend) else { return false };
+    b.newest_block(tail).is_some_and(|(glued, spaced)| {
+        !crate::backends::canonical(&glued).contains("tmmchat") && b.transient_shape(&glued, &spaced).is_some()
+    })
 }
 
 fn now_secs() -> u64 {
@@ -572,7 +613,9 @@ pub fn check_once() {
             // agent needs a person, and the turn end the hooks never sent is
             // recorded once for the incident (board #362 c).
             if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. }) {
-                commit_exhausted(&project.session, &p.window_name, seen, now_secs());
+                let capped = matches!(decision, Decision::Capped { .. });
+                let newest = capped && error_is_newest(backend, &tail);
+                commit_exhausted(&project.session, &p.window_name, capped, newest, seen, now_secs());
             }
             match decision {
                 Decision::Send { attempt } => {
@@ -1086,6 +1129,128 @@ mod tests {
             assert_eq!(&now, before, "{name}: nothing typed");
         }
         assert!(super::super::telemetry::recent_events(&session, 0).iter().all(|e| !e.text.starts_with("auto-continue")), "never continued");
+    }
+
+    /// Board #362, the builder's 02:30 finding (the orchestrator's ruling,
+    /// cases A-E), through the PRODUCTION path: real managed panes painting
+    /// real kiro and claude captures, the window's cap reached, `check_once`
+    /// deciding Capped and committing. A capped incident sent nothing, so
+    /// its error is attributed by the screen (the newest block by the
+    /// backend's own grammar) and the hooks (nothing landed since it was
+    /// first seen so).
+    /// D: the error is the newest block on an open turn: one end, once.
+    /// A: a new prompt B with the screen unchanged (no repaint): B runs, no
+    ///    second end (the attribution rule, with the once flag under it).
+    /// B: a newer prompt already painted under the error (the turn running,
+    ///    as kiro 2.31.0 paints it): no end.
+    /// E: no measured grammar (claude) or a half-drawn kiro screen: no end;
+    ///    the paused row is still said. D again: a later independent
+    ///    incident on a new turn is its own.
+    #[test]
+    fn a_capped_incident_ends_a_turn_only_while_its_error_is_attributable() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-capped");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        // kiro-cli 2.31.0's busy footer, measured on this host (2026-10-16).
+        let busy = "›  Kiro is working · 0s · Type to steer · Ctrl+S to queue";
+        let painted_after = HIGH_TRAFFIC_SCREEN.replace("\n \n▸ Credits", &format!("\n \n{KIRO_228_SUBMITTED}{KIRO_228_RULE}▸ Credits"))
+            .replace("›  ask a question or describe a task ↵", busy);
+        let half = HIGH_TRAFFIC_SCREEN.split("›  ask").next().unwrap().to_string();
+        let screens = [
+            ("ki", "kiro", HIGH_TRAFFIC_SCREEN.to_string()),
+            ("kp", "kiro", painted_after),
+            ("kh", "kiro", half),
+            ("cl", "claude", CLAUDE_503_NARROW.to_string()),
+        ];
+        for (name, backend, screen) in &screens {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": backend, "cmd": backend, "team": "" }).to_string()).unwrap();
+            std::fs::write(ws.join(format!("{name}.txt")), screen).unwrap();
+        }
+        let show = |name: &str| format!("cat {}; cat", ws.join(format!("{name}.txt")).display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "ki", "-c", &ws.to_string_lossy(), &show("ki")])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        for name in ["kp", "kh", "cl"] {
+            std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), &show(name)]).status().unwrap();
+        }
+        super::super::adopt(&session, Some("rec-capped-test")).expect("adopt");
+        // Each window has an open turn and its cap reached (three ladders).
+        for (name, _, _) in &screens {
+            tm::record_prompt(&session, name, &format!("[tmm chat 2026-10-16 02:40] lead: @{name} A"));
+            for sig in ["0|a", "0|b", "0|c"] {
+                assert!(matches!(tracker().lock().unwrap().decide(&session, name, now_secs(), sig, |_| false), Decision::Send { .. }));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let st = |w: &str| { let s = tm::derive(&session, w, 0); (s.state, s.detail) };
+        let ends = |w: &str| tm::recent_events(&session, 0).into_iter().filter(|e| e.window == w && e.kind == "notif" && e.text == "failed").count();
+        let paused = |w: &str| tm::recent_events(&session, 0).into_iter().filter(|e| e.window == w && e.text.starts_with("auto-continue paused")).count();
+        check_once();
+        // D: attributable, one end.
+        assert_eq!(st("ki"), ("idle".to_string(), EXHAUSTED.to_string()), "D");
+        assert_eq!(ends("ki"), 1, "D");
+        // B: a newer prompt painted under the error: no end.
+        assert_eq!(st("kp"), ("running".to_string(), String::new()), "B");
+        assert_eq!(ends("kp"), 0, "B");
+        // E: half-drawn, and no grammar: no end, the paused row still said.
+        assert_eq!((st("kh").0.as_str(), ends("kh")), ("running", 0), "E half-drawn");
+        assert_eq!((st("cl").0.as_str(), ends("cl")), ("running", 0), "E claude");
+        for w in ["ki", "kp", "kh", "cl"] {
+            assert_eq!(paused(w), 1, "{w}: the cap is still said");
+        }
+        // A: a new prompt to ki, the screen unchanged (a cat pane never repaints).
+        tm::record_prompt(&session, "ki", "[tmm chat 2026-10-16 02:41] human: @ki B");
+        tm::record_held(&session, "ki", "[tmm chat 2026-10-16 02:41] lead: @ki held for B", 0, "m1").unwrap();
+        check_once();
+        check_once();
+        assert_eq!(st("ki"), ("running".to_string(), String::new()), "A: B runs");
+        assert_eq!(ends("ki"), 1, "A: no second end");
+        assert_eq!(tm::held_rows(&session, "ki").len(), 1, "A: B's held line stays held");
+        // D again: a later independent incident (a new Request ID) on a new turn.
+        tm::record_prompt(&session, "ki", "[tmm chat 2026-10-16 02:42] human: @ki C");
+        std::fs::write(ws.join("ki2.txt"), HIGH_TRAFFIC_SCREEN.replace("ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146", "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9")).unwrap();
+        std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:ki"), &format!("cat {}; cat", ws.join("ki2.txt").display())]).status().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        check_once();
+        assert_eq!(st("ki"), ("idle".to_string(), EXHAUSTED.to_string()), "D again: its own end");
+        assert_eq!(ends("ki"), 2);
+        for w in ["ki", "kp", "kh", "cl"] {
+            tracker().lock().unwrap().retain_windows(&session, &[w.to_string()]);
+        }
+    }
+
+    /// Board #362, case C, through the commit the capture tick makes: a turn
+    /// fact lands between the capture and the commit. The observation is
+    /// Stale and nothing is spent; and as that fact came after the error was
+    /// first seen as the newest block, the incident is never attributed
+    /// again (the fact may be an unrepainted prompt).
+    #[test]
+    fn a_capped_incident_overtaken_during_its_capture_is_never_attributed() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let session = format!("capc-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 02:40] lead: @w A");
+        let decide = |sig: &str| tracker().lock().unwrap().decide(&session, "w", now_secs(), sig, |_| false);
+        for sig in ["0|a", "0|b", "0|c"] {
+            assert!(matches!(decide(sig), Decision::Send { .. }));
+        }
+        assert!(matches!(decide("1|x"), Decision::Capped { .. }));
+        let seen = tm::turn_version(&session, "w");
+        tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 02:41] human: @w B");
+        assert!(!commit_exhausted(&session, "w", true, true, seen, now_secs()), "stale");
+        assert!(tracker().lock().unwrap().exhausted_new(&session, "w"), "nothing spent");
+        assert!(matches!(decide("1|x"), Decision::Capped { first: false }));
+        assert!(!commit_exhausted(&session, "w", true, true, tm::turn_version(&session, "w"), now_secs()), "a fact since the first sighting");
+        assert_eq!(tm::derive(&session, "w", 0).state, "running");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
     }
 
     #[test]
@@ -1886,11 +2051,11 @@ mod tests {
                 sends += 1;
             }
             assert_eq!(decide(base + 300), Decision::GiveUp { first: true }, "incident {n}");
-            assert!(commit_exhausted(&session, "w", tm::turn_version(&session, "w"), now_secs()), "incident {n}: its turn gets its end");
+            assert!(commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w"), now_secs()), "incident {n}: its turn gets its end");
             let st = tm::derive(&session, "w", 0);
             assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", EXHAUSTED), "incident {n}");
             assert_eq!(decide(base + 320), Decision::GiveUp { first: false });
-            assert!(!commit_exhausted(&session, "w", tm::turn_version(&session, "w"), now_secs()), "incident {n}: one continuous incident is written once");
+            assert!(!commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w"), now_secs()), "incident {n}: one continuous incident is written once (the once flag: a give-up has no attribution rule over it)");
             assert_eq!(ends(), n, "incident {n}");
             // The error leaves the screen: the incident is over.
             tracker().lock().unwrap().clear(&session, "w");

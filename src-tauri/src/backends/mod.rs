@@ -203,6 +203,19 @@ impl Backend {
         }
     }
 
+    /// The NEWEST block on this backend's screen by its own measured
+    /// grammar, `(glued, spaced)`, or `None` when it cannot tell (no grammar
+    /// measured, a turn running, a half-drawn screen). Board #362: a capped
+    /// recovery incident ends a turn only while its error is this block.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn newest_block(self, pane: &str) -> Option<(String, String)> {
+        match self {
+            Backend::Kiro => kiro::newest_block(pane),
+            Backend::Codex => codex::newest_block(pane),
+            _ => None,
+        }
+    }
+
     /// The program whose `--version` names the CLI version a pane of this
     /// backend runs, for the recovery drift guard; `None` where recovery
     /// has no shape to compare (board #362).
