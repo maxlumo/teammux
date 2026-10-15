@@ -707,11 +707,26 @@ fn version_output(mut cmd: std::process::Command, limit: std::time::Duration) ->
         let _ = tx.send(stdout.take(VERSION_READ_CAP).read_to_string(&mut out).ok().map(|_| out));
     });
     let exited = loop {
-        match leader_exited(pid) {
-            Some(true) => break true,
-            Some(false) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Some(false) => break false,
-            None => return None, // reaped elsewhere: its id is no longer ours to signal
+        match leader_wait(pid) {
+            LeaderWait::Exited => break true,
+            LeaderWait::Running if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            LeaderWait::Running => break false,
+            LeaderWait::Interrupted => continue,
+            // Reaped by someone else (ECHILD): its pid, and so its group id,
+            // may already be another process's. Nothing is signalled.
+            LeaderWait::ReapedElsewhere => {
+                eprintln!("projects: version probe {pid}: its leader was reaped elsewhere; its group is not signalled");
+                return None;
+            }
+            // The kernel would not say. The leader is still this probe's own
+            // unreaped child, so it alone is ended by its pid; the group is not
+            // signalled on a guess (review P2-3).
+            LeaderWait::Failed(errno) => {
+                eprintln!("projects: version probe {pid}: waitid failed (errno {errno}); only the leader is ended");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     };
     // The leader stays unreaped while the read runs, so the group id stays
@@ -725,18 +740,46 @@ fn version_output(mut cmd: std::process::Command, limit: std::time::Duration) ->
     out.filter(|_| status.is_some_and(|s| s.success()))
 }
 
-/// Has the leader `pid` exited? Asked WITHOUT reaping it (`WNOWAIT`), so its
-/// pid stays held and its group id stays this probe's. `None` when it cannot
-/// be asked (it was reaped by someone else).
+/// What waiting on the probe's leader said (review P2-3 on 6111d25b: every
+/// waitid failure used to read as "reaped elsewhere", EINTR included, which
+/// skipped the group cleanup).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn leader_exited(pid: libc::pid_t) -> Option<bool> {
+#[derive(Debug, PartialEq)]
+enum LeaderWait {
+    Exited,
+    Running,
+    /// EINTR: ask again.
+    Interrupted,
+    /// ECHILD: it is no longer our child to wait for, so its pid may be reused.
+    ReapedElsewhere,
+    /// Any other failure, with its errno: the leader's state is unknown.
+    Failed(i32),
+}
+
+/// Has the leader `pid` exited? Asked WITHOUT reaping it (`WNOWAIT`), so its
+/// pid stays held and its group id stays this probe's.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn leader_wait(pid: libc::pid_t) -> LeaderWait {
     // SAFETY: `info` is a zeroed out-parameter the call fills; si_pid is read
     // after it, as waitid(2) says to tell "exited" from "nothing yet" under
     // WNOHANG.
-    unsafe {
+    let (r, errno, si_pid) = unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         let r = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
-        (r == 0).then(|| info.si_pid() == pid)
+        (r, std::io::Error::last_os_error().raw_os_error().unwrap_or(0), info.si_pid())
+    };
+    classify_wait(r, errno, si_pid, pid)
+}
+
+/// `leader_wait`'s reading of one waitid answer. Pure.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn classify_wait(r: i32, errno: i32, si_pid: i32, pid: i32) -> LeaderWait {
+    match (r, errno) {
+        (0, _) if si_pid == pid => LeaderWait::Exited,
+        (0, _) => LeaderWait::Running,
+        (_, libc::EINTR) => LeaderWait::Interrupted,
+        (_, libc::ECHILD) => LeaderWait::ReapedElsewhere,
+        (_, e) => LeaderWait::Failed(e),
     }
 }
 
@@ -1620,8 +1663,23 @@ mod tests {
     const KIRO_228_IMAGE: &str = "• Read /local/home/cfu/work/projects/video-factory/producti\n  ons/261013-jpeg-explainer/02_preprod/style-frames/sf_t13.\n  20.png\n    ╰ output:\n      ...+2 lines above\n            ductions/261013-jpeg-explainer/02_preprod/style\n            -frames/sf_t13.20.png\n         2  Format: png\n         3  Size: 170344 bytes\n         4  MediaType: image/png\n    (ctrl+o to toggle)\n\n• At least one of the image dimensions exceed max allowed\n  size for many-image requests: 2000 pixels (Request ID:\n  1336b8d6-2439-48cc-baa1-958338597643)\n\n▸ Credits: turn 19.11 • session 282.96 | Time: 2m 49s\n───────────────────────────────────────────────────────────\n";
     /// The same pane's later work (the next turn's first blocks, real).
     const KIRO_228_LATER: &str = "  （用 1280 宽副本、一次一两张）。报告写同目录 check.md。\n\n• Thought for 1s...\n    ╰ I've already got most of what I need, but I should\n      still check the remaining frames at a smaller size\n      and read the end of the manifest first.\n• Shell cd\n  /local/home/cfu/work/projects/video-factory/productions/2\n  61013-jpeg-explainer; tail -12\n  review/g3-v001/manifest.md; ls review/g3-v001\n  review/g3-v001/*/ ; ls -la --time-style=+%m-%d_%H:%M\n";
-    /// The same pane's idle furniture under its newest block (real, 10-15).
-    const KIRO_228_IDLE: &str = "───────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to\n exit\n───────────────────────────────────────────────────────────\nchecker · claude-opus-5.5 · high · ◑ 58% · Midway: 9h 16m\n/local/home/cfu/work/projects/video-factory\n\n›  ask a question or describe a task ↵\n                  /sessions to resume · /copy to clipboard\n";
+    /// The same pane's idle furniture under its newest block (real, 10-15),
+    /// from just after the credits line's rule (`KIRO_228_IMAGE` ends with
+    /// it, so the two together are one screen: credits, rule, banner, rule,
+    /// status lines, idle composer).
+    const KIRO_228_IDLE: &str = " Trust All Tools active, confirmations are off · /quit to\n exit\n───────────────────────────────────────────────────────────\nchecker · claude-opus-5.5 · high · ◑ 58% · Midway: 9h 16m\n/local/home/cfu/work/projects/video-factory\n\n›  ask a question or describe a task ↵\n                  /sessions to resume · /copy to clipboard\n";
+    /// The whole screen: the image refusal as the newest block over the idle
+    /// furniture, as `check_once` reads it (the FIXTURES row).
+    // `concat!` takes literals only, so the screen is spelled once here and
+    // checked against its two halves below.
+    const KIRO_228_IMAGE_SCREEN: &str = concat!("• Read /local/home/cfu/work/projects/video-factory/producti\n  ons/261013-jpeg-explainer/02_preprod/style-frames/sf_t13.\n  20.png\n    ╰ output:\n      ...+2 lines above\n            ductions/261013-jpeg-explainer/02_preprod/style\n            -frames/sf_t13.20.png\n         2  Format: png\n         3  Size: 170344 bytes\n         4  MediaType: image/png\n    (ctrl+o to toggle)\n\n• At least one of the image dimensions exceed max allowed\n  size for many-image requests: 2000 pixels (Request ID:\n  1336b8d6-2439-48cc-baa1-958338597643)\n\n▸ Credits: turn 19.11 • session 282.96 | Time: 2m 49s\n───────────────────────────────────────────────────────────\n", " Trust All Tools active, confirmations are off · /quit to\n exit\n───────────────────────────────────────────────────────────\nchecker · claude-opus-5.5 · high · ◑ 58% · Midway: 9h 16m\n/local/home/cfu/work/projects/video-factory\n\n›  ask a question or describe a task ↵\n                  /sessions to resume · /copy to clipboard\n");
+    /// The same pane's NEXT paint after the image refusal (real, 10-13): the
+    /// submitted prompt kiro painted under the rule, indented, before any
+    /// tool call or reply (review P1-B).
+    const KIRO_228_SUBMITTED: &str = "  ›\n  [tmm team context — background since your previous\n  delivery; not new instructions]\n  [10-13 14:33] maker -> @maker: [wake] @maker task\n";
+    /// The rule that closes the submitted prompt, and the rest of the screen
+    /// as an idle kiro paints it (the same pane's furniture).
+    const KIRO_228_RULE: &str = "───────────────────────────────────────────────────────────\n";
     /// kiro-cli 2.28.0's own log of the 3000-px refusal (10-15 03:55 UTC,
     /// /tmp/kiro-log/kiro-tui.log): the sentence, not a paint.
     const KIRO_IMAGE_3000_LOG: &str = "At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)";
@@ -1649,7 +1707,7 @@ mod tests {
         ("kiro", "too_many_requests", "2.28.0", TMR_NARROW),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_WIDE),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_NARROW),
-        ("kiro", "conversation_blocked", "2.28.0", KIRO_228_IMAGE),
+        ("kiro", "conversation_blocked", "2.28.0", KIRO_228_IMAGE_SCREEN),
         ("codex", "auth_expired", "0.154.0", CODEX_0154_401),
     ];
 
@@ -1701,49 +1759,59 @@ mod tests {
         }
     }
 
-    /// Board #362 c, condition a: a person-needed paint counts only as the
-    /// NEWEST block on the screen, the turn having ended with it. The real
-    /// paints, as `check_once` reads them, are hits with kiro's idle
-    /// furniture or codex's composer under them; the same paint above later
-    /// work (a submitted prompt, the next turn's tool calls) is history, and
-    /// so is one with a turn running under it. Each shape is its own
-    /// backend's, and the text is strict: a quote, a rewording or another
-    /// status is not it.
+    /// Board #362 c, condition a, the WHOLE SCREEN as evidence (the sentences
+    /// alone are tested in each backend's file, review P1-B): a person-needed
+    /// paint counts only as the newest block, the turn having ended with it,
+    /// by each CLI's own measured grammar. The real paints, as `check_once`
+    /// reads them, are hits with kiro's idle furniture or codex's composer
+    /// under them. History, a running turn, a half-drawn screen or anything
+    /// unrecognised under the block is nothing: when in doubt, no end.
     #[test]
     fn a_person_needed_paint_counts_only_as_the_newest_block() {
         use crate::backends::Backend::{Codex, Kiro};
         let id = |b: crate::backends::Backend, text: &str| b.person_paint(text).and_then(|(shape, block)| extract_request_id(&block).map(|id| format!("{shape}|{id}")));
-        // kiro: newest, alone and with its idle furniture under it.
-        assert_eq!(id(Kiro, KIRO_228_IMAGE).as_deref(), Some("conversation_blocked|1336b8d6-2439-48cc-baa1-958338597643"));
-        assert_eq!(id(Kiro, &format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}")).as_deref(), Some("conversation_blocked|1336b8d6-2439-48cc-baa1-958338597643"));
-        // The limit is read as digits: kiro's log has the 3000-px sentence.
-        assert_eq!(id(Kiro, &format!("• {KIRO_IMAGE_3000_LOG}\n")).as_deref(), Some("conversation_blocked|3c60ad4b-3654-47c8-aeb0-146c2a910433"));
-        // Above later work, or with a turn running under it: history.
+        let screen = format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}");
+        assert_eq!(screen, KIRO_228_IMAGE_SCREEN, "the FIXTURES screen is these two halves");
+        // kiro: the real screen, the error as its newest block.
+        assert_eq!(id(Kiro, &screen).as_deref(), Some("conversation_blocked|1336b8d6-2439-48cc-baa1-958338597643"));
+        // The 3000-px sentence (kiro's own log) under the same furniture.
+        let log = KIRO_228_IMAGE.replace("• At least one of the image dimensions exceed max allowed\n  size for many-image requests: 2000 pixels (Request ID:\n  1336b8d6-2439-48cc-baa1-958338597643)", &format!("• {KIRO_IMAGE_3000_LOG}"));
+        assert_eq!(id(Kiro, &format!("{log}{KIRO_228_IDLE}")).as_deref(), Some("conversation_blocked|3c60ad4b-3654-47c8-aeb0-146c2a910433"));
+        // History: a submitted prompt after it (no tool call or reply yet),
+        // the next turn's blocks after it, both with the idle composer under.
+        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}{KIRO_228_SUBMITTED}{KIRO_228_RULE}{KIRO_228_IDLE}")), None, "a submitted prompt is newer");
+        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}  › [tmm chat 2026-10-15 23:50] human: @checker continue\n{KIRO_228_RULE}{KIRO_228_IDLE}")), None, "a one-line delivered prompt is newer");
         assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}{KIRO_228_LATER}{KIRO_228_IDLE}")), None, "the next turn's blocks are under it");
-        let busy = KIRO_228_IDLE.replace("›  ask a question or describe a task ↵", "›  Kiro is working · 4s · Type to steer · Ctrl+S to queue");
-        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}{busy}")), None, "a turn runs: a prompt was taken after it");
-        // Strict: a quote of it, a rewording, no Request ID, a non-number.
-        assert_eq!(Kiro.person_paint(&format!("• Shell cat log\n  [tmm chat 2026-10-15 14:15] orchestrator: • {KIRO_IMAGE_3000_LOG}\n")), None);
-        assert_eq!(Kiro.person_paint(&format!("  › [tmm chat 2026-10-15 14:15] orchestrator: {KIRO_IMAGE_3000_LOG}\n")), None, "an indented quote has no head of its own");
-        assert_eq!(Kiro.person_paint("• At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels.\n"), None);
-        assert_eq!(Kiro.person_paint("• At least one of the image dimensions exceed max allowed size for many-image requests: many pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)\n"), None);
-        assert_eq!(Kiro.person_paint(&format!("• I saw: {KIRO_IMAGE_3000_LOG}\n")), None, "prose about it");
+        // A running turn: either spelling of the working footer.
+        let busy = screen.replace("›  ask a question or describe a task ↵", "›  Kiro is working · 4s · Type to steer · Ctrl+S to queue");
+        assert_eq!(Kiro.person_paint(&busy), None, "a turn runs");
+        let old_busy = screen.replace("\n\n›  ask a question or describe a task ↵", "\n Kiro is working · Type to queue · Ctrl+S to steer\n›  ask a question or describe a task ↵");
+        assert_eq!(Kiro.person_paint(&old_busy), None, "the no-› working footer");
+        // Half-drawn or not idle: no composer, a typed composer, the
+        // furniture cut short, the error alone on the screen.
+        assert_eq!(Kiro.person_paint(screen.split("›  ask").next().unwrap()), None, "no composer yet");
+        assert_eq!(Kiro.person_paint(&screen.replace("›  ask a question or describe a task ↵", "›  mwinit done, carry on")), None, "something is being typed");
+        assert_eq!(Kiro.person_paint(&format!("{KIRO_228_IMAGE}›  ask a question or describe a task ↵\n")), None, "the furniture is not all there");
+        assert_eq!(Kiro.person_paint(KIRO_228_IMAGE), None, "no composer at all");
+        // Not the sentence (each one tested in kiro.rs): a quote of it.
+        assert_eq!(Kiro.person_paint(&screen.replace("• At least one", "• Shell cat log\n  [tmm chat 2026-10-15 14:15] orchestrator: • At least one")), None);
         // codex: newest above its composer.
         assert_eq!(id(Codex, CODEX_0154_401).as_deref(), Some("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79"));
         // Above the next delivered prompt: history. No composer (mid-paint): nothing.
         assert_eq!(Codex.person_paint(CODEX_0154_401_THEN_PROMPT), None);
         let no_composer = CODEX_0154_401.split("› Ask Codex").next().unwrap();
         assert_eq!(Codex.person_paint(no_composer), None);
+        // Half-drawn: the submitted prompt is the last `›`, its lines under it.
+        let half = CODEX_0154_401_THEN_PROMPT.split("\n\n› Ask Codex").next().unwrap();
+        assert_eq!(Codex.person_paint(half), None, "the last › is a prompt we typed");
         // A turn running under it ("• Working …"), another status, another host, a quote.
         let working = CODEX_0154_401.replace("\n\n\n› Ask", "\n\n• Working (3s • esc to interrupt)\n\n› Ask");
         assert_eq!(Codex.person_paint(&working), None);
         assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("401 Unauthorized", "403 Forbidden")), None);
-        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("bedrock-runtime", "api.example")), None);
-        assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("■ unexpected", "• unexpected")), None, "a message bullet is the agent talking");
         assert_eq!(Codex.person_paint(&CODEX_0154_401.replace("■ unexpected", "› [tmm chat 2026-10-14 11:27] orchestrator: ■ unexpected")), None);
         // A shape is its own backend's.
         assert_eq!(Kiro.person_paint(CODEX_0154_401), None);
-        assert_eq!(Codex.person_paint(&format!("{KIRO_228_IMAGE}{KIRO_228_IDLE}")), None);
+        assert_eq!(Codex.person_paint(&screen), None);
         assert_eq!(crate::backends::Backend::Claude.person_paint(CODEX_0154_401), None);
         // And no transient shape reads the person-needed paints.
         assert_eq!(error_signature("kiro", KIRO_228_IMAGE), None);
@@ -2019,6 +2087,35 @@ mod tests {
         assert!(alive(outside_pid), "the probe signalled a process that is not its own");
         let _ = outside.kill();
         let _ = outside.wait();
+    }
+
+    /// Board #362 review P2-3: the probe's wait tells its failures apart.
+    /// EINTR is asked again; ECHILD (the leader was reaped by someone else,
+    /// shown here for real) means its pid may be reused, so nothing is
+    /// signalled; any other failure leaves the leader's state unknown.
+    #[test]
+    fn the_probe_wait_tells_an_interrupt_from_a_reaped_leader_from_a_failure() {
+        assert_eq!(classify_wait(0, 0, 42, 42), LeaderWait::Exited);
+        assert_eq!(classify_wait(0, 0, 0, 42), LeaderWait::Running, "WNOHANG, nothing yet");
+        assert_eq!(classify_wait(-1, libc::EINTR, 0, 42), LeaderWait::Interrupted);
+        assert_eq!(classify_wait(-1, libc::ECHILD, 0, 42), LeaderWait::ReapedElsewhere);
+        assert_eq!(classify_wait(-1, libc::EINVAL, 0, 42), LeaderWait::Failed(libc::EINVAL));
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        assert_eq!(leader_wait(pid), LeaderWait::Running);
+        let _ = child.kill();
+        let mut exited = false;
+        for _ in 0..100 {
+            if leader_wait(pid) == LeaderWait::Exited { exited = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(exited, "an exited leader is seen, and not reaped by the asking");
+        // Reaped by someone else: ECHILD.
+        let mut status = 0;
+        // SAFETY: reaping this test's own child, standing in for "someone else".
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(leader_wait(pid), LeaderWait::ReapedElsewhere);
+        drop(child); // std's Child never waits or kills on drop
     }
 
     /// Board #362, validator P3: once capped, the "paused" row is said ONCE

@@ -1355,29 +1355,93 @@ fn image_too_large(spaced: &str) -> bool {
             .is_some_and(is_uuid)
 }
 
+/// kiro's composer with nothing typed and no turn running (kiro-cli 2.28.0,
+/// measured on video-factory:checker and builder: `›  ask a question or
+/// describe a task ↵`, at column zero).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const IDLE_COMPOSER: &str = "›  ask a question or describe a task";
+
 /// The NEWEST paint on a kiro screen, when it is one of kiro's errors that
 /// needs a person (board #362 c): `(shape, block)`, the block de-wrapped
-/// (lines trimmed, joined without a separator). Newest means the turn ended
-/// with it: it is the last column-zero block kiro heads with one of its own
-/// glyphs (`HEAD_GLYPHS`: its prose, its tool calls and its errors all open
-/// that way), and no turn is running under it (the prompt line is not
-/// `Kiro is working`). Under it there is only kiro's furniture (the credits
-/// line, the rules, the status line, the composer), none of which opens with
-/// those glyphs. The same paint above later work is history and says
-/// nothing (orchestrator's condition a). A quote of the error (a delivery
-/// typed into the pane, an agent's own prose) is indented under its own head
-/// and is never this block.
+/// (lines trimmed, joined without a separator).
+///
+/// Newest means the turn ended with it, and that is read by kiro's own
+/// measured screen grammar, not by "the last bullet" (review P1-B on
+/// 6111d25b: an image error, then a newly submitted prompt, then the idle
+/// composer was still read as the newest). Bottom up: the LAST column-zero
+/// `›` line must be the IDLE composer (`IDLE_COMPOSER`; a typed composer, a
+/// `›  Kiro is working …` footer or no composer at all, a half-drawn screen,
+/// is not); the block is the last column-zero `HEAD_GLYPHS` block above it;
+/// and everything between them is kiro's idle furniture and nothing else
+/// (`idle_furniture`): a submitted prompt (kiro paints it indented, `  ›`
+/// or `  [tmm chat …]`), a tool call, prose or a third rule means a newer
+/// turn has painted, and the block is history. A working footer anywhere
+/// under the block (either spelling, `›  Kiro is working` or the older
+/// ` Kiro is working`) means a turn runs. When in doubt, nothing: a missed
+/// stall costs a person one look, a false one ends a working turn.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
-    if lines.iter().rev().find(|l| l.starts_with('›')).is_some_and(|l| working_footer(l).is_some()) {
+    let composer = lines.iter().rposition(|l| l.starts_with('›'))?;
+    if !lines[composer].starts_with(IDLE_COMPOSER) {
         return None;
     }
-    let head = lines.iter().rposition(|l| l.starts_with(HEAD_GLYPHS))?;
-    let body: Vec<&str> = lines[head + 1..].iter().take_while(|l| l.starts_with(' ') && !l.trim().is_empty()).map(|l| l.trim()).collect();
-    let spaced = std::iter::once(lines[head]).chain(body.iter().copied()).collect::<Vec<_>>().join(" ");
-    let glued = std::iter::once(lines[head]).chain(body.iter().copied()).collect::<String>();
+    let head = lines[..composer].iter().rposition(|l| l.starts_with(HEAD_GLYPHS))?;
+    let end = head + 1 + lines[head + 1..composer].iter().take_while(|l| l.starts_with(' ') && !l.trim().is_empty()).count();
+    if lines[end..].iter().any(|l| working_footer(l).is_some())
+        || !idle_furniture(&lines[end..composer])
+        || !lines[composer + 1..].iter().all(|l| l.trim().is_empty() || (l.starts_with(' ') && !l.contains("[tmm ")))
+    {
+        return None;
+    }
+    let block = &lines[head..end];
+    let spaced = block.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let glued = block.iter().map(|l| l.trim()).collect::<String>();
     image_too_large(&spaced).then_some(("conversation_blocked", glued))
+}
+
+/// What kiro paints between its newest block and the idle composer once a
+/// turn has ended, top to bottom (kiro-cli 2.28.0, measured on
+/// video-factory:checker and builder; 2.22.1 adds the tasks line,
+/// lingting:kiro): the turn's `▸ Credits … | Time …` (or `▸ Time …`) line
+/// and ` ◐ N tasks remaining · ctrl+x expand`, a rule, the one-space-indented
+/// `Trust All Tools active … /quit to` banner and its ` exit` wrap, a rule,
+/// then at most three column-zero status lines (`<agent> · <model> · … ·
+/// Midway: …` and the cwd), with blank lines anywhere. Exactly two rules,
+/// and nothing that is not one of these: no `›` or bullet line, no `[tmm …]`
+/// stamp, no two-space-indented line (a submitted prompt, a tool output).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn idle_furniture(region: &[&str]) -> bool {
+    let (mut rules, mut status) = (0, 0);
+    let one_space = |l: &str| l.starts_with(' ') && !l.starts_with("  ");
+    for line in region {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.chars().all(|c| c == '─') {
+            rules += 1;
+            if rules > 2 {
+                return false;
+            }
+            continue;
+        }
+        if line.contains("[tmm ") || line.starts_with('›') || line.starts_with(HEAD_GLYPHS) {
+            return false;
+        }
+        let fits = match rules {
+            0 => line.starts_with("▸ ") || (one_space(line) && t.contains(" tasks remaining")),
+            1 => one_space(line),
+            _ => {
+                status += 1;
+                !line.starts_with(' ') && status <= 3
+            }
+        };
+        if !fits {
+            return false;
+        }
+    }
+    rules == 2 && status > 0
 }
 
 /// The program whose `--version` names the kiro-cli a pane runs.
@@ -1386,6 +1450,31 @@ pub(crate) const VERSION_PROGRAM: &str = "kiro-cli";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the
+    /// whole-screen evidence, `recovery::tests`): the image refusal is exactly
+    /// kiro's sentence under a measured head glyph, the pixel limit as digits
+    /// (2000 in the real paint, 3000 in kiro's own log), a Request ID uuid and
+    /// the closing paren; a hard wrap is a space. A rewording, no id, a word
+    /// for the number, prose around it or a quote stamp is not it.
+    #[test]
+    fn the_image_refusal_is_exactly_kiros_sentence() {
+        let s = "At least one of the image dimensions exceed max allowed size for many-image requests";
+        assert!(image_too_large(&format!("• {s}: 2000 pixels (Request ID: 1336b8d6-2439-48cc-baa1-958338597643)")));
+        assert!(image_too_large(&format!("• {s}: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)")));
+        assert!(image_too_large(&format!("● {s}:\n  3000 pixels (Request ID:\n  3c60ad4b-3654-47c8-aeb0-146c2a910433)")), "the 2.22.1 glyph, wrapped");
+        for bad in [
+            format!("• {s}: 3000 pixels."),
+            format!("• {s}: many pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)"),
+            format!("• {s}: 3000 pixels (Request ID: not-a-uuid)"),
+            format!("• {s}: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433) and more"),
+            format!("• I saw: {s}: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)"),
+            format!("› [tmm chat 2026-10-15 14:15] orchestrator: {s}: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)"),
+            format!("{s}: 3000 pixels (Request ID: 3c60ad4b-3654-47c8-aeb0-146c2a910433)"),
+        ] {
+            assert!(!image_too_large(&bad), "{bad}");
+        }
+    }
 
     /// Board #384 (reviewer P1-C): kiro's two recipe migrations go through
     /// the recipe's one door, the read INSIDE the home's section. Each starts

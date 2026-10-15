@@ -285,22 +285,38 @@ pub(crate) const VERSION_PROGRAM: &str = "codex";
 /// composer line and no content line (`codex_content_line`: a message, a
 /// tool call, a submitted prompt, a `Working` row, another error) sits
 /// between them. The same paint above later work is history (condition a);
-/// a screen with no composer is a screen mid-paint and says nothing.
+/// a screen with no composer, or whose last `›` is a prompt we typed with
+/// its continuation under it, is a screen mid-paint and says nothing.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
     let composer = lines.iter().rposition(|l| is_composer_line(l))?;
+    // The composer is codex's own furniture only at the BOTTOM, with at most
+    // the footer zone under it, and never a line we typed: a submitted prompt
+    // is also `›` at column zero, and on a half-drawn screen (the real
+    // composer not painted yet) the last `›` would be that prompt.
+    if lines[composer].contains("[tmm ") || lines[composer + 1..].iter().filter(|l| !l.trim().is_empty()).count() > FOOTER_ZONE_LINES {
+        return None;
+    }
     let head = lines[..composer].iter().rposition(|l| codex_content_line(l))?;
     if !lines[head].starts_with('\u{25a0}') {
         return None;
     }
     let block: String = lines[head..composer].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect();
-    let c = super::canonical(&block);
-    let id_tail = block.rsplit_once("request id:").map(|(_, id)| id.trim());
-    (c.starts_with("unexpectedstatus401unauthorized")
+    bedrock_401(&block).then_some(("auth_expired", block))
+}
+
+/// Is this de-wrapped codex block exactly the expired-credential error: the
+/// `■` glyph, `unexpected status 401 Unauthorized`, a `bedrock-runtime` url,
+/// and a request id uuid at its end? The SENTENCE alone; `person_paint` is
+/// what decides it is the newest paint (review P1-B: kept apart).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn bedrock_401(block: &str) -> bool {
+    let c = super::canonical(block);
+    block.starts_with('\u{25a0}')
+        && c.starts_with("unexpectedstatus401unauthorized")
         && c.contains("bedrockruntime")
-        && id_tail.is_some_and(super::is_uuid))
-    .then_some(("auth_expired", block))
+        && block.rsplit_once("request id:").map(|(_, id)| id.trim()).is_some_and(super::is_uuid)
 }
 
 pub(crate) struct CodexFooter {
@@ -700,6 +716,26 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the
+    /// whole-screen evidence): codex-cli 0.154.0's expired-credential block,
+    /// de-wrapped as `person_paint` joins it. Another status, another host,
+    /// no request id, a message bullet or a stamp is not it.
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn the_401_is_exactly_codexs_bedrock_auth_block() {
+        let real = "■ unexpected status 401 Unauthorized: Authentication failed: Please make sureyour API Key is valid., url:https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/responses, request id:389cc17d-bf5d-409b-ba80-102270246c79";
+        assert!(super::bedrock_401(real));
+        for bad in [
+            real.replace("401 Unauthorized", "403 Forbidden"),
+            real.replace("bedrock-runtime", "api.example"),
+            real.replace("389cc17d-bf5d-409b-ba80-102270246c79", "pending"),
+            real.replace('■', "•"),
+            format!("[tmm chat 2026-10-14 11:27] orchestrator: {real}"),
+        ] {
+            assert!(!super::bedrock_401(&bad), "{bad}");
+        }
+    }
+
     use super::*;
 
     /// The catalog the user's config points at is the authoritative model
