@@ -1039,10 +1039,25 @@ fn announce_move(session: &str, room: &str, ws: &str, agent: &str, rev: u64, roo
         return Announced::default();
     }
     let _ = crate::projects::rooms::post(room, agent, room_line);
-    let Ok(Some((team, told))) = update_recipe(&home, |r| r.as_ref().map(|r| {
+    let read_recipe = update_recipe(&home, |r| r.as_ref().map(|r| {
         let team = r.get("team").and_then(|v| v.as_str()).unwrap_or("").split('/').next().unwrap_or("").to_string();
         (team, Told::of(r).unwrap_or_default())
-    })) else { return Announced::default() };
+    }));
+    // The recipe could not be read (or is gone): nobody is told anything and
+    // the answer is a clean empty one, so the caller cannot tell it from "no
+    // one to tell". That is #388's recorded limit; the server log names it, so
+    // a missing notice can be traced to it (board #362, orchestrator).
+    let (team, told) = match read_recipe {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            eprintln!("projects: move of '{agent}': no launch recipe in {}; the move was not announced to any agent", home.display());
+            return Announced::default();
+        }
+        Err(e) => {
+            eprintln!("projects: move of '{agent}': its launch recipe could not be read ({e}); the move was not announced to any agent");
+            return Announced::default();
+        }
+    };
     // A team whose live members cannot be read (tmux could not be asked) is
     // NOT a team with nobody in it (board #388): nobody of it is told it
     // joined or left, and the next announcement retries.
