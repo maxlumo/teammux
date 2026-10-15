@@ -223,6 +223,21 @@ impl Store {
         Ok(seen)
     }
 
+    /// Has the screen paint `sig` already ended a turn of `window` (board
+    /// #362 c, condition b)? A turn end recorded from the screen carries its
+    /// paint's signature in `via` (`telemetry::record_missed_end`), so "once
+    /// per paint" is read from the log and outlives a gateway restart.
+    pub fn missed_end_recorded(&self, session: &str, window: &str, sig: &str) -> Result<bool, String> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM activity WHERE session = ?1 AND COALESCE(NULLIF(win, ''), CAST(window AS TEXT)) = ?2
+                   AND kind = 'notif' AND text = 'failed' AND via = ?3)",
+                rusqlite::params![session, window, sig],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("read missed ends: {e}"))
+    }
+
     /// The newest persisted TURN FACT of each kind, per window (board #249):
     /// the latest `prompt`, `tool` call, `permission_required`/`input_required`
     /// ask and turn end (`completed`/`failed`/`interrupted`). Deciding whether

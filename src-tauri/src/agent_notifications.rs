@@ -798,7 +798,7 @@ mod tests {
         crate::projects::telemetry::record_prompt(&session, "critic", ask);
         let (hub, root) = AgentNotificationHub::scratch_with_turn(&session, "critic", ask);
         use crate::projects::telemetry as tm;
-        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", tm::turn_version(&session, "critic"), tm_now()), tm::Missed::Ended);
+        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", "auth_expired|x", tm::turn_version(&session, "critic"), tm_now()), tm::Missed::Ended);
         assert!(hub.take_reply_targets(&session, "critic").is_empty(), "the edge closed at the missed end");
         let posted: Vec<_> = tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "msg" || e.text.contains("[reply]")).collect();
         assert!(posted.is_empty(), "nothing was returned as the agent's answer: {posted:?}");
@@ -811,7 +811,7 @@ mod tests {
         let next = "[tmm chat 2026-10-15 23:10] human: @critic mwinit done, carry on";
         tm::record_prompt(&session, "critic", next);
         let (hub, root) = AgentNotificationHub::scratch_with_turn(&session, "critic", next);
-        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", seen, tm_now()), tm::Missed::Stale);
+        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", "auth_expired|x", seen, tm_now()), tm::Missed::Stale);
         assert_eq!(tm::derive(&session, "critic", 0).state, "running", "the newer turn is still open");
         assert_eq!(hub.take_reply_targets(&session, "critic"), vec!["maker".to_string(), "human".to_string()],
             "the open turn's edge is intact: both requests it carries, none closed by the stale paint");

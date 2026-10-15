@@ -465,8 +465,8 @@ fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64
     if !tracker().lock().unwrap().person_new(session, window, sig) {
         return false;
     }
-    match super::telemetry::record_missed_end(session, window, detail, seen, ts) {
-        super::telemetry::Missed::Ended | super::telemetry::Missed::Attached => {
+    match super::telemetry::record_missed_end(session, window, detail, sig, seen, ts) {
+        super::telemetry::Missed::Ended | super::telemetry::Missed::Attached | super::telemetry::Missed::Recorded => {
             tracker().lock().unwrap().person_accept(session, window, sig);
             true
         }
@@ -1911,7 +1911,7 @@ mod tests {
             assert_eq!(t.decide(&session, "w", at, "1|a", verified), Decision::Send { attempt: n });
         }
         assert_eq!(t.decide(&session, "w", t0 + 300, "1|a", verified), Decision::GiveUp { first: true });
-        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
+        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, "recovery_exhausted|1|a", tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
         assert_eq!(t.decide(&session, "w", t0 + 320, "1|a", verified), Decision::GiveUp { first: false }, "our own end proves nothing");
         tm::record_notification_with(&session, "w", "completed", t0 + 330, crate::backends::EndQuality::Said);
         assert_eq!(t.decide(&session, "w", t0 + 340, "1|a", verified), Decision::Confirmed { first: true }, "the CLI's own end is evidence");

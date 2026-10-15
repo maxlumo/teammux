@@ -1530,6 +1530,21 @@ pub enum Missed {
     Stale,
     /// The window has no turn to end or describe.
     NoTurn,
+    /// This very paint already ended a turn of the window, recorded in the
+    /// log (condition b, durable): nothing more, after a restart too.
+    Recorded,
+}
+
+/// Has the paint `sig` already ended a turn of `window`? Read from the log
+/// (`Store::missed_end_recorded`), or the in-memory ring where tests do not
+/// persist, as `for_each_turn_input` does.
+fn paint_recorded(session: &str, window: &str, sig: &str) -> bool {
+    if !cfg!(test) || PERSIST_IN_TEST.with(|p| p.get()) {
+        return super::with_store(|s| s.missed_end_recorded(session, window, sig)).unwrap_or(false);
+    }
+    events().lock().unwrap().get(session).is_some_and(|rows| {
+        rows.iter().any(|e| e.window == window && e.kind == "notif" && e.text == "failed" && e.via == sig)
+    })
 }
 
 /// The turn end the HOOKS missed, recorded from the screen (board #362 c,
@@ -1552,6 +1567,11 @@ pub enum Missed {
 /// end, never flushes a newer turn's held lines. The capture itself runs
 /// with no lock held.
 ///
+/// Once per paint is durable (condition b): the end row carries the paint's
+/// signature `sig` in `via`, and a paint the log says already ended a turn
+/// of this window is `Recorded` and changes nothing, after a gateway restart
+/// too, when the tracker's in-memory marks are gone.
+///
 /// It carries NO reply: nothing is posted, nothing is returned as the
 /// agent's answer, and the requesters' edge simply closes at this end (the
 /// next turn's members start after it); they learn why from the status
@@ -1565,9 +1585,16 @@ pub enum Missed {
 /// capture tick that still sees the paint as the newest attaches it again.
 /// The running state is a projection of the screen and the log (tenet 7);
 /// a paint the person has cleared meanwhile is simply not re-attached.
-pub fn record_missed_end(session: &str, window: &str, detail: &str, seen: u64, ts: u64) -> Missed {
+pub fn record_missed_end(session: &str, window: &str, detail: &str, sig: &str, seen: u64, ts: u64) -> Missed {
     recovery_mark(session);
     let order = turn_order();
+    // Once per paint, from the log (condition b): a gateway restart forgets
+    // the tracker's marks, and a paint that ended an older turn must not end
+    // the turn a newer prompt opened (the validator-style rig: a pane that
+    // never repainted after the new prompt, restarted).
+    if paint_recorded(session, window, sig) {
+        return Missed::Recorded;
+    }
     let held = store().lock().unwrap().get(&(session.to_string(), window.to_string())).cloned();
     let Some(held) = held else { return Missed::NoTurn };
     if rec_version(&held) != seen {
@@ -1582,7 +1609,9 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, seen: u64, t
         return Missed::Attached;
     }
     let turn_had_prompt = held.prompt.is_some() && held.prompt_seq > held.end_seq;
-    let event = ("notif", "failed".to_string(), detail.to_string(), String::new(), Vec::new());
+    // The paint's signature rides in `via` (unused on an end row), so the
+    // log knows which paint ended this turn.
+    let event = ("notif", "failed".to_string(), detail.to_string(), sig.to_string(), Vec::new());
     let detail = detail.to_string();
     turn_fact_held(&order, session, window, ts, |_| false, Some(event), |r, ts, seq| {
         r.end = Some(("failed".to_string(), ts));
@@ -3029,7 +3058,7 @@ mod tests {
         let ends = || rows().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic G3 review");
         assert_eq!(derive(&session, "w1", 0).state, "running", "the hooks gave no end: running for hours, as measured");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Ended);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|sig", turn_version(&session, "w1"), now()), Missed::Ended);
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         assert!(!turn_busy(&session, "w1"), "an end: nothing is held behind it");
@@ -3041,7 +3070,7 @@ mod tests {
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         // The turn has ended: the detail goes on that end, no second row.
-        assert_eq!(record_missed_end(&session, "w1", "recovery_exhausted", turn_version(&session, "w1"), now()), Missed::Attached);
+        assert_eq!(record_missed_end(&session, "w1", "recovery_exhausted", "recovery_exhausted|sig", turn_version(&session, "w1"), now()), Missed::Attached);
         assert_eq!(derive(&session, "w1", 0).detail, "recovery_exhausted");
         assert_eq!(ends().len(), 1, "no double end");
         // A later prompt supersedes it; so does that turn's own hook end.
@@ -3052,7 +3081,7 @@ mod tests {
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""));
         // A window with no turn at all gets nothing.
-        assert_eq!(record_missed_end(&session, "w2", "auth_expired", turn_version(&session, "w2"), now()), Missed::NoTurn);
+        assert_eq!(record_missed_end(&session, "w2", "auth_expired", "auth_expired|sig", turn_version(&session, "w2"), now()), Missed::NoTurn);
         assert_eq!(derive(&session, "w2", 0).detail, "");
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -3077,17 +3106,43 @@ mod tests {
             end(&session);
             let hook_end = ends();
             assert_eq!(hook_end.len(), 1, "{what}");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Attached, "{what}");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|sig", turn_version(&session, "w1"), now()), Missed::Attached, "{what}");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
             assert_eq!(ends(), hook_end, "{what}: the end's row is the hook's, unchanged; no second end");
             simulate_restart(&session);
             recovery_mark(&session);
             let st = derive(&session, "w1", 0);
             assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""), "{what}: memory only, by contract");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", turn_version(&session, "w1"), now()), Missed::Attached, "{what}: the next tick");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|sig", turn_version(&session, "w1"), now()), Missed::Attached, "{what}: the next tick");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
             assert_eq!(ends(), hook_end, "{what}: still one end");
         }
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #362 c, condition b across a gateway restart (found on the
+    /// builder's live rig at 8fe5d522: a pane that had not repainted after a
+    /// newer prompt still showed the old 401 as its newest paint, and the
+    /// restarted gateway, its marks forgotten, ended the NEW turn). The paint
+    /// that ended a turn is in the log, and the same paint never ends another
+    /// turn of the window; a new paint (a new request id) does.
+    #[test]
+    fn a_paint_ends_one_turn_only_even_across_a_restart() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("once-{}", uuid::Uuid::new_v4());
+        let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").count();
+        record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @cx go");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|a", turn_version(&session, "w1"), now()), Missed::Ended);
+        record_prompt(&session, "w1", "[tmm chat 2026-10-16 00:30] human: @cx mwinit done, carry on");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|a", turn_version(&session, "w1"), now()), Missed::Recorded, "before a restart");
+        simulate_restart(&session);
+        recovery_mark(&session);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|a", turn_version(&session, "w1"), now()), Missed::Recorded, "after a restart");
+        assert_eq!(derive(&session, "w1", 0).state, "running", "the newer turn is still open");
+        assert_eq!(ends(), 1, "one end for one paint");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", "auth_expired|b", turn_version(&session, "w1"), now()), Missed::Ended, "a new paint ends the new turn");
+        assert_eq!(ends(), 2);
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
