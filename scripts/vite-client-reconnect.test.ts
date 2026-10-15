@@ -50,7 +50,7 @@ type Listener = { fn: (e: any) => void; once: boolean };
 
 function makeWorld(context: TestContext, hostname: string) {
   const world: any = {
-    sockets: [] as any[], reloads: 0, logs: [] as string[], token: 'tok-A', serverUp: true, fetchThrows: false,
+    sockets: [] as any[], reloads: 0, logs: [] as string[], token: 'tok-A', serverUp: true, fetchThrows: false, fetchHangs: false, fetches: 0,
     // What the server does with each HMR dial: 'open' | 'refuse'. Default: open.
     hmrDial: (_socket: any) => 'open',
     liveIntervals: new Set<unknown>(),
@@ -64,7 +64,8 @@ function makeWorld(context: TestContext, hostname: string) {
       this.url = String(url); this.protocol = protocol; world.sockets.push(this);
       queueMicrotask(() => {
         const answer = protocol === 'vite-ping' ? (world.serverUp ? 'open' : 'refuse') : world.hmrDial(this);
-        if (answer === 'open') this.serverOpen(); else this.serverRefuse();
+        if (answer === 'open') this.serverOpen(); else if (answer === 'refuse') this.serverRefuse(); // 'hang': neither, until the test says
+
       });
     }
     addEventListener(type: string, fn: (e: any) => void, options?: { once?: boolean }) { (this.listeners[type] ??= []).push({ fn, once: !!options?.once }); }
@@ -86,9 +87,14 @@ function makeWorld(context: TestContext, hostname: string) {
   g.setInterval = (fn: () => void, ms: number) => { const id = mockSetInterval(fn, ms); world.liveIntervals.add(id); return id; };
   g.clearInterval = (id: unknown) => { world.liveIntervals.delete(id); return mockClearInterval(id); };
   g.WebSocket = FakeWebSocket;
-  g.fetch = async () => {
-    if (world.fetchThrows) throw new Error('network down');
-    return { ok: true, text: async () => `const x = 1;\nconst wsToken = "${world.token}";\n` };
+  g.fetch = (_url: string, init?: { signal?: AbortSignal }) => {
+    world.fetches++;
+    if (world.fetchThrows) return Promise.reject(new Error('network down'));
+    if (world.fetchHangs) {
+      // A pending response: it ends only when the client’s own deadline aborts it.
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    }
+    return Promise.resolve({ ok: true, text: async () => `const x = 1;\nconst wsToken = "${world.token}";\n` });
   };
   g.document = { visibilityState: 'visible', querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {} };
   g.window = { addEventListener() {} };
@@ -104,8 +110,10 @@ const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(
 
 /** Advance the mocked clock in small steps until `done()`, up to `maxMs`. */
 async function until(context: TestContext, done: () => boolean, maxMs = 120000, step = 50) {
-  for (let t = 0; t <= maxMs && !done(); t += step) { await settle(); context.mock.timers.tick(step); }
+  let t = 0;
+  for (; t <= maxMs && !done(); t += step) { await settle(); context.mock.timers.tick(step); }
   await settle();
+  return t;
 }
 
 let counter = 0;
@@ -223,4 +231,56 @@ test('a failed re-dial is NOT a restart: a changed server identity is, and only 
       if (!reloads) assert.ok(world.logs.some((l: string) => l.includes('the dev server restarted; HMR is off until this page is reloaded')), world.logs.join('\n'));
     });
   }
+});
+
+test('PENDING is not the same as refused (#393, reviewer P2)', async (context) => {
+  // 1. The first HMR upgrade never answers. The loop must not wait for it: after its 8 s it dials
+  //    again, restores on the next, and when the hung socket finally opens it is CLOSED and silent.
+  await context.test('a hung upgrade is given up on after 8 s; its late socket is shut and never touches the new transport', async (t) => {
+    const world = makeWorld(t, 'app.example');
+    const client = await loadClient(t, true);
+    await settle();
+    newest(world).serverMessage({ type: 'connected' });
+    const seen: unknown[] = [];
+    const hot = client.createHotContext('/m.js');
+    hot.on('app:event', (data: unknown) => seen.push(data));
+    let hung: any = null;
+    world.hmrDial = (socket: any) => { if (!hung) { hung = socket; return 'hang'; } return 'open'; };
+    world.sockets[0].serverDrop();
+    const waited = await until(t, () => world.logs.some((l: string) => l.includes('connection restored')));
+    assert.ok(hung, 'the first dial is the one that hangs');
+    assert.ok(waited >= 8000 && waited < 20000, `it gave up on the pending upgrade after its 8 s, not before and not never (${waited} ms)`);
+    assert.equal(world.reloads, 0);
+    const live = newest(world);
+    assert.notEqual(live, hung, 'and restored on a LATER socket');
+    live.serverMessage({ type: 'connected' });
+    // The hung socket answers LATE. It is shut, and what it says reaches nobody.
+    hung.serverOpen();
+    await settle();
+    assert.equal(hung.readyState, 3, 'the late socket is closed by the client');
+    hung.serverMessage({ type: 'custom', event: 'app:event', data: 'from the abandoned attempt' });
+    live.serverMessage({ type: 'custom', event: 'app:event', data: 'live' });
+    await settle();
+    assert.deepEqual(seen, ['live'], 'only the live transport delivers');
+    hot.send('app:ping', {});
+    await settle();
+    assert.ok(live.sent.some((m: string) => m.includes('app:ping')) && !hung.sent.some((m: string) => m.includes('app:ping')), 'and sends go out on the live socket, not the abandoned one');
+    for (let i = 0; i < 3; i++) { t.mock.timers.tick(30000); await settle(); }
+    assert.equal(world.liveIntervals.size, 1, 'the abandoned attempt left no ping timer behind');
+  });
+  // 2. The identity read hangs too: it is aborted at 5 s and read as unknown, so the loop goes on
+  //    to the next dial (twelve of them, then the console says HMR is off) and nothing reloads.
+  await context.test('a hung identity read is "unknown" after 5 s: the loop goes on and nothing reloads', async (t) => {
+    const world = makeWorld(t, 'localhost');
+    world.fetchHangs = true;
+    await loadClient(t, true);
+    await settle();
+    newest(world).serverMessage({ type: 'connected' });
+    world.hmrDial = () => 'refuse';
+    world.sockets[0].serverDrop();
+    const waited = await until(t, () => world.logs.some((l: string) => l.includes('could not re-establish HMR')), 400000, 100);
+    assert.equal(world.reloads, 0, 'an identity read that never answers is unknown, not a restart');
+    assert.equal(world.fetches, 12, 'one identity read per attempt, each given up on');
+    assert.ok(waited < 12 * (5000 + 5000 + 100) + 5000, `bounded: ${waited} ms for 12 attempts with a hung identity read each`);
+  });
 });

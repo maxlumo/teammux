@@ -75,8 +75,10 @@ function allowCompactXtermLines() {
 // and compares. Only a confirmed new identity reloads, and only a page on the
 // loopback (the local dev loop's wanted answer to a restart); a page reached
 // through any other host never reloads, it says so once in the console. Short of
-// either, it keeps trying for ~1 minute and then says HMR is off until a manual
-// reload.
+// either, it keeps trying (12 attempts, ~1 minute when dials fail at once; every
+// attempt is bounded at 8 s and every identity read at 5 s, so a PENDING upgrade or
+// fetch delays the next dial but never blocks it) and then says HMR is off until a
+// manual reload.
 //
 // Guarded like the xterm patch: every piece of text it replaces must be found
 // exactly once, or the dev server fails loudly instead of silently reloading again.
@@ -102,14 +104,19 @@ export const CLIENT_PATCHES = [
       ');',
       'let transport = __tmmNewTransport();',
       '// The server\'s identity: its HMR token changes on every start (tmux-mobile #393).',
+      '// Bounded: a pending fetch is "unknown", never a reason to wait.',
       'async function __tmmServerRestarted() {',
+      '  const abort = new AbortController();',
+      '  const timer = setTimeout(() => abort.abort(), 5e3);',
       '  try {',
-      '    const res = await fetch(importMetaUrl.href.split("?")[0], { cache: "no-store" });',
+      '    const res = await fetch(importMetaUrl.href.split("?")[0], { cache: "no-store", signal: abort.signal });',
       '    if (!res.ok) return false;',
       '    const served = /const wsToken = "([^"]*)"/.exec(await res.text())?.[1];',
       '    return !!served && served !== wsToken;',
       '  } catch {',
       '    return false;',
+      '  } finally {',
+      '    clearTimeout(timer);',
       '  }',
       '}',
       'let willUnload = false;',
@@ -138,16 +145,22 @@ export const CLIENT_PATCHES = [
       '          let restored = false;',
       '          let restarted = false;',
       '          for (let attempt = 0; attempt < 12 && !restored && !restarted; attempt++) {',
+      '            let abandoned = false;',
       '            transport = __tmmNewTransport();',
       '            hmrClient.transport = transport;',
-      '            try {',
-      '              await transport.connect(createHMRHandler((next) => {',
-      '                if (next.type === "custom" && next.event === "vite:ws:connect") restored = true;',
-      '                return handleMessage(next);',
-      '              }));',
-      '            } catch {}',
+      '            // Each attempt is bounded (8 s): a pending upgrade must not hold up the next dial.',
+      '            // A socket that opens AFTER its attempt was given up on is shut, never used.',
+      '            await Promise.race([transport.connect(createHMRHandler(async (next) => {',
+      '              if (next.type === "custom" && next.event === "vite:ws:connect") {',
+      '                if (abandoned) { next.data.webSocket.close(); return; }',
+      '                restored = true;',
+      '              }',
+      '              if (abandoned) return;',
+      '              return handleMessage(next);',
+      '            })).catch(() => {}), wait(8e3)]);',
       '            if (!restored) await wait(50);',
       '            if (restored) break;',
+      '            abandoned = true;',
       '            restarted = await __tmmServerRestarted();',
       '            if (!restarted) await wait(Math.min(1e3 * (attempt + 1), 5e3));',
       '          }',

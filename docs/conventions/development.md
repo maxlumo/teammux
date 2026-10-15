@@ -312,8 +312,18 @@ of calling `location.reload()`:
    (`localhost`, `127.0.0.1`, `[::1]`: the local dev loop's wanted answer to a
    restart); a page reached through any other host never reloads and logs once
    "the dev server restarted; HMR is off until this page is reloaded". With the
-   identity unchanged or unreadable it keeps trying for about a minute (12
-   attempts) and then logs that HMR is off until a reload.
+   identity unchanged or unreadable it keeps trying and then logs that HMR is off
+   until a reload. The trying is BOUNDED, and stops after a while: 12 attempts
+   (about a minute when every dial fails at once), each given 8 s and each identity
+   read 5 s, so a PENDING upgrade or fetch delays the next dial and never blocks it;
+   a timed-out attempt is invalidated, and if its socket opens late it is shut and
+   its messages ignored, so it can never touch the live transport. THE COST: counting
+   starts after the ping answers (the server is reachable), so it is not a recovery
+   window for a whole network outage; and when HTTP is reachable but HMR keeps
+   failing, the tab stops receiving source updates and needs a refresh to get them
+   back — HMR carries source updates, not the room's data, so the app's own socket,
+   the draft and the page are untouched. Hot updates are NOT promised to resume
+   after an outage of any length.
 4. If the same server is back, HMR resumes and the console says "connection
    restored; the page was not reloaded".
 
