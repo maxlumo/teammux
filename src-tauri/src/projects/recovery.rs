@@ -269,7 +269,6 @@ struct Rec {
     /// (board #362 e): it is never continued, even after older ladders age
     /// out of the window while it is still on the screen.
     capped: bool,
-    capped_reported: bool,
 }
 
 /// What the tracker decided for one (window, tick) with the error visible.
@@ -287,7 +286,9 @@ pub enum Decision {
     GiveUp { first: bool },
     /// A fresh incident with `MAX_INCIDENTS` ladders already started in the
     /// window (board #362 e): not continued; the agent needs a person.
-    /// `true` exactly once per incident.
+    /// `true` once per capped STRETCH of the window, not per incident
+    /// (validator P3): the stretch ends when a ladder can start again or the
+    /// agent works again.
     Capped { first: bool },
 }
 
@@ -300,6 +301,11 @@ pub struct Tracker {
     /// window: the cross-incident cap reads it. It outlives the incident
     /// records, which go when their error leaves the screen.
     starts: HashMap<(String, String), Vec<u64>>,
+    /// The windows whose cap has been SAID (validator P3, #362): once per
+    /// capped stretch, not once per fresh incident, which under a fresh error
+    /// every ~20 s floods the feed. The stretch ends when the window has room
+    /// again (a ladder starts) or the agent works again (a tool call).
+    capped_said: std::collections::HashSet<(String, String)>,
 }
 
 impl Tracker {
@@ -353,11 +359,12 @@ impl Tracker {
             starts.retain(|&t| t + INCIDENT_WINDOW_SECS > now);
             if starts.len() >= MAX_INCIDENTS {
                 rec.capped = true;
-                let first = !rec.capped_reported;
-                rec.capped_reported = true;
+                let first = self.capped_said.insert((session.to_string(), window.to_string()));
                 return Decision::Capped { first };
             }
             starts.push(now);
+            // The window has room again: a later cap is a new stretch, said again.
+            self.capped_said.remove(&(session.to_string(), window.to_string()));
         }
         rec.attempts += 1;
         rec.sent_at = now;
@@ -373,9 +380,12 @@ impl Tracker {
     /// the now-working agent — the repeat-send the owner reported
     /// (2026-08-26: "系统会反复发送好几次 auto recovery").
     pub fn confirm(&mut self, session: &str, window: &str) {
-        if let Some(rec) = self.map.get_mut(&(session.to_string(), window.to_string())) {
+        let key = (session.to_string(), window.to_string());
+        if let Some(rec) = self.map.get_mut(&key) {
             rec.confirmed = true;
         }
+        // The agent works again: a later cap is a new stretch, said again.
+        self.capped_said.remove(&key);
     }
 
     /// The error is no longer on the window's screen: the incident is over,
@@ -389,6 +399,7 @@ impl Tracker {
     pub fn retain_windows(&mut self, session: &str, live: &[String]) {
         self.map.retain(|(s, w), _| s != session || live.contains(w));
         self.starts.retain(|(s, w), _| s != session || live.contains(w));
+        self.capped_said.retain(|(s, w)| s != session || live.contains(w));
     }
 }
 
@@ -1553,6 +1564,41 @@ mod tests {
         assert_eq!(version_output(std::process::Command::new("/nonexistent/tmm-no-such-cli"), limit), None, "not installed");
     }
 
+    /// Board #362, validator P3: once capped, the "paused" row is said ONCE
+    /// for the stretch, however many fresh incidents follow; it is said again
+    /// only after the cap cleared, by a ladder starting again (the window
+    /// freed) or by the agent working again (a tool call).
+    #[test]
+    fn a_capped_agent_is_said_once_until_the_cap_clears() {
+        let mut t = Tracker::default();
+        let t0 = 1_000_000;
+        for (i, sig) in ["1|a", "1|b", "1|c"].iter().enumerate() {
+            assert_eq!(t.decide("s", "w", t0 + i as u64 * 20, sig, silent), Decision::Send { attempt: 1 });
+        }
+        let said = |d: &Decision| matches!(d, Decision::Capped { first: true });
+        let mut rows = 0;
+        for i in 0..5u64 {
+            let d = t.decide("s", "w", t0 + 60 + i * 20, &format!("1|x{i}"), silent);
+            assert!(matches!(d, Decision::Capped { .. }), "{d:?}");
+            rows += said(&d) as usize;
+        }
+        assert_eq!(rows, 1, "cap reached, 5 more fresh incidents: exactly one row");
+        // The agent works again (a tool call): the stretch is over; the next cap is said.
+        t.confirm("s", "w");
+        assert_eq!(t.decide("s", "w", t0 + 200, "1|y", silent), Decision::Capped { first: true });
+        assert_eq!(t.decide("s", "w", t0 + 220, "1|z", silent), Decision::Capped { first: false });
+        // The window frees: a ladder starts; capped again later, it is said again.
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 1, "1|m", silent), Decision::Send { attempt: 1 });
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 21, "1|n", silent), Decision::Send { attempt: 1 });
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 41, "1|o", silent), Decision::Send { attempt: 1 });
+        assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 61, "1|p", silent), Decision::Capped { first: true });
+        // Another window has its own stretch.
+        for (i, sig) in ["2|a", "2|b", "2|c"].iter().enumerate() {
+            t.decide("s", "v", t0 + i as u64, sig, silent);
+        }
+        assert_eq!(t.decide("s", "v", t0 + 10, "2|d", silent), Decision::Capped { first: true });
+    }
+
     /// Board #362 e: at most `MAX_INCIDENTS` incidents START a ladder per
     /// window in `INCIDENT_WINDOW_SECS`. One incident's own retries are not
     /// incidents; the next fresh one in the window is not continued (said
@@ -1576,7 +1622,7 @@ mod tests {
         assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 300, "1|d", silent), Decision::Capped { first: false });
         // Leaving the screen does not reset the window's count.
         t.clear("s", "w");
-        assert_eq!(t.decide("s", "w", t0 + 300, "1|e", silent), Decision::Capped { first: true }, "the count outlives the record");
+        assert_eq!(t.decide("s", "w", t0 + 300, "1|e", silent), Decision::Capped { first: false }, "the count outlives the record, and the cap was already said");
         // A fresh incident once the oldest ladder has aged out is continued.
         assert_eq!(t.decide("s", "w", t0 + INCIDENT_WINDOW_SECS + 1, "1|f", silent), Decision::Send { attempt: 1 });
         // Another window has its own count.
