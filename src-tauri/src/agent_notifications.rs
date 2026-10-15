@@ -880,6 +880,8 @@ mod tests {
         assert!(stop("kiro", &format!("  {placeholder}")).empty);
         assert!(!stop("kiro", "Done: the gate is green.").empty);
         assert!(!stop("kiro", &format!("I saw this line in the log: {placeholder}")).empty, "a real reply that quotes it is a reply");
+        assert!(!stop("kiro", &format!("{placeholder} Then the result: green.")).empty, "the placeholder followed by real text is a reply");
+        assert!(!stop("kiro", "(No assistant response was recorded for the preceding turn").empty, "half the sentence is not the CLI's text");
         assert!(!stop("claude", placeholder).empty, "only kiro-cli writes it");
         assert!(!normalize(&envelope("kiro", json!({"hook_event_name":"stop"}))).unwrap().empty, "no reply at all is not the placeholder");
         // grok (1.0.5, payloads measured live): camelCase keys, snake_case

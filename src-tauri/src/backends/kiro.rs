@@ -539,8 +539,21 @@ pub(crate) fn kiro_reply_from_session(jsonl: &str) -> Option<String> {
 /// such lines between 2026-10-12 and 10-15 across eight agents). It is the
 /// CLI's own sentence, not the agent's: a turn whose whole reply is this
 /// ended without saying anything, whatever it was in the middle of.
+///
+/// The text, whole. Measured: 31 `assistant` rows, `operationType: "Say"`, in
+/// `~/.kiro/sessions/*/messages.jsonl` written between 2026-10-12 and
+/// 2026-10-14 by kiro-cli 2.28 through 2.31 (the host runs 2.31.0; the store
+/// does not record which CLI wrote a row) — all 31 byte-identical, em dash and
+/// all. Nothing else is accepted: this line decides whether an agent is TYPED
+/// into, so a prefix, the sentence followed by real text, or a reply that
+/// merely quotes it is a reply, never the CLI's stand-in.
+const EMPTY_TURN_PLACEHOLDER: &str = "(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)";
+
+/// Is `text` that placeholder and nothing else? Whitespace is normalised (a
+/// hook may hand the reply over wrapped or padded); no word is.
 pub(crate) fn is_empty_turn_reply(text: &str) -> bool {
-    text.trim_start().starts_with("(No assistant response was recorded for the preceding turn")
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    words(text) == words(EMPTY_TURN_PLACEHOLDER)
 }
 
 /// A session id is one path component: never empty, never a path, never a
@@ -1646,6 +1659,63 @@ mod tests {
         ];
         let all = format!("{}\n{}", rows.join("\n"), second.join("\n"));
         assert_eq!(kiro_reply_from_session(&all), None, "a turn with only placeholders has no reply");
+    }
+
+    /// Board #355. The placeholder is the CLI's whole sentence or it is not the
+    /// placeholder: the decision types into an agent's pane, so a looser match
+    /// would nudge an agent that had answered (reviewer P1-A).
+    #[test]
+    fn only_the_whole_placeholder_is_an_empty_turn() {
+        let whole = EMPTY_TURN_PLACEHOLDER;
+        assert!(is_empty_turn_reply(whole));
+        assert!(is_empty_turn_reply(&format!("\n  {whole}\n")), "padding is not text");
+        assert!(is_empty_turn_reply(&whole.replace(". This", ".\nThis")), "a wrapped line is the same words");
+        // What it is NOT: each of these has been, or could be, a real reply.
+        let cut = &whole[..whole.find(" This placeholder").unwrap()];
+        assert!(!is_empty_turn_reply("(No assistant response was recorded for the preceding turn"), "half a sentence");
+        assert!(!is_empty_turn_reply(cut), "the first sentence alone");
+        assert!(!is_empty_turn_reply(&format!("{whole} Then the gate went green: 673 passed.")), "the placeholder followed by the real result");
+        assert!(!is_empty_turn_reply(&format!("Result first. {whole}")), "text before it");
+        assert!(!is_empty_turn_reply(&format!("The log says: \"{whole}\" — that was the validator's turn.")), "a reply that quotes it");
+        assert!(!is_empty_turn_reply(&whole.replace("preceding", "previous")), "one word different is not the CLI's text");
+        assert!(!is_empty_turn_reply(&whole.replace("No assistant", "no assistant")), "nor is a different case");
+        assert!(!is_empty_turn_reply(""));
+        assert!(!is_empty_turn_reply("Done."));
+    }
+
+    /// Board #355: the captured shape, replayed. Rows are the real ones of a
+    /// stalled turn (kiro-cli v3 session store, `sess_aea970de…`, written
+    /// 2026-10-13 23:58 UTC; ids shortened, the project's text dropped): a tool
+    /// call and its result, then the CLI's own `Say` row, then the `steer` line
+    /// that arrived after. The Stop hook for that turn carries NO text, so the
+    /// reply comes from the isolated home's session file — the same lookup the
+    /// live consumer runs. The store does not record the CLI version that wrote
+    /// the row; the host's was 2.31.0.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_captured_stalled_turn_is_read_back_as_the_placeholder() {
+        let rows = [
+            r#"{"id":"b97e","timestamp":"2026-10-13T23:58:32.723Z","payload":{"type":"session_metadata","key":"contextUsage","value":{"usagePercentage":48.8},"executionId":"4a87"}}"#,
+            r#"{"id":"run_command_toolu-call","timestamp":"2026-10-13T23:58:33.802Z","payload":{"type":"tool_call","toolCallId":"run_command_toolu","toolName":"execute_bash","args":{"command":"tmm board note 48 \"...\""}}}"#,
+            r#"{"id":"run_command_toolu-result","timestamp":"2026-10-13T23:58:33.802Z","payload":{"type":"tool_result","toolCallId":"run_command_toolu","content":"Output:\n✓ #48\n✓ sent\n\n\nExit Code: 0","success":true,"executionId":"4a87"}}"#,
+            r#"{"id":"515c-say","timestamp":"2026-10-13T23:58:45.402Z","payload":{"type":"assistant","content":"(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)","operationType":"Say","executionId":"4a87","_meta":{"kiro":{"agentMode":"writer"}}}}"#,
+            r#"{"id":"steer-58ec","timestamp":"2026-10-13T23:58:45.427Z","payload":{"type":"user","content":"[tmm chat 2026-10-14 07:58] editor: [reply] ok","source":"steer"}}"#,
+        ];
+        let home = std::env::temp_dir().join(format!("tmm-kiro-empty-{}", uuid::Uuid::new_v4()));
+        let dir = home.join("sessions").join("297005da4b9f6bd1").join("sess_aea9");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("messages.jsonl"), rows.join("\n")).unwrap();
+        let stop = serde_json::json!({"hook_event_name": "stop", "session_id": "sess_aea9"});
+        let reply = reply_fallback(stop.as_object().unwrap(), Some(&home)).expect("the Stop hook has no body: the session file answers");
+        assert_eq!(reply, EMPTY_TURN_PLACEHOLDER, "the captured row is byte-for-byte the constant");
+        assert!(is_empty_turn_reply(&reply));
+
+        // The same turn when the agent DID say something after the tool call.
+        let said = [rows[2], r#"{"id":"1","timestamp":"2026-10-13T23:59:00.000Z","payload":{"type":"assistant","content":"Posted #48; waiting on the critic.","operationType":"Say"}}"#];
+        std::fs::write(dir.join("messages.jsonl"), said.join("\n")).unwrap();
+        let reply = reply_fallback(stop.as_object().unwrap(), Some(&home)).unwrap();
+        assert!(!is_empty_turn_reply(&reply), "{reply}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Board #213: resume follows the engine on the launch line.
