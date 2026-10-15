@@ -13,23 +13,35 @@ pub fn registry_list() -> Result<Value, String> {
     })
 }
 
-/// A def that names no input mode gets its backend's default (board #336:
-/// kiro steers) — here, at the door, so only what is being SAVED is filled.
-/// A stored row keeps the mode it was saved with, and stored team text that
-/// predates the field keeps meaning `queue` (the serde default). Returns
-/// whether it filled one. An unknown backend is left to the validation.
-pub(crate) fn with_default_input_mode(def: &mut Value) -> bool {
-    let Some(obj) = def.as_object_mut() else { return false };
-    if obj.get("input_mode").is_some_and(|v| !v.is_null()) { return false; }
-    let Some(backend) = obj.get("backend").and_then(Value::as_str).and_then(crate::backends::Backend::parse) else { return false };
-    obj.insert("input_mode".into(), json!(backend.default_input_mode()));
-    true
+/// Whether a def NAMES an input mode. Absent and null both mean "not named"
+/// (board #336): the mode is then resolved by `unnamed_input_mode`.
+fn names_input_mode(def: &Value) -> bool {
+    def.get("input_mode").is_some_and(|v| !v.is_null())
+}
+
+/// The mode for a def that names none (board #336, reviewer P1-B on
+/// 99e233c3). A definition that ALREADY EXISTS keeps the mode it was stored
+/// with, so an update that does not mention the mode never changes it; only
+/// a NEW definition gets its backend's default (kiro steers). A kept mode the
+/// def's backend can no longer carry (a steer row moved to claude) falls to
+/// the new backend's default, the same thing the editor does. An unknown
+/// backend is left to the validation (`queue`, which it then refuses by name).
+fn unnamed_input_mode(backend: &str, stored: Option<&str>) -> String {
+    if let Some(mode) = stored.filter(|m| models::validate_input_mode(backend, m).is_ok()) {
+        return mode.to_string();
+    }
+    crate::backends::Backend::parse(backend).map_or("queue", |b| b.default_input_mode()).to_string()
 }
 
 pub fn registry_save(def: &Value) -> Result<Value, String> {
+    let named = names_input_mode(def);
     let mut def = def.clone();
-    with_default_input_mode(&mut def);
-    let agent: store::RegAgent =
+    if !named {
+        // A null is not a value serde's default covers; the mode is resolved
+        // below, against the stored row.
+        if let Some(obj) = def.as_object_mut() { obj.remove("input_mode"); }
+    }
+    let mut agent: store::RegAgent =
         serde_json::from_value(def).map_err(|e| format!("invalid agent def: {e}"))?;
     // The registry name becomes the window name and the isolated home's
     // directory — one rule for both (`agents::valid_name`).
@@ -49,11 +61,51 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
     // in a line nobody reads. See `models`.
     models::validate(&agent.backend, &agent.model)?;
     models::validate_effort(&agent.backend, &agent.effort)?;
-    models::validate_input_mode(&agent.backend, &agent.input_mode)?;
+    // Whether the row exists is read in the SAME store section that writes
+    // it: two separate sections would let a concurrent save decide "new"
+    // about a row that is no longer new.
     with_store(|store| {
+        if !named {
+            let stored = store.reg_get(&agent.name)?;
+            agent.input_mode = unnamed_input_mode(&agent.backend, stored.as_ref().map(|a| a.input_mode.as_str()));
+        }
+        models::validate_input_mode(&agent.backend, &agent.input_mode)?;
         store.reg_save(&agent, now())?;
         Ok(json!({ "ok": true, "name": agent.name }))
     })
+}
+
+/// A team's bare members that name no input mode (board #336, reviewer P1-B):
+/// a member the STORED team already has (same name, bare) keeps the mode it
+/// was stored with — including none, which has always meant `queue` (the
+/// serde default) and so is left absent; only a NEW bare member gets its
+/// backend's default. Returns the members text to store: the incoming text,
+/// byte for byte, unless a mode was filled. Text that is not a JSON array is
+/// returned as it came, for `teams::validate` to name.
+fn fill_member_input_modes(members: &str, stored: Option<&store::RegTeam>) -> Result<String, String> {
+    let Ok(mut incoming) = serde_json::from_str::<Vec<Value>>(members) else { return Ok(members.to_string()) };
+    let before: Vec<Value> = stored.and_then(|t| serde_json::from_str(&t.members).ok()).unwrap_or_default();
+    let bare = |m: &Value| m.get("base").and_then(Value::as_str).unwrap_or("").trim().is_empty()
+        && m.get("team").and_then(Value::as_str).unwrap_or("").trim().is_empty()
+        && m.get("agent").is_some_and(Value::is_object);
+    let mut filled = false;
+    for m in incoming.iter_mut().filter(|m| bare(m)) {
+        let name = m.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let agent = m.get_mut("agent").expect("bare");
+        if names_input_mode(agent) { continue; }
+        let backend = agent.get("backend").and_then(Value::as_str).unwrap_or("").to_string();
+        let old = before.iter().find(|o| bare(o) && o.get("name").and_then(Value::as_str).unwrap_or("").trim() == name);
+        let mode = match old {
+            // Existing, and stored without a mode: leave it so (queue).
+            Some(o) if !names_input_mode(&o["agent"]) => continue,
+            Some(o) => unnamed_input_mode(&backend, o["agent"]["input_mode"].as_str()),
+            None => unnamed_input_mode(&backend, None),
+        };
+        agent["input_mode"] = json!(mode);
+        filled = true;
+    }
+    if !filled { return Ok(members.to_string()); }
+    serde_json::to_string(&incoming).map_err(|e| e.to_string())
 }
 
 pub fn teams_list() -> Result<Value, String> {
@@ -70,13 +122,6 @@ pub fn team_get(name: &str) -> Result<Option<store::RegTeam>, String> {
 /// discovered by the human the moment they try to start the team.
 pub fn teams_save(def: &Value) -> Result<Value, String> {
     let mut team: store::RegTeam = serde_json::from_value(def.clone()).map_err(|e| format!("invalid team def: {e}"))?;
-    // A bare member's inline agent is a NEW definition too: the same default
-    // at the same door. Text that is not a JSON array is left as it came, for
-    // `teams::validate` to name.
-    if let Ok(mut members) = serde_json::from_str::<Vec<Value>>(&team.members) {
-        let filled = members.iter_mut().filter_map(|m| m.get_mut("agent")).fold(false, |any, a| with_default_input_mode(a) | any);
-        if filled { team.members = serde_json::to_string(&members).map_err(|e| e.to_string())?; }
-    }
     let (known, known_teams): (Vec<String>, Vec<String>) = with_store(|store| {
         store.reg_seed(now())?;
         Ok((
@@ -127,7 +172,13 @@ pub fn teams_save(def: &Value) -> Result<Value, String> {
             serde_json::from_str::<Vec<Value>>(&a.mcp).map_err(|e| format!("member '{}': mcp must be a JSON array: {e}", m.name))?;
         }
     }
+    // A NEW bare member gets its backend's input mode (#336); an existing
+    // one keeps its stored mode. Decided in the section that writes, against
+    // the team as it is stored now. Every mode filled is valid for its
+    // backend by construction (`unnamed_input_mode`), so the validation
+    // above still holds for the text stored.
     with_store(|store| {
+        team.members = fill_member_input_modes(&team.members, store.team_get(&team.name)?.as_ref())?;
         store.team_save(&team, now())?;
         Ok(json!({ "ok": true, "name": team.name, "members": members.len() }))
     })

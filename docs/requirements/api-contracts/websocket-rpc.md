@@ -191,7 +191,7 @@ server start (`source = "builtin"`; save/delete refuse their names).
 | Method | Params | Response |
 |--------|--------|----------|
 | `registry_list` | — | `{agents: [{name, backend, model, effort, input_mode, system, skills, mcp}]}` (the `can_hire` flag was retired 2026-09-26; `input_mode` is `queue`\|`steer`, v25) |
-| `registry_save` | `def` | Validates backend, model id (against the backend's own CLI), effort enum and `input_mode` (absent or null = the backend's `default_input_mode`, board #336; `steer` only where `backends_list` says `input_modes`). `teams_save` fills a bare member's inline agent the same way; a stored row or stored team text is never rewritten |
+| `registry_save` | `def` | Validates backend, model id (against the backend's own CLI), effort enum and `input_mode` (absent or null: an existing row keeps its stored mode, a NEW one gets the backend's `default_input_mode`, board #336; `steer` only where `backends_list` says `input_modes`). `teams_save` treats a bare member's inline agent without `input_mode` the same way (a null there is refused, as before), matched by member name against the stored team; an existing member stored without a mode is left so (queue) |
 | `registry_delete` | `name` | OK |
 | `global_prompt_get` | — | `{text, path, max_bytes}` — the app-wide agent instructions (`<config>/AGENTS.md`), prepended to every managed agent's system prompt at spawn |
 | `global_prompt_set` | `text` | `{ok, bytes}`; empty text deletes the file; > 24 KB rejected |

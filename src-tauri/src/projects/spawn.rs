@@ -2097,6 +2097,50 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(stored("dmnamed"), named, "nothing to fill: the text is stored as it came");
     }
 
+    /// Board #336 reviewer P1-B: registry_save and teams_save are UPSERTS, so
+    /// "only a new definition gets the default" has to be decided against
+    /// what is stored. An update that names no mode keeps the stored one —
+    /// for a registry row, and for a team's existing bare member, including
+    /// a member stored before #245 with no mode at all (which has always
+    /// meant queue) — while a new bare member saved beside it gets the
+    /// backend's default.
+    #[test]
+    fn an_update_that_names_no_input_mode_keeps_the_stored_one() {
+        super::super::tests::use_test_store();
+        let save = |name: &str, backend: &str, mode: Option<&str>, system: &str| {
+            let mut def = json!({ "name": name, "backend": backend, "model": "", "effort": "", "system": system, "skills": "[]", "mcp": "[]" });
+            if let Some(m) = mode { def["input_mode"] = json!(m); }
+            super::super::registry_save(&def).unwrap();
+            super::super::registry_get(name).unwrap().unwrap().input_mode
+        };
+        assert_eq!(save("upq", "kiro", Some("queue"), "v1"), "queue");
+        assert_eq!(save("upq", "kiro", None, "v2"), "queue", "an existing queue kiro stays queue on an update without a mode");
+        assert_eq!(save("ups", "codex", Some("steer"), "v1"), "steer");
+        assert_eq!(save("ups", "codex", None, "v2"), "steer", "and an existing steer stays steer");
+        assert_eq!(save("ups", "claude", None, "v3"), "queue", "a kept steer the new backend cannot carry falls to its default");
+
+        // A team stored before #245: its bare kiro member carries no mode.
+        let historic = r#"[{"name":"old","base":"","role":"Old","agent":{"name":"old","backend":"kiro","model":"","effort":"","system":"Old.","skills":"[]","mcp":"[]"}}]"#;
+        super::super::with_store(|st| st.team_save(&super::super::store::RegTeam { name: "upteam".into(), description: "".into(), members: historic.into() }, 1)).unwrap();
+        let members = |name: &str| super::super::teams::parse_members(&super::super::team_get(name).unwrap().unwrap()).unwrap();
+        assert_eq!(members("upteam")[0].agent.as_ref().unwrap().input_mode, "queue", "it has always meant queue");
+        // Only the description and the role change, the members go back as read.
+        let edited = historic.replace(r#""role":"Old""#, r#""role":"Older""#);
+        super::super::teams_save(&json!({ "name": "upteam", "description": "now described", "members": edited.clone() })).unwrap();
+        assert_eq!(super::super::team_get("upteam").unwrap().unwrap().members, edited, "the existing member is stored as it came: no mode is filled in");
+        assert_eq!(members("upteam")[0].agent.as_ref().unwrap().input_mode, "queue", "and it still restarts queued");
+        // A new bare kiro member beside it: that one is new, so it steers.
+        let grown = edited.replace("}}]", r#"}},{"name":"new","base":"","role":"","agent":{"name":"new","backend":"kiro","model":"","effort":"","system":"New.","skills":"[]","mcp":"[]"}}]"#);
+        super::super::teams_save(&json!({ "name": "upteam", "description": "", "members": grown })).unwrap();
+        let both: Vec<(String, String)> = members("upteam").iter().map(|m| (m.name.clone(), m.agent.as_ref().unwrap().input_mode.clone())).collect();
+        assert_eq!(both, [("old".to_string(), "queue".to_string()), ("new".to_string(), "steer".to_string())]);
+        // The new member is now stored with steer; an update naming no mode keeps it.
+        let stripped = super::super::team_get("upteam").unwrap().unwrap().members.replace(r#","input_mode":"steer""#, "");
+        assert!(!stripped.contains("steer"), "{stripped}");
+        super::super::teams_save(&json!({ "name": "upteam", "description": "", "members": stripped })).unwrap();
+        assert_eq!(members("upteam")[1].agent.as_ref().unwrap().input_mode, "steer", "an existing steer member stays steer");
+    }
+
     /// The recipe's provenance (`agent_def`, or `team`+`member`) is what the
     /// restart resolves through; a def deleted after the spawn degrades soft.
     #[test]

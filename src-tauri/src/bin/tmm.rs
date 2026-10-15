@@ -943,23 +943,7 @@ async fn main() {
                 fail(EXIT_USAGE, "registry save needs --name and --backend (and usually --system):\n  tmm registry save --name tester --backend kiro --system \"You run the test suite …\" [--skills a,b] [--mcp '<json array>']");
             };
             let backend = flags.get("backend").cloned().flatten().unwrap_or_default();
-            // --skills is a comma list of refs; --mcp is a raw JSON array
-            // (server-validated either way).
-            let skills: Vec<String> = flags
-                .get("skills").cloned().flatten()
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-                .unwrap_or_default();
-            let def = json!({
-                "name": name,
-                "backend": backend,
-                "model": flags.get("model").cloned().flatten().unwrap_or_default(),
-                "effort": flags.get("effort").cloned().flatten().unwrap_or_default(),
-                "system": flags.get("system").cloned().flatten().unwrap_or_default(),
-                "skills": serde_json::to_string(&skills).unwrap(),
-                "mcp": flags.get("mcp").cloned().flatten().unwrap_or_else(|| "[]".into()),
-                // Absent = null: the server fills the backend's default (#336).
-                "input_mode": flags.get("input-mode").cloned().flatten(),
-            });
+            let def = registry_def(&name, &backend, &flags);
             let r = rpc(&ctx, "registry_save", json!({ "def": def })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); }
         }
@@ -1086,6 +1070,33 @@ async fn main() {
 }
 
 type Flags = std::collections::HashMap<String, Option<String>>;
+
+/// The def `tmm registry save` sends. `input_mode` is sent only when
+/// `--input-mode` was given (board #336, reviewer P1-A): the key is OMITTED
+/// otherwise, never null, so an older server applies its own `queue` default
+/// (serde's default covers a missing field, not a null) and a current one
+/// keeps a stored row's mode or gives a new def its backend's default.
+/// --skills is a comma list of refs; --mcp is a raw JSON array (both
+/// server-validated).
+fn registry_def(name: &str, backend: &str, flags: &Flags) -> Value {
+    let skills: Vec<String> = flags
+        .get("skills").cloned().flatten()
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let mut def = json!({
+        "name": name,
+        "backend": backend,
+        "model": flags.get("model").cloned().flatten().unwrap_or_default(),
+        "effort": flags.get("effort").cloned().flatten().unwrap_or_default(),
+        "system": flags.get("system").cloned().flatten().unwrap_or_default(),
+        "skills": serde_json::to_string(&skills).unwrap(),
+        "mcp": flags.get("mcp").cloned().flatten().unwrap_or_else(|| "[]".into()),
+    });
+    if let Some(mode) = flags.get("input-mode").cloned().flatten() {
+        def["input_mode"] = json!(mode);
+    }
+    def
+}
 
 /// `tmm task …` — background tasks as tmux windows. The only subtree that
 /// opens no socket and reads no config, so it stays usable when the hub is
@@ -2437,6 +2448,33 @@ mod tests {
         assert_eq!(flags.get("input-mode").cloned().flatten().as_deref(), Some("steer"));
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
+        assert_eq!(registry_def("dev", "kiro", &flags)["input_mode"], "steer", "a given mode is sent");
+    }
+
+    /// Board #336 reviewer P1-A: without `--input-mode` the key is OMITTED,
+    /// never null. An older server's `RegAgent.input_mode` is a String with
+    /// a serde default, which covers a missing field and refuses a null; so
+    /// a null broke every plain `tmm registry save` against an older gateway.
+    #[test]
+    fn registry_save_without_an_input_mode_omits_the_key() {
+        let args: Vec<String> = ["registry", "save", "--name", "dev", "--backend", "kiro", "--system", "x"]
+            .iter().map(|s| s.to_string()).collect();
+        let (flags, _, _) = split_flags(&args);
+        let def = registry_def("dev", "kiro", &flags);
+        assert!(def.get("input_mode").is_none(), "no key on the wire: {def}");
+        // What an older server does with it: the same struct shape, its
+        // serde default.
+        #[derive(serde::Deserialize)]
+        struct OlderServerDef {
+            #[allow(dead_code)]
+            name: String,
+            #[serde(default = "queue")]
+            input_mode: String,
+        }
+        fn queue() -> String { "queue".into() }
+        assert_eq!(serde_json::from_value::<OlderServerDef>(def).unwrap().input_mode, "queue", "an older server saves its queue");
+        assert!(serde_json::from_value::<OlderServerDef>(json!({ "name": "dev", "input_mode": null })).is_err(),
+            "and a null would have been refused there");
     }
 
     /// Board #367: there was no way to hand an OPEN issue to another agent

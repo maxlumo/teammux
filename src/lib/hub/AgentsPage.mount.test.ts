@@ -391,6 +391,59 @@ test('a new kiro agent or bare kiro member starts in steer, and a backend pick t
   } finally { await app.close(); }
 });
 
+// Reviewer P2 on 99e233c3: the default is where a NEW draft STARTS. A mode
+// the person picked, or a stored one, is not moved to a default by a backend
+// pick or by a backend list that lands late; only a steer the picked backend
+// cannot carry becomes queue (the #245 rule above).
+test('a picked or stored mode survives a backend pick, and a late list moves only an untouched new draft (#336)', async context => {
+  const fixture = await hostFixture();
+  const served = (name: string, input_modes: boolean, default_input_mode?: 'steer') =>
+    ({ name, icon: `/assets/${name}.svg`, color: `--backend-${name}`, efforts: [], input_modes, ...(default_input_mode ? { default_input_mode } : {}) });
+  const list = [served('kiro', true, 'steer'), served('codex', true), served('claude', false)];
+  let controls!: { serve: (value: unknown) => void };
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value, backends: null },
+    modules: [rpc({ registryList: async () => ({ agents: [alpha, { ...alpha, name: 'ks', backend: 'kiro', input_mode: 'steer' }] }) })],
+  });
+  const mode = () => app.document.querySelector('[aria-label="While busy"] .sel-value')?.textContent ?? null;
+  const pick = async (label: string, option: string) => {
+    app.document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click(); await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=option]')].find(o => o.textContent?.trim() === option)!.click();
+    await app.flush();
+  };
+  const newAgent = async () => { app.document.querySelector<HTMLButtonElement>('.side-row.add')!.click(); await app.flush(); };
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.side-row.add'); i++) await app.flush();
+    await newAgent();
+    assert.equal(mode(), null, 'no list yet: a queue draft shows no field');
+    controls.serve(list); await app.flush();
+    assert.equal(mode(), 'Steer', 'the late list gives the untouched new kiro its default');
+    command(app, 'Cancel').click(); await app.flush();
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'following the default is not an edit: no discard prompt');
+
+    await newAgent();
+    await pick('While busy', 'Queue');
+    await pick('Backend', 'codex');
+    assert.equal(mode(), 'Queue', 'a picked queue stays queue on codex');
+    await pick('Backend', 'kiro');
+    assert.equal(mode(), 'Queue', 'and on kiro: the pick is not replaced by the default');
+    controls.serve(list); await app.flush();
+    assert.equal(mode(), 'Queue', 'nor by a list that lands again');
+    command(app, 'Cancel').click(); await app.flush();
+    command(app, 'Discard').click(); await app.flush();
+
+    await openAgent(app, 'alpha');
+    assert.equal(mode(), 'Queue', 'a stored codex def (no mode = queue)');
+    await pick('Backend', 'kiro');
+    assert.equal(mode(), 'Queue', 'moved to kiro, it keeps its stored queue');
+    command(app, 'Cancel').click(); await app.flush();
+    command(app, 'Discard').click(); await app.flush();
+    await openAgent(app, 'ks');
+    await pick('Backend', 'codex');
+    assert.equal(mode(), 'Steer', 'a stored kiro steer moved to codex keeps steer: codex carries it');
+  } finally { await app.close(); }
+});
+
 test('a server that names no default keeps a new draft at queue (#336)', async context => {
   const fixture = await hostFixture();
   const app = await fixture.mount(context, {

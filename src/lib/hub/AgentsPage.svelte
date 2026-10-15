@@ -352,14 +352,33 @@
   // fetched on connect): re-read it then, so an open editor gains the
   // input-mode field instead of waiting for the next visit (board #245).
   let servedTick = $state(0);
-  $effect(() => onServedBackends(() => { servedTick++; backends = spawnableBackends(); }));
+  $effect(() => onServedBackends(() => { servedTick++; backends = spawnableBackends(); followServedDefaults(); }));
   const switchesInputMode = (backend) => { void servedTick; return backendSwitchesInputMode(backend); };
-  /** An explicit backend pick in the editor puts the draft at that backend's
-   * default mode (board #336: kiro steers, a backend without the switch
-   * queues), the mode a new draft on it starts in. With no list yet nothing
-   * is judged: the field keeps its value and registry_save decides. */
+  // A NEW agent or bare member's mode FOLLOWS its backend's default (board
+  // #336: kiro steers) until the person picks a mode: `modeFollowsDefault`,
+  // a UI-only flag the payload never carries. A stored definition, or a draft
+  // whose mode was picked, is never moved to a default (reviewer P2 on
+  // 99e233c3) — only a steer the picked backend cannot carry becomes queue.
+  /** An explicit backend pick in the editor. With no list yet nothing is
+   * judged: the field keeps its value and registry_save decides. */
   function pickBackend(draft, backend) {
-    if (draft && servedBackendsKnown()) draft.input_mode = backendDefaultInputMode(backend);
+    if (!draft || !servedBackendsKnown()) return;
+    if (draft.modeFollowsDefault) draft.input_mode = backendDefaultInputMode(backend);
+    else if (draft.input_mode === 'steer' && !backendSwitchesInputMode(backend)) draft.input_mode = 'queue';
+  }
+  /** The list landed after a new draft opened (it is fetched on connect):
+   * a draft still following its default takes the served one. That is not an
+   * edit, so an otherwise untouched draft stays untouched (no leave prompt). */
+  function followServedDefaults() {
+    const followers = [editing, ...(editingTeam?.members ?? []).map((m) => m.agent)].filter((d) => d?.modeFollowsDefault);
+    if (!followers.length) return;
+    const clean = !dirty;
+    for (const d of followers) d.input_mode = backendDefaultInputMode(d.backend);
+    if (clean) rememberDraft();
+  }
+  /** A mode picked in the field ends following the default. */
+  function pickMode(draft) {
+    if (draft.modeFollowsDefault) draft.modeFollowsDefault = false;
   }
   let models = $state([]);
   $effect(() => {
@@ -474,6 +493,7 @@
       model: agent.model ?? '',
       effort: agent.effort ?? '',
       input_mode: stored ? (agent.input_mode ?? 'queue') : backendDefaultInputMode(backend),
+      modeFollowsDefault: !stored,
       system: agent.system ?? '',
       skillSel: skillEntries.filter((x) => typeof x === 'string'),
       mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
@@ -663,7 +683,7 @@
             mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
             mcpExtra: mcpEntries.filter((x) => typeof x !== 'string'),
           }
-        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
+        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), modeFollowsDefault: true, system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
       rememberDraft();
     });
   }
@@ -689,7 +709,7 @@
        same contract as its model/effort overrides. -->
   {#if switchesInputMode(backend) || draft.input_mode === 'steer'}
     <label class="config-field"><span class="config-field-label">{t('agentsInputMode')}</span>
-      <Select bind:value={draft.input_mode} disabled={saving || removing}
+      <Select bind:value={draft.input_mode} disabled={saving || removing} onchange={() => pickMode(draft)}
         options={[
           ...(inherited ? [{ value: '', label: `${t('teamsInherit')} (${t(inherited === 'steer' ? 'agentsInputSteer' : 'agentsInputQueue')})` }] : []),
           { value: 'queue', label: t('agentsInputQueue') }, { value: 'steer', label: t('agentsInputSteer') },

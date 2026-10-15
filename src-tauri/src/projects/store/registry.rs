@@ -73,11 +73,11 @@ pub struct RegAgent {
     /// for the turn to end and becomes the next prompt, `steer` goes into the
     /// running turn. Only a backend whose switch is measured
     /// (`Backend::switches_input_mode`) accepts `steer`, and its backend file
-    /// renders the value into its own config. A NEW def that names no mode
-    /// gets its backend's default at the door (`registry::with_default_input_mode`,
-    /// board #336: kiro steers); this serde default (`queue`) is what a STORED
-    /// text without the field (a team member's inline agent saved before
-    /// #245) has always meant, so it stays.
+    /// renders the value into its own config. A save that names no mode keeps
+    /// an existing definition's, and gives a NEW one its backend's default
+    /// (`registry::unnamed_input_mode`, board #336: kiro steers). This serde
+    /// default (`queue`) is what a STORED text without the field (a team
+    /// member's inline agent saved before #245) has always meant, so it stays.
     #[serde(default = "default_input_mode")]
     pub input_mode: String,
     #[serde(default)]
