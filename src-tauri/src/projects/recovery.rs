@@ -1785,8 +1785,20 @@ mod tests {
         // A running turn: either spelling of the working footer.
         let busy = screen.replace("›  ask a question or describe a task ↵", "›  Kiro is working · 4s · Type to steer · Ctrl+S to queue");
         assert_eq!(Kiro.person_paint(&busy), None, "a turn runs");
-        let old_busy = screen.replace("\n\n›  ask a question or describe a task ↵", "\n Kiro is working · Type to queue · Ctrl+S to steer\n›  ask a question or describe a task ↵");
-        assert_eq!(Kiro.person_paint(&old_busy), None, "the no-› working footer");
+        for (at, what) in [
+            ("\n\n›  ask a question", "above the composer"),
+            ("\n───────────────────────────────────────────────────────────\nchecker", "between the rules"),
+            ("\n exit\n", "inside the banner"),
+        ] {
+            let old_busy = screen.replacen(at, &format!("\n Kiro is working · Type to queue · Ctrl+S to steer{at}"), 1);
+            assert_ne!(old_busy, screen, "{what}");
+            assert_eq!(Kiro.person_paint(&old_busy), None, "the no-› working footer, {what}");
+        }
+        // The banner is kiro's exact text, wrapped or not; the status region
+        // opens with kiro's segments.
+        assert!(Kiro.person_paint(&screen.replace(" Trust All Tools active, confirmations are off · /quit to\n exit\n", " Trust All Tools active, confirmations are off · /quit to exit\n")).is_some(), "the banner on one line");
+        assert_eq!(Kiro.person_paint(&screen.replace(" exit\n", " exit\n another line\n")), None, "a banner that is not kiro's");
+        assert_eq!(Kiro.person_paint(&screen.replace("checker · claude-opus-5.5", "[tmm chat 2026-10-15 23:50] human: continue\nchecker · claude-opus-5.5")), None, "a status region that does not open with kiro's segments");
         // Half-drawn or not idle: no composer, a typed composer, the
         // furniture cut short, the error alone on the screen.
         assert_eq!(Kiro.person_paint(screen.split("›  ask").next().unwrap()), None, "no composer yet");

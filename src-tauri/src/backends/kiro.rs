@@ -120,23 +120,16 @@ fn toast_mode(line: &str) -> Option<&'static str> {
 /// them, and reading them as whole words is what keeps "the line mentions
 /// steer" from being an answer.
 fn footer_mode(line: &str) -> Option<&'static str> {
-    let rest = working_footer(line)?;
-    let now = mode_word(segment_after(rest, " · Type to ")?)?;
-    let other = mode_word(segment_after(rest, " · Ctrl+S to ")?)?;
-    // A footer that offers the mode it is already in says nothing.
-    (now != other).then_some(now)
-}
-
-/// The line IS the footer kiro paints while a turn runs — `Kiro is working`
-/// right after the stamp at column zero — and what follows the label. One
-/// reading for the mode (`footer_mode`) and for "a turn runs" (`person_paint`).
-fn working_footer(line: &str) -> Option<&str> {
     let body = match line.strip_prefix('›') {
         Some(after) if after.starts_with(' ') => after.trim_start(),
         Some(_) => return None,
         None => line.strip_prefix(' ').unwrap_or(line),
     };
-    body.strip_prefix("Kiro is working")
+    let rest = body.strip_prefix("Kiro is working")?;
+    let now = mode_word(segment_after(rest, " · Type to ")?)?;
+    let other = mode_word(segment_after(rest, " · Ctrl+S to ")?)?;
+    // A footer that offers the mode it is already in says nothing.
+    (now != other).then_some(now)
 }
 
 /// What follows `marker` up to the next ` · ` — one segment of the footer.
@@ -1374,11 +1367,10 @@ const IDLE_COMPOSER: &str = "›  ask a question or describe a task";
 /// is not); the block is the last column-zero `HEAD_GLYPHS` block above it;
 /// and everything between them is kiro's idle furniture and nothing else
 /// (`idle_furniture`): a submitted prompt (kiro paints it indented, `  ›`
-/// or `  [tmm chat …]`), a tool call, prose or a third rule means a newer
-/// turn has painted, and the block is history. A working footer anywhere
-/// under the block (either spelling, `›  Kiro is working` or the older
-/// ` Kiro is working`) means a turn runs. When in doubt, nothing: a missed
-/// stall costs a person one look, a false one ends a working turn.
+/// or `  [tmm chat …]`), a tool call, prose, the older ` Kiro is working`
+/// footer or a third rule means a newer turn has painted, and the block is
+/// history. When in doubt, nothing: a missed stall costs a person one look,
+/// a false one ends a working turn.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();
@@ -1388,8 +1380,7 @@ pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
     }
     let head = lines[..composer].iter().rposition(|l| l.starts_with(HEAD_GLYPHS))?;
     let end = head + 1 + lines[head + 1..composer].iter().take_while(|l| l.starts_with(' ') && !l.trim().is_empty()).count();
-    if lines[end..].iter().any(|l| working_footer(l).is_some())
-        || !idle_furniture(&lines[end..composer])
+    if !idle_furniture(&lines[end..composer])
         || !lines[composer + 1..].iter().all(|l| l.trim().is_empty() || (l.starts_with(' ') && !l.contains("[tmm ")))
     {
         return None;
@@ -1400,19 +1391,28 @@ pub(crate) fn person_paint(pane: &str) -> Option<(&'static str, String)> {
     image_too_large(&spaced).then_some(("conversation_blocked", glued))
 }
 
+/// kiro's Trust banner, whitespace collapsed: one line on a wide pane, two
+/// or three when it wraps (all three measured on kiro-cli 2.28.0 and 2.22.1;
+/// managed agents always run with `--trust-all-tools`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const TRUST_BANNER: &str = "Trust All Tools active, confirmations are off · /quit to exit";
+
 /// What kiro paints between its newest block and the idle composer once a
-/// turn has ended, top to bottom (kiro-cli 2.28.0, measured on
-/// video-factory:checker and builder; 2.22.1 adds the tasks line,
+/// turn has ended, top to bottom, read by its measured TEXT (kiro-cli 2.28.0
+/// on video-factory:checker and builder; 2.22.1 adds the tasks line,
 /// lingting:kiro): the turn's `▸ Credits … | Time …` (or `▸ Time …`) line
-/// and ` ◐ N tasks remaining · ctrl+x expand`, a rule, the one-space-indented
-/// `Trust All Tools active … /quit to` banner and its ` exit` wrap, a rule,
-/// then at most three column-zero status lines (`<agent> · <model> · … ·
-/// Midway: …` and the cwd), with blank lines anywhere. Exactly two rules,
-/// and nothing that is not one of these: no `›` or bullet line, no `[tmm …]`
-/// stamp, no two-space-indented line (a submitted prompt, a tool output).
+/// and ` ◐ N tasks remaining · ctrl+x expand`; a rule; the one-space Trust
+/// banner, exactly `TRUST_BANNER` however it wraps; a rule; then one to
+/// three column-zero status lines, the first with kiro's ` · ` segments
+/// (`<agent> · <model> · …`), the rest its wrap or the cwd. Blank lines
+/// anywhere. Anything else (a two-space-indented line such as a submitted
+/// prompt or tool output, the older ` Kiro is working` footer, a third rule,
+/// a status line with no segments) is not furniture.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn idle_furniture(region: &[&str]) -> bool {
-    let (mut rules, mut status) = (0, 0);
+    let mut rules = 0;
+    let mut banner = String::new();
+    let mut status: Vec<&str> = Vec::new();
     let one_space = |l: &str| l.starts_with(' ') && !l.starts_with("  ");
     for line in region {
         let t = line.trim();
@@ -1426,22 +1426,26 @@ fn idle_furniture(region: &[&str]) -> bool {
             }
             continue;
         }
-        if line.contains("[tmm ") || line.starts_with('›') || line.starts_with(HEAD_GLYPHS) {
-            return false;
-        }
         let fits = match rules {
             0 => line.starts_with("▸ ") || (one_space(line) && t.contains(" tasks remaining")),
-            1 => one_space(line),
+            1 => {
+                banner.push(' ');
+                banner.push_str(t);
+                one_space(line)
+            }
             _ => {
-                status += 1;
-                !line.starts_with(' ') && status <= 3
+                status.push(line);
+                !line.starts_with(' ')
             }
         };
         if !fits {
             return false;
         }
     }
-    rules == 2 && status > 0
+    rules == 2
+        && banner.split_whitespace().collect::<Vec<_>>().join(" ") == TRUST_BANNER
+        && (1..=3).contains(&status.len())
+        && status[0].contains(" · ")
 }
 
 /// The program whose `--version` names the kiro-cli a pane runs.
