@@ -17,7 +17,12 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from './lib/test/mount.ts';
 import { recordServer } from './lib/app/servers.ts';
+import { RECONNECT_WATCHDOG_MS } from './lib/app/reconnect.ts';
 import { migrateServerState } from './lib/app/server-state-migration.ts';
+
+/** Steps of 5 s that carry the fake clock past a reconnect loop's WHOLE window (the
+ * watchdog, board #393): a drop is retried quietly for that long, then gives up. */
+const GIVE_UP_STEPS = Math.ceil(RECONNECT_WATCHDOG_MS / 5_000) + 2;
 
 /** The harness types a mocked module as functions only, and `ADDRESS_LABELS`
  * is a constant the facade exports. Mocked modules are replaced wholesale, so
@@ -1699,7 +1704,7 @@ async function gaveUpOnA(context: TestContext, next: (url: string, n: number) =>
     { calls: events, rpc: editorRpc, gate: (url, n) => (n === 1 ? null : failing ? Promise.reject(new Error('refused')) : next(url, n)) });
   const area = await dirtyEditor(h.app, h.settle);
   h.net.drop();
-  for (let i = 0; i < 30; i++) { await h.app.advance(5_000); await h.settle(); }
+  for (let i = 0; i < GIVE_UP_STEPS; i++) { await h.app.advance(5_000); await h.settle(); }
   const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]');
   assert.ok(field, `the loop gave up: the connect card is up (${events.filter((e) => e.startsWith('connect:')).length} dials)`);
   failing = false;
@@ -1707,6 +1712,31 @@ async function gaveUpOnA(context: TestContext, next: (url: string, n: number) =>
   const dialogs = () => h.app.document.querySelectorAll('[role=alertdialog]').length;
   return { ...h, events, area, field, dials, dialogs };
 }
+
+test('a 60 s drop reconnects quietly: the view and the unsaved draft stay, the connect card never comes up (#393)', async (context) => {
+  // Owner, 2026-10-15: a dropped connection should "recover quietly"; measured
+  // live (a proxy dropping the connection for 30 s) the app gave up after ~25 s
+  // and put the connect card over the person's work. The loop now retries for the
+  // whole watchdog window; here the server is back after 60 s.
+  const events: string[] = [];
+  let failing = true;
+  const h = await bootApp(context,
+    { ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    (url) => (url.includes('//b') ? 'm-b' : 'm-a'),
+    { calls: events, rpc: editorRpc, gate: (_url, n) => (n === 1 ? null : failing ? Promise.reject(new Error('refused')) : null) });
+  const area = await dirtyEditor(h.app, h.settle);
+  const card = () => h.app.document.querySelector('.card .fields input[type="text"]');
+  h.net.drop();
+  for (let i = 0; i < 12; i++) { await h.app.advance(5_000); await h.settle(); }
+  assert.equal(card(), null, `60 s into the drop: no connect card (${events.filter((e) => e.startsWith('connect:')).length} dials)`);
+  assert.ok(h.app.document.querySelector('.reconnect-bar'), 'the existing reconnect bar is the only cue');
+  failing = false;
+  for (let i = 0; i < 4; i++) { await h.app.advance(1_000); await h.settle(); }
+  assert.equal(card(), null, 'back: still no connect card');
+  assert.equal(h.app.document.querySelector('.reconnect-bar'), null, 'and the bar is gone');
+  assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 0, 'nothing asks');
+  assert.ok(area.isConnected && area.value === '# notes\n\nunsaved', 'the draft is the same editor with the same text');
+});
 
 test('a form walk freezes a reconnect loop in its backoff: no dial while it asks, and a stay starts the loop again (reviewer P1 on 4fbce02e)', async (context) => {
   const h = await gaveUpOnA(context, () => Promise.reject(new Error('refused')));
@@ -6972,7 +7002,7 @@ test('P1-1 (own dial, arrival refused): the focus alias s OWN reconnect — out,
   const draftA = await dirtyEditor(h.app, h.settle);
   failing = true;
   a.drop();
-  for (let i = 0; i < 30; i++) { await h.app.advance(5_000); await h.settle(); }
+  for (let i = 0; i < GIVE_UP_STEPS; i++) { await h.app.advance(5_000); await h.settle(); }
   assert.ok(h.app.document.querySelector('.card .fields input[type="text"]'), 'A s loop gave up: the connect card is up');
   assert.ok(c.isConnected(), 'C, a member, is untouched');
   failing = false; aHangs = true; aliasProves = true;

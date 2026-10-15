@@ -34,7 +34,7 @@
   import { normalizeUiZoom, stepUiZoom, UI_ZOOM_DEFAULT } from './lib/app/ui-zoom.ts';
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
-  import { createReconnectMachine } from './lib/app/reconnect.ts';
+  import { createReconnectMachine, RECONNECT_MAX_ATTEMPTS } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
   import { dialOrder, dialTimeoutMs } from './lib/app/dial-order.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
@@ -78,8 +78,6 @@
 
   // Tunable constants
   const KB_OPEN_THRESHOLD = 100; // px difference to detect keyboard open
-  const RECONNECT_MAX_ATTEMPTS = 10;           // total attempts before giving up
-  const RECONNECT_WATCHDOG_MS = 180000;        // hard cap: if still reconnecting after 3min, force reset
   const SLIDE_ANIMATION_MS = 120;
   const OPTIMIZE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -1295,8 +1293,6 @@
       classifyAddress,
       addressLabels: ADDRESS_LABELS,
       target: () => targetOf(localStorage, runtime.id),
-      maxAttempts: RECONNECT_MAX_ATTEMPTS,
-      watchdogMs: RECONNECT_WATCHDOG_MS,
       onStateChange: (st) => {
         if (bound() !== runtime) { if (st.reconnecting) aggregate.reconnecting(runtime); return; }
         reconnecting = st.reconnecting;

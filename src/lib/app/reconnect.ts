@@ -63,15 +63,26 @@ export interface ReconnectDeps {
   clearTimeoutFn?: typeof clearTimeout;
 }
 
-const DEFAULT_MAX_ATTEMPTS = 10;
-const DEFAULT_WATCHDOG_MS = 180000;
+/** The longest wait between two attempts (the backoff grows 0.5 s per attempt up to this). */
+export const RETRY_GAP_CAP_MS = 3000;
+/** The hard cap on one reconnect loop: still reconnecting after this, force a reset. */
+export const RECONNECT_WATCHDOG_MS = 180000;
+/**
+ * How many attempts a loop makes before it gives up — DERIVED, the one place
+ * (docs/design-docs/features/disconnect-grace.md § The client's side): the
+ * watchdog window over the longest retry gap, so the count can never end the
+ * loop before the window does. A connection that drops reconnects quietly for
+ * that whole window; only then does the person land on the connect card.
+ * (Board #393: a fixed 10 gave up after ~25 s, measured live.)
+ */
+export const RECONNECT_MAX_ATTEMPTS = RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS;
 
 export function createReconnectMachine(deps: ReconnectDeps) {
   const {
     connect, findBestAddress, isAddressViable, noteAddressUnreachable,
     classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp, attempt: takeSocket,
-    maxAttempts = DEFAULT_MAX_ATTEMPTS,
-    watchdogMs = DEFAULT_WATCHDOG_MS,
+    maxAttempts = RECONNECT_MAX_ATTEMPTS,
+    watchdogMs = RECONNECT_WATCHDOG_MS,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
   } = deps;
@@ -214,7 +225,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
         noteAddressUnreachable(useAddr);
       }
       if (n + 1 < maxAttempts) {
-        const delay = Math.min(500 * (n + 1), 3000); // tighter backoff since timeouts are short
+        const delay = Math.min(500 * (n + 1), RETRY_GAP_CAP_MS); // tighter backoff since timeouts are short
         retryTimer = setTimeoutFn(() => { void tryAttempt(n + 1, myGen); }, delay);
       } else {
         reconnecting = false;

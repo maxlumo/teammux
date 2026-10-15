@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReconnectMachine, type ReconnectDeps, type ReconnectState } from './reconnect.ts';
+import { createReconnectMachine, RECONNECT_MAX_ATTEMPTS, RECONNECT_WATCHDOG_MS, RETRY_GAP_CAP_MS, type ReconnectDeps, type ReconnectState } from './reconnect.ts';
 import { targetOf } from './server-target.ts';
 import { currentServerId } from './servers.ts';
 
@@ -115,6 +115,36 @@ test('failures retry with capped backoff, then give up after maxAttempts', async
   assert.equal(h.machine.isActive(), false);
   // Reachability failures were recorded for the cooldown memory.
   assert.equal(h.unreachable.length, 3);
+});
+
+test('a dropped connection is retried for the whole watchdog window, so a 60 s outage never reaches the connect card (#393)', async () => {
+  // Owner, 2026-10-15: a dropped connection "should recover quietly". The app's
+  // attempt budget is the watchdog window over the retry cap (App.svelte); 10
+  // attempts gave up after ~25 s and dropped the person to the connect card,
+  // measured live through a proxy that dropped the connection for 30 s.
+  // The budget is DERIVED in reconnect.ts (disconnect-grace.md § The client's side):
+  // attempts x the longest gap reach the watchdog, so the count cannot end the loop first.
+  assert.equal(RECONNECT_MAX_ATTEMPTS, RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS);
+  const budget = RECONNECT_MAX_ATTEMPTS;
+  const outage = async (maxAttempts: number, recoverAtMs: number) => {
+    let up = false;
+    const h = harness({
+      storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
+      connectImpl: async () => { if (!up) throw new Error('connection timeout'); return 'back'; },
+      maxAttempts,
+    });
+    h.machine.start();
+    for (let t = 0; t < recoverAtMs + 10000 && !h.events.some((e) => e.gaveUp || e.success); t += 500) {
+      if (t === recoverAtMs) up = true;
+      await h.timers.advance(500);
+    }
+    return h.events;
+  };
+  const kept = await outage(budget, 60000);
+  assert.ok(kept.some((e) => e.success), 'the server is back after 60 s and the loop is still trying');
+  assert.ok(!kept.some((e) => e.gaveUp), 'and it never gave up');
+  const old = await outage(10, 60000);
+  assert.ok(old.some((e) => e.gaveUp) && !old.some((e) => e.success), 'with the old budget of 10 the same outage ends at the connect card');
 });
 
 test('auth errors do NOT mark the address unreachable', async () => {

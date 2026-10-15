@@ -121,3 +121,43 @@ to eliminating the reflow; can revisit if needed.
 - `disconnect_grace_secs` in `~/.config/tmux-mobile/config.toml`
 - Env var `DISCONNECT_GRACE_SECS` overrides config
 - Default 600 (10 min); set to `0` for legacy immediate restore
+
+## The client's side: how long a dropped connection is retried (board #393)
+
+The grace period above is the SERVER waiting for a client to come back. The
+client's half is the same promise from the other end: a dropped connection
+reconnects QUIETLY and the person's place on the screen is not disturbed.
+
+Owner, 2026-10-15 23:40: "ws连接中断了再重试恢复，为什么整个浏览器网页都要刷新呢…应该悄悄恢复，最多有个悬浮提示一下重连就行，保证整个页面稳定性". A dropped
+connection never reloads the page (the app has no `location.reload`; a source
+test pins it) and its only cue is the existing floating reconnect bar
+(`.reconnect-bar`, "Reconnecting… (k/N · class)") — no new UI.
+
+**The rule: a lost connection is retried for the reconnect loop's whole
+watchdog window, and only then does the person land on the connect card.**
+The attempt budget is DERIVED in one place, `app/reconnect.ts`:
+`RECONNECT_MAX_ATTEMPTS = RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS` (180 000 ms
+over the 3 000 ms longest retry gap = 60 attempts), so the count can never end
+the loop before the window does; App.svelte holds no budget of its own and the
+bar counts against the same number.
+
+**Why.** The budget used to be a literal 10 attempts. With the gap growing 0.5 s
+per attempt up to 3 s, ten attempts last ~25 s: a connection that stayed down
+longer put the connect card over the hub view and the text being typed
+(measured live, 2026-10-15, headless Chrome through a TCP hop that dropped the
+connection: a 5 s drop reconnected; a 30 s drop gave up at ~25 s). A restarting
+SSH tunnel (up to 90 s to notice with `ServerAliveInterval 30 × 3`), a CloudFront
+edge change, a laptop waking and a Wi-Fi handover all outlast that. After the
+change the same rig: 5, 30 and 60 s drops reconnect with nothing but the bar,
+the hub view and the draft kept, and the gateway sees a new connection when the
+cut ends (`App.shell.mount.test.ts` § "a 60 s drop reconnects quietly" runs the
+60 s case on the fake clock; `reconnect.test.ts` pins the arithmetic).
+
+**What does NOT change.** Beyond the window (3 minutes) the loop still gives
+up and shows the connect card, so a server that is really gone does not keep
+a device retrying for ever; an authentication refusal is not a drop and is
+reported at once; the form and a server switch still take the socket from a
+running loop. The Vite dev client's own reload-on-reconnect, which is what
+reloaded a browser tab before the app's loop ever got a say, is a separate
+mechanism, patched in `vite.config.js` (see
+[development.md § The dev server](../../conventions/development.md#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)).
