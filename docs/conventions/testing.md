@@ -389,9 +389,11 @@ flaky wall-clock assertions in the test.
   releases B, so the assertion races B's wake-up and passes only when the
   asserting thread happens to run first. Reason: board #386 —
   `a_command_recorded_during_an_end_is_not_retired_by_it` failed once in a
-  full gate and 21 of 320 runs in a loop of 8 parallel runners under ~2x CPU
-  oversubscription, always at that late assertion; its sibling
-  `an_end_racing_an_echo_waits_and_keeps_the_next_command` had the same shape.
+  full gate and 36 of 640 runs (two loops of 8 parallel runners under ~2x CPU
+  oversubscription), always at that late assertion; its sibling
+  `an_end_racing_an_echo_waits_and_keeps_the_next_command` has the same shape
+  but did not fail in 320 runs (its racer does more work after the release),
+  and was fixed for the same reason, not because it was seen to flake.
   Reproduce a suspected race by looping the one test under load
   (busy-loop processes ≥ 2x the cores, several runners at once) before and
   after the fix.
