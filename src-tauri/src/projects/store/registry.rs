@@ -27,23 +27,15 @@ pub(super) const DEFAULT_OMP_MODEL: &str = "bedrock-extra/global.anthropic.claud
 /// K3 here and needs no per-machine alias in the seed.
 pub(super) const DEFAULT_KIMI_SYSTEM: &str = "You are a powerful 10x developer running on Kimi Code who can handle any task with decisive execution and minimal words.";
 
-pub(super) const LEGACY_DEFAULT_KIRO_SYSTEM: &str = "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.";
-
-pub(super) const VERBOSE_DEFAULT_KIRO_SYSTEM: &str = concat!(
-    "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
-    "\n\nGit workflow:\n",
-    "- Before changing tracked files, create or reuse a dedicated Git worktree and task branch. If this session already runs inside that task worktree, use it; otherwise keep the launch checkout for reading, coordination, and final integration only.\n",
-    "- Use the worktree's absolute path for every file edit, test, build, and Git command. Verify and commit in the worktree before integrating.\n",
-    "- Preserve the user's configured Git author. Every commit you materially author must end with exactly one trailer, separated from the body by a blank line:\n",
-    "  Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>\n",
-    "- Do not add the Kiro trailer when you only review or integrate someone else's commit."
-);
-
-pub(super) const DEFAULT_KIRO_SYSTEM: &str = concat!(
-    "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
-    "\n\nFor code changes, use a dedicated Git worktree instead of the launch checkout. Preserve the user's configured Git author and add this trailer to every commit you author:\n",
-    "Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>"
-);
+/// The shipped `kiro` default: the persona line and NOTHING else (board #344,
+/// owner 2026-10-11 / 10-15: "这个提示词是我们自己的 tmm 配置，发布版本的默认配置
+/// 不应该有这些"). A release must carry no personal workflow rules, so the seed
+/// no longer names a worktree location, a Git author rule or the Kiro
+/// co-author trailer: those are one owner's conventions, and they live where
+/// a person declares them — the app-wide `<config>/AGENTS.md` that leads every
+/// managed agent's prompt, and the stored definitions that person already has.
+/// It is the same sentence the other five seeds use for their own backend.
+pub(super) const DEFAULT_KIRO_SYSTEM: &str = "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.";
 
 /// A central skill asset. The FILES live in the app-managed skills dir; the
 /// `source` (local path or git url) is where they were imported from and what
@@ -249,21 +241,15 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM reg_agents", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         if count > 0 {
-            // Upgrade only the two known untouched Kiro defaults. Existing
-            // installs often customize model/effort/skills/MCP while leaving
-            // the seeded system text alone; a narrow SQL update preserves every
-            // one of those fields. A custom persona must never be overwritten.
-            self.conn
-                .execute(
-                    "UPDATE reg_agents SET system=?1, updated_at=?2 WHERE name='kiro' AND system IN (?3, ?4)",
-                    params![
-                        DEFAULT_KIRO_SYSTEM,
-                        now as i64,
-                        LEGACY_DEFAULT_KIRO_SYSTEM,
-                        VERBOSE_DEFAULT_KIRO_SYSTEM
-                    ],
-                )
-                .map_err(|e| format!("upgrade default Kiro agent: {e}"))?;
+            // A stored definition is the user's DECLARATION (tenet 7), and this
+            // runs on every registry read: it seeds an EMPTY table and does
+            // nothing else. It used to upgrade a stored `kiro` whose system
+            // text equalled an older shipped default to a newer one — which is
+            // how a Git workflow and a personal co-author trailer were written
+            // into definitions nobody had asked to change (board #344). The
+            // shipped default no longer carries them, so there is nothing to
+            // upgrade TO, and rewriting a stored prompt behind its owner's back
+            // is not a thing the seed does.
             return Ok(());
         }
         // backend-seeds:begin — the shipped default agent per backend. The
@@ -431,12 +417,24 @@ mod tests {
             "the six backend defaults are the fixed leading group"
         );
         assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mem","mcp-cli"]"#));
-        let expected_kiro_system = concat!(
+        assert_eq!(
+            seeded[0].system,
             "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
-            "\n\nFor code changes, use a dedicated Git worktree instead of the launch checkout. Preserve the user's configured Git author and add this trailer to every commit you author:\n",
-            "Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>"
+            "the shipped Kiro default is the persona line and nothing else"
         );
-        assert_eq!(seeded[0].system, expected_kiro_system, "the default Kiro persona stays concise");
+        // The owner's rule for a RELEASE (board #344): the shipped defaults
+        // carry no personal workflow. A worktree location, a Git author rule
+        // or a co-author trailer is one person's convention and lives in the
+        // app-wide AGENTS.md and in that person's own stored definitions —
+        // never in what every fresh install is handed. Checked over ALL six
+        // seeds, so adding a rule to any backend's default fails here.
+        for a in &seeded {
+            let lower = a.system.to_lowercase();
+            for word in ["worktree", "co-authored-by", "trailer", "git author", "git workflow", "commit"] {
+                assert!(!lower.contains(word), "the {} seed must not carry workflow text ({word:?}): {}", a.name, a.system);
+            }
+            assert!(a.system.starts_with("You are a powerful 10x developer running on "), "{}: {}", a.name, a.system);
+        }
         assert_eq!(seeded[0].mcp, "[]", "Kiro uses its built-in web search");
         assert_eq!(seeded[4].mcp, "[]", "OMP ships its own web_search tool");
         assert!(seeded[1..4].iter().all(|a| a.mcp.contains("kiro-web-search")));
@@ -478,49 +476,71 @@ mod tests {
         assert_eq!(store.reg_list().unwrap().len(), 6);
     }
 
+    /// Board #344: a stored definition is the user's declaration and the seed
+    /// never rewrites it. `reg_seed` used to upgrade a stored `kiro` whose
+    /// system text equalled an older shipped default — and the "newer" one
+    /// ADDED a Git workflow and a personal co-author trailer to definitions
+    /// nobody had asked to change. These are the texts it used to rewrite,
+    /// spelled out here ONLY to prove they now come through untouched: the
+    /// original terse sentence, the first verbose Git version, and the
+    /// worktree-plus-trailer version that briefly shipped as the default.
     #[test]
-    fn registry_seed_upgrades_only_known_default_kiro_systems() {
+    fn registry_seed_never_rewrites_a_stored_definition() {
+        let terse = "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.";
+        let verbose = concat!(
+            "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
+            "\n\nGit workflow:\n",
+            "- Before changing tracked files, create or reuse a dedicated Git worktree and task branch. If this session already runs inside that task worktree, use it; otherwise keep the launch checkout for reading, coordination, and final integration only.\n",
+            "- Use the worktree's absolute path for every file edit, test, build, and Git command. Verify and commit in the worktree before integrating.\n",
+            "- Preserve the user's configured Git author. Every commit you materially author must end with exactly one trailer, separated from the body by a blank line:\n",
+            "  Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>\n",
+            "- Do not add the Kiro trailer when you only review or integrate someone else's commit."
+        );
+        let concise = concat!(
+            "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
+            "\n\nFor code changes, use a dedicated Git worktree instead of the launch checkout. Preserve the user's configured Git author and add this trailer to every commit you author:\n",
+            "Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>"
+        );
         let store = Store::open_memory().unwrap();
-        let legacy = "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.";
         let mut kiro = RegAgent {
             name: "kiro".into(),
             backend: "kiro".into(),
             model: "gpt-5.6-sol".into(),
             effort: "high".into(),
             input_mode: "queue".into(),
-            system: legacy.into(),
+            system: String::new(),
             skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
             mcp: "[]".into(),
         };
-        store.reg_save(&kiro, 100).unwrap();
-
-        store.reg_seed(200).unwrap();
-        let upgraded = store.reg_get("kiro").unwrap().unwrap();
-        assert!(upgraded.system.contains("dedicated Git worktree"));
-        assert!(upgraded
-            .system
-            .contains("Co-authored-by: Kiro Agent <244629292+kiro-agent@users.noreply.github.com>"));
-        assert_eq!(upgraded.model, "gpt-5.6-sol", "a prompt upgrade preserves the chosen model");
-        assert_eq!(upgraded.effort, "high", "a prompt upgrade preserves effort");
-        assert_eq!(upgraded.skills, kiro.skills, "a prompt upgrade preserves skills");
-        assert_eq!(upgraded.mcp, kiro.mcp, "a prompt upgrade preserves MCP");
-
-        kiro.system = VERBOSE_DEFAULT_KIRO_SYSTEM.into();
-        store.reg_save(&kiro, 300).unwrap();
-        store.reg_seed(400).unwrap();
-        assert_eq!(
-            store.reg_get("kiro").unwrap().unwrap().system,
-            DEFAULT_KIRO_SYSTEM,
-            "the first verbose worktree prompt also upgrades to the concise one"
-        );
-
-        kiro.system = "My deliberately customized Kiro persona.".into();
-        store.reg_save(&kiro, 500).unwrap();
-        store.reg_seed(600).unwrap();
-        assert_eq!(
-            store.reg_get("kiro").unwrap().unwrap().system,
-            "My deliberately customized Kiro persona.",
-            "seeding never overwrites a custom system prompt"
-        );
+        // Every text the seed ever shipped, plus a custom one, plus the
+        // current shipped default: each must be byte-identical after seeding.
+        let mut at = 100;
+        for (label, text) in [
+            ("the original terse default", terse),
+            ("the first verbose Git version", verbose),
+            ("the worktree-and-trailer default that briefly shipped", concise),
+            ("a custom persona", "My deliberately customized Kiro persona."),
+            ("the current shipped default", DEFAULT_KIRO_SYSTEM),
+        ] {
+            kiro.system = text.into();
+            store.reg_save(&kiro, at).unwrap();
+            store.reg_seed(at + 50).unwrap();
+            let kept = store.reg_get("kiro").unwrap().unwrap();
+            assert_eq!(kept.system, text, "{label}: a stored definition is the user's declaration");
+            assert_eq!(kept.model, "gpt-5.6-sol", "{label}: the model is untouched");
+            assert_eq!(kept.effort, "high", "{label}: the effort is untouched");
+            assert_eq!(kept.skills, kiro.skills, "{label}: skills are untouched");
+            assert_eq!(kept.mcp, kiro.mcp, "{label}: MCP is untouched");
+            let stamp: i64 = store
+                .conn
+                .query_row("SELECT updated_at FROM reg_agents WHERE name='kiro'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(stamp, at as i64, "{label}: not even the timestamp moves — nothing was written");
+            at += 100;
+        }
+        // And a fresh table still seeds the persona-only default.
+        let fresh = Store::open_memory().unwrap();
+        fresh.reg_seed(1).unwrap();
+        assert_eq!(fresh.reg_get("kiro").unwrap().unwrap().system, DEFAULT_KIRO_SYSTEM);
     }
 }

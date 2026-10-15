@@ -271,6 +271,20 @@ history as containing a live signing key.
   following its imports; `scripts/vite-config.test.ts` pins it). `npm test`'s
   globs and tsconfig's `include` are anchored at `src/`/`scripts/`, so they
   never reach it.
+- **Three places say where a worktree goes, and only the first two are the
+  project's.** (1) The repo's `AGENTS.md` non-negotiable 4, which every agent
+  working ON this repository reads. (2) This section. (3) The owner's own
+  app-wide `<config>/AGENTS.md` (`tmm prompt`), which leads every managed
+  agent's prompt on every backend and is where a person's workflow rules
+  live — it is user configuration, not a file in git, and the one place that
+  should carry the same location (`<repo>/worktree/<agent>-<task>`, inside the
+  project directory, `worktree/` gitignored) for agents working on OTHER
+  projects. They must agree. What must NOT carry it is the shipped registry
+  seed (`projects/store/registry.rs`): a release hands every fresh install a
+  persona line only (board #344), so a location written there would be one
+  owner's convention in everyone's defaults. A mismatch between (1)-(2) and
+  (3) is silent — the agent simply builds its worktree where the prompt says —
+  so changing the location means editing all three, and the third by hand.
 - Verify and commit on the task branch. Only then fast-forward/cherry-pick the
   verified commit into the intended branch from the integration checkout. Keep
   the worktree until integration is confirmed, then remove it with
