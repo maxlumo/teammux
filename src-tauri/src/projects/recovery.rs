@@ -1905,6 +1905,9 @@ mod tests {
     fn an_observation_overtaken_by_a_newer_turn_fact_changes_nothing() {
         use super::super::telemetry as tm;
         super::super::tests::use_test_store();
+        // Persisted, so every end has its row id: a missed check would then
+        // ATTACH to the newer end (the bug), not fail for want of a row.
+        tm::PERSIST_IN_TEST.with(|p| p.set(true));
         let barriers: [(&str, &dyn Fn(&str)); 5] = [
             ("a new prompt", &|s| { tm::record_prompt(s, "w", "[tmm chat 2026-10-16 00:10] human: @w next"); }),
             ("a tool call", &|s| tm::record_tool(s, "w", "Bash", "npm test")),
@@ -1921,7 +1924,8 @@ mod tests {
             let before = tm::derive(&session, "w", 0);
             let rows = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif").count();
             let ends = rows();
-            assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()), "{what}: stale");
+            assert_eq!(tm::record_missed_end(&session, "w", "auth_expired", tm::Identity::Paint("auth_expired|x"), seen, now_secs()), tm::Missed::Stale, "{what}");
+            assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()), "{what}: not accepted");
             let after = tm::derive(&session, "w", 0);
             assert_eq!((after.state.as_str(), after.detail.as_str()), (before.state.as_str(), before.detail.as_str()), "{what}: the newer turn is untouched");
             assert_ne!(after.detail, "auth_expired", "{what}");
@@ -1939,6 +1943,7 @@ mod tests {
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:10] human: @w next");
         assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once: the newer turn is not ended");
         assert_eq!(tm::derive(&session, "w", 0).state, "running");
+        tm::PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
     /// Board #362 review P2-1: an end recorded from the screen is our own
