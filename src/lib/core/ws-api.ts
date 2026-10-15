@@ -465,7 +465,7 @@ export function createWsApi(connection: Connection) {
   const hubAgentSetTeam = Object.assign(
     async (session: string, agent: string, team: string) => {
       requireCap(connection, AGENT_TEAM);
-      return call<{ agent: string; team: string | null; left: string | null; changed: boolean }>('hub_agent_set_team', { session, agent, team });
+      return call<{ agent: string; team: string | null; left: string | null; changed: boolean; untold?: string[]; unread?: string | null }>('hub_agent_set_team', { session, agent, team });
     },
     { hold: (): Promise<void> | undefined => holdForLogin(connection) },
   );

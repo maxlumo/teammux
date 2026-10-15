@@ -293,6 +293,10 @@ mod tests {
         let half = told("C", &[("a2", "A"), ("c1", "C")]);
         assert_eq!(plan(&half, "C", &names(&["c1", "c2"])), Plan { left: vec![("a2".into(), "A".into())], joined: names(&["c2"]), mover: false }, "the untold rest of a cut-short fan-out");
         assert_eq!(plan(&told("A", &[("a1", "A")]), "A", &names(&["a1", "a3"])), Plan { left: vec![], joined: names(&["a3"]), mover: false }, "a member who arrived since is told");
+        // Validator R2 (board #388): a recipient told under A who is now a
+        // live member of C was told the agent is in A: it hears it left A
+        // AND that it joined C (only `t != team` separates this case).
+        assert_eq!(plan(&told("A", &[("x", "A")]), "C", &names(&["x"])), Plan { left: vec![("x".into(), "A".into())], joined: names(&["x"]), mover: true });
         let v = a.to_value();
         assert_eq!(Told::of(&json!({ "team_told": v })), Some(a));
         assert_eq!(Told::of(&json!({})), None, "no ledger yet: the caller seeds it from the recipe");

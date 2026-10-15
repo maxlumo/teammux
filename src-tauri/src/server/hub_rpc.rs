@@ -695,6 +695,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let seed = |old: &str| team_members(session, old, agent);
             let (left, changed, rev) = crate::projects::spawn::set_agent_team(&project.path, agent, team, &seed)
                 .map_err(RpcError::InvalidParams)?;
+            let mut told = Announced::default();
             if changed {
                 // This agent's announcements one at a time; only the latest
                 // revision's speaks, and it says what is true now against what
@@ -702,9 +703,11 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 let home = crate::projects::spawn::agent_home(&project.path, agent);
                 let turn = crate::projects::recipe::announcement(&home);
                 let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
-                announce_move(session, &room, &project.path, agent, rev, &move_line(agent, team, &left), by, &turn);
+                told = announce_move(session, &room, &project.path, agent, rev, &move_line(agent, team, &left), by, &turn);
             }
-            Ok(serde_json::json!({ "agent": agent, "team": if team.is_empty() { serde_json::Value::Null } else { serde_json::json!(team) }, "left": if left.is_empty() { serde_json::Value::Null } else { serde_json::json!(left) }, "changed": changed }))
+            // Who was owed a notice and did not get it, said to the caller
+            // (board #388; `tmm agent team` notes it on stderr).
+            Ok(serde_json::json!({ "agent": agent, "team": if team.is_empty() { serde_json::Value::Null } else { serde_json::json!(team) }, "left": if left.is_empty() { serde_json::Value::Null } else { serde_json::json!(left) }, "changed": changed, "untold": told.untold, "unread": told.unread }))
         }
         "hub_agent_input_mode" => {
             let agent = param(p, "agent")?;
@@ -1002,66 +1005,130 @@ fn tell_team_of_join(session: &str, root: &str, joiner: &str, backend: &str, by:
 /// to it, so a fan-out cut short by a newer move leaves the rest to that
 /// move's turn. The ledger never decides membership: the recipe does.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn announce_move(session: &str, room: &str, ws: &str, agent: &str, rev: u64, room_line: &str, by: &str, _turn: &crate::projects::recipe::Held) {
+fn announce_move(session: &str, room: &str, ws: &str, agent: &str, rev: u64, room_line: &str, by: &str, _turn: &crate::projects::recipe::Held) -> Announced {
     use crate::projects::recipe::{plan, update_recipe, current_team_rev, Told};
     let home = crate::projects::spawn::agent_home(ws, agent);
     let current = || current_team_rev(&home) == rev;
     if !current() {
-        return;
+        return Announced::default();
     }
     let _ = crate::projects::rooms::post(room, agent, room_line);
     let Ok(Some((team, told))) = update_recipe(&home, |r| r.as_ref().map(|r| {
         let team = r.get("team").and_then(|v| v.as_str()).unwrap_or("").split('/').next().unwrap_or("").to_string();
         (team, Told::of(r).unwrap_or_default())
-    })) else { return };
-    let members_now = if team.is_empty() { Vec::new() } else { team_members(session, &team, agent) };
-    let todo = plan(&told, &team, &members_now);
+    })) else { return Announced::default() };
+    // A team whose live members cannot be read (tmux could not be asked) is
+    // NOT a team with nobody in it (board #388): nobody of it is told it
+    // joined or left, and the next announcement retries.
+    let read = if team.is_empty() { Ok(Vec::new()) } else { team_members(session, &team, agent) };
+    let unread = read.as_ref().err().map(|e| { eprintln!("projects: move of '{agent}': team '{team}' members could not be read ({e}); they are told at its next move"); team.clone() });
+    let todo = plan(&told, &team, &members_or_told(read, &told, &team));
     let stamp = stamp_now();
-    let record = |change: &dyn Fn(&mut Told)| {
-        let _ = update_recipe(&home, |r| if let Some(r) = r.as_mut() {
-            let mut t = Told::of(r).unwrap_or_default();
-            change(&mut t);
-            r["team_told"] = t.to_value();
-        });
-    };
-    let deliver = |to: &str, line: &str| crate::projects::delivery::agent_target(session, to)
-        .is_some_and(|target| crate::projects::delivery::deliver_if(session, to, &target, line, &current));
-    for (to, was) in &todo.left {
-        if deliver(to, &crate::projects::delivery::left_notice(agent, was, &stamp)) {
-            record(&|t| { if t.members.get(to) == Some(was) { t.members.remove(to); } });
-        }
-    }
-    if !todo.joined.is_empty() {
-        // The one reading of a pane's agent, recipe first: a
-        // managed window that fell back to a shell is still kiro.
-        let backend = crate::tmux::list_panes(session).unwrap_or_default().iter()
-            .find(|p| p.window_name == agent && p.active)
-            .and_then(|p| crate::projects::agents::detect_pane(Some(ws), p))
-            .map(|a| a.backend).unwrap_or("");
-        let notice = crate::projects::delivery::moved_in_notice(agent, &team, backend, by, &stamp);
-        for to in &todo.joined {
-            if deliver(to, &notice) {
-                record(&|t| { t.members.insert(to.clone(), team.clone()); });
+    let backend = std::cell::OnceCell::new();
+    let deliver = |to: &str, owed: &Owed| {
+        let line = match owed {
+            Owed::Left(was) => crate::projects::delivery::left_notice(agent, was, &stamp),
+            // The one reading of a pane's agent, recipe first: a managed
+            // window that fell back to a shell is still kiro.
+            Owed::Joined => crate::projects::delivery::moved_in_notice(agent, &team, backend.get_or_init(|| crate::tmux::list_panes(session).unwrap_or_default().iter()
+                .find(|p| p.window_name == agent && p.active)
+                .and_then(|p| crate::projects::agents::detect_pane(Some(ws), p))
+                .map(|a| a.backend).unwrap_or("")), by, &stamp),
+            Owed::Mover => {
+                let mates = if team.is_empty() { Vec::new() } else { crate::projects::spawn::team_mates(ws, &team, agent) };
+                crate::projects::delivery::moved_notice(agent, &team, &told.mover, &mates, &stamp)
             }
+        };
+        crate::projects::delivery::agent_target(session, to)
+            .is_some_and(|target| crate::projects::delivery::deliver_if(session, to, &target, &line, &current))
+    };
+    let mut out = tell_difference(&home, agent, &team, &todo, &deliver);
+    for to in &out.unrecorded {
+        eprintln!("projects: move of '{agent}': @{to} was told, but the recipe could not record it; a later move may tell it again");
+    }
+    out.unread = unread;
+    out
+}
+
+/// What an announcement owes one recipient (board #384).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+enum Owed<'a> {
+    /// "x left your team", for the team the recipient was told.
+    Left(&'a str),
+    /// "x joined your team", for the agent's current team.
+    Joined,
+    /// The agent itself: its current team.
+    Mover,
+}
+
+/// How an announcement went (board #388), for the caller to say so.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Debug, Default, PartialEq)]
+struct Announced {
+    /// The recipients the delivery door did not take a notice for: still
+    /// owed, so the ledger is unchanged for them and the next announcement
+    /// tells them.
+    untold: Vec<String>,
+    /// Told, but the ledger write failed: a later announcement may tell them
+    /// again (at least once, never silently "recorded").
+    unrecorded: Vec<String>,
+    /// The current team, when its live members could not be read.
+    unread: Option<String>,
+}
+
+/// The bookkeeping half of an announcement (board #384/#388), the delivery
+/// injected: each owed notice goes through `deliver`, and the ledger
+/// (`team_told`, through the recipe's door) takes a recipient only when the
+/// door delivered to it. A refused one stays as it was, so the next
+/// announcement owes it again. A failed write is reported, never taken as
+/// recorded.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn tell_difference(home: &std::path::Path, agent: &str, team: &str, todo: &crate::projects::recipe::Plan, deliver: &dyn Fn(&str, &Owed) -> bool) -> Announced {
+    use crate::projects::recipe::{update_recipe, Told};
+    let mut out = Announced::default();
+    let record = |change: &dyn Fn(&mut Told)| update_recipe(home, |r| match r.as_mut() {
+        Some(r) => { let mut t = Told::of(r).unwrap_or_default(); change(&mut t); r["team_told"] = t.to_value(); true }
+        None => false,
+    }).unwrap_or(false);
+    let mut settle = |to: &str, owed: Owed, change: &dyn Fn(&mut Told)| {
+        if !deliver(to, &owed) {
+            out.untold.push(to.to_string());
+        } else if !record(change) {
+            out.unrecorded.push(to.to_string());
         }
+    };
+    for (to, was) in &todo.left {
+        settle(to, Owed::Left(was), &|t| { if t.members.get(to) == Some(was) { t.members.remove(to); } });
+    }
+    for to in &todo.joined {
+        settle(to, Owed::Joined, &|t| { t.members.insert(to.clone(), team.to_string()); });
     }
     if todo.mover {
-        let mates = if team.is_empty() { Vec::new() } else { crate::projects::spawn::team_mates(ws, &team, agent) };
-        if deliver(agent, &crate::projects::delivery::moved_notice(agent, &team, &told.mover, &mates, &stamp)) {
-            record(&|t| t.mover = team.clone());
-        }
+        settle(agent, Owed::Mover, &|t| t.mover = team.to_string());
     }
+    out
+}
+
+/// The current team's live members for an announcement's plan (board #388):
+/// as read, or, when they could not be read, exactly the recipients already
+/// told for this team, so the plan owes nobody of it a "joined" or a "left"
+/// (an unread team is not an empty one), while recipients told for another
+/// team are still told they left.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn members_or_told(read: Result<Vec<String>, String>, told: &crate::projects::recipe::Told, team: &str) -> Vec<String> {
+    read.unwrap_or_else(|_| told.members.iter().filter(|(_, t)| t.as_str() == team).map(|(r, _)| r.clone()).collect())
 }
 
 /// The CURRENT live managed members of team `root` in this session other
 /// than `except`, by window (board #382/#384): the one reading of "the
-/// team's live members" the join, move and leave notices share.
+/// team's live members" the join, move and leave notices share. `Err` when
+/// they cannot be read (no project, tmux could not be asked): never an
+/// empty team (board #388).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn team_members(session: &str, root: &str, except: &str) -> Vec<String> {
-    let Ok(Some(project)) = crate::projects::project_for_session(session) else { return Vec::new() };
+fn team_members(session: &str, root: &str, except: &str) -> Result<Vec<String>, String> {
+    let project = crate::projects::project_for_session(session)?.ok_or_else(|| format!("no project for session '{session}'"))?;
     let ws = Some(project.path.as_str());
-    let mut members: Vec<String> = crate::tmux::list_panes(session)
-        .unwrap_or_default()
+    let mut members: Vec<String> = crate::tmux::list_panes(session)?
         .into_iter()
         .map(|p| p.window_name)
         .filter(|name| name != except && crate::projects::is_managed_in(ws, name))
@@ -1069,7 +1136,7 @@ fn team_members(session: &str, root: &str, except: &str) -> Vec<String> {
         .collect();
     members.sort();
     members.dedup();
-    members
+    Ok(members)
 }
 
 /// Type `notice` into the pane of every CURRENT live member of team `root`
@@ -1079,7 +1146,8 @@ fn team_members(session: &str, root: &str, except: &str) -> Vec<String> {
 /// the step that types or holds). Returns who it was typed to.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn tell_team(session: &str, root: &str, except: &str, notice: &str, still_due: &dyn Fn() -> bool) -> Vec<String> {
-    team_members(session, root, except).into_iter()
+    // #382's join notice at spawn stays best effort: an unread team tells nobody.
+    team_members(session, root, except).unwrap_or_default().into_iter()
         .filter(|name| crate::projects::delivery::agent_target(session, name)
             .is_some_and(|target| crate::projects::delivery::deliver_if(session, name, &target, notice, still_due)))
         .collect()
@@ -2463,7 +2531,7 @@ mod tests {
 
         let moved = set("helper", "squad");
         assert!(moved.error.is_none(), "{:?}", moved.error.map(|e| e.message));
-        assert_eq!(moved.result.unwrap(), serde_json::json!({ "agent": "helper", "team": "squad", "left": null, "changed": true }));
+        assert_eq!(moved.result.unwrap(), serde_json::json!({ "agent": "helper", "team": "squad", "left": null, "changed": true, "untold": [], "unread": null }));
         assert_eq!(recipe("helper")["team"], "squad");
         assert_eq!(recipe("helper")["member"], "", "a joined member");
         assert!(wait_for("lead", "tmm: [reply] @helper joined your team squad"), "the team's member is told: {:?}", pane("lead"));
@@ -2482,7 +2550,7 @@ mod tests {
         assert_eq!(again.result.unwrap()["changed"], false, "already there: nothing typed, nothing posted");
 
         let out = set("helper", "");
-        assert_eq!(out.result.unwrap(), serde_json::json!({ "agent": "helper", "team": null, "left": "squad", "changed": true }));
+        assert_eq!(out.result.unwrap(), serde_json::json!({ "agent": "helper", "team": null, "left": "squad", "changed": true, "untold": [], "unread": null }));
         assert!(wait_for("lead", "tmm: [reply] @helper left your team squad"), "{:?}", pane("lead"));
         assert!(wait_for("helper", "you left team squad and are standalone now"), "{:?}", pane("helper"));
         let lines: Vec<String> = room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] moved") || b.starts_with("[tmm] left")).collect();
@@ -2577,6 +2645,68 @@ mod tests {
         assert!(mover.join().unwrap().error.is_none());
         assert_eq!(lines().len(), before + 1, "told once the earlier turn ended");
         assert!(wait_for("core1", "@helper left your team core"));
+    }
+
+    /// Board #388 (validator R5/R5b): a notice the delivery door does not take
+    /// records nothing, and the next announcement owes exactly that one again;
+    /// a recipient the door took is recorded once. The mover too. A failed
+    /// ledger write is reported, never taken as recorded.
+    #[test]
+    fn a_refused_notice_is_not_recorded_and_the_next_announcement_retries_it() {
+        use crate::projects::recipe::{plan, update_recipe, Told};
+        use std::cell::RefCell;
+        let home = std::env::temp_dir().join(format!("tmm-told-{}", uuid::Uuid::new_v4())).join(".tmm/agents/helper");
+        std::fs::create_dir_all(&home).unwrap();
+        let seeded = Told { mover: "squad".into(), members: [("lead", "squad"), ("dev", "squad")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        update_recipe(&home, |r| *r = Some(serde_json::json!({ "team": "core", "team_told": seeded.to_value() }))).unwrap();
+        let told = || Told::of(&serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap()).unwrap();
+        let members = vec!["c1".to_string(), "c2".to_string()];
+        let sent = RefCell::new(Vec::<String>::new());
+        let refuse: RefCell<Vec<&str>> = RefCell::new(vec!["dev", "c2", "helper"]);
+        let deliver = |to: &str, owed: &super::Owed| {
+            let what = match owed { super::Owed::Left(t) => format!("left:{t}"), super::Owed::Joined => "joined".into(), super::Owed::Mover => "mover".into() };
+            sent.borrow_mut().push(format!("{to}={what}"));
+            !refuse.borrow().contains(&to)
+        };
+        // First announcement: dev's "left", c2's "joined" and the mover's notice are refused.
+        let out = super::tell_difference(&home, "helper", "core", &plan(&told(), "core", &members), &deliver);
+        assert_eq!(out.untold, ["dev", "c2", "helper"]);
+        assert!(out.unrecorded.is_empty());
+        assert_eq!(told(), Told { mover: "squad".into(), members: [("dev", "squad"), ("c1", "core")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() },
+            "lead's left and c1's join are recorded; dev, c2 and the mover are as they were");
+        // The next announcement owes exactly those again, and they now land.
+        refuse.borrow_mut().clear();
+        sent.borrow_mut().clear();
+        let again = plan(&told(), "core", &members);
+        let out = super::tell_difference(&home, "helper", "core", &again, &deliver);
+        assert_eq!(*sent.borrow(), ["dev=left:squad", "c2=joined", "helper=mover"], "only what is still owed");
+        assert_eq!(out, super::Announced::default());
+        assert_eq!(told(), Told { mover: "core".into(), members: [("c1", "core"), ("c2", "core")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() });
+        assert!(plan(&told(), "core", &members).left.is_empty() && plan(&told(), "core", &members).joined.is_empty() && !plan(&told(), "core", &members).mover, "nothing is owed now");
+
+        // A delivered notice whose ledger write fails is reported, not recorded.
+        let breaking = |to: &str, _: &super::Owed| { std::fs::write(home.join("launch.json"), "{ half").unwrap(); let _ = to; true };
+        let todo = plan(&Told { mover: "core".into(), members: Default::default() }, "core", &["c3".to_string()]);
+        let out = super::tell_difference(&home, "helper", "core", &todo, &breaking);
+        assert_eq!(out.unrecorded, ["c3"], "told, but not recorded: said so");
+        assert!(out.untold.is_empty());
+        let _ = std::fs::remove_dir_all(home.parent().unwrap().parent().unwrap().parent().unwrap());
+    }
+
+    /// Board #388: an unread team is not an empty team. Its members are taken
+    /// as the ones already told for it, so the plan owes none of them a
+    /// "joined" or a "left", while recipients told for another team are
+    /// still told they left.
+    #[test]
+    fn an_unread_team_tells_none_of_its_own_and_still_tells_the_old_team() {
+        use crate::projects::recipe::{plan, Told};
+        let told = Told { mover: "squad".into(), members: [("lead", "squad"), ("c1", "core")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        let members = super::members_or_told(Err("tmux could not be asked".into()), &told, "core");
+        assert_eq!(members, ["c1"]);
+        let todo = plan(&told, "core", &members);
+        assert_eq!(todo.left, [("lead".to_string(), "squad".to_string())], "the old team is still told");
+        assert!(todo.joined.is_empty(), "nobody of the unread team is told it joined");
+        assert_eq!(super::members_or_told(Ok(vec!["c2".into()]), &told, "core"), ["c2"], "a read list is used as read");
     }
 
     /// Board #382: a join into a team with nobody in this project is refused

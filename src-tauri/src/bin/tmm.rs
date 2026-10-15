@@ -897,6 +897,9 @@ async fn main() {
                     (true, t, _) if !t.is_empty() => println!("✓ moved {name} to team {t} (its prompt follows at its next start)"),
                     (true, _, l) => println!("✓ {name} left team {l} (standalone; its prompt follows at its next start)"),
                 }
+                for note in team_move_notes(&name, &r) {
+                    eprintln!("{note}");
+                }
             }
         }
         ("project", rest) if rest.first().map(String::as_str) == Some("list") => {
@@ -2219,6 +2222,26 @@ fn assign_target(raw: &str) -> &str {
     if name == "-" { "" } else { name }
 }
 
+/// What `tmm agent team` says on stderr when the move's notices were cut
+/// short (board #388), in #347's shape: not an error (the move IS made, exit
+/// 0), and nothing is queued; the agent's next move tells whoever is still
+/// owed. `untold` = the panes that did not take a notice; `unread` = the
+/// team whose members could not be read.
+fn team_move_notes(name: &str, r: &Value) -> Vec<String> {
+    let mut notes: Vec<String> = r.get("untold").and_then(|v| v.as_array()).into_iter().flatten()
+        .filter_map(|v| v.as_str())
+        .map(|to| if to == name {
+            format!("note: @{name} was not told its team: the notice was not typed into its pane; nothing is queued, its next move tells it")
+        } else {
+            format!("note: @{to} was not told about {name}: the notice was not typed into its pane; nothing is queued, {name}'s next move tells it")
+        })
+        .collect();
+    if let Some(team) = r.get("unread").and_then(|v| v.as_str()) {
+        notes.push(format!("note: team {team}'s members could not be read (tmux could not be asked), so none of them was told {name} joined; {name}'s next move tells them"));
+    }
+    notes
+}
+
 /// A mention no pane received, SAID where the sender is looking (board #347):
 /// `tmm send`'s answer and a board hand-off's (board #377) both carry the
 /// rows, and this is the one place that words them. Not an error: the line IS
@@ -2535,6 +2558,20 @@ mod tests {
         assert_eq!(spawn_params("p", "kiro", "go", "lead", &flags), json!({ "session": "p", "agent": "kiro", "brief": "go", "by": "lead", "join": "dev-squad" }));
         let (flags, _, _) = parse(&["spawn", "kiro"]);
         assert!(spawn_params("p", "kiro", "", "lead", &flags).get("join").is_none(), "standalone, even when the caller is a team member");
+    }
+
+    /// Board #388: a move whose notices were cut short says so, one note per
+    /// recipient still owed and one for an unread team; a clean move says
+    /// nothing. The move is made either way (the notes are not a failure).
+    #[test]
+    fn a_cut_short_move_says_who_was_not_told() {
+        assert!(team_move_notes("helper", &json!({ "changed": true, "untold": [], "unread": null })).is_empty());
+        assert!(team_move_notes("helper", &json!({ "changed": true })).is_empty(), "an older server's answer has neither");
+        let notes = team_move_notes("helper", &json!({ "untold": ["lead", "helper"], "unread": "core" }));
+        assert_eq!(notes.len(), 3);
+        assert!(notes[0].starts_with("note: @lead was not told about helper") && notes[0].contains("nothing is queued"), "{}", notes[0]);
+        assert!(notes[1].starts_with("note: @helper was not told its team"), "{}", notes[1]);
+        assert!(notes[2].starts_with("note: team core's members could not be read"), "{}", notes[2]);
     }
 
     /// Board #384: `-` leaves the team; anything else names one.

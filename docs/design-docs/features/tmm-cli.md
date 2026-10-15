@@ -69,7 +69,8 @@ tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
 tmm agent team <name> <team|->       move a running agent into a team of this project, or out (-), at runtime
                                      (#384; needs the server's agent_team cap; a definition member is refused;
-                                     its prompt follows at its next start)
+                                     its prompt follows at its next start; a teammate the notice did not reach
+                                     is noted on stderr, exit 0, #388)
 tmm spawn <agent> [--brief <text>]   spawn a registry agent into this project (standalone)
 tmm spawn <agent> --join <team>      …into a team of this project, at runtime (#382; needs the server's spawn_join cap;
                                      the team must have a member home here, live or stopped)

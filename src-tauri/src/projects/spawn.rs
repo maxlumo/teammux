@@ -440,8 +440,11 @@ fn team_homes(workspace: &str, root: &str) -> Vec<(String, String, String)> {
 /// (`recipe::Told`, P1-B residual) from the recipe as it stands before the
 /// move: the agent was told its old team, and `seed(old team)` (that team's
 /// live members) were told it is their teammate, by its prompt or a join
-/// notice. An empty ledger is never read as "nobody was told".
-pub fn set_agent_team(workspace: &str, window_name: &str, team: &str, seed: &dyn Fn(&str) -> Vec<String>) -> Result<(String, bool, u64), String> {
+/// notice. An empty ledger is never read as "nobody was told", and a seed
+/// that cannot be read refuses the move with the recipe unchanged (board
+/// #388): an unread team is not an empty one, and a ledger seeded later
+/// would describe the wrong team.
+pub fn set_agent_team(workspace: &str, window_name: &str, team: &str, seed: &dyn Fn(&str) -> Result<Vec<String>, String>) -> Result<(String, bool, u64), String> {
     let team = team.trim();
     // Judged before the section (it reads OTHER homes' recipes, and a
     // section is a leaf): a team that is here now is here a moment later.
@@ -463,7 +466,11 @@ pub fn set_agent_team(workspace: &str, window_name: &str, team: &str, seed: &dyn
             return Ok((old_root, false, rev));
         }
         if super::recipe::Told::of(recipe).is_none() {
-            let members = if old_root.is_empty() { Vec::new() } else { seed(&old_root) };
+            let members = if old_root.is_empty() { Vec::new() } else {
+                seed(&old_root).map_err(|e| format!(
+                    "could not read who is in team '{old_root}' to know who to tell ({e}); nothing was changed, try again"
+                ))?
+            };
             let told = super::recipe::Told { mover: old_root.clone(), members: members.into_iter().map(|m| (m, old_root.clone())).collect() };
             recipe["team_told"] = told.to_value();
         }
@@ -2246,10 +2253,10 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
         let before = recipe();
 
-        assert!(set_agent_team(&ws_str, "mvsolo", "ghost", &|_| Vec::new()).unwrap_err().contains("team 'ghost' has no member in this project"));
+        assert!(set_agent_team(&ws_str, "mvsolo", "ghost", &|_| Ok(Vec::new())).unwrap_err().contains("team 'ghost' has no member in this project"));
         assert_eq!(recipe(), before, "a refused move writes nothing");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Vec::new()).unwrap(), (String::new(), false, 0), "standalone already");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Vec::new()).unwrap(), (String::new(), true, 1));
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Ok(Vec::new())).unwrap(), (String::new(), false, 0), "standalone already");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Ok(Vec::new())).unwrap(), (String::new(), true, 1));
         let mut expected = before.clone();
         expected["team"] = json!("mvteam");
         expected["team_rev"] = json!(1);
@@ -2262,10 +2269,10 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!prompt().contains("## Your team"), "the running agent's config is not rewritten");
         assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
         assert!(prompt().contains("## Your team: \"mvteam\"") && prompt().contains("- @lead — leads"), "its next start carries the block: {}", prompt());
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Vec::new()).unwrap(), ("mvteam".to_string(), false, 1), "already there: no new revision");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Ok(Vec::new())).unwrap(), ("mvteam".to_string(), false, 1), "already there: no new revision");
 
-        assert!(set_agent_team(&ws_str, "lead", "", &|_| Vec::new()).unwrap_err().contains("by the team's definition — change it in Agents > Teams"), "a definition member stays");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Vec::new()).unwrap(), ("mvteam".to_string(), true, 2));
+        assert!(set_agent_team(&ws_str, "lead", "", &|_| Ok(Vec::new())).unwrap_err().contains("by the team's definition — change it in Agents > Teams"), "a definition member stays");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Ok(Vec::new())).unwrap(), ("mvteam".to_string(), true, 2));
         let mut left = before.clone();
         left["team_rev"] = json!(2);
         left["team_told"] = json!({ "mover": "", "members": {} });
@@ -2275,17 +2282,26 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let seeded_home = agent_home(&ws_str, "seeded");
         std::fs::create_dir_all(&seeded_home).unwrap();
         LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
-        assert_eq!(set_agent_team(&ws_str, "seeded", "", &|t| if t == "mvteam" { vec!["lead".to_string()] } else { Vec::new() }).unwrap(), ("mvteam".to_string(), true, 1));
+        assert_eq!(set_agent_team(&ws_str, "seeded", "", &|t| Ok(if t == "mvteam" { vec!["lead".to_string()] } else { Vec::new() })).unwrap(), ("mvteam".to_string(), true, 1));
         assert_eq!(read(&seeded_home.join("launch.json"))["team_told"], json!({ "mover": "mvteam", "members": { "lead": "mvteam" } }));
-        assert_eq!(set_agent_team(&ws_str, "seeded", "mvteam", &|_| vec!["nobody".to_string()]).unwrap().1, true);
+        assert_eq!(set_agent_team(&ws_str, "seeded", "mvteam", &|_| Ok(vec!["nobody".to_string()])).unwrap().1, true);
         assert_eq!(read(&seeded_home.join("launch.json"))["team_told"]["members"], json!({ "lead": "mvteam" }), "seeded once; a later move does not reseed");
+        // A seed that cannot be read refuses the first move, recipe unchanged
+        // (board #388): an unread team is not an empty one.
+        let unread_home = agent_home(&ws_str, "unread");
+        std::fs::create_dir_all(&unread_home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", input_mode: "" }.write(&unread_home).unwrap();
+        let unread_before = read(&unread_home.join("launch.json"));
+        let refused = set_agent_team(&ws_str, "unread", "", &|_| Err("tmux could not be asked".into())).unwrap_err();
+        assert!(refused.contains("could not read who is in team 'mvteam'") && refused.contains("nothing was changed"), "{refused}");
+        assert_eq!(read(&unread_home.join("launch.json")), unread_before, "the recipe is unchanged: no team, no revision, no ledger");
         // A fresh recipe in another team (a reused home) drops the ledger.
         LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
         assert!(read(&seeded_home.join("launch.json")).get("team_told").is_none());
         assert_eq!(read(&seeded_home.join("launch.json"))["team_rev"], 2, "the revision stays");
         assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
         assert!(!prompt().contains("## Your team"), "and its next start drops the block");
-        assert!(set_agent_team(&ws_str, "nobody", "mvteam", &|_| Vec::new()).unwrap_err().contains("is not an agent this app started"));
+        assert!(set_agent_team(&ws_str, "nobody", "mvteam", &|_| Ok(Vec::new())).unwrap_err().contains("is not an agent this app started"));
 
         // Reviewer P2-1: two sub-teams of one root each have a `dev` with its
         // own role. The moved agent hears each dev's role by (path, member),
@@ -2309,7 +2325,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // held, a move of THIS agent waits and lands after it; a restart
         // takes the same section; another agent's home is not held up.
         let held = super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo"));
-        let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam", &|_| Vec::new())) };
+        let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam", &|_| Ok(Vec::new()))) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(recipe()["team"], "", "the move waits for the section");
         assert!(refresh_agent(&ws_str, "proj", "lead"), "another home's restart is not held up");
