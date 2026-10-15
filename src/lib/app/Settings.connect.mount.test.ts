@@ -331,3 +331,24 @@ test('a candidate the app stopped waiting on is closed, and the form is not left
   assert.equal(app.order.at(-1), 'close', `the superseded candidate leaves no live connection: ${app.order.join(' → ')}`);
   assert.ok(buttons(app).includes('Connect'), `and the form is back to Connect: ${buttons(app).join(' | ')}`);
 });
+
+// Board #381: the page layer clips, so the one scroller the person has is the
+// form's own `.wrapper` (its CSS is pinned in Settings.source.test.ts and its
+// geometry proved in Chromium). That only helps if every action the card
+// offers is rendered INSIDE that scroller, in each state the card can be in.
+test('every action on the card renders inside the page\'s own scroller (#381)', async (context) => {
+  let release: ((machine: string) => void) | null = null;
+  const app = await mount(context, () => new Promise((resolve) => { release = resolve; }), alpha);
+  const scroller = app.document.querySelector('.wrapper');
+  assert.ok(scroller, 'the form renders its scroller');
+  assert.ok(scroller.querySelector(':scope > .card'), 'the card sits directly in it');
+  const outside = () => [...app.document.querySelectorAll('button')]
+    .filter((button) => !scroller.contains(button)).map((button) => button.textContent?.trim());
+  assert.ok(buttons(app).includes('Connect') && buttons(app).some((label) => /share/iu.test(label)), `idle: Connect and Share render: ${buttons(app).join(' | ')}`);
+  assert.deepEqual(outside(), [], 'idle: no action outside the scroller');
+  await connectTo(app, 'wss://same.test/ws');
+  assert.ok(buttons(app).includes('Cancel'), `connecting: Cancel renders: ${buttons(app).join(' | ')}`);
+  assert.deepEqual(outside(), [], 'connecting: no action outside the scroller');
+  release!('m-a');
+  for (let i = 0; i < 8; i++) await app.flush();
+});

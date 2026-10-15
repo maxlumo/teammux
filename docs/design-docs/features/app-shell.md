@@ -564,3 +564,33 @@ thing the rule forbids. `aria-label`s stay — the card is pointer/keyboard-
 focus only and the label is for everyone; on touch there is no card and
 nothing was lost, since touch never showed a title either. The phone's tab
 bar gets no card for the same reason.
+
+### A page taller than the window scrolls itself (2026-10-15, #381)
+
+A page layer (`.page-layer`, absolutely inset) and every ancestor above it
+clip, so the shell never scrolls for a page: a page whose content can outgrow
+the window owns a scroller. The connect page did not (owner: "我页面缩放的话首
+页登录页面好像超出页面了"): at interface scale 150% or more, on a 390×560
+window, or in the 640×400 / 195×422 CSS viewports that browser zoom 200%
+leaves, Connect and Share sat below the edge with nothing to scroll.
+
+- **The page's root is the scroller**: `.wrapper { flex: 1; min-height: 0;
+  overflow-y: auto; overflow-x: hidden }`. `min-height: 0` is the half that is
+  easy to miss: a flex item's minimum height is its content by default, so
+  without it the wrapper grows with the card and `overflow-y` has nothing to
+  scroll.
+- **The card centres with `margin: auto`, never `align-items` /
+  `justify-content: center` on the scroller.** Centring keeps centring an item
+  taller than its scroller, which puts its top above the scroll origin, out of
+  reach. Auto margins collapse to zero instead: the card starts at the top and
+  the rest scrolls into view, and a card that fits is centred as before
+  (1280×800 at 100%: the card's top at 128 px before and after).
+- Root font-size is not a lever here (200% moved the card 589 → 595 px): the
+  page is sized in px tokens, so the interface scale (`--ui-zoom`) and browser
+  zoom are what grow it.
+
+Pinned by `app/Settings.source.test.ts` (the two rules) and
+`Settings.connect.mount.test.ts` (every card action renders inside the
+scroller, idle and connecting); the geometry is measured in Chromium (#381
+board notes: 1280×800, 390×844, 390×560 at 100/150/180%, and the browser-zoom
+viewports).

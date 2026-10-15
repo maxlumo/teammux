@@ -383,15 +383,24 @@
 </div>
 
 <style>
+  /* The page is its own scroller: its layer and every ancestor clip, so a card
+     taller than the window (zoomed, short, keyboard up) was cut off with
+     nothing to scroll (board #381). `min-height: 0` lets `overflow-y` act;
+     the card centres with auto margins, which collapse to the top when there
+     is no room, where `align-items: center` pushed its top out of reach.
+     app-shell.md § "A page taller than the window scrolls itself". */
   .wrapper {
     flex: 1;
+    min-height: 0;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 24px 16px;
   }
 
   .card {
+    margin: auto;
     width: 100%;
     max-width: 380px;
     /* A raised surface, never canvas-on-canvas (owner, 2026-09-05: "第一次
