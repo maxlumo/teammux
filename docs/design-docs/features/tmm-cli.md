@@ -467,46 +467,61 @@ the UI and nowhere else. The verb is the picker's own save, `hub_board_save`,
 and that save is also the hand-off: an assignment DISPATCHES (the UI's rule
 since board #11), and since board #377 the SERVER does it — one `@name` line
 through the one delivery carrier, so the agent is actually woken instead of
-silently gaining a label. The verb carries no brief of its own; the text, the
-room record and the delivery are the same whichever surface asked (see
+silently gaining a label. The verb asks for it (`dispatch: true`) and carries
+no brief of its own; the text, the room record and the delivery are the same
+whichever surface asked (see
 [board.md](board.md#an-assignment-is-handed-over-by-the-server-once-board-377-2026-10-15)).
-The line is a POINTER — the issue named, who handed it over, `tmm board take
-<id>` and `tmm board show <id>` — because the recipient holds the CLI that
-prints the issue. A name is checked at the door against the project's
-managed agents (plus `human`, who reads the board) because an assignment to a
-typo looks exactly like a success, and `-` is the one spelling of "nobody" — a
-shell cannot pass an empty argument comfortably, and it is the picker's first
-row. The record is the server's too: every assignee CHANGE posts one `[tmm]
-assigned <name> — board #N <title>` room line (`unassigned <who-lost-it>` when
-cleared), from whichever surface saved it, which is how the status moves have
-always read.
+The line is the owner's hand-off, not a pointer: who assigned it, the ENTIRE
+title and body, the note thread under a 1200-character budget (a cut points to
+`tmm board show <id>`), and `tmm board take <id>` last. A name is checked at
+the door against the project's managed agents (plus `human`, who reads the
+board) because an assignment to a typo looks exactly like a success, and `-` is
+the one spelling of "nobody" — a shell cannot pass an empty argument
+comfortably, and it is the picker's first row. The record is the server's too:
+every assignee CHANGE posts one `[tmm] assigned <name> — board #N <title>` room
+line (`unassigned <who-lost-it>` when cleared), from whichever surface saved
+it, which is how the status moves have always read. `tmm board add --assignee`
+is the same door: the issue is filed and handed over in one request (it used to
+write only a label).
 
-Three things the #367 review made explicit, and what #377 did to them. The
-issue TITLE rides in the delivered line, so it is DE-ADDRESSED first
+Four things the reviews made explicit, and where they live now. The quoted words
+in the line — title, body, notes, who — are DE-ADDRESSED first
 (`address::unaddressed`, the same `@` → `＠` rule a reply's quote has used
 since #290): a title like "修复 @all 的投递" would otherwise have typed a
 hand-off meant for one agent into every pane, because `mention_names` reads
 the whole body and cannot tell our words from the ones we quoted — the
-command's `name` argument is the only address in that line, and the stored
-title is untouched. That rule now lives where the line is written, in the
-server's `board_assign_brief`. The second was a failure mode that no longer
-exists: with the save and the post as two requests, a lost answer to the second
-left it unknown whether the agent had been told, and the CLI had to report the
-assignment as saved and the notification as unconfirmed. They are one request
-now, so a lost answer is just a failed command: it exits non-zero without a
-`✓`, and the save may or may not have landed. The recovery is unchanged and is
-the contract: **naming the assignee again re-sends the hand-off** (the server
-hands the issue over whenever a save names an assignee, changed or not), at the
-cost of a possible duplicate, which `tmm log --grep "board #N"` lets the
-operator check first. No exactly-once is claimed anywhere. The third is the
-agent that is not there: when the hand-off reached no pane the answer carries
-`offline` and the CLI says so on stderr in `tmm send`'s words (#347), exit 0,
-because the assignment is on the board. The CLI is tested against a fake server
+assignee is the only address in that line, and the stored issue is untouched.
+That rule is applied where the line is written, in the server's
+`board_assign_brief`, and the assignee itself is validated at the save door
+(`""`, `human`, or ONE valid name; `all` and `dev @all` are refused with
+nothing saved). Second, the answer: the save is committed before the telling,
+so how the telling went comes back as `dispatch: sent | offline | failed` and
+is read, not guessed. `tmm` prints the saved line first; `failed` then exits
+non-zero ("`#N` IS assigned to `<name>` on the board, but `<name>` was not
+told"), and `offline` is a note on stderr in `tmm send`'s words (#347), exit 0,
+because the assignment is on the board. That holds for `add --assignee` as for
+`assign`. The old two-request world needed an "unconfirmed" report when the
+second answer was lost; there is one request now, so a lost answer is just a
+failed command: no `✓`, non-zero, and the save may or may not have landed. The
+recovery is unchanged and is the contract: **naming the assignee again
+re-sends the hand-off** (the server hands the issue over whenever a flagged
+save names an assignee, changed or not), at the cost of a possible duplicate,
+which `tmm log --grep "board #N"` lets the operator check first. No
+exactly-once is claimed anywhere. Third, compatibility: the verb reads
+`board_dispatch` in the server's login answer BEFORE it sends the save and, on
+a server that lacks it, exits (code 4, like any method the server does not
+have) with "update the server to assign. Nothing was saved." — a gateway older
+than the `tmm` that runs against it would otherwise store a label and print a
+success. An older `tmm` against this server sends no flag and posts its own
+brief, which is exactly one hand-off. The CLI is tested against a fake server
 (`tests/board_assign_cli.rs`): one save and no post of its own, the save
-carrying the assignee and `who`, a lost answer exiting non-zero without a
-`✓`, a failed save changing nothing, an unknown name writing nothing, `-`
-saving without checking a name, an absent assignee said on stderr, and a
-re-run with the SAME assignee still sending the save — that last one guards the
+carrying the assignee, `who` and the flag, a server without the capability
+refused with the save never sent (and `add` without an assignee unaffected),
+`add --assignee` in one save, a lost answer exiting non-zero without a `✓`, a
+failed hand-off saved-but-not-told with a non-zero exit, a failed save
+changing nothing, an unknown name writing nothing, `-` saving without checking
+a name, an absent assignee said on stderr for both entry points, and a re-run
+with the SAME assignee still sending the save — that last one guards the
 recovery contract from being quietly turned into a skip. A fake server is the
 right test because the `-` that never reached the argument parser proved that
 string tests of the helpers do not hold this verb.

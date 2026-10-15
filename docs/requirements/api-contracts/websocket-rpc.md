@@ -9,7 +9,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>", "e2e": 2}                // nonce + newest handshake version
 → {"method": "auth", "params": {"client_nonce": "<hex>", "proof": "<hex>", "e2e": 2}}
-← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}}}>
+← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch"]}}>
 ```
 - IKM = token, salt = server_nonce ‖ client_nonce (16 + 16 bytes), HKDF-SHA256, 32-byte outputs
 - **v2** (current) derives THREE keys, one per job, by `info` label:
@@ -37,12 +37,17 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>"}
 → {"method": "auth", "params": {"token": "..."}}
-← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}}}
+← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}, "caps": ["board_dispatch"]}}
 ```
 `build` (board #368) is the build the server runs, `{"version": "1.0.0", "commit": "46392f16", "built": "2026-10-14 07:40"}`:
 the package version, the source commit (`git --short=8`: AT LEAST 8 hex characters, so two sides compare by prefix; `dev` when git was unavailable) and the UTC minute the build ran
 (`unknown` when the clock was). It rides the login answer, not a new RPC, in both paths. A server older than #368 sends
 none; a client reads that as "unknown", never as a mismatch.
+
+`caps` (board #377) lists what the server can do that a client must know BEFORE it writes. Today one: `board_dispatch` —
+`hub_board_save` with `dispatch: true` hands the issue to its assignee. A server that lacks it sends no `caps` at all, and a
+client that needs one refuses the write (the page disables its assignee picker, `tmm board assign` / `add --assignee` exit
+with nothing saved) rather than store a label no agent is ever told about. Like `build`, it rides the login answer, in both paths.
 
 ### Rate Limiting
 - Max auth failures tracked per IP
@@ -173,7 +178,7 @@ humans) and the desktop hub UI. See
 | `hub_board_list` | `session` | `{issues: […], statuses}` — the project task board, four fixed columns (`todo/doing/review/done`); each issue carries a note COUNT. Public `id`/`#N` is a session-local sequence: every project's first issue is `#1`, deletes leave gaps, and numbers are never reused. Every single-issue operation resolves `session + id`; the database-wide row key remains internal for note FKs only |
 | `hub_board_counts` | — (no `session`, like `hub_rooms`) | `{counts: {"<session>": {todo, doing, review, done, total}}}` — issue counts for EVERY board in one grouped read; the four statuses are zero-filled server-side, `total` is explicit, and a project with an empty board is ABSENT (absence = hide) |
 | `hub_board_get` | `session`, `id` | The issue with its full `notes` thread and server-computed `editable` (`true` only while unassigned and before any Agent save/note activity) |
-| `hub_board_save` | `session`, `id?`, `title?`, `body?`, `status?`, `assignee?`, `who?` | Create (no id) or PATCH (id + only the changed fields — COALESCE, so a `move` cannot erase a body edited meanwhile). Once assigned or touched by an Agent, title/body are immutable server-side; workflow fields remain patchable. A save that names an `assignee` (not empty, not `human`, not `who`) also posts the one hand-off line to that agent (board #377). `{ok, id}`, plus `offline` when the hand-off reached no pane |
+| `hub_board_save` | `session`, `id?`, `title?`, `body?`, `status?`, `assignee?`, `dispatch?`, `who?` | Create (no id) or PATCH (id + only the changed fields — COALESCE, so a `move` cannot erase a body edited meanwhile). Once assigned or touched by an Agent, title/body are immutable server-side; workflow fields remain patchable. `assignee` is `""` (clear), `human`, or ONE valid agent name — anything else (`all`, `dev @all`, whitespace) is `-32602` with nothing saved. `dispatch: true` (sent only by clients that read `board_dispatch` in the login answer) also hands the issue to the assignee: the brief goes to a managed agent of THIS project, once per save that names one (not the actor, not `human`). Without the flag nothing is posted (an older client posts its own brief). `{ok, id}`, plus `dispatch: "sent" \| "offline" \| "failed"` when a hand-off was asked and there was somebody to tell, `dispatch_error` with `offline`/`failed`, and `offline` (as `hub_post`'s) when no pane received it. The save is committed BEFORE the telling, so `failed` is an answer, never an error |
 | `hub_board_note` | `session`, `id`, `body`, `who?` | Appends to the issue's own thread, bumps `updated_at` |
 | `hub_board_delete` | `session`, `id` | `{ok}` — deletes the issue and cascades its notes |
 
