@@ -534,15 +534,26 @@ test('a terminal that becomes visible re-asserts its pane size, even when its ow
     'the visible effect asserts before it replays the frame');
 });
 
-test('a hidden terminal neither sizes nor paints the pane it shares; its reconnect capture is recorded only (board #395)', () => {
-  // The behaviour is driven in Terminal.shared.mount.test.ts; here the three
-  // gates are pinned where they live, so a refactor cannot move one silently.
+test('a hidden terminal neither sizes nor paints the pane it shares, and a reply outlives no pane (board #395)', () => {
+  // The behaviour is driven in Terminal.shared.mount.test.ts; here the gates
+  // are pinned where they live, so a refactor cannot move one silently.
   assert.match(source, /--kb-locked-h[^\n]*\n\s*\}\n\s*if \(!visible\) return;\n\s*const fit = calcFit\(\);/u,
     'doResize returns before measuring a fit while hidden');
+  assert.match(source, /resizeSendTimer = setTimeout\(\(\) => \{\s*\n\s*resizeSendTimer = 0;\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!visible\) return;\s*\n\s*resizePane\(target, pendingCols, pendingRows\)/u,
+    'the SEND re-checks that the terminal is shown (review P1-a)');
+  assert.match(source, /\$effect\(\(\) => \{ if \(!visible\) cancelPaneResizeRef\?\.\(\); \}\);/u,
+    'hiding withdraws a size not yet sent');
+  assert.match(source, /cancelPaneResizeRef = \(\) => \{\s*\n\s*clearTimeout\(resizeSendTimer\);\s*\n\s*resizeSendTimer = 0;\s*\n\s*pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;/u,
+    'withdrawn with its pending echo state');
   assert.match(source, /const onReconnected = [\s\S]*?if \(term && visible\) \{\s*\n\s*const fit = calcFit\(\);/u,
     'a reconnect re-sends the size of a shown terminal only');
-  assert.match(source, /const onReconnected = [\s\S]*?lastContent = c;\s*\n\s*\/\/[^\n]*\n\s*if \(!visible\) return;\s*\n\s*if \(termAtBottom\) writeToXterm\(c, lastCursor\);/u,
-    'the reconnect capture is recorded, not drawn, while hidden');
+  assert.match(source, /function _writeToXtermNow\(content, cursor\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!term \|\| touchScrolling \|\| !visible\) return;/u,
+    'the ONE draw gate: a hidden terminal records, it never draws');
+  // Every capture reply checks the lifetime it was asked in (review P1-b).
+  const captures = [...source.matchAll(/capturePane\(target\)\.then\(r => \{\s*\n\s*if \(!alive\b/gu)].length;
+  assert.equal(captures, [...source.matchAll(/capturePane\(target\)\.then/gu)].length, 'every capture reply is bound to its pane s lifetime');
+  assert.ok(captures >= 3, 'the first capture, the resume capture and the reconnect capture');
+  assert.match(source, /return \(\) => \{\s*\n\s*responseFilter\.reset\(\);\s*\n\s*clearTerminalFeedback\(\);\s*\n\s*alive = false;/u, 'the lifetime ends in the cleanup');
 });
 
 // #365 (owner 2026-10-14: "Terminal 上方的 Tab 栏和 Chat 上方的 Tab 栏，样式需要做得

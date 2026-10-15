@@ -1,8 +1,9 @@
 <script>
   // Host for Terminal.shared.mount.test.ts (board #395): ONE real runtime and
-  // two Terminals on the SAME pane, as the app has them — the Terminal page's
-  // and the Hub drawer's — each told separately whether it is shown. What the
-  // test controls is the socket, the boxes' sizes and their observers.
+  // two Terminals, as the app has them — the Terminal page's and the Hub
+  // drawer's — each told separately whether it is shown and which pane it
+  // shows (the same pane by default). What the test controls is the socket,
+  // the boxes' sizes and their observers.
   import ServerScope from '../app/ServerScope.svelte';
   import Terminal from './Terminal.svelte';
   import { createServerFleet } from '../app/server-fleet.ts';
@@ -16,16 +17,18 @@
   const serverState = createServerState(createServerStore(localStorage, runtime.id));
   let mounted = $state(false);
   let shown = $state({ page: false, drawer: true });
+  let targets = $state({ page: target, drawer: target });
   globalThis.__shared = {
     dial: () => runtime.dial(),
     mount() { mounted = true; },
     show(which, on) { shown = { ...shown, [which]: on }; },
+    retarget(which, t) { targets = { ...targets, [which]: t }; },
   };
 </script>
 
 {#if mounted}
   <ServerScope {runtime} state={serverState}>
-    <div class="cell" data-cell="page"><Terminal {target} session="app" visible={shown.page} active={shown.page} /></div>
-    <div class="cell" data-cell="drawer"><Terminal {target} session="app" embedded chromeless visible={shown.drawer} active={shown.drawer} /></div>
+    <div class="cell" data-cell="page"><Terminal target={targets.page} session="app" visible={shown.page} active={shown.page} /></div>
+    <div class="cell" data-cell="drawer"><Terminal target={targets.drawer} session="app" embedded chromeless visible={shown.drawer} active={shown.drawer} /></div>
   </ServerScope>
 {/if}

@@ -315,6 +315,9 @@
     });
   });
   let doResizeRef = null;
+  // Set by the main $effect (its resize timer): withdraws a size not yet sent
+  // when the terminal is hidden (board #395).
+  let cancelPaneResizeRef = null;
   // Set by the main $effect (needs its `lastContent` closure). Releases every
   // state that suppresses rendering — see resumeLiveTail().
   let resumeLiveTailRef = null;
@@ -343,6 +346,8 @@
   // busy pane and cooked the machine; owner, 2026-08-22). `lastContent` and
   // friends are plain lets, so this effect re-runs on `visible` alone.
   let wasVisible = true;
+  // Hidden: a size queued while shown is withdrawn, not sent (board #395).
+  $effect(() => { if (!visible) cancelPaneResizeRef?.(); });
   $effect(() => {
     if (!visible) { wasVisible = false; return; }
     if (wasVisible) return;
@@ -570,7 +575,12 @@
   }
 
   function _writeToXtermNow(content, cursor) {
-    if (!term || touchScrolling) return;
+    // The ONE draw gate (board #395 review P2): a hidden terminal records,
+    // it never draws — whatever queued the frame (a push, a capture reply,
+    // a resume, a frame already waiting for its animation frame when the
+    // terminal was hidden). Every caller has recorded `lastContent` first,
+    // and the repaint-on-show effect draws it when shown.
+    if (!term || touchScrolling || !visible) return;
     // Reconcile terminal dimensions with server-reported ones.
     // If we have a pending local resize, only clear it when server echoes matching dims;
     // otherwise ignore stale dims. If no pending (or expired), trust server.
@@ -648,6 +658,12 @@
   $effect(() => {
     target;
     return untrack(() => {
+    // This target's LIFETIME (board #395 review P1-b): every reply that
+    // arrives after it ended — a capture asked for A, landing after the
+    // component moved to B (A→B→A included: a new lifetime is a new flag) —
+    // is dropped before it touches `lastContent` or the xterm, which are
+    // component-wide and already belong to the next pane.
+    let alive = true;
     touchScrolling = false; // reset on pane switch
     pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
     lockKeyboard(); // pane switch
@@ -1266,7 +1282,7 @@
       // half-alive: a successful send_keys/capture response proves the RPC path
       // and immediately converges the display to tmux's actual contents.
       capturePane(target).then(r => {
-        if (generation !== resumeGeneration || !term) return;
+        if (!alive || generation !== resumeGeneration || !term) return;
         const content = r.output ?? r.content;
         if (content == null) return;
         const changed = content !== lastContent;
@@ -1357,9 +1373,21 @@
       clearTimeout(resizeSendTimer);
       resizeSendTimer = setTimeout(() => {
         resizeSendTimer = 0;
+        // The SEND is the gate (board #395 review P1-a): a size queued while
+        // shown must not reach tmux if this terminal was hidden in the 120 ms
+        // since (hiding also withdraws it, below; the target's cleanup clears
+        // this timer). Coming back on screen asserts the current size again.
+        if (!visible) return;
         resizePane(target, pendingCols, pendingRows).catch(() => {});
       }, 120);
     }
+    /** Hidden: a size still waiting to be sent is withdrawn with its pending
+     * echo state (board #395); an RPC already sent is not undone. */
+    cancelPaneResizeRef = () => {
+      clearTimeout(resizeSendTimer);
+      resizeSendTimer = 0;
+      pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
+    };
 
     // `assert`: send the size even when it equals ours — another instance of
     // this pane (the Hub drawer's / the page's) may have sized tmux to ITS box
@@ -1488,9 +1516,9 @@
       pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
       // Force doResize to actually send by invalidating the cur===fit check.
       // We do this by momentarily pretending term has different dims.
-      // Only while shown (board #395): a hidden instance re-sending its size
-      // here took the pane from the visible one after every gateway restart;
-      // it asserts its own size when it is shown again.
+      // Only while shown (board #395): a hidden terminal re-sends nothing;
+      // its queued size was withdrawn when it was hidden, and the show path
+      // asserts its size.
       if (term && visible) {
         const fit = calcFit();
         if (fit) {
@@ -1505,11 +1533,10 @@
       // the user sees stale content right after the reconnect dialog
       // disappears, which feels broken on flaky networks.
       capturePane(target).then(r => {
+        if (!alive) return; // a reply for a pane this component left
         const c = r.output || r.content;
         if (c && c !== lastContent) {
           lastContent = c;
-          // Hidden: recorded only; the repaint-on-show effect draws it.
-          if (!visible) return;
           if (termAtBottom) writeToXterm(c, lastCursor);
           else hasNewContent = true;
         }
@@ -1565,6 +1592,7 @@
 
     subscribe(target);
     capturePane(target).then(r => {
+      if (!alive) return; // the component moved to another pane meanwhile
       if (lastContent) return; // subscription already delivered content
       const c = r.output || r.content;
       if (c) {
@@ -1576,12 +1604,14 @@
     return () => {
       responseFilter.reset();
       clearTerminalFeedback();
+      alive = false; // replies still in flight belong to a pane we left
       resizeObs.disconnect();
       clearTimeout(resizeSendTimer);
       window.removeEventListener('app-zoom-change', onAppZoom);
       try { onFirstRender.dispose(); } catch {}
       try { onSelChange.dispose(); } catch {}
       doResizeRef = null;
+      cancelPaneResizeRef = null;
       resumeLiveTailRef = null;
       termEl?.classList.remove('compact-lines');
       termEl?.style.removeProperty('--xterm-char-height');

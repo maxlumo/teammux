@@ -187,16 +187,38 @@ rows were outside its box: a right-aligned status line (what agent CLIs
 paint) was never seen to change, 1 of 5 one-second samples of the drawer's
 bottom rows distinct, while the pane ticked every second. Toggling the
 Terminal tab or "open in Terminal tab" put a box of that size on screen,
-which is why it looked like fullscreen fixed it. A gateway restart did the
-same through `onReconnected`, which re-sent every instance's size.
+which is why it looked like fullscreen fixed it. `onReconnected` was a
+second path to the same wrong send: it re-sent every instance's size, the
+hidden one's included. That path is read from the code and pinned by a
+test; the freeze measured live was the window-resize one.
 
-The rule: **only the instance on screen sizes the pane.** `doResize` returns
-before measuring while `visible` is false (it still records the keyboard-free
-height), and `onReconnected` re-sends the size of a shown terminal only; its
-capture of a hidden one is recorded, not drawn. Coming back on screen asserts
-the current size (#198), which is the only moment a hidden instance's size
-matters. Same probe after the fix: tmux stays 64×47 while the hidden page's
-box changes, and the drawer's bottom rows changed in 5 of 5 samples.
+The rule: **only the instance on screen sizes the pane.** The gate is the
+SEND: the 120 ms resize timer re-checks `visible` when it fires, and hiding a
+terminal withdraws a size it had queued, with its pending echo state (review
+P1-a on 2b5eeeb4: a size queued while shown used to reach tmux if the
+terminal was hidden within those 120 ms). In front of it, `doResize` returns
+before measuring while hidden (it still records the keyboard-free height),
+and `onReconnected` re-sends the size of a shown terminal only. Coming back
+on screen asserts the current size (#198), which is the only moment a hidden
+instance's size matters. Same probe after the fix: tmux stays 64×47 while the
+hidden page's box changes, and the drawer's bottom rows changed in 5 of 5
+samples.
+
+**A reply belongs to the pane it was asked for** (review P1-b on 2b5eeeb4).
+`lastContent` and the xterm are the component's, and a target switch
+rebuilds them in place; a `capture_pane` asked for pane A that answered after
+the component moved to B used to write A's screen into B's cache and screen,
+and with no new output on B the server's deduplication would never correct
+it. Each target lifetime has its own `alive` flag, ended in its cleanup, and
+every capture reply (the first one, the page-resume one, the reconnect one)
+checks it before it touches either; a new visit to A is a new lifetime, so
+A → B → A drops the first visit's reply too.
+
+**Hidden records, it never draws.** The one place a frame reaches the xterm,
+`_writeToXtermNow`, returns while hidden; every caller records `lastContent`
+first, and the repaint-on-show effect draws it (review P2 on 2b5eeeb4: the
+first capture, the page-resume capture and a frame already waiting for its
+animation frame could still draw into a hidden terminal).
 
 Two instances that are BOTH on screen (two split cells, or another client on
 the same pane) still share one tmux size; the last to size it wins. That is
@@ -205,10 +227,15 @@ unchanged, and outside this rule. On the phone the Hub has no terminal drawer
 Terminal page is silent there too and asserts when shown.
 
 Pinned by `Terminal.shared.mount.test.ts` (one real connection, the page's
-and the drawer's Terminal on one pane, boxes and observers owned by the test:
-the hidden page's box change sends nothing, the visible drawer's sends its
-size, a reconnect re-sends the drawer's only, showing the page asserts its
-current box) and `Terminal.source.test.ts` (the three gates where they live).
+and the drawer's Terminal, boxes and observers owned by the test: the hidden
+page's box change sends nothing, the visible drawer's sends its size, a
+reconnect re-sends the drawer's only, showing the page asserts its current
+box; a size queued while shown and hidden within 120 ms is never sent, nor
+after a hidden reconnect; with capture replies held, A's late reply after a
+move to B changes neither B's screen nor its cache, a first-visit reply after
+A → B → A is dropped, and the current visit's reply while hidden is recorded
+and drawn on show) and `Terminal.source.test.ts` (each gate where it lives,
+and every `capturePane` reply bound to its lifetime).
 
 ## Implementation sketch
 
