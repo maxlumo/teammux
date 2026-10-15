@@ -130,7 +130,9 @@ test('the travel a carried element is translated by is in layout units: client p
   const h = harness({ zoom: 1.5, axis: 'xy' });
   h.drag.down(h.ev(0, 0), { id: 'z' });
   h.drag.move(h.ev(RAIL_DRAG_THRESHOLD - 1, 0));
-  assert.equal(h.live(), null, 'the threshold is in client px, unscaled');
+  assert.equal(h.live(), null, 'below the threshold: no drag');
+  h.drag.move(h.ev(RAIL_DRAG_THRESHOLD, 0));
+  assert.deepEqual(h.live(), { id: 'z', dx: RAIL_DRAG_THRESHOLD / 1.5, dy: 0 }, 'AT the threshold in client px it is a drag: the threshold is not scaled by the zoom');
   h.drag.move(h.ev(30, -15));
   assert.deepEqual(h.live(), { id: 'z', dx: 20, dy: -10 });
   // No zoom reading (0, NaN from an unset property) is 1, never a division by zero.
