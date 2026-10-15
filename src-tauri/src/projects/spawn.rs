@@ -43,6 +43,33 @@ pub const SPAWN_CAP: usize = 8;
 /// windows and two managed agents has room for six more hires. "Ours" is the
 /// ONE definition, `home_is_managed` via `is_managed_in` (#112), not the
 /// pane sniff, which counted anything that LOOKED like an agent.
+/// The project's windows as tmux answers RIGHT NOW — the one read every decision
+/// about who may start in a home is made from (board #383 review, P1-A).
+///
+/// "No windows" is an answer only when tmux GIVES it: an empty list, or tmux saying
+/// the session does not exist (the project's session is not up yet, and the first
+/// spawn creates it). Any other failure — a socket it may not open, tmux not run,
+/// an error we do not recognise — is "cannot tell", which refuses; it is never
+/// "nothing is running", because a running agent taken for a stopped one has its
+/// home rewritten and a second window opened under its name.
+fn panes_now(session: &str) -> Result<Vec<tmux::TmuxPane>, String> {
+    panes_answer(tmux::list_panes(session))
+}
+
+/// `panes_now` over an answer already in hand (the seam the tests use).
+fn panes_answer(answer: Result<Vec<tmux::TmuxPane>, String>) -> Result<Vec<tmux::TmuxPane>, String> {
+    match answer {
+        Ok(panes) => Ok(panes),
+        Err(e) if tmux::session_confirmed_absent(&e) => Ok(Vec::new()),
+        Err(e) => Err(format!("could not ask tmux which agents are running ({}); nothing was started, try again", e.trim())),
+    }
+}
+
+/// The window names of `panes_now`.
+fn window_names_now(session: &str) -> Result<Vec<String>, String> {
+    Ok(panes_now(session)?.into_iter().map(|p| p.window_name).collect())
+}
+
 fn managed_window_count(workspace: &str, panes: &[tmux::TmuxPane]) -> usize {
     let mut seen = std::collections::HashSet::new();
     panes
@@ -130,7 +157,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     }
 
     // The cap counts MANAGED agents only (board #126) — see managed_window_count.
-    let panes = tmux::list_panes(req.session).unwrap_or_default();
+    let panes = panes_now(req.session)?;
     let agent_windows = managed_window_count(&workspace, &panes);
     if agent_windows >= SPAWN_CAP {
         return Err(format!("project already has {agent_windows} agents (cap {SPAWN_CAP}) — finish or close one first"));
@@ -149,7 +176,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     // (`live_now`): the panes read above are only for the cap and for a restart's
     // fallback, and a snapshot taken before another request finished is no
     // licence to take what that request now runs (reviewer round 3).
-    let live_now = || -> Vec<String> { tmux::list_panes(req.session).unwrap_or_default().into_iter().map(|p| p.window_name).collect() };
+    let live_now = || window_names_now(req.session);
     let starting = Starting { agent_def: if req.def.is_none() { def.name.as_str() } else { "" }, team: req.team.as_deref().unwrap_or(""), member: req.member };
     let _identity;
     let window_name = match (req.claim, req.resume) {
@@ -449,7 +476,7 @@ fn effective_def(project_path: &str, window_name: &str, p: &Provenance) -> Optio
 pub fn fork(session: &str, source: &str, as_name: Option<&str>, by: &str) -> Result<Value, String> {
     let project = super::project_for_session(session)?
         .ok_or_else(|| format!("no project for session '{session}'"))?;
-    let live_now = || -> Vec<String> { tmux::list_panes(session).unwrap_or_default().into_iter().map(|p| p.window_name).collect() };
+    let live_now = || window_names_now(session);
     let mut plan = plan_fork_with(&project.path, &live_now, source, as_name)?;
     let outcome = spawn(&plan.request(session, by));
     // The claim is kept only by a launch that worked; otherwise dropping the plan
@@ -499,13 +526,13 @@ impl ForkPlan {
 /// (`live` = the project's window names), its definition must still exist, and
 /// the new name must be free among live windows AND existing homes.
 fn plan_fork(workspace: &str, live: &[String], source: &str, as_name: Option<&str>) -> Result<ForkPlan, String> {
-    plan_fork_with(workspace, &|| live.to_vec(), source, as_name)
+    plan_fork_with(workspace, &|| Ok(live.to_vec()), source, as_name)
 }
 
 /// `plan_fork` with the live windows read through `live_now` (fresh, at the moment
 /// of the check and again inside the claim's critical section).
-fn plan_fork_with(workspace: &str, live_now: &dyn Fn() -> Vec<String>, source: &str, as_name: Option<&str>) -> Result<ForkPlan, String> {
-    let live = live_now();
+fn plan_fork_with(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String>, source: &str, as_name: Option<&str>) -> Result<ForkPlan, String> {
+    let live = live_now()?;
     if !super::is_managed_in(Some(workspace), source) {
         return Err(format!("'{source}' is not an agent this app started"));
     }
@@ -649,9 +676,10 @@ fn may_start_in(workspace: &str, name: &str, who: &Starting) -> Result<bool, Str
 ///   over.
 /// The reservation is held until the spawn returns, which is after the window
 /// exists, so a completed request hands its name over to "live", never to "free".
-fn reserve_name(workspace: &str, live_now: &dyn Fn() -> Vec<String>, who: &Starting, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
+fn reserve_name(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String>, who: &Starting, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
     let mut flight = in_flight();
-    let live = live_now();
+    // A read that failed refuses here, before anything is reserved or touched.
+    let live = live_now()?;
     let key = |n: &str| (workspace.to_string(), n.to_string());
     let candidates: Vec<String> = match explicit {
         Some(n) => vec![n.to_string()],
@@ -689,7 +717,7 @@ fn reserve_name(workspace: &str, live_now: &dyn Fn() -> Vec<String>, who: &Start
 /// is refused, and a directory that cannot be inspected or created is "cannot
 /// tell", which refuses and never reads as free. A refresh or a restart reuses
 /// its OWN home and never comes through here.
-fn claim_home(workspace: &str, live_now: &dyn Fn() -> Vec<String>, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
+fn claim_home(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String>, explicit: Option<&str>, base: &str) -> Result<Claim, String> {
     let candidates: Vec<String> = match explicit {
         Some(n) => vec![n.trim().to_string()],
         None => (2..10).map(|i| format!("{base}-{i}")).collect(),
@@ -699,12 +727,14 @@ fn claim_home(workspace: &str, live_now: &dyn Fn() -> Vec<String>, explicit: Opt
 
 /// `claim_home` over candidates the caller fixed (the seam the deterministic
 /// tests use to make two requests reach the same one).
-fn claim_first(workspace: &str, live_now: &dyn Fn() -> Vec<String>, candidates: &[String], explicit: bool) -> Result<Claim, String> {
-    let agents = Path::new(workspace).join(".tmm").join("agents");
-    std::fs::create_dir_all(&agents).map_err(|e| format!("cannot tell which agent names are free ({}: {e}); nothing was created", agents.display()))?;
+fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String>, candidates: &[String], explicit: bool) -> Result<Claim, String> {
     let taken = |name: &str| format!("the name '{name}' is taken — a window, an agent home or another request already has it");
     let mut flight = in_flight();
-    let live = live_now(); // fresh, inside the allocation lock
+    // Fresh, inside the allocation lock — and read BEFORE anything on disk is
+    // touched: a read that failed refuses with nothing created.
+    let live = live_now()?;
+    let agents = Path::new(workspace).join(".tmm").join("agents");
+    std::fs::create_dir_all(&agents).map_err(|e| format!("cannot tell which agent names are free ({}: {e}); nothing was created", agents.display()))?;
     for name in candidates {
         super::agents::valid_name(name)?;
         let key = (workspace.to_string(), name.clone());
@@ -1005,7 +1035,7 @@ pub fn team_plan_for(session: &str, team_name: &str) -> Result<TeamPlan, String>
         .collect();
     homes.sort();
     let current: Vec<(String, String)> = flat.iter().map(|f| (f.path.clone(), f.member.name.trim().to_string())).collect();
-    let live: Vec<String> = tmux::list_panes(session).unwrap_or_default().into_iter().map(|p| p.window_name).collect();
+    let live = window_names_now(session)?;
     Ok(team_plan(&homes, &current, &live))
 }
 
@@ -1023,7 +1053,7 @@ pub fn spawn_team_members(session: &str, team_name: &str, brief: &str, by: &str,
     let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP)?;
     let project = super::project_for_session(session)?
         .ok_or_else(|| format!("no project for session '{session}'"))?;
-    let panes = tmux::list_panes(session).unwrap_or_default();
+    let panes = panes_now(session)?;
     let homes = if only_new { team_windows_from_recipes(&project.path, &team.name) } else { Default::default() };
     let has_home = |f: &super::teams::Flat| homes.get(&(f.path.clone(), f.member.name.trim().to_string())).cloned();
     let wanted = |f: &super::teams::Flat| has_home(f).is_none() && only.is_none_or(|o| o.iter().any(|n| n == f.member.name.trim()));
@@ -3303,7 +3333,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
                     let (b, w, c) = (barrier.clone(), ws_str.clone(), candidates.clone());
                     std::thread::spawn(move || {
                         b.wait();
-                        claim_first(&w, &|| vec!["dev".to_string()], &c, explicit)
+                        claim_first(&w, &|| Ok(vec!["dev".to_string()]), &c, explicit)
                     })
                 })
                 .collect();
@@ -3338,17 +3368,17 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let live = vec!["dev".to_string()];
 
         // Deterministic: the fork's claim is HELD (its window is not open yet).
-        let fork_claim = claim_home(&ws_str, &|| live.clone(), None, "dev").unwrap();
+        let fork_claim = claim_home(&ws_str, &|| Ok(live.clone()), None, "dev").unwrap();
         assert_eq!(fork_claim.name(), "dev-2");
-        let hire = reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, None, "dev").unwrap();
+        let hire = reserve_name(&ws_str, &|| Ok(live.clone()), &Starting { agent_def: "dev", team: "", member: "" }, None, "dev").unwrap();
         assert_eq!(hire.name(), "dev-3", "an ordinary hire steps past the name a fork holds");
-        assert!(reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap_err().contains("being created by another request"), "an explicit team-spawn name is refused");
+        assert!(reserve_name(&ws_str, &|| Ok(live.clone()), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap_err().contains("being created by another request"), "an explicit team-spawn name is refused");
         assert!(agent_home(&ws_str, "dev-2").is_dir() && !agent_home(&ws_str, "dev-3").exists(), "the hire made no home of the fork's, and the fork wrote none of the hire's");
         // When the fork's launch fails and its (empty) claim is dropped, the name is free again.
         drop(fork_claim);
         assert!(!agent_home(&ws_str, "dev-2").exists(), "an empty claimed home is given back");
         drop(hire);
-        let again = reserve_name(&ws_str, &|| live.clone(), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap();
+        let again = reserve_name(&ws_str, &|| Ok(live.clone()), &Starting { agent_def: "dev", team: "", member: "" }, Some("dev-2"), "dev").unwrap();
         assert_eq!(again.name(), "dev-2");
         drop(again);
 
@@ -3359,8 +3389,8 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let (b1, w1, l1, n1) = (barrier.clone(), ws_str.clone(), live.clone(), base.clone());
             let (b2, w2, l2, n2) = (barrier, ws_str.clone(), live, base);
-            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| l1.clone(), None, &n1) });
-            let hire = std::thread::spawn(move || { b2.wait(); reserve_name(&w2, &|| l2.clone(), &Starting { agent_def: "", team: "", member: "" }, None, &n2) });
+            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| Ok(l1.clone()), None, &n1) });
+            let hire = std::thread::spawn(move || { b2.wait(); reserve_name(&w2, &|| Ok(l2.clone()), &Starting { agent_def: "", team: "", member: "" }, None, &n2) });
             let (fork, hire) = (fork.join().unwrap().unwrap(), hire.join().unwrap().unwrap());
             assert_ne!(fork.name(), hire.name(), "round {round}: one name, one request");
         }
@@ -3376,23 +3406,23 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let ws = std::env::temp_dir().join(format!("tmm-fork-drop-{}", uuid::Uuid::new_v4()));
         let ws_str = ws.to_string_lossy().to_string();
         let live: Vec<String> = Vec::new();
-        let written = claim_first(&ws_str, &|| live.clone(), &["w-2".to_string()], true).unwrap();
+        let written = claim_first(&ws_str, &|| Ok(live.clone()), &["w-2".to_string()], true).unwrap();
         std::fs::write(agent_home(&ws_str, "w-2").join("launch.json"), "{\"someone\":\"else\"}").unwrap();
         std::fs::write(agent_home(&ws_str, "w-2").join("half-written"), "x").unwrap();
         drop(written); // uncommitted, but not empty any more
         assert_eq!(std::fs::read_to_string(agent_home(&ws_str, "w-2").join("launch.json")).unwrap(), "{\"someone\":\"else\"}", "another request's material survives a failed one");
         assert!(agent_home(&ws_str, "w-2").join("half-written").exists());
 
-        let empty = claim_first(&ws_str, &|| live.clone(), &["w-3".to_string()], true).unwrap();
+        let empty = claim_first(&ws_str, &|| Ok(live.clone()), &["w-3".to_string()], true).unwrap();
         assert!(agent_home(&ws_str, "w-3").is_dir());
         drop(empty);
         assert!(!agent_home(&ws_str, "w-3").exists(), "an empty claimed home goes back");
 
-        let mut kept = claim_first(&ws_str, &|| live.clone(), &["w-4".to_string()], true).unwrap();
+        let mut kept = claim_first(&ws_str, &|| Ok(live.clone()), &["w-4".to_string()], true).unwrap();
         kept.commit();
         drop(kept);
         assert!(agent_home(&ws_str, "w-4").is_dir(), "a launch that worked keeps its home");
-        assert!(claim_first(&ws_str, &|| live.clone(), &["w-4".to_string()], true).unwrap_err().contains("is taken"), "and the name stays taken");
+        assert!(claim_first(&ws_str, &|| Ok(live.clone()), &["w-4".to_string()], true).unwrap_err().contains("is taken"), "and the name stays taken");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -3409,16 +3439,16 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let theirs = agent_home(&ws_str, "late-2");
         std::fs::create_dir_all(&theirs).unwrap();
         std::fs::write(theirs.join("launch.json"), "{\"theirs\":true}").unwrap();
-        let third = claim_first(&ws_str, &|| Vec::new(), &candidates, false).unwrap();
+        let third = claim_first(&ws_str, &|| Ok(Vec::new()), &candidates, false).unwrap();
         assert_eq!(third.name(), "late-3", "an auto name steps past it");
-        assert!(claim_first(&ws_str, &|| Vec::new(), &["late-2".to_string()], true).unwrap_err().contains("is taken"), "an explicit one is refused");
+        assert!(claim_first(&ws_str, &|| Ok(Vec::new()), &["late-2".to_string()], true).unwrap_err().contains("is taken"), "an explicit one is refused");
         assert_eq!(std::fs::read_to_string(theirs.join("launch.json")).unwrap(), "{\"theirs\":true}", "the other home is byte for byte as it was");
 
         // A homes directory nobody can look into: not free, refused, nothing created.
         let agents = ws.join(".tmm").join("agents");
         std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let denied = claim_first(&ws_str, &|| Vec::new(), &["late-4".to_string()], true);
-        let denied_auto = claim_first(&ws_str, &|| Vec::new(), &["late-5".to_string()], false);
+        let denied = claim_first(&ws_str, &|| Ok(Vec::new()), &["late-4".to_string()], true);
+        let denied_auto = claim_first(&ws_str, &|| Ok(Vec::new()), &["late-5".to_string()], false);
         std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(denied.as_ref().is_err_and(|e| e.contains("cannot tell")), "{denied:?}");
         assert!(denied_auto.as_ref().is_err_and(|e| e.contains("cannot tell")), "an auto name does not read the failure as free either: {denied_auto:?}");
@@ -3536,7 +3566,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let ws = std::env::temp_dir().join(format!("tmm-fork-late-hire-{}", uuid::Uuid::new_v4()));
         let ws_str = ws.to_string_lossy().to_string();
         let live = std::sync::Arc::new(std::sync::Mutex::new(vec!["dev".to_string()]));
-        let fresh = { let live = live.clone(); move || live.lock().unwrap().clone() };
+        let fresh = { let live = live.clone(); move || Ok(live.lock().unwrap().clone()) };
         let hire = Starting { agent_def: "dev", team: "", member: "" };
 
         let mut fork = claim_home(&ws_str, &fresh, None, "dev").unwrap();
@@ -3554,7 +3584,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap(), before, "the running fork's recipe is untouched");
         assert_eq!(std::fs::read_to_string(agent_home(&ws_str, "dev-2").join("session.log")).unwrap(), "the fork's conversation");
         // What a snapshot taken before the fork finished would have done:
-        let stale = reserve_name(&ws_str, &|| vec!["dev".to_string()], &hire, None, "dev").unwrap();
+        let stale = reserve_name(&ws_str, &|| Ok(vec!["dev".to_string()]), &hire, None, "dev").unwrap();
         assert_eq!(stale.name(), "dev-2", "the stale read is the bug: it reuses the running fork's home");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -3572,21 +3602,21 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // The fork of a squad member: a joined agent, team root, no member.
         write_recipe(&ws_str, "dev-2", r#"{"agent_def":"","member":"","team":"squad","from_member":"squad/dev"}"#);
         let fork_recipe = std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap();
-        let running = || vec!["lead".to_string(), "dev".to_string(), "dev-2".to_string()];
+        let running = || Ok(vec!["lead".to_string(), "dev".to_string(), "dev-2".to_string()]);
         let err = reserve_name(&ws_str, &running, &member, Some("dev-2"), "dev").unwrap_err();
         assert!(err.contains("already running"), "{err}");
         // Even once it is no longer live, it is the fork's home, not this member's.
-        let err = reserve_name(&ws_str, &|| vec!["lead".to_string()], &member, Some("dev-2"), "dev").unwrap_err();
+        let err = reserve_name(&ws_str, &|| Ok(vec!["lead".to_string()]), &member, Some("dev-2"), "dev").unwrap_err();
         assert!(err.contains("another agent's home"), "{err}");
         assert_eq!(std::fs::read(agent_home(&ws_str, "dev-2").join("launch.json")).unwrap(), fork_recipe, "the fork's home is untouched");
         // The member's own stopped slot (recipe: this team, this member) starts again.
         write_recipe(&ws_str, "dev", r#"{"agent_def":"","member":"dev","team":"squad"}"#);
-        let own = reserve_name(&ws_str, &|| vec!["lead".to_string()], &member, Some("dev"), "dev").unwrap();
+        let own = reserve_name(&ws_str, &|| Ok(vec!["lead".to_string()]), &member, Some("dev"), "dev").unwrap();
         assert_eq!(own.name(), "dev", "a stopped slot named by its recipe is the request's own");
         drop(own);
         // Another team's member with the same name is not.
         let other = Starting { agent_def: "", team: "other", member: "dev" };
-        assert!(reserve_name(&ws_str, &|| Vec::new(), &other, Some("dev"), "dev").unwrap_err().contains("another agent's home"));
+        assert!(reserve_name(&ws_str, &|| Ok(Vec::new()), &other, Some("dev"), "dev").unwrap_err().contains("another agent's home"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -3629,7 +3659,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let nobody = || Starting { agent_def: "", team: "", member: "" };
         for round in 0..300 {
             let name = format!("order-{round}");
-            let old = claim_first(&ws_str, &|| Vec::new(), &[name.clone()], true).unwrap(); // uncommitted, empty home
+            let old = claim_first(&ws_str, &|| Ok(Vec::new()), &[name.clone()], true).unwrap(); // uncommitted, empty home
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let (b, w, n) = (barrier.clone(), ws_str.clone(), name.clone());
             let newer = std::thread::spawn(move || {
@@ -3638,7 +3668,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
                 loop {
                     assert!(std::time::Instant::now() < deadline, "the claimed name never left the in-flight set");
                     // The same name, as an explicit team-spawn would ask for it.
-                    if let Ok(claim) = reserve_name(&w, &|| Vec::new(), &Starting { agent_def: "", team: "", member: "" }, Some(&n), &n) {
+                    if let Ok(claim) = reserve_name(&w, &|| Ok(Vec::new()), &Starting { agent_def: "", team: "", member: "" }, Some(&n), &n) {
                         let home = agent_home(&w, &n);
                         let made = std::fs::create_dir_all(&home);
                         let wrote = made.and_then(|_| std::fs::write(home.join("launch.json"), "{}"));
@@ -3687,10 +3717,10 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let (b1, w1, l1, b_1) = (barrier.clone(), ws_str.clone(), live.clone(), base.clone());
             let (b2, w2, l2, p2) = (barrier, ws_str.clone(), live, planned.clone());
-            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| l1.clone(), None, &b_1) });
+            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| Ok(l1.clone()), None, &b_1) });
             let member = std::thread::spawn(move || {
                 b2.wait();
-                reserve_name(&w2, &|| l2.clone(), &Starting { agent_def: "", team: "clash", member: "m3" }, Some(&p2), "m3")
+                reserve_name(&w2, &|| Ok(l2.clone()), &Starting { agent_def: "", team: "clash", member: "m3" }, Some(&p2), "m3")
             });
             let (fork, member) = (fork.join().unwrap().unwrap(), member.join().unwrap());
             match member {
@@ -3708,5 +3738,128 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         }
         eprintln!("clash rounds: member won {member_won}, fork won {fork_won}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #383 review (P1-A residual): the windows are read inside the
+    /// allocation lock, and a read that FAILED was taken for "no windows" — a running
+    /// `dev` whose recipe is the request's own looked like a stopped slot, so its
+    /// home was rewritten and a second window opened under its name. "No windows" is
+    /// an answer only when tmux gives it: an empty list, or tmux saying the session
+    /// does not exist. Everything else is "cannot tell".
+    #[test]
+    fn only_an_answer_from_tmux_is_a_list_of_windows_and_everything_else_is_cannot_tell() {
+        assert!(panes_answer(Ok(Vec::new())).unwrap().is_empty(), "an empty list is an answer");
+        // The session is not up yet: tmux SAYS so (measured wordings, tmux.rs
+        // session_confirmed_absent), and the first spawn is what creates it.
+        for absent in [
+            "tmux error: can't find session: proj\n",
+            "tmux error: no server running on /tmp/x/sock\n",
+            "tmux error: error connecting to /tmp/x/sock (No such file or directory)\n",
+        ] {
+            assert!(panes_answer(Err(absent.to_string())).unwrap().is_empty(), "confirmed absent is empty: {absent}");
+        }
+        // tmux could not be asked, or answered in words we do not know.
+        for unanswered in [
+            "tmux error: error connecting to /tmp/x/sock (Permission denied)\n",
+            "Failed to run tmux: No such file or directory (os error 2)",
+            "tmux error: server exited unexpectedly\n",
+            "",
+        ] {
+            let err = panes_answer(Err(unanswered.to_string())).unwrap_err();
+            assert!(err.contains("could not ask tmux which agents are running") && err.contains("nothing was started"), "{unanswered:?}: {err}");
+        }
+    }
+
+    /// The same, at the three allocation doors: with the read failing, `reserve_name`
+    /// (automatic and explicit) and `claim_home` / `claim_first` (automatic and
+    /// explicit) refuse with NOTHING reserved and NOTHING on disk — the running
+    /// `dev`'s home is byte for byte as it was, no new home appears, and a
+    /// workspace never touched is still not there. A read that succeeds and is
+    /// empty starts as before.
+    #[test]
+    fn a_failed_live_read_refuses_every_allocation_and_touches_nothing() {
+        let ws = std::env::temp_dir().join(format!("tmm-live-unknown-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let untouched = std::env::temp_dir().join(format!("tmm-live-unknown-new-{}", uuid::Uuid::new_v4()));
+        let untouched_str = untouched.to_string_lossy().to_string();
+        // `dev` is running, and its recipe is the one a hire of `dev` would match.
+        write_recipe(&ws_str, "dev", r#"{"agent_def":"dev","member":"","team":""}"#);
+        std::fs::write(agent_home(&ws_str, "dev").join("session.log"), "the running conversation").unwrap();
+        let before = (std::fs::read(agent_home(&ws_str, "dev").join("launch.json")).unwrap(), std::fs::read(agent_home(&ws_str, "dev").join("session.log")).unwrap());
+        let homes = || { let mut v: Vec<String> = std::fs::read_dir(ws.join(".tmm").join("agents")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect(); v.sort(); v };
+
+        let unanswered = || -> Result<Vec<String>, String> {
+            panes_answer(Err("tmux error: error connecting to /tmp/x/sock (Permission denied)\n".to_string())).map(|_| Vec::new())
+        };
+        let hire = Starting { agent_def: "dev", team: "", member: "" };
+        let refused = |r: Result<Claim, String>, what: &str| {
+            let err = r.err().unwrap_or_else(|| format!("{what}: NO ERROR"));
+            assert!(err.contains("could not ask tmux which agents are running"), "{what}: {err}");
+        };
+        refused(reserve_name(&ws_str, &unanswered, &hire, None, "dev"), "automatic hire");
+        refused(reserve_name(&ws_str, &unanswered, &hire, Some("dev"), "dev"), "explicit hire of the running name");
+        refused(claim_home(&ws_str, &unanswered, None, "dev"), "automatic fork");
+        refused(claim_home(&ws_str, &unanswered, Some("dev-2"), "dev"), "explicit fork");
+        refused(claim_home(&untouched_str, &unanswered, None, "dev"), "fork in a workspace never used");
+
+        let flight = in_flight();
+        for (w, n) in [(&ws_str, "dev"), (&ws_str, "dev-2"), (&untouched_str, "dev-2")] {
+            assert!(!flight.contains(&(w.to_string(), n.to_string())), "{n} was reserved on a failed read");
+        }
+        drop(flight);
+        assert_eq!(homes(), vec!["dev".to_string()], "no home was created");
+        assert_eq!((std::fs::read(agent_home(&ws_str, "dev").join("launch.json")).unwrap(), std::fs::read(agent_home(&ws_str, "dev").join("session.log")).unwrap()), before, "the running agent's home is byte for byte as it was");
+        assert!(!untouched.exists(), "a refused claim does not even create the workspace's .tmm");
+
+        // tmux answered, with nothing running: the same requests start.
+        let none = || -> Result<Vec<String>, String> { Ok(Vec::new()) };
+        let own = reserve_name(&ws_str, &none, &hire, None, "dev").unwrap();
+        assert_eq!(own.name(), "dev", "an empty answer is a stopped slot, its own recipe starts again");
+        drop(own);
+        let fork = claim_home(&untouched_str, &none, None, "dev").unwrap();
+        assert_eq!(fork.name(), "dev-2", "and a fork claims its next name");
+        drop(fork);
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&untouched);
+    }
+
+    /// A fork reads the windows twice: once to find its source running, again inside
+    /// the claim. The second read failing claims nothing — the first one having
+    /// answered is no licence for the allocation.
+    #[test]
+    fn a_fork_whose_allocation_read_fails_claims_nothing() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-fork-read-fails-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("fkread", "Fork persona.", "steer");
+        let def = super::super::registry_get("fkread").unwrap().unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "fkread")), &def, "fkread", "proj", &ws_str, "", "lead", None, "fkread", "", "").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let second_fails = || -> Result<Vec<String>, String> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { Ok(vec!["fkread".to_string()]) } else { panes_answer(Err("tmux error: error connecting to /tmp/x/sock (Permission denied)\n".to_string())).map(|_| Vec::new()) }
+        };
+        let err = plan_fork_with(&ws_str, &second_fails, "fkread", None).err().expect("a failed allocation read refuses the fork");
+        assert!(err.contains("could not ask tmux which agents are running"), "{err}");
+        assert_eq!(calls.get(), 2, "the source check read once, the claim read again");
+        assert!(!agent_home(&ws_str, "fkread-2").exists(), "no home was made for the fork");
+        assert!(!in_flight().contains(&(ws_str.clone(), "fkread-2".to_string())), "and no name is held");
+        // The first read failing refuses the fork too (it cannot tell the source runs).
+        let err = plan_fork_with(&ws_str, &|| panes_answer(Err("Failed to run tmux: nope".to_string())).map(|_| Vec::new()), "fkread", None).err().unwrap();
+        assert!(err.contains("could not ask tmux"), "{err}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// No decision in the launcher reads the windows by swallowing a failure: the
+    /// only `list_panes` call in this file's production code is `panes_now`'s, so
+    /// the cap, the allocation, a team's plan and a team spawn all go through the
+    /// one answer-or-"cannot tell" read.
+    #[test]
+    fn the_launcher_reads_the_windows_only_through_the_one_honest_read() {
+        let src = include_str!("spawn.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("a test module")];
+        let calls: Vec<&str> = production.lines().filter(|l| l.contains("list_panes(") && !l.trim_start().starts_with("//")).collect();
+        assert_eq!(calls.len(), 1, "one read of the windows: {calls:?}");
+        assert!(calls[0].contains("panes_answer(tmux::list_panes(session))"), "{calls:?}");
     }
 }
