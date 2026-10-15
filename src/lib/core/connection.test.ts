@@ -1436,3 +1436,89 @@ test('after the login the plain-token path delivers a text push, and ignores a b
   await until(() => seen.pushes.length === 1);
   assert.deepEqual(seen.pushes, ['REAL'], 'a text push IS delivered');
 });
+
+// ── Follow-up to #393 round 4 (validator's two P3 gaps, reviewer's phase-1 wording) ──
+
+test('a socket error, a close or a timeout BEFORE the nonce ends the attempt as a network failure, never a refusal, and a fresh handshake works (#393 follow-up)', (t) => withWebCrypto(async () => {
+  const faults: Array<[string, (socket: MockWebSocket) => void, RegExp, number]> = [
+    ['a socket error', (s) => s.onerror?.(), /^connection failed$/u, 300],
+    ['a close', (s) => s.onclose?.({ code: 1006, reason: '', wasClean: false }), /^connection closed during auth$/u, 300],
+    ['the connect timer', () => {}, /^connection timeout$/u, 40],
+  ];
+  for (const [what, fault, expected, timeoutMs] of faults) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const seen = watch(conn);
+    const dialing = conn.connect('ws://early-fault.test/ws', 'tok', timeoutMs);
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    fault(socket);
+    const error = await rejection(dialing);
+    assert.ok(error, `${what}: the dial failed`);
+    assert.match(error.message, expected, what);
+    assert.equal(isAuthRefusal(error), false, `${what}: a network failure, not a refusal`);
+    // Whatever the old socket says afterwards reaches nobody and gets no answer.
+    socket.message(new FakeE2eServer('tok', 2, 'm', 'h').nonceFrame());
+    sendEvilTail(socket);
+    await settle(30);
+    assert.equal(socket.sent.length, 0, `${what}: the late nonce was not answered`);
+    assert.deepEqual([seen.pushes, seen.team], [[], []], `${what}: and nothing was delivered`);
+    assert.equal(conn.getMachineId() ?? null, null, `${what}: no identity`);
+    await freshHandshakeWorks(conn, 'encrypted', what);
+  }
+}));
+
+test('the PLAIN-token path takes only the server’s ERR_AUTH code as a refusal: another code, no code and no error are this dial’s failure only (#393 follow-up, validator P3)', async (t) => {
+  const answers: Array<[string, unknown, string]> = [
+    ['a JSON-RPC internal error', { id: 0, error: { code: -32603, message: 'internal' } }, 'internal'],
+    ['a legacy HTTP-style code', { id: 0, error: { code: 401, message: 'invalid token' } }, 'invalid token'],
+    ['a message and no code', { id: 0, error: { message: 'bad token' } }, 'bad token'],
+    ['a code and no message', { id: 0, error: { code: -32603 } }, 'auth failed'],
+    ['an answer that is nothing', { id: 0 }, 'auth failed'],
+  ];
+  for (const [what, answer, message] of answers) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const dialing = conn.connect('ws://plain-other.test/ws', 'wrong');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    await until(() => socket.sent.length >= 1);
+    socket.message(answer);
+    const error = await rejection(dialing);
+    assert.ok(error, `${what}: the dial failed`);
+    assert.equal(error.message, message, what);
+    assert.equal(isAuthRefusal(error), false, `${what}: NOT a refusal — the loop retries`);
+  }
+});
+
+test('a dial that disconnect() or dispose() cancels announces once and ends on its own socket: failDial acts on the connection only while the connection still holds that socket (#393 follow-up, validator P3)', (t) => withWebCrypto(async () => {
+  // disconnect() lets go of the socket (ws = null) BEFORE it cancels the unfinished dial, so the
+  // dial's failure arrives for a socket the connection no longer holds. It must close that
+  // socket and settle the promise and do nothing else to the connection: no second capability
+  // announcement, no second stop of the idle probe. (No sequence leaves a NEWER socket in place
+  // while an older attempt is unfinished — connect() cancels first — so this is the one order
+  // in which the guard has work to do.)
+  for (const how of ['disconnect', 'dispose'] as const) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const seen = watch(conn);
+    const server = new FakeE2eServer('tok-x', 2, 'm', 'h');
+    const dialing = conn.connect('ws://cancel.test/ws', 'tok-x');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message(server.nonceFrame());
+    await until(() => socket.sent.length >= 1);          // the auth message is out; the answer is awaited
+    const announced = seen.caps.length;
+    conn[how]();
+    const error = await rejection(dialing);
+    assert.equal(error?.code, 'DISCONNECTED', `${how}: the dial was settled by the cancellation`);
+    await settle(10);
+    assert.equal(seen.caps.length - announced, 1, `${how}: the connection announced "no capabilities" ONCE (its own), not again for the cancelled attempt`);
+    assert.ok(socket.closed >= 1, `${how}: the attempt’s socket was closed`);
+    assert.equal(conn.getMachineId() ?? null, null, `${how}: no identity`);
+  }
+}));
