@@ -573,50 +573,104 @@ pub fn installed_version(backend: crate::backends::Backend) -> Option<String> {
     Some(v.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
 }
 
+/// The most of a `--version` answer that is read. The answer is one line; a
+/// probe that keeps writing must not grow the gateway's memory (reviewer
+/// round 2, #362).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const VERSION_READ_CAP: u64 = 64 * 1024;
+
 /// Run `cmd` and return its stdout, within ONE total `limit` for the start,
 /// the exit and the read (reviewer P2-2, #362): a wrapper that exits while a
 /// child it forked keeps stdout open would otherwise block the read, and the
-/// drift loop with it, forever. stdout is read on its own thread; the caller
-/// waits for the exit and then for that thread, both against the same
-/// deadline, and gives up (killing the process) when it passes. Only a
-/// SUCCESSFUL exit's output is used. A thread left blocked on a pipe that a
-/// stray child holds ends when that child closes it.
+/// drift loop with it, forever. stdout is read on its own thread, and the
+/// thread STOPS reading after `VERSION_READ_CAP` bytes and drops the pipe;
+/// the caller waits for the exit and then for that thread, both against the
+/// same deadline. Only a SUCCESSFUL exit's output is used.
+///
+/// The probe runs in a process group of its own, and the group is killed on
+/// every way out (reviewer round 2, #362): a child holding stdout, or one
+/// still writing, ends with the probe, and its pipe closing ends the reader
+/// thread. The signal can reach this probe's processes and nothing else: the
+/// group is a NEW one (`process_group(0)`, its id the leader's pid, never the
+/// gateway's group), and it is signalled while the leader is NOT yet reaped
+/// (its exit is watched with `waitid(WNOWAIT)`, which leaves it a zombie), so
+/// the kernel still holds that pid and no other process can own a group of
+/// that id. A leader that something else reaped is not signalled at all.
+/// Anything that `setsid`s itself away is its own choice, as for
+/// `tasks::stop`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn version_output(mut cmd: std::process::Command, limit: std::time::Duration) -> Option<String> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     let deadline = std::time::Instant::now() + limit;
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
+    let pid = child.id() as libc::pid_t;
+    // Kill the probe's group, then reap its leader. Called only while the
+    // leader is unreaped (see above).
+    let end = |child: &mut std::process::Child| {
+        // SAFETY: a plain syscall; `pid` is this probe's unreaped leader, so
+        // the group of that id is the one `spawn` created.
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+        child.wait().ok()
+    };
+    let Some(stdout) = child.stdout.take() else {
+        end(&mut child);
+        return None;
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut out = String::new();
-        let _ = tx.send(stdout.read_to_string(&mut out).ok().map(|_| out));
+        let _ = tx.send(stdout.take(VERSION_READ_CAP).read_to_string(&mut out).ok().map(|_| out));
     });
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+    let exited = loop {
+        match leader_exited(pid) {
+            Some(true) => break true,
+            Some(false) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Some(false) => break false,
+            None => return None, // reaped elsewhere: its id is no longer ours to signal
         }
     };
-    if !status.success() {
-        return None;
+    // The leader stays unreaped while the read runs, so the group id stays
+    // this probe's until `end` below.
+    let out = if exited {
+        rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).ok().flatten()
+    } else {
+        None
+    };
+    let status = end(&mut child);
+    out.filter(|_| status.is_some_and(|s| s.success()))
+}
+
+/// Has the leader `pid` exited? Asked WITHOUT reaping it (`WNOWAIT`), so its
+/// pid stays held and its group id stays this probe's. `None` when it cannot
+/// be asked (it was reaped by someone else).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn leader_exited(pid: libc::pid_t) -> Option<bool> {
+    // SAFETY: `info` is a zeroed out-parameter the call fills; si_pid is read
+    // after it, as waitid(2) says to tell "exited" from "nothing yet" under
+    // WNOHANG.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let r = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+        (r == 0).then(|| info.si_pid() == pid)
     }
-    rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).ok().flatten()
 }
 
 /// The drift guard (board #362 b): for each backend recovery has shapes for,
 /// compare the installed CLI with the versions its shapes were measured on,
 /// and when it is newer post ONE `[tmm]` line in the room of every live
-/// project that runs a managed agent of that backend — once per room and
-/// installed version (`meta` `recovery_drift:<backend>:<room>`, set only on a
-/// successful post), so neither a gateway restart nor the daily check repeats
-/// it, and a room missed once is told at the next pass. Nothing else
+/// project that runs a managed agent of that backend — once per room per
+/// change of installed version (`meta` `recovery_drift:<backend>:<room>`
+/// holds the last version told, set only on a successful post; a downgrade
+/// back to an older version is a change and is said again), so neither a
+/// gateway restart nor the daily check repeats it, and a room missed once is
+/// told at the next pass. Nothing else
 /// follows: no auto-action, no retry loop. Fail-soft throughout.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn check_drift() {
@@ -1494,12 +1548,12 @@ mod tests {
         assert_eq!(drift_warning(Backend::Kiro, "garbage"), None);
     }
 
-    /// Board #362 b, the posting, once per ROOM and installed version
-    /// (reviewer P1): each room running the backend gets one line; a room
+    /// Board #362 b, the posting, once per ROOM per change of installed
+    /// version (reviewer P1; round 2): each room running the backend gets one line; a room
     /// whose post fails is told at the next pass and the room already told
     /// gets nothing extra; a room that starts running the backend later is
     /// told at the next pass; a restart (another pass) repeats nothing; a
-    /// newer version is said again in every room; a project that does not run
+    /// newer version is said again in every room, and so is a downgrade back; a project that does not run
     /// it hears nothing; a CLI that cannot be asked says nothing. The posts
     /// are recorded, not written to the shared test room log (a real post
     /// there took seq 1 from the legacy-import test running beside it).
@@ -1542,13 +1596,17 @@ mod tests {
         assert_eq!(check_drift_with(&installed, &runs, &post), 0, "a restart or the daily check repeats nothing");
         *version.borrow_mut() = Some("2.32.1");
         assert_eq!(check_drift_with(&installed, &runs, &post), 3, "a newer CLI is said again in every room that runs it");
+        // A downgrade is a change too (orchestrator, round 2): the room keeps the LAST version told.
+        *version.borrow_mut() = Some("2.31.0");
+        assert_eq!(check_drift_with(&installed, &runs, &post), 3, "back to 2.31.0 is said again");
+        assert_eq!(check_drift_with(&installed, &runs, &post), 0);
         for p in [&a, &b, &later, &none] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
     }
 
     /// Board #362, reviewer P2-2: ONE deadline for the start, the exit and
     /// the read. Controllable wrappers, never a real CLI: a plain answer is
-    /// read; a hang is cut at the limit; a wrapper that exits at once while a
-    /// child it forked keeps stdout open is cut at the limit too (the read
+    /// read; the caller returns at the limit on a hang, and on a wrapper that
+    /// exits at once while a child it forked keeps stdout open (the read
     /// alone would wait for the child); a failing exit is not read.
     #[test]
     fn the_version_probe_is_bounded_end_to_end_and_reads_only_a_success() {
@@ -1562,6 +1620,70 @@ mod tests {
         }
         assert_eq!(version_output(sh("echo 'kiro-cli 2.31.0'; exit 3"), limit), None, "a failing exit is not read");
         assert_eq!(version_output(std::process::Command::new("/nonexistent/tmm-no-such-cli"), limit), None, "not installed");
+    }
+
+    /// Board #362, reviewer round 2: the caller returning at its deadline is
+    /// not enough; the probe's own processes end with it, and ONLY its own.
+    /// Each wrapper forks a child that writes its pid to a file, and after the
+    /// probe returns that child is gone: under a leader that hangs, and
+    /// holding stdout after its leader exited 0. A process outside the probe
+    /// (in this test's own group, as the gateway's tmux and agents are in
+    /// theirs) is alive after every probe. The cap STOPS the read: a child
+    /// that keeps writing is read only up to the cap, and a LEADER that writes
+    /// forever dies of SIGPIPE once the reader lets go of the pipe, long
+    /// before the deadline (a read that ran on and only cut the answer would
+    /// keep it alive until the deadline).
+    #[test]
+    fn the_version_probe_leaves_none_of_its_processes_and_reads_at_most_its_cap() {
+        let limit = std::time::Duration::from_millis(1500);
+        let alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
+        fn poll(what: &str, mut ok: impl FnMut() -> bool) {
+            for _ in 0..100 {
+                if ok() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("{what}");
+        }
+        let mut outside = std::process::Command::new("sleep").arg("30").spawn().expect("a process outside the probe");
+        let outside_pid = outside.id() as libc::pid_t;
+        let child = r#"sh -c 'echo $$ > "$PIDF"; exec sleep 30'"#;
+        for (i, (what, script)) in
+            [("a hang", format!("{child} & wait")), ("a child holding stdout after its leader exited 0", format!("{child} & echo early"))]
+                .into_iter()
+                .enumerate()
+        {
+            let pidf = std::env::temp_dir().join(format!("tmm-probe-{}-{i}", std::process::id()));
+            let _ = std::fs::remove_file(&pidf);
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", &script]).env("PIDF", &pidf);
+            let t0 = std::time::Instant::now();
+            assert_eq!(version_output(cmd, limit), None, "{what}");
+            assert!(t0.elapsed() < limit + std::time::Duration::from_millis(700), "{what}: returned at the limit, took {:?}", t0.elapsed());
+            let mut pid: libc::pid_t = 0;
+            poll(&format!("{what}: the child wrote its pid"), || {
+                pid = std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                pid > 1
+            });
+            poll(&format!("{what}: child {pid} outlived the probe"), || !alive(pid));
+            let _ = std::fs::remove_file(&pidf);
+            assert!(alive(outside_pid), "{what}: the probe signalled a process that is not its own");
+        }
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sh -c 'while :; do echo 2.31.0; done' & sleep 0.3"]);
+        let out = version_output(cmd, limit).expect("an endless writer is read up to the cap, not to the deadline");
+        assert_eq!(out.len() as u64, VERSION_READ_CAP);
+        assert!(out.starts_with("2.31.0\n"));
+        let long = std::time::Duration::from_secs(5);
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "while :; do echo 2.31.0; done"]);
+        let t0 = std::time::Instant::now();
+        assert_eq!(version_output(cmd, long), None, "a leader killed by SIGPIPE did not succeed");
+        assert!(t0.elapsed() < long / 2, "the read stopped at the cap and let go of the pipe: took {:?}", t0.elapsed());
+        assert!(alive(outside_pid), "the probe signalled a process that is not its own");
+        let _ = outside.kill();
+        let _ = outside.wait();
     }
 
     /// Board #362, validator P3: once capped, the "paused" row is said ONCE
