@@ -332,6 +332,8 @@ export function createConnection(): Connection {
   let onDisconnect: (() => void) | null = null;
   /** Who watches the current socket's capabilities (`onCaps`). */
   const capsListeners = new Set<(caps: string[] | undefined) => void>();
+  /** Callers parked in `whenCaps`: disposing the connection ends their wait now, not at their timer. */
+  const capsWaiters = new Set<(reason: Error) => void>();
   function emitCaps() {
     const caps = ws?._getCaps?.();
     for (const cb of [...capsListeners]) { try { cb(caps); } catch {} }
@@ -777,9 +779,11 @@ export function createConnection(): Connection {
     const known = getCaps();
     if (known) return Promise.resolve(known);
     return new Promise<string[]>((resolve, reject) => {
-      const done = () => { clearTimeout(timer); off(); };
+      const done = () => { clearTimeout(timer); off(); capsWaiters.delete(abort); };
+      const abort = (reason: Error) => { done(); reject(reason); };
       const off = onCaps((caps) => { if (caps) { done(); resolve(caps); } });
-      const timer = setTimeout(() => { done(); reject(new Error('the server has not answered its login')); }, timeoutMs);
+      const timer = setTimeout(() => abort(new Error('the server has not answered its login')), timeoutMs);
+      capsWaiters.add(abort);
     });
   }
 
@@ -911,6 +915,7 @@ export function createConnection(): Connection {
     paneOutputListeners.clear();
     paneClosedListeners.clear();
     teamMessageListeners.clear();
+    for (const abort of [...capsWaiters]) abort(new Error('connection disposed'));
     capsListeners.clear();
     subRefcount.clear();
   }

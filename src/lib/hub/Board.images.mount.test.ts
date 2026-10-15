@@ -15,7 +15,7 @@ const issueA = { id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: ''
 const issueB = { id: 2, title: 'B', body: 'Body B', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] };
 
 type Calls = { saves: any[]; notes: any[]; posts: any[]; uploads: string[] };
-type Opts = { caps?: string[]; refuse?: (patch: any) => void; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
+type Opts = { list?: (session: string) => Promise<unknown>; caps?: string[]; refuse?: (patch: any) => void; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
@@ -50,7 +50,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
       hubRooms: async () => ({ rooms: {} }),
       boardCounts: async () => ({ counts: Object.fromEntries((opts.projects ?? ['fixture']).map((p) => [p, { todo: issues.length, doing: 0, review: 0, done: 0, total: issues.length }])) }),
       hubAgents: async () => ({ agents: opts.agents ?? [] }),
-      boardList: async () => ({ issues }),
+      boardList: async (session: string) => (opts.list ? opts.list(session) : { issues }),
       boardGet: async (_s: string, id: number) => issues.find((i) => i.id === id),
       boardSave: async (session: string, patch: any) => {
         // The write path's own gate (ws-api.boardSave) refuses BEFORE anything is sent or stored.
@@ -798,4 +798,45 @@ test('an offline assignee is a line like a failed hand-off, and Reassign sends t
     assert.equal(app.q('.err'), null, 'delivered this time: the line and the button are gone');
     assert.equal(app.calls.posts.length, 0, 'the page still posts nothing of its own');
   } finally { await app.close(); }
+});
+
+test('a Reassign belongs to the project it was born in: a switch drops it with its line, and a click captured before the switch lands nowhere (board #377)', async (context) => {
+  let holdB = null as (() => void) | null; // set when B's list is requested
+  const app = await mount(context, {
+    projects: ['fixture', 'other'], agents: [alice], stateful: true,
+    answer: (patch) => ({ ok: true, id: patch.id, dispatch: 'offline', offline: [{ name: 'alice', why: 'stopped' }] }),
+    // B's list answers only when the test lets it: the window in which the old page used to still show A's action.
+    list: (session) => (session === 'other' ? new Promise((res) => { holdB = () => res({ issues: [{ id: 1, title: 'B one', body: 'b', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }] }); }) : Promise.resolve({ issues: [{ id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] }] })),
+  });
+  const reassignButton = () => [...app.document.querySelectorAll<HTMLButtonElement>('.err button')].find((b) => /Reassign/u.test(`${b.textContent} ${b.getAttribute('aria-label')}`));
+  const project = async (name: string) => {
+    [...app.document.querySelectorAll<HTMLButtonElement>('button.proj-row')].find((r) => r.querySelector('.p-name')?.textContent === name)!.click();
+    await app.flush();
+  };
+  try {
+    // A: assign alice on #1; the hand-off reaches nobody; Reassign is offered.
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    await pickAlice(app, '.detail');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 12; i++) await app.flush();
+    assert.ok(reassignButton(), 'A offers Reassign');
+    // An ordinary poll succeeding is not the delivery it is waiting for.
+    context.mock.timers.tick(8000); for (let i = 0; i < 6; i++) await app.flush();
+    assert.ok(reassignButton(), 'a successful poll does not erase it');
+    const captured = reassignButton()!; // a click handed to something that outlives the page state
+
+    await project('other'); // B, whose list has not answered
+    assert.ok(!reassignButton(), 'no Reassign on B');
+    assert.equal(app.q('.err'), null, 'and no error line carried over from A');
+    captured.click(); for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(app.calls.saves.map((x) => x.session), ['fixture'], 'a click captured before the switch writes nothing, least of all to B');
+
+    holdB?.(); for (let i = 0; i < 6; i++) await app.flush(); // B answers
+    assert.ok(!reassignButton());
+    await project('fixture'); // and back to A: the old action is not revived
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.ok(!reassignButton(), 'A -> B -> A does not bring it back');
+    captured.click(); for (let i = 0; i < 6; i++) await app.flush();
+    assert.equal(app.calls.saves.length, 1, 'and the captured click is still nothing');
+  } finally { holdB?.(); await app.close(); }
 });

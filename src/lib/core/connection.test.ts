@@ -712,3 +712,48 @@ test('after a reconnect to a server without board_dispatch a flagged save is ref
   await settle();
   assert.equal(methodsSent(old).filter((m) => m === 'hub_board_save').length, 1, 'ordinary edits keep working against any server');
 });
+
+test('disposing a connection ends a parked whenCaps now, not at its timer (board #377)', async (t) => {
+  const conn = createConnection();
+  const dial = conn.connect(A_URL, 'tok');
+  dial.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  const parked = conn.whenCaps(60_000); // far longer than this test would wait
+  let settled: string | null = null;
+  parked.then(() => { settled = 'resolved'; }, (e: Error) => { settled = e.message; });
+  await settle();
+  assert.equal(settled, null, 'parked while the login has not answered');
+  conn.dispose();
+  await settle();
+  assert.equal(settled, 'connection disposed', 'released by the dispose, with its own reason');
+  t.after(() => {});
+});
+
+test('a flagged save issued after a redial reads the NEW socket, not the answer the old one gave (board #377)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const api = createWsApi(conn);
+  const first = conn.connect(A_URL, 'tok');
+  MockWebSocket.instances.at(-1)!.readyState = MockWebSocket.OPEN;
+  MockWebSocket.instances.at(-1)!.message({ server_nonce: '00'.repeat(16) });
+  login(MockWebSocket.instances.at(-1)!, ['board_dispatch']);
+  await first;
+  assert.deepEqual(conn.getCaps(), ['board_dispatch']);
+
+  // Redialled, not yet answered: the modern answer is gone with its socket.
+  const second = conn.connect(A_URL, 'tok');
+  second.catch(() => {});
+  const next = MockWebSocket.instances.at(-1)!;
+  next.readyState = MockWebSocket.OPEN;
+  next.message({ server_nonce: '11'.repeat(16) });
+  const save = api.boardSave('s', ask);
+  const outcome = save.then(() => 'sent', (e: any) => e.code);
+  await settle();
+  assert.ok(!methodsSent(next).includes('hub_board_save'), 'held for the new socket\u2019s own answer');
+  login(next); // and that socket is an OLDER server
+  await second;
+  assert.equal(await outcome, 'server_too_old');
+  assert.ok(!methodsSent(next).includes('hub_board_save'), 'refused unsent');
+});

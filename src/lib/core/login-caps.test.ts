@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BOARD_DISPATCH, CapError, lacksCap, parseCaps, requireCap } from './login-caps.ts';
+import { BOARD_DISPATCH, CapError, holdForLogin, lacksCap, parseCaps, requireCap } from './login-caps.ts';
 
 test('parseCaps keeps the plain strings of a list and nothing else (board #377)', () => {
   assert.deepEqual(parseCaps(['board_dispatch']), ['board_dispatch']);
@@ -15,7 +15,8 @@ test('a server lacks a capability only when it ANSWERED without it (board #377)'
   assert.equal(lacksCap([BOARD_DISPATCH], BOARD_DISPATCH), false);
 });
 
-// The one gate on the write path (board #377 review, P1-B residual).
+// The gate on the write path (board #377 review, P1-B residual): WAIT for the
+// login (async), then CHECK (synchronous).
 const fake = (initial: string[] | undefined) => {
   let caps = initial;
   const waiters: ((c: string[]) => void)[] = [];
@@ -25,27 +26,25 @@ const fake = (initial: string[] | undefined) => {
     answer(c: string[]) { caps = c; for (const w of waiters.splice(0)) w(c); },
   };
 };
+const refusal = (code: string) => (e: unknown) => e instanceof CapError && e.code === code;
 
-test('requireCap passes only on an answered login that includes the capability (board #377)', async () => {
-  await requireCap(fake([BOARD_DISPATCH]), BOARD_DISPATCH);
-  await assert.rejects(requireCap(fake([]), BOARD_DISPATCH), (e: unknown) => e instanceof CapError && e.code === 'server_too_old', 'an older server: a refusal');
-  await assert.rejects(requireCap(fake(['other']), BOARD_DISPATCH), (e: unknown) => e instanceof CapError && e.code === 'server_too_old');
+test('requireCap passes only on an answered login that includes the capability, and never waits (board #377)', () => {
+  requireCap(fake([BOARD_DISPATCH]), BOARD_DISPATCH);
+  assert.throws(() => requireCap(fake([]), BOARD_DISPATCH), refusal('server_too_old'), 'an older server: a refusal');
+  assert.throws(() => requireCap(fake(['other']), BOARD_DISPATCH), refusal('server_too_old'));
+  assert.throws(() => requireCap(fake(undefined), BOARD_DISPATCH), refusal('login_pending'), 'unknown is never a yes, and the check does not wait: that is holdForLogin\u2019s job');
 });
 
-test('requireCap WAITS for an unanswered login, never treats it as a yes, and gives up as login_pending (board #377)', async () => {
+test('holdForLogin WAITS for an unanswered login and gives up as login_pending (board #377)', async () => {
+  await holdForLogin(fake([]));            // answered (even with nothing): nothing to hold for
+  await holdForLogin(fake([BOARD_DISPATCH]));
   const slow = fake(undefined);
   let passed = false;
-  const gate = requireCap(slow, BOARD_DISPATCH, 1000).then(() => { passed = true; });
+  const hold = holdForLogin(slow, 1000).then(() => { passed = true; });
   await new Promise((r) => setImmediate(r));
-  assert.equal(passed, false, 'unknown is not a yes');
+  assert.equal(passed, false, 'held while the login has not answered');
   slow.answer([BOARD_DISPATCH]);
-  await gate;
-  assert.equal(passed, true, 'and it goes once the login says so');
-
-  const refused = fake(undefined);
-  const g2 = requireCap(refused, BOARD_DISPATCH, 1000);
-  refused.answer([]);
-  await assert.rejects(g2, (e: unknown) => e instanceof CapError && e.code === 'server_too_old', 'the login answered without it: refused');
-
-  await assert.rejects(requireCap(fake(undefined), BOARD_DISPATCH, 5), (e: unknown) => e instanceof CapError && e.code === 'login_pending', 'a login that never answers is not waited on forever');
+  await hold;
+  assert.equal(passed, true);
+  await assert.rejects(holdForLogin(fake(undefined), 5), refusal('login_pending'), 'a login that never answers is not waited on forever');
 });

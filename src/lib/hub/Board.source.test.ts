@@ -82,10 +82,12 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   // the save landed, never a failed save: the create form is gone and the edit
   // is rebased first, and the line carries a real action — Reassign sends the
   // same assignee again with no change to the draft.
-  assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);[\s\S]*err = `#\$\{created\.id\}: \$\{untold\}`;[\s\S]*resend = \{ id: created\.id, name: assignee, line: err \};/u, 'the create reports it after closing the form AND after the reload, which clears the line');
+  assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);\s*if \(untold && alive && cur === ctx\.session\) resend = \{ session: ctx\.session, id: created\.id, name: assignee, line: `#\$\{created\.id\}: \$\{untold\}` \};/u, 'the create offers Reassign after closing the form AND after the reload, which clears the error line');
   assert.match(source, /answer\?\.dispatch === 'failed'[\s\S]*answer\?\.dispatch === 'offline'/u, 'failed and offline both speak');
-  assert.match(source, /async function reassign\(\) \{[\s\S]*await boardSave\(ctx\.session, \{ id: again\.id, assignee: again\.name, dispatch: true \}\);/u, 'Reassign is the flagged save with no draft change');
-  assert.match(source, /\{#if resend && err === resend\.line\}<CommandButton variant="secondary" label=\{t\('boardReassign'\)\} disabled=\{busy\} onclick=\{reassign\} \/>\{\/if\}/u, 'beside its own line only');
+  assert.match(source, /async function reassign\(\) \{[\s\S]*if \(!alive \|\| again\.session !== cur\) \{ resend = null; return; \}[\s\S]*await boardSave\(again\.session, \{ id: again\.id, assignee: again\.name, dispatch: true \}\);/u, 'Reassign is the flagged save to the project it was born in, and a click from another project is dropped');
+  assert.match(source, /let resend = \$state<\{ session: string; id: number; name: string; line: string \} \| null>\(null\);/u, 'it carries its own project');
+  assert.match(source, /err = ''; resend = null; \/\/ the old board's error line and its Reassign belong to it/u, 'a project switch drops it with its error line, in the effect that resets the rest');
+  assert.match(source, /\{#if resend\}\s*<div class="err appear">\{resend\.line\}\s*<CommandButton variant="secondary" label=\{t\('boardReassign'\)\} disabled=\{busy\} onclick=\{reassign\} \/>\s*<\/div>\s*\{\/if\}/u, 'its own line, so a poll that clears the error line cannot erase it');
 });
 
 test('the layout hierarchy: one compact title line, the body visibly bigger (board #11)', () => {
@@ -973,7 +975,7 @@ test('every submit acts on its frozen context, never the live cur/sel; the page 
   }
   assert.match(source, /const owns = \(c: OpCtx\) => alive && c\.gen === opGen;/u);
   assert.match(source, /registerLeaveGuard\(\{\s*runtime: guardOwner,\s*page: guardPage,/u, 'the #315 walk reaches the Board, as its owner s guard');
-  assert.match(source, /if \(noteDirty \|\| untold\) \{\s*await refetchSel\(ctx\);[\s\S]*?resend = [^;]*;\s*\}\s*return;\s*\}/u, 'a body save keeps a note draft on screen, and so does a hand-off that was not delivered');
+  assert.match(source, /if \(noteDirty \|\| untold\) \{\s*await refetchSel\(ctx\);\s*if \(untold && owns\(ctx\)\) resend = [^;]*;\s*return;\s*\}/u, 'a body save keeps a note draft on screen, and so does a hand-off that was not delivered');
 });
 
 test('the whole draft is locked while it is submitted, and a saved draft adopts what was sent (board #329 review)', () => {

@@ -14,7 +14,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { BOARD_DISPATCH, requireCap } from './login-caps.ts';
+import { BOARD_DISPATCH, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -374,7 +374,10 @@ export function createWsApi(connection: Connection) {
     // and ignores the flag, which reads as a success nobody is told about.
     // The gate lives here, on the write path, bound to the socket that will
     // carry the call; the page only mirrors it for display.
-    if (fields.dispatch) await requireCap(connection, BOARD_DISPATCH);
+    if (fields.dispatch) {
+      await holdForLogin(connection); // may wait for the login; the only await
+      requireCap(connection, BOARD_DISPATCH); // then check and write in ONE synchronous block
+    }
     return call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
   };
   const boardNote = (session: string, id: number, body: string) =>

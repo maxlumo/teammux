@@ -34,22 +34,28 @@ export class CapError extends Error {
   }
 }
 
-/** The ONE gate for a write that only an up-to-date server can do, bound to
- * the CURRENT authenticated socket at the moment of writing (board #377
- * review, P1-B): an unanswered login is a wait, never a yes; a login that
- * answered without `cap` is a refusal, before anything is sent. The caller
- * sends in the same tick it returns, so no reconnect can slip between the
- * answer it checked and the socket it writes to. */
-export async function requireCap(
+/** Wait for the CURRENT socket's login to answer, if it has not (board #377).
+ * Resolves at once when it has. A login that never answers is not waited on
+ * forever: after `waitMs` it is `login_pending`. This is the only `await` of
+ * the gate; the CHECK (`requireCap`) is a separate, synchronous step so the
+ * write that follows it reads the same socket the check did. */
+export async function holdForLogin(
   connection: { getCaps(): string[] | undefined; whenCaps(timeoutMs?: number): Promise<string[]> },
-  cap: string,
   waitMs = 5000,
 ): Promise<void> {
-  if (connection.getCaps() === undefined) {
-    try { await connection.whenCaps(waitMs); } catch {
-      throw new CapError('login_pending', 'The server has not answered its login yet. Try again in a moment.');
-    }
+  if (connection.getCaps() !== undefined) return;
+  try { await connection.whenCaps(waitMs); } catch {
+    throw new CapError('login_pending', 'The server has not answered its login yet. Try again in a moment.');
   }
+}
+
+/** The ONE check for a write that only an up-to-date server can do, bound to
+ * the CURRENT authenticated socket (board #377 review, P1-B): an unanswered
+ * login is never a yes, and a login that answered without `cap` is a refusal,
+ * before anything is sent. SYNCHRONOUS on purpose: the caller sends in the
+ * same block that this returns in, so no reconnect can slip between the
+ * answer it checked and the socket it writes to. */
+export function requireCap(connection: { getCaps(): string[] | undefined }, cap: string): void {
   const caps = connection.getCaps();
   if (caps === undefined) throw new CapError('login_pending', 'The server has not answered its login yet. Try again in a moment.');
   if (!caps.includes(cap)) throw new CapError('server_too_old', 'This server is older than the app. Update the server to assign.');

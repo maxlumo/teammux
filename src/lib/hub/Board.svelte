@@ -89,10 +89,18 @@
     if (answer?.dispatch === 'offline') return t('boardDispatchOffline').replace('{name}', name).replace('{why}', answer.dispatch_error ?? answer.offline?.[0]?.why ?? '');
     return '';
   };
-  /** The unreached assignee behind the line on screen, so the person has a
-   * real action: Reassign sends the same assignee again. Shown only while its
-   * own line is (`line`), never beside an unrelated error. */
-  let resend = $state<{ id: number; name: string; line: string } | null>(null);
+  /** A hand-off that was saved but not delivered, and the action that fixes
+   * it: Reassign sends the same assignee again (board #377). It is an ACTION OF
+   * ONE ISSUE IN ONE PROJECT, so it carries the project it was born in
+   * (the frozen session; the server is the scope's, fixed for the page's life,
+   * and a server switch destroys the page) — and a click goes THERE, never to
+   * whatever the page shows now; a project switch drops it. It is NOT bound to
+   * the view generation: opening another issue in the same project does not
+   * make an unreached assignee reached. It has
+   * its own line and lifecycle, not the page's error line: a successful poll
+   * is not the delivery it is waiting for, and an unrelated error must not
+   * hide it. */
+  let resend = $state<{ session: string; id: number; name: string; line: string } | null>(null);
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
    * for the Board family (`hub-union.svelte.ts` createBoardUnion) and the
@@ -603,6 +611,7 @@
     viewGeneration++;
     sel = null; creating = false; ready = false; issues = []; noteText = ''; nTitle = ''; nBody = ''; nAssignee = ''; pendingDiscard = null; pendingDelete = null;
     shotView = ''; opGen++;
+    err = ''; resend = null; // the old board's error line and its Reassign belong to it
     untrack(() => { createStage.clear(); bodyStage.clear(); noteStage.clear(); });
     if (justLoadedTimer) clearTimeout(justLoadedTimer); justLoaded = false; // the unfold belongs to the board that loaded
     // untrack: this effect runs on `cur` — reading acts to bump its gen
@@ -715,7 +724,7 @@
       // hand-off that failed keeps the detail open with its own line.
       if (noteDirty || untold) {
         await refetchSel(ctx);
-        if (untold && owns(ctx)) { err = `#${id}: ${untold}`; resend = { id, name: patch.assignee ?? '', line: err }; }
+        if (untold && owns(ctx)) resend = { session: ctx.session, id, name: patch.assignee ?? '', line: `#${id}: ${untold}` };
         return;
       }
       // A FAILED save takes the catch instead — the detail stays open with
@@ -753,25 +762,30 @@
     // A hand-off that failed is reported; the issue is saved and can be
     // assigned again from its detail. After the reload, which clears `err`.
     const untold = dispatchLine(created, assignee);
-    if (untold && alive && cur === ctx.session) { err = `#${created.id}: ${untold}`; resend = { id: created.id, name: assignee, line: err }; }
+    if (untold && alive && cur === ctx.session) resend = { session: ctx.session, id: created.id, name: assignee, line: `#${created.id}: ${untold}` };
     busy = false; submitting = false;
   }
   /** Reassign: send the hand-off again to the SAME assignee, with no change to
    * the draft (board #377). The save is the flagged one `tmm board assign`
-   * makes, which the server answers by telling the agent again. */
+   * makes, which the server answers by telling the agent again. It goes to the
+   * context the action was born in, and only while that context is still the
+   * page's: a click that outlived its project (a captured callback, a button
+   * left on screen across a slow list load) is dropped, never redirected. */
   async function reassign() {
     const again = resend;
     if (!again || busy) return;
-    const ctx = freeze();
+    // Born in another project (a button left on screen across a slow list
+    // load, a callback handed out earlier): dropped, never redirected.
+    if (!alive || again.session !== cur) { resend = null; return; }
     busy = true; submitting = true;
     try {
-      const answer = await boardSave(ctx.session, { id: again.id, assignee: again.name, dispatch: true });
-      if (!owns(ctx)) return;
+      const answer = await boardSave(again.session, { id: again.id, assignee: again.name, dispatch: true });
+      if (!alive || again.session !== cur) return;
       resend = null;
       await load();
       const untold = dispatchLine(answer, again.name);
-      if (untold && owns(ctx)) { err = `#${again.id}: ${untold}`; resend = { ...again, line: err }; }
-    } catch (e) { if (owns(ctx)) err = saveError(e); }
+      if (untold && alive && again.session === cur) resend = { ...again, line: `#${again.id}: ${untold}` };
+    } catch (e) { if (alive && again.session === cur) err = saveError(e); }
     finally { busy = false; submitting = false; }
   }
   async function addNote() {
@@ -1354,9 +1368,10 @@
       <div class="empty">{t('boardEmpty')}</div>
     {/if}
   {/if}
-  {#if err}
-    <div class="err appear">{err}
-      {#if resend && err === resend.line}<CommandButton variant="secondary" label={t('boardReassign')} disabled={busy} onclick={reassign} />{/if}
+  {#if err}<div class="err appear">{err}</div>{/if}
+  {#if resend}
+    <div class="err appear">{resend.line}
+      <CommandButton variant="secondary" label={t('boardReassign')} disabled={busy} onclick={reassign} />
     </div>
   {/if}
   </div>
