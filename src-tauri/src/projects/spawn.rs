@@ -434,8 +434,14 @@ fn team_homes(workspace: &str, root: &str) -> Vec<(String, String, String)> {
 /// is not present in this project (`check_join`). Returns the team it left
 /// ('' when it was standalone), whether anything changed, and the membership
 /// REVISION the recipe now records (`recipe::team_rev`, +1 per change; P1-B):
-/// the move's notices carry it and are dropped once a newer one exists.
-pub fn set_agent_team(workspace: &str, window_name: &str, team: &str) -> Result<(String, bool, u64), String> {
+/// only the announcement of the latest revision speaks.
+///
+/// On the agent's FIRST move it also seeds the announcer's ledger
+/// (`recipe::Told`, P1-B residual) from the recipe as it stands before the
+/// move: the agent was told its old team, and `seed(old team)` (that team's
+/// live members) were told it is their teammate, by its prompt or a join
+/// notice. An empty ledger is never read as "nobody was told".
+pub fn set_agent_team(workspace: &str, window_name: &str, team: &str, seed: &dyn Fn(&str) -> Vec<String>) -> Result<(String, bool, u64), String> {
     let team = team.trim();
     // Judged before the section (it reads OTHER homes' recipes, and a
     // section is a leaf): a team that is here now is here a moment later.
@@ -455,6 +461,11 @@ pub fn set_agent_team(workspace: &str, window_name: &str, team: &str) -> Result<
         let rev = super::recipe::team_rev(recipe);
         if team == old_root {
             return Ok((old_root, false, rev));
+        }
+        if super::recipe::Told::of(recipe).is_none() {
+            let members = if old_root.is_empty() { Vec::new() } else { seed(&old_root) };
+            let told = super::recipe::Told { mover: old_root.clone(), members: members.into_iter().map(|m| (m, old_root.clone())).collect() };
+            recipe["team_told"] = told.to_value();
         }
         recipe["team"] = json!(team);
         recipe["team_rev"] = json!(rev + 1);
@@ -735,7 +746,12 @@ impl LaunchRecipe<'_> {
         super::recipe::update_in(section, |slot| {
             let mut next = fresh;
             if let (Some(Value::Object(old)), Value::Object(new)) = (slot.as_ref(), &mut next) {
+                // A fresh recipe in another team (a home reused for a new
+                // spawn) makes the announcer's ledger describe someone else's
+                // past: it goes, and the next move seeds it again.
+                let same_team = old.get("team") == new.get("team");
                 for (k, v) in old {
+                    if k == "team_told" && !same_team { continue; }
                     new.entry(k.clone()).or_insert_with(|| v.clone());
                 }
             }
@@ -2230,14 +2246,15 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
         let before = recipe();
 
-        assert!(set_agent_team(&ws_str, "mvsolo", "ghost").unwrap_err().contains("team 'ghost' has no member in this project"));
+        assert!(set_agent_team(&ws_str, "mvsolo", "ghost", &|_| Vec::new()).unwrap_err().contains("team 'ghost' has no member in this project"));
         assert_eq!(recipe(), before, "a refused move writes nothing");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "").unwrap(), (String::new(), false, 0), "standalone already");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam").unwrap(), (String::new(), true, 1));
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Vec::new()).unwrap(), (String::new(), false, 0), "standalone already");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Vec::new()).unwrap(), (String::new(), true, 1));
         let mut expected = before.clone();
         expected["team"] = json!("mvteam");
         expected["team_rev"] = json!(1);
-        assert_eq!(recipe(), expected, "only the team field and its revision changed");
+        expected["team_told"] = json!({ "mover": "", "members": {} });
+        assert_eq!(recipe(), expected, "only the team field, its revision and the seeded ledger (standalone: nobody was told) changed");
         assert!(!agent_home(&ws_str, "mvsolo").join("launch.json.tmp").exists(), "no temp file left");
         assert_eq!(super::super::joined_team(Some(&ws_str), "mvsolo").as_deref(), Some("mvteam"));
         assert_eq!(team_mates(&ws_str, "mvteam", "mvsolo"), [("lead".to_string(), "leads".to_string())]);
@@ -2245,16 +2262,30 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!prompt().contains("## Your team"), "the running agent's config is not rewritten");
         assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
         assert!(prompt().contains("## Your team: \"mvteam\"") && prompt().contains("- @lead — leads"), "its next start carries the block: {}", prompt());
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam").unwrap(), ("mvteam".to_string(), false, 1), "already there: no new revision");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Vec::new()).unwrap(), ("mvteam".to_string(), false, 1), "already there: no new revision");
 
-        assert!(set_agent_team(&ws_str, "lead", "").unwrap_err().contains("by the team's definition — change it in Agents > Teams"), "a definition member stays");
-        assert_eq!(set_agent_team(&ws_str, "mvsolo", "").unwrap(), ("mvteam".to_string(), true, 2));
+        assert!(set_agent_team(&ws_str, "lead", "", &|_| Vec::new()).unwrap_err().contains("by the team's definition — change it in Agents > Teams"), "a definition member stays");
+        assert_eq!(set_agent_team(&ws_str, "mvsolo", "", &|_| Vec::new()).unwrap(), ("mvteam".to_string(), true, 2));
         let mut left = before.clone();
         left["team_rev"] = json!(2);
-        assert_eq!(recipe(), left, "left: the recipe is what it was, a revision on");
+        left["team_told"] = json!({ "mover": "", "members": {} });
+        assert_eq!(recipe(), left, "left: the recipe is what it was, a revision on; the ledger is the announcer's, untouched by the move");
+        // The first move seeds the ledger from the recipe as it stood: the
+        // agent's old team, and that team's live members as `seed` reads them.
+        let seeded_home = agent_home(&ws_str, "seeded");
+        std::fs::create_dir_all(&seeded_home).unwrap();
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: Some("mvteam"), agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
+        assert_eq!(set_agent_team(&ws_str, "seeded", "", &|t| if t == "mvteam" { vec!["lead".to_string()] } else { Vec::new() }).unwrap(), ("mvteam".to_string(), true, 1));
+        assert_eq!(read(&seeded_home.join("launch.json"))["team_told"], json!({ "mover": "mvteam", "members": { "lead": "mvteam" } }));
+        assert_eq!(set_agent_team(&ws_str, "seeded", "mvteam", &|_| vec!["nobody".to_string()]).unwrap().1, true);
+        assert_eq!(read(&seeded_home.join("launch.json"))["team_told"]["members"], json!({ "lead": "mvteam" }), "seeded once; a later move does not reseed");
+        // A fresh recipe in another team (a reused home) drops the ledger.
+        LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }.write(&seeded_home).unwrap();
+        assert!(read(&seeded_home.join("launch.json")).get("team_told").is_none());
+        assert_eq!(read(&seeded_home.join("launch.json"))["team_rev"], 2, "the revision stays");
         assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
         assert!(!prompt().contains("## Your team"), "and its next start drops the block");
-        assert!(set_agent_team(&ws_str, "nobody", "mvteam").unwrap_err().contains("is not an agent this app started"));
+        assert!(set_agent_team(&ws_str, "nobody", "mvteam", &|_| Vec::new()).unwrap_err().contains("is not an agent this app started"));
 
         // Reviewer P2-1: two sub-teams of one root each have a `dev` with its
         // own role. The moved agent hears each dev's role by (path, member),
@@ -2278,7 +2309,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // held, a move of THIS agent waits and lands after it; a restart
         // takes the same section; another agent's home is not held up.
         let held = super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo"));
-        let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam")) };
+        let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam", &|_| Vec::new())) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(recipe()["team"], "", "the move waits for the section");
         assert!(refresh_agent(&ws_str, "proj", "lead"), "another home's restart is not held up");

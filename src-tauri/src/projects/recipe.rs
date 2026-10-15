@@ -150,6 +150,62 @@ pub(crate) fn current_team_rev(home: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// What has been TOLD about an agent's team (board #384, P1-B residual): the
+/// announcer's ledger, kept in the agent's recipe as `team_told`. It records
+/// only what was announced, never who is in a team: membership is the
+/// recipe's `team`, and nothing reads this to decide it.
+///
+/// `mover` is the team the agent itself was last told it is in ('' =
+/// standalone); `members` is every recipient who was last told "this agent is
+/// your teammate", with the team root it was told for. A recipient enters on
+/// a delivered (typed or held) join notice and leaves on a delivered "left"
+/// notice, so a fan-out cut short leaves the rest as they were and the next
+/// announcement covers them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Told {
+    pub mover: String,
+    pub members: std::collections::BTreeMap<String, String>,
+}
+
+impl Told {
+    pub(crate) fn of(recipe: &Value) -> Option<Told> {
+        let t = recipe.get("team_told")?;
+        let mover = t.get("mover").and_then(Value::as_str).unwrap_or("").to_string();
+        let members = t.get("members").and_then(Value::as_object)
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+            .unwrap_or_default();
+        Some(Told { mover, members })
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        serde_json::json!({ "mover": self.mover, "members": self.members })
+    }
+}
+
+/// What one announcement says, computed from FACTS (the ruling): `told`
+/// against the agent's CURRENT team and that team's live members now.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Plan {
+    /// (recipient, the team it was told) to tell "the agent left your team".
+    pub left: Vec<(String, String)>,
+    /// Recipients to tell "the agent joined your team".
+    pub joined: Vec<String>,
+    /// Whether the agent is told its current team (it was last told another).
+    pub mover: bool,
+}
+
+/// The difference between what was told and what is true. Pure.
+pub(crate) fn plan(told: &Told, team: &str, members_now: &[String]) -> Plan {
+    let left = told.members.iter()
+        .filter(|(r, t)| team.is_empty() || t.as_str() != team || !members_now.contains(r))
+        .map(|(r, t)| (r.clone(), t.clone()))
+        .collect();
+    let joined = if team.is_empty() { Vec::new() } else {
+        members_now.iter().filter(|r| told.members.get(*r).map(String::as_str) != Some(team)).cloned().collect()
+    };
+    Plan { left, joined, mover: told.mover != team }
+}
+
 /// One agent's move announcements, one at a time and in the order their
 /// revisions were committed (board #384, P1-B): the room line and the typed
 /// notices of one move are told before the next move of the SAME agent is,
@@ -220,6 +276,26 @@ mod tests {
         mover.join().unwrap();
         assert_eq!(read(&h), json!({ "cmd": "kiro-cli chat", "team": "squad" }), "the migration and the move both survive");
         let _ = std::fs::remove_dir_all(h.parent().unwrap().parent().unwrap().parent().unwrap());
+    }
+
+    /// The plan is the difference between what was told and what is true:
+    /// A -> B -> C tells A "left", C "joined", the mover once, B nothing;
+    /// A -> B -> A tells nobody anything; a recipient a cut-short fan-out
+    /// never reached is still owed its notice.
+    #[test]
+    fn an_announcement_says_exactly_what_changed_since_the_last_one() {
+        let told = |mover: &str, m: &[(&str, &str)]| Told { mover: mover.into(), members: m.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let a = told("A", &[("a1", "A"), ("a2", "A")]);
+        assert_eq!(plan(&a, "C", &names(&["c1"])), Plan { left: vec![("a1".into(), "A".into()), ("a2".into(), "A".into())], joined: names(&["c1"]), mover: true });
+        assert_eq!(plan(&a, "A", &names(&["a1", "a2"])), Plan { left: vec![], joined: vec![], mover: false }, "back where it was told: nothing");
+        assert_eq!(plan(&a, "", &[]), Plan { left: vec![("a1".into(), "A".into()), ("a2".into(), "A".into())], joined: vec![], mover: true });
+        let half = told("C", &[("a2", "A"), ("c1", "C")]);
+        assert_eq!(plan(&half, "C", &names(&["c1", "c2"])), Plan { left: vec![("a2".into(), "A".into())], joined: names(&["c2"]), mover: false }, "the untold rest of a cut-short fan-out");
+        assert_eq!(plan(&told("A", &[("a1", "A")]), "A", &names(&["a1", "a3"])), Plan { left: vec![], joined: names(&["a3"]), mover: false }, "a member who arrived since is told");
+        let v = a.to_value();
+        assert_eq!(Told::of(&json!({ "team_told": v })), Some(a));
+        assert_eq!(Told::of(&json!({})), None, "no ledger yet: the caller seeds it from the recipe");
     }
 
     #[test]

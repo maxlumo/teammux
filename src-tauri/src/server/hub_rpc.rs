@@ -690,16 +690,19 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             if crate::projects::managed_home(session, agent).is_none() {
                 return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
             }
-            let (left, changed, rev) = crate::projects::spawn::set_agent_team(&project.path, agent, team)
+            // The first move seeds the announcer's ledger with the old team's
+            // live members: its prompt or a join notice told them.
+            let seed = |old: &str| team_members(session, old, agent);
+            let (left, changed, rev) = crate::projects::spawn::set_agent_team(&project.path, agent, team, &seed)
                 .map_err(RpcError::InvalidParams)?;
             if changed {
-                // This agent's announcements one at a time, in commit order;
-                // each part is dropped once a newer move of it is committed
-                // (P1-B). Never under the recipe section: delivery is slow.
+                // This agent's announcements one at a time; only the latest
+                // revision's speaks, and it says what is true now against what
+                // was told (P1-B). Never under the recipe section: delivery is slow.
                 let home = crate::projects::spawn::agent_home(&project.path, agent);
                 let turn = crate::projects::recipe::announcement(&home);
                 let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
-                announce_move(session, &room, &project.path, agent, team, &left, rev, by, &turn);
+                announce_move(session, &room, &project.path, agent, rev, &move_line(agent, team, &left), by, &turn);
             }
             Ok(serde_json::json!({ "agent": agent, "team": if team.is_empty() { serde_json::Value::Null } else { serde_json::json!(team) }, "left": if left.is_empty() { serde_json::Value::Null } else { serde_json::json!(left) }, "changed": changed }))
         }
@@ -984,48 +987,77 @@ fn tell_team_of_join(session: &str, root: &str, joiner: &str, backend: &str, by:
     tell_team(session, root, joiner, &notice, &|| true)
 }
 
-/// Announce one committed runtime move of `agent` (board #384): the room
-/// line, the old team's members, the new team's members, then the mover.
-/// Called inside the agent's announcement turn (`recipe::announcement`), so
-/// two moves of one agent are told in the order they were committed, and
-/// every part is gated on `rev` still being the agent's membership revision:
-/// at the delivery door (`deliver_if`) for a notice, before the post for the
-/// room line. A move overtaken by a newer one says nothing more, so nobody is
-/// left believing a team the agent has already left (reviewer P1-B).
+/// Announce `agent`'s team as it stands (board #384), from FACTS, not
+/// replayed from the request (P1-B residual and the orchestrator's ruling):
+/// the recipe's current team against the announcer's ledger (`recipe::Told`,
+/// what each recipient was last told). Run in the agent's announcement turn
+/// (`recipe::announcement`), for the revision `rev` it committed; a turn whose
+/// revision is no longer current says nothing, because the latest one covers
+/// what it skipped. Otherwise: the room line, then exactly the difference
+/// (`recipe::plan`): "x left your team" to every recipient told x is its
+/// teammate who no longer has it, the join notice to every current live
+/// member not yet told, and the agent its current team once. Each notice goes
+/// through the one delivery door gated on `rev` (`deliver_if`), and the
+/// ledger records a recipient only when the door delivered (typed or held)
+/// to it, so a fan-out cut short by a newer move leaves the rest to that
+/// move's turn. The ledger never decides membership: the recipe does.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[allow(clippy::too_many_arguments)]
-fn announce_move(session: &str, room: &str, ws: &str, agent: &str, team: &str, left: &str, rev: u64, by: &str, _turn: &crate::projects::recipe::Held) {
+fn announce_move(session: &str, room: &str, ws: &str, agent: &str, rev: u64, room_line: &str, by: &str, _turn: &crate::projects::recipe::Held) {
+    use crate::projects::recipe::{plan, update_recipe, current_team_rev, Told};
     let home = crate::projects::spawn::agent_home(ws, agent);
-    let current = || crate::projects::recipe::current_team_rev(&home) == rev;
-    if current() {
-        let _ = crate::projects::rooms::post(room, agent, &move_line(agent, team, left));
+    let current = || current_team_rev(&home) == rev;
+    if !current() {
+        return;
     }
+    let _ = crate::projects::rooms::post(room, agent, room_line);
+    let Ok(Some((team, told))) = update_recipe(&home, |r| r.as_ref().map(|r| {
+        let team = r.get("team").and_then(|v| v.as_str()).unwrap_or("").split('/').next().unwrap_or("").to_string();
+        (team, Told::of(r).unwrap_or_default())
+    })) else { return };
+    let members_now = if team.is_empty() { Vec::new() } else { team_members(session, &team, agent) };
+    let todo = plan(&told, &team, &members_now);
     let stamp = stamp_now();
-    if !left.is_empty() {
-        tell_team(session, left, agent, &crate::projects::delivery::left_notice(agent, left, &stamp), &current);
+    let record = |change: &dyn Fn(&mut Told)| {
+        let _ = update_recipe(&home, |r| if let Some(r) = r.as_mut() {
+            let mut t = Told::of(r).unwrap_or_default();
+            change(&mut t);
+            r["team_told"] = t.to_value();
+        });
+    };
+    let deliver = |to: &str, line: &str| crate::projects::delivery::agent_target(session, to)
+        .is_some_and(|target| crate::projects::delivery::deliver_if(session, to, &target, line, &current));
+    for (to, was) in &todo.left {
+        if deliver(to, &crate::projects::delivery::left_notice(agent, was, &stamp)) {
+            record(&|t| { if t.members.get(to) == Some(was) { t.members.remove(to); } });
+        }
     }
-    if !team.is_empty() {
+    if !todo.joined.is_empty() {
         // The one reading of a pane's agent, recipe first: a
         // managed window that fell back to a shell is still kiro.
         let backend = crate::tmux::list_panes(session).unwrap_or_default().iter()
             .find(|p| p.window_name == agent && p.active)
             .and_then(|p| crate::projects::agents::detect_pane(Some(ws), p))
             .map(|a| a.backend).unwrap_or("");
-        tell_team(session, team, agent, &crate::projects::delivery::moved_in_notice(agent, team, backend, by, &stamp), &current);
+        let notice = crate::projects::delivery::moved_in_notice(agent, &team, backend, by, &stamp);
+        for to in &todo.joined {
+            if deliver(to, &notice) {
+                record(&|t| { t.members.insert(to.clone(), team.clone()); });
+            }
+        }
     }
-    let mates = if team.is_empty() { Vec::new() } else { crate::projects::spawn::team_mates(ws, team, agent) };
-    if let Some(target) = crate::projects::delivery::agent_target(session, agent) {
-        crate::projects::delivery::deliver_if(session, agent, &target, &crate::projects::delivery::moved_notice(agent, team, left, &mates, &stamp), &current);
+    if todo.mover {
+        let mates = if team.is_empty() { Vec::new() } else { crate::projects::spawn::team_mates(ws, &team, agent) };
+        if deliver(agent, &crate::projects::delivery::moved_notice(agent, &team, &told.mover, &mates, &stamp)) {
+            record(&|t| t.mover = team.clone());
+        }
     }
 }
 
-/// Type `notice` into the pane of every CURRENT live member of team `root`
-/// in this session other than `except` (board #382/#384): the one reading of
-/// "the team's live members" the join, move and leave notices share, through
-/// the one delivery door; `still_due` is its gate (`deliver_if`, checked in
-/// the step that types or holds). Returns who it was typed to.
+/// The CURRENT live managed members of team `root` in this session other
+/// than `except`, by window (board #382/#384): the one reading of "the
+/// team's live members" the join, move and leave notices share.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn tell_team(session: &str, root: &str, except: &str, notice: &str, still_due: &dyn Fn() -> bool) -> Vec<String> {
+fn team_members(session: &str, root: &str, except: &str) -> Vec<String> {
     let Ok(Some(project)) = crate::projects::project_for_session(session) else { return Vec::new() };
     let ws = Some(project.path.as_str());
     let mut members: Vec<String> = crate::tmux::list_panes(session)
@@ -1037,7 +1069,17 @@ fn tell_team(session: &str, root: &str, except: &str, notice: &str, still_due: &
         .collect();
     members.sort();
     members.dedup();
-    members.into_iter()
+    members
+}
+
+/// Type `notice` into the pane of every CURRENT live member of team `root`
+/// in this session other than `except` (board #382/#384): the one reading of
+/// "the team's live members" the join, move and leave notices share, through
+/// the one delivery door; `still_due` is its gate (`deliver_if`, checked in
+/// the step that types or holds). Returns who it was typed to.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn tell_team(session: &str, root: &str, except: &str, notice: &str, still_due: &dyn Fn() -> bool) -> Vec<String> {
+    team_members(session, root, except).into_iter()
         .filter(|name| crate::projects::delivery::agent_target(session, name)
             .is_some_and(|target| crate::projects::delivery::deliver_if(session, name, &target, notice, still_due)))
         .collect()
@@ -2449,20 +2491,22 @@ mod tests {
         assert_eq!(before, after, "nobody was restarted");
     }
 
-    /// Board #384, reviewer P1-B, on REAL panes with a barrier: two moves of
-    /// one agent. Move 1 (into squad) commits and its announcement is HELD;
-    /// move 2 (squad → ops) commits and is announced; then move 1's
-    /// announcement is released: none of it is told (room, squad's member,
-    /// the mover), so nobody is left believing helper is in squad. And one
-    /// agent's announcements wait their turn: while one is in progress the
-    /// next move commits but is told only after it.
+    /// Board #384, reviewer P1-B and its residual, on REAL panes with a
+    /// barrier, starting from a REAL old team (helper joined squad by its
+    /// recipe; no ledger is filled by hand). A move's announcement says what
+    /// is true against what was told, and an overtaken one says nothing:
+    ///   A -> B overtaken by B -> C: A (squad's lead) hears "left" once, B
+    ///   (ops) hears nothing, C (core) hears "joined", the mover its current
+    ///   team once, the room only the move that stands;
+    ///   then A -> B overtaken by B -> A: nobody hears anything.
+    /// And one agent's announcements wait their turn.
     #[test]
-    fn an_overtaken_move_announces_nothing_and_moves_are_told_in_commit_order() {
+    fn an_announcement_tells_the_difference_and_an_overtaken_move_says_nothing() {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-mvrev-{tag}");
         let ws = std::env::temp_dir().join(format!("tmm-mvrev-ws-{tag}"));
-        let windows = [("lead", "squad", "lead"), ("helper", "", ""), ("other", "ops", "dev")];
+        let windows = [("lead", "squad", "lead"), ("helper", "squad", ""), ("ops1", "ops", "ops1"), ("core1", "core", "core1"), ("solo", "", "")];
         for (name, team, member) in windows {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -2483,27 +2527,43 @@ mod tests {
         }
         crate::projects::adopt(&session, Some("mvrev-live-test")).expect("adopt project");
         let pane = |name: &str| crate::tmux::capture_pane_plain(&format!("{session}:{name}"), Some(0)).unwrap_or_default();
+        // A `cat` pane shows a typed line twice (the tty's echo, then cat's).
+        let times = |name: &str, text: &str| pane(name).matches(text).count() / 2;
         let wait_for = |name: &str, text: &str| (0..30).any(|_| { let hit = pane(name).contains(text); if !hit { std::thread::sleep(std::time::Duration::from_millis(100)); } hit });
         let lines = || -> Vec<String> { room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] moved") || b.starts_with("[tmm] left")).collect() };
         let ws_s = ws.to_string_lossy().to_string();
         let room_id = super::project_room(&session);
-
-        // Move 1 commits; its announcement is held back.
-        let (left1, changed1, rev1) = crate::projects::spawn::set_agent_team(&ws_s, "helper", "squad").unwrap();
-        assert_eq!((left1.as_str(), changed1, rev1), ("", true, 1));
-        // Move 2 commits and is announced.
-        let r = handle_hub_request(&req("hub_agent_set_team", serde_json::json!({ "session": session, "agent": "helper", "team": "ops" })), None);
-        assert_eq!(r.result.unwrap()["left"], "squad");
-        assert!(wait_for("helper", "you were moved into team ops"), "{:?}", pane("helper"));
-        assert!(wait_for("other", "@helper joined your team ops"), "{:?}", pane("other"));
-        assert!(wait_for("lead", "@helper left your team squad"), "{:?}", pane("lead"));
-        // Move 1's announcement is released: it is stale, so it says nothing.
         let home = crate::projects::spawn::agent_home(&ws_s, "helper");
-        super::announce_move(&session, &room_id, &ws_s, "helper", "squad", "", rev1, "", &crate::projects::recipe::announcement(&home));
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        assert!(!pane("lead").contains("joined your team squad"), "squad is not told helper joined: {:?}", pane("lead"));
-        assert!(!pane("helper").contains("moved into team squad"), "the mover is not told squad: {:?}", pane("helper"));
-        assert_eq!(lines(), ["[tmm] moved helper — to team ops, from team squad"], "the room says only the move that stands");
+        let seed = |old: &str| super::team_members(&session, old, "helper");
+        let set = |team: &str| handle_hub_request(&req("hub_agent_set_team", serde_json::json!({ "session": session, "agent": "helper", "team": team })), None);
+        let quiet = |names: &[&str]| { std::thread::sleep(std::time::Duration::from_millis(400)); for n in names { assert!(!pane(n).contains("[reply]"), "{n} hears nothing: {:?}", pane(n)); } };
+
+        // A -> B (squad -> ops) commits; its announcement is held back.
+        let (_, changed1, rev1) = crate::projects::spawn::set_agent_team(&ws_s, "helper", "ops", &seed).unwrap();
+        assert!(changed1);
+        // B -> C (ops -> core) commits and is announced: the difference from
+        // what was told (squad: lead), not a replay of its request (ops).
+        assert_eq!(set("core").result.unwrap()["left"], "ops");
+        assert!(wait_for("lead", "@helper left your team squad"), "the old team is told: {:?}", pane("lead"));
+        assert!(wait_for("core1", "@helper joined your team core"), "{:?}", pane("core1"));
+        assert!(wait_for("helper", "you were moved into team core"), "{:?}", pane("helper"));
+        // Move 1's announcement is released: overtaken, it says nothing.
+        super::announce_move(&session, &room_id, &ws_s, "helper", rev1, &super::move_line("helper", "ops", "squad"), "", &crate::projects::recipe::announcement(&home));
+        quiet(&["ops1", "solo"]);
+        assert_eq!(times("lead", "@helper left your team squad"), 1, "squad hears it left exactly once");
+        assert_eq!(times("lead", "joined your team"), 0);
+        assert_eq!(times("core1", "@helper joined your team core"), 1);
+        assert_eq!(times("helper", "you were moved into team"), 1, "the mover is told once, its current team");
+        assert!(!pane("helper").contains("moved into team ops"));
+        assert_eq!(lines(), ["[tmm] moved helper — to team core, from team ops"], "the room says only the move that stands");
+
+        // A -> B (core -> ops) overtaken by B -> A (ops -> core): core was
+        // told helper is its teammate and still is; nobody hears anything.
+        let (_, _, rev3) = crate::projects::spawn::set_agent_team(&ws_s, "helper", "ops", &seed).unwrap();
+        assert!(set("core").error.is_none());
+        super::announce_move(&session, &room_id, &ws_s, "helper", rev3, &super::move_line("helper", "ops", "core"), "", &crate::projects::recipe::announcement(&home));
+        quiet(&["ops1", "solo"]);
+        assert_eq!((times("core1", "tmm: [reply] @helper"), times("lead", "tmm: [reply] @helper"), times("helper", "tmm: [reply]")), (1, 1, 1), "A -> B -> A tells nobody anything new");
 
         // One agent's announcements in commit order: while one is told, the
         // next commits at once but is told after it.
@@ -2511,12 +2571,15 @@ mod tests {
         let mover = { let s = session.clone(); std::thread::spawn(move || handle_hub_request(&req("hub_agent_set_team", serde_json::json!({ "session": s, "agent": "helper", "team": "" })), None)) };
         std::thread::sleep(std::time::Duration::from_millis(300));
         let recipe: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
-        assert_eq!((recipe["team"].as_str(), recipe["team_rev"].as_u64()), (Some(""), Some(3)), "committed at once");
-        assert_eq!(lines().len(), 1, "but not told while another announcement of it is in progress");
+        assert_eq!((recipe["team"].as_str(), recipe["team_rev"].as_u64()), (Some(""), Some(5)), "committed at once");
+        let before = lines().len();
         drop(turn);
         assert!(mover.join().unwrap().error.is_none());
-        assert_eq!(lines().last().map(String::as_str), Some("[tmm] left helper — team ops, now standalone"));
+        assert_eq!(lines().len(), before + 1, "told once the earlier turn ended");
+        assert!(wait_for("core1", "@helper left your team core"));
     }
+
+    /// Board #382: a join into a team with nobody in this project is refused
     /// by name, before any window is opened (no tmux needed to see it).
     #[test]
     fn a_join_into_a_team_that_is_not_here_is_refused() {
