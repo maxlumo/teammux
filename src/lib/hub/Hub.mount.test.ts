@@ -2671,7 +2671,7 @@ test('on a phone the disabled Move items say why on the item itself: a touch scr
   } finally { await app.close(); }
 });
 
-test('a drag belongs to the project and page it was pressed in: released after a switch (or A -> B -> A, a hidden page, a lost cap) it moves nothing (#384, P1-A)', { timeout: 60000 }, async (context) => {
+test('a drag belongs to the project and page it was pressed in: released after a switch (or A -> B -> A, a hidden page, a lost focus, a lost cap) it moves nothing (#384, P1-A)', { timeout: 60000 }, async (context) => {
   let capsCb: ((caps: string[] | undefined) => void) | undefined;
   const { app, moves } = await moveFixture(context, ['board_dispatch', 'spawn_join', 'agent_team'], {
     projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({
@@ -2725,6 +2725,16 @@ test('a drag belongs to the project and page it was pressed in: released after a
     await release();
     await app.setProps({ visible: true });
     assert.deepEqual(moves, [], 'nor from a hidden page');
+
+    // Displayed but no longer the focus: the host moved focus to another
+    // server and this tree is only revealed (reviewer P2: visible is not
+    // the whole eligibility).
+    await carry();
+    await app.setScope({ eligible: false });
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'losing the focus cancels the drag');
+    await release();
+    assert.deepEqual(moves, [], 'nor from a tree that is visible but not eligible');
+    await app.setScope({ eligible: true });
 
     await carry();
     capsCb!(['board_dispatch', 'spawn_join']);

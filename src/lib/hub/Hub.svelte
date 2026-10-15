@@ -81,15 +81,18 @@
   });
   const moveBlocked = $derived(lacksCap(loginCaps, AGENT_TEAM));
   /* The context a card drag belongs to (board #384, reviewer P1-A): a NEW
-     object whenever the project, the page's visibility, the room's readiness
-     or the server's capability changes (a $derived re-runs on any input
-     change, so A → B → A is two new objects, never the first one back). The
-     roster captures it at the press, cancels a press or drag the moment it
-     changes, and commits only while the one it captured is still this one,
-     so a release after a project switch moves nothing in either project. */
+     object whenever the project, the page's eligibility, the room's
+     readiness or the server's capability changes (a $derived re-runs on any
+     input change, so A → B → A is two new objects, never the first one back).
+     Eligible is Board's reading: displayed (`visible`) AND the host's answer
+     (`scope.eligible()`: this tree is the focus, not a background tree a
+     leave question merely revealed, and its runtime still serves; reviewer
+     P2). The roster captures it at the press, cancels a press or drag the
+     moment it changes, and commits only while the one it captured is still
+     this one, so a release after a switch moves nothing anywhere. */
   const moveScope = $derived({
     session: selected,
-    ok: visible && roomReady && !moveBlocked && loginCaps !== undefined,
+    ok: visible && (scope.eligible ? scope.eligible() : true) && roomReady && !moveBlocked && loginCaps !== undefined,
   });
   // This server's backend catalog (②b-3): the avatars and whether a running
   // agent can switch its input mode are its answer.
