@@ -3075,6 +3075,66 @@ async function groupFixture(context: TestContext, extra: Record<string, (...args
   return { ...app, labels, pick, contextmenu: context_ };
 }
 
+/** Open an agent card's menu the way a person does: right-click on its select button. */
+const openCardMenu = async (app: Awaited<ReturnType<typeof groupFixture>>, name: string) => {
+  const select = stripCard(app.document, name).querySelector<HTMLElement>('.agent-select')!;
+  select.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+  await app.flush();
+};
+const cardMenuLabels = (app: Awaited<ReturnType<typeof groupFixture>>) =>
+  [...app.document.querySelectorAll<HTMLButtonElement>('[role=menu] .menu-item')].map((b) => b.textContent!.trim());
+const pickCardItem = async (app: Awaited<ReturnType<typeof groupFixture>>, label: string) => {
+  [...app.document.querySelectorAll<HTMLButtonElement>('[role=menu] .menu-item')].find((b) => b.textContent?.trim() === label)!.click();
+  await app.flush();
+};
+
+test('a running agent\'s card menu forks it in one tap; a stopped one has no Fork (#383)', { timeout: 60000 }, async (context) => {
+  const forks: unknown[][] = [];
+  const app = await groupFixture(context, {
+    hubAgentFork: async (...args: unknown[]) => { forks.push(args); return { window_name: 'solo-2', pane: '%9', backend: 'codex', forked_from: 'solo' }; },
+  }, () => {});
+  try {
+    await openCardMenu(app, 'solo');
+    const labels = cardMenuLabels(app);
+    const fork = labels.indexOf('Fork');
+    assert.ok(fork > 0, `a running agent offers Fork: ${labels}`);
+    assert.equal(labels[fork - 1], 'Configure agent', 'Fork follows Config');
+    assert.ok(fork < labels.indexOf('Restart') && fork < labels.indexOf('Stop') && fork < labels.indexOf('Remove'), 'and leads the consequential verbs (destructive last)');
+    await pickCardItem(app, 'Fork');
+    for (let i = 0; i < 10 && !forks.length; i++) await app.flush();
+    assert.deepEqual(forks, [['fixture', 'solo']], 'one tap, one fork, of that agent in this project, with no name and no dialog');
+    assert.equal(app.document.querySelector('.dlg[role=alertdialog]'), null, 'no confirmation');
+    // The stopped agent (qa) is offered Resume/Remove, never Fork.
+    await openCardMenu(app, 'qa');
+    assert.ok(cardMenuLabels(app).includes('Resume'), `qa's own menu is open: ${cardMenuLabels(app)}`);
+    assert.ok(!cardMenuLabels(app).includes('Fork'), `a stopped card has no Fork: ${cardMenuLabels(app)}`);
+  } finally { await app.close(); }
+});
+
+test('a refused fork says why, and a second tap while one is in flight is not a second fork (#383)', { timeout: 60000 }, async (context) => {
+  const forks: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const app = await groupFixture(context, {
+    hubAgentFork: async (_s: string, name: string) => {
+      forks.push(name);
+      await gate;
+      throw new Error('project already has 8 agents (cap 8) — finish or close one first');
+    },
+  });
+  try {
+    await openCardMenu(app, 'solo');
+    await pickCardItem(app, 'Fork');
+    await openCardMenu(app, 'solo');
+    await pickCardItem(app, 'Fork');
+    assert.deepEqual(forks, ['solo'], 'the second tap during the first fork does nothing');
+    release();
+    for (let i = 0; i < 12 && !app.document.querySelector('.composer-feedback [role="alert"]'); i++) await app.flush();
+    const said = app.document.querySelector('.composer-feedback [role="alert"]')?.textContent ?? '';
+    assert.match(said, /Could not fork solo: project already has 8 agents/u, said);
+  } finally { await app.close(); }
+});
+
 test('right-click on All opens the group verbs at any time, counted, destructive last (#258)', { timeout: 60000 }, async (context) => {
   const app = await groupFixture(context, {});
   try {

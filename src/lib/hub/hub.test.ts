@@ -980,6 +980,10 @@ test('a lifecycle line splits into a highlighted verb and its subject', () => {
   assert.deepEqual(sysParts('removed k'), { verb: 'removed', who: 'k', text: '', cmd: false });
   // The spawn brief follows the em-dash; the dash itself is layout, not content.
   assert.deepEqual(sysParts('spawned dev — fix the bug'), { verb: 'spawned', who: 'dev', text: 'fix the bug', cmd: false });
+  // A fork (#383) speaks the lifecycle grammar too: the new agent is the subject, the source and the team are the detail.
+  assert.deepEqual(sysParts('forked dev-2 from dev'), { verb: 'forked', who: 'dev-2', text: 'from dev', cmd: false });
+  assert.deepEqual(sysParts('forked dev-2 from dev — joined team squad'), { verb: 'forked', who: 'dev-2', text: 'from dev — joined team squad', cmd: false });
+  assert.equal(sysVerbColor('forked'), sysVerbColor('spawned'), 'a fork is a start: the same colour, no new species');
   // #271: the live queue/steer switch is its own row in the one grammar.
   assert.deepEqual(sysParts('switched kiro — steer mode (this session)'), { verb: 'switched', who: 'kiro', text: 'steer mode (this session)', cmd: false });
   // A verb with nothing after it (`[tmm] done`) names nobody.

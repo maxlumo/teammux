@@ -1345,7 +1345,7 @@ export function systemLine(body: string | null | undefined): string | null {
 /** The lifecycle verbs the server narrates (`hub_rpc.rs`). A line that does not
  * start with one of them is left whole — an unknown shape must render as its own
  * text, never as a guessed verb plus a truncated remainder. */
-const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'kept', 'moved', 'left', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
+const SYS_VERBS = new Set(['spawned', 'forked', 'started', 'stopped', 'restarted', 'kept', 'moved', 'left', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
 
 /**
  * ONE structure for every line the app narrates: WHO it is about, WHAT
@@ -1355,6 +1355,8 @@ const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'kept',
  *
  * - `removed k`               → who `k`,   verb `removed`
  * - `spawned dev — fix bug`   → who `dev`, verb `spawned`, text `fix bug`
+ * - `forked dev-2 from dev` → who `dev-2`, verb `forked`, text `from dev` (#383: a fork is a
+ *   start, so it speaks the same grammar and wears the same colour as `spawned`)
  * - `done`                    → verb `done` (nobody named)
  * - `/model x → dev, rev`     → who `dev, rev`, verb `/model`, text `x`, cmd
  *
@@ -1468,6 +1470,7 @@ export function promptParts(text: string | null | undefined): { from: string; bo
 export function sysVerbColor(verb: string): string {
   switch (verb) {
     case 'spawned':
+    case 'forked':
     case 'started':
     case 'restarted':
     // A queue/steer switch (#271) changes how the agent takes input: accent,

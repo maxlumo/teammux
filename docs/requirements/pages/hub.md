@@ -130,7 +130,9 @@ completion).
   bottom edge line), and a context menu reached from the card itself or from
   right-click/long-press — no dedicated dots control taking roster space
   (Message / Watch / Only its messages — the one-agent feed filter, also a
-  double-click on the card / configure agent / Interrupt / Move to team /
+  double-click on the card / configure agent / **Fork** (running agents only,
+  board #383: one tap, no dialog — a NEW agent with this one's definition, a
+  fresh conversation, named `<name>-2`; zh 复制一个) / Interrupt / Move to team /
   Leave team / Restart / Stop / Remove — rising consequence order). The card TAP menu
   aligns to the card's LEFT edge (board #47 — the card reads name-first
   from its left edge; same shared placement flip/clamp as the title menu);

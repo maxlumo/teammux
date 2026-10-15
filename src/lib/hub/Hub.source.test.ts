@@ -298,6 +298,27 @@ test('agent restart remains one parent action for roster and context menu (board
   assert.match(i18n, /hubRestart: '重启'/u);
 });
 
+test('Fork is one item of the shared agent menu: running agents only, after Config, before the consequential verbs, one tap (#383)', async () => {
+  const source = await readFile(new URL('./Hub.svelte', import.meta.url), 'utf8');
+  const items = source.slice(source.indexOf('function agentItems'), source.indexOf('function projectItems'));
+  // The stopped branch returns before the running list: Fork is only in the second.
+  const stoppedBranch = items.slice(items.indexOf('if (stopped.includes(name))'), items.indexOf('const a = managedAgents.find'));
+  assert.doesNotMatch(stoppedBranch, /hubFork/u, 'a stopped agent is not forked');
+  const order = ['t(\'hubAgentConfig\')', "t('hubFork')", "t('hubInterrupt')", "t('hubRestart')", "t('hubStop')", "t('hubRemove')"]
+    .map((needle) => items.lastIndexOf(needle));
+  assert.ok(order.every((at) => at >= 0), 'every verb is in the menu');
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'Config, Fork, Interrupt, Restart, Stop, Remove: constructive first, destructive last');
+  assert.match(items, /label: t\('hubFork'\), icon: 'git-branch', onselect: \(\) => forkAgent\(name, session\)/u, 'one tap runs the fork: no dialog');
+  const fork = source.slice(source.indexOf('async function forkAgent'), source.indexOf('/** Queue ⇄ steer for this session'));
+  assert.match(fork, /acting\) return/u, 'a second tap while one is in flight is a no-op');
+  assert.match(fork, /await hubAgentFork\(session, name\)/u);
+  assert.match(fork, /t\('hubForkFailed'\)/u, 'a refusal is said with its reason');
+  assert.doesNotMatch(fork, /askAction|ConfirmDialog/u, 'it cuts nothing, so it asks nothing');
+  const i18n = await readFile(new URL('../core/i18n.svelte.ts', import.meta.url), 'utf8');
+  assert.match(i18n, /hubFork: 'Fork'/u);
+  assert.match(i18n, /hubFork: '复制一个'/u, 'fork means nothing to someone who does not use git; the room line still says forked');
+});
+
 test('sidebar dots and roster cards drink from ONE state map (board #8)', () => {
   // Both pollers route through mergeStates: the roster poll overlays its
   // project's keys onto the shared map, and the rooms poll overlays the

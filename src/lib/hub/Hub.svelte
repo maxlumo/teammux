@@ -67,7 +67,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
@@ -1686,6 +1686,30 @@
   }
   const startAgent = (name) => restartAgent(name, 'start failed');
 
+  /** Fork a running agent (board #383): one tap, no dialog. The server copies
+   * its effective definition into a NEW agent under a fresh name, a fresh home
+   * and a fresh conversation; the new card and the room's "forked x from y"
+   * row say what happened. `acting` makes a second tap a no-op, so a double tap
+   * cannot make two agents. A refusal (the spawn cap, a deleted definition) is
+   * said in the composer's feedback slot with its reason, like a mode switch's. */
+  async function forkAgent(name, session = selected) {
+    if (!session || session !== selected || acting) return;
+    acting = true;
+    const feedbackToken = commandFeedbackLifetime.begin();
+    commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+    try {
+      await hubAgentFork(session, name);
+      await Promise.all([reload(), loadAgents(), loadFeed()]);
+    } catch (e) {
+      if (selected === session) commandFeedbackLifetime.update(feedbackToken, {
+        kind: 'error',
+        message: t('hubForkFailed').replace('{name}', name).replace('{error}', e?.message ?? String(e)),
+      });
+    } finally {
+      acting = false;
+    }
+  }
+
   /** Queue ⇄ steer for this session (board #271): the CLI's own live
    * toggle, verified by the server; the card reads the new mode from the
    * pane on the next agents load. A failure is said in the composer's
@@ -2050,6 +2074,8 @@
       { label: t('hubWatch'), icon: 'terminal', onselect: () => { if (a) watchAgent(a); } },
       filterItem(name),
       ...config,
+      // Constructive verbs lead: a running agent can be forked (#383).
+      { label: t('hubFork'), icon: 'git-branch', onselect: () => forkAgent(name, session) },
       ...(busyTargetsFor(name, agents).length
         ? [{ label: t('hubInterrupt'), icon: 'stop', warn: true, disabled: interrupting.includes(name), onselect: () => interrupt(name, session) }]
         : []),
