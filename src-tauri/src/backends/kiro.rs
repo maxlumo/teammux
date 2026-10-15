@@ -1428,10 +1428,12 @@ fn idle_furniture(region: &[&str]) -> bool {
         }
         let fits = match rules {
             0 => line.starts_with("▸ ") || (one_space(line) && t.contains(" tasks remaining")),
+            // The banner is checked by its whole text below, which no other
+            // line between the rules can pass.
             1 => {
                 banner.push(' ');
                 banner.push_str(t);
-                one_space(line)
+                true
             }
             _ => {
                 status.push(line);
