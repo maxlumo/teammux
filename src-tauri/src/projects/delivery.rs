@@ -1502,9 +1502,10 @@ mod tests {
     /// the whole batch into a turn nobody had read. Through the real
     /// `deliver_with`: A's log cannot be read, A:dev holds a line past
     /// HOLD_MAX_SECS. A queue line and a steer line arrive: nothing typed,
-    /// all three held, no warn. A hold that cannot be written while unknown
-    /// is said undelivered and not typed. After A's log is repaired, the
-    /// next line is decided by A's replayed state: an open turn with an
+    /// all three held, no warn. A steer window of A with nothing held gets
+    /// its line held, not steered. A hold that cannot be written while
+    /// unknown is said undelivered and not typed. After A's log is repaired,
+    /// the next line is decided by A's replayed state: an open turn with an
     /// overdue hold, so the known overdue rule types the batch.
     #[test]
     fn a_new_line_for_an_unknown_window_never_releases_its_overdue_hold() {
@@ -1528,6 +1529,15 @@ mod tests {
         assert!(typed().is_empty(), "nothing typed into an unknown turn: {:?}", typed());
         assert_eq!(held(&a, "dev"), 3, "the overdue line and both new ones stay held");
         assert!(warns(&a).is_empty(), "no warn: {:?}", warns(&a));
+        // A steer window of A with nothing held: the line is held, not
+        // steered into a turn nobody has read (its row, like A's others,
+        // stored undecodable).
+        crate::projects::with_store(|st| st.insert_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
+        telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{a}'"));
+        assert!(!telemetry::turn_known(&a, "aux"));
+        assert!(deliver_with(&a, "aux", "t", "[tmm chat 03:11] lead: @aux steer, nothing held", 0, "", || Some("steer")));
+        assert!(typed().is_empty(), "not steered into an unknown turn: {:?}", typed());
+        assert_eq!(held(&a, "aux"), 1);
 
         // A hold that cannot be written while unknown: said, not typed.
         sql(&format!("CREATE TEMP TRIGGER unknown_hold_fault BEFORE INSERT ON deliveries
