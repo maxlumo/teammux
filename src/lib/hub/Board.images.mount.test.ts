@@ -15,7 +15,7 @@ const issueA = { id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: ''
 const issueB = { id: 2, title: 'B', body: 'Body B', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] };
 
 type Calls = { saves: any[]; notes: any[]; posts: any[]; uploads: string[] };
-type Opts = { caps?: string[]; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
+type Opts = { caps?: string[]; refuse?: (patch: any) => void; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
@@ -26,7 +26,11 @@ const walk = () => confirmLeave({ leaving: guardsSeen[0]?.runtime ?? null, curre
 async function mount(context: TestContext, opts: Opts = {}) {
   clearLeaveGuardsForTests(); guardsSeen.length = 0;
   const calls: Calls = { saves: [], notes: [], posts: [], uploads: [] };
-  const issues = opts.issues ?? [issueA, issueB];
+  // The connection's login capabilities, which a test can CHANGE (a reconnect to another server).
+  let capsNow: string[] | undefined = 'caps' in opts ? opts.caps : ['board_dispatch'];
+  const capsWatchers: ((caps: string[] | undefined) => void)[] = [];
+  // The DEFAULT fixtures are copied per mount: a stateful fake writes into its issues, and one test's writes must not reach the next.
+  const issues = opts.issues ?? [issueA, issueB].map((i) => ({ ...i }));
   let back!: () => boolean;
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true, guardPage: 'board', onGoBack: (fn: typeof back) => back = fn },
@@ -40,7 +44,8 @@ async function mount(context: TestContext, opts: Opts = {}) {
       w.URL.revokeObjectURL = () => {};
     },
     modules: [{
-      getCaps: () => ('caps' in opts ? opts.caps : ['board_dispatch']), // the login answer's capabilities (board #377)
+      getCaps: () => capsNow, // the login answer's capabilities (board #377)
+      onCaps: (cb: (caps: string[] | undefined) => void) => { capsWatchers.push(cb); },
       projectList: async () => ({ projects: (opts.projects ?? ['fixture']).map((p) => ({ project: { id: p, session: p, name: p, path: `/work/${p}` }, live: true })) }),
       hubRooms: async () => ({ rooms: {} }),
       boardCounts: async () => ({ counts: Object.fromEntries((opts.projects ?? ['fixture']).map((p) => [p, { todo: issues.length, doing: 0, review: 0, done: 0, total: issues.length }])) }),
@@ -48,6 +53,8 @@ async function mount(context: TestContext, opts: Opts = {}) {
       boardList: async () => ({ issues }),
       boardGet: async (_s: string, id: number) => issues.find((i) => i.id === id),
       boardSave: async (session: string, patch: any) => {
+        // The write path's own gate (ws-api.boardSave) refuses BEFORE anything is sent or stored.
+        opts.refuse?.(patch);
         calls.saves.push({ ...patch, session });
         if (opts.save) await opts.save(patch);
         // A stateful fake: the stored issue takes the patch, so boardGet answers what was saved.
@@ -87,7 +94,8 @@ async function mount(context: TestContext, opts: Opts = {}) {
     el.value = v; el.setSelectionRange(v.length, v.length);
     el.dispatchEvent(new app.window.Event('input', { bubbles: true })); await flush();
   };
-  return { ...app, calls, flush, q, paste, type, back: () => back() };
+  const setCaps = async (caps: string[] | undefined) => { capsNow = caps; for (const w of capsWatchers) w(caps); await flush(); };
+  return { ...app, calls, flush, q, paste, type, back: () => back(), setCaps };
 }
 
 test('an image pasted into a new issue is a chip, and the saved body carries its ref', async (context) => {
@@ -715,4 +723,79 @@ test('against a server whose login lacks board_dispatch the pickers are disabled
     assert.equal(unknown.q(disabledPicker), null, 'an unanswered question is not a no');
     assert.doesNotMatch(unknown.q('.detail')?.textContent ?? '', /older than the app/u, 'and no complaint');
   } finally { await unknown.close(); }
+});
+
+// ── Board #377 review, residual P1-B and P2s ─────────────────────────────────
+test('one mounted Board follows the connection: modern → old → modern, and an unanswered login is neither (board #377)', async (context) => {
+  const app = await mount(context, { agents: [alice] });
+  const disabledPicker = '.detail .d-meta button[disabled], .detail [aria-haspopup][disabled], .detail .sel[aria-disabled="true"]';
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    assert.equal(app.q(disabledPicker), null, 'a server that can: the picker works');
+    assert.doesNotMatch(app.q('.detail')?.textContent ?? '', /older than the app/u);
+    await app.setCaps([]); // reconnected to an OLDER server
+    assert.ok(app.q(disabledPicker), 'the picker is disabled on the same mounted Board');
+    assert.match(app.q('.detail .meta-bit')?.textContent ?? '', /older than the app/u, 'and says why');
+    await app.setCaps(undefined); // the socket is being redialled: no answer yet
+    assert.equal(app.q(disabledPicker), null, 'unknown is not a refusal');
+    assert.doesNotMatch(app.q('.detail')?.textContent ?? '', /older than the app/u);
+    await app.setCaps(['board_dispatch']); // and back to one that can
+    assert.equal(app.q(disabledPicker), null);
+    assert.doesNotMatch(app.q('.detail')?.textContent ?? '', /older than the app/u);
+  } finally { await app.close(); }
+});
+
+test('a save the write path refuses or holds keeps the draft and says why in the page\u2019s words (board #377)', async (context) => {
+  let refusal: { code: string } | null = null;
+  const app = await mount(context, {
+    agents: [alice], stateful: true,
+    refuse: () => { if (refusal) throw Object.assign(new Error('gate'), refusal); },
+  });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    const title = app.q<HTMLInputElement>('.d-title-input')!;
+    title.value = 'A renamed'; title.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+    await pickAlice(app, '.detail');
+    const save = () => [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+
+    refusal = { code: 'login_pending' };
+    save(); for (let i = 0; i < 12; i++) await app.flush();
+    assert.match(app.q('.err')?.textContent ?? '', /Still connecting to the server/u, 'a login that has not answered');
+    assert.equal(app.q<HTMLInputElement>('.d-title-input')!.value, 'A renamed', 'the draft is kept');
+    assert.ok(app.q('.detail'), 'and the detail stays');
+
+    refusal = { code: 'server_too_old' };
+    save(); for (let i = 0; i < 12; i++) await app.flush();
+    assert.match(app.q('.err')?.textContent ?? '', /older than the app\. Update the server to assign/u, 'a server that answered without the capability');
+    assert.equal(app.q<HTMLInputElement>('.d-title-input')!.value, 'A renamed', 'still the draft');
+
+    refusal = null; // the gate lets it through: the SAME draft goes, once
+    save(); for (let i = 0; i < 12; i++) await app.flush();
+    assert.deepEqual(app.calls.saves.at(-1), { id: 1, title: 'A renamed', assignee: 'alice', dispatch: true, session: 'fixture' });
+  } finally { await app.close(); }
+});
+
+test('an offline assignee is a line like a failed hand-off, and Reassign sends the same assignee again with no draft change (board #377)', async (context) => {
+  let n = 0;
+  const app = await mount(context, {
+    agents: [alice], stateful: true,
+    answer: (patch) => (++n === 1
+      ? { ok: true, id: patch.id, dispatch: 'offline', offline: [{ name: 'alice', why: 'stopped' }] }
+      : { ok: true, id: patch.id, dispatch: 'sent' }),
+  });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    await pickAlice(app, '.detail');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 12; i++) await app.flush();
+    assert.match(app.q('.err')?.textContent ?? '', /#1: Saved, but alice was not reached \(stopped\); nothing is queued for it\./u, 'offline is not a silent success');
+    const again = () => [...app.document.querySelectorAll<HTMLButtonElement>('.err button')].find((b) => /Reassign/u.test(`${b.textContent} ${b.getAttribute('aria-label')}`));
+    assert.ok(again(), 'a real action beside the line');
+    again()!.click();
+    for (let i = 0; i < 12; i++) await app.flush();
+    assert.deepEqual(app.calls.saves.at(-1), { id: 1, assignee: 'alice', dispatch: true, session: 'fixture' }, 'the flagged save, nothing else changed');
+    assert.equal(app.calls.saves.length, 2);
+    assert.equal(app.q('.err'), null, 'delivered this time: the line and the button are gone');
+    assert.equal(app.calls.posts.length, 0, 'the page still posts nothing of its own');
+  } finally { await app.close(); }
 });

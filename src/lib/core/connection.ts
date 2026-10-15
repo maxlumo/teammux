@@ -284,6 +284,16 @@ export interface Connection {
    * undefined while there is no authenticated socket, `[]` for an older server
    * that announced none. */
   getCaps(): string[] | undefined;
+  /** Observe the capabilities of the CURRENT authenticated socket (board
+   * #377): called with the list when a login answers, and with `undefined`
+   * when the socket goes away or is replaced, so a page that shows or hides
+   * something by capability follows a reconnect to a server with others.
+   * Returns the unsubscribe. */
+  onCaps(cb: (caps: string[] | undefined) => void): () => void;
+  /** The capabilities of the current socket: at once if its login has
+   * answered, else as soon as one does. Rejects after `timeoutMs` (a login
+   * that never answers must not hold a caller forever) or when disposed. */
+  whenCaps(timeoutMs?: number): Promise<string[]>;
   /** The URL the current socket was dialled with — the origin a signed
    * download URL of THIS connection must be resolved against. */
   url(): string | null;
@@ -320,6 +330,12 @@ export function createConnection(): Connection {
   // for the whole room — so a plain Set, not a per-target map.
   const teamMessageListeners = new Set<(message: TeamMessage) => void>();
   let onDisconnect: (() => void) | null = null;
+  /** Who watches the current socket's capabilities (`onCaps`). */
+  const capsListeners = new Set<(caps: string[] | undefined) => void>();
+  function emitCaps() {
+    const caps = ws?._getCaps?.();
+    for (const cb of [...capsListeners]) { try { cb(caps); } catch {} }
+  }
   let recoveryEnabled = false;
   let disconnectNotified = false;
   // Idle-probe state. lastInboundAt is updated on every inbound message
@@ -471,6 +487,7 @@ export function createConnection(): Connection {
         ws.close();
       } catch {}
       ws = null;
+      emitCaps();
       stopIdleProbe();
       rejectAllPending('superseded by new connect');
     }
@@ -524,6 +541,7 @@ export function createConnection(): Connection {
         clearTimeout(timeout);
         authed = true;
         socket._cipher = cipher;
+        emitCaps();
         recoveryEnabled = true;
         disconnectNotified = false;
         // Liveness is the server's job at the protocol layer: it sends WS
@@ -688,6 +706,7 @@ export function createConnection(): Connection {
         const wasAuthed = authed;
         authed = false;
         ws = null;
+        emitCaps();
         rejectAllPending(wasAuthed ? 'connection lost' : 'connection closed during auth');
         // Surface close-frame metadata so we can tell client-initiated from
         // server-initiated from network-killed disconnects:
@@ -714,6 +733,7 @@ export function createConnection(): Connection {
     if (disposed) return;
     const socket = ws;
     ws = null;
+    emitCaps();
     recoveryEnabled = false;
     disconnectNotified = false;
     stopIdleProbe();
@@ -747,12 +767,29 @@ export function createConnection(): Connection {
     return ws?._getCaps?.();
   }
 
+  function onCaps(cb: (caps: string[] | undefined) => void): () => void {
+    capsListeners.add(cb);
+    return () => { capsListeners.delete(cb); };
+  }
+
+  function whenCaps(timeoutMs = 5000): Promise<string[]> {
+    if (disposed) return Promise.reject(new Error('connection disposed'));
+    const known = getCaps();
+    if (known) return Promise.resolve(known);
+    return new Promise<string[]>((resolve, reject) => {
+      const done = () => { clearTimeout(timer); off(); };
+      const off = onCaps((caps) => { if (caps) { done(); resolve(caps); } });
+      const timer = setTimeout(() => { done(); reject(new Error('the server has not answered its login')); }, timeoutMs);
+    });
+  }
+
   let rpcTimeouts = 0;
 
   function forceDisconnect(reason?: string) {
     if (!ws) return;
     const socket = ws;
     ws = null;
+    emitCaps();
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -874,11 +911,12 @@ export function createConnection(): Connection {
     paneOutputListeners.clear();
     paneClosedListeners.clear();
     teamMessageListeners.clear();
+    capsListeners.clear();
     subRefcount.clear();
   }
 
   return {
-    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, getBuild, getCaps, url,
+    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, getBuild, getCaps, onCaps, whenCaps, url,
     setOnDisconnect,
     addPaneOutputListener, removePaneOutputListener,
     addPaneClosedListener, removePaneClosedListener,

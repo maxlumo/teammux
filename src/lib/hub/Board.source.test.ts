@@ -55,7 +55,7 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
     'one save carries the patch, assignee included, and asks for the hand-off only when it names one');
   assert.equal(save.split('boardSave(').length - 1, 1, 'and it is the only save in saveDraft');
   // Create-with-assignee is one request too.
-  const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('async function addNote'));
+  const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('/** Reassign:'));
   assert.match(create, /created = await boardSave\(ctx\.session, assignee \? \{ title, body, assignee, dispatch: true \} : \{ title, body \}\);/u,
     'the assignee is part of the create');
   assert.equal(create.split('boardSave(').length - 1, 1, 'one request, never create-then-assign');
@@ -65,18 +65,27 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   const closes = create.indexOf('creating = false;');
   assert.ok(closes > -1 && create.indexOf('busy = false;\n      return;') < closes,
     'only a FAILED create keeps the form for an honest retry');
-  // An older server (its login answer lacks `board_dispatch`) is refused
-  // BEFORE the write, in both entry points, and the pickers are disabled: a
-  // label nobody is told about must not read as a success (board #377 review
-  // P1-B).
-  assert.match(source, /const assignBlocked = \(\) => lacksCap\(guardOwner\.connection\.getCaps\?\.\(\), BOARD_DISPATCH\);/u, 'the one definition of "too old"');
-  assert.match(save, /if \(patch\.assignee && assignBlocked\(\)\) \{ err = t\('boardAssignOldServer'\); return; \}[\s\S]*busy = true;/u, 'the edit refuses before it writes');
-  assert.match(create, /if \(assignee && assignBlocked\(\)\) \{ err = t\('boardAssignOldServer'\); return; \}[\s\S]*busy = true;/u, 'the create refuses before it writes');
-  assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting \|\| assignBlocked\(\)\}/gu)].length, 2, 'both pickers are disabled on an old server');
-  // A hand-off that failed after the save landed is its own line, never a
-  // failed save: the create form is gone and the edit is rebased first.
-  assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);[\s\S]*err = `#\$\{created\.id\}: \$\{untold\}`;/u, 'the create reports it after closing the form AND after the reload, which clears the line');
-  assert.match(save, /if \(noteDirty \|\| untold\) \{ await refetchSel\(ctx\); if \(untold && owns\(ctx\)\) err = untold; return; \}/u, 'the edit rebases, then reports it');
+  // The capability gate is ONE: `ws-api.boardSave` refuses an old server and
+  // waits for an unanswered login, before anything is sent (board #377 review
+  // P1-B). The page only SHOWS it — observed per connection so a reconnect to
+  // a server with other capabilities re-renders — and maps the two refusals
+  // into its own words; it has no second check on the submit path.
+  assert.match(source, /let loginCaps = \$state<string\[\] \| undefined>\(guardOwner\.connection\.getCaps\?\.\(\)\);/u, 'the capabilities are state');
+  assert.match(source, /guardOwner\.connection\.onCaps\?\.\(\(caps: string\[\] \| undefined\) => \{ loginCaps = caps; \}\)/u, 'and follow the connection');
+  assert.match(source, /const assignBlocked = \(\) => lacksCap\(loginCaps, BOARD_DISPATCH\);/u, 'the one definition of "known to be too old"');
+  assert.ok(!save.includes('assignBlocked') && !create.includes('assignBlocked'), 'no second gate on the submit path');
+  assert.match(save, /catch \(e\) \{ if \(owns\(ctx\)\) err = saveError\(e\); \}/u, 'a refusal keeps the draft and says why');
+  assert.match(create, /if \(owns\(ctx\)\) err = saveError\(e\);/u, 'and keeps the create form');
+  assert.match(source, /if \(code === 'server_too_old'\) return t\('boardAssignOldServer'\);[\s\S]*if \(code === 'login_pending'\) return t\('boardAssignConnecting'\);/u);
+  assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting \|\| assignBlocked\(\)\}/gu)].length, 2, 'both pickers are disabled on a server known to be old');
+  // A hand-off that was not delivered (failed OR offline) is its own line after
+  // the save landed, never a failed save: the create form is gone and the edit
+  // is rebased first, and the line carries a real action — Reassign sends the
+  // same assignee again with no change to the draft.
+  assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);[\s\S]*err = `#\$\{created\.id\}: \$\{untold\}`;[\s\S]*resend = \{ id: created\.id, name: assignee, line: err \};/u, 'the create reports it after closing the form AND after the reload, which clears the line');
+  assert.match(source, /answer\?\.dispatch === 'failed'[\s\S]*answer\?\.dispatch === 'offline'/u, 'failed and offline both speak');
+  assert.match(source, /async function reassign\(\) \{[\s\S]*await boardSave\(ctx\.session, \{ id: again\.id, assignee: again\.name, dispatch: true \}\);/u, 'Reassign is the flagged save with no draft change');
+  assert.match(source, /\{#if resend && err === resend\.line\}<CommandButton variant="secondary" label=\{t\('boardReassign'\)\} disabled=\{busy\} onclick=\{reassign\} \/>\{\/if\}/u, 'beside its own line only');
 });
 
 test('the layout hierarchy: one compact title line, the body visibly bigger (board #11)', () => {
@@ -964,7 +973,7 @@ test('every submit acts on its frozen context, never the live cur/sel; the page 
   }
   assert.match(source, /const owns = \(c: OpCtx\) => alive && c\.gen === opGen;/u);
   assert.match(source, /registerLeaveGuard\(\{\s*runtime: guardOwner,\s*page: guardPage,/u, 'the #315 walk reaches the Board, as its owner s guard');
-  assert.match(source, /if \(noteDirty \|\| untold\) \{ await refetchSel\(ctx\); if \(untold && owns\(ctx\)\) err = untold; return; \}/u, 'a body save keeps a note draft on screen, and so does a hand-off that failed');
+  assert.match(source, /if \(noteDirty \|\| untold\) \{\s*await refetchSel\(ctx\);[\s\S]*?resend = [^;]*;\s*\}\s*return;\s*\}/u, 'a body save keeps a note draft on screen, and so does a hand-off that was not delivered');
 });
 
 test('the whole draft is locked while it is submitted, and a saved draft adopts what was sent (board #329 review)', () => {

@@ -14,6 +14,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
+import { BOARD_DISPATCH, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -89,6 +90,8 @@ export interface BoardSaveAnswer {
   id: number;
   dispatch?: 'sent' | 'offline' | 'failed';
   dispatch_error?: string;
+  /** `hub_post`'s own rows (#347): which names no pane received, and why. */
+  offline?: { name: string; why: string }[];
 }
 
 export interface BoardIssue {
@@ -365,8 +368,15 @@ export function createWsApi(connection: Connection) {
     call<BoardIssue>('hub_board_get', { session, id });
   /** Create (no id) or patch (id + only the fields to change). `who` records the
    * actor; the UI always says 'human'. */
-  const boardSave = (session: string, fields: { id?: number; title?: string; body?: string; status?: string; assignee?: string; dispatch?: boolean }) =>
-    call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
+  const boardSave = async (session: string, fields: { id?: number; title?: string; body?: string; status?: string; assignee?: string; dispatch?: boolean }) => {
+    // A save that asks the server to hand the issue over (board #377) is the
+    // ONE write that needs `board_dispatch`: an older server stores the label
+    // and ignores the flag, which reads as a success nobody is told about.
+    // The gate lives here, on the write path, bound to the socket that will
+    // carry the call; the page only mirrors it for display.
+    if (fields.dispatch) await requireCap(connection, BOARD_DISPATCH);
+    return call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
+  };
   const boardNote = (session: string, id: number, body: string) =>
     call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human' });
   const boardDelete = (session: string, id: number) =>

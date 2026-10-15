@@ -642,3 +642,73 @@ test('the capabilities a server announces at login are read per connection; none
   modern.conn.disconnect();
   assert.equal(modern.conn.getCaps(), undefined, 'a closed socket says nothing about a server');
 });
+
+// ── Board #377 review, P1-B residual: a save that asks the server to hand the
+// issue over is gated ONCE, on the write path, against the CURRENT socket.
+const methodsSent = (socket: InstanceType<typeof MockWebSocket>) =>
+  socket.sent.map((frame) => { try { return JSON.parse(String(frame)).method as string | undefined; } catch { return undefined; } });
+const login = (socket: InstanceType<typeof MockWebSocket>, caps?: string[]) =>
+  socket.message({ result: { authenticated: true, machine_id: 'machine-a', hostname: 'alpha', ...(caps ? { caps } : {}) } });
+const ask = { title: 'T', assignee: 'alice', dispatch: true };
+
+test('a flagged board save waits for the login answer and sends nothing before it (board #377)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const api = createWsApi(conn);
+  const dial = conn.connect(A_URL, 'tok');
+  dial.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  assert.equal(conn.getCaps(), undefined, 'the login has not answered');
+
+  const save = api.boardSave('s', ask);
+  save.catch(() => {});
+  await settle();
+  assert.ok(!methodsSent(socket).includes('hub_board_save'), `held: nothing is written before the login answers (${methodsSent(socket)})`);
+
+  login(socket, ['board_dispatch']);
+  await dial;
+  await settle();
+  assert.equal(methodsSent(socket).filter((m) => m === 'hub_board_save').length, 1, 'and exactly one save goes once it has');
+  const frame = JSON.parse(String(socket.sent.find((f) => JSON.parse(String(f)).method === 'hub_board_save')));
+  assert.equal(frame.params.dispatch, true);
+  socket.message({ id: frame.id, result: { ok: true, id: 3, dispatch: 'sent' } });
+  assert.deepEqual(await save, { ok: true, id: 3, dispatch: 'sent' });
+});
+
+test('after a reconnect to a server without board_dispatch a flagged save is refused unsent, and a plain edit still goes (board #377)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const api = createWsApi(conn);
+  const seen: (string[] | undefined)[] = [];
+  conn.onCaps((caps) => seen.push(caps));
+
+  const first = conn.connect(A_URL, 'tok');
+  MockWebSocket.instances.at(-1)!.readyState = MockWebSocket.OPEN;
+  MockWebSocket.instances.at(-1)!.message({ server_nonce: '00'.repeat(16) });
+  login(MockWebSocket.instances.at(-1)!, ['board_dispatch']);
+  await first;
+  assert.deepEqual(conn.getCaps(), ['board_dispatch']);
+
+  // The same Connection is redialled to an OLDER server: no caps in its login.
+  const second = conn.connect(A_URL, 'tok');
+  second.catch(() => {});
+  const old = MockWebSocket.instances.at(-1)!;
+  old.readyState = MockWebSocket.OPEN;
+  old.message({ server_nonce: '11'.repeat(16) });
+  assert.equal(conn.getCaps(), undefined, 'the new socket has not answered: the old answer is not its');
+  login(old);
+  await second;
+  assert.deepEqual(conn.getCaps(), [], 'answered, and without it');
+  assert.deepEqual(seen, [['board_dispatch'], undefined, []], 'modern, then NOTHING while the new socket is unanswered, then old: observers see every step');
+
+  await assert.rejects(api.boardSave('s', ask), (e: any) => e.code === 'server_too_old' && /Update the server/.test(e.message));
+  assert.ok(!methodsSent(old).includes('hub_board_save'), 'refused BEFORE anything was sent');
+
+  // A save that asks for no hand-off is not gated: an old server can store it.
+  const plain = api.boardSave('s', { id: 1, title: 'Just a rename' });
+  plain.catch(() => {});
+  await settle();
+  assert.equal(methodsSent(old).filter((m) => m === 'hub_board_save').length, 1, 'ordinary edits keep working against any server');
+});

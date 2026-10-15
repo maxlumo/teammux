@@ -10,6 +10,7 @@ const counts = { todo: 1, doing: 0, review: 0, done: 0, total: 1 };
 function rpc(extra: Record<string, (...args: any[]) => unknown>) {
   return {
     getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
+    onCaps: () => undefined,
     projectList: async () => ({ projects: [{ project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true }] }),
     hubRooms: async () => ({ rooms: {} }),
     boardCounts: async () => ({ counts: { fixture: counts } }),
@@ -99,6 +100,7 @@ test('a late Board deletion cannot close a newer visit to the same room (#167)',
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
       getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
+      onCaps: () => undefined,
       projectList: async () => ({ projects: ['fixture', 'other'].map(session => ({
         project: { id: session, name: session, session }, live: true,
       })) }),
@@ -264,6 +266,7 @@ async function landingBoard(context: any, opts: { failSave?: boolean } = {}) {
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
       getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
+      onCaps: () => undefined,
       projectList: async () => ({ projects: [
         { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
         { project: { id: 'other', session: 'other', name: 'Other' }, live: true },
@@ -382,6 +385,7 @@ async function realLanding(context: any) {
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
       getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
+      onCaps: () => undefined,
       projectList: async () => ({ projects: [
         { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
         { project: { id: 'other', session: 'other', name: 'Other' }, live: true },

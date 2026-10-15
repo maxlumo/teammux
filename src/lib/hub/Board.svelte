@@ -54,17 +54,45 @@
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
   const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
-  /** Is this server KNOWN to be too old to hand an assignment over (board
-   * #377)? Its login answer lacks `board_dispatch`. An unanswered question (no
-   * authenticated socket yet) is not a no. The picker is disabled and the
-   * save is not sent: an older server would store a label no agent is told
-   * about, and the page would call that a success. */
-  const assignBlocked = () => lacksCap(guardOwner.connection.getCaps?.(), BOARD_DISPATCH);
-  /** The line a save's answer owes the person when the assignee was NOT told
-   * (board #377 review P1-A): the issue is saved either way — that is why this
-   * is a line of its own and not a failure of the save. */
-  const dispatchLine = (answer: { dispatch?: string; dispatch_error?: string } | null | undefined, name: string) =>
-    answer?.dispatch === 'failed' ? t('boardDispatchFailed').replace('{name}', name).replace('{error}', answer.dispatch_error ?? '') : '';
+  /** The capabilities of THIS server's current authenticated socket (board
+   * #377): `undefined` while its login has not answered (or while it is being
+   * redialled), `[]` for an older server that announced none. Observed, not
+   * read once, so a reconnect to a server with other capabilities re-renders
+   * the pickers and their note. */
+  let loginCaps = $state<string[] | undefined>(guardOwner.connection.getCaps?.());
+  $effect(() => {
+    loginCaps = guardOwner.connection.getCaps?.();
+    const off = guardOwner.connection.onCaps?.((caps: string[] | undefined) => { loginCaps = caps; });
+    return () => { if (typeof off === 'function') off(); };
+  });
+  /** Is this server KNOWN to be too old to hand an assignment over? Its login
+   * answered without `board_dispatch`. This only SHOWS it (a disabled picker
+   * and why): the refusal itself is the write path's, in `ws-api.boardSave`,
+   * bound to the socket that carries the call. An unanswered login is not a
+   * no here either — the save waits for it there. */
+  const assignBlocked = () => lacksCap(loginCaps, BOARD_DISPATCH);
+  /** Why a write did not go, in this page's words: the two gate refusals
+   * (board #377) have their own copy; anything else is the server's message. */
+  const saveError = (e: unknown) => {
+    const code = (e as { code?: string } | null)?.code;
+    if (code === 'server_too_old') return t('boardAssignOldServer');
+    if (code === 'login_pending') return t('boardAssignConnecting');
+    return String((e as Error)?.message ?? e);
+  };
+  /** The line a save's answer owes the person when the assignee was NOT
+   * reached (board #377 review P1-A): `failed` (the telling went wrong) and
+   * `offline` (nothing was delivered: stopped, not this project's agent, or
+   * tmux could not be asked). The issue is saved either way — that is why
+   * this is a line of its own and not a failure of the save. */
+  const dispatchLine = (answer: { dispatch?: string; dispatch_error?: string; offline?: { why?: string }[] } | null | undefined, name: string) => {
+    if (answer?.dispatch === 'failed') return t('boardDispatchFailed').replace('{name}', name).replace('{error}', answer.dispatch_error ?? '');
+    if (answer?.dispatch === 'offline') return t('boardDispatchOffline').replace('{name}', name).replace('{why}', answer.dispatch_error ?? answer.offline?.[0]?.why ?? '');
+    return '';
+  };
+  /** The unreached assignee behind the line on screen, so the person has a
+   * real action: Reassign sends the same assignee again. Shown only while its
+   * own line is (`line`), never beside an unrelated error. */
+  let resend = $state<{ id: number; name: string; line: string } | null>(null);
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
    * for the Board family (`hub-union.svelte.ts` createBoardUnion) and the
@@ -663,13 +691,13 @@
     const saved = { ...draft, body: bodyStage.body(draft.body) };
     const patch = draftPatch(saved, draftBase);
     if (!patch) return;
-    // Refused BEFORE anything is written: this server cannot tell the agent.
-    if (patch.assignee && assignBlocked()) { err = t('boardAssignOldServer'); return; }
     busy = true; submitting = true;
     try {
       // ONE save carries every changed field, the assignee included, and asks
       // the server to hand the issue over (board #377): a change confirmed by
-      // the ✓ briefs the agent exactly like assign-at-birth does.
+      // the ✓ briefs the agent exactly like assign-at-birth does. A server too
+      // old for that (or whose login has not answered) is the write path's to
+      // refuse or hold, before anything is sent — the catch keeps the draft.
       const answer = await boardSave(ctx.session, patch.assignee ? { id, ...patch, dispatch: true } : { id, ...patch });
       const untold = dispatchLine(answer, patch.assignee ?? '');
       if (!owns(ctx)) return;
@@ -685,12 +713,16 @@
       // detail stays, rebased on the saved body, with the note as it was.
       // The edit IS saved, so the draft above is already rebased on it; a
       // hand-off that failed keeps the detail open with its own line.
-      if (noteDirty || untold) { await refetchSel(ctx); if (untold && owns(ctx)) err = untold; return; }
+      if (noteDirty || untold) {
+        await refetchSel(ctx);
+        if (untold && owns(ctx)) { err = `#${id}: ${untold}`; resend = { id, name: patch.assignee ?? '', line: err }; }
+        return;
+      }
       // A FAILED save takes the catch instead — the detail stays open with
       // the error and the typed draft (createIssue's rule).
       sel = null;
       await load();
-    } catch (e) { if (owns(ctx)) err = String((e as Error)?.message ?? e); }
+    } catch (e) { if (owns(ctx)) err = saveError(e); }
     finally { busy = false; submitting = false; }
   }
   async function createIssue() {
@@ -701,8 +733,6 @@
     const title = nTitle.trim();
     const body = createStage.body(nBody).trim(); // the one materialized body
     const assignee = nAssignee;
-    // Refused BEFORE anything is written: this server cannot tell the agent.
-    if (assignee && assignBlocked()) { err = t('boardAssignOldServer'); return; }
     busy = true; submitting = true;
     let created: { id: number; dispatch?: string; dispatch_error?: string };
     try {
@@ -710,8 +740,9 @@
       // and hands it over (board #11, #377).
       created = await boardSave(ctx.session, assignee ? { title, body, assignee, dispatch: true } : { title, body });
     } catch (e) {
-      // The CREATE failed: the form stays, retry is honest.
-      if (owns(ctx)) err = String((e as Error)?.message ?? e);
+      // The CREATE failed (or was refused before it was sent): the form stays,
+      // retry is honest.
+      if (owns(ctx)) err = saveError(e);
       busy = false; submitting = false;
       return;
     }
@@ -722,8 +753,26 @@
     // A hand-off that failed is reported; the issue is saved and can be
     // assigned again from its detail. After the reload, which clears `err`.
     const untold = dispatchLine(created, assignee);
-    if (untold && alive && cur === ctx.session) err = `#${created.id}: ${untold}`;
+    if (untold && alive && cur === ctx.session) { err = `#${created.id}: ${untold}`; resend = { id: created.id, name: assignee, line: err }; }
     busy = false; submitting = false;
+  }
+  /** Reassign: send the hand-off again to the SAME assignee, with no change to
+   * the draft (board #377). The save is the flagged one `tmm board assign`
+   * makes, which the server answers by telling the agent again. */
+  async function reassign() {
+    const again = resend;
+    if (!again || busy) return;
+    const ctx = freeze();
+    busy = true; submitting = true;
+    try {
+      const answer = await boardSave(ctx.session, { id: again.id, assignee: again.name, dispatch: true });
+      if (!owns(ctx)) return;
+      resend = null;
+      await load();
+      const untold = dispatchLine(answer, again.name);
+      if (untold && owns(ctx)) { err = `#${again.id}: ${untold}`; resend = { ...again, line: err }; }
+    } catch (e) { if (owns(ctx)) err = saveError(e); }
+    finally { busy = false; submitting = false; }
   }
   async function addNote() {
     if (!sel || !noteStage.sendable(noteText) || busy || blocked(noteStage)) return;
@@ -1305,7 +1354,11 @@
       <div class="empty">{t('boardEmpty')}</div>
     {/if}
   {/if}
-  {#if err}<div class="err appear">{err}</div>{/if}
+  {#if err}
+    <div class="err appear">{err}
+      {#if resend && err === resend.line}<CommandButton variant="secondary" label={t('boardReassign')} disabled={busy} onclick={reassign} />{/if}
+    </div>
+  {/if}
   </div>
   {#if visible && sel && acts.error}
     <div class="note-feedback pop-layer" use:feedbackPosition={{ trigger: copyTrigger, bounds: notesEl, scrollport: detailEl }}>
