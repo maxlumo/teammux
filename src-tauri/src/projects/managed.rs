@@ -54,6 +54,9 @@ pub fn agent_remove(session: &str, agent: &str) -> Result<Value, String> {
         return Err(format!("'{agent}' is not an agent of project '{}'", project.name));
     }
     let slot_removed = with_store(|store| store.delete_slot(&project.id, agent))?;
+    // The identity is gone for good: so are its accepted person-needed paints
+    // (board #362 c). A stop or a restart keeps them; only a remove forgets.
+    with_store(|store| store.forget_person_paints(session, agent))?;
     // The v3 workspace entry (a symlink into the home, board #207) goes with it.
     crate::backends::kiro::remove_workspace_entry(std::path::Path::new(&project.path), agent);
     let home_removed = home.is_some_and(|h| std::fs::remove_dir_all(h).is_ok());
@@ -233,6 +236,58 @@ mod tests {
         assert!(agent_remove(&session, "nope").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #362 c, the cleanup of accepted person-needed paints (the
+    /// orchestrator's ruling on accepted-once, with the reviewer's boundary):
+    /// they are forgotten ONLY when the identity is explicitly removed. A
+    /// restart of the gateway, a `retain_windows` pass with the window
+    /// briefly missing, or a stop or restart of the agent keep them; a remove
+    /// forgets that agent's alone, not another agent's whose name starts with
+    /// the same letters; a session rename carries them; deleting the project
+    /// forgets the rest.
+    #[test]
+    fn accepted_paints_are_forgotten_only_when_their_identity_is_removed() {
+        use crate::projects::telemetry as tm;
+        use_test_store();
+        let dir = std::env::temp_dir().join(format!("tmm-rmpaint-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let made = create(&dir.to_string_lossy(), Some("rmpaint"), None, None).unwrap();
+        let id = made["id"].as_str().unwrap().to_string();
+        let session = made["session"].as_str().unwrap().to_string();
+        for name in ["dev", "dev-2"] {
+            let home = dir.join(".tmm").join("agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), "{}").unwrap();
+        }
+        let sig = "auth_expired|23a04597-c6d8-4439-954f-2216f9c7d687";
+        let set = |s: &str, w: &str| with_store(|st| st.meta_set(&store::person_paint_key(s, w, sig), "42")).unwrap();
+        let has = |s: &str, w: &str| tm::accepted_paint(s, w, sig).unwrap() == Some(42);
+        set(&session, "dev");
+        set(&session, "dev-2");
+        // A gateway restart, a window briefly missing from tmux, a stop or a
+        // restart of the agent: none of them is a remove.
+        tm::forget_process_state(&session);
+        tm::retain_windows(&session, &[]);
+        recovery_retain(&session);
+        assert!(has(&session, "dev") && has(&session, "dev-2"), "kept through restart, absence and stop");
+        // The remove forgets dev's, never dev-2's.
+        agent_remove(&session, "dev").unwrap();
+        assert!(!has(&session, "dev"), "removed: forgotten");
+        assert!(has(&session, "dev-2"), "another agent's is kept");
+        // A rename carries the rest; a project delete forgets them.
+        let renamed = format!("{session}-r");
+        with_store(|st| st.set_session(&id, &renamed, &session)).unwrap();
+        assert!(!has(&session, "dev-2") && has(&renamed, "dev-2"), "moved with the session");
+        with_store(|st| st.delete_project(&id)).unwrap();
+        assert!(!has(&renamed, "dev-2"), "the project's identities are gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The recovery tracker's own housekeeping for a window set (a window
+    /// gone from one listing), as the capture tick runs it.
+    fn recovery_retain(session: &str) {
+        crate::projects::recovery::retain_windows_for_test(session, &[]);
     }
 
     /// `agent_remove("../..")` used to resolve `<ws>/.tmm/agents/../..` — the

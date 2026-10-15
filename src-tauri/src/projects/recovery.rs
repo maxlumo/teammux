@@ -440,6 +440,12 @@ impl Tracker {
     }
 }
 
+/// Test-only: the tracker's window housekeeping, as `check_once` runs it.
+#[cfg(test)]
+pub(crate) fn retain_windows_for_test(session: &str, live: &[String]) {
+    tracker().lock().unwrap().retain_windows(session, live);
+}
+
 fn tracker() -> &'static Mutex<Tracker> {
     static T: OnceLock<Mutex<Tracker>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(Tracker::default()))
@@ -1931,7 +1937,7 @@ mod tests {
             assert_ne!(after.detail, "auth_expired", "{what}");
             assert_eq!(rows(), ends, "{what}: no end written");
             assert_eq!(tm::held_rows(&session, "w").len(), 1, "{what}: the held line is not flushed by a stale observation");
-            assert_eq!(tm::accepted_paint(&session, "w").unwrap(), None, "{what}: the paint is not marked accepted");
+            assert_eq!(tm::accepted_paint(&session, "w", "auth_expired|x").unwrap(), None, "{what}: the paint is not marked accepted");
         }
         // Control: the same observation with no fact after it is accepted.
         let session = format!("p1a-ok-{}", uuid::Uuid::new_v4());
@@ -1939,7 +1945,7 @@ mod tests {
         let seen = tm::turn_version(&session, "w");
         assert!(commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()));
         assert_eq!(tm::derive(&session, "w", 0).detail, "auth_expired");
-        assert_eq!(tm::accepted_paint(&session, "w").unwrap().map(|(_, sig)| sig).as_deref(), Some("auth_expired|x"), "accepted: marked");
+        assert!(tm::accepted_paint(&session, "w", "auth_expired|x").unwrap().is_some(), "accepted: marked");
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:10] human: @w next");
         assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once: the newer turn is not ended");
         assert_eq!(tm::derive(&session, "w", 0).state, "running");

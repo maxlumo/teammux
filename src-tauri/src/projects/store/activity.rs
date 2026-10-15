@@ -105,6 +105,25 @@ impl CommandLife {
     }
 }
 
+/// The `meta` key of the durable fact "person-needed paint `sig` (its
+/// `<shape>|<Request ID>`) of `window` was accepted" (board #362 c), whose
+/// value is the activity row id of the exact end it belongs to. ONE fact
+/// per paint, kept for good (orchestrator's ruling on accepted-once): no
+/// set with a capacity, because a paint evicted from it could end a later
+/// turn when it is the newest on the screen again. Sessions and agent names
+/// hold no ':' (`slug`, `agents::valid_name`).
+pub fn person_paint_key(session: &str, window: &str, sig: &str) -> String {
+    format!("{}{sig}", person_paint_prefix(session, Some(window)))
+}
+
+/// The key prefix of every such fact of a session, or of one window in it.
+pub fn person_paint_prefix(session: &str, window: Option<&str>) -> String {
+    match window {
+        Some(w) => format!("person_paint:{session}:{w}:"),
+        None => format!("person_paint:{session}:"),
+    }
+}
+
 impl Store {
     /// Append one observed event. Called on every hook, so it stays a single
     /// INSERT and its failure is the caller's to ignore. Returns the row id:
@@ -225,13 +244,12 @@ impl Store {
 
     /// A turn end recorded from the SCREEN (board #362 c, review P1-E on
     /// f998b599) and, when the paint has a global identity, its acceptance
-    /// mark, in ONE transaction: the `notif failed` row (its `tool` the
-    /// detail), then `meta` `key` = `"<that row's id> <sig>"`. Both or
-    /// neither: a mark with no end would make a restart skip a turn that
-    /// never ended, and an end with no mark would let the same paint end a
-    /// later turn. The end's row id. Real hook telemetry stays fail-soft and
-    /// outside this.
-    pub fn insert_missed_end(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept: Option<(&str, &str)>) -> Result<i64, String> {
+    /// fact, in ONE transaction: the `notif failed` row (its `tool` the
+    /// detail), then `meta` `accept_key` = that row's id. Both or neither: a
+    /// fact with no end would make a restart skip a turn that never ended,
+    /// and an end with no fact would let the same paint end a later turn.
+    /// The end's row id. Real hook telemetry stays fail-soft and outside this.
+    pub fn insert_missed_end(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept_key: Option<&str>) -> Result<i64, String> {
         let tx = self.conn.transaction().map_err(|e| format!("missed end transaction: {e}"))?;
         tx.execute(
             "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
@@ -240,15 +258,29 @@ impl Store {
         )
         .map_err(|e| format!("insert missed end: {e}"))?;
         let row = tx.last_insert_rowid();
-        if let Some((key, sig)) = accept {
+        if let Some(key) = accept_key {
             tx.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
-                rusqlite::params![key, format!("{row} {sig}")],
+                rusqlite::params![key, row.to_string()],
             )
             .map_err(|e| format!("accept missed end: {e}"))?;
         }
         tx.commit().map_err(|e| format!("commit missed end: {e}"))?;
         Ok(row)
+    }
+
+    /// Forget the accepted person-needed paints of ONE agent's identity
+    /// (board #362, orchestrator's ruling on accepted-once): called only when
+    /// that identity is explicitly removed (`agent_remove`), never on a stop,
+    /// a restart or a window missing from one tmux listing. Another agent's
+    /// records, a name that merely starts with this one included, are kept.
+    pub fn forget_person_paints(&self, session: &str, window: &str) -> Result<usize, String> {
+        self.conn
+            .execute(
+                "DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1",
+                rusqlite::params![person_paint_prefix(session, Some(window))],
+            )
+            .map_err(|e| format!("forget person paints: {e}"))
     }
 
     /// The newest persisted TURN FACT of each kind, per window (board #249):

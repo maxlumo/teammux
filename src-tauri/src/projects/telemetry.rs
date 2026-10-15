@@ -1576,24 +1576,16 @@ pub enum Identity<'a> {
     Incident,
 }
 
-/// The `meta` key of the paint a window last accepted.
-fn paint_key(session: &str, window: &str) -> String {
-    format!("person_paint:{session}:{window}")
-}
-
-/// The paint `window` last accepted and the persisted row id of the end it
-/// belongs to, or `None` when there is none. One record per window, which
-/// ASSUMES an older paint does not come back to be the newest on the screen
-/// (a CLI paints downwards; not proven for every TUI). `Err` = unknown,
-/// including a value that exists but does not parse (review P2 on f998b599:
-/// it is not "absent", which would accept the paint again).
-pub fn accepted_paint(session: &str, window: &str) -> Result<Option<(i64, String)>, String> {
-    let Some(v) = super::with_store(|s| s.meta_get(&paint_key(session, window)))? else { return Ok(None) };
-    v.split_once(' ')
-        .and_then(|(row, sig)| Some((row.parse::<i64>().ok().filter(|r| *r > 0)?, sig.to_string())))
-        .filter(|(_, sig)| !sig.is_empty())
-        .map(Some)
-        .ok_or_else(|| format!("unreadable accepted paint {v:?}"))
+/// The end row the person-needed paint `sig` of `window` was accepted for,
+/// or `None` when it never was (board #362 c). Kept for GOOD, one fact per
+/// paint (`store::person_paint_key`; the orchestrator's ruling on
+/// accepted-once): a paint accepted once is never handled again, whatever
+/// came in between, so no assumption about what a CLI repaints is needed.
+/// `Err` = unknown, including a value that exists but does not parse
+/// (review P2 on f998b599: it is not "absent", which would accept it again).
+pub fn accepted_paint(session: &str, window: &str, sig: &str) -> Result<Option<i64>, String> {
+    let Some(v) = super::with_store(|s| s.meta_get(&super::store::person_paint_key(session, window, sig)))? else { return Ok(None) };
+    v.parse::<i64>().ok().filter(|r| *r > 0).map(Some).ok_or_else(|| format!("unreadable accepted paint {v:?}"))
 }
 
 /// The turn end the HOOKS missed, recorded from the screen (board #362 c,
@@ -1617,9 +1609,9 @@ pub fn accepted_paint(session: &str, window: &str) -> Result<Option<(i64, String
 /// with no lock held.
 ///
 /// Once is the observation's `Identity` (review P1-C, P1-D). A `Paint` is
-/// accepted durably for the EXACT end it belongs to, named by that end's
-/// persisted activity row id (`accepted_paint`: `<end row id> <sig>`), not
-/// its second (review P1-C residual: ends share seconds). An end this
+/// accepted durably, one fact per paint kept for good (`accepted_paint`),
+/// for the EXACT end it belongs to, named by that end's persisted activity
+/// row id, not its second (review P1-C residual: ends share seconds). An end this
 /// paint ENDS is written with its mark in one store transaction
 /// (`Store::insert_missed_end`, review P1-E), and memory, the command rows
 /// and the flush follow only its success; an end it is ATTACHED to is the
@@ -1655,20 +1647,20 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
         Missed::Unknown
     };
     if let Identity::Paint(sig) = identity {
-        match accepted_paint(session, window) {
+        match accepted_paint(session, window, sig) {
             Err(e) => return unknown("read", e),
             // Accepted for the EXACT end it belongs to, by that end's row id:
             // the same end, still current, gets its detail back (a restart
             // dropped it from memory); any other end, a newer one in the same
             // second included, is not this paint's (review P1-C).
-            Ok(Some((row, accepted))) if accepted == sig => {
+            Ok(Some(row)) => {
                 if !open && held.end_row == row {
                     with_rec(session, window, |r| r.person_end = (r.end_seq, detail.to_string()));
                     return Missed::Attached;
                 }
                 return Missed::Recorded;
             }
-            Ok(_) => {}
+            Ok(None) => {}
         }
     }
     if !open {
@@ -1682,7 +1674,7 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
             if held.end_row == 0 {
                 return unknown("bound", "the end has no persisted row".into());
             }
-            if let Err(e) = super::with_store(|s| s.meta_set(&paint_key(session, window), &format!("{} {sig}", held.end_row))) {
+            if let Err(e) = super::with_store(|s| s.meta_set(&super::store::person_paint_key(session, window, sig), &held.end_row.to_string())) {
                 return unknown("written", e);
             }
         }
@@ -1692,12 +1684,11 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
     // Ended: the end row and the acceptance mark in ONE store transaction
     // (review P1-E); memory, the command rows and the flush only after it.
     let ts_ms = ts * 1000 + now_ms() % 1000;
-    let key = paint_key(session, window);
-    let accept = match identity {
-        Identity::Paint(sig) => Some((key.as_str(), sig)),
+    let key = match identity {
+        Identity::Paint(sig) => Some(super::store::person_paint_key(session, window, sig)),
         Identity::Incident => None,
     };
-    let row = match super::with_store(|s| s.insert_missed_end(session, window, ts_ms, detail, accept)) {
+    let row = match super::with_store(|s| s.insert_missed_end(session, window, ts_ms, detail, key.as_deref())) {
         Ok(row) => row,
         Err(e) => return unknown("written", e),
     };
@@ -3326,6 +3317,61 @@ mod tests {
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
+    /// Board #362, the orchestrator's ruling on accepted-once: a paint with
+    /// a Request ID, once accepted, stays accepted whatever came in between.
+    /// X is accepted for turn A (ending it, or attached to A's hook end), a
+    /// newer paint Y for turn B, and X then comes back as the newest paint on
+    /// turn C, open or already ended by its own hook: X is Recorded, C keeps
+    /// its state and its own detail, no end is written, C's held line stays
+    /// held, before and after a restart. A paint never seen before (Z) is
+    /// still handled.
+    #[test]
+    fn an_accepted_paint_stays_accepted_whatever_came_in_between() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let x = Identity::Paint("auth_expired|23a04597-c6d8-4439-954f-2216f9c7d687");
+        let y = Identity::Paint("auth_expired|be7c7ada-a80d-4670-be53-11d245f535e7");
+        let z = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
+        for (x_how, c_ended) in [("Ended", false), ("Ended", true), ("Attached", false), ("Attached", true)] {
+            let what = format!("X {x_how}, C {}", if c_ended { "ended" } else { "open" });
+            let session = format!("once-{}", uuid::Uuid::new_v4());
+            let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif" && r.text == "failed").count();
+            let version = || turn_version(&session, "w1");
+            record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:50] lead: @w1 A");
+            if x_how == "Attached" {
+                record_interrupt(&session, "w1");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Attached, "{what}");
+            } else {
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Ended, "{what}");
+            }
+            record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:51] lead: @w1 B");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", y, version(), now()), Missed::Ended, "{what}: Y");
+            record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:52] lead: @w1 C");
+            record_held(&session, "w1", "[tmm chat 2026-10-16 01:52] human: @w1 held for C", 0, "m1").unwrap();
+            if c_ended {
+                record_notification_with(&session, "w1", "completed", now(), EndQuality::Said);
+            }
+            let before = (derive(&session, "w1", 0), ends(), held_rows(&session, "w1").len());
+            for when in ["before a restart", "after a restart"] {
+                if when == "after a restart" {
+                    simulate_restart(&session);
+                    recovery_mark(&session);
+                }
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Recorded, "{what}, {when}");
+                let st = derive(&session, "w1", 0);
+                assert_eq!((st.state.as_str(), st.detail.as_str()), (before.0.state.as_str(), before.0.detail.as_str()), "{what}, {when}: C untouched");
+                assert_ne!(st.detail, "auth_expired", "{what}, {when}: no old detail on C");
+                assert_eq!(ends(), before.1, "{what}, {when}: no extra end");
+                if !c_ended {
+                    assert_eq!(held_rows(&session, "w1").len(), before.2, "{what}, {when}: C's held line stays held");
+                }
+            }
+            // A paint never accepted is still handled.
+            assert!(matches!(record_missed_end(&session, "w1", "auth_expired", z, version(), now()), Missed::Ended | Missed::Attached), "{what}: Z");
+        }
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
     /// Board #362 review P1-E on f998b599: the synthetic end and its
     /// acceptance mark commit together. The meta table is writable but the
     /// end's INSERT is refused (a real failed write): Unknown, no mark left
@@ -3346,12 +3392,12 @@ mod tests {
             let guard = if refused == "activity" {
                 format!("BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'notif'")
             } else {
-                format!("BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1'")
+                format!("BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1:auth_expired|389cc17d-bf5d-409b-ba80-102270246c79'")
             };
             crate::projects::with_store(|s| s.exec_test_sql(&format!("CREATE TEMP TRIGGER p1e {guard} BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"))).unwrap();
             assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{refused} refused");
             crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER p1e;")).unwrap();
-            assert_eq!(accepted_paint(&session, "w1").unwrap(), None, "{refused} refused: no mark");
+            assert_eq!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").unwrap(), None, "{refused} refused: no mark");
             assert_eq!(ends(), 0, "{refused} refused: no end row");
             assert_eq!(derive(&session, "w1", 0).state, "running", "{refused} refused: nothing ended in memory");
             assert_eq!(held_rows(&session, "w1").len(), 1, "{refused} refused: not flushed as a success");
@@ -3373,9 +3419,9 @@ mod tests {
         let session = format!("p2p-{}", uuid::Uuid::new_v4());
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic go");
         let x = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
-        for bad in ["garbage", "0 auth_expired|x", "12 ", "-3 auth_expired|x"] {
-            crate::projects::with_store(|s| s.meta_set(&format!("person_paint:{session}:w1"), bad)).unwrap();
-            assert!(accepted_paint(&session, "w1").is_err(), "{bad:?}");
+        for bad in ["garbage", "0", "-3", "12 x", ""] {
+            crate::projects::with_store(|s| s.meta_set(&crate::projects::store::person_paint_key(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79"), bad)).unwrap();
+            assert!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").is_err(), "{bad:?}");
             assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{bad:?}");
             assert_eq!(derive(&session, "w1", 0).state, "running", "{bad:?}");
         }
@@ -3394,7 +3440,7 @@ mod tests {
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic go");
         record_held(&session, "w1", "[tmm chat 2026-10-15 12:33] human: @critic held", 0, "m1").unwrap();
         crate::projects::with_store(|s| s.exec_test_sql(&format!(
-            "CREATE TEMP TRIGGER p2u BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1'
+            "CREATE TEMP TRIGGER p2u BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1:auth_expired|389cc17d-bf5d-409b-ba80-102270246c79'
              BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
         ))).unwrap();
         let x = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
@@ -3402,7 +3448,7 @@ mod tests {
         crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER p2u;")).unwrap();
         assert_eq!(derive(&session, "w1", 0).state, "running", "nothing ended");
         assert_eq!(held_rows(&session, "w1").len(), 1, "nothing flushed");
-        assert_eq!(accepted_paint(&session, "w1").unwrap(), None, "nothing marked");
+        assert_eq!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").unwrap(), None, "nothing marked");
         assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Ended, "asked again, accepted");
         PERSIST_IN_TEST.with(|p| p.set(false));
     }

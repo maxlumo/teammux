@@ -244,6 +244,19 @@ impl Store {
             // lose them and two renames fire them into a room nobody reads.
             tx.execute("UPDATE wakes SET session = ?1 WHERE session = ?2", params![session, prev])
                 .map_err(|e| format!("rename wakes session: {e}"))?;
+            // The accepted person-needed paints (board #362 c) are kept for
+            // good, so they follow the rename too; a stale orphan at the free
+            // destination name is discarded first, as the Board's sequence is.
+            if session != prev {
+                let (to, from) = (super::person_paint_prefix(session, None), super::person_paint_prefix(prev, None));
+                tx.execute("DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1", params![to])
+                    .map_err(|e| format!("clear destination paint records: {e}"))?;
+                tx.execute(
+                    "UPDATE meta SET key = ?1 || substr(key, length(?2) + 1) WHERE substr(key, 1, length(?2)) = ?2",
+                    params![to, from],
+                )
+                .map_err(|e| format!("rename paint records: {e}"))?;
+            }
         }
         tx.commit().map_err(|e| format!("commit session rename: {e}"))?;
         Ok(n > 0)
@@ -358,6 +371,10 @@ impl Store {
             .map_err(|e| format!("delete project board: {e}"))?;
         tx.execute("DELETE FROM issue_sequences WHERE session = ?1", params![session])
             .map_err(|e| format!("delete project Board sequence: {e}"))?;
+        // Every agent identity of the project goes with it: its accepted
+        // person-needed paints too (board #362 c).
+        tx.execute("DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1", params![super::person_paint_prefix(&session, None)])
+            .map_err(|e| format!("delete project paint records: {e}"))?;
         let n = tx
             .execute("DELETE FROM projects WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
