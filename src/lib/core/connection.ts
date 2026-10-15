@@ -119,6 +119,13 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** The server's nonce, checked at the door: 16 bytes sent as 32 hex digits (wire.rs). A string
+ * of another length would be fed to the key derivation, whose salt holds exactly 16; anything
+ * else is not a nonce at all. null = not one, and the caller ends the attempt (board #393). */
+function parseServerNonce(raw: unknown): Uint8Array | null {
+  return typeof raw === 'string' && /^[0-9a-f]{32}$/i.test(raw) ? hexToBytes(raw) : null;
+}
+
 // E2E handshake versions. The server advertises the newest it speaks in its
 // `server_nonce` frame (`e2e: 2`); we ask for that one in our auth params and
 // fall back to v1 for a server that never mentions it. Mirrors
@@ -236,13 +243,11 @@ async function encryptMsg(text: string, cipher: Cipher | null): Promise<string |
   return new Uint8Array(ct);
 }
 
-// Decrypt an inbound binary ciphertext into the original JSON string.
-async function decryptMsg(buf: string | ArrayBuffer | Uint8Array, cipher: Cipher | null): Promise<string> {
-  if (!cipher) {
-    // Plain-token fallback: buf is already the decoded text.
-    return typeof buf === 'string' ? buf : new TextDecoder().decode(buf as ArrayBuffer);
-  }
-  // decryptMsg with a cipher is only ever called with binary frames.
+// Decrypt an inbound binary ciphertext into the original JSON string. It takes a cipher or it
+// is not called: there is NO plain fallback here (a null cipher used to return the frame's text
+// as if it were decrypted, which let a plain success frame pass for the sealed answer on the
+// encrypted path — board #393 review). The plain-token path never reaches this function.
+async function decryptMsg(buf: ArrayBuffer | Uint8Array, cipher: Cipher): Promise<string> {
   const ctBytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf as ArrayBuffer);
   const nonce = makeNonce(cipher.recvCounter++);
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, cipher.recvKey, ctBytes as BufferSource);
@@ -610,9 +615,13 @@ export function createConnection(): Connection {
         // even if the message is just a handshake / push / heartbeat.
         lastInboundAt = Date.now();
         const job = socket._recvQueue.then(() => handleMessage(event));
-        // A failed frame must not stall the chain; the handler already turned
-        // every failure it cares about into a disconnect or a dropped frame.
-        socket._recvQueue = job.catch(() => {});
+        // A failed frame must not stall the chain. DURING THE HANDSHAKE any error that escapes
+        // the handler — a malformed nonce, a key derivation that throws, a send on a socket
+        // that is not open — is a failure of THIS attempt and goes to its failDial, never
+        // swallowed (board #393 review: the dial then hung to its timeout, or a later frame was
+        // still read against a half-built session). After the login the handler has already
+        // turned every failure it cares about into a disconnect or a dropped frame.
+        socket._recvQueue = job.catch((error) => { if (!authed) failDial(error); });
       };
 
       async function handleMessage(event: MessageEvent) {
@@ -627,16 +636,21 @@ export function createConnection(): Connection {
           try { data = JSON.parse(event.data); } catch {}
         }
 
-        // Step 1: Receive server_nonce (always text)
-        if (!authed && !serverNonce && data?.server_nonce) {
-          serverNonce = hexToBytes(data.server_nonce);
+        // Step 1: the nonce. Until it has come, the ONLY acceptable frame is a valid one — a text
+        // frame whose `server_nonce` is 32 hex digits. A push, an RPC answer, a binary frame, a
+        // plain success or a malformed nonce is a protocol error: it ends the attempt, and
+        // nothing is derived, sent or dispatched on its account (board #393 review).
+        if (!authed && !serverNonce) {
+          const nonce = parseServerNonce(data?.server_nonce);
+          if (!nonce) { failDial(new Error('auth failed: the first frame was not a valid server nonce')); return; }
+          serverNonce = nonce;
           encrypted = !!crypto.subtle;
           if (encrypted) {
             // Encrypted auth. The server names the newest handshake it speaks;
             // an older server sends no `e2e` and gets the v1 derivation.
             const version = data.e2e === E2E_VERSION ? E2E_VERSION : 1;
             const clientNonce = crypto.getRandomValues(new Uint8Array(16));
-            const session = await buildSession(token, serverNonce, clientNonce, version);
+            const session = await buildSession(token, nonce, clientNonce, version);
             if (failed || ws !== socket) return;
             cipher = session.cipher;
             socket.send(JSON.stringify({
@@ -650,7 +664,7 @@ export function createConnection(): Connection {
           return;
         }
 
-        // Step 2: Auth response
+        // Step 2: Auth response — the only frame accepted until the login is done.
         if (!authed && serverNonce) {
           if (encrypted) {
             // Encrypted auth response — must arrive as a binary frame.
@@ -667,7 +681,10 @@ export function createConnection(): Connection {
               return;
             }
             try {
-              const pt = await decryptMsg(event.data, cipher!);
+              // An encrypted attempt decrypts with a real session key or it fails: there is no
+              // mode in which the frame is read as plain text (board #393 review).
+              if (!cipher) throw new Error('no session key');
+              const pt = await decryptMsg(event.data, cipher);
               if (failed || ws !== socket) return;
               const resp = JSON.parse(pt);
               if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; build = parseBuild(resp.result.build); caps = parseCaps(resp.result.caps); authSuccess(); return; }
@@ -682,13 +699,22 @@ export function createConnection(): Connection {
           }
         }
 
+        // The login is not complete: nothing below — a push, an RPC answer — reaches a
+        // listener. Both blocks above return for every frame while !authed; this line says so
+        // where the dispatch begins, so a branch added above that forgets its `return` cannot
+        // deliver a frame from a connection that has not proven anything (board #393 review).
+        if (!authed) return;
+
         // Post-auth: every encrypted message arrives as a binary frame and
         // gets decrypted + wire-decoded into JSON. Plain-token connections
         // continue to receive text frames (data is already parsed above).
         if (authed && encrypted) {
           if (!isBinary) return; // ignore unexpected text frames after encrypted auth
           let pt;
-          try { pt = await decryptMsg(event.data, cipher); }
+          try {
+            if (!cipher) throw new Error('no session key');
+            pt = await decryptMsg(event.data, cipher);
+          }
           catch {
             // The receive counter already advanced for this frame, so every
             // later frame would fail too: the session is dead from here on.

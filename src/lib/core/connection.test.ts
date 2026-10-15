@@ -14,7 +14,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FakeE2eServer, MockWebSocket, handshake, handshakePlain,
-  installDoubles, settle, trackTimers, until, withWebCrypto,
+  installDoubles, realCrypto, settle, trackTimers, until, withWebCrypto,
 } from './connection.fixture.ts';
 
 installDoubles();
@@ -1160,3 +1160,276 @@ test('the default reconnect budget dials ONCE on a real refusal, marks nothing u
   assert.ok(dropped.log.dials >= 2 && dropped.log.gaveUp === 0, `retried (${dropped.log.dials} dials)`);
   assert.ok(dropped.log.unreachable.length >= 1, 'and the address is remembered as unreachable');
 }));
+
+// ── The handshake is a gate, phase by phase (reviewer round 4 @651812da) ──
+//
+// Three ways in that round 3 left open, each on the real `createConnection`:
+//   · a nonce that is not 16 bytes made the key derivation throw INSIDE the receive chain, which
+//     swallowed it; the dial hung with `encrypted` set and no cipher, and `decryptMsg`'s plain
+//     fallback then read a plain binary success as the sealed answer;
+//   · a derivation or a send that failed anywhere in the handshake was swallowed the same way;
+//   · a push that arrived before the login reached the listeners.
+// The table of what every phase does with every kind of frame is in disconnect-grace.md; each
+// row names the test here that pins it.
+
+type Conn = ReturnType<typeof createConnection>;
+
+const EVIL_TEAM = { method: 'team_message', params: { message: { id: 1, text: 'EVIL' } } };
+/** A plain frame sent as a BINARY one: what a middlebox, or a downgrade, puts where the sealed answer belongs. */
+const plainBinary = (frame: unknown) => new TextEncoder().encode(JSON.stringify(frame)).buffer as ArrayBuffer;
+
+/** Everything a connection could be made to announce or deliver. */
+function watch(conn: Conn) {
+  const seen = { caps: [] as unknown[], pushes: [] as string[], team: [] as unknown[] };
+  conn.onCaps((caps) => seen.caps.push(caps));
+  conn.addPaneOutputListener('evil:0.0', (_target, content) => seen.pushes.push(String(content)));
+  conn.addTeamMessageListener((message) => seen.team.push(message));
+  return seen;
+}
+
+/** What must still be true of a connection whose attempt has failed, however many frames came after. */
+function assertGateHeld(conn: Conn, seen: ReturnType<typeof watch>, socket: MockWebSocket, why: string) {
+  assertNothingTookHold(conn, seen, socket, why);
+  assert.deepEqual(seen.team, [], `${why}: no team message was delivered`);
+}
+
+/** The frames that logged a connection in or reached a listener before round 4. */
+function sendEvilTail(socket: MockWebSocket) {
+  socket.binary(plainBinary(EVIL_SUCCESS));   // the hole: a plain binary success where the sealed answer belongs
+  socket.message(EVIL_SUCCESS);
+  socket.message(EVIL_PUSH);
+  socket.binary(plainBinary(EVIL_PUSH));
+  socket.message(EVIL_TEAM);
+}
+
+/** A dial with a short timer, so a mutant that leaves it hanging fails in 300 ms with the wrong reason, not after 15 s. */
+function dialOpen(conn: Conn, url: string, token: string, open = true) {
+  const dialing = conn.connect(url, token, 300);
+  dialing.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  if (open) socket.readyState = MockWebSocket.OPEN;
+  return { dialing, socket };
+}
+
+const rejection = (dialing: Promise<unknown>) => dialing.then(() => null, (e: unknown) => e) as Promise<(Error & { code?: number }) | null>;
+
+const inMode = <T>(mode: 'encrypted' | 'plain-token', fn: () => Promise<T>) => (mode === 'encrypted' ? withWebCrypto(fn) : fn());
+
+/** A normal handshake on the same object, after the failure: the failure left nothing behind. */
+async function freshHandshakeWorks(conn: Conn, mode: 'encrypted' | 'plain-token', why: string) {
+  if (mode === 'encrypted') await handshake(conn, new FakeE2eServer('tok-ok', 2, 'machine-ok', 'ok'), 'ws://fresh.test/ws', 'tok-ok');
+  else await handshakePlain(conn, 'ws://fresh.test/ws', 'tok-ok', 'machine-ok');
+  assert.equal(conn.getMachineId(), 'machine-ok', `${why}: a fresh handshake still succeeds`);
+  assert.equal(conn.isConnected(), true, `${why}: and the connection is up`);
+}
+
+const BAD_NONCES: Array<[string, unknown]> = [
+  ['33 bytes (66 hex digits)', 'ab'.repeat(33)],
+  ['15 bytes (30 hex digits)', 'ab'.repeat(15)],
+  ['an odd number of digits', 'a'.repeat(31)],
+  ['not hex', 'zz'.repeat(16)],
+  ['a number', 12345],
+  ['empty', ''],
+  ['null', null],
+  ['an object', {}],
+];
+
+for (const mode of ['encrypted', 'plain-token'] as const) {
+  test(`a malformed server nonce ends the attempt at the door: nothing is derived or sent, a plain success and a push (queued or late) change nothing, a fresh handshake works (${mode}, #393 round 4)`, (t) => inMode(mode, async () => {
+    for (const queued of [true, false]) {
+      for (const [what, nonce] of BAD_NONCES) {
+        const why = `${mode}: nonce is ${what}, then the tail ${queued ? 'queued behind it' : 'arriving later'}`;
+        const conn = createConnection();
+        t.after(() => conn.dispose());
+        const seen = watch(conn);
+        const { dialing, socket } = dialOpen(conn, 'ws://bad-nonce.test/ws', 'tok');
+        socket.message({ server_nonce: nonce, e2e: 2 });
+        if (queued) sendEvilTail(socket);
+        const error = await rejection(dialing);
+        assert.ok(error, `${why}: the login did not resolve`);
+        assert.match(error.message, /not a valid server nonce/u, `${why}: refused for what it is, not left to time out`);
+        assert.equal(isAuthRefusal(error), false, `${why}: a protocol error, not a bad token`);
+        if (!queued) sendEvilTail(socket);
+        await settle(30);
+        assert.equal(socket.sent.length, 0, `${why}: nothing was derived or sent — not the token either`);
+        assertGateHeld(conn, seen, socket, why);
+        await freshHandshakeWorks(conn, mode, why);
+        assert.deepEqual(seen.pushes, [], `${why}: and the old socket’s frames still reached nobody`);
+      }
+    }
+  }));
+}
+
+test('a valid nonce whose key derivation FAILS ends the attempt with that error: nothing is sent, a plain binary success and a push (queued or late) change nothing, a fresh handshake works (#393 round 4)', (t) => withWebCrypto(async () => {
+  const broken = { subtle: { importKey: async () => { throw new Error('forced derivation failure'); } }, getRandomValues: (a: Uint8Array) => realCrypto.getRandomValues(a) };
+  for (const queued of [true, false]) {
+    const why = `derivation fails, then the tail ${queued ? 'queued behind it' : 'arriving later'}`;
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const seen = watch(conn);
+    const { dialing, socket } = dialOpen(conn, 'ws://derive-fails.test/ws', 'tok');
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: broken });
+    let error: Awaited<ReturnType<typeof rejection>>;
+    try {
+      socket.message(new FakeE2eServer('tok', 2, 'm', 'h').nonceFrame());
+      if (queued) sendEvilTail(socket);
+      error = await rejection(dialing);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { configurable: true, value: realCrypto });
+    }
+    assert.ok(error, `${why}: the login did not resolve`);
+    assert.match(error.message, /forced derivation failure/u, `${why}: the dial failed with the derivation’s own error at once, not by timing out`);
+    if (!queued) sendEvilTail(socket);
+    await settle(30);
+    assert.equal(socket.sent.length, 0, `${why}: no auth message went out`);
+    assertGateHeld(conn, seen, socket, why);
+    await freshHandshakeWorks(conn, 'encrypted', why);
+  }
+}));
+
+for (const mode of ['encrypted', 'plain-token'] as const) {
+  test(`a send that fails during the handshake ends THAT attempt with its error, and what follows changes nothing (${mode}, #393 round 4)`, (t) => inMode(mode, async () => {
+    for (const queued of [true, false]) {
+      const why = `${mode}: the auth message cannot be sent, then the tail ${queued ? 'queued behind it' : 'arriving later'}`;
+      const conn = createConnection();
+      t.after(() => conn.dispose());
+      const seen = watch(conn);
+      // Left CONNECTING: the double's send() throws "socket is not open", as a real one does.
+      const { dialing, socket } = dialOpen(conn, 'ws://send-fails.test/ws', 'tok', false);
+      socket.message(new FakeE2eServer('tok', 2, 'm', 'h').nonceFrame());
+      if (queued) sendEvilTail(socket);
+      const error = await rejection(dialing);
+      assert.ok(error, `${why}: the login did not resolve`);
+      assert.match(error.message, /not open/u, `${why}: the send’s own error, at once, not a timeout`);
+      if (!queued) sendEvilTail(socket);
+      await settle(30);
+      assertGateHeld(conn, seen, socket, why);
+      await freshHandshakeWorks(conn, mode, why);
+    }
+  }));
+}
+
+const BEFORE_THE_NONCE: Array<[string, (socket: MockWebSocket) => void]> = [
+  ['a pane push', (s) => s.message(EVIL_PUSH)],
+  ['a team message', (s) => s.message(EVIL_TEAM)],
+  ['an RPC answer', (s) => s.message({ id: 1, result: [] })],
+  ['a plain success', (s) => s.message(EVIL_SUCCESS)],
+  ['a plain binary success', (s) => s.binary(plainBinary(EVIL_SUCCESS))],
+  ['a plain binary push', (s) => s.binary(plainBinary(EVIL_PUSH))],
+  ['a text frame that is no JSON', (s) => s.onmessage?.({ data: 'not json {' })],
+  ['a frame with the version but no nonce', (s) => s.message({ e2e: 2 })],
+];
+
+for (const mode of ['encrypted', 'plain-token'] as const) {
+  test(`a frame BEFORE the nonce — a push, an answer, a success, garbage — ends the attempt: no listener, no login, even with a valid nonce queued behind it (${mode}, #393 round 4)`, (t) => inMode(mode, async () => {
+    for (const [what, send] of BEFORE_THE_NONCE) {
+      const why = `${mode}: ${what} as the first frame`;
+      const conn = createConnection();
+      t.after(() => conn.dispose());
+      const seen = watch(conn);
+      const { dialing, socket } = dialOpen(conn, 'ws://early.test/ws', 'tok');
+      send(socket);
+      socket.message(new FakeE2eServer('tok', 2, 'm', 'h').nonceFrame());   // the nonce arrives, too late to matter
+      const error = await rejection(dialing);
+      assert.ok(error, `${why}: the login did not resolve`);
+      assert.match(error.message, /not a valid server nonce/u, why);
+      assert.equal(isAuthRefusal(error), false, why);
+      await settle(30);
+      assert.equal(socket.sent.length, 0, `${why}: the queued nonce was not answered`);
+      assertGateHeld(conn, seen, socket, why);
+      await freshHandshakeWorks(conn, mode, why);
+    }
+  }));
+}
+
+test('while the auth answer is awaited a push is never dispatched: a sealed push, a sealed team message, a plain push end the attempt (#393 round 4)', (t) => withWebCrypto(async () => {
+  const frames: Array<[string, (server: InstanceType<typeof FakeE2eServer>, socket: MockWebSocket) => Promise<void>, RegExp]> = [
+    ['a SEALED push (the keys are right; it is not the answer)', async (server, socket) => socket.binary(await server.seal(JSON.stringify(EVIL_PUSH))), /^auth failed$/u],
+    ['a SEALED team message', async (server, socket) => socket.binary(await server.seal(JSON.stringify(EVIL_TEAM))), /^auth failed$/u],
+    ['a plain push', async (_server, socket) => socket.message(EVIL_PUSH), /expected binary auth response/u],
+  ];
+  for (const [what, send, expected] of frames) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const seen = watch(conn);
+    const server = new FakeE2eServer('the-right-token', 2, 'machine-r', 'right');
+    const { dialing, socket } = dialOpen(conn, 'ws://awaiting.test/ws', 'the-right-token');
+    socket.message(server.nonceFrame());
+    await until(() => socket.sent.length >= 1);
+    assert.equal(await server.accept(JSON.parse(socket.sent[0] as string)), true, 'the proof is right');
+    await send(server, socket);
+    const error = await rejection(dialing);
+    assert.ok(error, `${what}: the login did not resolve`);
+    assert.match(error.message, expected, what);
+    await settle(30);
+    assertGateHeld(conn, seen, socket, what);
+  }
+}));
+
+test('while the plain-token answer is awaited a push is never dispatched either (#393 round 4)', async (t) => {
+  for (const [what, frame] of [['a pane push', EVIL_PUSH], ['a team message', EVIL_TEAM]] as const) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const seen = watch(conn);
+    const { dialing, socket } = dialOpen(conn, 'ws://awaiting-plain.test/ws', 'tok');
+    socket.message({ server_nonce: '00'.repeat(16) });
+    await until(() => socket.sent.length >= 1);
+    socket.message(frame);
+    const error = await rejection(dialing);
+    assert.ok(error, `${what}: the login did not resolve`);
+    assert.match(error.message, /^auth failed$/u, what);
+    await settle(30);
+    assertGateHeld(conn, seen, socket, what);
+  }
+});
+
+test('after the login the encrypted path ignores a plain text frame and a second nonce, and delivers a sealed push (#393 round 4)', (t) => withWebCrypto(async () => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const seen = watch(conn);
+  const server = new FakeE2eServer('tok-live', 2, 'machine-live', 'live');
+  const socket = await handshake(conn, server, 'ws://live.test/ws', 'tok-live');
+  const sentBefore = socket.sent.length;
+  socket.message(EVIL_PUSH);                                   // plain text on an encrypted link: ignored
+  socket.message(new FakeE2eServer('other', 2, 'machine-other', 'other').nonceFrame());   // not a second handshake
+  await settle(30);
+  assert.deepEqual(seen.pushes, [], 'a plain push is not delivered on an encrypted link');
+  assert.equal(conn.getMachineId(), 'machine-live', 'and a second nonce changes no identity');
+  assert.equal(socket.sent.length, sentBefore, 'nor is it answered');
+  socket.binary(await server.seal(JSON.stringify({ method: 'pane_output', params: { target: 'evil:0.0', content: 'REAL', cursor: null } })));
+  await until(() => seen.pushes.length === 1);
+  assert.deepEqual(seen.pushes, ['REAL'], 'a sealed push IS delivered');
+}));
+
+test('a listener that throws after the login does not end the connection: the handshake’s catch is for the handshake (#393 round 4)', (t) => withWebCrypto(async () => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const seen = watch(conn);
+  conn.addPaneOutputListener('boom:0.0', () => { throw new Error('listener boom'); });
+  const server = new FakeE2eServer('tok-live', 2, 'machine-live', 'live');
+  const socket = await handshake(conn, server, 'ws://throws.test/ws', 'tok-live');
+  socket.binary(await server.seal(JSON.stringify({ method: 'pane_output', params: { target: 'boom:0.0', content: 'X', cursor: null } })));
+  socket.binary(await server.seal(JSON.stringify({ method: 'pane_output', params: { target: 'evil:0.0', content: 'AFTER', cursor: null } })));
+  await until(() => seen.pushes.length === 1);
+  assert.deepEqual(seen.pushes, ['AFTER'], 'the next push is delivered');
+  assert.equal(conn.isConnected(), true, 'the connection is still up');
+  assert.equal(conn.getMachineId(), 'machine-live', 'and still logged in');
+  assert.equal(socket.closed, 0, 'its socket was not closed');
+}));
+
+test('after the login the plain-token path delivers a text push, and ignores a binary frame and a second nonce (#393 round 4)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const seen = watch(conn);
+  const socket = await handshakePlain(conn, 'ws://live-plain.test/ws', 'tok', 'machine-live');
+  const sentBefore = socket.sent.length;
+  socket.binary(plainBinary(EVIL_PUSH));
+  socket.message({ server_nonce: '11'.repeat(16) });
+  await settle(30);
+  assert.deepEqual(seen.pushes, [], 'a binary frame is nothing on the plain path');
+  assert.equal(conn.getMachineId(), 'machine-live', 'and a second nonce changes no identity');
+  assert.equal(socket.sent.length, sentBefore, 'nor is it answered');
+  socket.message({ method: 'pane_output', params: { target: 'evil:0.0', content: 'REAL', cursor: null } });
+  await until(() => seen.pushes.length === 1);
+  assert.deepEqual(seen.pushes, ['REAL'], 'a text push IS delivered');
+});

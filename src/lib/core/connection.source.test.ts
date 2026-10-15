@@ -104,3 +104,18 @@ test('ws.ts holds NO connection and no second door, only the factories and the d
   // URL — a device fact, not a server's.
   assert.match(src, /const probeFailedAt = new Map<string, number>\(\);/u);
 });
+
+test('the handshake takes its inputs through ONE door each and decryptMsg has no plain mode (#393 round 4)', async () => {
+  const src = code(await read('connection.ts'));
+  // decryptMsg needs a real cipher: a null one used to return the frame's text as if it were
+  // decrypted, which let a plain binary success pass for the sealed answer.
+  const decrypt = src.match(/async function decryptMsg\(([^)]*)\)[^{]*\{[\s\S]*?\n\}/u);
+  assert.ok(decrypt, 'decryptMsg exists');
+  const [whole = '', params = ''] = decrypt;
+  assert.match(params, /cipher: Cipher$/u, 'it takes a Cipher, not a Cipher | null');
+  assert.doesNotMatch(whole, /!cipher|TextDecoder|typeof buf === 'string'/u, 'and has no branch that reads the frame as plain text');
+  assert.doesNotMatch(src, /decryptMsg\([^)]*\bnull\b/u, 'nobody calls it with null');
+  // The server's nonce reaches hexToBytes only through parseServerNonce (type, hex, length).
+  assert.equal(src.match(/\bhexToBytes\(/gu)?.length, 2, 'hexToBytes: its definition and the one call inside parseServerNonce');
+  assert.match(src, /function parseServerNonce\(raw: unknown\)[^{]*\{\s*return typeof raw === 'string' && \/\^\[0-9a-f\]\{32\}\$\/i\.test\(raw\)/u);
+});

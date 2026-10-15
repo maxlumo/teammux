@@ -203,6 +203,39 @@ already queued behind it and arriving later, on the encrypted and the plain-toke
 paths: the promise stays rejected, identity and capabilities do not change, nothing
 is announced or pushed, and the socket is closed.
 
+**The handshake is a gate, one phase at a time** (reviewer, round 4: the third pass over this gate; each earlier fix had
+closed the branch named and left its neighbour open, so this one sweeps every phase). The rule: until the login completes,
+a connection delivers nothing, and every error on the way ends THAT attempt through its own `failDial` — none is swallowed.
+`core/connection.ts`'s receive handler runs the frames of one socket strictly in arrival order, so a frame that arrives
+while an earlier one is being worked on waits, and is handled in the phase it then finds. The server's nonce is read at the
+door by `parseServerNonce` (a string of 32 hex digits = 16 bytes, the salt's width in the key derivation); the receive
+chain's `catch` calls `failDial` with the error while `authed` is false; `decryptMsg` takes a real `Cipher`, has no plain
+mode, and no code path calls it without one (the first cut had `cipher: Cipher | null` and read a plain frame as "decrypted").
+
+| phase (state) | a frame or an error | what happens | pinned by (`connection.test.ts`) |
+|---|---|---|---|
+| **1 · before the nonce** (no `serverNonce`) | a valid nonce: text, `server_nonce` = 32 hex digits | taken; phase 2 | every handshake test |
+| | a malformed nonce (not a string, not hex, not 16 bytes), a push, a team message, an RPC answer, a plain or binary success, text that is no JSON, `e2e` without a nonce | `failDial("auth failed: the first frame was not a valid server nonce")`; nothing derived and nothing sent (not the token); a valid nonce queued behind it is not answered; no listener is called | "a malformed server nonce ends the attempt at the door" (8 values × encrypted/plain × queued/late, then a fresh handshake); "a frame BEFORE the nonce" (8 kinds × both modes) |
+| | an error | none can occur: there is no async work or crypto yet | — |
+| **2 · while the key is built** (nonce taken, `buildSession` awaiting; plain-token: no key, the token goes out at once) | a frame | waits; handled in phase 3 (or 5 if this phase failed) | "a valid nonce whose key derivation FAILS" (a plain binary success, a push and a team message queued behind it, then late) |
+| | a derivation, crypto or send error (socket not open) | the receive chain's catch → `failDial(that error)`; the socket is closed, its handlers cut; what waited behind is dropped | "a valid nonce whose key derivation FAILS"; "a send that fails during the handshake" (both modes) |
+| | the dial times out, is superseded, disconnected or disposed, or the socket closes | `failDial` / the settle path; the continuation after the `await` sees `failed \|\| ws !== socket` and sends nothing | "encryption that finishes after a reconnect reaches neither socket"; "disposeAll settles a dial that is mid-authentication"; "a dial superseded by the next connect is settled" |
+| **3 · waiting for the auth answer** (auth sent) | encrypted: the server's plain `ERR_AUTH` | `failDial(refusal)`: the reconnect loop stops | "the server's plain invalid-proof frame on the ENCRYPTED path is kept as a refusal" |
+| | encrypted: any other text (a push, a plain success, no JSON) | `failDial("expected binary auth response")`; never a login, never a refusal | "a plain frame on the encrypted path is NEVER a login"; "while the auth answer is awaited a push is never dispatched" (plain push) |
+| | encrypted: a binary frame that does not decrypt, is no JSON, is no authentication, or is a sealed push or error | `failDial("auth failed")`; nothing dispatched | "only the server's explicit PLAIN ERR_AUTH is a refusal"; "while the auth answer is awaited…" (sealed push, sealed team message) |
+| | encrypted: a real sealed `authenticated` | `authSuccess`: identity, build and capabilities are read, the dial resolves; phase 4 | every `handshake()` |
+| | plain-token: text `authenticated` / `ERR_AUTH` / any other (a push, a binary frame) | success / `failDial(refusal)` / `failDial(message or "auth failed")`; a push is not dispatched | "the PLAIN-token path keeps the server's invalid-token refusal too"; "while the plain-token answer is awaited a push is never dispatched either" |
+| | a parse or decrypt error | `failDial("auth failed")` (the same line as the frame being wrong) | as above |
+| **4 · after success** (`authed`) | encrypted: a sealed frame | decrypted; a push or an answer is dispatched. It does not decrypt: `forceDisconnect("decrypt failed")` (the counter has moved, so the session is dead). It decrypts but is no JSON: dropped | "after the login the encrypted path ignores a plain text frame and a second nonce, and delivers a sealed push" |
+| | encrypted: a text frame, a second nonce | ignored: not a push, not a second handshake, not answered | same |
+| | plain-token: a text push or answer; a binary frame; a second nonce | dispatched; ignored; ignored | "after the login the plain-token path delivers a text push, and ignores a binary frame and a second nonce" |
+| **5 · after failure** (`failed`) | any frame (queued or late), close, error | nothing: the handlers are cut, `handleMessage` and every continuation return on `failed`; a later `connect()` on the same object dials a NEW socket and its handshake succeeds | "after a failed ENCRYPTED login the same socket can never log in"; "…PLAIN-token login…"; "a failed attempt ends only ITS OWN socket"; and the fresh-handshake line closing each test of phases 1–2 |
+
+The source pin `connection.source.test.ts` ("the handshake takes its inputs through ONE door each and decryptMsg has no
+plain mode") keeps `decryptMsg`'s signature non-null and `parseServerNonce` the only caller of `hexToBytes`. The line
+`if (!authed) return` before the dispatch is defence in depth: the two handshake blocks return for every frame while
+`!authed`, and this states it where the dispatch begins.
+
 **What does NOT change.** Beyond the window (3 minutes) the loop still gives
 up and shows the connect card, so a server that is really gone does not keep
 a device retrying for ever; the form and a server switch still take the socket from a

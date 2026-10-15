@@ -11,6 +11,9 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 → {"method": "auth", "params": {"client_nonce": "<hex>", "proof": "<hex>", "e2e": 2}}
 ← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch", "spawn_join", "agent_team"]}}>
 ```
+- The client accepts exactly one first frame: the nonce, `server_nonce` = 32 hex digits (16 bytes). The server sends nothing before it;
+  a client ends the attempt on any other first frame or any other length, and delivers nothing (pushes, answers) until the login completes
+  (phase table: [disconnect-grace.md](../../design-docs/features/disconnect-grace.md))
 - IKM = token, salt = server_nonce ‖ client_nonce (16 + 16 bytes), HKDF-SHA256, 32-byte outputs
 - **v2** (current) derives THREE keys, one per job, by `info` label:
   `tmux-mobile-e2e/v2/proof` (HMAC proof key), `tmux-mobile-e2e/v2/c2s`
