@@ -202,13 +202,28 @@ warnings — Kotlin 2.x wants the `compilerOptions` DSL; non-blocking).
 ## Build Output Location (this machine)
 
 Tauri prints the APK path as the in-project
-`src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`,
-**but on this machine that path does not exist after a build.** The
-Gradle build directory is relocated to a global cache (set in the user's
-environment, not in the repo); the cargo target is NOT — it is the checkout's
-own `src-tauri/target` (no `CARGO_TARGET_DIR`, no cargo config on this host;
-an earlier version of this note put it in `~/.cache/builds/cargo-target`,
-which no longer exists here):
+`src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
+On this machine Gradle does not build there: its build directory is
+relocated to a global cache (set in the user's environment, not in the
+repo), and `src-tauri/gen/android/app/build` is a SYMLINK into it
+(`…/app/build -> ~/.cache/builds/gradle-builds/android-<hash>/app/` in the
+launch checkout). Whether the in-project path exists therefore depends on how
+the build was run:
+
+- **`npm run build:android`** ends with `scripts/preflight.mjs android-apk`,
+  which re-points that link at THIS checkout's output when it is missing,
+  dangling, or stale (pointing at another checkout), and exits 0 only when
+  the APK exists at the in-project path. After a successful
+  `npm run build:android` the path above exists. A real `app/build`
+  directory (the `.gradle-local-build` opt-out) is left alone.
+- **A bare `npx tauri android build`** skips the postflight: the in-project
+  path may be missing (a fresh git worktree has no link at all), dangling, or
+  point at another checkout's older APK. Trust the physical location below.
+
+The cargo target is NOT relocated — it is the checkout's own `src-tauri/target`
+(no `CARGO_TARGET_DIR`, no cargo config on this host; an earlier version of
+this note put it in `~/.cache/builds/cargo-target`, which no longer exists
+here). The physical locations:
 
 - APK: `~/.cache/builds/gradle-builds/android-<hash>/app/outputs/apk/universal/release/app-universal-release.apk`
 - Rust `.so`: `<checkout>/src-tauri/target/aarch64-linux-android/release/libtmux_mobile.so`
