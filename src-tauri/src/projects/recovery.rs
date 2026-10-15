@@ -588,16 +588,17 @@ pub fn check_drift() {
             super::is_managed_in(Some(project.path.as_str()), &p.window_name)
                 && super::agents::detect_pane(Some(project.path.as_str()), p).is_some_and(|a| a.backend == backend.name())
         })
-    });
+    }, &|room, line| super::rooms::post(room, "tmm", line).is_ok());
 }
 
 /// `check_drift` with what it asks of the machine injected: the installed
-/// version, and whether a project runs a managed agent of a backend. Returns
-/// how many rooms were told.
+/// version, whether a project runs a managed agent of a backend, and the post
+/// into a room (true = posted). Returns how many rooms were told.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn check_drift_with(
     installed: &dyn Fn(crate::backends::Backend) -> Option<String>,
     runs: &dyn Fn(&super::Project, crate::backends::Backend) -> bool,
+    post: &dyn Fn(&str, &str) -> bool,
 ) -> usize {
     let projects = match super::with_store(|s| s.list_projects(false)) {
         Ok(list) => list,
@@ -617,7 +618,7 @@ pub fn check_drift_with(
         let mut told = 0;
         for project in projects.iter().filter(|p| runs(p, backend)) {
             let room = if project.room.is_empty() { format!("proj:{}", project.session) } else { project.room.clone() };
-            if super::rooms::post(&room, "tmm", &format!("[tmm] {warning}")).is_ok() {
+            if post(&room, &format!("[tmm] {warning}")) {
                 told += 1;
             }
         }
@@ -1417,6 +1418,12 @@ mod tests {
                 assert_eq!(crate::backends::measured_version(backend, m.shape), Some(m));
             }
         }
+        // And the other way round: every shape a fixture shows is in its
+        // backend's table, so a shape dropped from the table fails here.
+        for (backend, shape, _, _) in FIXTURES {
+            let b = crate::backends::Backend::parse(backend).unwrap();
+            assert!(crate::backends::measured_version(b, shape).is_some(), "{backend} {shape} is not in RECOVERY_SHAPES");
+        }
         assert_eq!(crate::backends::measured_version(crate::backends::Backend::Kiro, "nope"), None);
         for b in [crate::backends::Backend::Codex, crate::backends::Backend::Grok, crate::backends::Backend::Omp, crate::backends::Backend::Kimi] {
             assert!(b.recovery_shapes().is_empty(), "{}: capture first, no guessed shape (board #362 d)", b.name());
@@ -1444,11 +1451,15 @@ mod tests {
     /// Board #362 b, the posting: one `[tmm]` line in each room of a project
     /// that runs the backend, once per installed version; a restart (a second
     /// call) repeats nothing, a newer version is said again, a project that
-    /// does not run it hears nothing, and a CLI that cannot be asked says
-    /// nothing and is asked again next time.
+    /// does not run it hears nothing, a CLI that cannot be asked says nothing
+    /// and is asked again next time, and a drift nobody runs is not marked as
+    /// said (it is said when a project starts running it). The posts are
+    /// recorded, not written to the shared test room log (a real post there
+    /// took seq 1 from the legacy-import test running beside it).
     #[test]
     fn the_drift_warning_is_posted_once_per_version_in_the_rooms_that_run_it() {
         use crate::backends::Backend;
+        use std::cell::RefCell;
         super::super::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let mk = |name: &str| super::super::Project {
@@ -1458,22 +1469,27 @@ mod tests {
         };
         let (with_kiro, without) = (mk("kiro"), mk("none"));
         for p in [&with_kiro, &without] { super::super::with_store(|s| s.insert_project(p)).unwrap(); }
-        let lines = |p: &super::super::Project| -> Vec<String> {
-            super::super::rooms::history_page(&p.room, None, 50)["messages"].as_array().unwrap().iter()
-                .filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] recovery shapes")).collect()
-        };
-        let version = std::cell::RefCell::new(None::<&str>);
+        let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
+        let posted = RefCell::new(Vec::<(String, String)>::new());
+        let post = |room: &str, line: &str| { posted.borrow_mut().push((room.to_string(), line.to_string())); true };
+        let lines = |p: &super::super::Project| posted.borrow().iter().filter(|(r, _)| *r == p.room).map(|(_, l)| l.clone()).collect::<Vec<_>>();
+        let version = RefCell::new(None::<&str>);
         let installed = |b: Backend| (b == Backend::Kiro).then(|| version.borrow().map(str::to_string)).flatten();
-        let runs = |p: &super::super::Project, b: Backend| b == Backend::Kiro && p.id == with_kiro.id;
-        assert_eq!(check_drift_with(&installed, &runs), 0, "kiro cannot be asked: nothing said");
+        let running = RefCell::new(true);
+        let runs = |p: &super::super::Project, b: Backend| *running.borrow() && b == Backend::Kiro && p.id == with_kiro.id;
+        assert_eq!(check_drift_with(&installed, &runs, &post), 0, "kiro cannot be asked: nothing said");
         *version.borrow_mut() = Some("2.31.0");
-        assert_eq!(check_drift_with(&installed, &runs), 1);
+        // Nobody runs kiro yet: nothing is said, and nothing is marked said.
+        *running.borrow_mut() = false;
+        assert_eq!(check_drift_with(&installed, &runs, &post), 0);
+        *running.borrow_mut() = true;
+        assert_eq!(check_drift_with(&installed, &runs, &post), 1, "said once a project runs it");
         assert_eq!(lines(&with_kiro).len(), 1);
-        assert!(lines(&with_kiro)[0].contains("running 2.31.0"));
+        assert!(lines(&with_kiro)[0].starts_with("[tmm] recovery shapes for kiro") && lines(&with_kiro)[0].contains("running 2.31.0"));
         assert!(lines(&without).is_empty(), "a project that does not run kiro hears nothing");
-        assert_eq!(check_drift_with(&installed, &runs), 0, "a restart or the daily check repeats nothing");
+        assert_eq!(check_drift_with(&installed, &runs, &post), 0, "a restart or the daily check repeats nothing");
         *version.borrow_mut() = Some("2.32.1");
-        assert_eq!(check_drift_with(&installed, &runs), 1, "a newer CLI is said again");
+        assert_eq!(check_drift_with(&installed, &runs, &post), 1, "a newer CLI is said again");
         assert_eq!(lines(&with_kiro).len(), 2);
         for p in [&with_kiro, &without] { let _ = super::super::with_store(|s| s.delete_project(&p.id)); }
         let _ = super::super::with_store(|s| s.meta_set("recovery_drift:kiro", ""));
