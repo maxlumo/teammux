@@ -125,10 +125,11 @@ fn waiting_on_purpose(session: &str, window: &str) -> bool {
     let wake_for_it = super::wakes::pending(Some(session))
         .iter()
         .any(|w| crate::address::mention_names(&w.body).iter().any(|n| n == window));
-    wake_for_it
-        || crate::tasks::list()
-            .iter()
-            .any(|t| t.session == session && matches!(t.state, crate::tasks::State::Running))
+    wake_for_it || task_running_in(session, &crate::tasks::list())
+}
+
+fn task_running_in(session: &str, tasks: &[crate::tasks::Task]) -> bool {
+    tasks.iter().any(|t| t.session == session && matches!(t.state, crate::tasks::State::Running))
 }
 
 #[cfg(test)]
@@ -245,6 +246,29 @@ mod tests {
         crate::projects::wakes::schedule(&s, "lead", "@dev check the build", due).unwrap();
         assert!(waiting_on_purpose(&s, "dev"), "a wake addressed to it: it was told to wait");
         assert!(!waiting_on_purpose(&s, "lead"), "a wake for someone else says nothing about this agent");
+    }
+
+    /// A `Task` does not record who started it, so a running task anywhere in the
+    /// project is a reason to wait; another project's, or a finished one, is not.
+    #[test]
+    fn a_running_task_in_the_project_is_a_reason_to_wait() {
+        use crate::tasks::State;
+        let task = |session: &str, state: State| crate::tasks::Task {
+            name: "t".into(),
+            session: session.into(),
+            window: "t".into(),
+            pane: "%1".into(),
+            cmd: "sleep 9".into(),
+            state,
+            pid: "1".into(),
+            started: 0,
+            dead_at: 0,
+            wake_error: String::new(),
+        };
+        assert!(!task_running_in("p", &[]));
+        assert!(task_running_in("p", &[task("p", State::Running)]));
+        assert!(!task_running_in("p", &[task("q", State::Running)]), "another project's task says nothing");
+        assert!(!task_running_in("p", &[task("p", State::Exited(0)), task("p", State::Killed("term".into()))]), "a finished task is not a reason to wait");
     }
 
     #[test]
