@@ -32,6 +32,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
+  import { BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
   import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -53,6 +54,17 @@
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
   const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
+  /** Is this server KNOWN to be too old to hand an assignment over (board
+   * #377)? Its login answer lacks `board_dispatch`. An unanswered question (no
+   * authenticated socket yet) is not a no. The picker is disabled and the
+   * save is not sent: an older server would store a label no agent is told
+   * about, and the page would call that a success. */
+  const assignBlocked = () => lacksCap(guardOwner.connection.getCaps?.(), BOARD_DISPATCH);
+  /** The line a save's answer owes the person when the assignee was NOT told
+   * (board #377 review P1-A): the issue is saved either way — that is why this
+   * is a line of its own and not a failure of the save. */
+  const dispatchLine = (answer: { dispatch?: string; dispatch_error?: string } | null | undefined, name: string) =>
+    answer?.dispatch === 'failed' ? t('boardDispatchFailed').replace('{name}', name).replace('{error}', answer.dispatch_error ?? '') : '';
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
    * for the Board family (`hub-union.svelte.ts` createBoardUnion) and the
@@ -633,10 +645,10 @@
   }
   // Assigning DOES something (owner, 2026-08-29: "Assign 给某个 Agent 去做"),
   // and the SERVER does it (board #377): `hub_board_save` records the change
-  // in the room and types the hand-off into the assignee's pane, the same
-  // text for this page and for `tmm board assign`. So the page carries no
-  // brief of its own — the assignee rides in the one save, and picking an
-  // agent here is picking it there.
+  // in the room and, when the request asks (`dispatch: true`), types the
+  // hand-off into the assignee's pane — the same text for this page and for
+  // `tmm board assign`. So the page carries no brief of its own: the assignee
+  // rides in the one save, and how the telling went comes back in the answer.
   /** Explicit save of the USER's changed fields (diffed against the draft
    * base, never the live issue); a failure KEEPS the draft. The refetch's
    * rebase then normalizes: the server now carries the saved text, so base
@@ -651,12 +663,15 @@
     const saved = { ...draft, body: bodyStage.body(draft.body) };
     const patch = draftPatch(saved, draftBase);
     if (!patch) return;
+    // Refused BEFORE anything is written: this server cannot tell the agent.
+    if (patch.assignee && assignBlocked()) { err = t('boardAssignOldServer'); return; }
     busy = true; submitting = true;
     try {
-      // ONE save carries every changed field, the assignee included: the
-      // server hands the issue over (board #377), and a change confirmed by
+      // ONE save carries every changed field, the assignee included, and asks
+      // the server to hand the issue over (board #377): a change confirmed by
       // the ✓ briefs the agent exactly like assign-at-birth does.
-      await boardSave(ctx.session, { id, ...patch });
+      const answer = await boardSave(ctx.session, patch.assignee ? { id, ...patch, dispatch: true } : { id, ...patch });
+      const untold = dispatchLine(answer, patch.assignee ?? '');
       if (!owns(ctx)) return;
       err = '';
       // What was SENT is now the server's: the draft and its base both take
@@ -668,7 +683,9 @@
       // The ✓ ANSWERS the edit (board #48 v2: back to the board) — unless the
       // NOTE box still holds a draft: the body save is not the note's, so the
       // detail stays, rebased on the saved body, with the note as it was.
-      if (noteDirty) { await refetchSel(ctx); return; }
+      // The edit IS saved, so the draft above is already rebased on it; a
+      // hand-off that failed keeps the detail open with its own line.
+      if (noteDirty || untold) { await refetchSel(ctx); if (untold && owns(ctx)) err = untold; return; }
       // A FAILED save takes the catch instead — the detail stays open with
       // the error and the typed draft (createIssue's rule).
       sel = null;
@@ -684,11 +701,14 @@
     const title = nTitle.trim();
     const body = createStage.body(nBody).trim(); // the one materialized body
     const assignee = nAssignee;
+    // Refused BEFORE anything is written: this server cannot tell the agent.
+    if (assignee && assignBlocked()) { err = t('boardAssignOldServer'); return; }
     busy = true; submitting = true;
+    let created: { id: number; dispatch?: string; dispatch_error?: string };
     try {
       // Create-with-assignee is ONE request too: the server files the issue
       // and hands it over (board #11, #377).
-      await boardSave(ctx.session, assignee ? { title, body, assignee } : { title, body });
+      created = await boardSave(ctx.session, assignee ? { title, body, assignee, dispatch: true } : { title, body });
     } catch (e) {
       // The CREATE failed: the form stays, retry is honest.
       if (owns(ctx)) err = String((e as Error)?.message ?? e);
@@ -699,6 +719,10 @@
     // a successful create is how duplicate issues are born (#11 review).
     if (owns(ctx)) { nTitle = ''; nBody = ''; nAssignee = ''; creating = false; createStage.clear(); }
     if (alive && cur === ctx.session) await load();
+    // A hand-off that failed is reported; the issue is saved and can be
+    // assigned again from its detail. After the reload, which clears `err`.
+    const untold = dispatchLine(created, assignee);
+    if (untold && alive && cur === ctx.session) err = `#${created.id}: ${untold}`;
     busy = false; submitting = false;
   }
   async function addNote() {
@@ -1107,9 +1131,10 @@
               disabled={submitting} onclick={() => { if (!submitting) draft.status = st; }}>{statusLabel(st)}</button>
           {/each}
         </div>
-        <Select value={draft.assignee} dense disabled={submitting}
+        <Select value={draft.assignee} dense disabled={submitting || assignBlocked()}
           options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: a.name, icon: backendIcon(a.agent) ?? undefined }))]}
           onchange={(v: string) => { if (!submitting) draft.assignee = v; }} />
+        {#if assignBlocked()}<span class="meta-bit">{t('boardAssignOldServer')}</span>{/if}
         {#if sel.created_by}<span class="meta-bit">{t('boardOpenedBy')} <span class="m-name">{sel.created_by}</span></span>{/if}
       </div>
       {#if sel.editable}
@@ -1215,9 +1240,10 @@
       <!-- Assign at birth: the same dispatch as the detail picker — the agent
            is briefed the moment the issue exists (board #11). -->
       <div class="d-meta">
-        <Select value={nAssignee} dense disabled={submitting}
+        <Select value={nAssignee} dense disabled={submitting || assignBlocked()}
           options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: a.name, icon: backendIcon(a.agent) ?? undefined }))]}
           onchange={(v: string) => { if (!submitting) nAssignee = v; }} />
+        {#if assignBlocked()}<span class="meta-bit">{t('boardAssignOldServer')}</span>{/if}
       </div>
       <!-- The body is MULTI-LINE, so Enter must stay a newline — the submit
            chord is Cmd+Enter (mac) / Ctrl+Enter (elsewhere), the pair every

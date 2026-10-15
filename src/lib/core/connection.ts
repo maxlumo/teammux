@@ -18,6 +18,7 @@
 // layer's (connection.source.test.ts pins that boundary).
 
 import { parseBuild, type BuildInfo } from './build-info.ts';
+import { parseCaps } from './login-caps.ts';
 
 // Cursor: x/y position, width, height, trailing trimmed lines.
 export interface Cursor { x: number; y: number; w: number; h: number; t: number }
@@ -52,6 +53,8 @@ interface AppSocket extends WebSocket {
   _getHostname?: () => string | null;
   /** undefined until the login answered; null when it named no build. */
   _getBuild?: () => BuildInfo | null | undefined;
+  /** undefined until the login answered; [] when it named none (board #377). */
+  _getCaps?: () => string[] | undefined;
 }
 
 // ─── Wire framing for the encrypted binary path ─────────────────────────
@@ -277,6 +280,10 @@ export interface Connection {
    * undefined while there is no authenticated socket, null when the server
    * named none (an older one). */
   getBuild(): BuildInfo | null | undefined;
+  /** The capabilities the server announced in its login answer (board #377):
+   * undefined while there is no authenticated socket, `[]` for an older server
+   * that announced none. */
+  getCaps(): string[] | undefined;
   /** The URL the current socket was dialled with — the origin a signed
    * download URL of THIS connection must be resolved against. */
   url(): string | null;
@@ -511,6 +518,7 @@ export function createConnection(): Connection {
       let machineId: string | null = null;
       let hostname: string | null = null;
       let build: BuildInfo | null = null;
+      let caps: string[] = [];
 
       function authSuccess() {
         clearTimeout(timeout);
@@ -531,6 +539,7 @@ export function createConnection(): Connection {
       socket._getMachineId = () => machineId;
       socket._getHostname = () => hostname;
       socket._getBuild = () => (authed ? build : undefined);
+      socket._getCaps = () => (authed ? caps : undefined);
 
       // Frames are handled strictly in arrival order. Decrypt + wire-decode is
       // async, and its latency depends on the frame: a ≥256-byte payload goes
@@ -598,12 +607,12 @@ export function createConnection(): Connection {
               const pt = await decryptMsg(event.data, cipher);
               if (ws !== socket) return;
               const resp = JSON.parse(pt);
-              if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; build = parseBuild(resp.result.build); authSuccess(); return; }
+              if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; build = parseBuild(resp.result.build); caps = parseCaps(resp.result.caps); authSuccess(); return; }
             } catch {}
             clearTimeout(timeout); cipher = null; reject(new Error('auth failed')); return;
           } else {
             // Plain (token) response — text frame.
-            if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); authSuccess(); return; }
+            if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); caps = parseCaps(data.result.caps); authSuccess(); return; }
             clearTimeout(timeout); reject(new Error(data?.error?.message || 'auth failed')); return;
           }
         }
@@ -732,6 +741,10 @@ export function createConnection(): Connection {
 
   function getBuild(): BuildInfo | null | undefined {
     return ws?._getBuild?.();
+  }
+
+  function getCaps(): string[] | undefined {
+    return ws?._getCaps?.();
   }
 
   let rpcTimeouts = 0;
@@ -865,7 +878,7 @@ export function createConnection(): Connection {
   }
 
   return {
-    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, getBuild, url,
+    connect, disconnect, dispose, call, isConnected, getMachineId, getHostname, getBuild, getCaps, url,
     setOnDisconnect,
     addPaneOutputListener, removePaneOutputListener,
     addPaneClosedListener, removePaneClosedListener,

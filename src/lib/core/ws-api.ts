@@ -79,6 +79,18 @@ export type ReadMark = { seq: number } | { ts: number };
 export interface ServerMark { seq: number; ts: number }
 /** The project task board: session-scoped issues in four fixed columns.
  * Humans write issues here; agents read and update them via `tmm board`. */
+/** What `hub_board_save` answers (board #377). `dispatch` is absent unless the
+ * request asked for a hand-off AND there was somebody to tell: `sent` (typed
+ * into a pane), `offline` (saved, nothing typed to anyone) or `failed` (saved,
+ * and the post itself failed: an answer, never an error, because the issue
+ * exists and a retry must not file it twice). */
+export interface BoardSaveAnswer {
+  ok: boolean;
+  id: number;
+  dispatch?: 'sent' | 'offline' | 'failed';
+  dispatch_error?: string;
+}
+
 export interface BoardIssue {
   /** Session-local durable number: every project starts at 1; the DB row key is hidden. */
   id: number;
@@ -353,8 +365,8 @@ export function createWsApi(connection: Connection) {
     call<BoardIssue>('hub_board_get', { session, id });
   /** Create (no id) or patch (id + only the fields to change). `who` records the
    * actor; the UI always says 'human'. */
-  const boardSave = (session: string, fields: { id?: number; title?: string; body?: string; status?: string; assignee?: string }) =>
-    call<{ ok: boolean; id: number }>('hub_board_save', { session, who: 'human', ...fields });
+  const boardSave = (session: string, fields: { id?: number; title?: string; body?: string; status?: string; assignee?: string; dispatch?: boolean }) =>
+    call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
   const boardNote = (session: string, id: number, body: string) =>
     call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human' });
   const boardDelete = (session: string, id: number) =>

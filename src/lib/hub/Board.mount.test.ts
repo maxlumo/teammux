@@ -9,6 +9,7 @@ const issue = { id: 1, title: 'Keep this issue', body: 'Body', status: 'todo', a
 const counts = { todo: 1, doing: 0, review: 0, done: 0, total: 1 };
 function rpc(extra: Record<string, (...args: any[]) => unknown>) {
   return {
+    getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
     projectList: async () => ({ projects: [{ project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true }] }),
     hubRooms: async () => ({ rooms: {} }),
     boardCounts: async () => ({ counts: { fixture: counts } }),
@@ -97,6 +98,7 @@ test('a late Board deletion cannot close a newer visit to the same room (#167)',
     props: { session: 'fixture', visible: true },
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
+      getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
       projectList: async () => ({ projects: ['fixture', 'other'].map(session => ({
         project: { id: session, name: session, session }, live: true,
       })) }),
@@ -261,6 +263,7 @@ async function landingBoard(context: any, opts: { failSave?: boolean } = {}) {
     props: { session: 'fixture', visible: true, guardPage: 'board', issueRequest: null },
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
+      getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
       projectList: async () => ({ projects: [
         { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
         { project: { id: 'other', session: 'other', name: 'Other' }, live: true },
@@ -378,6 +381,7 @@ async function realLanding(context: any) {
     props: { session: 'fixture', visible: true, guardPage: 'board', issueRequest: null },
     setup(window) { window.Element.prototype.getAnimations = () => []; },
     modules: [rpc({
+      getCaps: () => ['board_dispatch'], // the login answer of a server that can hand an assignment over (board #377)
       projectList: async () => ({ projects: [
         { project: { id: 'fixture', session: 'fixture', name: 'Fixture' }, live: true },
         { project: { id: 'other', session: 'other', name: 'Other' }, live: true },

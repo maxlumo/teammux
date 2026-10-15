@@ -617,3 +617,28 @@ test('between the socket opening and the login answer a server has named nothing
   await dial;
   assert.deepEqual(conn.getBuild(), BUILD);
 });
+
+test('the capabilities a server announces at login are read per connection; none is [] (a definite no), not unknown (board #377)', async (t) => {
+  const login = async (result: object) => {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const dial = conn.connect(A_URL, 'tok');
+    dial.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    const before = conn.getCaps();
+    socket.message({ result: { authenticated: true, machine_id: 'machine-a', hostname: 'alpha', ...result } });
+    await dial;
+    return { conn, before };
+  };
+  const modern = await login({ caps: ['board_dispatch'] });
+  assert.equal(modern.before, undefined, 'socket open, login not answered: unknown, which is not a refusal');
+  assert.deepEqual(modern.conn.getCaps(), ['board_dispatch']);
+  const older = await login({});
+  assert.deepEqual(older.conn.getCaps(), [], 'an older server announced none: a definite no');
+  assert.deepEqual((await login({ caps: 'board_dispatch' })).conn.getCaps(), [], 'not a list: none');
+  assert.deepEqual(modern.conn.getCaps(), ['board_dispatch'], 'and never another connection\u2019s');
+  modern.conn.disconnect();
+  assert.equal(modern.conn.getCaps(), undefined, 'a closed socket says nothing about a server');
+});

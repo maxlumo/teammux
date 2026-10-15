@@ -51,11 +51,12 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   // A ✓-confirmed assignee change rides in the SAME request as the other
   // changed fields — the server needs the title it will announce.
   const save = source.slice(source.indexOf('async function saveDraft'), source.indexOf('async function createIssue'));
-  assert.match(save, /await boardSave\(ctx\.session, \{ id, \.\.\.patch \}\);/u, 'one save carries the patch, assignee included');
+  assert.match(save, /await boardSave\(ctx\.session, patch\.assignee \? \{ id, \.\.\.patch, dispatch: true \} : \{ id, \.\.\.patch \}\);/u,
+    'one save carries the patch, assignee included, and asks for the hand-off only when it names one');
   assert.equal(save.split('boardSave(').length - 1, 1, 'and it is the only save in saveDraft');
   // Create-with-assignee is one request too.
   const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('async function addNote'));
-  assert.match(create, /await boardSave\(ctx\.session, assignee \? \{ title, body, assignee \} : \{ title, body \}\);/u,
+  assert.match(create, /created = await boardSave\(ctx\.session, assignee \? \{ title, body, assignee, dispatch: true \} : \{ title, body \}\);/u,
     'the assignee is part of the create');
   assert.equal(create.split('boardSave(').length - 1, 1, 'one request, never create-then-assign');
   // The form closes the MOMENT the create succeeds — a retryable form after a
@@ -64,6 +65,18 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   const closes = create.indexOf('creating = false;');
   assert.ok(closes > -1 && create.indexOf('busy = false;\n      return;') < closes,
     'only a FAILED create keeps the form for an honest retry');
+  // An older server (its login answer lacks `board_dispatch`) is refused
+  // BEFORE the write, in both entry points, and the pickers are disabled: a
+  // label nobody is told about must not read as a success (board #377 review
+  // P1-B).
+  assert.match(source, /const assignBlocked = \(\) => lacksCap\(guardOwner\.connection\.getCaps\?\.\(\), BOARD_DISPATCH\);/u, 'the one definition of "too old"');
+  assert.match(save, /if \(patch\.assignee && assignBlocked\(\)\) \{ err = t\('boardAssignOldServer'\); return; \}[\s\S]*busy = true;/u, 'the edit refuses before it writes');
+  assert.match(create, /if \(assignee && assignBlocked\(\)\) \{ err = t\('boardAssignOldServer'\); return; \}[\s\S]*busy = true;/u, 'the create refuses before it writes');
+  assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting \|\| assignBlocked\(\)\}/gu)].length, 2, 'both pickers are disabled on an old server');
+  // A hand-off that failed after the save landed is its own line, never a
+  // failed save: the create form is gone and the edit is rebased first.
+  assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);[\s\S]*err = `#\$\{created\.id\}: \$\{untold\}`;/u, 'the create reports it after closing the form AND after the reload, which clears the line');
+  assert.match(save, /if \(noteDirty \|\| untold\) \{ await refetchSel\(ctx\); if \(untold && owns\(ctx\)\) err = untold; return; \}/u, 'the edit rebases, then reports it');
 });
 
 test('the layout hierarchy: one compact title line, the body visibly bigger (board #11)', () => {
@@ -925,10 +938,10 @@ test('images: one materialized body per submit, given to the save; refused while
   const save = source.slice(source.indexOf('async function saveDraft'), source.indexOf('async function createIssue'));
   assert.match(save, /if \(!sel \|\| busy \|\| blocked\(bodyStage\)\) return;/u, 'save refuses while uploading/failed');
   assert.match(save, /const saved = \{ \.\.\.draft, body: bodyStage\.body\(draft\.body\) \};/u, 'frozen at entry');
-  assert.match(save, /await boardSave\(ctx\.session, \{ id, \.\.\.patch \}\);/u, 'the save carries the patch of the materialized text');
+  assert.match(save, /await boardSave\(ctx\.session, patch\.assignee \? \{ id, \.\.\.patch, dispatch: true \} : \{ id, \.\.\.patch \}\);/u, 'the save carries the patch of the materialized text');
   const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('async function addNote'));
   assert.match(create, /const body = createStage\.body\(nBody\)\.trim\(\);/u);
-  assert.match(create, /boardSave\(ctx\.session, assignee \? \{ title, body, assignee \} : \{ title, body \}\)/u, 'assign-at-birth rides the create');
+  assert.match(create, /boardSave\(ctx\.session, assignee \? \{ title, body, assignee, dispatch: true \} : \{ title, body \}\)/u, 'assign-at-birth rides the create');
   const note = source.slice(source.indexOf('async function addNote'), source.indexOf('// ── Delete is CONFIRMED'));
   assert.match(note, /blocked\(noteStage\)\) return;[\s\S]*const body = noteStage\.body\(noteText\)\.trim\(\);[\s\S]*await boardNote\(ctx\.session, id, body\);/u);
   // The SAME atoms as the chat: one pipeline, one strip, one image, one viewer.
@@ -951,13 +964,13 @@ test('every submit acts on its frozen context, never the live cur/sel; the page 
   }
   assert.match(source, /const owns = \(c: OpCtx\) => alive && c\.gen === opGen;/u);
   assert.match(source, /registerLeaveGuard\(\{\s*runtime: guardOwner,\s*page: guardPage,/u, 'the #315 walk reaches the Board, as its owner s guard');
-  assert.match(source, /if \(noteDirty\) \{ await refetchSel\(ctx\); return; \}/u, 'a body save keeps a note draft on screen');
+  assert.match(source, /if \(noteDirty \|\| untold\) \{ await refetchSel\(ctx\); if \(untold && owns\(ctx\)\) err = untold; return; \}/u, 'a body save keeps a note draft on screen, and so does a hand-off that failed');
 });
 
 test('the whole draft is locked while it is submitted, and a saved draft adopts what was sent (board #329 review)', () => {
   assert.match(source, /<input class="d-title-input" bind:value=\{draft\.title\} placeholder=\{t\('boardTitlePh'\)\} readonly=\{submitting\}\s*onkeydown=\{onChord\(saveDraft\)\} \/>/u, 'the locked title input also carries the #348 chord');
   assert.match(source, /disabled=\{submitting\} onclick=\{\(\) => \{ if \(!submitting\) draft\.status = st; \}\}/u);
-  assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting\}/gu)].length, 2);
+  assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting \|\| assignBlocked\(\)\}/gu)].length, 2);
   assert.equal([...source.matchAll(/onremove=\{\(i\) => \{ if \(!submitting\) \w+Stage\.remove\(i\); \}\}/gu)].length, 3);
   assert.match(source, /for \(const f of Object\.keys\(patch\) as \(keyof typeof saved\)\[\]\) \{ draft\[f\] = saved\[f\]; draftBase\[f\] = saved\[f\]; \}\s*bodyStage\.clear\(\);/u,
     'the snapshot is adopted BEFORE the map is cleared and the refetch rebases');

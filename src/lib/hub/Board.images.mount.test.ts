@@ -15,7 +15,7 @@ const issueA = { id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: ''
 const issueB = { id: 2, title: 'B', body: 'Body B', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] };
 
 type Calls = { saves: any[]; notes: any[]; posts: any[]; uploads: string[] };
-type Opts = { projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
+type Opts = { caps?: string[]; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
@@ -40,6 +40,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
       w.URL.revokeObjectURL = () => {};
     },
     modules: [{
+      getCaps: () => ('caps' in opts ? opts.caps : ['board_dispatch']), // the login answer's capabilities (board #377)
       projectList: async () => ({ projects: (opts.projects ?? ['fixture']).map((p) => ({ project: { id: p, session: p, name: p, path: `/work/${p}` }, live: true })) }),
       hubRooms: async () => ({ rooms: {} }),
       boardCounts: async () => ({ counts: Object.fromEntries((opts.projects ?? ['fixture']).map((p) => [p, { todo: issues.length, doing: 0, review: 0, done: 0, total: issues.length }])) }),
@@ -51,7 +52,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
         if (opts.save) await opts.save(patch);
         // A stateful fake: the stored issue takes the patch, so boardGet answers what was saved.
         if (opts.stateful && patch.id != null) { const i = issues.find((x) => x.id === patch.id); if (i) Object.assign(i, Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'id'))); }
-        return { id: patch.id ?? 9 };
+        return opts.answer ? opts.answer(patch) : { id: patch.id ?? 9 };
       },
       boardDelete: async () => ({}),
       boardNote: async (session: string, id: number, body: string) => { calls.notes.push({ id, body, session }); if (opts.note) await opts.note(); return {}; },
@@ -628,4 +629,90 @@ test('the detail chord obeys ✓: nothing changed, a bare/Shift Enter, an IME En
     assert.equal(app.calls.saves.length, 1, 'once the upload landed the same chord saves');
     assert.match(app.calls.saves[0].body, REF);
   } finally { release(); await app.close(); }
+});
+
+// ── Board #377: the hand-off is the SERVER's. The page saves ONCE (asking for
+// the hand-off), reads how the telling went from the answer, and never posts a
+// brief of its own. These drive the real Board against a server that answers
+// `dispatch: "failed"` — the save landed, the post did not — and one whose
+// login answer lacks `board_dispatch`.
+const alice = { name: 'alice', managed: true, state: 'idle', agent: 'kiro' };
+const failedHandOff = () => ({ ok: true, id: 9, dispatch: 'failed', dispatch_error: 'the room is full' });
+const newIssueButton = (app: { document: Document }) => [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /new/i.test(b.getAttribute('aria-label') ?? b.title ?? ''));
+async function pickAlice(app: { q: <E extends Element>(s: string) => E | null; document: Document; flush: () => Promise<void> }, scope: string) {
+  app.q<HTMLButtonElement>(`${scope} .sel-trigger, ${scope} [aria-haspopup="listbox"]`)!.click(); await app.flush();
+  [...app.document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent?.includes('alice'))!.click();
+  await app.flush();
+}
+
+test('a create with an assignee is ONE request; a hand-off that failed is reported after the form has closed, and nothing can file it twice (board #377)', async (context) => {
+  const app = await mount(context, { agents: [alice], answer: failedHandOff });
+  try {
+    newIssueButton(app)!.click(); await app.flush();
+    await app.type(app.q<HTMLTextAreaElement>('.n-title')!, 'Ship it');
+    await pickAlice(app, '.detail');
+    app.q<HTMLButtonElement>('.detail .icon-btn.go')!.click();
+    for (let i = 0; i < 5; i++) await app.flush();
+    assert.deepEqual(app.calls.saves, [{ title: 'Ship it', body: '', assignee: 'alice', dispatch: true, session: 'fixture' }], 'one request: the issue, its assignee, and the ask');
+    assert.equal(app.calls.posts.length, 0, 'the page posts no brief of its own');
+    assert.equal(app.q('.n-title'), null, 'the issue EXISTS, so the form is gone: there is nothing to retry');
+    assert.match(app.q('.err')?.textContent ?? '', /#9: Saved, but alice was not told: the room is full/u, 'the failed hand-off is its own line');
+  } finally { await app.close(); }
+});
+
+test('an edit that assigns saves once; a failed hand-off keeps the detail, rebased on what was saved, and a second ✓ sends nothing (board #377)', async (context) => {
+  const app = await mount(context, { agents: [alice], stateful: true, answer: failedHandOff });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    const title = app.q<HTMLInputElement>('.d-title-input')!;
+    title.value = 'A renamed'; title.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+    await pickAlice(app, '.detail');
+    const save = () => [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    save();
+    for (let i = 0; i < 5; i++) await app.flush();
+    assert.deepEqual(app.calls.saves, [{ id: 1, title: 'A renamed', assignee: 'alice', dispatch: true, session: 'fixture' }], 'title and assignee in the SAME request');
+    assert.equal(app.calls.posts.length, 0);
+    assert.ok(app.q('.detail'), 'the detail stays open: the hand-off needs saying');
+    assert.match(app.q('.err')?.textContent ?? '', /alice was not told: the room is full/u);
+    assert.equal(app.q<HTMLInputElement>('.d-title-input')!.value, 'A renamed', 'and the draft is the saved text');
+    save(); await app.flush();
+    assert.equal(app.calls.saves.length, 1, 'nothing is dirty, so nothing is sent again (and no second issue is ever filed)');
+  } finally { await app.close(); }
+});
+
+test('an edit that does not touch the assignee asks for no hand-off (board #377)', async (context) => {
+  const app = await mount(context, { agents: [alice], stateful: true });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    const title = app.q<HTMLInputElement>('.d-title-input')!;
+    title.value = 'Just a rename'; title.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 5; i++) await app.flush();
+    assert.deepEqual(app.calls.saves, [{ id: 1, title: 'Just a rename', session: 'fixture' }], 'no assignee, no dispatch flag: a plain edit never re-sends a hand-off');
+  } finally { await app.close(); }
+});
+
+test('against a server whose login lacks board_dispatch the pickers are disabled and say why; an unanswered login is not a refusal (board #377)', async (context) => {
+  const disabledPicker = '.detail .d-meta button[disabled], .detail [aria-haspopup][disabled], .detail .sel[aria-disabled="true"]';
+  // The detail of an issue, on an older server.
+  const old = await mount(context, { agents: [alice], caps: [] });
+  try {
+    old.q<HTMLButtonElement>('.card')!.click(); await old.flush();
+    assert.ok(old.q(disabledPicker), 'the detail picker is disabled');
+    assert.match(old.q('.detail .meta-bit')?.textContent ?? '', /older than the app/u, 'and says why');
+  } finally { await old.close(); }
+  // The create dialog, on an older server.
+  const oldCreate = await mount(context, { agents: [alice], caps: [] });
+  try {
+    newIssueButton(oldCreate)!.click(); await oldCreate.flush();
+    assert.ok(oldCreate.q(disabledPicker), 'the create picker is disabled');
+    assert.match(oldCreate.q('.detail .meta-bit')?.textContent ?? '', /older than the app/u);
+  } finally { await oldCreate.close(); }
+  // A login that has not answered yet says nothing about the server.
+  const unknown = await mount(context, { agents: [alice], caps: undefined });
+  try {
+    unknown.q<HTMLButtonElement>('.card')!.click(); await unknown.flush();
+    assert.equal(unknown.q(disabledPicker), null, 'an unanswered question is not a no');
+    assert.doesNotMatch(unknown.q('.detail')?.textContent ?? '', /older than the app/u, 'and no complaint');
+  } finally { await unknown.close(); }
 });
