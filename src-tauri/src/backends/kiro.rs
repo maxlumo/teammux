@@ -1722,17 +1722,8 @@ mod tests {
         assert_eq!(resume_command(v3, Some(id), Some(&notdir), "dev"), v3, "an unreadable store");
         assert_eq!(resume_command(v3, Some(id), None, "dev"), v3, "no home to check against");
 
-        // The id is found under whichever cwd-hash bucket holds it, and a
-        // bucket that does not is skipped rather than ending the search.
-        let many = root.join("many");
-        std::fs::create_dir_all(many.join("sessions").join("aaaa")).unwrap();
-        session(&many, "zzzz", id, &mode("dev"));
-        assert_eq!(resume_command(v3, Some(id), Some(&many), "dev"), resume, "found in a later bucket");
-
-        // An id that is not an id never becomes a path (the #376 guard, shared).
-        for evil in ["../x", "a/b", ".hidden", ""] {
-            assert!(!v3_session_resumable(&own, "dev", evil), "{evil:?}");
-        }
+        // (Which bucket holds the id, and an id that is a path, have their own
+        // tests below: they need fixtures that cannot pass by luck.)
         // The name comes from the CALLER, not from the launch line: an empty
         // name vouches for nothing, and the line's own `--agent` is never read.
         assert_eq!(resume_command(v3, Some(id), Some(&own), ""), v3, "no agent name: fresh");
@@ -1745,6 +1736,82 @@ mod tests {
         // ids are not `sess_…`.
         let v2 = "command kiro-cli chat --agent dev --trust-all-tools";
         assert_eq!(resume_command(v2, Some("0d1b8e2a-1111"), Some(&vibe), "dev"), format!("{v2} --resume-id 0d1b8e2a-1111"));
+    }
+
+    /// Board #379 (validator, negative control 5). The id is found under
+    /// whichever cwd-hash bucket holds it, and a bucket that does not is
+    /// skipped rather than ending the search. A real home always has a second
+    /// bucket beside the hash one (`sessions/cli/`), so an empty bucket in
+    /// front of the real one is the common case, not an edge.
+    ///
+    /// `read_dir` order belongs to the filesystem (tmpfs lists the newest
+    /// entry first, ext4 by name hash), so ONE real bucket among empties
+    /// proves nothing when it happens to list first: the first cut of this
+    /// test passed with `continue` changed to `return false`. Every bucket
+    /// therefore takes a turn as the real one, in homes created identically;
+    /// whatever order the filesystem lists them in, all but one turn put an
+    /// empty bucket in front.
+    #[test]
+    fn the_resume_search_goes_past_an_empty_bucket_in_any_listing_order() {
+        let root = crate::config::fresh_process_dir("tmm-kiro-379-buckets");
+        let id = "sess_e58968b6-0000-4000-8000-000000000001";
+        let body = format!(r#"{{"id":"{id}","agentMode":"dev"}}"#);
+        let buckets = ["cli", "13c0722d7b097be1", "aaaa", "mmmm", "zzzz"];
+        for real in buckets {
+            let home = root.join(format!("real-{real}"));
+            for bucket in buckets {
+                std::fs::create_dir_all(home.join("sessions").join(bucket)).unwrap();
+            }
+            let dir = home.join("sessions").join(real).join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.json"), &body).unwrap();
+            assert!(v3_session_resumable(&home, "dev", id), "the session is in `{real}`, past the empty buckets");
+        }
+    }
+
+    /// Ids that are paths, planted so that each WOULD resolve to a readable
+    /// session if nothing refused it: `../planted` out of a bucket into a
+    /// sibling, `a/b` and `a\b` below it, a dot directory, and `""`, which
+    /// makes the bucket itself the session. Board #379 (validator, negative
+    /// control 6): the first cut asserted refusals for ids that resolved to
+    /// nothing, so it passed with the guard removed. Returns the home and the
+    /// ids; the fixture checks its own claim that every one resolves.
+    fn plant_path_shaped_sessions(prefix: &str) -> (std::path::PathBuf, [&'static str; 5]) {
+        let home = crate::config::fresh_process_dir(prefix);
+        let sessions = home.join("sessions");
+        let bucket = sessions.join("13c0722d7b097be1");
+        let body = r#"{"id":"planted","agentMode":"dev"}"#;
+        let ids = ["../planted", "a/b", "a\\b", ".hidden", ""];
+        let plant = |dir: std::path::PathBuf| {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.json"), body).unwrap();
+        };
+        plant(sessions.join("planted"));
+        plant(bucket.join("a").join("b"));
+        plant(bucket.join("a\\b"));
+        plant(bucket.join(".hidden"));
+        plant(bucket.clone());
+        for id in ids {
+            assert!(bucket.join(id).join("session.json").is_file(), "{id:?} must resolve for this test to mean anything");
+        }
+        (home, ids)
+    }
+
+    #[test]
+    fn a_path_shaped_id_never_resumes_even_where_it_would_resolve() {
+        let (home, ids) = plant_path_shaped_sessions("tmm-kiro-379-guard-resume");
+        for id in ids {
+            assert!(!v3_session_resumable(&home, "dev", id), "{id:?} is a path, not a session id");
+        }
+    }
+
+    /// The same guard in front of the #376 reply lookup.
+    #[test]
+    fn a_path_shaped_id_is_missing_to_the_reply_lookup_even_where_it_would_resolve() {
+        let (home, ids) = plant_path_shaped_sessions("tmm-kiro-379-guard-lookup");
+        for id in ids {
+            assert_eq!(session_lookup(&home.join("sessions"), id), SessionSource::Missing, "{id:?} is a path, not a session id");
+        }
     }
 
     /// Board #207: the exact 3.0 hooks we write — no `matcher` anywhere (the
