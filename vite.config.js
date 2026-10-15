@@ -7,6 +7,7 @@ import {
   DEV_DOWNLOAD_PATH,
   DEV_WEB_PORT,
   DEV_WS_PATH,
+  devHost,
   devServerTargets,
 } from './scripts/dev-ports.mjs';
 
@@ -52,51 +53,124 @@ function allowCompactXtermLines() {
 // Vite's dev client answers a lost HMR socket with "[vite] server connection
 // lost. Polling for restart..." and, as soon as the server answers a ping,
 // `location.reload()` — the whole page, composer text and scroll position
-// included, whatever dropped it (a proxy's idle timeout, a laptop's wifi, the
-// SSH tunnel behind the CloudFront → Caddy → tunnel path the browser app is
-// reached through). The patch reconnects the SAME socket instead: if the server
-// answers (the same dev server is back), HMR resumes and the page is untouched.
-// If it cannot (the server RESTARTED — its HMR token is new, so this page's
-// client is refused), a page on the loopback keeps Vite's reload, which is the
-// local dev loop's wanted answer to a restart; a page reached through any other
-// host stays as it is and says so once in the console (HMR is off until it is
-// reloaded by hand). Guarded like the xterm patch: a Vite whose client reads
-// differently fails the dev server loudly instead of silently reloading again.
-// The Vite whose dev client this was measured against (live, 2026-10-15, through a
-// proxy that dropped the connection for 5, 30 and 60 s and a dev-server restart).
-// scripts/vite-config.test.ts fails when the installed Vite is another one, so an
-// upgrade re-checks the patch instead of silently keeping or losing it.
+// included, whatever dropped it (a proxy's idle timeout, a laptop's wifi, a tab
+// that was frozen and resumed, the SSH tunnel behind the CloudFront → Caddy →
+// tunnel path the browser app is reached through). The patch reconnects instead.
+//
+// HOW (reviewer P1-A on the first cut): Vite's transport wrapper is a state
+// machine that a failed dial POISONS — a rejected connectingPromise sticks and
+// every later connect() re-awaits it, disconnect() is a no-op once the socket has
+// closed, and the default (no hmr.port) path swaps its socket factory to the
+// SERVER's direct address, which a remote browser cannot reach. So each attempt
+// builds a FRESH transport from the same factory the page started with (always
+// dialled at the page's own proxied address first), hands it to the same HMRClient
+// (its module registrations — what makes hot updates reach the modules — stay), and
+// a failed attempt is simply thrown away. The old transport's 30 s ping timer is
+// also cleared the moment its socket is seen CLOSED (the wrapper's own disconnect
+// never runs after a natural close, so one timer would leak per drop).
+//
+// WHEN TO RELOAD: a failed re-dial is NOT evidence of a restart — the same server
+// may refuse one handshake and take the next. The evidence is the server's
+// IDENTITY: its HMR token is new on every start, so the page re-reads /@vite/client
+// and compares. Only a confirmed new identity reloads, and only a page on the
+// loopback (the local dev loop's wanted answer to a restart); a page reached
+// through any other host never reloads, it says so once in the console. Short of
+// either, it keeps trying for ~1 minute and then says HMR is off until a manual
+// reload.
+//
+// Guarded like the xterm patch: every piece of text it replaces must be found
+// exactly once, or the dev server fails loudly instead of silently reloading again.
+// The Vite whose dev client this was measured against (live, 2026-10-15/16, through a
+// proxy that dropped the connection for 5, 30 and 60 s, one that refused the first
+// HMR handshake, and a dev-server restart). scripts/vite-config.test.ts fails when the
+// installed Vite is another one, so an upgrade re-checks the patch instead of
+// silently keeping or losing it.
 export const QUIET_RECONNECT_MEASURED_ON = '6.4.2';
 
+export const CLIENT_PATCHES = [
+  // 1. The transport becomes a factory: a fresh one per attempt.
+  {
+    name: 'the transport factory',
+    original: 'const transport = normalizeModuleRunnerTransport(\n  (() => {\n    let wsTransport',
+    patched: 'const __tmmNewTransport = () => normalizeModuleRunnerTransport(\n  (() => {\n    let wsTransport',
+  },
+  {
+    name: 'the transport binding',
+    original: '  })()\n);\nlet willUnload = false;',
+    patched: [
+      '  })()',
+      ');',
+      'let transport = __tmmNewTransport();',
+      '// The server\'s identity: its HMR token changes on every start (tmux-mobile #393).',
+      'async function __tmmServerRestarted() {',
+      '  try {',
+      '    const res = await fetch(importMetaUrl.href.split("?")[0], { cache: "no-store" });',
+      '    if (!res.ok) return false;',
+      '    const served = /const wsToken = "([^"]*)"/.exec(await res.text())?.[1];',
+      '    return !!served && served !== wsToken;',
+      '  } catch {',
+      '    return false;',
+      '  }',
+      '}',
+      'let willUnload = false;',
+    ].join('\n'),
+  },
+  // 2. The ping timer dies with its socket.
+  {
+    name: 'the ping timer',
+    original: '      pingIntervalId = setInterval(() => {\n        if (socket.readyState === socket.OPEN) {\n          socket.send(JSON.stringify({ type: "ping" }));\n        }\n      }, pingInterval);',
+    patched: [
+      '      const ownPingId = pingIntervalId = setInterval(() => {',
+      '        if (socket.readyState === socket.OPEN) {',
+      '          socket.send(JSON.stringify({ type: "ping" }));',
+      '        } else if (socket.readyState === socket.CLOSED) {',
+      '          clearInterval(ownPingId);',
+      '        }',
+      '      }, pingInterval);',
+    ].join('\n'),
+  },
+  // 3. The reconnect, in place of the reload.
+  {
+    name: 'the reload after the ping',
+    original: '          await waitForSuccessfulPing(url.href);\n          location.reload();',
+    patched: [
+      '          await waitForSuccessfulPing(url.href);',
+      '          let restored = false;',
+      '          let restarted = false;',
+      '          for (let attempt = 0; attempt < 12 && !restored && !restarted; attempt++) {',
+      '            transport = __tmmNewTransport();',
+      '            hmrClient.transport = transport;',
+      '            try {',
+      '              await transport.connect(createHMRHandler((next) => {',
+      '                if (next.type === "custom" && next.event === "vite:ws:connect") restored = true;',
+      '                return handleMessage(next);',
+      '              }));',
+      '            } catch {}',
+      '            if (!restored) await wait(50);',
+      '            if (restored) break;',
+      '            restarted = await __tmmServerRestarted();',
+      '            if (!restarted) await wait(Math.min(1e3 * (attempt + 1), 5e3));',
+      '          }',
+      '          if (restored) console.info("[vite] connection restored; the page was not reloaded.");',
+      '          else if (restarted && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) location.reload();',
+      '          else if (restarted) console.info("[vite] the dev server restarted; HMR is off until this page is reloaded.");',
+      '          else console.info("[vite] could not re-establish HMR; it is off until this page is reloaded.");',
+    ].join('\n'),
+  },
+];
+
 export function quietDevReconnect() {
-  const original = '          await waitForSuccessfulPing(url.href);\n          location.reload();';
-  const patched = [
-    '          await waitForSuccessfulPing(url.href);',
-    '          let restored = false;',
-    '          for (let attempt = 0; attempt < 3 && !restored; attempt++) {',
-    '            try {',
-    '              await transport.disconnect();',
-    '              await transport.connect(createHMRHandler((next) => {',
-    '                if (next.type === "custom" && next.event === "vite:ws:connect") restored = true;',
-    '                return handleMessage(next);',
-    '              }));',
-    '            } catch {}',
-    '            if (!restored) await wait(1e3);',
-    '          }',
-    '          if (restored) console.info("[vite] connection restored; the page was not reloaded.");',
-    '          else if (["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) location.reload();',
-    '          else console.info("[vite] the dev server restarted; HMR is off until this page is reloaded.");',
-  ].join('\n');
   return {
     name: 'quiet-dev-reconnect',
     enforce: 'post',
     transform(code, id) {
       if (!id.split('?')[0].endsWith('/vite/dist/client/client.mjs')) return;
-      if (code.split(original).length !== 2) throw new Error('Unsupported Vite dev client reconnect');
-      for (const name of ['createHMRHandler', 'handleMessage', 'wait(', 'transport.disconnect', 'transport.connect']) {
-        if (!code.includes(name)) throw new Error(`Unsupported Vite dev client: no ${name}`);
+      let out = code;
+      for (const { name, original, patched } of CLIENT_PATCHES) {
+        if (out.split(original).length !== 2) throw new Error(`Unsupported Vite dev client: ${name} not found exactly once`);
+        out = out.replace(original, () => patched);
       }
-      return code.replace(original, patched);
+      return out;
     },
   };
 }
@@ -129,6 +203,17 @@ const NOT_THE_WEB_APP = ['worktree', 'src-tauri', 'temp', 'build', 'dist', '.tmm
 
 /** What the dev server's watcher skips (absolute globs). */
 export const watchIgnored = (root = ROOT) => NOT_THE_WEB_APP.map((dir) => `${root}/${dir}/**`);
+
+// What the dev server will NOT serve (board #393, security review): a watch
+// ignore is not access control. `server.fs.deny` REPLACES Vite's default list,
+// so the defaults (6.4.2: .env, .env.*, *.{crt,pem} and the .git directories)
+// are restated here — scripts/vite-config.test.ts fails if Vite's own default has
+// something this list lacks — and the directories that are not the web app are
+// added, absolute and anchored at the config like the watch list. Measured on a
+// private Vite before this: `.tmm/agents/x/launch.json`, `temp/`, `worktree/` and
+// `src-tauri/` answered 200 over a plain URL and over `/@fs/<abs path>`.
+export const VITE_DEFAULT_FS_DENY = ['.env', '.env.*', '*.{crt,pem}', '**/.git/**'];
+export const fsDeny = (root = ROOT) => [...VITE_DEFAULT_FS_DENY, ...NOT_THE_WEB_APP.map((dir) => `${root}/${dir}/**`)];
 
 /** Vite's default dependency-scan entry glob, minus the same directories. */
 export const scanEntries = () => ['**/*.html', ...NOT_THE_WEB_APP.map((dir) => `!${dir}/**`)];
@@ -187,11 +272,12 @@ export function createViteConfig(command, env = process.env, identityDeps = {}) 
       __TMM_LICENSE__: JSON.stringify(PACKAGE.license),
     },
     server: {
-      host: '0.0.0.0',
+      host: devHost(env),
       port: DEV_WEB_PORT,
       strictPort: true,
       allowedHosts: ['.ts.net', 'localhost'],
       watch: { ignored: watchIgnored() },
+      fs: { deny: fsDeny() },
       ...(command === 'serve' ? { proxy: devProxy(env) } : {}),
     },
   };

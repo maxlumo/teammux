@@ -22,9 +22,13 @@ PATH, and the gateway service records the absolute path of the `tmm` that
 installed it, so link the real file rather than copying it.
 
 The first launch generates a token in `~/.config/tmux-mobile/config.toml`.
-Open `http://<your-machine-ip>:5173`; the connection field is pre-filled with
-`ws://<your-machine-ip>:5173/ws`, because Vite proxies `/ws` and `/dl` to the
-loopback-only Rust server. Only port 5173 needs to be reachable.
+Open `http://localhost:5173` on this machine; the connection field is pre-filled
+with `ws://localhost:5173/ws`, because Vite proxies `/ws` and `/dl` to the
+loopback-only Rust server. Only port 5173 needs to be reachable — and Vite
+listens on the LOOPBACK only (board #393, see [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)):
+to open it from another device on your network, start it with
+`TMUX_MOBILE_DEV_HOST=0.0.0.0 npm run dev:all` and open
+`http://<your-machine-ip>:5173`, which then pre-fills `ws://<your-machine-ip>:5173/ws`.
 
 `tmm` is built next to the server binary and is on every managed agent's PATH.
 From any shell:
@@ -58,8 +62,8 @@ dev server; see [testing.md](testing.md#3-client-behavior-componentmounttestts).
 ## Commands
 
 ```bash
-npm run dev:all          # one public :5173; proxies /ws + /dl to the gateway
-npm run dev              # Vite dev server only (web UI on 0.0.0.0:5173)
+npm run dev:all          # one :5173 (loopback unless TMUX_MOBILE_DEV_HOST says otherwise); proxies /ws + /dl to the gateway
+npm run dev              # Vite dev server only (web UI on 127.0.0.1:5173; TMUX_MOBILE_DEV_HOST=0.0.0.0 for the LAN)
 npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
 npm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
 npm run tauri:dev        # Desktop app + WS server (dev mode)
@@ -257,20 +261,64 @@ runs a real Vite watcher on a scratch root: a changed `.html` under any of them
 is not even reported, the control `index.html` is. Add a new build-output
 directory to `NOT_THE_WEB_APP` the day one appears.
 
+**Vite listens on the loopback, and does not serve what is not the web app**
+(security, reviewer on #393). A watch ignore is not access control. The dev
+server used to listen on `0.0.0.0:5173`, reachable from the whole security group
+(and, through the CloudFront route, from the internet), and it served the whole
+checkout: measured on a private Vite before the change, `.tmm/agents/x/launch.json`
+(an agent's environment), `temp/`, `worktree/` and `src-tauri/` answered 200 over
+a plain URL and over `/@fs/<absolute path>`. Now (`devHost`, `fsDeny` in
+`vite.config.js`):
+
+- `server.host` is `127.0.0.1` by default. The only intended path from outside
+  this host is the reverse SSH tunnel, which dials `127.0.0.1`, so the CloudFront
+  route keeps working (measured: no Tailscale on this host). A person who wants the
+  dev server on the LAN says so — `TMUX_MOBILE_DEV_HOST=0.0.0.0` (Tauri's own
+  `TAURI_DEV_HOST` for mobile dev is honoured too). `ss -ltn` on a Vite started
+  with no flag: `127.0.0.1:<port>`. `allowedHosts` is not widened.
+- `server.fs.deny` REPLACES Vite's defaults, so it restates them (`.env`, `.env.*`,
+  `*.{crt,pem}`, `**/.git/**` on 6.4.2; a test fails if the installed Vite's own
+  default has something this list lacks) and adds `worktree/`, `src-tauri/`,
+  `temp/`, `build/`, `dist/` and `.tmm/`, absolute and anchored at the config.
+  Measured on the private Vite after: all of them 403 over the plain URL AND
+  `/@fs/<abs path>`; `/`, `/src/main.ts`, `/node_modules/.vite/deps/…` and
+  `/@fs/<abs>/src/main.ts` still 200. `scripts/vite-config.test.ts` runs a real
+  server and asserts the same on a scratch root.
+
+This does NOT close the CloudFront route to Vite: whoever holds that URL still
+reaches the app's own source through Vite. Pointing the route at the gateway's
+built UI (`:9899`) is the owner's decision.
+
 **A lost HMR socket reconnects; it does not reload the page.** `quietDevReconnect()`
 (a Vite plugin in `vite.config.js`) patches Vite's own dev client, the way
 `allowCompactXtermLines()` patches xterm ([xterm-patch.md](../design-docs/features/xterm-patch.md)),
-at the one place it reloads after the ping: it reconnects the same socket instead.
-If the same dev server is back, HMR resumes and the page is untouched; the
-console says "connection restored; the page was not reloaded". If it cannot
-(the dev server RESTARTED — its HMR token is new and the old client is refused),
-a page on the loopback (`localhost`, `127.0.0.1`, `[::1]`) keeps Vite's reload,
-which is the local dev loop's wanted answer to a restart; a page reached through
-any other host stays as it is, logs once "the dev server restarted; HMR is off
-until this page is reloaded", and the person reloads when they choose to.
-Tabs opened before the supervised server picked the new config up (Vite
-restarts itself when `vite.config.js` changes) keep the old client until
-reloaded once.
+at four pieces of text, so that after the ping answers the page reconnects instead
+of calling `location.reload()`:
+
+1. Vite's transport wrapper is a state machine that a failed dial POISONS (a
+   rejected `connectingPromise` sticks and every later `connect()` re-awaits it;
+   `disconnect()` is a no-op once the socket has closed; and the default path
+   swaps its socket factory to the server's DIRECT address, which a remote browser
+   cannot reach). So the patch turns the transport into a factory
+   (`__tmmNewTransport`) and builds a FRESH one per attempt, always dialled at the
+   page's own proxied address first, handing it to the same `HMRClient` so the
+   modules' hot registrations survive. A failed attempt is thrown away.
+2. The 30 s ping timer of a closed socket is cleared (the wrapper never does it
+   after a natural close: one timer would leak per drop).
+3. A failed re-dial is NOT evidence of a restart: the same server may refuse one
+   handshake and take the next. The evidence is the server's IDENTITY — its HMR
+   token is new on every start — so the page re-reads `/@vite/client` and compares.
+   Only a confirmed new identity reloads, and only a page on the loopback
+   (`localhost`, `127.0.0.1`, `[::1]`: the local dev loop's wanted answer to a
+   restart); a page reached through any other host never reloads and logs once
+   "the dev server restarted; HMR is off until this page is reloaded". With the
+   identity unchanged or unreadable it keeps trying for about a minute (12
+   attempts) and then logs that HMR is off until a reload.
+4. If the same server is back, HMR resumes and the console says "connection
+   restored; the page was not reloaded".
+
+Tabs opened before the supervised server picked the new config up (Vite restarts
+itself when `vite.config.js` changes) keep the old client until reloaded once.
 
 *What was measured* (2026-10-15; nothing of the owner's was touched, the real
 URL was only read through, one read-only HMR socket per probe):
@@ -295,8 +343,14 @@ URL was only read through, one read-only HMR socket per probe):
 - on a private Vite behind a TCP hop that drops every connection for 5 s: the
   unpatched client reloaded the page (`navigation.type == "reload"`, the page's
   own variable gone); the patched one kept it, with the draft in the composer;
+  two drops in a row recovered both times and a hot update (an edit to
+  `App.svelte`) was delivered after each; with the hop refusing the FIRST HMR
+  handshake after a drop (the reviewer's sequence) the page still recovered with no
+  reload (the rig can reach the server's direct address, so Vite's own fallback
+  carries it; the dynamic test below drives the case where it cannot);
   restarting that Vite: a loopback page reloaded as before, an `app.localhost`
-  page (not in the loopback list) stayed put and logged once.
+  page (not in the loopback list) stayed put, logged the failed dial and then
+  "the dev server restarted…" once.
 
 *No server heartbeat.* The idle cut is already prevented by Vite's 30 s client
 ping for a live tab, and the reconnect now makes every other drop invisible, so a
@@ -304,13 +358,21 @@ heartbeat would be a second mechanism for a case the first covers.
 
 **The patch edits Vite's code, so it is stamped and it fails loudly.**
 `QUIET_RECONNECT_MEASURED_ON` is the Vite version it was measured on (6.4.2); the
-transform throws "Unsupported Vite dev client reconnect" when the text it replaces
-is not found exactly once, and `scripts/vite-config.test.ts` fails when the
-installed Vite is another version OR the text is gone, so an upgrade can never
-quietly lose the patch (or quietly keep one that no longer does anything).
-Upgrade procedure: run the test; when it fails, read the new
-`node_modules/vite/dist/client/client.mjs` § `vite:ws:disconnect`, adapt the
-patch, re-run the live check (a private Vite with its own `--port` and
+transform throws "Unsupported Vite dev client: … not found exactly once" when any of
+the four pieces of text it replaces is gone or doubled, and `scripts/vite-config.test.ts`
+fails when the installed Vite is another version OR any piece is gone, so an upgrade
+can never quietly lose the patch (or quietly keep one that no longer does anything).
+`scripts/vite-client-reconnect.test.ts` RUNS the patched client of the installed Vite
+in Node against a fake WebSocket, fetch, document and location with mocked timers: ping
+answers → the first HMR dial fails → the same server comes back must re-dial the page's
+own address, deliver later hot updates to modules registered before the drop and recover
+a second drop, the old ping timers must be gone, a failed dial with an unchanged or
+unreadable identity never reloads, and only a changed identity reloads a loopback page.
+The unpatched client is run through the same sequence as the control (it reloads).
+Upgrade procedure: run the tests; when they fail, read the new
+`node_modules/vite/dist/client/client.mjs` (the transport wrapper, the ping timer and
+§ `vite:ws:disconnect`), adapt the patch until `vite-client-reconnect.test.ts` passes on
+it, re-run the live check (a private Vite with its own `--port` and
 `cacheDir`, a TCP hop you can cut, a headless browser: a 5 s cut must leave the
 page's own variable in place), then update the stamp. Never weaken the guard to
 make the dev server start.

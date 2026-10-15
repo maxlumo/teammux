@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildIdentity, createViteConfig, devProxy, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, watchIgnored } from '../vite.config.js';
-import { DEV_SERVER_PORT_ENV } from './dev-ports.mjs';
+import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
+import { DEV_HOST_ENV, DEV_SERVER_PORT_ENV, devHost } from './dev-ports.mjs';
 
 test('Vite proxies WebSocket and downloads to the same internal Rust server', () => {
   const proxy = devProxy({ [DEV_SERVER_PORT_ENV]: '19099' });
@@ -76,11 +76,68 @@ test('a build output file changing does not reload the page; a source html does 
   assert.deepEqual(seen, ['index.html'], 'the index.html control was not reported');
 });
 
-test('a lost HMR socket is reconnected, never reloaded; a restarted server reloads only a loopback page (#393)', async () => {
-  // Vite's dev client ends "Polling for restart..." in location.reload(): the
-  // composer text and scroll position of the owner's browser tab. The patch
-  // reconnects the same socket; the guard below fails the dev server loudly on a
-  // Vite whose client reads differently.
+test('the dev server listens on the loopback unless a person says otherwise (#393, security)', () => {
+  // The only intended path from outside this host is the reverse SSH tunnel, which
+  // dials 127.0.0.1; a 0.0.0.0 listener was reachable from the whole security group.
+  assert.equal(createViteConfig('serve', {}).server.host, '127.0.0.1');
+  assert.equal(createViteConfig('build', {}).server.host, '127.0.0.1');
+  assert.equal(devHost({}), '127.0.0.1');
+  assert.equal(devHost({ [DEV_HOST_ENV]: '  ' }), '127.0.0.1', 'blank is not a choice');
+  assert.equal(devHost({ [DEV_HOST_ENV]: '0.0.0.0' }), '0.0.0.0', 'LAN dev is opt-in');
+  assert.equal(createViteConfig('serve', { [DEV_HOST_ENV]: '0.0.0.0' }).server.host, '0.0.0.0');
+  assert.equal(devHost({ TAURI_DEV_HOST: '192.168.1.5' }), '192.168.1.5', 'Tauri’s own name for mobile dev');
+  assert.equal(devHost({ [DEV_HOST_ENV]: '10.0.0.7', TAURI_DEV_HOST: '192.168.1.5' }), '10.0.0.7', 'ours wins');
+  assert.equal(createViteConfig('serve', {}).server.allowedHosts.join(), ['.ts.net', 'localhost'].join(), 'allowedHosts is not widened');
+});
+
+test('what is not the web app is not SERVED either: a watch ignore is not access control (#393, security)', async (context) => {
+  // Measured on a private Vite before: `.tmm/agents/x/launch.json` (an agent's
+  // environment), temp/, worktree/ and src-tauri/ answered 200 over a plain URL
+  // and over /@fs/<abs path>. server.fs.deny REPLACES Vite's defaults, so the list
+  // keeps every one of them and adds the directories that are not the web app.
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { createServer: createHttpServer } = await import('node:http');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer, resolveConfig } = await import('vite');
+  const root = mkdtempSync(join(tmpdir(), 'tmm-vite-deny-'));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const vitesOwn = (await resolveConfig({ root, configFile: false, logLevel: 'silent' }, 'serve')).server.fs.deny;
+  for (const pattern of vitesOwn) assert.ok(fsDeny(root).includes(pattern), `Vite’s own default ${pattern} is still denied`);
+  assert.deepEqual([...VITE_DEFAULT_FS_DENY].sort(), [...vitesOwn].sort(), 'the restated defaults ARE the installed Vite’s (re-check when Vite is upgraded)');
+  assert.deepEqual(createViteConfig('serve', {}).server.fs, { deny: fsDeny() });
+
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body>app</body></html>');
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'app.js'), 'export const app = 1;\n');
+  const hidden = ['.tmm/agents/x/launch.json', 'temp/x.txt', 'worktree/y.txt', 'src-tauri/Cargo.toml', 'build/z.txt', 'dist/index.html'];
+  for (const f of hidden) { mkdirSync(join(root, f, '..'), { recursive: true }); writeFileSync(join(root, f), 'SECRET'); }
+  const server = await createServer({
+    root, configFile: false, logLevel: 'silent', cacheDir: join(root, '.cache'),
+    server: { middlewareMode: true, hmr: false, fs: { deny: fsDeny(root) } },
+    optimizeDeps: { noDiscovery: true, entries: [] },
+  });
+  context.after(() => server.close());
+  const http = createHttpServer(server.middlewares);
+  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
+  context.after(() => http.close());
+  const base = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  const status = async (path: string) => (await fetch(`${base}${path}`)).status;
+  for (const f of hidden) {
+    assert.equal(await status(`/${f}`), 403, `/${f} (plain URL)`);
+    assert.equal(await status(`/@fs${join(root, f)}`), 403, `/@fs/${f}`);
+  }
+  assert.equal(await status('/'), 200, 'the app’s page still serves');
+  assert.equal(await status('/src/app.js'), 200, 'and its source');
+  assert.equal(await status(`/@fs${join(root, 'src', 'app.js')}`), 200, 'by /@fs too');
+});
+
+test('the dev-client patch is stamped with its Vite, lands on every piece of text it replaces, and fails loudly when one is gone (#393)', async () => {
+  // Vite’s dev client ends "Polling for restart..." in location.reload(): the composer
+  // text and scroll position of the owner’s browser tab. The patch (run against a fake
+  // browser in vite-client-reconnect.test.ts) reconnects with a fresh transport instead.
+  // This file pins what only the text can tell: the version it was measured on, the four
+  // anchors, and that a Vite whose client reads differently stops the dev server.
   const installed = JSON.parse(readFileSync(new URL('../node_modules/vite/package.json', import.meta.url), 'utf8')).version;
   assert.equal(installed, QUIET_RECONNECT_MEASURED_ON,
     `the dev-client patch was measured on Vite ${QUIET_RECONNECT_MEASURED_ON}, this is ${installed}: re-check it live and update the stamp (docs/conventions/development.md § The dev server)`);
@@ -88,23 +145,23 @@ test('a lost HMR socket is reconnected, never reloaded; a restarted server reloa
   const plugin = quietDevReconnect();
   const id = '/x/node_modules/vite/dist/client/client.mjs?v=1';
   const patched = plugin.transform(client, id) as string;
-  const afterPing = patched.slice(patched.indexOf('await waitForSuccessfulPing(url.href);'));
-  const handler = afterPing.slice(0, afterPing.indexOf('break;'));
   assert.ok(!/waitForSuccessfulPing\(url\.href\);\s*location\.reload\(\);/u.test(patched), 'the unconditional reload after the ping is gone');
-  assert.ok(handler.includes('vite:ws:connect') && handler.includes('transport.connect(') && handler.includes('transport.disconnect()'), handler);
-  assert.match(handler, /if \(restored\) console\.info\("\[vite\] connection restored; the page was not reloaded\."\)/u, 'a restored connection says so and does nothing else');
-  assert.equal((handler.match(/location\.reload\(\)/gu) ?? []).length, 1, 'the one reload left in the handler is the loopback restart’s');
-  assert.match(handler, /else if \(\["localhost", "127\.0\.0\.1", "\[::1\]"\]\.includes\(location\.hostname\)\) location\.reload\(\)/u, 'the loopback keeps Vite’s answer to a restart');
-  assert.match(handler, /else console\.info\("\[vite\] the dev server restarted; HMR is off until this page is reloaded\."\)/u);
+  assert.ok(patched.includes('const __tmmNewTransport = () => normalizeModuleRunnerTransport(') && patched.includes('let transport = __tmmNewTransport();'), 'the transport is a factory');
+  assert.equal((patched.match(/location\.reload\(\)/gu) ?? []).length, (client.match(/location\.reload\(\)/gu) ?? []).length, 'the reconnect adds one loopback reload and removes the unconditional one: no other reload is added');
+  assert.match(patched, /else if \(restarted && \["localhost", "127\.0\.0\.1", "\[::1\]"\]\.includes\(location\.hostname\)\) location\.reload\(\)/u, 'the one reload left is a CONFIRMED restart on the loopback');
+  assert.match(patched, /clearInterval\(ownPingId\)/u, 'the ping timer dies with its socket');
   // The patched client is still a module (esbuild is Vite’s own parser).
   const { transformWithEsbuild } = await import('vite');
   await transformWithEsbuild(patched, 'client.mjs', { loader: 'js', format: 'esm', target: 'esnext' });
-  // Not the Vite client: untouched. A client without the expected text: loud.
+  // Not the Vite client: untouched.
   assert.equal(plugin.transform('location.reload();', '/x/src/lib/other.js'), undefined);
-  assert.throws(() => plugin.transform(client.replace('await waitForSuccessfulPing(url.href);', 'await waitForSuccessfulPing(url.href, 1);'), id), /Unsupported Vite dev client reconnect/);
-  const original = '          await waitForSuccessfulPing(url.href);\n          location.reload();';
-  assert.ok(client.includes(original), 'the text the patch replaces is this Vite’s');
-  assert.throws(() => plugin.transform(`${client}\n${original}`, id), /Unsupported Vite dev client reconnect/, 'two of them is not the client we read');
+  // Every piece of replaced text must be there exactly once: gone, or twice, stops the dev server.
+  assert.equal(CLIENT_PATCHES.length, 4, 'the four pieces of text');
+  for (const { name, original } of CLIENT_PATCHES) {
+    assert.ok(client.includes(original), `the text the patch replaces is this Vite’s: ${name}`);
+    assert.throws(() => plugin.transform(client.replace(original, 'REMOVED'), id), /Unsupported Vite dev client: .* not found exactly once/, `gone: ${name}`);
+    assert.throws(() => plugin.transform(`${client}\n${original}`, id), /Unsupported Vite dev client: .* not found exactly once/, `twice: ${name}`);
+  }
   assert.ok(createViteConfig('serve', {}).plugins.some((p: { name?: string }) => p?.name === 'quiet-dev-reconnect'), 'and it is in the config');
 });
 

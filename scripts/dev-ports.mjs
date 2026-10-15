@@ -20,3 +20,17 @@ export function devServerTargets(env = process.env) {
     http: `http://127.0.0.1:${port}`,
   };
 }
+
+// Where the Vite dev server listens (board #393, security review). LOOPBACK by
+// default: the only intended path to it from outside this host is the reverse
+// SSH tunnel, which dials 127.0.0.1, and a 0.0.0.0 listener was reachable from
+// the whole security group — it served `.tmm/agents/*/launch.json` (agents'
+// environments) and `temp/` in the clear, measured. A person who wants the dev
+// server on the LAN says so: `TMUX_MOBILE_DEV_HOST=0.0.0.0 npm run dev:all`
+// (`TAURI_DEV_HOST` is Tauri's own name for mobile dev and is honoured too).
+export const DEV_HOST_ENV = 'TMUX_MOBILE_DEV_HOST';
+export const DEV_HOST_DEFAULT = '127.0.0.1';
+
+export function devHost(env = process.env) {
+  return String(env[DEV_HOST_ENV] ?? '').trim() || String(env.TAURI_DEV_HOST ?? '').trim() || DEV_HOST_DEFAULT;
+}
