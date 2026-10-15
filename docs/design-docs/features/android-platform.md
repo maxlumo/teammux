@@ -204,21 +204,26 @@ warnings — Kotlin 2.x wants the `compilerOptions` DSL; non-blocking).
 Tauri prints the APK path as the in-project
 `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`,
 **but on this machine that path does not exist after a build.** The
-Gradle build directory and cargo target are relocated to a global cache
-(set in the user's environment, not in the repo):
+Gradle build directory is relocated to a global cache (set in the user's
+environment, not in the repo); the cargo target is NOT — it is the checkout's
+own `src-tauri/target` (no `CARGO_TARGET_DIR`, no cargo config on this host;
+an earlier version of this note put it in `~/.cache/builds/cargo-target`,
+which no longer exists here):
 
 - APK: `~/.cache/builds/gradle-builds/android-<hash>/app/outputs/apk/universal/release/app-universal-release.apk`
-- Rust `.so`: `~/.cache/builds/cargo-target/aarch64-linux-android/release/libtmux_mobile.so`
+- Rust `.so`: `<checkout>/src-tauri/target/aarch64-linux-android/release/libtmux_mobile.so`
+  (a git worktree builds into its own `src-tauri/target`)
 
 Each project gets its own `android-<hash>` dir. To locate the freshest
 APK: `find ~/.cache/builds -name '*.apk' -newermt '-10 minutes'`.
 
 ## Build Prerequisites (this machine)
 
-- `NDK_HOME` is **not** set in the shell; `tauri android build` needs
-  it. Export before building:
-  `export NDK_HOME="$ANDROID_HOME/ndk/28.1.13356709"` (NDK 28.1 is the
-  installed version under `$ANDROID_HOME/ndk/`).
+- `tauri android build` needs `NDK_HOME`, which a plain shell may not
+  have (the agents' environment sets it). Export the newest installed NDK
+  rather than a version typed here — the installed one changes (28.1 when this
+  was written, 28.2.13676358 on 2026-10-15):
+  `export NDK_HOME="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"`.
 - JDK 17 (`JAVA_HOME` → openjdk@17) and the `aarch64-linux-android`
   rustup target are present.
 
