@@ -286,6 +286,12 @@ struct Rec {
     /// (board #362 e): it is never continued, even after older ladders age
     /// out of the window while it is still on the screen.
     capped: bool,
+    /// This incident's exhausted decision has been recorded as the turn's
+    /// end (board #362 c). Its identity is the INCIDENT (review P1-D: a
+    /// Claude 5xx has no Request ID, so its signature `1|` is no paint id),
+    /// so it lives and dies with this record: once per continuous incident,
+    /// and a later independent incident is recorded again.
+    exhausted_recorded: bool,
 }
 
 /// What the tracker decided for one (window, tick) with the error visible.
@@ -323,11 +329,6 @@ pub struct Tracker {
     /// every ~20 s floods the feed. The stretch ends when the window has room
     /// again (a ladder starts) or the agent works again (a tool call).
     capped_said: std::collections::HashSet<(String, String)>,
-    /// The last paint each window's missed turn end was recorded for (board
-    /// #362 c): a person-needed error's signature, or a capped/given-up
-    /// incident's. A paint is recorded ONCE (orchestrator's condition b), on
-    /// every tick it stays the newest nothing more is written.
-    person: HashMap<(String, String), String>,
 }
 
 impl Tracker {
@@ -417,19 +418,18 @@ impl Tracker {
         self.map.remove(&(session.to_string(), window.to_string()));
     }
 
-    /// Is `sig` a paint whose missed end has NOT been recorded for this
-    /// window yet (board #362 c, condition b: once per signature)? Asking
-    /// marks nothing: the mark is committed by `person_accept`, only once the
-    /// observation was accepted (review P1-A), so one rejected as stale, or
-    /// one with no turn to end, is looked at again on the next tick.
-    pub fn person_new(&self, session: &str, window: &str, sig: &str) -> bool {
-        self.person.get(&(session.to_string(), window.to_string())).is_none_or(|s| s != sig)
+    /// Has the window's current incident NOT had its exhausted decision
+    /// recorded yet? Asking marks nothing (`exhausted_accept` does, only once
+    /// telemetry accepted it, review P1-A).
+    pub fn exhausted_new(&self, session: &str, window: &str) -> bool {
+        self.map.get(&(session.to_string(), window.to_string())).is_some_and(|r| !r.exhausted_recorded)
     }
 
-    /// The paint `sig`'s missed end was recorded: later ticks that see the
-    /// same paint write nothing.
-    pub fn person_accept(&mut self, session: &str, window: &str, sig: &str) {
-        self.person.insert((session.to_string(), window.to_string()), sig.to_string());
+    /// The current incident's exhausted decision was recorded.
+    pub fn exhausted_accept(&mut self, session: &str, window: &str) {
+        if let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) {
+            r.exhausted_recorded = true;
+        }
     }
 
     /// Housekeeping: drop records for windows that no longer exist.
@@ -437,7 +437,6 @@ impl Tracker {
         self.map.retain(|(s, w), _| s != session || live.contains(w));
         self.starts.retain(|(s, w), _| s != session || live.contains(w));
         self.capped_said.retain(|(s, w)| s != session || live.contains(w));
-        self.person.retain(|(s, w), _| s != session || live.contains(w));
     }
 }
 
@@ -454,24 +453,31 @@ pub fn note_answered(session: &str, window: &str) {
     tracker().lock().unwrap().confirm(session, window);
 }
 
-/// Record the turn end the hooks missed for one screen observation (board
-/// #362 c): `sig` names the paint, `detail` what the person must do, and
-/// `seen` the turn-fact version read BEFORE the screen was captured. The
-/// once mark is committed only when telemetry accepted the observation
-/// (ended the open turn, or put the detail on the turn's own end): a stale
-/// observation, one a newer prompt, tool call, end or interrupt overtook,
-/// changes nothing and spends nothing (review P1-A). True when accepted.
+/// Record the turn end the hooks missed for a person-needed PAINT (board
+/// #362 c): `sig` is `<shape>|<Request ID>`, its global identity, `detail`
+/// what the person must do, and `seen` the turn-fact version read BEFORE
+/// the screen was captured. Telemetry keeps the once durably
+/// (`Identity::Paint`): an accepted paint never ends a later turn. True
+/// when accepted.
 fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64, ts: u64) -> bool {
-    if !tracker().lock().unwrap().person_new(session, window, sig) {
+    use super::telemetry::{record_missed_end, Identity, Missed};
+    matches!(record_missed_end(session, window, detail, Identity::Paint(sig), seen, ts), Missed::Ended | Missed::Attached)
+}
+
+/// Record the turn end the hooks missed for an EXHAUSTED recovery decision
+/// (capped or given up): once per incident (`Identity::Incident`, review
+/// P1-D), the mark committed only when telemetry accepted it. True when
+/// accepted.
+fn commit_exhausted(session: &str, window: &str, seen: u64, ts: u64) -> bool {
+    use super::telemetry::{record_missed_end, Identity, Missed};
+    if !tracker().lock().unwrap().exhausted_new(session, window) {
         return false;
     }
-    match super::telemetry::record_missed_end(session, window, detail, sig, seen, ts) {
-        super::telemetry::Missed::Ended | super::telemetry::Missed::Attached | super::telemetry::Missed::Recorded => {
-            tracker().lock().unwrap().person_accept(session, window, sig);
-            true
-        }
-        super::telemetry::Missed::Stale | super::telemetry::Missed::NoTurn => false,
+    let accepted = matches!(record_missed_end(session, window, EXHAUSTED, Identity::Incident, seen, ts), Missed::Ended | Missed::Attached);
+    if accepted {
+        tracker().lock().unwrap().exhausted_accept(session, window);
     }
+    accepted
 }
 
 fn now_secs() -> u64 {
@@ -521,8 +527,11 @@ pub fn check_once() {
             // it, and it is never continued. It is read first, so a transient
             // error still painted above it types nothing either.
             if let Some((shape, block)) = crate::backends::Backend::parse(backend).and_then(|b| b.person_paint(&tail)) {
-                let sig = format!("{shape}|{}", extract_request_id(&block).unwrap_or_else(|| crate::backends::canonical(&block)));
-                commit_person(&project.session, &p.window_name, &sig, shape, seen, now_secs());
+                // Its Request ID is its identity (every measured shape ends
+                // with one); without it nothing is recorded.
+                if let Some(id) = extract_request_id(&block) {
+                    commit_person(&project.session, &p.window_name, &format!("{shape}|{id}"), shape, seen, now_secs());
+                }
                 continue;
             }
             // The screen may open MID-BLOCK: a tall error paint plus the
@@ -557,7 +566,7 @@ pub fn check_once() {
             // agent needs a person, and the turn end the hooks never sent is
             // recorded once for the incident (board #362 c).
             if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. }) {
-                commit_person(&project.session, &p.window_name, &format!("{EXHAUSTED}|{sig}"), EXHAUSTED, seen, now_secs());
+                commit_exhausted(&project.session, &p.window_name, seen, now_secs());
             }
             match decision {
                 Decision::Send { attempt } => {
@@ -706,27 +715,23 @@ fn version_output(mut cmd: std::process::Command, limit: std::time::Duration) ->
         let mut out = String::new();
         let _ = tx.send(stdout.take(VERSION_READ_CAP).read_to_string(&mut out).ok().map(|_| out));
     });
-    let exited = loop {
-        match leader_wait(pid) {
-            LeaderWait::Exited => break true,
-            LeaderWait::Running if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
-            LeaderWait::Running => break false,
-            LeaderWait::Interrupted => continue,
-            // Reaped by someone else (ECHILD): its pid, and so its group id,
-            // may already be another process's. Nothing is signalled.
-            LeaderWait::ReapedElsewhere => {
-                eprintln!("projects: version probe {pid}: its leader was reaped elsewhere; its group is not signalled");
-                return None;
-            }
-            // The kernel would not say. The leader is still this probe's own
-            // unreaped child, so it alone is ended by its pid; the group is not
-            // signalled on a guess (review P2-3).
-            LeaderWait::Failed(errno) => {
-                eprintln!("projects: version probe {pid}: waitid failed (errno {errno}); only the leader is ended");
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
+    let exited = match wait_until(deadline, || leader_wait(pid)) {
+        LeaderWait::Exited => true,
+        LeaderWait::Running | LeaderWait::Interrupted => false,
+        // Reaped by someone else (ECHILD): its pid, and so its group id,
+        // may already be another process's. Nothing is signalled.
+        LeaderWait::ReapedElsewhere => {
+            eprintln!("projects: version probe {pid}: its leader was reaped elsewhere; its group is not signalled");
+            return None;
+        }
+        // The kernel would not say. The leader is still this probe's own
+        // unreaped child, so it alone is ended by its pid; the group is not
+        // signalled on a guess (review P2-3).
+        LeaderWait::Failed(errno) => {
+            eprintln!("projects: version probe {pid}: waitid failed (errno {errno}); only the leader is ended");
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
         }
     };
     // The leader stays unreaped while the read runs, so the group id stays
@@ -769,6 +774,24 @@ fn leader_wait(pid: libc::pid_t) -> LeaderWait {
         (r, std::io::Error::last_os_error().raw_os_error().unwrap_or(0), info.si_pid())
     };
     classify_wait(r, errno, si_pid, pid)
+}
+
+/// Ask `wait` until it says something final or `deadline` passes: a
+/// leader still running is asked again after 20 ms, an interrupted wait at
+/// once, and BOTH only while the deadline holds (review P2 on 4cd26dc9: a
+/// steady stream of EINTR must not outlast the probe's one total limit).
+/// Returns the last answer: `Running` or `Interrupted` means out of time.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn wait_until(deadline: std::time::Instant, mut wait: impl FnMut() -> LeaderWait) -> LeaderWait {
+    loop {
+        let answer = wait();
+        let in_time = std::time::Instant::now() < deadline;
+        match answer {
+            LeaderWait::Running if in_time => std::thread::sleep(std::time::Duration::from_millis(20)),
+            LeaderWait::Interrupted if in_time => {}
+            done => return done,
+        }
+    }
 }
 
 /// `leader_wait`'s reading of one waitid answer. Pure.
@@ -1830,19 +1853,44 @@ mod tests {
         assert_eq!(error_signature("codex", CODEX_0154_401), None);
     }
 
-    /// Board #362 c, condition b: a paint's missed end is recorded ONCE.
+    /// Board #362 c, condition b, the INCIDENT identity (review P1-D on
+    /// 4cd26dc9), with the real Claude Code 2.1.284 503 paint, which carries
+    /// no Request ID (its signature is the hit count `1|`). Incident 1
+    /// exhausts its ladder and its turn gets one recovery_exhausted end; the
+    /// same continuous incident is never written twice. The screen clears, a
+    /// real new turn hits a second, independent `1|` incident that exhausts
+    /// too: that turn gets its own end and detail. Each incident sends its
+    /// own ladder and not one continue more.
     #[test]
-    fn a_person_needed_paint_is_recorded_once_per_signature() {
-        let mut t = Tracker::default();
-        assert!(t.person_new("s", "w", "auth_expired|a"));
-        assert!(t.person_new("s", "w", "auth_expired|a"), "asking marks nothing");
-        t.person_accept("s", "w", "auth_expired|a");
-        assert!(!t.person_new("s", "w", "auth_expired|a"), "the same paint on the next tick");
-        assert!(t.person_new("s", "v", "auth_expired|a"), "another window");
-        assert!(t.person_new("s", "w", "auth_expired|b"), "a new paint (a new request id)");
-        t.person_accept("s", "w", "auth_expired|b");
-        t.retain_windows("s", &["v".to_string()]);
-        assert!(t.person_new("s", "w", "auth_expired|b"), "a window that went away took its record");
+    fn an_exhausted_incident_ends_its_own_turn_once_and_a_later_one_is_its_own() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let session = format!("p1d-{}", uuid::Uuid::new_v4());
+        let sig = error_signature("claude", CLAUDE_503_NARROW).unwrap();
+        assert_eq!(sig, "1|", "no Request ID: a hit count, no paint identity");
+        let ends = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif" && e.text == "failed").count();
+        let decide = |at: u64| tracker().lock().unwrap().decide(&session, "w", at, &sig, |t| tm::turn_fact_since(&session, "w", t));
+        // The tracker's clock is simulated; every turn fact uses the real one.
+        let mut sends = 0;
+        let t0 = now_secs();
+        for (n, base) in [(1, t0 + 10), (2, t0 + 1000)] {
+            tm::record_prompt(&session, "w", &format!("[tmm chat 2026-10-16 01:0{n}] human: @w turn {n}"));
+            for at in [base, base + 30, base + 90, base + 210] {
+                assert!(matches!(decide(at), Decision::Send { .. }), "incident {n}");
+                sends += 1;
+            }
+            assert_eq!(decide(base + 300), Decision::GiveUp { first: true }, "incident {n}");
+            assert!(commit_exhausted(&session, "w", tm::turn_version(&session, "w"), now_secs()), "incident {n}: its turn gets its end");
+            let st = tm::derive(&session, "w", 0);
+            assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", EXHAUSTED), "incident {n}");
+            assert_eq!(decide(base + 320), Decision::GiveUp { first: false });
+            assert!(!commit_exhausted(&session, "w", tm::turn_version(&session, "w"), now_secs()), "incident {n}: one continuous incident is written once");
+            assert_eq!(ends(), n, "incident {n}");
+            // The error leaves the screen: the incident is over.
+            tracker().lock().unwrap().clear(&session, "w");
+        }
+        assert_eq!(sends, 2 * MAX_ATTEMPTS as usize, "each incident its own ladder, not one continue more");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
     }
 
     /// Board #362 review P1-A, the two barriers, through the commit path the
@@ -1879,8 +1927,7 @@ mod tests {
             assert_ne!(after.detail, "auth_expired", "{what}");
             assert_eq!(rows(), ends, "{what}: no end written");
             assert_eq!(tm::held_rows(&session, "w").len(), 1, "{what}: the held line is not flushed by a stale observation");
-            assert!(tracker().lock().unwrap().person_new(&session, "w", "auth_expired|x"), "{what}: the once mark is not spent");
-            tracker().lock().unwrap().retain_windows(&session, &[]);
+            assert_eq!(tm::accepted_paint(&session, "w").unwrap(), None, "{what}: the paint is not marked accepted");
         }
         // Control: the same observation with no fact after it is accepted.
         let session = format!("p1a-ok-{}", uuid::Uuid::new_v4());
@@ -1888,9 +1935,10 @@ mod tests {
         let seen = tm::turn_version(&session, "w");
         assert!(commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()));
         assert_eq!(tm::derive(&session, "w", 0).detail, "auth_expired");
-        assert!(!tracker().lock().unwrap().person_new(&session, "w", "auth_expired|x"), "accepted: spent");
-        assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once");
-        tracker().lock().unwrap().retain_windows(&session, &[]);
+        assert_eq!(tm::accepted_paint(&session, "w").unwrap().map(|(_, sig)| sig).as_deref(), Some("auth_expired|x"), "accepted: marked");
+        tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:10] human: @w next");
+        assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once: the newer turn is not ended");
+        assert_eq!(tm::derive(&session, "w", 0).state, "running");
     }
 
     /// Board #362 review P2-1: an end recorded from the screen is our own
@@ -1911,7 +1959,7 @@ mod tests {
             assert_eq!(t.decide(&session, "w", at, "1|a", verified), Decision::Send { attempt: n });
         }
         assert_eq!(t.decide(&session, "w", t0 + 300, "1|a", verified), Decision::GiveUp { first: true });
-        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, "recovery_exhausted|1|a", tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
+        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, tm::Identity::Incident, tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
         assert_eq!(t.decide(&session, "w", t0 + 320, "1|a", verified), Decision::GiveUp { first: false }, "our own end proves nothing");
         tm::record_notification_with(&session, "w", "completed", t0 + 330, crate::backends::EndQuality::Said);
         assert_eq!(t.decide(&session, "w", t0 + 340, "1|a", verified), Decision::Confirmed { first: true }, "the CLI's own end is evidence");
@@ -2112,6 +2160,13 @@ mod tests {
         assert_eq!(classify_wait(-1, libc::EINTR, 0, 42), LeaderWait::Interrupted);
         assert_eq!(classify_wait(-1, libc::ECHILD, 0, 42), LeaderWait::ReapedElsewhere);
         assert_eq!(classify_wait(-1, libc::EINVAL, 0, 42), LeaderWait::Failed(libc::EINVAL));
+        // EINTR is retried, but only inside the one total deadline.
+        let limit = std::time::Duration::from_millis(300);
+        let t0 = std::time::Instant::now();
+        assert_eq!(wait_until(t0 + limit, || LeaderWait::Interrupted), LeaderWait::Interrupted, "out of time");
+        assert!(t0.elapsed() < limit + std::time::Duration::from_millis(200), "a stream of EINTR stops at the deadline: {:?}", t0.elapsed());
+        let mut n = 0;
+        assert_eq!(wait_until(t0 + std::time::Duration::from_secs(5), || { n += 1; if n < 3 { LeaderWait::Interrupted } else { LeaderWait::Exited } }), LeaderWait::Exited, "retried, then answered");
         let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id() as libc::pid_t;
         assert_eq!(leader_wait(pid), LeaderWait::Running);
