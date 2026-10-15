@@ -204,6 +204,21 @@ instance's size matters. Same probe after the fix: tmux stays 64×47 while the
 hidden page's box changes, and the drawer's bottom rows changed in 5 of 5
 samples.
 
+**No 0-sized resize is ever sent** (board #397, the #395 review's P2). The
+send also refuses a size with zero columns or rows, and `onReconnected`
+withdraws a size still waiting (`cancelPaneResizeRef`) instead of zeroing
+`pendingCols/Rows` under a live timer: when a shown terminal's box measured
+0 at the reconnect, its fit returned nothing, nothing re-queued, and the old
+timer fired with 0×0. Pinned in `Terminal.shared.mount.test.ts` (a size
+queued, the box at 0, a reconnect: nothing sent; the box back: the pane is
+sized again) and `Terminal.source.test.ts`.
+
+A terminal fills its host only if the host is a flex container, because the
+Terminal's root is `flex: 1`; in a block host it takes its content height
+and the fit holds its current rows (board #397, split view;
+`docs/design-docs/features/split-screen.md`, pinned by
+`terminal-hosts.source.test.ts` for every host).
+
 **A reply belongs to the pane it was asked for** (review P1-b on 2b5eeeb4).
 `lastContent` and the xterm are the component's, and a target switch
 rebuilds them in place; a `capture_pane` asked for pane A that answered after

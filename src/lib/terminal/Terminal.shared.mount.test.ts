@@ -136,7 +136,10 @@ async function mount(context: TestContext) {
     app.window.dispatchEvent(new app.window.CustomEvent('ws-reconnected', { detail: { serverId: 'a' } }));
     await flushAll();
   };
-  return { app, shared, wire, flushAll, settle, boxChanged, boxChangedNow, resizes, screen, reconnect };
+  /** Set a box's width without telling its observer (a layout moment the
+   * terminal has not measured yet, e.g. a box that is briefly 0). */
+  const setWidth = (cell: string, px: number) => { width[cell] = px; };
+  return { app, shared, wire, flushAll, settle, boxChanged, boxChangedNow, setWidth, resizes, screen, reconnect };
 }
 
 // The stand-in's cell is fontSize 14 × the CELL ratios: 1152 px → 137 cols,
@@ -253,4 +256,22 @@ test('a capture reply for a pane the terminal has left changes neither its cache
   assert.doesNotMatch(screen('drawer'), /A hidden capture/u, 'hidden: recorded, not drawn');
   shared.show('drawer', true); await settle();
   assert.match(screen('drawer'), /A hidden capture/u, 'shown: the recorded capture is drawn');
+});
+
+test('a reconnect withdraws a size still waiting, so a shown terminal with no box never sends 0x0 (board #397, the #395 review P2)', async (context) => {
+  const { app, flushAll, boxChangedNow, setWidth, resizes, reconnect } = await mount(context);
+  const start = resizes().length;
+  // The shown drawer queues 71x43; before it is sent its box measures 0 and
+  // the gateway reconnects: the fit finds nothing to send.
+  await boxChangedNow('drawer', 600);
+  setWidth('drawer', 0);
+  await reconnect();
+  await app.advance(300); await flushAll();
+  const sent = resizes().slice(start);
+  assert.ok(!sent.some((r) => /^0x|x0$/u.test(r)), `no 0-sized resize: ${sent}`);
+  assert.deepEqual(sent, [], `the queued size was withdrawn by the reconnect, and nothing else was sent: ${sent}`);
+  // The box comes back, at another width: the drawer sizes the pane again.
+  await boxChangedNow('drawer', 520);
+  await app.advance(200); await flushAll();
+  assert.equal(resizes().at(-1), '61x43');
 });

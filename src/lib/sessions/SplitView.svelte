@@ -150,6 +150,16 @@
     min-width: 0;
     min-height: 0;
     position: relative;
+    /* A flex column, like every other Terminal host (the page's
+       .terminal-body, the drawer's .term-body, the scratch panel's body):
+       the Terminal's root is `flex: 1`, which only fills a flex parent. As a
+       block this body let the Terminal take its CONTENT height, and xterm's
+       content is its rows, so a cell showing a window tmux had left at
+       80x24 measured 24 rows of box, fit 24 rows and never grew (board
+       #397: kk stayed 76x24 in a 790 px cell, the bottom of the pane
+       outside it). */
+    display: flex;
+    flex-direction: column;
   }
 
   .cell-empty {

@@ -82,6 +82,30 @@ multi-listener.
 - Cell 0 mirrors `terminalTarget` so the narrow-screen fallback shows the
   expected pane; reassigning the active cell updates the mirror.
 
+## Rules and their reasons
+
+### A cell's body is a flex column (2026-10-16, board #397)
+
+Owner, 10-16: "terminal侧边栏经常没有刷新 我点放大到全屏可能会好 … 可能全屏也有可能".
+Found by the validator during #395 and measured on main d77492f7 (own
+gateway, Vite preview, Chromium 1280×800, two cells on two tmux windows, no
+tmux client attached): a cell assigned to a window tmux had left at 80×24
+got its WIDTH right (tmux 80×24 → 76×24) but kept 24 rows: its terminal box
+was 384 px tall in a 790 px cell, and the bottom of the pane (an agent's
+status line) never showed. `.cell-body` was a plain block, and `Terminal`'s
+root is `flex: 1`, which only fills a flex parent; in a block it takes its
+content height, and xterm's content is its rows. The fit measures that box,
+finds the rows it already has, and holds them. A cell whose window tmux had
+already sized tall looked fine for the same reason. Every other Terminal
+host (the page's `.terminal-body`, the drawer's `.term-body`, the scratch
+panel's `.scratch-body`) was already a flex container. `.cell-body` is now a
+flex column; measured after: the fresh cell's box 738 px in its cell, tmux
+80×24 → 58×46 within 1.2 s of the assignment, both cells' bottom rows
+repainting 6 of 6 one-second samples; an empty cell's picker still fills its
+cell. `lib/terminal/terminal-hosts.source.test.ts` asserts that every element
+rendering a `<Terminal>` is a flex container (the mount tier has no layout),
+and fails on main's `SplitView.svelte`.
+
 ## Verification
 See the plan's verification section: build (`npm run build`), run
 `npm run tauri:dev`, then check single-pane regression, two panes streaming at

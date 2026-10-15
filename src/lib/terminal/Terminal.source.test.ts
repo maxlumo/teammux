@@ -539,8 +539,10 @@ test('a hidden terminal neither sizes nor paints the pane it shares, and a reply
   // are pinned where they live, so a refactor cannot move one silently.
   assert.match(source, /--kb-locked-h[^\n]*\n\s*\}\n\s*if \(!visible\) return;\n\s*const fit = calcFit\(\);/u,
     'doResize returns before measuring a fit while hidden');
-  assert.match(source, /resizeSendTimer = setTimeout\(\(\) => \{\s*\n\s*resizeSendTimer = 0;\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!visible\) return;\s*\n\s*resizePane\(target, pendingCols, pendingRows\)/u,
-    'the SEND re-checks that the terminal is shown (review P1-a)');
+  assert.match(source, /resizeSendTimer = setTimeout\(\(\) => \{\s*\n\s*resizeSendTimer = 0;\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!visible \|\| !pendingCols \|\| !pendingRows\) return;\s*\n\s*resizePane\(target, pendingCols, pendingRows\)/u,
+    'the SEND re-checks that the terminal is shown and the size is one (review P1-a; #397)');
+  assert.match(source, /const onReconnected = \(e\) => \{\s*\n\s*if \(e\?\.detail\?\.serverId !== runtime\.id\) return;\s*\n(?:\s*\/\/[^\n]*\n)*\s*cancelPaneResizeRef\?\.\(\);/u,
+    'a reconnect withdraws a size still waiting, it does not zero it under a live timer (#397)');
   assert.match(source, /\$effect\(\(\) => \{ if \(!visible\) cancelPaneResizeRef\?\.\(\); \}\);/u,
     'hiding withdraws a size not yet sent');
   assert.match(source, /cancelPaneResizeRef = \(\) => \{\s*\n\s*clearTimeout\(resizeSendTimer\);\s*\n\s*resizeSendTimer = 0;\s*\n\s*pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;/u,

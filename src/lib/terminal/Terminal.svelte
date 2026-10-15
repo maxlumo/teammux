@@ -1377,7 +1377,9 @@
         // shown must not reach tmux if this terminal was hidden in the 120 ms
         // since (hiding also withdraws it, below; the target's cleanup clears
         // this timer). Coming back on screen asserts the current size again.
-        if (!visible) return;
+        // Nor is a size that is not one ever sent (board #397, the #395
+        // review's P2): tmux has no 0-column pane.
+        if (!visible || !pendingCols || !pendingRows) return;
         resizePane(target, pendingCols, pendingRows).catch(() => {});
       }, 120);
     }
@@ -1513,7 +1515,11 @@
     // Only for THIS Terminal's server (board #335 ②b-4).
     const onReconnected = (e) => {
       if (e?.detail?.serverId !== runtime.id) return;
-      pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
+      // A size still waiting from before the drop is withdrawn with its
+      // pending state, not zeroed under a live timer (board #397, the #395
+      // review's P2: zeroing it left the timer able to send 0x0 when the
+      // fit below found no box). A shown terminal re-queues its fit.
+      cancelPaneResizeRef?.();
       // Force doResize to actually send by invalidating the cur===fit check.
       // We do this by momentarily pretending term has different dims.
       // Only while shown (board #395): a hidden terminal re-sends nothing;
