@@ -368,18 +368,29 @@ export function createWsApi(connection: Connection) {
     call<BoardIssue>('hub_board_get', { session, id });
   /** Create (no id) or patch (id + only the fields to change). `who` records the
    * actor; the UI always says 'human'. */
-  const boardSave = async (session: string, fields: { id?: number; title?: string; body?: string; status?: string; assignee?: string; dispatch?: boolean }) => {
-    // A save that asks the server to hand the issue over (board #377) is the
-    // ONE write that needs `board_dispatch`: an older server stores the label
-    // and ignores the flag, which reads as a success nobody is told about.
-    // The gate lives here, on the write path, bound to the socket that will
-    // carry the call; the page only mirrors it for display.
-    if (fields.dispatch) {
-      await holdForLogin(connection); // may wait for the login; the only await
-      requireCap(connection, BOARD_DISPATCH); // then check and write in ONE synchronous block
-    }
-    return call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
-  };
+  type BoardFields = { id?: number; title?: string; body?: string; status?: string; assignee?: string; dispatch?: boolean };
+  const boardSave = Object.assign(
+    async (session: string, fields: BoardFields) => {
+      // A save that asks the server to hand the issue over (board #377) is the
+      // ONE write that needs `board_dispatch`: an older server stores the label
+      // and ignores the flag, which reads as a success nobody is told about.
+      // The check is SYNCHRONOUS and sits in the same block as the write, so no
+      // reconnect can slip between the answer it read and the socket it writes
+      // to; an unanswered login is refused here, never treated as a yes.
+      if (fields.dispatch) requireCap(connection, BOARD_DISPATCH);
+      return call<BoardSaveAnswer>('hub_board_save', { session, who: 'human', ...fields });
+    },
+    {
+      /** What the save must WAIT for before it can be sent: the current socket's
+       * login, for a flagged save. The runtime's gate (`server-runtime.gateApi`)
+       * runs this, and when the wait ends it re-checks ITS OWN right to write in
+       * the same synchronous step that sends the frame — a runtime that detached
+       * or froze while the write waited sends nothing, and the caller gets the
+       * refusal. Nothing here retries a refused write. */
+      hold: (_session: string, fields: BoardFields): Promise<void> | undefined =>
+        fields.dispatch ? holdForLogin(connection) : undefined,
+    },
+  );
   const boardNote = (session: string, id: number, body: string) =>
     call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human' });
   const boardDelete = (session: string, id: number) =>

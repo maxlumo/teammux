@@ -21,6 +21,7 @@ installDoubles();
 const { createConnection } = await import('./connection.ts');
 const { createWsApi } = await import('./ws-api.ts');
 const { createConnectionRegistry } = await import('./connection-registry.ts');
+const { createServerRuntime } = await import('../app/server-runtime.ts');
 
 const A_URL = 'ws://a.test/ws';
 const B_URL = 'ws://b.test/ws';
@@ -650,11 +651,17 @@ const methodsSent = (socket: InstanceType<typeof MockWebSocket>) =>
 const login = (socket: InstanceType<typeof MockWebSocket>, caps?: string[]) =>
   socket.message({ result: { authenticated: true, machine_id: 'machine-a', hostname: 'alpha', ...(caps ? { caps } : {}) } });
 const ask = { title: 'T', assignee: 'alice', dispatch: true };
+/** A REAL server runtime over a real connection: the api a page gets, with the gate that asks the handle's write right (board #377). */
+const runtimeOver = (conn: ReturnType<typeof createConnection>) =>
+  createServerRuntime(
+    { id: 'srv', name: 'srv', address: 'ws://a.test/ws', token: 't' } as never,
+    { storage: { getItem: () => null, setItem() {}, removeItem() {} } as never, slot: { connection: conn, api: createWsApi(conn) } as never },
+  );
 
 test('a flagged board save waits for the login answer and sends nothing before it (board #377)', async (t) => {
   const conn = createConnection();
   t.after(() => conn.dispose());
-  const api = createWsApi(conn);
+  const api = runtimeOver(conn).api;
   const dial = conn.connect(A_URL, 'tok');
   dial.catch(() => {});
   const socket = MockWebSocket.instances.at(-1)!;
@@ -680,7 +687,7 @@ test('a flagged board save waits for the login answer and sends nothing before i
 test('after a reconnect to a server without board_dispatch a flagged save is refused unsent, and a plain edit still goes (board #377)', async (t) => {
   const conn = createConnection();
   t.after(() => conn.dispose());
-  const api = createWsApi(conn);
+  const api = runtimeOver(conn).api;
   const seen: (string[] | undefined)[] = [];
   conn.onCaps((caps) => seen.push(caps));
 
@@ -734,7 +741,7 @@ test('disposing a connection ends a parked whenCaps now, not at its timer (board
 test('a flagged save issued after a redial reads the NEW socket, not the answer the old one gave (board #377)', async (t) => {
   const conn = createConnection();
   t.after(() => conn.dispose());
-  const api = createWsApi(conn);
+  const api = runtimeOver(conn).api;
   const first = conn.connect(A_URL, 'tok');
   MockWebSocket.instances.at(-1)!.readyState = MockWebSocket.OPEN;
   MockWebSocket.instances.at(-1)!.message({ server_nonce: '00'.repeat(16) });
@@ -756,4 +763,37 @@ test('a flagged save issued after a redial reads the NEW socket, not the answer 
   await second;
   assert.equal(await outcome, 'server_too_old');
   assert.ok(!methodsSent(next).includes('hub_board_save'), 'refused unsent');
+});
+
+test('a flagged save that waited for the login is sent only if its runtime may still write when the wait ends; no retry (board #377)', async (t) => {
+  const cases: [string, (r: ReturnType<typeof runtimeOver>) => void, RegExp | null][] = [
+    ['detached while it waited', (r) => r.detach(), /detached/],
+    ['frozen while it waited', (r) => r.setFrozen(true), /frozen/],
+    ['still live', () => {}, null],
+  ];
+  for (const [label, lose, refusal] of cases) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const runtime = runtimeOver(conn);
+    const dial = conn.connect(A_URL, 'tok');
+    dial.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    const outcome = runtime.api.boardSave('s', ask).then(() => 'sent', (e: Error) => e.message);
+    await settle();
+    assert.equal(methodsSent(socket).filter((m) => m === 'hub_board_save').length, 0, `${label}: held while the login is unanswered`);
+    lose(runtime);
+    login(socket, ['board_dispatch']); // the connection itself is fine: it logs in WITH the capability
+    await dial; await settle();
+    const frames = methodsSent(socket).filter((m) => m === 'hub_board_save').length;
+    if (refusal) {
+      assert.equal(frames, 0, `${label}: the login completing sends nothing for a runtime that lost its right`);
+      assert.match(await outcome, refusal, `${label}: the caller gets the refusal (and keeps its draft)`);
+      await settle();
+      assert.equal(methodsSent(socket).filter((m) => m === 'hub_board_save').length, 0, `${label}: and nothing is retried afterwards`);
+    } else {
+      assert.equal(frames, 1, `${label}: exactly one frame`);
+    }
+  }
 });

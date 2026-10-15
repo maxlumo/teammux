@@ -195,13 +195,22 @@ function gateApi(api: WsApi, state: () => 'live' | 'detached' | 'frozen', id: Se
     Promise.reject(new Error(why === 'frozen'
       ? `server runtime frozen: ${id} writes nothing until the app's storage is recorded (Retry)`
       : `server runtime ${why}: ${id} is not serving this subtree right now`));
+  const allowed = (name: string) => {
+    const now = state();
+    return now === 'live' || (now === 'frozen' && kinds[name] === 'read');
+  };
   for (const [name, value] of Object.entries(api as unknown as Record<string, unknown>)) {
     gated[name] = typeof value === 'function'
       ? (...args: unknown[]) => {
-        const now = state();
-        return now === 'live' || (now === 'frozen' && kinds[name] === 'read')
-          ? (value as (...a: unknown[]) => unknown).apply(api, args)
-          : refuse(now);
+        const send = () => (value as (...a: unknown[]) => unknown).apply(api, args);
+        if (!allowed(name)) return refuse(state());
+        // A method may have to WAIT before it can be sent (a flagged board save
+        // waits for the socket's login, board #377). The right to write is
+        // asked again when the wait ends, in the SAME synchronous step that
+        // sends: a runtime detached or frozen meanwhile sends nothing and the
+        // caller gets the refusal. A refused write is never retried.
+        const hold = (value as { hold?: (...a: unknown[]) => Promise<void> | undefined }).hold?.(...args);
+        return hold ? hold.then(() => (allowed(name) ? send() : refuse(state()))) : send();
       }
       : value;
   }
