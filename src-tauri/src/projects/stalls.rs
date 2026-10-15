@@ -99,9 +99,11 @@ fn fire(session: &str, window: &str, end_seq: u64) {
     );
 }
 
-/// The decision and its one effect, with the outside facts injected. A fact that
-/// COULD NOT BE READ (`None`) is not a fact that nothing is there: an input into
-/// someone's pane is made only on what was actually seen.
+/// The decision and its one effect, with the outside facts injected. `waiting`
+/// is `None` when it COULD NOT BE CHECKED, which is not "nothing is pending": an
+/// input into someone's pane is made only on what was actually seen. (An
+/// unreadable board needs no such third value — no open item is no nudge
+/// either way.)
 ///
 /// `deliver` gets the line and `still_due`, and must ask it in the same step as
 /// the typing (`delivery::deliver_if` does, inside the window's lock). The check
@@ -112,7 +114,7 @@ fn fire_with(
     session: &str,
     window: &str,
     end_seq: u64,
-    open_items: &dyn Fn() -> Option<Vec<(i64, String)>>,
+    open_items: &dyn Fn() -> Vec<(i64, String)>,
     waiting: &dyn Fn() -> Option<bool>,
     deliver: &dyn Fn(&str, &dyn Fn() -> bool) -> bool,
 ) {
@@ -120,7 +122,7 @@ fn fire_with(
     if !still_due() {
         return;
     }
-    let Some(open) = open_items() else { return };
+    let open = open_items();
     if open.is_empty() || waiting() != Some(false) {
         return;
     }
@@ -146,21 +148,18 @@ fn nudge_line(stamp: &str, open: &[(i64, String)]) -> String {
 }
 
 /// The issues assigned to `window` and in `doing`: what it was in the middle of.
-/// `None` when the board could not be read.
-fn open_items(session: &str, window: &str) -> Option<Vec<(i64, String)>> {
-    let board = super::board_list(session).ok()?;
-    Some(
-        board["issues"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|i| i["assignee"].as_str() == Some(window) && i["status"].as_str() == Some("doing"))
-            .filter_map(|i| {
-                let id = i["id"].as_i64()?;
-                Some((id, super::issue_ref(i["title"].as_str().unwrap_or(""), i["body"].as_str().unwrap_or(""), id)))
-            })
-            .collect(),
-    )
+fn open_items(session: &str, window: &str) -> Vec<(i64, String)> {
+    let Ok(board) = super::board_list(session) else { return Vec::new() };
+    board["issues"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["assignee"].as_str() == Some(window) && i["status"].as_str() == Some("doing"))
+        .filter_map(|i| {
+            let id = i["id"].as_i64()?;
+            Some((id, super::issue_ref(i["title"].as_str().unwrap_or(""), i["body"].as_str().unwrap_or(""), id)))
+        })
+        .collect()
 }
 
 /// Was the agent told to wait? `None` when that could not be checked.
@@ -349,7 +348,7 @@ mod tests {
     /// `still_due` the way `delivery::deliver_if` does, inside its own step.
     /// Returns what was typed and whether the run's allowance is spent.
     fn run_with(
-        open: Option<Vec<(i64, String)>>,
+        open: Vec<(i64, String)>,
         waiting: Option<bool>,
         delivered: bool,
         during: &dyn Fn(&str, &str),
@@ -390,7 +389,7 @@ mod tests {
                 record_prompt(s, w, "[tmm chat 10:00] human: continue");
             }
         };
-        run_with(Some(open), Some(waiting), delivered, &during)
+        run_with(open, Some(waiting), delivered, &during)
     }
 
     #[test]
@@ -432,8 +431,8 @@ mod tests {
         save("Mine, review", "review", "dev");
         save("Theirs, doing", "doing", "lead");
         save("Nobody's, doing", "doing", "");
-        assert_eq!(open_items(&s, "dev"), Some(vec![(mine, "Mine, doing".to_string())]), "only what it is in the middle of");
-        assert_eq!(open_items(&s, "ghost"), Some(vec![]));
+        assert_eq!(open_items(&s, "dev"), vec![(mine, "Mine, doing".to_string())], "only what it is in the middle of");
+        assert!(open_items(&s, "ghost").is_empty());
 
         let wakes = |s: &str| crate::projects::wakes::try_pending(Some(s));
         let waiting = |s: &str, w: &str| waiting_from(s, w, wakes(s), Ok(vec![]));
@@ -466,10 +465,7 @@ mod tests {
         assert_eq!(waiting_from(&s, "dev", Err("store busy".into()), Ok(vec![])), None, "wakes unreadable: could not check");
         assert_eq!(waiting_from(&s, "dev", pending(), Err("no server".into())), None, "tasks unreadable: could not check");
         assert_eq!(waiting_from(&s, "dev", Err("x".into()), Err("y".into())), None);
-        // An unreadable board is not "nothing in doing" either.
-        let (sent, _) = run_with(None, Some(false), true, &|_, _| {});
-        assert!(sent.is_empty(), "the board could not be read: nothing typed");
-        let (sent, _) = run_with(Some(vec![(12, "Fix it".into())]), None, true, &|_, _| {});
+        let (sent, _) = run_with(vec![(12, "Fix it".into())], None, true, &|_, _| {});
         assert!(sent.is_empty(), "waiting could not be checked: nothing typed");
     }
 
@@ -480,7 +476,7 @@ mod tests {
     /// types the line.
     #[test]
     fn a_newer_input_between_the_check_and_the_delivery_drops_the_nudge() {
-        let open = || Some(vec![(12, "Fix it".to_string())]);
+        let open = || vec![(12, "Fix it".to_string())];
         let (sent, spent) = run_with(open(), Some(false), true, &|_, _| {});
         assert_eq!((sent.len(), spent), (1, true), "positive control: nothing arrived, one nudge");
 
