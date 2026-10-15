@@ -795,7 +795,22 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     Err(e) => errors.push(serde_json::json!({ "name": w, "error": format!("restart failed: {e}") })),
                 }
             }
-            Ok(serde_json::json!({ "team": team, "restarted": restarted, "stopped": stopped, "spawned": spawned, "errors": errors }))
+            // The agents that JOINED the team at runtime (board #382) are not
+            // in its definition, and a restart aligns the team with the
+            // definition: they are left as they are, and the room says so
+            // (once, not on a retry of the failed names).
+            let mut kept = Vec::new();
+            if only.is_none() {
+                if let Ok(Some(project)) = crate::projects::project_for_session(session) {
+                    for w in crate::projects::spawn::joined_windows(&project.path, team) {
+                        if window_of_agent(session, &w).is_some() {
+                            let _ = rooms::post(&room, &w, &kept_line(&w, team));
+                            kept.push(w);
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::json!({ "team": team, "restarted": restarted, "stopped": stopped, "spawned": spawned, "kept": kept, "errors": errors }))
         }
 
         // Spawn a registry agent into this project (tmm spawn / the UI's
@@ -825,22 +840,28 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let agent = param(p, "agent")?;
             let brief = p.get("brief").and_then(|v| v.as_str()).unwrap_or("");
             let by = p.get("by").and_then(|v| v.as_str()).unwrap_or("");
-            let result = crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest {
-                session, agent, brief, by, ..Default::default()
+            // `join` (board #382): put the agent in a RUNNING team of this
+            // project at runtime; absent or empty = standalone, as before.
+            // The team's definition is never edited (tenet 7).
+            let join = p.get("join").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+            let mut result = crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest {
+                session, agent, brief, by, team: join.map(str::to_string), ..Default::default()
             })
             .map_err(RpcError::InvalidParams)?;
             // The spawn is chat-visible: the room is the record.
             let who = if by.is_empty() { "human" } else { by };
-            let win = result.get("window_name").and_then(|v| v.as_str()).unwrap_or(agent);
+            let win = result.get("window_name").and_then(|v| v.as_str()).unwrap_or(agent).to_string();
             // `[tmm] ` marks a lifecycle line: the client renders it
             // as a system row rather than a chat bubble. A machine
             // marker, not a glyph — how it LOOKS is the UI's call.
-            let line = if brief.is_empty() {
-                format!("[tmm] spawned {win}")
-            } else {
-                format!("[tmm] spawned {win} — {brief}")
-            };
-            let _ = rooms::post(&room, who, &line);
+            let _ = rooms::post(&room, who, &spawn_line(&win, join, brief));
+            // The room line is the human's record; the team's members hear
+            // it in their panes (reviewer P1-B on 56a3ad44).
+            if let Some(team) = join {
+                let backend = result.get("backend").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                tell_team_of_join(session, team, &win, &backend, by, brief);
+            }
+            result["team"] = serde_json::json!(join);
             Ok(result)
         }
 
@@ -880,7 +901,11 @@ fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend>
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str) -> Result<bool, String> {
     let mut resumed = false;
+    // A joined agent (board #382: a team in its recipe, no member) stays in
+    // its team when the fallback below spawns it fresh.
+    let mut joined = None;
     if let Ok(Some(project)) = crate::projects::project_for_session(session) {
+        joined = crate::projects::joined_team(Some(&project.path), agent);
         // Bring the agent's materials up to date with the CURRENT
         // definition + app-wide AGENTS.md first: the recipe replay is
         // verbatim, so whatever is on disk now is what the agent will
@@ -896,10 +921,56 @@ fn start_agent(session: &str, agent: &str) -> Result<bool, String> {
     }
     if !resumed {
         crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest {
-            session, agent, brief: "", by: "", resume: true, ..Default::default()
+            session, agent, brief: "", by: "", team: joined, resume: true, ..Default::default()
         })?;
     }
     Ok(resumed)
+}
+
+/// A solo spawn's room line, in the lifecycle grammar `sysParts` reads
+/// (verb, subject, detail). A join names its team (board #382) the way a team
+/// spawn does (`— team t`), so the existing members, who are not
+/// re-materialized, learn of their new teammate from the room.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spawn_line(win: &str, join: Option<&str>, brief: &str) -> String {
+    match (join, brief.is_empty()) {
+        (None, true) => format!("[tmm] spawned {win}"),
+        (None, false) => format!("[tmm] spawned {win} — {brief}"),
+        (Some(t), true) => format!("[tmm] spawned {win} — joined team {t}"),
+        (Some(t), false) => format!("[tmm] spawned {win} — joined team {t}: {brief}"),
+    }
+}
+
+/// Type the join notice (`delivery::join_notice`) into the pane of every
+/// CURRENT member of team `root` in this session (board #382, reviewer P1-B
+/// on 56a3ad44): a live managed window whose recipe puts it in that team,
+/// other than the joiner. Not a solo agent, not another team's member, not
+/// the joiner itself; nobody is restarted or re-materialized. Through the one
+/// delivery door (`deliver_chat_line`), so a busy queue-mode member gets it
+/// at its turn's end like any other line. Returns who it was typed to.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn tell_team_of_join(session: &str, root: &str, joiner: &str, backend: &str, by: &str, brief: &str) -> Vec<String> {
+    let Ok(Some(project)) = crate::projects::project_for_session(session) else { return Vec::new() };
+    let ws = Some(project.path.as_str());
+    let mut members: Vec<String> = crate::tmux::list_panes(session)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.window_name)
+        .filter(|name| name != joiner && crate::projects::is_managed_in(ws, name))
+        .filter(|name| crate::projects::team_of(ws, name).is_some_and(|t| t.split('/').next() == Some(root)))
+        .collect();
+    members.sort();
+    members.dedup();
+    let notice = crate::projects::delivery::join_notice(joiner, root, backend, by, brief, &stamp_now());
+    members.into_iter().filter(|name| crate::projects::deliver_chat_line(session, name, &notice)).collect()
+}
+
+/// What a team restart says about an agent that JOINED the team at runtime
+/// (board #382): the restart aligns the team with its definition, which does
+/// not list it, so it is left running as it was. One line per such agent.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn kept_line(win: &str, team: &str) -> String {
+    format!("[tmm] kept {win} — joined team {team}, not in its definition: the restart left it as it is")
 }
 
 fn window_of_agent(session: &str, agent: &str) -> Option<usize> {
@@ -1986,6 +2057,9 @@ fn agent_states(session: &str) -> serde_json::Value {
                 // The configured team this window was started as part of
                 // (board #74) — the Hub groups same-team cards; null = solo.
                 "team": if managed { crate::projects::team_of(ws.as_deref(), &p.window_name) } else { None },
+                // In that team by a JOIN, not by its definition (board #382):
+                // a team restart leaves it as it is, a team stop stops it.
+                "joined": managed && crate::projects::joined_team(ws.as_deref(), &p.window_name).is_some(),
                 "state": if agent.is_some() { st.state.as_str() } else { "shell" },
                 "detail": st.detail,
                 "since": st.since,
@@ -2131,6 +2205,85 @@ mod tests {
         assert_eq!(got, vec![("old".into(), "squad".into()), ("qa".into(), "squad".into()), ("sub".into(), "squad/inner".into())]);
         assert!(super::stopped_teams(None, &[]).is_empty());
         let _ = std::fs::remove_dir_all(ws);
+    }
+
+    /// Board #382: a join is recorded where everyone reads it, in the
+    /// grammar the feed already parses, and so is a team restart that leaves
+    /// a joined agent as it is.
+    #[test]
+    fn a_join_and_a_kept_joiner_leave_room_lines() {
+        assert_eq!(super::spawn_line("helper", None, ""), "[tmm] spawned helper");
+        assert_eq!(super::spawn_line("helper", None, "go"), "[tmm] spawned helper — go");
+        assert_eq!(super::spawn_line("helper", Some("squad"), ""), "[tmm] spawned helper — joined team squad");
+        assert_eq!(super::spawn_line("helper", Some("squad"), "go"), "[tmm] spawned helper — joined team squad: go");
+        assert_eq!(super::kept_line("helper", "squad"), "[tmm] kept helper — joined team squad, not in its definition: the restart left it as it is");
+    }
+
+    /// Board #382 reviewer P1-B, on REAL panes: a join is typed to the team's
+    /// current members and to nobody else: not the joiner, not a solo agent,
+    /// not another team's member. Nobody is restarted (each pane keeps its
+    /// process). Every window is `cat`, so a pane shows what was typed.
+    #[test]
+    fn a_join_is_typed_to_the_teams_current_members_only() {
+        crate::projects::tests::use_test_store();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let session = format!("tmm-join-{tag}");
+        let ws = std::env::temp_dir().join(format!("tmm-join-ws-{tag}"));
+        let windows = [("lead", "squad", "lead"), ("rev", "squad/review", "r1"), ("helper", "squad", ""), ("solo", "", ""), ("other", "ops", "dev")];
+        for (name, team, member) in windows {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            let recipe = serde_json::json!({ "backend": "kiro", "cmd": format!("kiro-cli chat --agent {name}"), "team": team, "member": member });
+            std::fs::write(home.join("launch.json"), recipe.to_string()).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        for (name, _, _) in &windows[1..] {
+            assert!(std::process::Command::new("tmux").args(["new-window", "-d", "-t", &format!("={session}:"), "-n", name, "-c", &ws.to_string_lossy(), "cat"]).status().unwrap().success());
+        }
+        crate::projects::adopt(&session, Some("join-live-test")).expect("adopt project");
+        let pid = |name: &str| crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("{session}:{name}"), "#{pane_pid}"]).unwrap_or_default();
+        let before: Vec<String> = windows.iter().map(|(n, _, _)| pid(n)).collect();
+
+        let told = super::tell_team_of_join(&session, "squad", "helper", "kiro", "", "");
+        assert_eq!(told, ["lead", "rev"], "the team's live members, sub-team included");
+        let wanted = "tmm: [reply] @helper joined your team squad";
+        let pane = |name: &str| crate::tmux::capture_pane_plain(&format!("{session}:{name}"), Some(0)).unwrap_or_default();
+        for name in ["lead", "rev"] {
+            let mut text = String::new();
+            for _ in 0..30 {
+                text = pane(name);
+                if text.contains(wanted) { break; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(text.contains(wanted) && text.contains("[tmm chat "), "{name} got the notice in the stamped result shape: {text:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for name in ["helper", "solo", "other"] {
+            assert!(!pane(name).contains("joined your team"), "{name} is not told: {:?}", pane(name));
+        }
+        let after: Vec<String> = windows.iter().map(|(n, _, _)| pid(n)).collect();
+        assert_eq!(before, after, "nobody was restarted");
+    }
+
+    /// Board #382: a join into a team with nobody in this project is refused
+    /// by name, before any window is opened (no tmux needed to see it).
+    #[test]
+    fn a_join_into_a_team_that_is_not_here_is_refused() {
+        let session = project_with(&["solo"]);
+        crate::projects::registry_save(&serde_json::json!({ "name": "jnr-helper", "backend": "kiro", "system": "", "skills": "[]", "mcp": "[]" })).unwrap();
+        let r = handle_hub_request(&req("hub_spawn", serde_json::json!({ "session": session, "agent": "jnr-helper", "join": "squad" })), None);
+        let e = r.error.expect("refused");
+        assert_eq!((e.code, e.message.as_str()), (super::super::rpc::ERR_INVALID_PARAMS, "team 'squad' has no member in this project — start the team first, or spawn the agent standalone"));
+        assert!(room(&session).iter().all(|m| !m["body"].as_str().unwrap_or("").contains("spawned")), "nothing was spawned or recorded");
+        crate::projects::registry_delete("jnr-helper").ok();
     }
 
     /// Board #367: a reassignment used to leave NO trace in the room — only

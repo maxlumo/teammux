@@ -71,7 +71,10 @@ pub struct SpawnRequest<'a> {
     /// uniquified window. Empty for solo spawns.
     pub member: &'a str,
     /// The team this spawn belongs to; recorded in the launch recipe so the
-    /// Hub can group the cards.
+    /// Hub can group the cards. With no `member` it is a JOIN (board #382),
+    /// whatever made the def: the agent goes into that running team at
+    /// runtime, the team's definition untouched; `spawn` refuses a team with
+    /// no member here, and the team must be named by its ROOT.
     pub team: Option<String>,
     /// Restart fallback for a managed home whose slot is not currently
     /// restorable. Normal hires start fresh; Start/Restart resumes this
@@ -111,6 +114,14 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     let project = super::project_for_session(req.session)?
         .ok_or_else(|| format!("no project for session '{}'", req.session))?;
     let workspace = project.path.clone();
+    // A JOIN is any spawn that names a team with no member (board #382): a
+    // registry agent, a fork's effective def (#383), the restart fallback of
+    // an agent that joined. Each goes through the same check, whatever made
+    // its def (reviewer P2 on 56a3ad44). A team member placed by its team's
+    // definition names its member and is not a join.
+    if let Some(team) = join_of(req.team.as_deref(), req.member) {
+        check_join(&workspace, team)?;
+    }
 
     // The cap counts MANAGED agents only (board #126) — see managed_window_count.
     let panes = tmux::list_panes(req.session).unwrap_or_default();
@@ -221,6 +232,18 @@ fn materialize(
     let home = agent_home(workspace, window_name);
     std::fs::create_dir_all(&home).map_err(|e| format!("create agent home: {e}"))?;
     ensure_gitignore(workspace);
+    // A JOINED agent (board #382: a team and no member, however its def was
+    // made) gets its team block HERE and only here, so its spawn, every
+    // restart (`refresh_agent` reaches this with the same recipe fields) and a
+    // fork (#383) carry exactly one block that names the team as it stands.
+    let joined;
+    let def = match team.filter(|_| member.is_empty()) {
+        Some(root) => {
+            joined = with_joined_block(def, workspace, root, window_name);
+            &joined
+        }
+        None => def,
+    };
 
     // The software-wide instructions (`<config>/AGENTS.md`) lead every prompt,
     // on every backend — read now, so a spawn always carries the current text.
@@ -360,20 +383,70 @@ fn team_windows_from_recipes(
     workspace: &str,
     root: &str,
 ) -> std::collections::HashMap<(String, String), String> {
-    let mut map = std::collections::HashMap::new();
+    team_homes(workspace, root)
+        .into_iter()
+        .filter(|(_, _, member)| !member.is_empty())
+        .map(|(window, team, member)| ((team, member), window))
+        .collect()
+}
+
+/// Every home in `workspace` whose recipe puts it in the team rooted at
+/// `root`: (window, team path, member). The ONE reader of team membership
+/// off the recipes. A member of '' is an agent that JOINED the team at
+/// runtime (board #382; or a pre-#113 member, which named none): the
+/// definition does not list it, so a team restart leaves it alone.
+fn team_homes(workspace: &str, root: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
     let dir = Path::new(workspace).join(".tmm").join("agents");
-    let Ok(entries) = std::fs::read_dir(dir) else { return map };
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
     for entry in entries.flatten() {
         let Ok(text) = std::fs::read_to_string(entry.path().join("launch.json")) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let (team, member) = (get("team"), get("member"));
-        if member.is_empty() || team.split('/').next() != Some(root) {
+        let team = get("team");
+        if team.split('/').next() != Some(root) || root.is_empty() {
             continue;
         }
-        map.insert((team, member), entry.file_name().to_string_lossy().into_owned());
+        out.push((entry.file_name().to_string_lossy().into_owned(), team, get("member")));
     }
-    map
+    out.sort();
+    out
+}
+
+/// The agents that joined `root` at runtime (board #382), by window: the
+/// homes a team restart does not touch, which its room line names.
+pub fn joined_windows(workspace: &str, root: &str) -> Vec<String> {
+    team_homes(workspace, root).into_iter().filter(|(_, _, m)| m.is_empty()).map(|(w, _, _)| w).collect()
+}
+
+/// The team a spawn JOINS, if it is a join (board #382): it names a team and
+/// no member. Pure; the one test `spawn` applies before anything opens.
+fn join_of<'a>(team: Option<&'a str>, member: &str) -> Option<&'a str> {
+    team.filter(|_| member.trim().is_empty())
+}
+
+/// A join is into a team that is HERE (board #382): a team name, with at
+/// least one member home in this project. An unknown or foreign team is
+/// refused by name rather than recorded as a team of one.
+fn check_join(workspace: &str, root: &str) -> Result<(), String> {
+    super::agents::valid_name(root).map_err(|e| e.replacen("agent name", "team name", 1))?;
+    if team_homes(workspace, root).is_empty() {
+        return Err(format!("team '{root}' has no member in this project — start the team first, or spawn the agent standalone"));
+    }
+    Ok(())
+}
+
+/// `def` with the joined team's block appended to its prompt (board #382):
+/// the team as it stands now — its current definition, if any, and the
+/// teammates the recipes in this workspace record.
+fn with_joined_block(def: &RegAgent, workspace: &str, root: &str, window_name: &str) -> RegAgent {
+    let team = super::team_get(root).ok().flatten();
+    let flat = team.as_ref().and_then(|t| super::teams::expand(t, &|n| super::team_get(n), SPAWN_CAP).ok()).unwrap_or_default();
+    let block = super::teams::joined_block(root, team.as_ref(), &flat, window_name, &team_homes(workspace, root));
+    let mut out = def.clone();
+    let system = out.system.trim();
+    out.system = if system.is_empty() { block } else { format!("{system}\n\n{block}") };
+    out
 }
 
 /// Window name = agent name, uniquified if taken (lead, lead-2, …). The window
@@ -1957,6 +2030,99 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let recipe: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
         assert_eq!(recipe["spawned_by"], "lead");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #382: a registry agent spawned INTO a running team. It is
+    /// recorded in the team (the recipe's team, no member, its def name), so
+    /// every team-reading surface counts it; its prompt names the team and
+    /// its teammates, on the spawn and on every restart; a team restart's
+    /// plan leaves it alone (it is not in the definition); and a join into a
+    /// team that has nobody here is refused by name.
+    #[test]
+    fn a_joined_agent_is_in_the_team_but_not_in_its_definition() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-join-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
+        let save = |name: &str, persona: &str| {
+            super::super::registry_save(&json!({ "name": name, "backend": "kiro", "model": "", "effort": "", "system": persona, "skills": "[]", "mcp": "[]" })).unwrap()
+        };
+        save("jnbase", "Base.");
+        save("jnhelper", "Helper persona.");
+        super::super::teams_save(&json!({
+            "name": "jnteam", "description": "Ships it.",
+            "members": r#"[{"name":"lead","base":"jnbase","role":"splits the work"},{"name":"dev","base":"jnbase","role":"implements"}]"#
+        })).unwrap();
+        assert!(check_join(&ws_str, "jnteam").unwrap_err().contains("has no member in this project"), "nobody here yet");
+        let team = super::super::team_get("jnteam").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "splits the work".into(), "jnteam".into()), ("dev".into(), "implements".into(), "jnteam".into())];
+        let base = super::super::registry_get("jnbase").unwrap();
+        for (f, w) in flat.iter().zip(["lead", "dev"]) {
+            let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
+            materialize(&d, w, "proj", &ws_str, "", "", Some("jnteam"), "", f.member.name.trim()).unwrap();
+        }
+        check_join(&ws_str, "jnteam").unwrap();
+        assert!(check_join(&ws_str, "other").is_err(), "a team with nobody here");
+        assert!(check_join(&ws_str, "jn/team").unwrap_err().contains("team name"), "a name, not a path");
+
+        // The join: a registry def, the team, no member — what hub_spawn hands spawn.
+        let helper = super::super::registry_get("jnhelper").unwrap().unwrap();
+        materialize(&helper, "jnhelper", "proj", &ws_str, "", "lead", Some("jnteam"), "jnhelper", "").unwrap();
+        let recipe = read(&agent_home(&ws_str, "jnhelper").join("launch.json"));
+        assert_eq!((recipe["team"].as_str(), recipe["member"].as_str(), recipe["agent_def"].as_str()), (Some("jnteam"), Some(""), Some("jnhelper")));
+        assert_eq!(super::super::team_of(Some(&ws_str), "jnhelper").as_deref(), Some("jnteam"), "Hub's team tabs and team context read it as in the team");
+        let prompt = || read(&agent_home(&ws_str, "jnhelper").join("agents").join("jnhelper.json"))["prompt"].as_str().unwrap().to_string();
+        let p = prompt();
+        assert!(p.contains("Helper persona.") && p.contains("## Your team: \"jnteam\"\nShips it."), "{p}");
+        assert!(p.contains("- @lead — splits the work\n- @dev — implements"), "teammates with their roles: {p}");
+        let lead = read(&agent_home(&ws_str, "lead").join("agents").join("lead.json"))["prompt"].as_str().unwrap().to_string();
+        assert!(!lead.contains("jnhelper"), "an existing member is not re-materialized");
+
+        // Team restart: the definition decides, so the joiner is in no row.
+        let mut homes: Vec<(String, String, String)> = team_windows_from_recipes(&ws_str, "jnteam").into_iter().map(|((p, m), w)| (w, p, m)).collect();
+        homes.sort();
+        let current: Vec<(String, String)> = flat.iter().map(|f| (f.path.clone(), f.member.name.trim().to_string())).collect();
+        let plan = team_plan(&homes, &current, &["lead".into(), "dev".into(), "jnhelper".into()]);
+        assert_eq!(plan, TeamPlan { restart: vec!["dev".into(), "lead".into()], stop: vec![], spawn: vec![] }, "the joiner is neither restarted nor stopped");
+        assert_eq!(joined_windows(&ws_str, "jnteam"), ["jnhelper"], "it is the one the restart's room line names");
+
+        // A restart re-materializes it from its def, still in the team, and
+        // its block follows the team as it stands now.
+        super::super::teams_save(&json!({
+            "name": "jnteam", "description": "Ships it.",
+            "members": r#"[{"name":"lead","base":"jnbase","role":"owns merges"},{"name":"dev","base":"jnbase","role":"implements"}]"#
+        })).unwrap();
+        save("jnhelper", "Helper persona v2.");
+        assert!(refresh_agent(&ws_str, "proj", "jnhelper"));
+        let p = prompt();
+        assert!(p.contains("Helper persona v2.") && p.contains("- @lead — owns merges"), "{p}");
+        assert_eq!(p.matches("## Your team:").count(), 1, "one block, not one per restart");
+        let recipe = read(&agent_home(&ws_str, "jnhelper").join("launch.json"));
+        assert_eq!((recipe["team"].as_str(), recipe["member"].as_str()), (Some("jnteam"), Some("")), "a restart keeps the join");
+
+        // Reviewer P2 on 56a3ad44 (#383's fork hands spawn a ready-made def):
+        // the check is about the TEAM, not about how the def was made. A
+        // request with its own def that names a team and no member is a
+        // join, and is refused for a team that is not here, before any
+        // window; a team member placed by its definition is not a join.
+        let made = super::super::create(&ws_str, Some("jnproj"), None, None).unwrap();
+        let session = made["session"].as_str().unwrap().to_string();
+        let with_def = |team: &str, member: &'static str| spawn(&SpawnRequest {
+            session: &session, agent: "fork", def: Some(helper.clone()), team: Some(team.into()), member, ..Default::default()
+        });
+        assert!(with_def("ghost", "").unwrap_err().contains("team 'ghost' has no member in this project"), "a def of its own is checked too");
+        assert!(with_def("jnteam/sub", "").unwrap_err().contains("team name"), "joined by its root");
+        // Which requests are joins, without opening anything: a placed member
+        // (its definition names it) never is.
+        assert_eq!(join_of(Some("jnteam"), ""), Some("jnteam"));
+        assert_eq!(join_of(Some("jnteam"), "  "), Some("jnteam"));
+        assert_eq!(join_of(Some("jnteam/review"), "r1"), None, "a team spawn's member");
+        assert_eq!(join_of(None, ""), None, "standalone");
+
+        super::super::teams_delete("jnteam").ok();
+        for n in ["jnbase", "jnhelper"] { super::super::registry_delete(n).ok(); }
         std::fs::remove_dir_all(&ws).ok();
     }
 

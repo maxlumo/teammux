@@ -79,6 +79,16 @@ pub fn member_of(workspace: Option<&str>, window_name: &str) -> String {
     recipe_field(workspace, window_name, "member")
 }
 
+/// The team a window JOINED at runtime (board #382): a team in its recipe and
+/// no member, so the team's definition does not list it. `None` for a
+/// member the definition placed, and for a solo agent. The ONE reading of a
+/// join: `hub_agents.joined`, and the restart that keeps a joiner in its team.
+/// (A pre-#113 member also named no member; it reads as joined, which is how
+/// a team restart already treated it.)
+pub fn joined_team(workspace: Option<&str>, window_name: &str) -> Option<String> {
+    team_of(workspace, window_name).filter(|_| member_of(workspace, window_name).is_empty())
+}
+
 fn recipe_field(workspace: Option<&str>, window_name: &str, key: &str) -> String {
     let Some(recipe) = workspace.and_then(|w| agents::home_dir(w, window_name)).map(|h| h.join("launch.json")) else { return String::new() };
     std::fs::read_to_string(recipe)
@@ -166,6 +176,25 @@ pub fn deliver_chat_line(session: &str, target_name: &str, line: &str) -> bool {
 mod tests {
     use super::super::tests::use_test_store;
     use super::*;
+
+    /// Board #382: a join is a team in the recipe and no member; a member the
+    /// definition placed, and a solo agent, are not joined.
+    #[test]
+    fn a_join_is_a_team_without_a_member() {
+        let ws = std::env::temp_dir().join(format!("tmm-joined-{}", uuid::Uuid::new_v4()));
+        for (name, recipe) in [("joiner", r#"{"team":"squad","member":""}"#), ("placed", r#"{"team":"squad","member":"dev"}"#), ("solo", r#"{"team":""}"#)] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), recipe).unwrap();
+        }
+        let w = ws.to_str();
+        assert_eq!(joined_team(w, "joiner").as_deref(), Some("squad"));
+        assert_eq!(joined_team(w, "placed"), None);
+        assert_eq!(joined_team(w, "solo"), None);
+        assert_eq!(joined_team(w, "nobody"), None);
+        assert_eq!(team_of(w, "joiner").as_deref(), Some("squad"), "and it is in the team for everything that reads one");
+        std::fs::remove_dir_all(&ws).ok();
+    }
 
     #[test]
     fn removing_an_agent_drops_its_slot_and_home() {

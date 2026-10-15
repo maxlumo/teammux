@@ -7,6 +7,16 @@
 
 /** `hub_board_save` with `dispatch: true` hands the issue to its assignee. */
 export const BOARD_DISPATCH = 'board_dispatch';
+/** `hub_spawn` with `join` puts the new agent in a running team (board #382).
+ * An older server ignores `join` and spawns the agent standalone, which reads
+ * as a success; so a join is refused unless the server says it can. */
+export const SPAWN_JOIN = 'spawn_join';
+
+/** What an older server lacking a capability means for the person, per cap. */
+const TOO_OLD: Record<string, string> = {
+  [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
+  [SPAWN_JOIN]: 'This server is older than the app. Update the server to start an agent inside a team.',
+};
 
 /** A login answer's `caps`: the plain, non-empty strings in it, or `[]` for an
  * older server that sends none (or anything that is not a list). */
@@ -58,5 +68,5 @@ export async function holdForLogin(
 export function requireCap(connection: { getCaps(): string[] | undefined }, cap: string): void {
   const caps = connection.getCaps();
   if (caps === undefined) throw new CapError('login_pending', 'The server has not answered its login yet. Try again in a moment.');
-  if (!caps.includes(cap)) throw new CapError('server_too_old', 'This server is older than the app. Update the server to assign.');
+  if (!caps.includes(cap)) throw new CapError('server_too_old', TOO_OLD[cap] ?? 'This server is older than the app. Update the server.');
 }

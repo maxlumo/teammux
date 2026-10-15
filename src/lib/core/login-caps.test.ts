@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BOARD_DISPATCH, CapError, holdForLogin, lacksCap, parseCaps, requireCap } from './login-caps.ts';
+import { BOARD_DISPATCH, SPAWN_JOIN, CapError, holdForLogin, lacksCap, parseCaps, requireCap } from './login-caps.ts';
 
 test('parseCaps keeps the plain strings of a list and nothing else (board #377)', () => {
   assert.deepEqual(parseCaps(['board_dispatch']), ['board_dispatch']);
@@ -32,6 +32,9 @@ test('requireCap passes only on an answered login that includes the capability, 
   requireCap(fake([BOARD_DISPATCH]), BOARD_DISPATCH);
   assert.throws(() => requireCap(fake([]), BOARD_DISPATCH), refusal('server_too_old'), 'an older server: a refusal');
   assert.throws(() => requireCap(fake(['other']), BOARD_DISPATCH), refusal('server_too_old'));
+  // #382: each cap says what the person cannot do.
+  assert.throws(() => requireCap(fake([BOARD_DISPATCH]), SPAWN_JOIN), (e: any) => e.code === 'server_too_old' && /start an agent inside a team/.test(e.message));
+  assert.throws(() => requireCap(fake([]), BOARD_DISPATCH), (e: any) => /Update the server to assign\./.test(e.message));
   assert.throws(() => requireCap(fake(undefined), BOARD_DISPATCH), refusal('login_pending'), 'unknown is never a yes, and the check does not wait: that is holdForLogin\u2019s job');
 });
 

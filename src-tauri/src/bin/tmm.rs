@@ -56,7 +56,9 @@ USAGE (agent):
   tmm log [--since <ts>] [--limit N] [-f]   read chat; --since is exclusive, -f follows
                     [--grep <text>]   search the FULL history instead (repeatable = any-match)
                     [--global]        …across EVERY project's room, hits name their room
-  tmm spawn <agent> [--brief <text>]  spawn a registry agent into this project
+  tmm spawn <agent> [--brief <text>]  spawn a registry agent into this project (standalone)
+                    [--join <team>]   …into a team of this project instead, live or stopped (its definition is
+                                      not changed: a team stop stops it, a team restart keeps it)
   tmm spawn --team <team> [--brief <text>]  start a configured agent team (all members)
   tmm board [list]                    the project task board (kanban)
   tmm board add "title" [--body <text>] [--image <path|url>] [--assignee <name>]
@@ -757,12 +759,22 @@ async fn main() {
             };
             let brief = flags.get("brief").cloned().flatten().unwrap_or_default();
             let by = ctx.agent.clone().unwrap_or_default();
-            let r = rpc(&ctx, "hub_spawn", json!({ "session": session, "agent": agent, "brief": brief, "by": by })).await;
+            // A join needs the server to say it can (reviewer P1-A on
+            // 56a3ad44): checked on THIS connection's login, before the call.
+            let params = spawn_params(&session, &agent, &brief, &by, &flags);
+            let r = if params.get("join").is_some() {
+                rpc_needing(&ctx, "spawn_join", "hub_spawn", params).await
+            } else {
+                rpc(&ctx, "hub_spawn", params).await
+            };
             if ctx.json {
                 println!("{r}");
             } else {
                 let win = r.get("window_name").and_then(|v| v.as_str()).unwrap_or(&agent);
-                println!("✓ spawned {win}");
+                match r.get("team").and_then(|v| v.as_str()) {
+                    Some(team) => println!("✓ spawned {win} (joined team {team})"),
+                    None => println!("✓ spawned {win}"),
+                }
             }
         }
         ("registry", rest) if rest.first().map(String::as_str) == Some("list") => {
@@ -811,7 +823,7 @@ async fn main() {
                 println!("{r}");
             } else {
                 let list = |k: &str| r[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                for (k, verb) in [("restarted", "restarted"), ("spawned", "started (new)"), ("stopped", "stopped (left the team)")] {
+                for (k, verb) in [("restarted", "restarted"), ("spawned", "started (new)"), ("stopped", "stopped (left the team)"), ("kept", "kept (joined, not in the definition)")] {
                     if !list(k).is_empty() {
                         println!("✓ {verb}: {}", list(k));
                     }
@@ -1070,6 +1082,18 @@ async fn main() {
 }
 
 type Flags = std::collections::HashMap<String, Option<String>>;
+
+/// The params `tmm spawn <agent>` sends. Standalone unless `--join <team>`
+/// names a team (board #382): explicit even when the caller is itself a
+/// team member, so a teammate is never added to a team by accident. The key
+/// is sent only when given, so an older server sees what it always saw.
+fn spawn_params(session: &str, agent: &str, brief: &str, by: &str, flags: &Flags) -> Value {
+    let mut p = json!({ "session": session, "agent": agent, "brief": brief, "by": by });
+    if let Some(team) = flags.get("join").cloned().flatten() {
+        p["join"] = json!(team);
+    }
+    p
+}
 
 /// The def `tmm registry save` sends. `input_mode` is sent only when
 /// `--input-mode` was given (board #336, reviewer P1-A): the key is OMITTED
@@ -1709,7 +1733,7 @@ fn has_address(body: &str) -> bool {
 fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<String>>, Vec<String>, Vec<(String, String)>) {
     const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
-                          "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "file",
+                          "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re"];
     let mut flags = std::collections::HashMap::new();
     let mut pos = Vec::new();
@@ -1796,6 +1820,20 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// lacks `need` is refused with nothing written. Without this a `tmm board
 /// assign` against an older gateway would save a label no agent is ever told
 /// about and print a success line.
+/// What a write needing `need` says when the server's login lacks it (board
+/// #377; #382 for `spawn_join`): what it cannot do, how to get it, and that
+/// nothing was written.
+fn cap_refusal(need: &str) -> String {
+    match need {
+        "spawn_join" => format!(
+            "this server cannot start an agent inside a team (its login answer lacks `{need}`; an older server would start it standalone) — update the server to join. Nothing was spawned."
+        ),
+        _ => format!(
+            "this server cannot hand an assignment over (its login answer lacks `{need}`) — update the server to assign. Nothing was saved."
+        ),
+    }
+}
+
 async fn rpc_needing(ctx: &Ctx, need: &str, method: &str, params: Value) -> Value {
     match try_rpc_with(ctx, method, params, Some(need)).await {
         Ok(v) => v,
@@ -1826,9 +1864,7 @@ async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>
             .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(need)));
         if !has {
             let _ = ws.close(None).await;
-            return Err((EXIT_NOT_FOUND, format!(
-                "this server cannot hand an assignment over (its login answer lacks `{need}`) — update the server to assign. Nothing was saved."
-            )));
+            return Err((EXIT_NOT_FOUND, cap_refusal(need)));
         }
     }
 
@@ -2358,7 +2394,7 @@ mod tests {
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "--re "] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "--re ", "--join "] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }
@@ -2449,6 +2485,19 @@ mod tests {
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
         assert_eq!(registry_def("dev", "kiro", &flags)["input_mode"], "steer", "a given mode is sent");
+    }
+
+    /// Board #382: `--join` is a VALUED flag (else its team would fall out as
+    /// a positional and the spawn would go standalone), and without it the
+    /// spawn is standalone with no `join` key at all.
+    #[test]
+    fn spawn_joins_only_with_join() {
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let (flags, pos, _) = parse(&["spawn", "kiro", "--join", "dev-squad", "--brief", "go"]);
+        assert_eq!(pos, vec!["spawn", "kiro"]);
+        assert_eq!(spawn_params("p", "kiro", "go", "lead", &flags), json!({ "session": "p", "agent": "kiro", "brief": "go", "by": "lead", "join": "dev-squad" }));
+        let (flags, _, _) = parse(&["spawn", "kiro"]);
+        assert!(spawn_params("p", "kiro", "", "lead", &flags).get("join").is_none(), "standalone, even when the caller is a team member");
     }
 
     /// Board #336 reviewer P1-A: without `--input-mode` the key is OMITTED,

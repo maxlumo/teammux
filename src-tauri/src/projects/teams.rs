@@ -234,6 +234,42 @@ pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, ro
     Ok(def)
 }
 
+/// The team block of an agent that JOINED a running team (board #382): it
+/// was spawned on its own and put in the team at runtime, so the team's
+/// definition does not list it and `effective_def` never builds it a block.
+/// A member that does not know its team is not in it (orchestrator's ruling):
+/// it is told the team's name and description, its own name, and every
+/// teammate this project has (`mates`: window, team path, member name off the
+/// recipes; a member name of '' is another joiner), each with the role the
+/// CURRENT definition gives that member, which is how a lead or orchestrator
+/// is named, since a definition has no lead field. `team`/`flat` are absent
+/// for a team whose definition is gone. Pure.
+pub fn joined_block(root: &str, team: Option<&RegTeam>, flat: &[Flat], window_name: &str, mates: &[(String, String, String)]) -> String {
+    let mut block = format!("## Your team: \"{root}\"");
+    if let Some(d) = team.map(|t| t.description.trim()).filter(|d| !d.is_empty()) {
+        block += &format!("\n{d}");
+    }
+    block += &format!("\n\nYou are \"{window_name}\". You joined this team when you were started; its definition does not list you.");
+    let role = |path: &str, member: &str| flat.iter()
+        .find(|f| f.path == path && !member.is_empty() && f.member.name.trim() == member)
+        .map(|f| f.member.role.trim().to_string())
+        .unwrap_or_default();
+    let order = |path: &str, member: &str| flat.iter()
+        .position(|f| f.path == path && !member.is_empty() && f.member.name.trim() == member)
+        .unwrap_or(usize::MAX);
+    let mut others: Vec<&(String, String, String)> = mates.iter().filter(|(w, _, _)| w != window_name).collect();
+    others.sort_by(|a, b| (order(&a.1, &a.2), &a.0).cmp(&(order(&b.1, &b.2), &b.0)));
+    if !others.is_empty() {
+        block += "\nYour teammates (address one with `tmm send \"@name …\"`; a [path] marks a different sub-team):\n";
+        for (w, path, member) in others {
+            let tag = if path != root { format!(" [{path}]") } else { String::new() };
+            let r = role(path, member);
+            block += &if r.is_empty() { format!("- @{w}{tag}\n") } else { format!("- @{w}{tag} — {}\n", one_line(&r)) };
+        }
+    }
+    block.trim_end().to_string()
+}
+
 /// A role's first sentence-ish, for the roster line: one line, ≤120 chars.
 fn one_line(role: &str) -> String {
     let flat = role.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -376,5 +412,32 @@ mod tests {
         base.input_mode = "steer".into();
         let b2 = effective_def(&flat_of(&t, 1), Some(&base), "b", &[]).unwrap();
         assert_eq!(b2.input_mode, "steer", "…whatever the base says");
+    }
+
+    /// Board #382: an agent that joined a running team is told its team and
+    /// every teammate this project has, with the role the CURRENT definition
+    /// gives each member (in the definition's order, joiners after), never
+    /// itself.
+    #[test]
+    fn a_joined_agent_is_told_its_team_and_its_teammates() {
+        let mut dev = named("dev", r#"[{"name":"lead","base":"claude","role":"Splits the work, owns merges.\nNever writes code."},{"team":"review"}]"#);
+        dev.description = "Ships the app.".into();
+        let review = named("review", r#"[{"name":"r1","base":"claude","role":"design"}]"#);
+        let lookup = |n: &str| -> Result<Option<RegTeam>, String> { Ok(match n { "review" => Some(review.clone()), "dev" => Some(dev.clone()), _ => None }) };
+        let flat = expand(&dev, &lookup, 8).unwrap();
+        let mates = vec![
+            ("helper".to_string(), "dev".to_string(), String::new()),
+            ("r1".to_string(), "dev/review".to_string(), "r1".to_string()),
+            ("me".to_string(), "dev".to_string(), String::new()),
+            ("lead-2".to_string(), "dev".to_string(), "lead".to_string()),
+        ];
+        let b = joined_block("dev", Some(&dev), &flat, "me", &mates);
+        assert!(b.starts_with("## Your team: \"dev\"\nShips the app.\n\nYou are \"me\". You joined this team when you were started; its definition does not list you."), "{b}");
+        let lines: Vec<&str> = b.lines().filter(|l| l.starts_with("- @")).collect();
+        assert_eq!(lines, ["- @lead-2 — Splits the work, owns merges. Never writes code.", "- @r1 [dev/review] — design", "- @helper"],
+            "definition order with roles (the lead by its role), a sub-team tagged, another joiner after, never itself");
+        let gone = joined_block("dev", None, &[], "me", &mates[..1]);
+        assert_eq!(gone, "## Your team: \"dev\"\n\nYou are \"me\". You joined this team when you were started; its definition does not list you.\nYour teammates (address one with `tmm send \"@name …\"`; a [path] marks a different sub-team):\n- @helper",
+            "a deleted definition: names only");
     }
 }

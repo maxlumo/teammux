@@ -12,6 +12,8 @@ interface ScopeAgent {
   name: string;
   managed: boolean;
   team?: string | null;
+  /** In its team by a runtime join (board #382), not by the definition. */
+  joined?: boolean;
   state?: string;
 }
 
@@ -23,6 +25,10 @@ export interface GroupScope {
   live: string[];
   busy: string[];
   stopped: string[];
+  /** Live members a TEAM restart leaves as they are (board #382): the ones
+   * that joined at runtime. A team restart aligns the team with its
+   * definition, which does not list them; a team stop still stops them. */
+  kept: string[];
 }
 
 export function groupScope(
@@ -37,7 +43,8 @@ export function groupScope(
   const idle = target === ALL_TARGET
     ? [...stopped]
     : team ? stopped.filter((name) => teamRoot(stoppedTeams[name]) === team) : [];
-  return { live, busy, stopped: idle };
+  const kept = team ? agents.filter((a) => a.joined && live.includes(a.name)).map((a) => a.name) : [];
+  return { live, busy, stopped: idle, kept };
 }
 
 export type GroupVerb = 'interrupt' | 'restart' | 'start' | 'stop';
@@ -58,8 +65,10 @@ export interface GroupAction {
  * a per-agent decision. */
 export function groupActions(scope: GroupScope): GroupAction[] {
   const out: GroupAction[] = [];
+  const kept = scope.kept ?? [];
+  const restart = scope.live.filter((name) => !kept.includes(name));
   if (scope.busy.length) out.push({ verb: 'interrupt', names: scope.busy, confirm: false, danger: false });
-  if (scope.live.length) out.push({ verb: 'restart', names: scope.live, confirm: scope.busy.length > 0, danger: false });
+  if (restart.length) out.push({ verb: 'restart', names: restart, confirm: scope.busy.some((name) => restart.includes(name)), danger: false });
   if (scope.stopped.length) out.push({ verb: 'start', names: scope.stopped, confirm: false, danger: false });
   if (scope.live.length) out.push({ verb: 'stop', names: scope.live, confirm: true, danger: true });
   return out;

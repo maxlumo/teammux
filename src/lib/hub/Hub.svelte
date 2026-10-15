@@ -26,6 +26,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import Lightbox from '../ui/Lightbox.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
+  import Select from '../ui/Select.svelte';
   import Dialog from '../ui/Dialog.svelte';
   import './hub-atoms.css';
   import Icon from '../ui/Icon.svelte';
@@ -37,7 +38,7 @@
   import { issueRef } from './board.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
-  import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamTarget } from './hub-composer.ts';
+  import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
   import { walkFeedGap } from './hub-history.ts';
   import { createHubBackRegistry } from './hub-back.ts';
   import { notifyNews, isAway, roomProjectName, playCue, systemNotify, notifyEnabled, notifyLevel, excerpt } from './notifications.ts';
@@ -469,6 +470,7 @@
     delete issueTriggered[session];
     selected = session;
     openedAt = Infinity; rosterBase = null; // nothing is fresh until this room has settled
+    startJoin = ''; // a picker's Join belongs to the project it was opened in (#382)
     clearTimeout(justLoadedTimer); justLoaded = false; // an unfold belongs to the room that loaded
     composerText = hubPrefs.draft(session);
     clearAttachments(); // staged for one room; must not ride into another
@@ -1355,30 +1357,83 @@
   let pickerMode = $state('start');
   let startPick = $state([]);
   let startBrief = $state('');
+  // Where the picked agents go (board #382): '' = standalone, else a team
+  // RUNNING in this project, which they join at runtime (the team's
+  // definition is not changed). Defaults to the team tab the composer points
+  // at, the owner's "在这个 team 里招募"; a visible choice before confirming.
+  // It is the state of ONE open picker (reviewer P1 on a4f0d9d7): set when
+  // the picker opens, cleared when it closes and when the project changes,
+  // and handed to `addAgents` only by the picker's own confirm. No other
+  // entry reads it, so a choice left over from another picker or project can
+  // never put a one-tap start into a team.
+  let startJoin = $state('');
+  function closePicker() { pickerOpen = false; startJoin = ''; }
+  /** Which opening of the picker its draft belongs to. The add button stays
+   * enabled while a batch starts, so the picker can be reopened in the same
+   * project mid-batch; a batch clears the draft only if no opening came after
+   * the one it was confirmed from (reviewer P2 on 90b7c4e3, reachable). */
+  let pickerOpening = 0;
+  const runningTeams = $derived([...new Set(managedAgents.map((a) => teamRoot(a.team)).filter(Boolean))].sort());
+  const joinChoices = $derived([...new Set([...runningTeams, startJoin].filter(Boolean))].sort());
   let starting = $state(false);
   /** Add agents to the conversation: one, or several at once. Each is an
    * existing `hub_spawn`, run in order so the roster appears in the order it was
    * picked. In 'start' mode the new roster also gets a lead — the first that can
    * hire, else the first picked, the same rule pickLead applies to a live room.
    * In 'add' mode whoever you were talking to stays the recipient. */
-  async function addAgents(names, brief = '', mode = pickerMode) {
-    if (!selected || !names.length || starting) return;
+  /** The batch is FROZEN at confirmation (reviewer P1-C on 56a3ad44, the
+   * #329/#377 rule): the project, the Join, the names and the brief are the
+   * ones the person confirmed. A project switch while it runs stops the rest
+   * (`selectionGeneration`), so nothing lands in the other project and
+   * nothing there is re-targeted. A picked Join is sent as picked, even if
+   * that team stopped meanwhile: the server's `check_join` judges it, and
+   * every refusal is said in the composer's feedback slot, never only in the
+   * console. */
+  async function addAgents(picked, pickedBrief = '', mode = pickerMode, pickedJoin = '') {
+    if (!selected || !picked.length || starting) return;
+    const session = selected, gen = selectionGeneration, opening = pickerOpening;
+    const names = [...picked], brief = pickedBrief, join = pickedJoin;
+    const current = () => alive && selectionGeneration === gen && selected === session;
     starting = true;
-    pickerOpen = false;
+    closePicker();
+    const feedbackToken = commandFeedbackLifetime.begin();
+    commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+    const failed = [];
+    let first = '';
     try {
       for (const name of names) {
-        try { await hubSpawn(selected, name, brief); }
-        catch (e) { console.warn('spawn failed', name, e); }
+        if (!current()) break;
+        try {
+          const r = await hubSpawn(session, name, brief, '', join);
+          if (!first) first = r?.window_name || name;
+        } catch (e) {
+          failed.push({ name, why: spawnRefusal(e) });
+        }
       }
+      if (!current()) return;
+      if (failed.length) commandFeedbackLifetime.update(feedbackToken, {
+        kind: 'error',
+        message: failed.map((f) => t('hubSpawnFailed').replace('{name}', f.name).replace('{why}', f.why)).join('; '),
+      });
       await Promise.all([reload(), loadAgents(), loadFeed()]);
-      if (mode === 'start' || !recipient) {
-        setRecipient(names[0]);
+      if (first && current() && (mode === 'start' || !recipient)) {
+        setRecipient(first);
       }
     } finally {
       starting = false;
-      startPick = [];
-      startBrief = '';
+      // The picker's draft belongs to the opening it was confirmed in: a
+      // batch that ends after a project switch, or after the picker was
+      // opened again, leaves that newer draft alone.
+      if (current() && pickerOpening === opening) { startPick = []; startBrief = ''; }
     }
+  }
+  /** Why a spawn did not go, in this page's words: the gate's two refusals
+   * (#377, #382) have their own copy; anything else is the server's message
+   * (`check_join` names the team it refused). */
+  function spawnRefusal(e) {
+    if (e?.code === 'server_too_old') return t('hubJoinOldServer');
+    if (e?.code === 'login_pending') return t('boardAssignConnecting');
+    return String(e?.message ?? e);
   }
 
   /** Member names of a configured team, for the preset rows. */
@@ -1391,26 +1446,33 @@
    * order is its hierarchy — the lead is listed first). */
   async function startTeam(name, brief = '') {
     if (!selected || !name || starting) return;
+    // Frozen like a batch (#382 review): a switch while the team starts
+    // neither re-targets the other project's recipient nor clears its draft.
+    const session = selected, gen = selectionGeneration, opening = pickerOpening;
+    const current = () => alive && selectionGeneration === gen && selected === session;
     starting = true;
-    pickerOpen = false;
+    closePicker();
     try {
-      const r = await hubSpawnTeam(selected, name, brief);
+      const r = await hubSpawnTeam(session, name, brief);
       for (const e of r?.errors ?? []) console.warn('team member spawn failed', e.name, e.error);
+      if (!current()) return;
       await Promise.all([reload(), loadAgents(), loadFeed()]);
       const first = r?.spawned?.[0]?.window_name;
-      if (first && (pickerMode === 'start' || !recipient)) setRecipient(first);
+      if (first && current() && (pickerMode === 'start' || !recipient)) setRecipient(first);
     } catch (e) {
       console.warn('team spawn failed', name, e);
     } finally {
       starting = false;
-      startPick = [];
-      startBrief = '';
+      if (current() && pickerOpening === opening) { startPick = []; startBrief = ''; }
     }
   }
 
   function openPicker(mode) {
+    pickerOpening++;
     pickerMode = mode;
     startPick = [];
+    const tab = targetTeam(recipient);
+    startJoin = tab && runningTeams.includes(tab) ? tab : '';
     pickerOpen = true;
   }
 
@@ -1871,7 +1933,7 @@
       backLayers.register('contextMenu', () => { if (ctxAt) { closeCtx(); return true; } return false; }),
       backLayers.register('action', () => { if (!pendingAct) return false; if (!acting) pendingAct = null; return true; }),
       backLayers.register('trash', () => { if (!trashAsk) return false; if (!purging) trashAsk = null; return true; }),
-      backLayers.register('picker', () => { if (pickerOpen) { pickerOpen = false; return true; } return false; }),
+      backLayers.register('picker', () => { if (pickerOpen) { closePicker(); return true; } return false; }),
       // The dialog peels its own steps first, exactly as in Sessions and as
       // its Escape does (#317): one order per dismissal, one definition.
       backLayers.register('create', () => { if (!createOpen) return false; if (!createEl?.goBack()) createOpen = false; return true; }),
@@ -2391,7 +2453,7 @@
 
   {#if pickerOpen}
     <!-- ── Start a team: several agents at once ── -->
-    <Dialog {compact} label={t('hubStartTeam')} oncancel={() => pickerOpen = false}>
+    <Dialog {compact} label={t('hubStartTeam')} oncancel={closePicker}>
       <h2>{t('hubStartTeam')}</h2>
       {#if teams.length}
         <!-- Configured teams first (board #74): a tap starts the whole team
@@ -2416,11 +2478,22 @@
           </button>
         {/each}
       </div>
+      {#if joinChoices.length}
+        <!-- Join (board #382): the picked agents start standalone or inside a
+             team already running here. Only shown when there is one. A team
+             the person picked stays offered even if it stops meanwhile
+             (reviewer P1-C): it is never quietly turned into Standalone. -->
+        <label class="config-field"><span class="config-field-label">{t('hubJoin')}</span>
+          <Select value={startJoin} ariaLabel={t('hubJoin')} disabled={starting}
+            options={[{ value: '', label: t('hubJoinNone') }, ...joinChoices.map((team) => ({ value: team, label: t('hubJoinTeam').replace('{name}', team) }))]}
+            onchange={(v) => { startJoin = v; }} />
+        </label>
+      {/if}
       <input class="pick-brief" placeholder={t('hubBrief')} bind:value={startBrief} />
       <div class="dlg-actions">
-        <CommandButton label={t('cancel')} onclick={() => pickerOpen = false} />
+        <CommandButton label={t('cancel')} onclick={closePicker} />
         <CommandButton variant="primary" icon="zap" label={t('hubStartGo').replace('{n}', String(startPick.length))}
-          disabled={!startPick.length} pending={starting} onclick={() => addAgents(startPick, startBrief.trim())} />
+          disabled={!startPick.length} pending={starting} onclick={() => addAgents(startPick, startBrief.trim(), pickerMode, startJoin)} />
       </div>
     </Dialog>
   {/if}

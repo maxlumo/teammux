@@ -14,7 +14,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { BOARD_DISPATCH, holdForLogin, requireCap } from './login-caps.ts';
+import { BOARD_DISPATCH, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -60,6 +60,10 @@ export interface HubAgent {
    * null for a solo agent. The roster groups by root path; hover/ARIA retain
    * the full sub-team identity. */
   team?: string | null;
+  /** In `team` by a runtime JOIN, not by the team's definition (board #382):
+   * a team restart leaves it as it is, a team stop stops it. Absent on older
+   * servers. */
+  joined?: boolean;
   state: string;
   detail: string;
   since: number;
@@ -414,8 +418,26 @@ export function createWsApi(connection: Connection) {
       ...(opts.limit ? { limit: opts.limit } : {}),
       ...(opts.before ? { before_ts: opts.before.ts, before_id: opts.before.id } : {}),
     });
-  const hubSpawn = (session: string, agent: string, brief = '', by = '') =>
-    call('hub_spawn', { session, agent, brief, by });
+  /** `join` (board #382): a team running in this project the agent joins at
+   * runtime; '' = standalone. A JOIN needs `spawn_join` (reviewer P1-A on
+   * 56a3ad44): an older server ignores the key and spawns the agent outside
+   * the team, a success nobody asked for, so the join is refused here, before
+   * anything is sent, unless the CURRENT socket's login announced it. The same
+   * gate as a flagged board save (#377): the runtime waits for an unanswered
+   * login (`hold`) and re-checks its own right to write in the step that
+   * sends; the check itself is synchronous, in the block that writes. A
+   * standalone spawn is not gated. */
+  const hubSpawn = Object.assign(
+    async (session: string, agent: string, brief = '', by = '', join = '') => {
+      if (join) requireCap(connection, SPAWN_JOIN);
+      return call<{ window_name: string; pane: string; backend: string; team?: string | null }>(
+        'hub_spawn', { session, agent, brief, by, ...(join ? { join } : {}) });
+    },
+    {
+      hold: (_session: string, _agent: string, _brief = '', _by = '', join = ''): Promise<void> | undefined =>
+        join ? holdForLogin(connection) : undefined,
+    },
+  );
   /** Start a configured agent TEAM (board #74): every member spawns as an
    * ordinary managed agent with its role block; one failure does not stop the
    * others and comes back in `errors`. */

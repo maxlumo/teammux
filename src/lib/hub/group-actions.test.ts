@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { groupActions, groupScope, runGroup } from './group-actions.ts';
 
-const agents = [
+type Agent = { name: string; managed: boolean; team: string | null; joined?: boolean; state: string };
+const agents: Agent[] = [
   { name: 'lead', managed: true, team: 'squad', state: 'running' },
   { name: 'dev', managed: true, team: 'squad/sub', state: 'idle' },
   { name: 'solo', managed: true, team: null, state: 'waiting' },
@@ -31,6 +32,24 @@ test('a team covers only its members, nested sub-teams included, stopped ones by
     'stop:lead,dev:ask',
   ]);
   assert.deepEqual(verbs('team:ops'), ['restart:other:go', 'start:ops2:go', 'stop:other:ask']);
+});
+
+// Board #382 (orchestrator's ruling): an agent that JOINED a team at runtime
+// is in the team, so a team stop stops it; a team restart aligns the team
+// with its definition, which does not list it, so the restart leaves it.
+test('a team stop includes a joined agent; a team restart leaves it as it is (#382)', () => {
+  const joined = [...agents, { name: 'helper', managed: true, team: 'squad', joined: true, state: 'running' }];
+  assert.deepEqual(verbs('team:squad', joined), [
+    'interrupt:lead,helper:go',
+    'restart:lead,dev:ask',
+    'start:qa:go',
+    'stop:lead,dev,helper:ask',
+  ]);
+  const onlyHelperBusy = joined.map((a) => ({ ...a, state: a.name === 'helper' ? 'running' : 'idle' }));
+  assert.ok(verbs('team:squad', onlyHelperBusy).includes('restart:lead,dev:go'), 'a busy joiner is not a reason to ask: the restart does not touch it');
+  assert.deepEqual(verbs('team:squad', [{ name: 'helper', managed: true, team: 'squad', joined: true, state: 'idle' }], []), ['stop:helper:ask'],
+    'only joiners running: nothing to restart');
+  assert.ok(verbs('all', joined).includes('restart:lead,dev,solo,other,helper:ask'), 'All is not a team: it restarts everyone');
 });
 
 test('a restart asks only when it would cut a turn; a stop always asks', () => {

@@ -180,7 +180,14 @@ tmm agent restart --team <team>     # align a team with its current definition:
                                     #   gained, stop who it dropped (home kept)
 tmm agent remove <name>             # eject: stop + forget slot + delete home
 tmm spawn <registry-name> [--brief "<text>"]   # hire a teammate into this
-                                    #   project; no brief = it waits silently
+                                    #   project; no brief = it waits silently;
+                                    #   standalone unless you add --join
+tmm spawn <registry-name> --join <team>   # …into a team of this project (live or
+                                    #   stopped): it gets
+                                    #   the team's context and is told its
+                                    #   teammates; the team's definition is not
+                                    #   changed (a team stop stops it, a team
+                                    #   restart leaves it as it is)
 ```
 
 ## Projects

@@ -67,7 +67,9 @@ tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
 tmm agent list                       windows + agent detection + derived state
 tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
-tmm spawn <agent> [--brief <text>]   spawn a registry agent into this project
+tmm spawn <agent> [--brief <text>]   spawn a registry agent into this project (standalone)
+tmm spawn <agent> --join <team>      …into a team of this project, at runtime (#382; needs the server's spawn_join cap;
+                                     the team must have a member home here, live or stopped)
 tmm spawn --team <team> [--brief <text>]     start a configured team (all members)
 tmm project list                     ● live / ○ down, session + path
 tmm project create <path> [--name n] [--session s] [--with-agent <backend>]

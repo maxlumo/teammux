@@ -288,6 +288,31 @@ pub fn offline_notice(offline: &[(&str, &'static str)], stamp: &str) -> String {
     )
 }
 
+/// What a team's CURRENT members are told when an agent JOINS their team at
+/// runtime (board #382, reviewer P1-B on 56a3ad44). They are not
+/// re-materialized (their prompts keep the roster they were started with),
+/// and the room's `[tmm] spawned … — joined team` line never reaches them:
+/// `context_noise` drops every `[tmm]` row from the team context. So the
+/// join is TYPED to each of them, once, in the stamped RESULT shape the
+/// offline notice uses (`[tmm chat <stamp>] tmm: [reply] …`, see
+/// `offline_notice`): it asks nothing, so it opens no reply edge, and the
+/// agent's answer to it is not taken for an answer to anyone. Names the
+/// joiner, its backend, who started it, that the team's definition does not
+/// list it, and how to address it; its brief, if any, on one line.
+pub fn join_notice(joiner: &str, team: &str, backend: &str, by: &str, brief: &str, stamp: &str) -> String {
+    let who = if by.trim().is_empty() { "human" } else { by.trim() };
+    let mut line = format!(
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] @{joiner} joined your team {team}: a {backend} agent started by {who}; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@{joiner} …\"."
+    );
+    let flat = brief.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !flat.is_empty() {
+        let cut: String = flat.chars().take(120).collect();
+        let more = if flat.chars().count() > 120 { "…" } else { "" };
+        line += &format!(" Its brief: {cut}{more}");
+    }
+    line
+}
+
 /// Deliver one line to one managed agent window whose pane is `target`.
 /// True when it was typed or held; false when the pane refused it (said in
 /// the feed as `undelivered`, board #250). `ask_at` is where the stamped
@@ -686,6 +711,22 @@ mod tests {
         // is the bug this test exists to keep out.
         let bare = "[tmm] offline — @reviewer (stopped): your message is in the room.";
         assert_eq!(crate::address::requesters(bare), vec!["human".to_string()]);
+    }
+
+    /// Board #382 reviewer P1-B: the join notice is typed to a team's members
+    /// in the same result shape, so it asks nothing, alone or joining a turn
+    /// that already has a real request. Asserted on the REAL output.
+    #[test]
+    fn the_join_notice_asks_nothing_of_the_reply_edge() {
+        let notice = join_notice("helper", "squad", "kiro", "", "", "2026-10-15 16:00");
+        assert_eq!(notice, "[tmm chat 2026-10-15 16:00] tmm: [reply] @helper joined your team squad: a kiro agent started by human; the team's definition does not list it (a team restart leaves it running). Address it with tmm send \"@helper …\".");
+        assert!(crate::address::requesters(&notice).is_empty(), "{notice}");
+        let asked = "[tmm chat 2026-10-15 15:59] lead: @dev please look";
+        assert_eq!(crate::address::requesters(&format!("{asked}\n\n{notice}")), vec!["lead".to_string()]);
+        let briefed = join_notice("helper", "squad", "codex", "lead", &format!("Port the\n  parser. {}", "x".repeat(200)), "2026-10-15 16:00");
+        assert!(briefed.contains("a codex agent started by lead;"), "{briefed}");
+        assert!(briefed.contains(" Its brief: Port the parser. xxx") && briefed.ends_with("x…") && !briefed.contains('\n'), "one line, clipped: {briefed}");
+        assert!(crate::address::requesters(&briefed).is_empty(), "{briefed}");
     }
 
     fn warns(session: &str) -> Vec<String> {

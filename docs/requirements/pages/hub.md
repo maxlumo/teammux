@@ -165,6 +165,15 @@ completion).
   The empty-room preset lists configured teams as
   one-tap starts beside the single agents, and the "Start a team" picker
   offers them above the ad-hoc pick (the brief applies to every member).
+  When a team runs in the project, the picker also has a **Join** choice
+  (Standalone or one of those teams; board #382): the picked agents start
+  inside that team at runtime, are told their teammates (and the team's
+  members are told of them), and appear in its tab; the team's definition is
+  not changed. It defaults to the team tab the composer points at. A picked
+  team is kept as picked, the batch is the one confirmed (a project switch
+  stops it), and a refusal (team not running, server too old) is shown in
+  the composer's feedback slot. A team stop stops a joined agent; a team
+  restart leaves it running and says so (`kept`).
   Every row of that picker is three columns (board #341, owner's screenshot:
   empty team icons and an action that wrapped to two lines at a different
   place in each row): the avatar, ONE name column that wraps, and the

@@ -1017,6 +1017,11 @@ test('a lifecycle verb speaks the one status colour language', () => {
   assert.equal(sysVerbColor('stopped'), 'var(--text3)');
   assert.equal(sysVerbColor('removed'), 'var(--status-danger)');
   assert.equal(sysVerbColor('switched'), 'var(--accent)');
+  // #382: a team restart that left a joined agent alone, and a join's spawn line.
+  assert.deepEqual(sysParts('kept helper — joined team squad, not in its definition: the restart left it as it is'),
+    { verb: 'kept', who: 'helper', text: 'joined team squad, not in its definition: the restart left it as it is', cmd: false });
+  assert.equal(sysVerbColor('kept'), 'var(--text3)');
+  assert.deepEqual(sysParts('spawned helper — joined team squad: go'), { verb: 'spawned', who: 'helper', text: 'joined team squad: go', cmd: false });
   // A hand-off starts work moving; handing it back to nobody is rest (#367).
   assert.equal(sysVerbColor('assigned'), 'var(--accent)');
   assert.equal(sysVerbColor('unassigned'), sysVerbColor('stopped'));

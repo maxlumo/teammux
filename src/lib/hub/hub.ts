@@ -1345,7 +1345,7 @@ export function systemLine(body: string | null | undefined): string | null {
 /** The lifecycle verbs the server narrates (`hub_rpc.rs`). A line that does not
  * start with one of them is left whole — an unknown shape must render as its own
  * text, never as a guessed verb plus a truncated remainder. */
-const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
+const SYS_VERBS = new Set(['spawned', 'started', 'stopped', 'restarted', 'kept', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
 
 /**
  * ONE structure for every line the app narrates: WHO it is about, WHAT
@@ -1477,6 +1477,9 @@ export function sysVerbColor(verb: string): string {
     // issue back to nobody leaves it at rest, like a stop.
     case 'assigned': return 'var(--accent)';
     case 'unassigned': return 'var(--text3)';
+    // A team restart that left a joined agent as it was (#382): nothing
+    // happened to it, so it is at rest.
+    case 'kept': return 'var(--text3)';
     case 'done': return 'var(--status-ok)';
     // A message that reached nobody needs a person to notice (#347): the
     // amber the language already keeps for "paused on a human", not red —

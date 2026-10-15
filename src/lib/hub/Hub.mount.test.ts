@@ -2212,8 +2212,264 @@ test('Chat picker commands retain choice, disabled start and the original spawn 
     assert.ok(start.querySelector('svg')?.children.length, 'the command uses an existing icon, not a blank glyph');
     start.click();
     await app.flush();
-    assert.deepEqual(spawned, [['fixture', 'helper', '']]);
+    assert.deepEqual(spawned, [['fixture', 'helper', '', '', '']], 'standalone: no team to join');
     assert.equal(app.document.querySelector('.dlg-agents'), null, 'the existing spawn path closes the picker');
+  } finally { await app.close(); }
+});
+
+// Board #382: hiring inside a team. The picker offers Join (Standalone or a
+// team running here); its default follows the team tab the composer points
+// at, and it is a visible choice before confirming.
+test('the picker joins the team its tab points at by default, Standalone joins none, and no running team shows no choice (#382)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[][] = [];
+  let roster: { name: string; window: number; managed: boolean; agent: string; state: string; team: string | null }[] = [
+    { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+    { name: 'bob', window: 1, managed: true, agent: 'codex', state: 'idle', team: 'squad/review' },
+    { name: 'carol', window: 2, managed: true, agent: 'kiro', state: 'idle', team: 'ops' },
+  ];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_hub_lead', JSON.stringify({ fixture: 'team:squad' }));
+    },
+    modules: [{
+      ...rpc,
+      hubAgents: async () => ({ agents: roster }),
+      registryList: async () => ({ agents: [{ name: 'helper', backend: 'kiro' }] }),
+      hubSpawn: async (...args: unknown[]) => { spawned.push(args); return {}; },
+    }],
+  });
+  const join = () => app.document.querySelector<HTMLButtonElement>('[aria-label="Join"]');
+  const open = async () => {
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+  };
+  const go = async () => {
+    app.document.querySelector<HTMLButtonElement>('.dlg-agents .agent-pick')!.click(); await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!.click();
+    for (let i = 0; i < 6; i++) await app.flush();
+  };
+  try {
+    for (let i = 0; i < 20 && !app.document.querySelector('.roster-cluster.team-lit'); i++) await app.flush();
+    assert.ok(app.document.querySelector('.roster-cluster[data-team="squad"].team-lit'), 'the composer points at team squad');
+    await open();
+    assert.equal(join()?.querySelector('.sel-value')?.textContent, 'Team squad', 'the default follows the team tab');
+    join()!.click(); await app.flush();
+    assert.deepEqual([...app.document.querySelectorAll('[role=option]')].map((o) => o.textContent?.trim()), ['Standalone', 'Team ops', 'Team squad'],
+      'standalone, then each team running here, by its root');
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=option]')].find((o) => o.textContent?.trim() === 'Standalone')!.click();
+    await app.flush();
+    await go();
+    assert.deepEqual(spawned.at(-1), ['fixture', 'helper', '', '', ''], 'Standalone: no team');
+    await open();
+    assert.equal(join()?.querySelector('.sel-value')?.textContent, 'Team squad', 'the next opening defaults to the tab again');
+    await go();
+    assert.deepEqual(spawned.at(-1), ['fixture', 'helper', '', '', 'squad'], 'joined to squad');
+    roster = roster.map((a) => ({ ...a, team: null }));
+    await app.advance(5000);
+    await open();
+    assert.equal(join(), null, 'no team running here: no choice to make');
+    await go();
+    assert.deepEqual(spawned.at(-1), ['fixture', 'helper', '', '', '']);
+  } finally { await app.close(); }
+});
+
+// Reviewer P1-C on 56a3ad44: a confirmed choice is never quietly changed.
+// A picked Join stays the Join even when its team stops (the server judges
+// it, and its refusal is SAID), and a batch is frozen at confirmation: a
+// project switch stops it, so nothing lands in the other project.
+test('a picked Join survives its team stopping and the server\'s refusal is shown; an old server\'s refusal too (#382 review)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[][] = [];
+  let refuse: unknown = null;
+  let roster: { name: string; window: number; managed: boolean; agent: string; state: string; team: string | null }[] = [
+    { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+  ];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_hub_lead', JSON.stringify({ fixture: 'team:squad' }));
+    },
+    modules: [{
+      ...rpc,
+      hubAgents: async () => ({ agents: roster }),
+      registryList: async () => ({ agents: [{ name: 'helper', backend: 'kiro' }] }),
+      hubSpawn: async (...args: unknown[]) => { spawned.push(args); if (refuse) throw refuse; return { window_name: 'helper', team: args[4] || null }; },
+    }],
+  });
+  const join = () => app.document.querySelector<HTMLButtonElement>('[aria-label="Join"]');
+  const feedback = () => app.document.querySelector('.composer-feedback [role="alert"]')?.textContent?.trim() ?? '';
+  try {
+    for (let i = 0; i < 20 && !app.document.querySelector('.roster-cluster.team-lit'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(join()?.querySelector('.sel-value')?.textContent, 'Team squad');
+    roster = [];
+    await app.advance(5000);
+    assert.equal(join()?.querySelector('.sel-value')?.textContent, 'Team squad', 'the team stopped while the picker was open: the choice stays what was picked');
+    refuse = new Error("team 'squad' has no member in this project — start the team first, or spawn the agent standalone");
+    app.document.querySelector<HTMLButtonElement>('.dlg-agents .agent-pick')!.click(); await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.deepEqual(spawned.at(-1), ['fixture', 'helper', '', '', 'squad'], 'sent as picked, never as Standalone');
+    assert.match(feedback(), /Could not start helper: team 'squad' has no member in this project/u, 'the refusal is said where the person is looking');
+
+    roster = [{ name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' }];
+    await app.advance(5000);
+    refuse = Object.assign(new Error('too old'), { code: 'server_too_old' });
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-agents .agent-pick')!.click(); await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.match(feedback(), /Could not start helper: This server is older than the app\. Update the server to start an agent inside a team\./u);
+  } finally { await app.close(); }
+});
+
+test('a batch is frozen at confirmation: a project switch stops it, and nothing lands in the other project (#382 review)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[][] = [];
+  let release!: () => void;
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_hub_lead', JSON.stringify({ fixture: 'team:squad', other: 'carol' }));
+    },
+    modules: [{
+      ...rpc,
+      projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({ project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [] })) }),
+      hubAgents: async (session: string) => ({ agents: session === 'fixture'
+        ? [{ name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' }]
+        : [{ name: 'carol', window: 0, managed: true, agent: 'kiro', state: 'idle', team: null }] }),
+      registryList: async () => ({ agents: [{ name: 'one', backend: 'kiro' }, { name: 'two', backend: 'kiro' }] }),
+      hubSpawn: (...args: unknown[]) => { spawned.push(args); return args[1] === 'one' ? new Promise((yes) => { release = () => yes({ window_name: 'one', team: 'squad' }); }) : Promise.resolve({ window_name: String(args[1]) }); },
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  try {
+    for (let i = 0; i < 20 && !app.document.querySelector('.roster-cluster.team-lit'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    await settle(4);
+    for (const row of app.document.querySelectorAll<HTMLButtonElement>('.dlg-agents .agent-pick')) row.click();
+    await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!.click();
+    await settle(4);
+    assert.deepEqual(spawned, [['fixture', 'one', '', '', 'squad']], 'the first spawn is out and has not answered');
+    app.document.querySelector<HTMLElement>('[aria-label="other"] .proj-pick')!.click();
+    for (let i = 0; i < 20 && app.document.querySelector('.h1-text')?.textContent !== 'other'; i++) await app.flush();
+    assert.equal(app.document.querySelector('.h1-text')?.textContent, 'other');
+    // In other, the person opens the picker and starts a draft of their own.
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    await settle(4);
+    const brief = app.document.querySelector<HTMLInputElement>('.pick-brief')!;
+    brief.value = 'for other';
+    brief.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    app.document.querySelector<HTMLButtonElement>('.dlg-agents .agent-pick')!.click();
+    await app.flush();
+    release();
+    await settle();
+    assert.deepEqual(spawned, [['fixture', 'one', '', '', 'squad']], 'the rest of the batch stopped: nothing was spawned into other, and nothing with the other join');
+    assert.equal(selectedCard(app.document), 'carol', 'and other\'s recipient is untouched');
+    assert.equal(app.document.querySelector<HTMLInputElement>('.pick-brief')?.value, 'for other', 'the old batch ending does not wipe the new project\'s draft');
+    assert.equal(app.document.querySelector('.dlg-agents .agent-pick')?.getAttribute('aria-pressed'), 'true', 'nor its pick');
+  } finally { await app.close(); }
+});
+
+// Reviewer P1 on a4f0d9d7: the Join is the value of ONE confirmed picker
+// submission. A cancelled picker leaves nothing behind, a reopened picker
+// starts from the tab's default, and the empty room's one-tap start is
+// always standalone.
+// The add button stays enabled while a batch starts, so the picker CAN be
+// reopened in the same project mid-batch: the old batch ending must not
+// wipe that new opening's draft (reviewer P2 on 90b7c4e3, found reachable).
+test('a picker reopened in the same project while a batch starts keeps its draft when the batch ends (#382 review)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[][] = [];
+  let release!: () => void;
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_hub_project', 'fixture'); },
+    modules: [{
+      ...rpc,
+      registryList: async () => ({ agents: [{ name: 'one', backend: 'kiro' }, { name: 'two', backend: 'kiro' }] }),
+      hubSpawn: (...args: unknown[]) => { spawned.push(args); return args[1] === 'one' ? new Promise((yes) => { release = () => yes({ window_name: 'one' }); }) : Promise.resolve({ window_name: String(args[1]) }); },
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const rows = () => [...app.document.querySelectorAll<HTMLButtonElement>('.dlg-agents .agent-pick')];
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.roster-add > button'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    await settle(4);
+    rows()[0]!.click(); await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!.click();
+    await settle(4);
+    assert.equal(spawned.length, 1, 'the batch is starting');
+    const add = app.document.querySelector<HTMLButtonElement>('.roster-add > button')!;
+    assert.equal(add.disabled, false, 'the add button stays enabled meanwhile: a reopen is reachable');
+    add.click();
+    await settle(4);
+    const brief = app.document.querySelector<HTMLInputElement>('.pick-brief')!;
+    brief.value = 'second draft';
+    brief.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    rows()[1]!.click(); await app.flush();
+    release();
+    await settle();
+    assert.equal(app.document.querySelector<HTMLInputElement>('.pick-brief')?.value, 'second draft', 'the new opening\'s brief survives the old batch');
+    assert.equal(rows()[1]?.getAttribute('aria-pressed'), 'true', 'and its pick');
+  } finally { await app.close(); }
+});
+
+test('a cancelled Join leaves nothing behind: the next picker starts from the tab, and a one-tap start elsewhere is standalone (#382 review)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[][] = [];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_hub_lead', JSON.stringify({ fixture: 'team:squad' }));
+    },
+    modules: [{
+      ...rpc,
+      projectList: async () => ({ projects: ['fixture', 'empty'].map((session) => ({ project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [] })) }),
+      hubAgents: async (session: string) => ({ agents: session === 'fixture'
+        ? [{ name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' }, { name: 'carol', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'ops' }]
+        : [] }),
+      registryList: async () => ({ agents: [{ name: 'helper', backend: 'kiro' }] }),
+      hubSpawn: async (...args: unknown[]) => { spawned.push(args); return { window_name: 'helper' }; },
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const join = () => app.document.querySelector<HTMLButtonElement>('[aria-label="Join"]');
+  const pick = async (label: string) => {
+    join()!.click(); await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=option]')].find((o) => o.textContent?.trim() === label)!.click();
+    await app.flush();
+  };
+  const open = async () => { app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click(); await settle(4); };
+  const cancel = async () => { [...app.document.querySelectorAll<HTMLButtonElement>('.dlg-actions button')].find((b) => b.textContent?.trim() === 'Cancel')!.click(); await settle(4); };
+  try {
+    for (let i = 0; i < 20 && !app.document.querySelector('.roster-cluster.team-lit'); i++) await app.flush();
+    await open();
+    await pick('Team ops');
+    await cancel();
+    await open();
+    assert.equal(join()?.querySelector('.sel-value')?.textContent, 'Team squad', 'reopened: the tab\'s default, not the cancelled choice');
+    await pick('Team ops');
+    await cancel();
+    app.document.querySelector<HTMLElement>('[aria-label="empty"] .proj-pick')!.click();
+    for (let i = 0; i < 20 && !app.document.querySelector('.start-row'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.start-row')!.click();
+    await settle();
+    assert.deepEqual(spawned, [['empty', 'helper', '', '', '']], 'the empty room\'s one-tap start is standalone, whatever a picker held');
   } finally { await app.close(); }
 });
 

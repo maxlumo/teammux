@@ -720,6 +720,46 @@ test('after a reconnect to a server without board_dispatch a flagged save is ref
   assert.equal(methodsSent(old).filter((m) => m === 'hub_board_save').length, 1, 'ordinary edits keep working against any server');
 });
 
+// Board #382 reviewer P1-A: an older server ignores `join` and spawns the
+// agent standalone, so a join goes through the same gate as a flagged board
+// save; a standalone spawn is never gated.
+test('a join waits for the login, is refused unsent by a server without spawn_join, and a standalone spawn always goes (board #382)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const api = runtimeOver(conn).api;
+  const spawns = (socket: InstanceType<typeof MockWebSocket>) => socket.sent.map((f) => JSON.parse(String(f))).filter((f) => f.method === 'hub_spawn');
+
+  const first = conn.connect(A_URL, 'tok');
+  first.catch(() => {});
+  const modern = MockWebSocket.instances.at(-1)!;
+  modern.readyState = MockWebSocket.OPEN;
+  modern.message({ server_nonce: '00'.repeat(16) });
+  const held = api.hubSpawn('s', 'helper', '', '', 'squad');
+  held.catch(() => {});
+  await settle();
+  assert.equal(spawns(modern).length, 0, 'held while the login is unanswered');
+  login(modern, ['board_dispatch', 'spawn_join']);
+  await first;
+  await settle();
+  assert.deepEqual(spawns(modern).map((f) => f.params.join), ['squad'], 'one join, once the login said it can');
+
+  const second = conn.connect(A_URL, 'tok');
+  second.catch(() => {});
+  const old = MockWebSocket.instances.at(-1)!;
+  old.readyState = MockWebSocket.OPEN;
+  old.message({ server_nonce: '11'.repeat(16) });
+  login(old, ['board_dispatch']);
+  await second;
+  await assert.rejects(api.hubSpawn('s', 'helper', '', '', 'squad'),
+    (e: any) => e.code === 'server_too_old' && /start an agent inside a team/.test(e.message));
+  assert.equal(spawns(old).length, 0, 'refused BEFORE anything was sent: nothing can start standalone');
+  const plain = api.hubSpawn('s', 'helper');
+  plain.catch(() => {});
+  await settle();
+  assert.equal(spawns(old).length, 1, 'a standalone spawn is not gated');
+  assert.equal('join' in spawns(old)[0].params, false);
+});
+
 test('disposing a connection ends a parked whenCaps now, not at its timer (board #377)', async (t) => {
   const conn = createConnection();
   const dial = conn.connect(A_URL, 'tok');

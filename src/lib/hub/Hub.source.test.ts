@@ -214,7 +214,8 @@ test('Back keeps the original priority and current live guards in one dispatcher
     contextMenu: 'if (ctxAt) { closeCtx(); return true; }',
     action: 'if (!pendingAct) return false; if (!acting) pendingAct = null; return true;',
     trash: 'if (!trashAsk) return false; if (!purging) trashAsk = null; return true;',
-    picker: 'if (pickerOpen) { pickerOpen = false; return true; }',
+    // #382: closing the picker also clears its Join (closePicker).
+    picker: 'if (pickerOpen) { closePicker(); return true; }',
     // #317: the dialog peels its OWN steps first (folder picker, new-folder
     // field) through the one function its Escape also asks, so Back and
     // Escape cannot disagree about what a draft is.
@@ -692,7 +693,8 @@ test('a failed attachment is a chip that blocks send, never a console line', () 
 });
 
 test('composer calculations use the pure helpers without moving send or its gates (#117)', () => {
-  assert.match(source, /import \{ ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamTarget \} from '\.\/hub-composer\.ts';/u);
+  // teamRoot joined for the picker's running teams (board #382).
+  assert.match(source, /import \{ ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamRoot, teamTarget \} from '\.\/hub-composer\.ts';/u);
   const send = /async function send\(\) \{[\s\S]*?\n  \}/u.exec(source)?.[0] ?? '';
   const interpolation = send.indexOf('const body = attachmentBody(raw, atts);');
   assert.ok(interpolation > send.indexOf('if (attaching) return;'));
