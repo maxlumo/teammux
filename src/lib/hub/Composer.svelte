@@ -204,13 +204,15 @@
     { value: ALL_TARGET, hint: t('hubEveryone') },
   ]);
   /* `#` completion rides it too (#340): this project's board issues, which
-     Hub reads. A `#` starting to be typed asks Hub for a fresh list, so a
-     just-created issue is offered. */
+     Hub reads. Entering a `#` query in a room asks Hub for a fresh list, so a
+     just-created issue is offered: once per entry and per room (a draft that
+     already holds a `#` restored in another room asks for THAT room;
+     reviewer P2-B), never per keystroke. */
   const palette = $derived(paletteOff ? null
     : commandPalette(composerText, cmdModels[paletteBackend] ?? [], paletteBackend) ?? mentionPalette(composerText, mentionCandidates)
       ?? issuePalette(composerText, issues));
-  const typingIssue = $derived(issueQuery(composerText) !== null);
-  $effect(() => { if (typingIssue) untrack(onissues); });
+  const issueRoom = $derived(issueQuery(composerText) !== null ? selected : '');
+  $effect(() => { const room = issueRoom; if (room) untrack(() => onissues(room)); });
   $effect(() => { void composerText; paletteOff = false; });
   $effect(() => { void palette; paletteIdx = 0; });
   $effect(() => {

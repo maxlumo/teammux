@@ -122,35 +122,53 @@
   let teams = $state([]);           // RegTeam[] — configured agent teams (board #74)
   // ── Board references (board #340) ──────────────────────────────────────
   // Each project's issues as `#` names them: the composer's `#` palette and
-  // the feed's `#<id>` links read the open room's. Read only when needed —
-  // a `#` starting to be typed, or a message naming an id above the newest
-  // known one that was not asked about yet (ids only grow, so one below it
-  // that the board lacks was deleted) — never on a poll. Keyed by session,
-  // so a late answer lands on its own project and a revisit links at once.
-  let issueBoards = $state({});     // session → { list: IssueCandidate[], max }
-  const issueAsked = {};            // session → Set of ids a read was started for
+  // the feed's `#<id>` links read the open room's. Three things are kept
+  // apart (reviewer P1 on 0d48bdda):
+  //   - KNOWLEDGE: the last SUCCESSFUL snapshot of a project's board
+  //     (`issueBoards`). A failed read writes nothing, so it never becomes a
+  //     "this issue does not exist".
+  //   - READS: each started read of a project gets a number; an answer lands
+  //     only if it is newer than the snapshot it would replace, so two reads
+  //     finishing out of order never move the snapshot back (P2-A).
+  //   - TRIGGERS: what may start a read. A `#` starting to be typed in a
+  //     room (the composer's `onissues`), and a MESSAGE naming an id above
+  //     the snapshot's newest, once per message per visit (`issueTriggered`,
+  //     cleared when the room is entered). Ids only grow, so within a
+  //     successful snapshot a missing id at or below its newest was deleted;
+  //     one above it may be filed later, which a NEW message naming it, a
+  //     revisit or a typed `#` asks about again. Nothing retries by itself
+  //     after a failure, and nothing polls.
+  // Keyed by session, so a late answer lands on its own project.
+  let issueBoards = $state({});     // session → { list: IssueCandidate[], max, seq }
+  const issueReads = {};            // session → number of the last read started
+  const issueTriggered = {};        // session → Set of message keys that started a read this visit
   const roomIssues = $derived(issueBoards[selected]?.list ?? []);
   const roomIssueIds = $derived(roomIssues.map((i) => i.id));
   async function loadIssues(s = selected) {
     if (!s) return;
+    const seq = issueReads[s] = (issueReads[s] ?? 0) + 1;
     try {
       const r = await boardList(s);
-      if (!alive) return;
+      if (!alive || seq <= (issueBoards[s]?.seq ?? 0)) return;
       const list = (r.issues ?? []).map((i) => ({ id: i.id, ref: issueRef(i), open: i.status !== 'done' }));
-      issueBoards = { ...issueBoards, [s]: { list, max: list.reduce((m, i) => Math.max(m, i.id), 0) } };
-    } catch { /* keep the last list: "could not ask" is not "no issues" */ }
+      issueBoards = { ...issueBoards, [s]: { list, max: list.reduce((m, i) => Math.max(m, i.id), 0), seq } };
+    } catch { /* keep the last snapshot: "could not ask" is not "no issues" */ }
   }
-  // The ids a person or an agent named in this room (a system line carries
-  // its own board jump).
-  const roomIssueRefs = $derived([...new Set(feed.flatMap((m) => systemLine(m.body) ? [] : issueSpans(m.body ?? '').map((x) => x.id)))]);
+  // The messages of this room that name an issue, by their raw body (a
+  // system line carries its own board jump). The scan reads the raw text, so
+  // a `#id` inside code can start a read even though it is never linked.
+  const roomIssueRefs = $derived(feed.flatMap((m) => {
+    if (systemLine(m.body)) return [];
+    const ids = issueSpans(m.body ?? '').map((x) => x.id);
+    return ids.length ? [{ key: m.id ?? `${m.ts}:${m.from}`, ids }] : [];
+  }));
   $effect(() => {
-    const s = selected, refs = roomIssueRefs;
+    const s = selected, refs = roomIssueRefs, max = issueBoards[s]?.max ?? 0;
     if (!visible || !s || !refs.length) return;
-    const max = issueBoards[s]?.max ?? 0;
-    const asked = (issueAsked[s] ??= new Set());
-    const fresh = refs.filter((id) => id > max && !asked.has(id));
+    const triggered = (issueTriggered[s] ??= new Set());
+    const fresh = refs.filter((r) => !triggered.has(r.key) && r.ids.some((id) => id > max));
     if (!fresh.length) return;
-    for (const id of fresh) asked.add(id);
+    for (const r of fresh) triggered.add(r.key);
     untrack(() => loadIssues(s));
   });
   // A choice of destination never creates a second delivery path:
@@ -447,6 +465,8 @@
     else if (selected) roomCache.set(selected, { feed, lastTs, activity, lastActivityTs, agents, histSeq, histMore, actCursor, actMore });
     if (selected !== session || !jumpIntent) { windowed = null; revealId = ''; filterBefore = ''; filterNote = ''; }
     newReading();
+    // Entering a room is a revisit: its messages may ask the board again (#340).
+    delete issueTriggered[session];
     selected = session;
     openedAt = Infinity; rosterBase = null; // nothing is fresh until this room has settled
     clearTimeout(justLoadedTimer); justLoaded = false; // an unfold belongs to the room that loaded
@@ -2312,7 +2332,7 @@
       <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient}
         {roomReady}
         {agents} {pending} {attaching} {failed} {sendable} {interruptible} {replyTo}
-        issues={roomIssues} onissues={() => loadIssues()}
+        issues={roomIssues} onissues={(s) => loadIssues(s)}
         onclearreply={() => { replyTo = null; composer?.focus(); }}
         onsend={send} onstage={stageFiles} onremove={removeAttachment}
         onmodels={modelsList} oninterrupt={interrupt} onpreview={(path) => { shotView = path; }}

@@ -752,6 +752,8 @@ async function composerFixture(context: TestContext, extra: Record<string, (...a
     props: { visible: true, mobile },
     setup(window) {
       window.Element.prototype.getAnimations = () => [];
+      // A rendered message measures text; jsdom has no canvas (#340 tests render some).
+      window.HTMLCanvasElement.prototype.getContext = () => null;
       Object.defineProperty(window.performance, 'now', { value: () => window.Date.now() });
       for (const [key, value] of Object.entries(storage)) window.localStorage.setItem(key, value);
       if (overflowing) {
@@ -1059,6 +1061,89 @@ test('a #id this project has is a link in a message that opens it on the Board; 
     await app.advance(10000); await settle();
     assert.equal(reads.length, 2, 'an id above the board not asked about yet reads again, though below the #9 typo');
     assert.deepEqual(links(), ['#2', '#3']);
+  } finally { await app.close(); }
+});
+
+// Reviewer P1 on 0d48bdda: a read is an attempt, not a verdict. A failed
+// read leaves nothing behind, and an id above the board's newest may be filed
+// later, so a NEW message naming it, or entering the room again, asks again;
+// nothing retries on its own.
+test('a failed board read is not a verdict, and a reference to a not-yet-filed issue links once a new message names it (#340 review)', { timeout: 60000 }, async (context) => {
+  const reads: string[] = [];
+  let fail = true;
+  let board = [boardIssue(1, 'First'), boardIssue(2, 'Second')];
+  let log: unknown[] = [];
+  const msg = (n: number, body: string, from = 'alice') => ({ id: `m${n}`, seq: n, ts: 100 + n, from, body });
+  const app = await composerFixture(context, {
+    hubLog: async (session: string) => ({ messages: session === 'fixture' ? log : [], has_more: false }),
+    boardList: async (session: string) => {
+      reads.push(session);
+      if (fail) throw new Error('timed out');
+      return { issues: board, statuses: ['todo', 'doing', 'review', 'done'] };
+    },
+  });
+  const links = () => [...app.document.querySelectorAll('.feed .bubble a.issue-ref')].map((a) => a.textContent);
+  const poll = async () => { await app.advance(10000); for (let i = 0; i < 12; i++) await app.flush(); };
+  try {
+    log = [msg(1, 'fixed in #2')];
+    await poll();
+    assert.deepEqual(reads, ['fixture'], 'the message asks once');
+    assert.deepEqual(links(), [], 'and the read failed: nothing is linked');
+    await poll(); await poll();
+    assert.equal(reads.length, 1, 'a failure does not retry by itself');
+    fail = false;
+    log = [msg(1, 'fixed in #2'), msg(2, 'and #2 again')];
+    await poll();
+    assert.equal(reads.length, 2, 'a new message naming it asks again');
+    assert.deepEqual(links(), ['#2', '#2'], 'and the failure left no "no such issue" behind');
+
+    log = [...log as object[], msg(3, 'next up is #3')];
+    await poll();
+    assert.equal(reads.length, 3, '#3 is above the newest known issue: asked');
+    assert.equal(links().includes('#3'), false, 'not filed yet');
+    await poll();
+    assert.equal(reads.length, 3, 'the same message does not ask twice in one visit');
+    await app.room('other');
+    await app.room('fixture');
+    await poll();
+    assert.equal(reads.filter((r) => r === 'fixture').length, 4, 'entering the room again asks once more');
+    board = [...board, boardIssue(3, 'Third')];
+    log = [...log as object[], msg(4, '#3 is filed now')];
+    await poll();
+    assert.equal(reads.filter((r) => r === 'fixture').length, 5, 'a new message naming #3 asks again');
+    assert.deepEqual(links().filter((l) => l === '#3'), ['#3', '#3'], 'and both references link');
+  } finally { await app.close(); }
+});
+
+// Reviewer P2-A and P2-B on 0d48bdda.
+test('two board reads finishing out of order never move the list back, and a restored # draft reads its own room (#340 review)', { timeout: 60000 }, async (context) => {
+  const reads: { session: string; answer: (issues: unknown[]) => void }[] = [];
+  const app = await composerFixture(context, {
+    boardList: (session: string) => new Promise((resolve) => {
+      reads.push({ session, answer: (issues) => resolve({ issues, statuses: ['todo', 'doing', 'review', 'done'] }) });
+    }),
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    await app.text('see #');
+    await app.text('see');
+    await app.text('see #');
+    assert.equal(reads.length, 2, 'each entry into a # query reads');
+    reads[1]!.answer([boardIssue(1, 'First'), boardIssue(2, 'Just filed')]);
+    await app.flush(); await app.flush();
+    reads[0]!.answer([boardIssue(1, 'First')]);
+    await app.flush(); await app.flush();
+    assert.deepEqual(options(), ['#2', '#1'], 'the older answer, landing last, does not replace the newer list');
+
+    await app.room('other');
+    await app.text('and #');
+    assert.deepEqual(reads.map((r) => r.session), ['fixture', 'fixture', 'other']);
+    await app.room('fixture');
+    assert.equal(app.input.value, 'see #', 'the # draft is restored');
+    assert.deepEqual(reads.map((r) => r.session), ['fixture', 'fixture', 'other', 'fixture'], 'and it reads THIS room, though a # draft was open before');
+    await app.text('see #2');
+    assert.equal(reads.length, 4, 'typing on inside the query asks nothing more');
+    for (const r of reads.slice(2)) r.answer([]);
   } finally { await app.close(); }
 });
 

@@ -1110,11 +1110,14 @@ exactly what was typed, and an agent reads the issue with
 is the one remaining candidate offers nothing, so Enter sends.
 
 The list is Hub's, kept per project (`issueBoards`), and is READ ONLY WHEN
-NEEDED, never on a poll: each time a `#` starts being typed (the composer's
-`onissues`, so an issue filed a moment ago is offered), and when a message
-names an id above the newest known one that was not asked about yet (see
-hub-feed.md "A `#<id>` in a bubble is a door to that issue"). A room nobody
-references reads no board. A failed read keeps the last list.
+NEEDED, never on a poll: each time a `#` query is entered in a room (the
+composer's `onissues(room)`, keyed by the room as well as the entry, so a
+restored `#` draft in another room reads THAT room, and typing on inside the
+query reads nothing more; reviewer P2-B on 0d48bdda), and when a message
+names an id above the board's newest (see hub-feed.md "A `#<id>` in a bubble
+is a door to that issue", which also says what is kept apart: the last
+successful snapshot, the reads, the triggers). A room nobody references
+reads no board. A failed read keeps the last snapshot.
 
 ### The `/` palette is transcribed, not invented
 

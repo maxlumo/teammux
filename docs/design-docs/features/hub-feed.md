@@ -457,9 +457,11 @@ for preview/iframe routing and the event-order evidence.
 ### A `#<id>` in a bubble is a door to that issue (board #340, 2026-10-15)
 
 A `#<id>` a person or an agent writes in a message renders as a link
-(`markIssueRefs`, `hub.ts`) only when THIS project's board has that issue;
-any other number stays text, so a deleted issue, another project's number
-or a CSS colour is never a dead link. The reading is `issueSpans`: a `#` at
+(`markIssueRefs`, `hub.ts`) only when the last board snapshot Hub read for
+THIS project has that issue; any other number stays text (another project's
+number, a typo, a CSS colour). The snapshot is not live: an issue deleted
+after it stays a link until the next read, which then opens a board without
+it. The reading is `issueSpans`: a `#` at
 the start or after a character that is not part of a word, an HTML entity
 (`&#39;`) or a path (`/#12`), followed by digits that end the word. Like a
 mention it reads only text outside `code`, `pre` and `a`; both walk the
@@ -470,14 +472,30 @@ Board; compact: `openBoardTab`), and the tap is not a tap on the bubble
 (no action row). System lines are not linked: a board line carries its own
 jump.
 
-Hub reads the board (`issueBoards`, shared with the composer's `#` palette;
-see hub-composer.md) when the room's messages name an id ABOVE the newest
-issue it knows that it has not asked about yet. Issue ids only grow, so a
-lower id the board lacks was deleted and asking again would find nothing;
-a number above it is a new issue (an orchestrator files one, then names it)
-or a typo, and each such id is asked about once. A room whose messages name
-no issue reads no board. Pinned by the Hub mount test "a #id this project
-has is a link…" and the `issueSpans`/`markIssueRefs` unit test.
+What Hub keeps for this (`issueBoards`, shared with the composer's `#`
+palette; see hub-composer.md) is three things kept apart (reviewer P1 on
+0d48bdda, where one "asked" set had made a single attempt a permanent
+verdict: a timed-out first read, or a reference made before its issue was
+filed, never linked):
+
+- **Knowledge** is the last SUCCESSFUL snapshot of the project's board. A
+  failed read writes nothing, so it never stands for "no such issue".
+- **Reads** are numbered per project; an answer lands only if it is newer
+  than the snapshot it would replace, so two reads finishing out of order
+  never move the list back (P2-A).
+- **Triggers** start a read: a `#` query being entered in the composer, and
+  a MESSAGE naming an id above the snapshot's newest, once per message per
+  visit (`issueTriggered`, cleared when the room is entered). Issue ids only
+  grow, so within a successful snapshot a missing id at or below its newest
+  was deleted; one above it may be filed later (an orchestrator files an
+  issue, then names it), so a NEW message naming it, a revisit or a typed `#`
+  asks again. Nothing retries by itself after a failure, and nothing polls.
+
+The scan reads the raw message text, so a `#id` inside code can start a read
+although it is never linked. A room whose messages name no issue reads no
+board. Pinned by the Hub mount tests "a #id this project has is a link…",
+"a failed board read is not a verdict…" and "two board reads finishing out
+of order…", and the `issueSpans`/`markIssueRefs` unit test.
 
 ### Right-click and long press are ONE mechanism
 
