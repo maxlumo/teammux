@@ -493,8 +493,9 @@ fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64
 /// Record the turn end the hooks missed for an EXHAUSTED recovery decision
 /// (capped or given up): once per incident (`Identity::Incident`, review
 /// P1-D), the mark committed only when telemetry accepted it. `seen` is the
-/// turn version read before the capture. A GIVE-UP's sends were verified
-/// against the hooks, so its turn is the one the sends went to. A CAPPED
+/// turn version read before the capture. A GIVE-UP is not a recovery: each
+/// of its sends was checked against the hooks and none was confirmed, so its
+/// open turn is the one the sends went to. A CAPPED
 /// incident sent nothing, so its error is attributed by the screen and the
 /// hooks together (board #362, the builder's 02:30 finding): `newest` says
 /// its error is the newest block by the backend's own grammar, and nothing
@@ -1902,8 +1903,10 @@ mod tests {
     /// kiro-cli 2.31.0, a real idle screen after one finished reply (own
     /// tmux, scratch workspace, 80 columns, 2026-10-16; /tmp/gw362 kiro-idle.sh):
     /// the newest block `• pong`, then the same furniture as 2.28.0 with the
-    /// Trust banner on one line. Pins that today's kiro is still read by
-    /// `newest_block`, so a repaint fails here and not silently in the field.
+    /// Trust banner on one line. Pins that `newest_block` still reads this
+    /// recorded 2.31.0 screen, so a parser change that stops reading it fails
+    /// here. It cannot see a future CLI's repaint: that is the drift warning's
+    /// job, and a new capture beside it.
     const KIRO_231_IDLE_REPLY: &str = "  › Reply with exactly the word: pong\n\n• pong\n\n▸ Credits: turn 0.59 • session 0.59 | Time: 3s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nDefault · claude-opus-5.5 · medium · ◔ 5% · Midway: 5h 31m      /tmp/gw362/latws\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
     /// kiro-cli 2.28.0's own log of the 3000-px refusal (10-15 03:55 UTC,
     /// /tmp/kiro-log/kiro-tui.log): the sentence, not a paint.
