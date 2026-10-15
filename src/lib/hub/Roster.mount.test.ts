@@ -166,7 +166,7 @@ test('a server that cannot move an agent carries no card, and a click stays a cl
   } finally { await app.close(); }
 });
 
-test('a drag belongs to the context it was pressed in: a new one cancels it, and a press from the old one starts nothing (#384, P1-A)', async (context) => {
+test('a drag belongs to the context it was pressed in: a new one cancels it, and a press from the old one moves nothing (#384, P1-A)', async (context) => {
   const { app, moves, scopes, card, at } = await dragStrip(context, [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')]);
   // Scopes are made in the CLIENT realm, as Hub's are: Svelte proxies only
   // its own realm's plain objects, and a scope kept in $state would then
@@ -201,15 +201,18 @@ test('a drag belongs to the context it was pressed in: a new one cancels it, and
     assert.equal(app.document.querySelector('.acard.lifted'), null, 'a press from an old context is not a drag');
     at('pointerup', solo, 100);
 
-    // The checks hold on their own, before the cancel can run: a context
-    // change and the next pointer event in ONE task (effects run later).
+    // The commit holds on its own, before the cancel can run: a context
+    // change and the next pointer events in ONE task (effects run later).
+    // A press of the old context, carried and released in the new one, moves
+    // nothing: the commit checks the PRESS's scope, not one read at begin.
     await app.setProps({ moveScope: scope('room', 5) });
     at('pointerdown', solo, 250);
     void app.setProps({ moveScope: scope('room', 6) }); // its props are set now; its effects later
     at('pointermove', solo, 100);
-    assert.equal(app.document.querySelector('.acard.lifted'), null, 'begin refuses a press of an older context');
+    at('pointermove', solo, 100);
     at('pointerup', solo, 100);
     await app.flush();
+    assert.deepEqual(moves, [], 'a press of an older context commits nothing');
     await app.setProps({ moveScope: scope('room', 7) });
     at('pointerdown', solo, 250);
     for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }

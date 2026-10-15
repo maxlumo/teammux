@@ -457,7 +457,8 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
   const drags = source.match(/const cardDrags = createPressDrag\(\{[\s\S]*?\n {2}\}\);/u)?.[0] ?? '';
   assert.match(drags, /axis: 'xy'/u, 'a drop onto a group is 2D');
   assert.doesNotMatch(drags, /touch: true/u, 'a finger drags the strip\'s scroll; touch moves through the card menu');
-  assert.match(drags, /if \(!press\.scope\?\.ok \|\| press\.scope !== moveScope\) return null;/u, 'a press of another context, or one that may not move, carries nothing (P1-A)');
+  assert.match(drags, /if \(!moveScope\?\.ok\) return null;/u, 'where it may not move (no agent_team, hidden, loading) nothing is carried');
+  assert.match(drags, /dragScope = press\.scope;/u, 'the scope the commit checks is the PRESS\'s (P1-A)');
   assert.match(drags, /groupDropAt\(cardDrag\.rects, e\.clientX, e\.clientY\)/u);
   assert.match(drags, /commit: \(drag\) => \{ if \(drag\.target !== null && dragScope === moveScope && moveScope\?\.ok\) onmove\(drag\.name, drag\.target, dragScope\); \}/u, 'the commit re-checks the context in the same step');
   assert.match(source, /\n {2}let dragScope = null;/u, 'the pressed scope is kept out of $state (a proxy is never === the original)');

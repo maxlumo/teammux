@@ -179,10 +179,12 @@
     get: () => cardDrag,
     set: (drag) => { cardDrag = drag; },
     begin: (press) => {
-      // The context is the one the PRESS was made in (reviewer P1-A): a
-      // press that outlived a project switch, a hidden page or a lost cap
-      // starts nothing.
-      if (!press.scope?.ok || press.scope !== moveScope) return null;
+      // A drag only where it may move now. Its context is the one the PRESS
+      // was made in (reviewer P1-A): a press that outlived a project switch
+      // is cancelled by the effect below before the next pointer event, and
+      // whatever it carries the commit refuses, since it compares the
+      // PRESS's scope with the current one (never one read here).
+      if (!moveScope?.ok) return null;
       const a = managedAgents.find((x) => x.name === press.name);
       if (!a) return null;
       const from = rosterTeam(a);
