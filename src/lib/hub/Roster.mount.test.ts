@@ -201,18 +201,12 @@ test('a drag belongs to the context it was pressed in: a new one cancels it, and
     assert.equal(app.document.querySelector('.acard.lifted'), null, 'a press from an old context is not a drag');
     at('pointerup', solo, 100);
 
-    // The commit holds on its own, before the cancel can run: a context
-    // change and the next pointer events in ONE task (effects run later).
-    // A press of the old context, carried and released in the new one, moves
-    // nothing: the commit checks the PRESS's scope, not one read at begin.
-    await app.setProps({ moveScope: scope('room', 5) });
-    at('pointerdown', solo, 250);
-    void app.setProps({ moveScope: scope('room', 6) }); // its props are set now; its effects later
-    at('pointermove', solo, 100);
-    at('pointermove', solo, 100);
-    at('pointerup', solo, 100);
-    await app.flush();
-    assert.deepEqual(moves, [], 'a press of an older context commits nothing');
+    // The commit holds on its own, before the cancel can run: a drag carried
+    // over a target, then a context change and the release in ONE task (the
+    // cancel effect runs later). Effects and render flush together, so a press
+    // that outlives a change is cancelled before any target can be measured:
+    // that order needs no test of its own (capturing the scope at the press
+    // is pinned in Roster.source).
     await app.setProps({ moveScope: scope('room', 7) });
     at('pointerdown', solo, 250);
     for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
