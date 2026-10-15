@@ -102,9 +102,13 @@ panel's `.scratch-body`) was already a flex container. `.cell-body` is now a
 flex column; measured after: the fresh cell's box 738 px in its cell, tmux
 80×24 → 58×46 within 1.2 s of the assignment, both cells' bottom rows
 repainting 6 of 6 one-second samples; an empty cell's picker still fills its
-cell. `lib/terminal/terminal-hosts.source.test.ts` asserts that every element
-rendering a `<Terminal>` is a flex container (the mount tier has no layout),
-and fails on main's `SplitView.svelte`.
+cell. `lib/terminal/terminal-hosts.source.test.ts` parses every component
+with the Svelte parser and asserts that the element a `<Terminal>` renders
+directly into is a flex container (the mount tier has no layout); `{#if}`,
+`{#each}`, `{#key}` and `{#await}` render in place, and a `<Terminal>` the
+source cannot place (inside another component, a snippet, a dynamic element,
+or at a file's root) is refused rather than guessed. It fails on main's
+`SplitView.svelte`.
 
 ## Verification
 See the plan's verification section: build (`npm run build`), run

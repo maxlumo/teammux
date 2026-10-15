@@ -1366,6 +1366,12 @@
     // sometimes left the bottom rows blank. We run one more fit on
     // term.onRender's first fire so the first real fit uses real metrics.
     let resizeSendTimer = 0;
+    // A size this terminal owes its server: set by a reconnect (the new
+    // server forgot the size), paid by the next doResize that has a box and
+    // is on screen, as an assert. Until then a reconnect that found no box
+    // (board #397 review P2-1: the box measured 0, then came back at the
+    // SAME width) would send nothing ever: the fit equals the xterm's dims.
+    let assertOwed = false;
     function queuePaneResize(cols, rows) {
       pendingCols = cols;
       pendingRows = rows;
@@ -1418,6 +1424,7 @@
       if (!visible) return;
       const fit = calcFit();
       if (!fit) return;
+      if (assertOwed) { assertOwed = false; assert = true; }
       if (fit.cols === term.cols && fit.rows === term.rows) {
         if (assert) queuePaneResize(fit.cols, fit.rows);
         // Same dims but cell metrics may have changed (font size); refresh
@@ -1520,20 +1527,13 @@
       // review's P2: zeroing it left the timer able to send 0x0 when the
       // fit below found no box). A shown terminal re-queues its fit.
       cancelPaneResizeRef?.();
-      // Force doResize to actually send by invalidating the cur===fit check.
-      // We do this by momentarily pretending term has different dims.
-      // Only while shown (board #395): a hidden terminal re-sends nothing;
-      // its queued size was withdrawn when it was hidden, and the show path
-      // asserts its size.
-      if (term && visible) {
-        const fit = calcFit();
-        if (fit) {
-          queuePaneResize(fit.cols, fit.rows);
-          // term.resize is a no-op if dims already match, which is fine.
-          term.resize(fit.cols, fit.rows);
-          if (lastContent) writeToXterm(lastContent, lastCursor);
-        }
-      }
+      // The new server owes nothing to the old one's sizes: owe it ours and
+      // pay at once if we can. A shown terminal with a box sends its fit now;
+      // one with no box sends it when the box comes back, at whatever width
+      // (board #397 review P2-1); a hidden one re-sends nothing here (board
+      // #395), and the show path asserts its size.
+      assertOwed = true;
+      doResize();
       // Pull a fresh snapshot immediately rather than waiting up to 200 ms
       // for the server's subscribe loop to push the first frame. Otherwise
       // the user sees stale content right after the reconnect dialog

@@ -547,8 +547,10 @@ test('a hidden terminal neither sizes nor paints the pane it shares, and a reply
     'hiding withdraws a size not yet sent');
   assert.match(source, /cancelPaneResizeRef = \(\) => \{\s*\n\s*clearTimeout\(resizeSendTimer\);\s*\n\s*resizeSendTimer = 0;\s*\n\s*pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;/u,
     'withdrawn with its pending echo state');
-  assert.match(source, /const onReconnected = [\s\S]*?if \(term && visible\) \{\s*\n\s*const fit = calcFit\(\);/u,
-    'a reconnect re-sends the size of a shown terminal only');
+  assert.match(source, /const onReconnected = [\s\S]*?cancelPaneResizeRef\?\.\(\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*assertOwed = true;\s*\n\s*doResize\(\);/u,
+    'a reconnect owes the new server its size and pays through doResize, so only a shown terminal re-sends it');
+  assert.match(source, /if \(!fit\) return;\s*\n\s*if \(assertOwed\) \{ assertOwed = false; assert = true; \}/u,
+    'the owed size is paid by the first fit that has a box, as an assert (#397 review P2-1)');
   assert.match(source, /function _writeToXtermNow\(content, cursor\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!term \|\| touchScrolling \|\| !visible\) return;/u,
     'the ONE draw gate: a hidden terminal records, it never draws');
   // Every capture reply checks the lifetime it was asked in (review P1-b).

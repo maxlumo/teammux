@@ -213,11 +213,23 @@ timer fired with 0×0. Pinned in `Terminal.shared.mount.test.ts` (a size
 queued, the box at 0, a reconnect: nothing sent; the box back: the pane is
 sized again) and `Terminal.source.test.ts`.
 
+**A reconnect owes the new server our size until it is paid** (board #397
+review P2-1). The new server does not know the size the old one was told,
+so `onReconnected` sets `assertOwed` and calls `doResize`; the first
+`doResize` that is on screen and has a box pays it as an assert. Before, a
+reconnect that found no box re-queued nothing, and when the box came back at
+the SAME width its fit equalled the xterm's dims (the xterm took them when
+the size was first queued), so nothing was sent to the new server, ever.
+Pinned by the mount test's same-width row (it saw nothing sent before) and
+`Terminal.source.test.ts`. A hidden terminal still re-sends nothing on a
+reconnect: `doResize` returns while hidden, and the show path asserts.
+
 A terminal fills its host only if the host is a flex container, because the
 Terminal's root is `flex: 1`; in a block host it takes its content height
 and the fit holds its current rows (board #397, split view;
 `docs/design-docs/features/split-screen.md`, pinned by
-`terminal-hosts.source.test.ts` for every host).
+`terminal-hosts.source.test.ts`, which parses each component and checks the
+element a `<Terminal>` renders directly into).
 
 **A reply belongs to the pane it was asked for** (review P1-b on 2b5eeeb4).
 `lastContent` and the xterm are the component's, and a target switch

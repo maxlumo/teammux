@@ -275,3 +275,23 @@ test('a reconnect withdraws a size still waiting, so a shown terminal with no bo
   await app.advance(200); await flushAll();
   assert.equal(resizes().at(-1), '61x43');
 });
+
+test('a reconnect with no box owes the new server a size, paid when the box comes back at the SAME width (board #397 review P2-1)', async (context) => {
+  const { app, flushAll, boxChangedNow, setWidth, resizes, reconnect } = await mount(context);
+  const start = resizes().length;
+  // As above, but the xterm already took 71x43 when the size was queued, and
+  // the box comes back exactly as it was: its fit equals the xterm's dims, so
+  // only an owed assert sends it to the server that forgot it.
+  await boxChangedNow('drawer', 600);
+  setWidth('drawer', 0);
+  await reconnect();
+  await app.advance(300); await flushAll();
+  assert.deepEqual(resizes().slice(start), [], 'nothing while there is no box');
+  await boxChangedNow('drawer', 600);
+  await app.advance(200); await flushAll();
+  assert.deepEqual(resizes().slice(start), ['71x43'], 'the box is back: the new server is told the size once');
+  // Paid once: a later observer tick at the same size sends nothing more.
+  await boxChangedNow('drawer', 600);
+  await app.advance(200); await flushAll();
+  assert.deepEqual(resizes().slice(start), ['71x43'], 'and only once');
+});
