@@ -975,6 +975,119 @@ test('only the server’s explicit PLAIN ERR_AUTH is a refusal: a failed decrypt
   assert.equal(isAuthRefusal(error), false);
 }));
 
+// ── A failed login is the TERMINAL state of that attempt (reviewer P1-B residual @180d75c8) ──
+//
+// Rejecting the promise used to leave the socket and its handlers live. A later PLAIN
+// `authenticated: true` on the same socket (the cipher had been nulled, so the plain-token branch
+// took it) logged the connection in in plain text — identity, capabilities, liveness — behind a
+// promise that had already failed. Frames already queued behind the failure did the same.
+
+const EVIL_SUCCESS = { id: 0, result: { authenticated: true, machine_id: 'evil', hostname: 'evil', caps: ['board_dispatch'] } };
+const EVIL_PUSH = { method: 'pane_output', params: { target: 'evil:0.0', content: 'EVIL', cursor: null } };
+
+/** What must still be true of a connection after its attempt failed and a second answer came. */
+function assertNothingTookHold(conn: ReturnType<typeof createConnection>, observed: { caps: unknown[]; pushes: string[] }, socket: MockWebSocket, why: string) {
+  assert.equal(conn.getMachineId() ?? null, null, `${why}: no identity`);
+  assert.equal(conn.getHostname() ?? null, null, `${why}: no hostname`);
+  assert.equal(conn.getCaps(), undefined, `${why}: no capabilities`);
+  assert.deepEqual(observed.caps.filter((c) => c !== undefined), [], `${why}: no capability was ever announced`);
+  assert.deepEqual(observed.pushes, [], `${why}: no push was delivered`);
+  assert.equal(conn.isConnected(), false, `${why}: not connected`);
+  assert.ok(socket.closed >= 1, `${why}: the attempt’s socket was closed`);
+}
+
+test('after a failed ENCRYPTED login the same socket can never log in: a plain success and a push, queued or late, change nothing (#393 P1-B residual)', (t) => withWebCrypto(async () => {
+  const firstAnswers: Array<[string, unknown]> = [
+    ['the server’s plain invalid-proof refusal', { id: 0, error: { code: -32000, message: 'invalid proof' } }],
+    ['a plain error with another code', { id: 0, error: { code: -32603, message: 'internal' } }],
+    ['a plain frame that is nothing', { id: 0 }],
+  ];
+  for (const queued of [true, false]) {
+    for (const [what, first] of firstAnswers) {
+      const why = `${what}, then success+push ${queued ? 'ALREADY QUEUED behind it' : 'arriving later'}`;
+      const conn = createConnection();
+      t.after(() => conn.dispose());
+      const observed = { caps: [] as unknown[], pushes: [] as string[] };
+      conn.onCaps((caps) => observed.caps.push(caps));
+      conn.addPaneOutputListener('evil:0.0', (_target, content) => observed.pushes.push(String(content)));
+      const { dialing, socket } = await wrongTokenDial(conn, `ws://terminal-${queued}.test/ws`);
+      if (queued) {
+        // All three are in the receive queue before the first has been handled.
+        socket.message(first); socket.message(EVIL_SUCCESS); socket.message(EVIL_PUSH);
+        const error = await dialing.then(() => null, (e: unknown) => e);
+        assert.ok(error, `${why}: the promise stays rejected`);
+        await settle(30);
+      } else {
+        socket.message(first);
+        const error = await dialing.then(() => null, (e: unknown) => e);
+        assert.ok(error, `${why}: the promise stays rejected`);
+        socket.message(EVIL_SUCCESS); socket.message(EVIL_PUSH);   // handlers are cut: these reach nobody
+        await settle(30);
+      }
+      assertNothingTookHold(conn, observed, socket, why);
+    }
+  }
+  // A plain success as the FIRST answer on the encrypted path is the protocol error it always was: then nothing else lands either.
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const observed = { caps: [] as unknown[], pushes: [] as string[] };
+  conn.onCaps((caps) => observed.caps.push(caps));
+  conn.addPaneOutputListener('evil:0.0', (_target, content) => observed.pushes.push(String(content)));
+  const { dialing, socket } = await wrongTokenDial(conn, 'ws://terminal-first.test/ws');
+  socket.message(EVIL_SUCCESS); socket.message(EVIL_SUCCESS); socket.message(EVIL_PUSH);
+  const error = await dialing.then(() => null, (e: unknown) => e) as Error;
+  assert.match(error.message, /expected binary auth response/u);
+  await settle(30);
+  assertNothingTookHold(conn, observed, socket, 'a plain success as the first answer, twice, then a push');
+}));
+
+test('after a failed PLAIN-token login a later success frame cannot log the socket in either (#393 P1-B residual)', async (t) => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const observed = { caps: [] as unknown[], pushes: [] as string[] };
+  conn.onCaps((caps) => observed.caps.push(caps));
+  conn.addPaneOutputListener('evil:0.0', (_target, content) => observed.pushes.push(String(content)));
+  const dialing = conn.connect('ws://plain-terminal.test/ws', 'wrong');
+  dialing.catch(() => {});
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message({ server_nonce: '00'.repeat(16) });
+  await until(() => socket.sent.length >= 1);
+  socket.message({ id: 0, error: { code: -32000, message: 'invalid token' } });
+  socket.message(EVIL_SUCCESS); socket.message(EVIL_PUSH);
+  const error = await dialing.then(() => null, (e: unknown) => e) as Error;
+  assert.equal(error.message, 'invalid token');
+  await settle(30);
+  assertNothingTookHold(conn, observed, socket, 'plain path');
+});
+
+test('a failed attempt ends only ITS OWN socket: a fresh handshake afterwards succeeds, and the old attempt’s late frames and close touch nothing (#393 P1-B residual)', (t) => withWebCrypto(async () => {
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const observed = { caps: [] as unknown[], pushes: [] as string[] };
+  conn.onCaps((caps) => observed.caps.push(caps));
+  conn.addPaneOutputListener('evil:0.0', (_target, content) => observed.pushes.push(String(content)));
+  const failed = await wrongTokenDial(conn, 'ws://old.test/ws');
+  failed.socket.message({ id: 0, error: { code: -32000, message: 'invalid proof' } });
+  await failed.dialing.then(() => null, () => null);
+  // A new, normal connection on the same object.
+  const server = new FakeE2eServer('tok-fresh', 2, 'machine-fresh', 'fresh');
+  const fresh = await handshake(conn, server, 'ws://fresh.test/ws', 'tok-fresh');
+  assert.equal(conn.isConnected(), true);
+  assert.equal(conn.getMachineId(), 'machine-fresh');
+  const closedBefore = fresh.closed;
+  // The old attempt’s socket is dead to the connection: whatever it says or does now is nothing.
+  failed.socket.message(EVIL_SUCCESS);
+  failed.socket.message(EVIL_PUSH);
+  failed.socket.onclose?.({ code: 1006, reason: '', wasClean: false });
+  failed.socket.onerror?.();
+  await settle(30);
+  assert.equal(conn.isConnected(), true, 'the newer connection is still up');
+  assert.equal(conn.getMachineId(), 'machine-fresh', 'and still the fresh server’s');
+  assert.equal(fresh.closed, closedBefore, 'the old failure did not close it');
+  assert.deepEqual(observed.pushes, [], 'no push from the old socket');
+}));
+
 test('the PLAIN-token path keeps the server’s invalid-token refusal too (#393 P1-B)', async (t) => {
   const conn = createConnection();
   t.after(() => conn.dispose());

@@ -182,6 +182,27 @@ is never accepted on the encrypted path (no downgrade): it is the protocol error
 (`connection.test.ts`), and through the reconnect machine with its default budget:
 one dial, no unreachable cooldown; a socket closed during auth is still retried.
 
+**A failed login is the TERMINAL state of that attempt** (reviewer P1-B residual on
+the first cut of the above). Rejecting the dial's promise was not enough: the socket
+and its handlers stayed live, and the encrypted-path failure cleared the session
+cipher, which the receive handler also used to mean "this attempt chose plain-token
+auth". So a LATER plain `authenticated: true` on the same socket — or one already
+queued behind the failure — took the plain branch and logged the connection in, in
+plain text: identity, capabilities, the liveness probe, pushes, behind a promise that
+had already failed. Now `failDial` in `core/connection.ts` ends the attempt: its
+handlers are cut, its socket is closed and, if the connection still points at it,
+released; the chosen mode (`encrypted`) is its own variable, set once at the nonce
+and never inferred from the cipher; and every handler and every continuation after
+an `await` checks `failed`. It acts on THIS attempt's socket only, so an old failure
+can never close a newer connection (a fresh handshake on the same object afterwards
+succeeds, and the old socket's late frames, close and error touch nothing). The
+classification is unchanged: only the server's coded `ERR_AUTH` stops the reconnect
+loop; every other failure ends only that dial. Tested on the real `createConnection`
+with the failing answer followed by a plain success and a push on the same socket,
+already queued behind it and arriving later, on the encrypted and the plain-token
+paths: the promise stays rejected, identity and capabilities do not change, nothing
+is announced or pushed, and the socket is closed.
+
 **What does NOT change.** Beyond the window (3 minutes) the loop still gives
 up and shows the connect card, so a server that is really gone does not keep
 a device retrying for ever; the form and a server switch still take the socket from a

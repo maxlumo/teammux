@@ -509,7 +509,6 @@ export function createConnection(): Connection {
       const dial: Dial = { settle: () => {}, fail: rejectRaw, timeout: null };
       const resolve = (value: string | null) => { endDial(dial); resolveRaw(value); };
       const reject = (error: unknown) => { endDial(dial); rejectRaw(error); };
-      dial.fail = reject;
       dialing.add(dial);
 
       let socket!: AppSocket;
@@ -530,13 +529,19 @@ export function createConnection(): Connection {
         return;
       }
 
-      const timeout = setTimeout(() => {
-        try { socket?.close(); } catch {}
-        reject(new Error('connection timeout'));
-      }, timeoutMs);
+      const timeout = setTimeout(() => failDial(new Error('connection timeout')), timeoutMs);
       dial.timeout = timeout;
+      // A cancelled dial (superseded, disconnected, disposed) ends the same way a failed one does.
+      dial.fail = (error) => failDial(error);
 
       let authed = false;
+      // The mode this attempt CHOSE, explicitly: encrypted when Web Crypto exists, plain-token
+      // when it does not. It is set once, at the nonce, and nothing else decides it — least of
+      // all `cipher` being null, which is also what a failed login used to leave behind (board
+      // #393 review: a plain success frame after a failed encrypted login then logged in).
+      let encrypted = false;
+      // An authentication FAILURE is the terminal state of this attempt (below).
+      let failed = false;
       let cipher: Cipher | null = null;
       let serverNonce: Uint8Array | null = null;
       let machineId: string | null = null;
@@ -544,7 +549,32 @@ export function createConnection(): Connection {
       let build: BuildInfo | null = null;
       let caps: string[] = [];
 
+      /** The terminal state of a failed attempt (board #393 review, P1-B residual). Rejecting the
+       * promise is not enough: the socket and its handlers would stay live, and a later frame on
+       * it — a plain `authenticated: true` after a failed encrypted login, or one already queued
+       * behind the failure — could still log in, set identity and capabilities and start the
+       * link's life. So the attempt ENDS: its handlers are cut, its socket is closed and, if the
+       * app still points at it, released. Keyed by THIS socket: a failure that arrives late can
+       * only ever close its own socket, never a newer connection's. */
+      function failDial(error: unknown) {
+        if (failed) return;
+        failed = true;
+        clearTimeout(timeout);
+        socket.onmessage = null;
+        socket.onopen = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        if (ws === socket) {
+          ws = null;
+          emitCaps();
+          stopIdleProbe();
+        }
+        try { socket.close(); } catch {}
+        reject(error);
+      }
+
       function authSuccess() {
+        if (failed) return;
         clearTimeout(timeout);
         authed = true;
         socket._cipher = cipher;
@@ -586,7 +616,7 @@ export function createConnection(): Connection {
       };
 
       async function handleMessage(event: MessageEvent) {
-        if (ws !== socket) return;
+        if (failed || ws !== socket) return;
         // event.data is either a string (text frames: handshake, plain auth
         // path) or an ArrayBuffer (binary frames: encrypted messages).
         const isBinary = event.data instanceof ArrayBuffer;
@@ -600,13 +630,14 @@ export function createConnection(): Connection {
         // Step 1: Receive server_nonce (always text)
         if (!authed && !serverNonce && data?.server_nonce) {
           serverNonce = hexToBytes(data.server_nonce);
-          if (crypto.subtle) {
+          encrypted = !!crypto.subtle;
+          if (encrypted) {
             // Encrypted auth. The server names the newest handshake it speaks;
             // an older server sends no `e2e` and gets the v1 derivation.
             const version = data.e2e === E2E_VERSION ? E2E_VERSION : 1;
             const clientNonce = crypto.getRandomValues(new Uint8Array(16));
             const session = await buildSession(token, serverNonce, clientNonce, version);
-            if (ws !== socket) return;
+            if (failed || ws !== socket) return;
             cipher = session.cipher;
             socket.send(JSON.stringify({
               method: 'auth',
@@ -621,10 +652,9 @@ export function createConnection(): Connection {
 
         // Step 2: Auth response
         if (!authed && serverNonce) {
-          if (cipher) {
+          if (encrypted) {
             // Encrypted auth response — must arrive as a binary frame.
             if (!isBinary) {
-              clearTimeout(timeout); cipher = null;
               // ONE plain frame is expected here and it is a refusal: the server has no
               // session key for a proof it just rejected, so its `invalid proof`
               // (ERR_AUTH) comes as text (connection.rs). It is kept as such — the
@@ -632,22 +662,22 @@ export function createConnection(): Connection {
               // it is ONLY ever a refusal: a plain frame is never read as a login that
               // succeeded (no downgrade), and any other unexpected frame stays the
               // protocol error it always was (board #393).
-              if (data?.error?.code === ERR_AUTH) reject(refusal(data.error.message));
-              else reject(new Error('auth failed: expected binary auth response'));
+              if (data?.error?.code === ERR_AUTH) failDial(refusal(data.error.message));
+              else failDial(new Error('auth failed: expected binary auth response'));
               return;
             }
             try {
-              const pt = await decryptMsg(event.data, cipher);
-              if (ws !== socket) return;
+              const pt = await decryptMsg(event.data, cipher!);
+              if (failed || ws !== socket) return;
               const resp = JSON.parse(pt);
               if (resp.result?.authenticated) { machineId = resp.result.machine_id; hostname = resp.result.hostname; build = parseBuild(resp.result.build); caps = parseCaps(resp.result.caps); authSuccess(); return; }
             } catch {}
-            clearTimeout(timeout); cipher = null; reject(new Error('auth failed')); return;
+            failDial(new Error('auth failed'));
+            return;
           } else {
             // Plain (token) response — text frame.
             if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); caps = parseCaps(data.result.caps); authSuccess(); return; }
-            clearTimeout(timeout);
-            reject(data?.error?.code === ERR_AUTH ? refusal(data.error.message) : new Error(data?.error?.message || 'auth failed'));
+            failDial(data?.error?.code === ERR_AUTH ? refusal(data.error.message) : new Error(data?.error?.message || 'auth failed'));
             return;
           }
         }
@@ -655,7 +685,7 @@ export function createConnection(): Connection {
         // Post-auth: every encrypted message arrives as a binary frame and
         // gets decrypted + wire-decoded into JSON. Plain-token connections
         // continue to receive text frames (data is already parsed above).
-        if (authed && cipher) {
+        if (authed && encrypted) {
           if (!isBinary) return; // ignore unexpected text frames after encrypted auth
           let pt;
           try { pt = await decryptMsg(event.data, cipher); }
@@ -736,12 +766,12 @@ export function createConnection(): Connection {
         //   custom 4xxx codes = the server's `break`/`return` paths just
         //          drop the connection without a code, you'll see 1006.
         if (wasAuthed) notifyDisconnect('socket closed');
-        else reject(new Error('connection closed during auth'));
+        else { failed = true; reject(new Error('connection closed during auth')); }
       };
 
       socket.onerror = () => {
         clearTimeout(timeout);
-        if (!authed) reject(new Error('connection failed'));
+        if (!authed) failDial(new Error('connection failed'));
       };
     });
   }
