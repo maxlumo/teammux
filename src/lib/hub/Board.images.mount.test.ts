@@ -639,6 +639,15 @@ test('the detail chord obeys ✓: nothing changed, a bare/Shift Enter, an IME En
   } finally { release(); await app.close(); }
 });
 
+
+/** The click handler Svelte attached to a node: the CAPTURED callback itself, which is what a handler handed out earlier would still call after the page moved on (Svelte 5 keeps a delegated handler under the node's `events` symbol). A click on a detached node proves nothing about it. */
+function clickHandlerOf(node: Element): (e: Event) => void {
+  const events = Object.getOwnPropertySymbols(node).find((s) => s.description === 'events');
+  const handler = events ? (node as unknown as Record<symbol, { click?: (e: Event) => void }>)[events]?.click : undefined;
+  assert.equal(typeof handler, 'function', 'the node carries the real Svelte click handler');
+  return handler!;
+}
+
 // ── Board #377: the hand-off is the SERVER's. The page saves ONCE (asking for
 // the hand-off), reads how the telling went from the answer, and never posts a
 // brief of its own. These drive the real Board against a server that answers
@@ -824,21 +833,26 @@ test('a Reassign belongs to the project it was born in: a switch drops it with i
     // An ordinary poll succeeding is not the delivery it is waiting for.
     context.mock.timers.tick(8000); for (let i = 0; i < 6; i++) await app.flush();
     assert.ok(reassignButton(), 'a successful poll does not erase it');
-    const captured = reassignButton()!; // a click handed to something that outlives the page state
+    // The CAPTURED handler itself — what Svelte attached to the button, not a click on
+    // a node (a detached node proves nothing about delegated events). It is what a
+    // callback handed out earlier would still call after the switch.
+    const captured = reassignButton()!;
+    const handler = clickHandlerOf(captured);
+    const invoke = async () => { handler(new app.window.Event('click')); for (let i = 0; i < 6; i++) await app.flush(); };
 
     await project('other'); // B, whose list has not answered
     assert.ok(!reassignButton(), 'no Reassign on B');
     assert.equal(app.q('.err'), null, 'and no error line carried over from A');
-    captured.click(); for (let i = 0; i < 6; i++) await app.flush();
-    assert.deepEqual(app.calls.saves.map((x) => x.session), ['fixture'], 'a click captured before the switch writes nothing, least of all to B');
+    await invoke();
+    assert.deepEqual(app.calls.saves.map((x) => x.session), ['fixture'], 'the captured handler, invoked after the switch, writes nothing, least of all to B');
 
     holdB?.(); for (let i = 0; i < 6; i++) await app.flush(); // B answers
     assert.ok(!reassignButton());
     await project('fixture'); // and back to A: the old action is not revived
     for (let i = 0; i < 6; i++) await app.flush();
     assert.ok(!reassignButton(), 'A -> B -> A does not bring it back');
-    captured.click(); for (let i = 0; i < 6; i++) await app.flush();
-    assert.equal(app.calls.saves.length, 1, 'and the captured click is still nothing');
+    await invoke();
+    assert.equal(app.calls.saves.length, 1, 'and the captured handler is still nothing');
   } finally { holdB?.(); await app.close(); }
 });
 
@@ -886,4 +900,55 @@ test('the outcome line and Reassign end only by Reassign, Close, a project switc
     for (let i = 0; i < 12; i++) await second.flush();
     assert.ok(![...second.document.querySelectorAll('.err')].some((e) => /Saved, but/u.test(e.textContent ?? '')), 'a later delivered save of the same issue resolves the old line');
   } finally { await second.close(); }
+});
+
+test('the outcome line is hidden and inert while its Board is not the focused one, and comes back with it (board #377)', async (context) => {
+  const app = await mount(context, {
+    agents: [alice], stateful: true,
+    answer: (patch) => ({ ok: true, id: patch.id, dispatch: 'offline', offline: [{ name: 'alice', why: 'stopped' }] }),
+  });
+  const button = () => [...app.document.querySelectorAll<HTMLButtonElement>('.err button')].find((b) => /Reassign/u.test(`${b.textContent} ${b.getAttribute('aria-label')}`));
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    await pickAlice(app, '.detail');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 12; i++) await app.flush();
+    const shown = button()!;
+    assert.ok(shown, 'shown on the focused Board');
+    const handler = clickHandlerOf(shown);
+
+    await app.setScope({ eligible: false }); // the host moved focus to another server's Board; this one is only hidden
+    assert.ok(!button(), 'hidden with its Board');
+    handler(new app.window.Event('click')); for (let i = 0; i < 6; i++) await app.flush();
+    assert.equal(app.calls.saves.length, 1, 'and a hidden page never sends, even if its handler is called');
+
+    await app.setScope({ eligible: true }); // focus returns
+    assert.ok(button(), 'it is back with the board');
+    button()!.click(); for (let i = 0; i < 12; i++) await app.flush();
+    assert.equal(app.calls.saves.length, 2, 'and works again');
+    assert.deepEqual(app.calls.saves.at(-1), { id: 1, assignee: 'alice', dispatch: true, session: 'fixture' });
+  } finally { await app.close(); }
+});
+
+test('clearing the issue\u2019s assignee ends its old Reassign even though the server says nothing about a clear (board #377)', async (context) => {
+  const app = await mount(context, {
+    agents: [alice], stateful: true,
+    // alice: offline. The clear answers nothing about a dispatch, which is the server skipping it correctly.
+    answer: (patch) => (patch.assignee === 'alice'
+      ? { ok: true, id: patch.id, dispatch: 'offline', offline: [{ name: 'alice', why: 'stopped' }] }
+      : { ok: true, id: patch.id }),
+  });
+  const button = () => [...app.document.querySelectorAll<HTMLButtonElement>('.err button')].find((b) => /Reassign/u.test(`${b.textContent} ${b.getAttribute('aria-label')}`));
+  const save = () => [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    await pickAgent(app, '.detail', 'alice'); save();
+    for (let i = 0; i < 12; i++) await app.flush();
+    assert.ok(button(), 'alice was not reached: Reassign is offered');
+    await pickAgent(app, '.detail', 'Unassigned'); save();
+    for (let i = 0; i < 12; i++) await app.flush();
+    assert.equal(app.calls.saves.at(-1)?.assignee, '', 'the clear was saved');
+    assert.ok(!button(), 'the old Reassign is gone: it can no longer restore what was just removed');
+    assert.equal(app.calls.saves.length, 2);
+  } finally { await app.close(); }
 });

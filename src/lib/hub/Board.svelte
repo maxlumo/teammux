@@ -92,16 +92,17 @@
   /** A hand-off that was saved but not delivered, and the action that fixes
    * it: Reassign sends the same assignee again (board #377). It is an ACTION OF
    * ONE ISSUE IN ONE PROJECT, so it carries the project it was born in
-   * (the frozen session; the server is the scope's, fixed for the page's life,
-   * and a server switch destroys the page) — and a click goes THERE, never to
+   * (the frozen session; the server is this page's scope, fixed for its life) —
+   * and a click goes THERE, never to
    * whatever the page shows now; a project switch drops it. It is NOT bound to
    * the view generation: opening another issue in the same project does not
    * make an unreached assignee reached. It has
    * its own line and lifecycle, not the page's error line: a successful poll
    * is not the delivery it is waiting for, and an unrelated error must not
    * hide it. Only four things end it: a click on Reassign (the new outcome
-   * replaces it), Close, a project switch, or a LATER save of the same issue
-   * that reports an outcome of its own. */
+   * replaces it), Close, a project switch, or a LATER saved change of that
+   * issue's assignee (to someone else or cleared). While its Board is not the
+   * focused one it is hidden and inert, and returns with the board. */
   let resend = $state<{ session: string; id: number; name: string; line: string } | null>(null);
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
@@ -712,9 +713,11 @@
       const answer = await boardSave(ctx.session, patch.assignee ? { id, ...patch, dispatch: true } : { id, ...patch });
       const untold = dispatchLine(answer, patch.assignee ?? '');
       if (!owns(ctx)) return;
-      // A LATER save of the same issue that reports its own outcome replaces the
-      // earlier one (board #377): delivered now, the old line is resolved.
-      if (answer?.dispatch && resend?.session === ctx.session && resend.id === id) resend = null;
+      // Any saved CHANGE of this issue's assignee — to someone else, or cleared —
+      // ends the old Reassign (board #377), whether or not the answer carries a
+      // dispatch: a clear is correctly skipped by the server and says nothing,
+      // and the old button must not be able to restore what was just removed.
+      if (patch.assignee !== undefined && resend?.session === ctx.session && resend.id === id) resend = null;
       err = '';
       // What was SENT is now the server's: the draft and its base both take
       // the materialized fields (refs, not [img:n] — the map is about to be
@@ -778,7 +781,10 @@
    * left on screen across a slow list load) is dropped, never redirected. */
   async function reassign() {
     const again = resend;
-    if (!again || busy) return;
+    // Hidden is inert (Aggregate keeps one Board per server and only hides the ones
+    // out of focus): the action belongs to this server's board, so it comes back
+    // when the board is shown again, but a page nobody is looking at never sends.
+    if (!again || busy || !eligible()) return;
     // Born in another project (a button left on screen across a slow list
     // load, a callback handed out earlier): dropped, never redirected.
     if (!alive || again.session !== cur) { resend = null; return; }
@@ -1374,7 +1380,7 @@
     {/if}
   {/if}
   {#if err}<div class="err appear">{err}</div>{/if}
-  {#if resend}
+  {#if resend && eligible()}
     <div class="err appear">{resend.line}
       <CommandButton variant="secondary" label={t('boardReassign')} disabled={busy} onclick={reassign} />
       <CommandButton variant="icon" icon="x" label={t('close')} onclick={() => (resend = null)} />
