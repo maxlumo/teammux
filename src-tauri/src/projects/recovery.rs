@@ -1142,7 +1142,9 @@ mod tests {
     /// A: a new prompt B with the screen unchanged (no repaint): B runs, no
     ///    second end (the attribution rule, with the once flag under it).
     /// B: a newer prompt already painted under the error (the turn running,
-    ///    as kiro 2.31.0 paints it): no end.
+    ///    as kiro 2.31.0 paints it): no end. B': a later turn's work painted
+    ///    under it and that turn ended by its hook: its end keeps its own
+    ///    detail (the newest block must be the error's own shape).
     /// E: no measured grammar (claude) or a half-drawn kiro screen: no end;
     ///    the paused row is still said. D again: a later independent
     ///    incident on a new turn is its own.
@@ -1158,11 +1160,16 @@ mod tests {
         let painted_after = HIGH_TRAFFIC_SCREEN.replace("\n \n▸ Credits", &format!("\n \n{KIRO_228_SUBMITTED}{KIRO_228_RULE}▸ Credits"))
             .replace("›  ask a question or describe a task ↵", busy);
         let half = HIGH_TRAFFIC_SCREEN.split("›  ask").next().unwrap().to_string();
+        // A later turn's work painted under the error (the real blocks of
+        // video-factory:checker's next turn), its turn ended by its hook: the
+        // newest block is not the error.
+        let later = HIGH_TRAFFIC_SCREEN.replace("\n \n▸ Credits", &format!("\n \n{}\n▸ Credits", KIRO_228_LATER.trim_end()));
         let screens = [
             ("ki", "kiro", HIGH_TRAFFIC_SCREEN.to_string()),
             ("kp", "kiro", painted_after),
             ("kh", "kiro", half),
             ("cl", "claude", CLAUDE_503_NARROW.to_string()),
+            ("kr", "kiro", later),
         ];
         for (name, backend, screen) in &screens {
             let home = ws.join(".tmm/agents").join(name);
@@ -1178,7 +1185,7 @@ mod tests {
             eprintln!("no tmux server — skipping");
             return;
         }
-        for name in ["kp", "kh", "cl"] {
+        for name in ["kp", "kh", "cl", "kr"] {
             std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), &show(name)]).status().unwrap();
         }
         super::super::adopt(&session, Some("rec-capped-test")).expect("adopt");
@@ -1189,6 +1196,7 @@ mod tests {
                 assert!(matches!(tracker().lock().unwrap().decide(&session, name, now_secs(), sig, |_| false), Decision::Send { .. }));
             }
         }
+        tm::record_notification_with(&session, "kr", "completed", now_secs(), crate::backends::EndQuality::Said);
         std::thread::sleep(std::time::Duration::from_millis(300));
         let st = |w: &str| { let s = tm::derive(&session, w, 0); (s.state, s.detail) };
         let ends = |w: &str| tm::recent_events(&session, 0).into_iter().filter(|e| e.window == w && e.kind == "notif" && e.text == "failed").count();
@@ -1203,7 +1211,11 @@ mod tests {
         // E: half-drawn, and no grammar: no end, the paused row still said.
         assert_eq!((st("kh").0.as_str(), ends("kh")), ("running", 0), "E half-drawn");
         assert_eq!((st("cl").0.as_str(), ends("cl")), ("running", 0), "E claude");
-        for w in ["ki", "kp", "kh", "cl"] {
+        // B': the newest block is a later turn's own work: its hook end keeps
+        // its own (empty) detail, no end is written.
+        assert_eq!(st("kr"), ("idle".to_string(), String::new()), "B': a later turn's end is not the error's");
+        assert_eq!(ends("kr"), 0, "B'");
+        for w in ["ki", "kp", "kh", "cl", "kr"] {
             assert_eq!(paused(w), 1, "{w}: the cap is still said");
         }
         // A: a new prompt to ki, the screen unchanged (a cat pane never repaints).
@@ -1222,7 +1234,7 @@ mod tests {
         check_once();
         assert_eq!(st("ki"), ("idle".to_string(), EXHAUSTED.to_string()), "D again: its own end");
         assert_eq!(ends("ki"), 2);
-        for w in ["ki", "kp", "kh", "cl"] {
+        for w in ["ki", "kp", "kh", "cl", "kr"] {
             tracker().lock().unwrap().retain_windows(&session, &[w.to_string()]);
         }
     }
