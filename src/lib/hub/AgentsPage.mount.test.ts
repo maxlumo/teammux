@@ -334,6 +334,77 @@ test('Team disclosure is not an edit; its actual role uses the guarded Save (#15
   } finally { await app.close(); }
 });
 
+// Owner #336: "在启动 Agent 的时候如果是 kiro 默认就给我使用 steer 模式吧". A NEW
+// draft starts in the mode the server names for its backend, and an explicit
+// backend pick takes that backend's default. A STORED definition is opened
+// with the mode it was saved with (the #245 tests above: a stored queue kiro
+// shows Queue).
+test('a new kiro agent or bare kiro member starts in steer, and a backend pick takes its default (#336)', async context => {
+  const fixture = await hostFixture();
+  const served = (name: string, input_modes: boolean, default_input_mode?: 'steer') =>
+    ({ name, icon: `/assets/${name}.svg`, color: `--backend-${name}`, efforts: [], input_modes, ...(default_input_mode ? { default_input_mode } : {}) });
+  const writes: any[] = [];
+  const teamWrites: any[] = [];
+  const team = { name: 'squad', description: '', members: JSON.stringify([{ name: 'dev', base: 'alpha', role: 'Implement' }]) };
+  let controls!: { section: (value: string) => void };
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value, backends: [served('kiro', true, 'steer'), served('codex', true), served('claude', false)] },
+    modules: [rpc({
+      registrySave: async (value: unknown) => { writes.push(value); },
+      teamsList: async () => ({ teams: [team] }),
+      teamsSave: async (value: any) => { teamWrites.push(value); return {}; },
+    })],
+  });
+  const mode = (root: ParentNode = app.document) => root.querySelector<HTMLButtonElement>('[aria-label="While busy"]')?.querySelector('.sel-value')?.textContent ?? null;
+  const pick = async (label: string, option: string, root: ParentNode = app.document) => {
+    root.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click(); await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('[role=option]')].find(o => o.textContent?.trim() === option)!.click();
+    await app.flush();
+  };
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.side-row.add'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.side-row.add')!.click(); await app.flush();
+    assert.equal(mode(), 'Steer', 'a new agent on the default backend (kiro) starts in steer');
+    await pick('Backend', 'codex');
+    assert.equal(mode(), 'Queue', 'codex can switch, but its default is queue');
+    await pick('Backend', 'claude');
+    assert.equal(mode(), null, 'claude: no switch, no field');
+    await pick('Backend', 'kiro');
+    assert.equal(mode(), 'Steer', 'back on kiro: its default again');
+    const name = app.document.querySelector<HTMLInputElement>('.editor input[placeholder="reviewer"]')!;
+    name.value = 'fresh';
+    name.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+    command(app, 'Save').click();
+    for (let i = 0; i < 5 && !writes.length; i++) await app.flush();
+    assert.deepEqual([writes[0]?.backend, writes[0]?.input_mode], ['kiro', 'steer'], 'and it saves steer');
+
+    for (let i = 0; i < 5; i++) await app.flush();
+    controls.section('teams'); await app.flush();
+    await openAgent(app, 'squad');
+    const member = () => app.document.querySelectorAll<HTMLElement>('.member')[0]!;
+    await pick('Member source', 'Bare coding agent', member());
+    assert.equal(mode(member()), 'Steer', 'a member turned into a new bare kiro starts in steer');
+    command(app, 'Save').click();
+    for (let i = 0; i < 5 && !teamWrites.length; i++) await app.flush();
+    const members = JSON.parse(teamWrites[0].members);
+    assert.deepEqual([members[0].agent?.backend, members[0].agent?.input_mode], ['kiro', 'steer']);
+  } finally { await app.close(); }
+});
+
+test('a server that names no default keeps a new draft at queue (#336)', async context => {
+  const fixture = await hostFixture();
+  const app = await fixture.mount(context, {
+    // An older server: input_modes, but no default_input_mode.
+    props: { ready: () => {}, backends: [{ name: 'kiro', icon: '/assets/kiro.svg', color: '--backend-kiro', efforts: [], input_modes: true }] },
+    modules: [rpc()],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.side-row.add'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.side-row.add')!.click(); await app.flush();
+    assert.equal(app.document.querySelector('[aria-label="While busy"] .sel-value')?.textContent, 'Queue');
+  } finally { await app.close(); }
+});
+
 test('a team\'s bare member takes the same input-mode field (#245)', async context => {
   const fixture = await hostFixture();
   const served = (name: string, input_modes: boolean) => ({ name, icon: `/assets/${name}.svg`, color: `--backend-${name}`, efforts: [], input_modes });

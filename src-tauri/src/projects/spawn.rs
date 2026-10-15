@@ -1743,7 +1743,14 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             assert_eq!(super::super::models::validate_input_mode(b.name(), "steer").is_ok(), b.switches_input_mode(), "{}", b.name());
             assert!(super::super::models::validate_input_mode(b.name(), "").is_err());
             assert_eq!(b.describe()["input_modes"], b.switches_input_mode(), "the client reads the switch, never mirrors it");
+            // Board #336: the default is always a mode this backend accepts,
+            // and the client reads it from the same list.
+            assert!(super::super::models::validate_input_mode(b.name(), b.default_input_mode()).is_ok(), "{}", b.name());
+            assert_eq!(b.describe()["default_input_mode"], b.default_input_mode(), "{}", b.name());
         }
+        let defaults: Vec<(&str, &str)> = Backend::ALL.iter().map(|b| (b.name(), b.default_input_mode())).collect();
+        assert_eq!(defaults, [("kiro", "steer"), ("claude", "queue"), ("codex", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue")],
+            "owner #336: a new kiro steers; every other backend keeps queue");
         assert!(super::super::models::validate_input_mode("kiro", "interrupt").is_err());
     }
 
@@ -2048,6 +2055,46 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(refresh_agent(&ws_str, "proj", "st") && refresh_agent(&ws_str, "proj", "in"));
         assert_eq!((mode("st").as_str(), mode("in").as_str()), ("queue", "steer"), "restart: the override, and the base's new mode");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #336: a NEW definition that names no input mode gets its
+    /// backend's default at the door — a registry def and a team's bare
+    /// member alike — and a kiro def saved that way spawns steering. A mode
+    /// that IS named is kept, and team text with nothing to fill is stored
+    /// byte for byte.
+    #[test]
+    fn a_def_that_names_no_input_mode_gets_its_backends_default() {
+        super::super::tests::use_test_store();
+        let save = |name: &str, backend: &str, mode: Option<Value>| {
+            let mut def = json!({ "name": name, "backend": backend, "model": "", "effort": "", "system": "New.", "skills": "[]", "mcp": "[]" });
+            if let Some(m) = mode { def["input_mode"] = m; }
+            super::super::registry_save(&def).unwrap();
+            super::super::registry_get(name).unwrap().unwrap().input_mode
+        };
+        assert_eq!(save("dmkiro", "kiro", None), "steer", "a new kiro steers");
+        assert_eq!(save("dmnull", "kiro", Some(Value::Null)), "steer", "null is the CLI's 'no flag'");
+        assert_eq!(save("dmclaude", "claude", None), "queue", "a backend without the switch queues");
+        assert_eq!(save("dmcodex", "codex", None), "queue", "codex switches, but its default is queue");
+        assert_eq!(save("dmkq", "kiro", Some(json!("queue"))), "queue", "a named mode is kept");
+        assert!(super::super::registry_save(&json!({ "name": "dmempty", "backend": "kiro", "input_mode": "", "system": "", "skills": "[]", "mcp": "[]" })).is_err(),
+            "an empty mode is still refused, not defaulted");
+
+        let ws = std::env::temp_dir().join(format!("tmm-default-mode-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let d = super::super::registry_get("dmkiro").unwrap().unwrap();
+        materialize(&d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "").unwrap();
+        let cli: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(&ws_str, "dmkiro").join("settings/cli.json")).unwrap()).unwrap();
+        assert_eq!(cli["chat.defaultInterruptBehavior"], "steer", "and it spawns steering");
+        let _ = std::fs::remove_dir_all(&ws);
+
+        let stored = |name: &str| super::super::team_get(name).unwrap().unwrap().members;
+        let bare = |mode: &str| format!(r#"{{"name":"raw","base":"","role":"","agent":{{"name":"raw","backend":"kiro","model":"","effort":"",{mode}"system":"Bare.","skills":"[]","mcp":"[]"}}}}"#);
+        super::super::teams_save(&json!({ "name": "dmteam", "description": "", "members": format!("[{}]", bare("")) })).unwrap();
+        let members: Vec<Value> = serde_json::from_str(&stored("dmteam")).unwrap();
+        assert_eq!(members[0]["agent"]["input_mode"], "steer", "a bare kiro member without a mode steers");
+        let named = format!(r#"[{},{{"name":"der","base":"dmkiro","role":""}}]"#, bare(r#""input_mode":"queue","#));
+        super::super::teams_save(&json!({ "name": "dmnamed", "description": "", "members": named.clone() })).unwrap();
+        assert_eq!(stored("dmnamed"), named, "nothing to fill: the text is stored as it came");
     }
 
     /// The recipe's provenance (`agent_def`, or `team`+`member`) is what the

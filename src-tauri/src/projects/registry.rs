@@ -13,9 +13,24 @@ pub fn registry_list() -> Result<Value, String> {
     })
 }
 
+/// A def that names no input mode gets its backend's default (board #336:
+/// kiro steers) — here, at the door, so only what is being SAVED is filled.
+/// A stored row keeps the mode it was saved with, and stored team text that
+/// predates the field keeps meaning `queue` (the serde default). Returns
+/// whether it filled one. An unknown backend is left to the validation.
+pub(crate) fn with_default_input_mode(def: &mut Value) -> bool {
+    let Some(obj) = def.as_object_mut() else { return false };
+    if obj.get("input_mode").is_some_and(|v| !v.is_null()) { return false; }
+    let Some(backend) = obj.get("backend").and_then(Value::as_str).and_then(crate::backends::Backend::parse) else { return false };
+    obj.insert("input_mode".into(), json!(backend.default_input_mode()));
+    true
+}
+
 pub fn registry_save(def: &Value) -> Result<Value, String> {
+    let mut def = def.clone();
+    with_default_input_mode(&mut def);
     let agent: store::RegAgent =
-        serde_json::from_value(def.clone()).map_err(|e| format!("invalid agent def: {e}"))?;
+        serde_json::from_value(def).map_err(|e| format!("invalid agent def: {e}"))?;
     // The registry name becomes the window name and the isolated home's
     // directory — one rule for both (`agents::valid_name`).
     agents::valid_name(&agent.name)?;
@@ -54,7 +69,14 @@ pub fn team_get(name: &str) -> Result<Option<store::RegTeam>, String> {
 /// backend or with a model the backend rejects — each would otherwise be
 /// discovered by the human the moment they try to start the team.
 pub fn teams_save(def: &Value) -> Result<Value, String> {
-    let team: store::RegTeam = serde_json::from_value(def.clone()).map_err(|e| format!("invalid team def: {e}"))?;
+    let mut team: store::RegTeam = serde_json::from_value(def.clone()).map_err(|e| format!("invalid team def: {e}"))?;
+    // A bare member's inline agent is a NEW definition too: the same default
+    // at the same door. Text that is not a JSON array is left as it came, for
+    // `teams::validate` to name.
+    if let Ok(mut members) = serde_json::from_str::<Vec<Value>>(&team.members) {
+        let filled = members.iter_mut().filter_map(|m| m.get_mut("agent")).fold(false, |any, a| with_default_input_mode(a) | any);
+        if filled { team.members = serde_json::to_string(&members).map_err(|e| e.to_string())?; }
+    }
     let (known, known_teams): (Vec<String>, Vec<String>) = with_store(|store| {
         store.reg_seed(now())?;
         Ok((

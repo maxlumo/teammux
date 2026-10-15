@@ -39,7 +39,7 @@
   const guardOwner = scope.runtime;
   const { registryList, registrySave, registryDelete, modelsList, skillsList, skillsSave, skillsDelete, skillsRefresh, skillsImport, skillsFiles, skillsFile, mcpList, mcpSave, mcpDelete, teamsList, teamsSave, teamsDelete, globalPromptGet, globalPromptSet } = guardOwner.api;
   const catalog = scope.state.backends;
-  const { icon: backendIcon, spawnable: spawnableBackends, defaultBackend, efforts: backendEfforts, switchesInputMode: backendSwitchesInputMode, onChange: onServedBackends, known: servedBackendsKnown } = catalog;
+  const { icon: backendIcon, spawnable: spawnableBackends, defaultBackend, efforts: backendEfforts, switchesInputMode: backendSwitchesInputMode, defaultInputMode: backendDefaultInputMode, onChange: onServedBackends, known: servedBackendsKnown } = catalog;
   const backendColor = (backend) => colorOf(backend, catalog);
   let backends = $state(spawnableBackends());
   // `section` narrows the page to ONE kind — 'agents' | 'teams' | 'skills' |
@@ -354,11 +354,12 @@
   let servedTick = $state(0);
   $effect(() => onServedBackends(() => { servedTick++; backends = spawnableBackends(); }));
   const switchesInputMode = (backend) => { void servedTick; return backendSwitchesInputMode(backend); };
-  /** An explicit backend pick in the editor: a steer draft moving to a backend
-   * the server says cannot switch becomes queue. With no list yet nothing is
-   * judged — the field stays visible and registry_save decides. */
+  /** An explicit backend pick in the editor puts the draft at that backend's
+   * default mode (board #336: kiro steers, a backend without the switch
+   * queues), the mode a new draft on it starts in. With no list yet nothing
+   * is judged: the field keeps its value and registry_save decides. */
   function pickBackend(draft, backend) {
-    if (draft?.input_mode === 'steer' && servedBackendsKnown() && !backendSwitchesInputMode(backend)) draft.input_mode = 'queue';
+    if (draft && servedBackendsKnown()) draft.input_mode = backendDefaultInputMode(backend);
   }
   let models = $state([]);
   $effect(() => {
@@ -460,15 +461,19 @@
   // bare source owns prompt / Skills / MCP in this editor.
   const TEAM_MAX = 8; // mirrors the server's spawn cap (validated there too, on the EXPANSION)
   const blankMember = () => ({ name: '', base: defs[0]?.name ?? '', team: '', role: '', model: '', effort: '', input_mode: '', agent: null, expanded: true });
-  function bareEditor(agent = {}) {
+  /** A bare member's draft: its stored agent, or (none) a new one, which
+   * starts in its backend's default mode (#336). */
+  function bareEditor(stored = null) {
+    const agent = stored ?? {};
     const skillEntries = parseRefs(agent.skills);
     const mcpEntries = parseRefs(agent.mcp);
+    const backend = agent.backend ?? defaultBackend();
     return {
       name: agent.name ?? '',
-      backend: agent.backend ?? defaultBackend(),
+      backend,
       model: agent.model ?? '',
       effort: agent.effort ?? '',
-      input_mode: agent.input_mode ?? 'queue',
+      input_mode: stored ? (agent.input_mode ?? 'queue') : backendDefaultInputMode(backend),
       system: agent.system ?? '',
       skillSel: skillEntries.filter((x) => typeof x === 'string'),
       mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
@@ -658,7 +663,7 @@
             mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
             mcpExtra: mcpEntries.filter((x) => typeof x !== 'string'),
           }
-        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: 'queue', system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
+        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
       rememberDraft();
     });
   }

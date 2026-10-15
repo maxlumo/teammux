@@ -107,6 +107,7 @@ impl Backend {
             "color": format!("--backend-{}", self.name()),
             "efforts": self.effort_values(),
             "input_modes": self.switches_input_mode(),
+            "default_input_mode": self.default_input_mode(),
             "input_mode_toggle": self.live_input_toggle().is_some(),
         })
     }
@@ -194,6 +195,19 @@ impl Backend {
             Backend::Grok => grok::SWITCHES_INPUT_MODE,
             Backend::Omp => omp::SWITCHES_INPUT_MODE,
             Backend::Kimi => kimi::SWITCHES_INPUT_MODE,
+        }
+    }
+
+    /// The input mode a NEW definition on this backend gets when it names
+    /// none (board #336): the empty-registry seed, a `registry_save` /
+    /// `teams_save` def without `input_mode`, and the Agents editor's new
+    /// draft (through `backends_list.default_input_mode`). `queue` wherever
+    /// the backend file says nothing; it is always a mode
+    /// `models::validate_input_mode` accepts for this backend.
+    pub fn default_input_mode(self) -> &'static str {
+        match self {
+            Backend::Kiro => kiro::DEFAULT_INPUT_MODE,
+            _ => "queue",
         }
     }
 

@@ -61,6 +61,9 @@ export interface BackendInfo {
   /** Whether a definition may choose queue|steer (board #245): only where
    * the switch was measured. Absent on older servers, which offer none. */
   input_modes?: boolean;
+  /** The mode a NEW definition on this backend starts in (board #336: kiro
+   * steers). Absent on older servers: queue. */
+  default_input_mode?: 'queue' | 'steer';
   /** Whether a RUNNING session can switch queue|steer (board #271: kiro's
    * Ctrl+S). Absent on older servers, which offer no switch. */
   input_mode_toggle?: boolean;
@@ -104,6 +107,9 @@ export interface BackendCatalog {
   /** Whether this backend's editor offers queue|steer (board #245). Server
    * truth only: no fallback list, so an older server offers nothing. */
   switchesInputMode(backend: string | null | undefined): boolean;
+  /** The mode a new draft on this backend starts in (board #336). Server
+   * truth only, like `switchesInputMode`: queue with no list. */
+  defaultInputMode(backend: string | null | undefined): 'queue' | 'steer';
   /** Whether a RUNNING agent of this backend can switch queue|steer (#271).
    * Server truth only, like `switchesInputMode`. */
   togglesInputMode(backend: string | null | undefined): boolean;
@@ -136,6 +142,7 @@ export function createBackendCatalog(): BackendCatalog {
     defaultBackend: () => (served?.map((b) => b.name) ?? FALLBACK_BACKENDS)[0] ?? FALLBACK_BACKENDS[0]!,
     efforts: (backend) => of(backend)?.efforts ?? FALLBACK_EFFORTS[backend ?? ''] ?? [],
     switchesInputMode: (backend) => of(backend)?.input_modes === true,
+    defaultInputMode: (backend) => of(backend)?.default_input_mode === 'steer' ? 'steer' : 'queue',
     togglesInputMode: (backend) => of(backend)?.input_mode_toggle === true,
     colorToken: (backend) => of(backend)?.color ?? null,
     icon: (backend) => of(backend)?.icon ?? shippedIcon(backend),

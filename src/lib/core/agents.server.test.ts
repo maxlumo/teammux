@@ -16,7 +16,7 @@ test('two servers answer for their own installed CLIs', () => {
   // The real case: a laptop with kiro and codex, a build box with only claude.
   const a = createBackendCatalog();
   const b = createBackendCatalog();
-  a.set([info({ name: 'kiro', efforts: ['low', 'max'], input_modes: true }), info({ name: 'codex' })]);
+  a.set([info({ name: 'kiro', efforts: ['low', 'max'], input_modes: true, default_input_mode: 'steer' }), info({ name: 'codex' })]);
   b.set([info({ name: 'claude', efforts: ['high'] })]);
 
   assert.deepEqual(a.spawnable(), ['kiro', 'codex']);
@@ -29,6 +29,10 @@ test('two servers answer for their own installed CLIs', () => {
   // ships rather than borrowing A's answer.
   assert.deepEqual(b.efforts('kiro'), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(b.switchesInputMode('kiro'), false, 'server truth only, and B never said it');
+  // Board #336: a new draft's mode is the server's word too.
+  assert.equal(a.defaultInputMode('kiro'), 'steer');
+  assert.equal(a.defaultInputMode('codex'), 'queue', 'a backend that names none queues');
+  assert.equal(b.defaultInputMode('kiro'), 'queue', 'and B never said kiro steers');
 });
 
 test('one server s list arriving does not notify the other, or change it', () => {

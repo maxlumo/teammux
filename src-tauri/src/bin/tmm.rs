@@ -126,9 +126,10 @@ USAGE (human or agent — self-management):
   tmm registry save --name <n> --backend <{backends}> [--system <text>]
                     [--model m] [--effort low|medium|high|…] [--skills a,b] [--mcp <json>]
                     [--input-mode queue|steer]   a line typed while it is busy waits
-                                      (queue, default) or enters the running turn
-                                      (steer: kiro, codex only; no receipt, reply may
-                                      go to the wrong sender). Applied on restart
+                                      (queue) or enters the running turn (steer:
+                                      kiro, codex only; no receipt, reply may go to
+                                      the wrong sender). Default: steer on kiro,
+                                      queue elsewhere. Applied on restart
   tmm registry delete <name>
   tmm prompt show|path                the app-wide agent instructions (<config>/AGENTS.md),
   tmm prompt set <text> | --file <p>  prepended to EVERY managed agent's system prompt at spawn;
@@ -956,7 +957,8 @@ async fn main() {
                 "system": flags.get("system").cloned().flatten().unwrap_or_default(),
                 "skills": serde_json::to_string(&skills).unwrap(),
                 "mcp": flags.get("mcp").cloned().flatten().unwrap_or_else(|| "[]".into()),
-                "input_mode": flags.get("input-mode").cloned().flatten().unwrap_or_else(|| "queue".into()),
+                // Absent = null: the server fills the backend's default (#336).
+                "input_mode": flags.get("input-mode").cloned().flatten(),
             });
             let r = rpc(&ctx, "registry_save", json!({ "def": def })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); }

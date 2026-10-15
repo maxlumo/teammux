@@ -9,6 +9,12 @@
 /// its sender enters no reply edge.
 pub(crate) const SWITCHES_INPUT_MODE: bool = true;
 
+/// The mode a NEW kiro definition starts in when it names none (board #336,
+/// owner 2026-10-15: "在启动 Agent 的时候如果是 kiro 默认就给我使用 steer 模式吧
+/// 不要用 queue 模式"). A definition that is already stored keeps what it was
+/// saved with; Ctrl+S still toggles a running session.
+pub(crate) const DEFAULT_INPUT_MODE: &str = "steer";
+
 /// The cli.json key that carries the definition's input mode.
 const INTERRUPT_KEY: &str = "chat.defaultInterruptBehavior";
 

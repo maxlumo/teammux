@@ -71,9 +71,13 @@ pub struct RegAgent {
     pub effort: String,
     /// What a line typed at the BUSY agent does (board #245): `queue` waits
     /// for the turn to end and becomes the next prompt, `steer` goes into the
-    /// running turn. `queue` is the default for every agent; only a backend
-    /// whose switch is measured (`Backend::switches_input_mode`) accepts
-    /// `steer`, and its backend file renders the value into its own config.
+    /// running turn. Only a backend whose switch is measured
+    /// (`Backend::switches_input_mode`) accepts `steer`, and its backend file
+    /// renders the value into its own config. A NEW def that names no mode
+    /// gets its backend's default at the door (`registry::with_default_input_mode`,
+    /// board #336: kiro steers); this serde default (`queue`) is what a STORED
+    /// text without the field (a team member's inline agent saved before
+    /// #245) has always meant, so it stays.
     #[serde(default = "default_input_mode")]
     pub input_mode: String,
     #[serde(default)]
@@ -256,13 +260,16 @@ impl Store {
         // ONE place outside src/backends/ allowed to spell backend names: a
         // seed is registry DATA (a name, a persona), not backend knowledge,
         // and the literal guard (backends::tests) skips this fenced region.
+        // Each seed starts in its backend's default input mode (board #336:
+        // kiro steers), the one definition a new def without a mode gets.
+        let mode = |backend: &str| crate::backends::Backend::parse(backend).map_or("queue", |b| b.default_input_mode()).to_string();
         let seeds = [
             RegAgent {
                 name: "kiro".into(),
                 backend: "kiro".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("kiro"),
                 system: DEFAULT_KIRO_SYSTEM.into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -272,7 +279,7 @@ impl Store {
                 backend: "codex".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("codex"),
                 system: "You are a powerful 10x developer running on Codex who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
@@ -282,7 +289,7 @@ impl Store {
                 backend: "claude".into(),
                 model: "global.anthropic.claude-fable-5-1[1m]".into(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("claude"),
                 system: "You are a powerful 10x developer running on Claude Code who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
@@ -292,7 +299,7 @@ impl Store {
                 backend: "grok".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("grok"),
                 system: "You are a powerful 10x developer running on Grok who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
@@ -302,7 +309,7 @@ impl Store {
                 backend: "omp".into(),
                 model: DEFAULT_OMP_MODEL.into(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("omp"),
                 system: DEFAULT_OMP_SYSTEM.into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 // omp ships its own web_search tool — no MCP search shim needed.
@@ -313,7 +320,7 @@ impl Store {
                 backend: "kimi".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: mode("kimi"),
                 system: DEFAULT_KIMI_SYSTEM.into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
                 // kimi's built-in search is the Moonshot service (a Kimi API
@@ -417,6 +424,11 @@ mod tests {
             "the six backend defaults are the fixed leading group"
         );
         assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mem","mcp-cli"]"#));
+        // Board #336: each seed starts in its backend's default mode.
+        assert_eq!(
+            seeded.iter().map(|a| (a.name.as_str(), a.input_mode.as_str())).collect::<Vec<_>>(),
+            [("kiro", "steer"), ("codex", "queue"), ("claude", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue")]
+        );
         assert_eq!(
             seeded[0].system,
             "You are a powerful 10x developer running on Kiro CLI who can handle any task with decisive execution and minimal words.",
@@ -531,6 +543,7 @@ mod tests {
             assert_eq!(kept.effort, "high", "{label}: the effort is untouched");
             assert_eq!(kept.skills, kiro.skills, "{label}: skills are untouched");
             assert_eq!(kept.mcp, kiro.mcp, "{label}: MCP is untouched");
+            assert_eq!(kept.input_mode, "queue", "{label}: a stored queue stays queue though a new kiro steers (#336)");
             let stamp: i64 = store
                 .conn
                 .query_row("SELECT updated_at FROM reg_agents WHERE name='kiro'", [], |r| r.get(0))
