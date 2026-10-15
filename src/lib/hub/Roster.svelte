@@ -231,15 +231,32 @@
   const looseShown = $derived(groups.some((g) => !g.team));
   $effect(() => {
     if (!cardDrag) return;
-    return cardDrags.listen();
+    // The strip resized under a carried card (expanded, a split pane's width,
+    // the window): every box moved, the drag ends (reviewer P2). The first
+    // report is the size it started at.
+    const strip = cardsEl;
+    let start = null;
+    const resized = typeof ResizeObserver !== 'undefined' && strip ? new ResizeObserver((entries) => {
+      const r = entries[entries.length - 1]?.contentRect;
+      if (!r) return;
+      if (!start) { start = { w: r.width, h: r.height }; return; }
+      if (r.width !== start.w || r.height !== start.h) cardDrags.cancel();
+    }) : null;
+    resized?.observe(strip);
+    const off = cardDrags.listen();
+    return () => { off(); resized?.disconnect(); };
   });
   // The strip scrolling under a carried card (`.cards` onscroll) moves every
   // target and the card's own origin: the geometry is stale, the drag ends.
-  // A roster change mid-drag (an agent arrives, stops, moves) changes the
-  // layout: the targets are measured again at the next move.
+  // So does a roster change (an agent arrives, stops, changes team): its
+  // target and boxes go together, so a release that follows with no further
+  // pointer move cannot drop on a group that is no longer there (reviewer
+  // P2). Keyed by names and teams, not the array: a poll replaces the array
+  // every few seconds with the same roster.
+  const rosterKey = $derived(managedAgents.map((a) => `${a.name}:${a.team ?? ''}`).join(','));
   $effect(() => {
-    void managedAgents;
-    untrack(() => { if (cardDrag) cardDrag.rects = null; });
+    void rosterKey;
+    return () => cardDrags.cancel();
   });
 
   function clickAgent(event, name) {

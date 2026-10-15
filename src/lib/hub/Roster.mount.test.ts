@@ -52,7 +52,7 @@ test('an overflowing room still expands under the kept pref and offers the chevr
 // no layout, so each drop target's box is supplied by its `data-drop` key
 // ('-' = standalone): one row, squad | standalone | ops.
 const BOXES: Record<string, [number, number]> = { squad: [0, 200], '-': [210, 300], ops: [310, 420] };
-async function dragStrip(context: test.TestContext, agents: Record<string, unknown>[], canMove = true, strip: [number, number] = [0, 1000]) {
+async function dragStrip(context: test.TestContext, agents: Record<string, unknown>[], canMove = true, strip: [number, number] = [0, 1000], extraSetup: (win: any) => void = () => {}) {
   const moves: [string, string][] = [];
   const scopes: unknown[] = [];
   const picks: string[] = [];
@@ -67,6 +67,7 @@ async function dragStrip(context: test.TestContext, agents: Record<string, unkno
     },
     modules: [],
     setup(win) {
+      extraSetup(win);
       win.Element.prototype.getAnimations = () => [];
       // The boxes appear with the drag's `data-drop`, which flip reads as a
       // move; jsdom has no Web Animations, and the motion is not under test.
@@ -270,7 +271,7 @@ test('a drop target is the part of a group the strip shows: one scrolled or clip
   } finally { await app.close(); }
 });
 
-test('a roster change mid-drag measures the targets again (#384, P2-2)', async (context) => {
+test('a roster change mid-drag cancels it, and the release that follows with no further move drops nothing; a poll of the same roster does not (#384, P2)', async (context) => {
   const agents = [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')];
   const { app, moves, card, at } = await dragStrip(context, agents);
   try {
@@ -278,15 +279,45 @@ test('a roster change mid-drag measures the targets again (#384, P2-2)', async (
     at('pointerdown', solo, 250);
     for (const x of [365, 365]) { at('pointermove', solo, x); await app.flush(); }
     assert.equal(app.document.querySelector('.drop-target')?.getAttribute('data-drop'), 'ops');
-    // ops moves (a member arrives and the layout shifts): its box is now
-    // 430..540, so the point it was under is empty strip.
-    BOXES.ops = [430, 540];
+    // A poll hands over a NEW array of the same roster: the drag stays.
+    await app.setProps({ managedAgents: agents.map((a) => ({ ...a })) });
+    assert.equal(app.document.querySelector('.acard.lifted')?.getAttribute('data-agent'), 'solo', 'the same roster keeps the drag');
+    // A member arrives: the layout changed, the drag ends with its target.
     await app.setProps({ managedAgents: [...agents, member('ops2', 'ops')] });
-    at('pointermove', solo, 365);
-    await app.flush();
-    assert.equal(app.document.querySelector('.drop-target'), null, 're-measured: no stale target');
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'a roster change cancels the drag');
     at('pointerup', solo, 365);
     await app.flush();
-    assert.deepEqual(moves, [], 'no move to where ops used to be');
-  } finally { BOXES.ops = [310, 420]; await app.close(); }
+    assert.deepEqual(moves, [], 'the release with no further move drops nothing');
+  } finally { await app.close(); }
+});
+
+test('the strip resizing mid-drag (expanded, a split pane, the window) cancels it (#384, P2)', async (context) => {
+  const observers: { cb: (entries: { contentRect: { width: number; height: number } }[]) => void; els: Element[] }[] = [];
+  const { app, moves, card, at } = await dragStrip(context, [member('lead', 'squad'), member('solo', null), member('ops1', 'ops')], true, [0, 1000], (win) => {
+    win.ResizeObserver = class {
+      rec: (typeof observers)[number];
+      constructor(cb: (typeof observers)[number]['cb']) { this.rec = { cb, els: [] }; observers.push(this.rec); }
+      observe(el: Element) { this.rec.els.push(el); }
+      unobserve() {}
+      disconnect() { this.rec.els = []; }
+    } as unknown as typeof ResizeObserver;
+  });
+  const report = (w: number, h = 60) => {
+    for (const o of [...observers]) if (o.els.some((el) => el.classList.contains('cards'))) o.cb([{ contentRect: { width: w, height: h } }]);
+  };
+  try {
+    const solo = card('solo');
+    at('pointerdown', solo, 250);
+    for (const x of [100, 100]) { at('pointermove', solo, x); await app.flush(); }
+    report(1000);
+    report(1000);
+    await app.flush();
+    assert.ok(app.document.querySelector('.acard.lifted'), 'its own size, reported again, keeps the drag');
+    report(640);
+    await app.flush();
+    assert.equal(app.document.querySelector('.acard.lifted'), null, 'a new width cancels it');
+    at('pointerup', solo, 100);
+    await app.flush();
+    assert.deepEqual(moves, [], 'and nothing drops');
+  } finally { await app.close(); }
 });

@@ -474,7 +474,8 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
   assert.match(source, /onscroll=\{\(\) => \{ if \(cardDrag\) cardDrags\.cancel\(\); \}\}/u, 'the strip scrolling ends a drag (P2-2)');
   assert.match(source, /const view = cardsEl\?\.getBoundingClientRect\(\);[\s\S]{0,600}Math\.max\(r\.left, view\.left\)[\s\S]{0,200}Math\.min\(r\.right, view\.right\)/u, 'targets are clipped to the strip\'s visible box (P2-2)');
   assert.match(source, /function clickAgent\(event, name\) \{\n {4}if \(cardDrags\.consumeClick\(\)\) return;/u);
-  assert.match(source, /if \(!cardDrag\) return;\n {4}return cardDrags\.listen\(\);/u, 'Escape, resize and the window release while carrying');
+  assert.match(source, /if \(!cardDrag\) return;[\s\S]{0,900}?const off = cardDrags\.listen\(\);\n {4}return \(\) => \{ off\(\); resized\?\.disconnect\(\); \};/u, 'Escape, resize and the window release while carrying, and the strip resizing (P2)');
+  assert.match(source, /const rosterKey = \$derived\(managedAgents\.map\(\(a\) => `\$\{a\.name\}:\$\{a\.team \?\? ''\}`\)\.join\(','\)\);\n {2}\$effect\(\(\) => \{\n {4}void rosterKey;\n {4}return \(\) => cardDrags\.cancel\(\);/u, 'a roster change (by names and teams) cancels a drag (P2)');
   // The lift is the strip's own tab paint: the lit tab's OPAQUE fill (a
   // translucent wash let the card underneath read through it, live proof),
   // the accent line, the menu shadow; the target's enclosure is the accent
