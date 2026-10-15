@@ -3135,7 +3135,8 @@ mod tests {
         record_command_delivery(&session, "kiro", "goal b", "m-b").unwrap();
         record_notification(&session, "kiro", "completed", now()); // both Idle now
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (s2, d2) = (session.clone(), done.clone());
+        let done_inside = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s2, d2, d3, seen) = (session.clone(), done.clone(), done.clone(), done_inside.clone());
         let racer: std::sync::Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Default::default();
         let slot = racer.clone();
         *IN_PROMPT_HOOK.lock().unwrap() = Some(Box::new(move || {
@@ -3144,9 +3145,12 @@ mod tests {
                 d2.store(true, std::sync::atomic::Ordering::SeqCst);
             }));
             std::thread::sleep(std::time::Duration::from_millis(150));
+            // Still INSIDE the echo's section, so the end cannot have finished.
+            // Observed here, asserted below: see `a_command_recorded_during_an_end...`.
+            seen.store(d3.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
         }));
         assert!(record_prompt(&session, "kiro", "goal a"), "goal a's echo");
-        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "the end waited for the echo's section");
+        assert!(!done_inside.load(std::sync::atomic::Ordering::SeqCst), "the end waited for the echo's section");
         racer.lock().unwrap().take().unwrap().join().unwrap();
         assert_eq!(held(&session, "kiro"), vec!["goal b"], "the end saw goal a's prompt and retired nothing");
         assert!(record_prompt(&session, "kiro", "goal b"), "and goal b's own echo settles it");
@@ -3160,7 +3164,8 @@ mod tests {
         crate::projects::tests::use_test_store();
         let session = format!("cmd-end-race-{}", uuid::Uuid::new_v4());
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (s2, d2) = (session.clone(), done.clone());
+        let done_inside = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s2, d2, d3, seen) = (session.clone(), done.clone(), done.clone(), done_inside.clone());
         let racer: std::sync::Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Default::default();
         let slot = racer.clone();
         *IN_END_HOOK.lock().unwrap() = Some(Box::new(move || {
@@ -3169,10 +3174,20 @@ mod tests {
                 d2.store(true, std::sync::atomic::Ordering::SeqCst);
             }));
             std::thread::sleep(std::time::Duration::from_millis(150));
+            // Still INSIDE the end's section, so the insert cannot have finished:
+            // that is the only moment "it waited" is a fact. It is OBSERVED here
+            // and asserted after the call. Asserting `done` after
+            // `record_notification` returns (the first form of this test) read it
+            // AFTER the section ended, when that very return has released the
+            // racer: on an idle machine the asserting thread runs first, under
+            // load the racer finishes its insert first and the test failed with
+            // nothing wrong in the code (board #386: 21 of 320 runs at 2x CPU
+            // oversubscription).
+            seen.store(d3.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
         }));
         // A prompt-less end: it WILL retire the oldest Idle command it sees.
         record_notification(&session, "kiro", "failed", now());
-        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "the insert waited for the end's section");
+        assert!(!done_inside.load(std::sync::atomic::Ordering::SeqCst), "the insert waited for the end's section");
         racer.lock().unwrap().take().unwrap().join().unwrap();
         assert_eq!(held(&session, "kiro"), vec!["goal new"], "the new command was not retired by the end it raced");
         assert!(record_prompt(&session, "kiro", "goal new"), "and its echo settles it");

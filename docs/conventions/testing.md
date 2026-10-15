@@ -382,6 +382,19 @@ flaky wall-clock assertions in the test.
   files: structure, emitted markup and executing behavior are different
   contracts. Use the cheapest tier that actually proves the claim.
 - Every regression fix starts with a failing test that reproduces it.
+- A test that proves "B waited for A's critical section" observes B INSIDE
+  that section — from the test hook that holds it, after the pause that gives
+  B time to get in — and asserts the observation after the call. It never
+  asserts "B has not finished" once A's call has returned: the return is what
+  releases B, so the assertion races B's wake-up and passes only when the
+  asserting thread happens to run first. Reason: board #386 —
+  `a_command_recorded_during_an_end_is_not_retired_by_it` failed once in a
+  full gate and 21 of 320 runs in a loop of 8 parallel runners under ~2x CPU
+  oversubscription, always at that late assertion; its sibling
+  `an_end_racing_an_echo_waits_and_keeps_the_next_command` had the same shape.
+  Reproduce a suspected race by looping the one test under load
+  (busy-loop processes ≥ 2x the cores, several runners at once) before and
+  after the fix.
 - Rust tests never see the operator's `~/.config/tmux-mobile`. Under
   `cfg(test)` the lib's `config::dirs_next()` is ONE empty temp directory
   per test process (`/tmp/tmm-config-test-<pid>`), so every
