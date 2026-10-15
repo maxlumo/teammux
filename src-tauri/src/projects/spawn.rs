@@ -750,7 +750,10 @@ mod relaunch_tests {
         let r = render_kiro(&d, window_name, &home, &ws, "p", &[]).unwrap();
         // The same step spawn runs next: the v3 engine on the recorded line.
         let cmd = crate::backends::kiro::reconcile_engine_in(&r.cmd, " --agent-engine v3").unwrap_or(r.cmd.clone());
-        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &cmd, spawned_by: "", team: None, agent_def: "", member: "", input_mode: "" }
+        // A solo spawn records the registry def's name beside the (possibly
+        // uniquified) window name, exactly as `spawn` does — so a comparison
+        // against the DEF name would genuinely differ from the window name here.
+        LaunchRecipe { backend: "kiro", env: &r.env, cmd: &cmd, spawned_by: "", team: None, agent_def: def_name, member: "", input_mode: "" }
             .write(&home)
             .unwrap();
         let id = "sess_e58968b6-0000-4000-8000-000000000001".to_string();
