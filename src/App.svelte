@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { activeModal } from './lib/ui/modal.ts';
+  import { createPressDrag } from './lib/ui/press-drag.ts';
   import Settings from './lib/app/Settings.svelte';
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
@@ -32,7 +33,7 @@
   import { applyFontVars } from './lib/app/fonts.svelte.ts';
   import { normalizeUiZoom, stepUiZoom, UI_ZOOM_DEFAULT } from './lib/app/ui-zoom.ts';
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
-  import { RAIL_DRAG_THRESHOLD, RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
+  import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
   import { dialOrder, dialTimeoutMs } from './lib/app/dial-order.ts';
@@ -3393,8 +3394,6 @@
    *  drag start. Snapshotted because the carried icon moves by `transform`,
    *  which reflows nothing — re-measuring mid-drag could only add jitter. */
   let railDrag = $state(null);
-  let railPress = null;        // pre-threshold bookkeeping; deliberately not reactive
-  let railClickGuard = false;  // a drag must not ALSO switch pages on release
 
   function setRailOrder(next) {
     railOrder = next;
@@ -3402,28 +3401,20 @@
     if (raw) localStorage.setItem(RAIL_ORDER_KEY, raw);
     else localStorage.removeItem(RAIL_ORDER_KEY);
   }
-  function railPointerDown(e, slot) {
-    if (e.button !== 0 || e.pointerType === 'touch') return;
-    // Cleared on every fresh press, so a guard left behind by a drag whose
-    // click never arrived cannot swallow the NEXT click.
-    railClickGuard = false;
-    railPress = { slot, y: e.clientY, el: e.currentTarget };
-    // Captured at once so a fast drag off the 34px button keeps reporting here
-    // instead of to whatever it passes over.
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
-  function railPointerMove(e) {
-    if (!railPress) return;
-    const dy = e.clientY - railPress.y;
-    if (!railDrag) {
-      // A press that moves a few px is a CLICK — mouse jitter must not reorder
-      // the rail, and switching pages is what the icon is for almost always.
-      if (Math.abs(dy) < RAIL_DRAG_THRESHOLD) return;
-      const nav = railPress.el.closest('.rail');
-      if (!nav) return;
-      railDrag = {
-        slot: railPress.slot,
-        dy,
+  // The press, the threshold, the capture, the click guard and the cancel
+  // are the ONE press-drag (ui/press-drag.ts, board #384): mouse and pen
+  // only, since the rail is a column of navigation buttons. What the rail
+  // owns is the geometry: the slot rects snapshotted at drag start and the
+  // insertion index the line is drawn from.
+  const railDrags = createPressDrag({
+    get: () => railDrag,
+    set: (drag) => { railDrag = drag; },
+    begin: (press) => {
+      const nav = press.el.closest('.rail');
+      if (!nav) return null;
+      return {
+        slot: press.slot,
+        dy: 0,
         navTop: nav.getBoundingClientRect().top,
         rects: [...nav.querySelectorAll('[data-rail-slot]')].map((el) => {
           const r = el.getBoundingClientRect();
@@ -3431,27 +3422,21 @@
         }),
         idx: 0,
       };
-    }
-    railDrag.dy = dy;
-    railDrag.idx = railDropIndex(railDrag.rects, e.clientY);
-  }
-  function railPointerUp() {
-    if (railDrag) {
-      // Committed with the SAME index the insertion line was drawn from, so
-      // the icon can only land where the line said it would.
-      setRailOrder(railDropAt(railOrder, railDrag.slot, railDrag.rects, railDrag.idx));
-      railClickGuard = true;
-    }
-    railPress = null;
-    railDrag = null;
-  }
+    },
+    track: (_drag, e, { dy }) => {
+      railDrag.dy = dy;
+      railDrag.idx = railDropIndex(railDrag.rects, e.clientY);
+    },
+    // Committed with the SAME index the insertion line was drawn from, so
+    // the icon can only land where the line said it would.
+    commit: () => setRailOrder(railDropAt(railOrder, railDrag.slot, railDrag.rects, railDrag.idx)),
+  });
+  const railPointerDown = (e, slot) => railDrags.down(e, { slot });
+  const railPointerMove = (e) => railDrags.move(e);
+  const railPointerUp = () => railDrags.up();
   /** Abandon a drag without reordering — and still swallow the click, because
    *  the pointer travelled: the user was dragging, not picking a page. */
-  function railCancelDrag() {
-    if (railDrag) railClickGuard = true;
-    railPress = null;
-    railDrag = null;
-  }
+  const railCancelDrag = () => railDrags.cancel();
   // A second click on the ACTIVE tab is not nothing: the page gets a
   // "reselect" — the Hub expands its collapsed project sidebar (owner,
   // 2026-09-14: "左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏"; board
@@ -3494,7 +3479,7 @@
     ((storageHeld ? null : view.pageReselect[page]) ?? toggleShellSide)();
   }
   function railActivate(slot) {
-    if (railClickGuard) { railClickGuard = false; return; }
+    if (railDrags.consumeClick()) return;
     if (slot === 'prefs') togglePrefs();
     else if (slot === page) { ((storageHeld ? null : view.pageReselect[slot]) ?? shellReselect[slot])?.(); return; }
     else switchTab(slot);
@@ -3506,15 +3491,7 @@
   // the release and a carried icon would be stranded on screen.
   $effect(() => {
     if (!railDrag) return;
-    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); railCancelDrag(); } };
-    window.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', railCancelDrag);
-    window.addEventListener('pointerup', railPointerUp, true);
-    return () => {
-      window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', railCancelDrag);
-      window.removeEventListener('pointerup', railPointerUp, true);
-    };
+    return railDrags.listen();
   });
 
   // Swipe left/right to switch tabs with slide animation

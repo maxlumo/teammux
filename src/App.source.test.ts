@@ -201,18 +201,19 @@ test('every page icon is draggable and the brand is not', () => {
 test('a plain click still switches pages; a drag never does', () => {
   // The whole risk of putting a gesture on a navigation button: the press that
   // was meant to switch pages must still switch pages.
-  assert.match(source, /if \(Math\.abs\(dy\) < RAIL_DRAG_THRESHOLD\) return;/u,
-    'the drag only begins after the threshold, so jitter on a click is not a reorder');
-  assert.match(source, /function railActivate\(slot\) \{\s*if \(railClickGuard\) \{ railClickGuard = false; return; \}/u,
+  // Since #384 the press is the ONE press-drag (ui/press-drag.ts): the
+  // threshold, the capture at pointerdown, the guard armed by a committed AND
+  // an abandoned drag and cleared by every fresh press are executed in
+  // ui/press-drag.test.ts. Here: the rail uses it, re-implements none of it,
+  // stays mouse/pen only, and swallows the click that follows a drag.
+  assert.match(source, /import \{ createPressDrag \} from '\.\/lib\/ui\/press-drag\.ts';/u);
+  const rails = source.match(/const railDrags = createPressDrag\(\{[\s\S]*?\n  \}\);/u)?.[0] ?? '';
+  assert.ok(rails, 'the rail\'s drag is the shared one');
+  assert.doesNotMatch(rails, /touch: true/u, 'a column of navigation buttons: mouse and pen only');
+  assert.doesNotMatch(source, /RAIL_DRAG_THRESHOLD|setPointerCapture|railClickGuard|railPress\b/u, 'no second press mechanism in App');
+  assert.match(source, /function railActivate\(slot\) \{\s*if \(railDrags\.consumeClick\(\)\) return;/u,
     'the click that follows a drag is swallowed');
-  assert.match(source, /function railPointerUp\(\)[\s\S]*?railClickGuard = true;/u, 'a committed drag arms the guard');
-  assert.match(source, /function railCancelDrag\(\)[\s\S]*?if \(railDrag\) railClickGuard = true;/u,
-    'an ABANDONED drag arms it too — the pointer travelled, so it was not a pick');
-  assert.match(source, /railClickGuard = false;\s*railPress = \{ slot/u,
-    'every fresh press clears the guard, so a stale one cannot swallow the next click');
-  // Capture at pointerdown: a fast drag leaving the 34px button must keep
-  // reporting to the rail rather than to whatever it passes over.
-  assert.match(source, /setPointerCapture\(e\.pointerId\)/u);
+  assert.match(source, /const railCancelDrag = \(\) => railDrags\.cancel\(\);/u);
 });
 
 test('a drag shows what moves and where it lands, and can be abandoned', () => {
@@ -227,10 +228,10 @@ test('a drag shows what moves and where it lands, and can be abandoned', () => {
   assert.match(style, /\.rail\.reordering \.rail-btn:not\(\.dragging\):hover/u,
     'hover is suppressed mid-drag — under the cursor it reads as a second selection');
   // Escape / resize / a lost capture all end the drag: a stranded carried icon
-  // with no release is the worst failure this gesture has.
-  assert.match(source, /if \(e\.key === 'Escape'\) \{ e\.preventDefault\(\); railCancelDrag\(\); \}/u);
-  assert.match(source, /window\.addEventListener\('resize', railCancelDrag\)/u);
-  assert.match(source, /window\.addEventListener\('pointerup', railPointerUp, true\)/u);
+  // with no release is the worst failure this gesture has. The listeners are
+  // the shared drag's (`listen`, executed in ui/press-drag.test.ts), live
+  // exactly while a drag is.
+  assert.match(source, /if \(!railDrag\) return;\s*return railDrags\.listen\(\);/u);
 });
 
 test('the order persists, and the DEFAULT order stores nothing', () => {

@@ -24,7 +24,8 @@
   import { SHORTCUTS, SHORTCUT_GROUPS, isCharacterInput, shortcutFromEvent, shortcutLabel, type ShortcutAction, type ShortcutDef, type ShortcutHost } from './shortcuts.ts';
   import { shortcuts } from './shortcuts.svelte.ts';
   import { moveMs } from '../ui/motion.ts';
-  import { RAIL_DRAG_THRESHOLD, listDropAt, railDropIndex, railDropOffset } from './nav-order.ts';
+  import { listDropAt, railDropIndex, railDropOffset } from './nav-order.ts';
+  import { createPressDrag } from '../ui/press-drag.ts';
   import AgentsPage from '../hub/AgentsPage.svelte';
   import ServerScope from './ServerScope.svelte';
 
@@ -368,52 +369,47 @@
   // a switch command, and on touch a whole-row vertical drag would fight the
   // page's scroll — the grip opts out of scrolling with `touch-action: none`.
   let addrDrag = $state<{ address: string; dy: number; idx: number; listTop: number; rects: { slot: string; top: number; bottom: number }[] } | null>(null);
-  let addrPress: { address: string; y: number; el: HTMLElement } | null = null; // pre-threshold bookkeeping; deliberately not reactive
 
   function removeAddress(address: string) {
     if (pendingAddress || commands.address.pending) return;
     onAddressesChange(addresses.filter((a) => a !== address));
   }
 
-  function addrPointerDown(e: PointerEvent, address: string) {
-    if (e.button !== 0 || pendingAddress || commands.address.pending) return;
-    addrPress = { address, y: e.clientY, el: e.currentTarget as HTMLElement };
-    // Captured at once so a fast drag off the small grip keeps reporting here
-    // instead of to whatever it passes over.
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-  function addrPointerMove(e: PointerEvent) {
-    if (!addrPress) return;
-    const dy = e.clientY - addrPress.y;
-    if (!addrDrag) {
-      if (Math.abs(dy) < RAIL_DRAG_THRESHOLD) return;
-      const list = addrPress.el.closest('.address-list');
-      if (!list) return;
-      addrDrag = {
-        address: addrPress.address, dy, idx: 0,
+  // The press, the threshold, the capture and the cancel are the ONE
+  // press-drag (ui/press-drag.ts, board #384). A finger may start it: the
+  // grip opts out of scrolling. The list owns the geometry: the row rects
+  // snapshotted at drag start and the insertion index the line is drawn from.
+  const addrDrags = createPressDrag<{ address: string }, NonNullable<typeof addrDrag>>({
+    get: () => addrDrag,
+    set: (drag) => { addrDrag = drag; },
+    touch: true,
+    begin: (press) => {
+      const list = press.el.closest('.address-list');
+      if (!list) return null;
+      return {
+        address: press.address, dy: 0, idx: 0,
         listTop: list.getBoundingClientRect().top,
         rects: [...list.querySelectorAll('[data-addr-row]')].map((el) => {
           const r = el.getBoundingClientRect();
           return { slot: (el as HTMLElement).dataset.addrRow!, top: r.top, bottom: r.bottom };
         }),
       };
-    }
-    addrDrag.dy = dy;
-    addrDrag.idx = railDropIndex(addrDrag.rects, e.clientY);
+    },
+    track: (_drag, e, { dy }) => {
+      addrDrag!.dy = dy;
+      addrDrag!.idx = railDropIndex(addrDrag!.rects, e.clientY);
+    },
+    // Committed with the SAME index the insertion line was drawn from, so
+    // the row can only land where the line said it would.
+    commit: () => { if (addrDrag) onAddressesChange(listDropAt(addresses, addrDrag.address, addrDrag.rects, addrDrag.idx)); },
+  });
+  function addrPointerDown(e: PointerEvent, address: string) {
+    if (e.button !== 0 || pendingAddress || commands.address.pending) return;
+    addrDrags.down(e, { address });
   }
-  function addrPointerUp() {
-    if (addrDrag) {
-      // Committed with the SAME index the insertion line was drawn from, so
-      // the row can only land where the line said it would.
-      onAddressesChange(listDropAt(addresses, addrDrag.address, addrDrag.rects, addrDrag.idx));
-    }
-    addrPress = null;
-    addrDrag = null;
-  }
-  function addrCancelDrag() {
-    addrPress = null;
-    addrDrag = null;
-  }
+  const addrPointerMove = (e: PointerEvent) => addrDrags.move(e);
+  const addrPointerUp = () => addrDrags.up();
+  const addrCancelDrag = () => addrDrags.cancel();
   /** The keyboard form of the same reorder: one step per arrow, committed at
    *  once — there is no drag in flight to cancel. */
   function addrGripKey(e: KeyboardEvent, address: string) {
@@ -433,15 +429,7 @@
   // would be stranded on screen.
   $effect(() => {
     if (!addrDrag) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); addrCancelDrag(); } };
-    window.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', addrCancelDrag);
-    window.addEventListener('pointerup', addrPointerUp, true);
-    return () => {
-      window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', addrCancelDrag);
-      window.removeEventListener('pointerup', addrPointerUp, true);
-    };
+    return addrDrags.listen();
   });
   /** The embedded AgentsPage's own back chain, and whether it is showing an
    *  editor (which brings its own page head). */

@@ -134,7 +134,15 @@ test('failover addresses are removable and drag-reorderable through ONE write pa
   // The drag is the rail's idiom, not a second dialect: the shared threshold
   // and drop geometry come from nav-order.ts, the carried row moves by
   // transform, and the commit animates with the shared flip tempo.
-  assert.match(source, /import \{ RAIL_DRAG_THRESHOLD, listDropAt, railDropIndex, railDropOffset \} from '\.\/nav-order\.ts'/u);
+  // Since #384 the press itself (threshold, capture, cancel) is the ONE
+  // press-drag, executed in ui/press-drag.test.ts; the list keeps the drop
+  // geometry, and a finger may start it because the grip opts out of
+  // scrolling.
+  assert.match(source, /import \{ listDropAt, railDropIndex, railDropOffset \} from '\.\/nav-order\.ts'/u);
+  assert.match(source, /import \{ createPressDrag \} from '\.\.\/ui\/press-drag\.ts'/u);
+  assert.match(source, /const addrDrags = createPressDrag<[\s\S]*?>\(\{[\s\S]*?touch: true,/u, 'a finger may start it on the grip');
+  assert.doesNotMatch(source, /RAIL_DRAG_THRESHOLD|setPointerCapture|addEventListener\('pointerup'/u, 'no second press mechanism here');
+  assert.match(source, /if \(!addrDrag\) return;\s*return addrDrags\.listen\(\);/u, 'Escape, a resize and a lost capture end the drag');
   assert.match(source, /as address \(address\)/u, 'a keyed each — flip needs stable identity');
   assert.match(source, /animate:flip=\{\{ duration: moveMs\(\) \}\}/u);
   // The grip, not the row, is the handle: the row is already a switch command,
