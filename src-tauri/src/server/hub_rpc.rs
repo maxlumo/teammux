@@ -961,16 +961,15 @@ fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend>
 /// slot from the declaration; a window younger than the capture loop's
 /// 120 s rule may not be in it yet, so it falls back to a fresh spawn — a
 /// new conversation instead of a resumed one, still better than an agent
-/// that does not come back. True when it resumed; `Err` is the spawn's own
-/// error, which the caller reports as `restart failed: …`.
+/// that does not come back. That fallback is resolved from the window's own
+/// recipe (`spawn::respawn`), not from a registry lookup of its name: a
+/// fork, a uniquified teammate or a team member is not in the registry under
+/// its window name (board #389). True when it resumed; `Err` is the spawn's
+/// own error, which the caller reports as `restart failed: …`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str) -> Result<bool, String> {
     let mut resumed = false;
-    // A joined agent (board #382: a team in its recipe, no member) stays in
-    // its team when the fallback below spawns it fresh.
-    let mut joined = None;
     if let Ok(Some(project)) = crate::projects::project_for_session(session) {
-        joined = crate::projects::joined_team(Some(&project.path), agent);
         // Bring the agent's materials up to date with the CURRENT
         // definition + app-wide AGENTS.md first: the recipe replay is
         // verbatim, so whatever is on disk now is what the agent will
@@ -985,9 +984,7 @@ fn start_agent(session: &str, agent: &str) -> Result<bool, String> {
         resumed = crate::projects::up_agent(&project.id, agent).unwrap_or(false) && window_of_agent(session, agent).is_some();
     }
     if !resumed {
-        crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest {
-            session, agent, brief: "", by: "", team: joined, resume: true, ..Default::default()
-        })?;
+        crate::projects::spawn::respawn(session, agent)?;
     }
     Ok(resumed)
 }
@@ -4996,5 +4993,54 @@ mod tests {
             let err = fork_as(&json!({ "as": bad.clone() })).unwrap_err();
             assert!(matches!(&err, RpcError::InvalidParams(m) if m.contains("as must be a non-empty agent name")), "{bad}: {err:?}");
         }
+    }
+
+    /// Board #389, end to end on a real (isolated) tmux: restart an agent that is
+    /// not the first of its kind within seconds of creating it. The slot is not in
+    /// the declaration yet (the capture loop settles one after 120 s), so
+    /// `start_agent` falls back to a fresh launch — which asked the registry for the
+    /// WINDOW name and answered "no agent named 'rfe-2' in the registry", after the
+    /// restart had already killed the window. It now starts what the recipe says:
+    /// the same window, the same home, the same definition and spawner.
+    #[test]
+    fn a_restart_before_the_slot_settles_brings_the_agent_back_in_its_own_home() {
+        crate::projects::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("restart-fallback");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        crate::projects::adopt(&session, Some("restart-fallback-test")).expect("adopt project");
+        crate::projects::registry_save(&serde_json::json!({
+            "name": "rfe", "backend": "kiro", "model": "", "effort": "", "input_mode": "steer",
+            "system": "Restart fallback persona.", "skills": "[]", "mcp": "[]"
+        }))
+        .unwrap();
+        let spawn = || crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest { session: &session, agent: "rfe", by: "lead", ..Default::default() });
+        assert_eq!(spawn().unwrap()["window_name"], "rfe");
+        // The name is taken, as a fork's always is: the window is "rfe-2", no registry name.
+        assert_eq!(spawn().unwrap()["window_name"], "rfe-2");
+        let home = ws.join(".tmm/agents/rfe-2");
+        let recipe = || -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap() };
+        assert_eq!(recipe()["agent_def"], "rfe");
+
+        // What `hub_agent_restart` does: kill the window, then start the agent again.
+        let window = window_of_agent(&session, "rfe-2").expect("the agent is running");
+        crate::tmux::kill_window(&format!("{session}:{window}")).unwrap();
+        assert!(window_of_agent(&session, "rfe-2").is_none());
+        let resumed = start_agent(&session, "rfe-2").expect("the restart brings it back instead of losing it");
+        assert!(!resumed, "the slot was not settled, so this is the fresh-launch fallback");
+        assert!(window_of_agent(&session, "rfe-2").is_some(), "and the agent is running again, in its own window");
+        let again = recipe();
+        assert_eq!((again["agent_def"].as_str(), again["spawned_by"].as_str()), (Some("rfe"), Some("lead")), "its definition and spawner are what they were: {again}");
+        assert!(!ws.join(".tmm/agents/rfe-3").exists() && !ws.join(".tmm/agents/rfe-2-2").exists(), "no second home");
+        crate::projects::registry_delete("rfe").ok();
     }
 }

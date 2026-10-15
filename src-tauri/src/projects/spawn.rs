@@ -404,6 +404,74 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
     materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member).is_ok()
 }
 
+/// Start a managed window again from scratch, in its own home (the restart's
+/// fallback when the slot cannot be restored: a window younger than the capture
+/// loop's settle rule is not in the declaration yet, board #389). WHAT it
+/// starts comes from the window's own recipe and nowhere else — the same
+/// provenance `refresh_agent` replays and `fork` copies (`effective_def`) — and
+/// never from a registry lookup of the WINDOW name, which names a registry
+/// definition only for the first agent of its kind: `kiro-2`, a fork, a
+/// uniquified teammate and a team member are not in the registry under that
+/// name, and asking it lost the agent a restart had just killed.
+pub fn respawn(session: &str, window_name: &str) -> Result<Value, String> {
+    let project = super::project_for_session(session)?
+        .ok_or_else(|| format!("no project for session '{session}'"))?;
+    let plan = plan_respawn(&project.path, window_name)?;
+    spawn(&plan.request(session))
+}
+
+/// What a respawn launches, decided before any window opens.
+struct Respawn {
+    /// The window and home it starts in: its own.
+    name: String,
+    /// Who started it, kept (a restart is not a new spawner).
+    by: String,
+    team: Option<String>,
+    member: String,
+    from_member: String,
+    /// The registry definition to launch by name, for a solo agent (so the recipe
+    /// keeps `agent_def` and a later restart follows the registry again).
+    agent: String,
+    /// The definition handed in, for a team member or a fork of one.
+    def: Option<RegAgent>,
+}
+
+impl Respawn {
+    fn request<'a>(&'a self, session: &'a str) -> SpawnRequest<'a> {
+        SpawnRequest {
+            session, agent: &self.agent, by: &self.by, def: self.def.clone(), window_name: Some(self.name.clone()),
+            team: self.team.clone(), member: &self.member, from_member: &self.from_member, resume: true, ..Default::default()
+        }
+    }
+}
+
+/// `respawn`'s decision: the window's recipe says what it is. A window with no
+/// readable recipe has nothing to follow and keeps the plain registry lookup by
+/// its name (what a restart did before provenance existed); one whose
+/// definition is gone is refused by name, its home kept.
+fn plan_respawn(workspace: &str, window_name: &str) -> Result<Respawn, String> {
+    let Some(p) = recipe_provenance(workspace, window_name) else {
+        return Ok(Respawn { name: window_name.to_string(), by: String::new(), team: None, member: String::new(), from_member: String::new(), agent: window_name.to_string(), def: None });
+    };
+    let def = effective_def(workspace, window_name, &p).ok_or_else(|| {
+        format!("the definition behind '{window_name}' no longer exists (its agent or team was deleted) — it cannot be started again; its home is kept")
+    })?;
+    // A team member (or a fork of one) is started from the definition its team
+    // gives it; every other agent by its registry definition's NAME, which is
+    // the recipe's `agent_def`, or the window's own name for a pre-#113 recipe.
+    let by_team = !p.member.is_empty() || !p.from_member.is_empty();
+    let agent = if by_team { String::new() } else if p.agent_def.is_empty() { window_name.to_string() } else { p.agent_def.clone() };
+    Ok(Respawn {
+        name: window_name.to_string(),
+        by: p.by,
+        team: (!p.team.is_empty()).then_some(p.team),
+        member: p.member,
+        from_member: p.from_member,
+        agent,
+        def: by_team.then_some(def),
+    })
+}
+
 /// Where a managed window's definition comes from: the provenance its launch
 /// recipe records (board #113).
 struct Provenance {
@@ -3861,5 +3929,98 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let calls: Vec<&str> = production.lines().filter(|l| l.contains("list_panes(") && !l.trim_start().starts_with("//")).collect();
         assert_eq!(calls.len(), 1, "one read of the windows: {calls:?}");
         assert!(calls[0].contains("panes_answer(tmux::list_panes(session))"), "{calls:?}");
+    }
+
+    /// Board #389 (validator, on #383's SHIP): restarting an agent within ~2 min
+    /// of its creation FAILED with "no agent named 'kiro-2' in the registry" and the
+    /// agent, whose window the restart had just killed, was gone. The slot is not
+    /// in the declaration until the capture loop's 120 s settle rule has passed, so
+    /// `up_agent` cannot restore it and the restart falls back to a fresh spawn —
+    /// which looked the WINDOW name up in the registry. Only the first agent of a
+    /// kind is named like its definition: a fork, a uniquified hire and a team
+    /// member never are. The fallback now starts what the window's own recipe says.
+    #[test]
+    fn a_restart_before_the_slot_settles_starts_what_the_recipe_says_not_a_registry_name() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-respawn-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        fk_save("rpsolo", "Respawn persona.", "steer");
+        let def = super::super::registry_get("rpsolo").unwrap().unwrap();
+
+        // A fork of a solo agent: window "rpsolo-2", definition "rpsolo", started by "lead".
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rpsolo-2")), &def, "rpsolo-2", "proj", &ws_str, "", "lead", None, "rpsolo", "", "").unwrap();
+        // What the fallback used to ask for: the window name, as a registry name.
+        let old = spawn(&SpawnRequest { session: "proj", agent: "rpsolo-2", resume: true, ..Default::default() }).unwrap_err();
+        assert!(old.contains("no agent named 'rpsolo-2' in the registry"), "the failure the validator saw: {old}");
+        let plan = plan_respawn(&ws_str, "rpsolo-2").unwrap();
+        let req = plan.request("proj");
+        assert_eq!((req.agent, req.window_name.as_deref(), req.by, req.resume), ("rpsolo", Some("rpsolo-2"), "lead", true), "its own definition by name, its own window, its own spawner");
+        assert!(req.def.is_none() && req.team.is_none() && req.member.is_empty() && req.from_member.is_empty(), "a solo agent stays a registry launch");
+
+        // A solo agent that JOINED a team keeps it.
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rpjoin")), &def, "rpjoin", "proj", &ws_str, "", "", Some("rpteam"), "rpsolo", "", "").unwrap();
+        let plan = plan_respawn(&ws_str, "rpjoin").unwrap();
+        assert_eq!((plan.agent.as_str(), plan.team.as_deref(), plan.member.as_str()), ("rpsolo", Some("rpteam"), ""));
+
+        // A team member spawned as "dev-2": the team's definition for it, the member's slot.
+        fk_save("rpbase", "Base.", "steer");
+        super::super::teams_save(&json!({
+            "name": "rpteam",
+            "description": "",
+            "members": r#"[{"name":"dev","base":"rpbase","role":"implement the change"},{"name":"rev","base":"rpbase","role":"review the diff"}]"#
+        }))
+        .unwrap();
+        let team = super::super::team_get("rpteam").unwrap().unwrap();
+        let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("dev-2".into(), "implement the change".into(), "rpteam".into()), ("rev".into(), "review the diff".into(), "rpteam".into())];
+        let base = super::super::registry_get("rpbase").unwrap();
+        for (f, w) in flat.iter().zip(["dev-2", "rev"]) {
+            let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
+            materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rpteam"), "", f.member.name.trim(), "").unwrap();
+        }
+        let plan = plan_respawn(&ws_str, "dev-2").unwrap();
+        let req = plan.request("proj");
+        assert_eq!((req.team.as_deref(), req.member, req.from_member, req.window_name.as_deref(), req.by, req.resume), (Some("rpteam"), "dev", "", Some("dev-2"), "lead", true));
+        let d = req.def.expect("a team member is started from its team's definition");
+        assert!(d.system.contains("Your role: implement the change"), "the role is applied: {}", d.system);
+
+        // A fork of that member: a joined agent in the team ROOT, the member's definition, no slot.
+        let fork_def = fork_member_def("rpteam", "dev", "rpteam-fork").unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dev-3")), &fork_def, "dev-3", "proj", &ws_str, "", "lead", Some("rpteam"), "", "", "rpteam/dev").unwrap();
+        let plan = plan_respawn(&ws_str, "dev-3").unwrap();
+        let req = plan.request("proj");
+        assert_eq!((req.team.as_deref(), req.member, req.from_member, req.window_name.as_deref()), (Some("rpteam"), "", "rpteam/dev", Some("dev-3")));
+        assert!(req.def.is_some() && req.agent.is_empty(), "a fork of a member is started from the member's definition, not by a registry name");
+
+        // A pre-#113 recipe names no definition: the window name IS the definition's. No recipe at
+        // all has nothing to follow: the same plain lookup as before.
+        write_recipe(&ws_str, "rpsolo", r#"{"backend":"kiro","cmd":"x"}"#);
+        assert_eq!(plan_respawn(&ws_str, "rpsolo").unwrap().agent, "rpsolo");
+        let bare = plan_respawn(&ws_str, "stranger").unwrap();
+        assert_eq!((bare.agent.as_str(), bare.def.is_none(), bare.name.as_str()), ("stranger", true, "stranger"));
+
+        // The definition behind it is gone: refused by name, the home kept, never a different agent.
+        super::super::registry_delete("rpsolo").unwrap();
+        let gone = plan_respawn(&ws_str, "rpsolo-2").err().expect("a deleted definition is not started again");
+        assert!(gone.contains("'rpsolo-2'") && gone.contains("no longer exists"), "{gone}");
+        assert!(agent_home(&ws_str, "rpsolo-2").join("launch.json").exists(), "its home is kept");
+
+        super::super::registry_delete("rpbase").ok();
+        super::super::teams_delete("rpteam").ok();
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// The restart's fallback is ONE route: `start_agent` hands the window to
+    /// `spawn::respawn`, and nothing else builds a resuming request — in
+    /// particular nothing that names a registry definition after a window.
+    #[test]
+    fn the_restart_fallback_has_one_route_through_the_recipe() {
+        let spawn_src = include_str!("spawn.rs");
+        let production = &spawn_src[..spawn_src.find("#[cfg(test)]").expect("a test module")];
+        assert_eq!(production.matches("resume: true").count(), 1, "one place builds a resuming request (Respawn::request)");
+        let hub_src = include_str!("../server/hub_rpc.rs");
+        let hub = &hub_src[..hub_src.find("#[cfg(test)]").expect("a test module")];
+        assert!(hub.contains("crate::projects::spawn::respawn(session, agent)?"), "start_agent's fallback is respawn");
+        assert!(!hub.contains("resume: true"), "the server builds no resuming request of its own");
     }
 }
