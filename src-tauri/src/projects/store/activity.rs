@@ -223,6 +223,34 @@ impl Store {
         Ok(seen)
     }
 
+    /// A turn end recorded from the SCREEN (board #362 c, review P1-E on
+    /// f998b599) and, when the paint has a global identity, its acceptance
+    /// mark, in ONE transaction: the `notif failed` row (its `tool` the
+    /// detail), then `meta` `key` = `"<that row's id> <sig>"`. Both or
+    /// neither: a mark with no end would make a restart skip a turn that
+    /// never ended, and an end with no mark would let the same paint end a
+    /// later turn. The end's row id. Real hook telemetry stays fail-soft and
+    /// outside this.
+    pub fn insert_missed_end(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept: Option<(&str, &str)>) -> Result<i64, String> {
+        let tx = self.conn.transaction().map_err(|e| format!("missed end transaction: {e}"))?;
+        tx.execute(
+            "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
+             VALUES (?1, 0, ?2, ?3, 'notif', 'failed', ?4, '', '', '', NULL)",
+            rusqlite::params![session, window, ts_ms as i64, detail],
+        )
+        .map_err(|e| format!("insert missed end: {e}"))?;
+        let row = tx.last_insert_rowid();
+        if let Some((key, sig)) = accept {
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+                rusqlite::params![key, format!("{row} {sig}")],
+            )
+            .map_err(|e| format!("accept missed end: {e}"))?;
+        }
+        tx.commit().map_err(|e| format!("commit missed end: {e}"))?;
+        Ok(row)
+    }
+
     /// The newest persisted TURN FACT of each kind, per window (board #249):
     /// the latest `prompt`, `tool` call, `permission_required`/`input_required`
     /// ask and turn end (`completed`/`failed`/`interrupted`). Deciding whether

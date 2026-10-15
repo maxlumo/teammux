@@ -96,6 +96,13 @@ struct Rec {
     /// paint is seen on a turn that had already ended (an interrupt, say), the
     /// detail is put on that end and no second end is written. (0, "") = none.
     person_end: (u64, String),
+    /// The persisted activity row id of the current end (`end`), 0 when it
+    /// has none (its INSERT failed, or a test that does not persist). The
+    /// one identity of an end that a restart keeps (board #362 review P1-C
+    /// on f998b599: two ends often share a second, and `end_seq` is an
+    /// in-process counter a restart rebuilds), so an accepted paint is bound
+    /// to it.
+    end_row: i64,
     /// `end_seq` of an end recorded from the screen (`record_missed_end`),
     /// not reported by the CLI: never evidence that the model answered
     /// (board #362 review P2-1). 0 = none.
@@ -330,13 +337,18 @@ fn push_full_with(session: &str, window: &str, ts_ms: u64, kind: &str, text: Str
 /// Returns the row id the event was written as, when it was written.
 fn push(session: &str, ev: ActivityEvent) -> Option<i64> {
     let id = persist(session, &ev);
+    ring_push(session, ev);
+    id
+}
+
+/// The in-memory half of `push`, for a row already persisted by its caller.
+fn ring_push(session: &str, ev: ActivityEvent) {
     let mut map = events().lock().unwrap();
     let q = map.entry(session.to_string()).or_default();
     q.push_back(ev);
     while q.len() > EVENTS_CAP {
         q.pop_front();
     }
-    id
 }
 
 /// Unit tests exercise the ring and the derive rules; the durable log is tested
@@ -644,6 +656,7 @@ fn replay_turn_facts(r: &mut Rec, facts: &super::store::TurnFacts) {
         let kind = if f.text == "failed" { "failed" } else { "completed" };
         r.end = Some((kind.to_string(), f.ts / 1000));
         r.end_seq = recovered_arrival(f.id);
+        r.end_row = f.id;
         // An end the hooks missed carries its detail in the row's `tool`
         // column (`record_missed_end`); a hook's own end has none.
         if f.text == "failed" && !f.tool.is_empty() {
@@ -758,9 +771,14 @@ fn turn_fact_held(
     #[cfg(test)]
     std::thread::sleep(std::time::Duration::from_micros(30));
     // The order comes from the one counter, after the insert, under the lock.
-    let _ = row;
     let seq = order_of();
-    with_rec(session, window, |r| apply(r, ts, seq));
+    with_rec(session, window, |r| {
+        apply(r, ts, seq);
+        // An end fact takes this row as its durable identity (`end_row`).
+        if r.end_seq == seq {
+            r.end_row = row.unwrap_or(0);
+        }
+    });
     true
 }
 
@@ -1563,12 +1581,19 @@ fn paint_key(session: &str, window: &str) -> String {
     format!("person_paint:{session}:{window}")
 }
 
-/// The paint `window` last accepted and the second its turn ended at, or
-/// `None`. One per window: a newer paint is lower on the screen, so an older
-/// one is never the newest again. `Err` = unknown.
-pub fn accepted_paint(session: &str, window: &str) -> Result<Option<(u64, String)>, String> {
-    let v = super::with_store(|s| s.meta_get(&paint_key(session, window)))?;
-    Ok(v.and_then(|v| v.split_once(' ').and_then(|(at, sig)| Some((at.parse().ok()?, sig.to_string())))))
+/// The paint `window` last accepted and the persisted row id of the end it
+/// belongs to, or `None` when there is none. One record per window, which
+/// ASSUMES an older paint does not come back to be the newest on the screen
+/// (a CLI paints downwards; not proven for every TUI). `Err` = unknown,
+/// including a value that exists but does not parse (review P2 on f998b599:
+/// it is not "absent", which would accept the paint again).
+pub fn accepted_paint(session: &str, window: &str) -> Result<Option<(i64, String)>, String> {
+    let Some(v) = super::with_store(|s| s.meta_get(&paint_key(session, window)))? else { return Ok(None) };
+    v.split_once(' ')
+        .and_then(|(row, sig)| Some((row.parse::<i64>().ok().filter(|r| *r > 0)?, sig.to_string())))
+        .filter(|(_, sig)| !sig.is_empty())
+        .map(Some)
+        .ok_or_else(|| format!("unreadable accepted paint {v:?}"))
 }
 
 /// The turn end the HOOKS missed, recorded from the screen (board #362 c,
@@ -1592,12 +1617,17 @@ pub fn accepted_paint(session: &str, window: &str) -> Result<Option<(u64, String
 /// with no lock held.
 ///
 /// Once is the observation's `Identity` (review P1-C, P1-D). A `Paint` is
-/// accepted durably for the turn it was first seen on: before the end row or
-/// the attachment, `accepted_paint` records `<that turn's end second>
-/// <sig>`, and a later sighting of the same paint is `Recorded` unless that
-/// very end is still the window's current one, when it just puts the detail
-/// back (`Attached`, a restart having dropped it from memory). An
-/// `Incident` is deduped by the caller, per incident. A record that cannot
+/// accepted durably for the EXACT end it belongs to, named by that end's
+/// persisted activity row id (`accepted_paint`: `<end row id> <sig>`), not
+/// its second (review P1-C residual: ends share seconds). An end this
+/// paint ENDS is written with its mark in one store transaction
+/// (`Store::insert_missed_end`, review P1-E), and memory, the command rows
+/// and the flush follow only its success; an end it is ATTACHED to is the
+/// turn's own existing row, and the mark is written after it, naming it. A
+/// later sighting of the same paint is `Recorded` unless that very end is
+/// still the window's current one, when it just puts the detail back
+/// (`Attached`, a restart having dropped it from memory). An `Incident` is
+/// deduped by the caller, per incident. A record that cannot
 /// be read or written is `Unknown` and changes nothing.
 ///
 /// It carries NO reply: nothing is posted, nothing is returned as the
@@ -1620,7 +1650,6 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
         return Missed::Stale;
     }
     let open = matches!(derive_from(&held, 0, now()).state.as_str(), "running" | "waiting");
-    let end_at = held.end.as_ref().map(|(_, t)| *t);
     let unknown = |what: &str, e: String| {
         eprintln!("projects: '{window}' in {session}: the paint record could not be {what} ({e}); nothing recorded, asked again next tick");
         Missed::Unknown
@@ -1628,8 +1657,12 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
     if let Identity::Paint(sig) = identity {
         match accepted_paint(session, window) {
             Err(e) => return unknown("read", e),
-            Ok(Some((at, accepted))) if accepted == sig => {
-                if !open && end_at == Some(at) {
+            // Accepted for the EXACT end it belongs to, by that end's row id:
+            // the same end, still current, gets its detail back (a restart
+            // dropped it from memory); any other end, a newer one in the same
+            // second included, is not this paint's (review P1-C).
+            Ok(Some((row, accepted))) if accepted == sig => {
+                if !open && held.end_row == row {
                     with_rec(session, window, |r| r.person_end = (r.end_seq, detail.to_string()));
                     return Missed::Attached;
                 }
@@ -1638,31 +1671,58 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
             Ok(_) => {}
         }
     }
-    let accept = |at: u64| match identity {
-        Identity::Paint(sig) => super::with_store(|s| s.meta_set(&paint_key(session, window), &format!("{at} {sig}"))),
-        Identity::Incident => Ok(()),
-    };
     if !open {
-        let Some(at) = end_at else { return Missed::NoTurn };
-        if let Err(e) = accept(at) {
-            return unknown("written", e);
+        if held.end.is_none() {
+            return Missed::NoTurn;
+        }
+        // Attached to the turn's own, existing end: no second end. The mark
+        // names that end's row; an end with no durable row cannot be named,
+        // so nothing is recorded for a paint.
+        if let Identity::Paint(sig) = identity {
+            if held.end_row == 0 {
+                return unknown("bound", "the end has no persisted row".into());
+            }
+            if let Err(e) = super::with_store(|s| s.meta_set(&paint_key(session, window), &format!("{} {sig}", held.end_row))) {
+                return unknown("written", e);
+            }
         }
         with_rec(session, window, |r| r.person_end = (r.end_seq, detail.to_string()));
         return Missed::Attached;
     }
-    if let Err(e) = accept(ts) {
-        return unknown("written", e);
-    }
+    // Ended: the end row and the acceptance mark in ONE store transaction
+    // (review P1-E); memory, the command rows and the flush only after it.
+    let ts_ms = ts * 1000 + now_ms() % 1000;
+    let key = paint_key(session, window);
+    let accept = match identity {
+        Identity::Paint(sig) => Some((key.as_str(), sig)),
+        Identity::Incident => None,
+    };
+    let row = match super::with_store(|s| s.insert_missed_end(session, window, ts_ms, detail, accept)) {
+        Ok(row) => row,
+        Err(e) => return unknown("written", e),
+    };
+    ring_push(session, ActivityEvent {
+        id: 0,
+        ts: ts_ms,
+        window: window.to_string(),
+        kind: "notif".into(),
+        text: "failed".into(),
+        tool: detail.to_string(),
+        via: String::new(),
+        state: String::new(),
+        deliveries: Vec::new(),
+        requesters: None,
+    });
     let turn_had_prompt = held.prompt.is_some() && held.prompt_seq > held.end_seq;
-    let event = ("notif", "failed".to_string(), detail.to_string(), String::new(), Vec::new());
-    let detail = detail.to_string();
-    turn_fact_held(&order, session, window, ts, |_| false, Some(event), |r, ts, seq| {
+    let seq = order_of();
+    with_rec(session, window, |r| {
         r.end = Some(("failed".to_string(), ts));
         r.end_seq = seq;
+        r.end_row = row;
         r.ask = None; // a finished turn cannot still be asking
-        r.person_end = (seq, detail);
+        r.person_end = (seq, detail.to_string());
         r.missed_end_seq = seq;
-    }, None);
+    });
     // The end's effect on the window's command rows, as a hook end has it.
     end_commands(session, window, turn_had_prompt);
     drop(order);
@@ -3223,6 +3283,102 @@ mod tests {
         assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Recorded);
         assert_eq!(derive(&session, "w1", 0).detail, "", "B's end keeps its own (empty) detail");
         PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #362 review P1-C residual on f998b599: a second is not an end's
+    /// identity. A paint accepted for turn A's end never attaches to a NEWER
+    /// end in the SAME second, before or after a restart, whether it was
+    /// attached to A's hook end or ended A itself; A's own end, still
+    /// current, takes its detail back after a restart.
+    #[test]
+    fn a_paint_is_bound_to_its_exact_end_not_to_a_second() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let x = Identity::Paint("auth_expired|23a04597-c6d8-4439-954f-2216f9c7d687");
+        let t = now();
+        for (what, a_ends) in [("attached to A's hook end", true), ("ended A itself", false)] {
+            let session = format!("p1cr-{}", uuid::Uuid::new_v4());
+            record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:20] lead: @w1 A");
+            if a_ends {
+                record_notification_with(&session, "w1", "completed", t, EndQuality::Said);
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Attached, "{what}");
+            } else {
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Ended, "{what}");
+            }
+            // A's own end, current, re-attaches after a restart.
+            simulate_restart(&session);
+            recovery_mark(&session);
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Attached, "{what}: A's own end");
+            assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
+            // Turn B opens and ends by its hook in the SAME second as A's end.
+            record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:20] lead: @w1 B");
+            record_notification_with(&session, "w1", "completed", t, EndQuality::Said);
+            for when in ["before a restart", "after a restart"] {
+                if when == "after a restart" {
+                    simulate_restart(&session);
+                    recovery_mark(&session);
+                }
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Recorded, "{what}, {when}");
+                let st = derive(&session, "w1", 0);
+                assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""), "{what}, {when}: B's end keeps its own detail");
+            }
+        }
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #362 review P1-E on f998b599: the synthetic end and its
+    /// acceptance mark commit together. The meta table is writable but the
+    /// end's INSERT is refused (a real failed write): Unknown, no mark left
+    /// to swallow later handling, the turn still running and its held line
+    /// not flushed. The other way round, a refused mark leaves no end row
+    /// (the transaction rolled back). After the database recovers and the
+    /// gateway restarts, the turn gets exactly one end.
+    #[test]
+    fn the_missed_end_and_its_mark_commit_together_or_not_at_all() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let x = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
+        for refused in ["activity", "meta"] {
+            let session = format!("p1e-{refused}-{}", uuid::Uuid::new_v4());
+            let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").count();
+            record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic go");
+            record_held(&session, "w1", "[tmm chat 2026-10-15 12:33] human: @critic held", 0, "m1").unwrap();
+            let guard = if refused == "activity" {
+                format!("BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'notif'")
+            } else {
+                format!("BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1'")
+            };
+            crate::projects::with_store(|s| s.exec_test_sql(&format!("CREATE TEMP TRIGGER p1e {guard} BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"))).unwrap();
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{refused} refused");
+            crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER p1e;")).unwrap();
+            assert_eq!(accepted_paint(&session, "w1").unwrap(), None, "{refused} refused: no mark");
+            assert_eq!(ends(), 0, "{refused} refused: no end row");
+            assert_eq!(derive(&session, "w1", 0).state, "running", "{refused} refused: nothing ended in memory");
+            assert_eq!(held_rows(&session, "w1").len(), 1, "{refused} refused: not flushed as a success");
+            simulate_restart(&session);
+            recovery_mark(&session);
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Ended, "{refused}: recovered");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Attached, "{refused}: then its own end");
+            assert_eq!(ends(), 1, "{refused}: exactly one end");
+            assert_eq!(derive(&session, "w1", 0).detail, "auth_expired");
+        }
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #362 review P2 on f998b599: a mark that exists but does not
+    /// parse is UNKNOWN, not absent: nothing is recorded on it.
+    #[test]
+    fn an_unparseable_acceptance_mark_is_unknown_not_absent() {
+        crate::projects::tests::use_test_store();
+        let session = format!("p2p-{}", uuid::Uuid::new_v4());
+        record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic go");
+        let x = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
+        for bad in ["garbage", "0 auth_expired|x", "12 ", "-3 auth_expired|x"] {
+            crate::projects::with_store(|s| s.meta_set(&format!("person_paint:{session}:w1"), bad)).unwrap();
+            assert!(accepted_paint(&session, "w1").is_err(), "{bad:?}");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{bad:?}");
+            assert_eq!(derive(&session, "w1", 0).state, "running", "{bad:?}");
+        }
     }
 
     /// Board #362 review P2 on 4cd26dc9: the paint record is a safety gate,
