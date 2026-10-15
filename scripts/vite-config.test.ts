@@ -92,6 +92,8 @@ test('a lost HMR socket is reconnected, never reloaded; a restarted server reloa
   const handler = afterPing.slice(0, afterPing.indexOf('break;'));
   assert.ok(!/waitForSuccessfulPing\(url\.href\);\s*location\.reload\(\);/u.test(patched), 'the unconditional reload after the ping is gone');
   assert.ok(handler.includes('vite:ws:connect') && handler.includes('transport.connect(') && handler.includes('transport.disconnect()'), handler);
+  assert.match(handler, /if \(restored\) console\.info\("\[vite\] connection restored; the page was not reloaded\."\)/u, 'a restored connection says so and does nothing else');
+  assert.equal((handler.match(/location\.reload\(\)/gu) ?? []).length, 1, 'the one reload left in the handler is the loopback restart’s');
   assert.match(handler, /else if \(\["localhost", "127\.0\.0\.1", "\[::1\]"\]\.includes\(location\.hostname\)\) location\.reload\(\)/u, 'the loopback keeps Vite’s answer to a restart');
   assert.match(handler, /else console\.info\("\[vite\] the dev server restarted; HMR is off until this page is reloaded\."\)/u);
   // The patched client is still a module (esbuild is Vite’s own parser).

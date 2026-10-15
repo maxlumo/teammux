@@ -31,7 +31,11 @@ test('the render tier is ONE process: every *.render.ts suite is collected by re
   // against a 60 s budget. The suites now run in one process behind one
   // warm server; the fixed cost is paid once, outside any test's timer.
   const creators = listed('createServer\\(');
-  assert.deepEqual(creators, ['src/lib/test/ssr.ts'], 'createServer( exists once, in the helper');
+  // The render tier's server is the helper's. The one other creator is not a render
+  // process: scripts/vite-config.test.ts (board #393) runs the dev server's real file
+  // watcher in middleware mode on a scratch root — no port, no socket, no component —
+  // to prove a changed build-output .html is not reported (Vite turns it into a reload).
+  assert.deepEqual(creators, ['scripts/vite-config.test.ts', 'src/lib/test/ssr.ts'], 'createServer( exists once for the render tier, in the helper (plus the watcher test)');
   // rg exits 1 when nothing matches — which is the pass here.
   let strays = '';
   try { strays = execFileSync('rg', ['--files', 'src', 'scripts', '-g', '*.render.test.ts'], { cwd: root, encoding: 'utf8' }).trim(); } catch (e) { if ((e as { status?: number }).status !== 1) throw e; }
