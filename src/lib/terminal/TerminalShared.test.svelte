@@ -11,13 +11,14 @@
   import { createServerStore } from '../app/server-store.ts';
   import { loadServers } from '../app/servers.ts';
 
-  let { target = 'app:0.0' } = $props();
+  // Both start on the same pane; the test can move either.
+  const PANE = 'app:0.0';
   const fleet = createServerFleet({ storage: localStorage });
   const runtime = loadServers(localStorage).map((entry) => fleet.include(entry))[0];
   const serverState = createServerState(createServerStore(localStorage, runtime.id));
   let mounted = $state(false);
   let shown = $state({ page: false, drawer: true });
-  let targets = $state({ page: target, drawer: target });
+  let targets = $state({ page: PANE, drawer: PANE });
   globalThis.__shared = {
     dial: () => runtime.dial(),
     mount() { mounted = true; },
