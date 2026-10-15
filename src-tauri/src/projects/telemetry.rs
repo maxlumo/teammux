@@ -79,13 +79,21 @@ struct Rec {
     ask_seq: u64,
     tool_seq: u64,
     /// `end_seq` of a turn end whose whole reply was the CLI's placeholder
-    /// (board #355): the turn said nothing. Compared with the CURRENT `end_seq`,
-    /// so a later real end simply stops matching — nothing needs to clear it.
-    /// 0 = no such end.
+    /// (board #355): the turn said nothing. Written in the SAME step as that
+    /// end, from the arrival number the end itself took — never read back as
+    /// "the newest end" afterwards, which an interrupt landing in between would
+    /// have inherited (review P1-B). Compared with the CURRENT `end_seq`, so a
+    /// later end of any kind simply stops matching. 0 = no such end.
     empty_end_seq: u64,
-    /// A nudge has already been owed for the current run of empty turns; it is
-    /// forgiven only by a turn that ends with something to say.
-    nudged: bool,
+    /// A nudge was DELIVERED in the current run of empty turns. A scheduled one
+    /// that was cancelled does not count — the allowance is spent by the line
+    /// typed, not by the timer set — and only a turn that ends with something
+    /// to say forgives it.
+    nudge_spent: bool,
+    /// A timer is waiting on this window's nudge: at most one per agent, so the
+    /// number of sleepers is bounded by the number of windows, not by how many
+    /// empty turns come before it fires.
+    nudge_armed: bool,
 }
 
 static NEXT_ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -731,6 +739,19 @@ fn turn_fact_held(
 /// permission/input prompt means the agent is blocked on the human while the
 /// turn stays open.
 pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
+    record_notification_with(session, window, kind, ts, false);
+}
+
+/// `record_notification` for a stop whose reply the caller has already read
+/// (board #355): `empty` = the whole reply was the CLI's placeholder, so the
+/// turn said nothing. How a turn ended is part of THE END'S OWN WRITE — the
+/// mark is the arrival number this very end takes, inside the one critical
+/// section — so it can never land on a different end: a human's interrupt
+/// written between a stop and a separate "and it was empty" step used to
+/// inherit the mark and be nudged for it (review P1-B). A completion that
+/// says something forgives the nudge a run of empty turns had spent.
+pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64, empty: bool) {
+    let completed = kind == "completed";
     let kind_is_ask = matches!(kind, "permission_required" | "input_required");
     // ONE critical section (board #264, orchestrator 11:57): whether the
     // ending turn had a prompt is read, the end written and the window's
@@ -753,6 +774,11 @@ pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
             r.end = Some((kind, ts));
             r.end_seq = seq;
             r.ask = None; // a finished turn cannot still be asking
+            if completed && empty {
+                r.empty_end_seq = seq;
+            } else if completed {
+                r.nudge_spent = false;
+            }
         }
     }, None);
     #[cfg(test)]
@@ -764,44 +790,84 @@ pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
     }
 }
 
-/// How the turn that JUST ended ended (board #355), recorded beside the end
-/// `record_notification` wrote: `empty` = its whole reply was the CLI's
-/// placeholder. A turn that ends with something to say forgives an earlier
-/// nudge, so the next empty turn can be answered once more.
-pub fn record_end_quality(session: &str, window: &str, empty: bool) {
+/// Is the window owed a nudge right now: its newest end is an empty one, the
+/// run's allowance is unspent, and the window is still at rest after it (no
+/// turn started, nothing asked or ended since — `derive_from` is the one
+/// definition of "at rest after that end").
+fn nudge_owed(rec: &Rec) -> bool {
+    !rec.nudge_spent
+        && rec.empty_end_seq != 0
+        && rec.empty_end_seq == rec.end_seq
+        && derive_from(rec, 0, now()).detail == EMPTY_DETAIL
+}
+
+/// Claim the window's ONE nudge timer (board #355): true when an empty end is
+/// owed a nudge and no timer is already waiting for this window. A timer that
+/// is waiting re-reads the window when it wakes, so a second empty end before
+/// it fires needs no second timer — it simply becomes the end that is answered.
+pub fn arm_nudge(session: &str, window: &str) -> bool {
     let mut map = store().lock().unwrap();
-    let rec = map.entry((session.to_string(), window.to_string())).or_default();
-    if empty {
-        rec.empty_end_seq = rec.end_seq;
-    } else {
-        rec.nudged = false;
+    let Some(rec) = map.get_mut(&(session.to_string(), window.to_string())) else { return false };
+    if rec.nudge_armed || !nudge_owed(rec) {
+        return false;
+    }
+    rec.nudge_armed = true;
+    true
+}
+
+/// What the window's timer should do next.
+#[derive(Debug, PartialEq)]
+pub enum NudgeWait {
+    /// The owed end has not aged enough: sleep this many seconds, then ask again.
+    Wait(u64),
+    /// The newest end is empty, unanswered, and `after` seconds old: answer it.
+    Due(u64),
+    /// Nothing is owed (or the end was already answered): the timer is released
+    /// IN THIS STEP, so an empty end that arrives right after finds it free.
+    Gone,
+}
+
+/// The window's timer asks what to do. `answered` is the end it has already
+/// looked at, so an end it declined (nothing open, told to wait) is not looked
+/// at again. The decision and the release are one step under the record lock.
+pub fn nudge_wait(session: &str, window: &str, after: u64, answered: u64) -> NudgeWait {
+    let mut map = store().lock().unwrap();
+    let Some(rec) = map.get_mut(&(session.to_string(), window.to_string())) else { return NudgeWait::Gone };
+    if !nudge_owed(rec) || rec.end_seq == answered {
+        rec.nudge_armed = false;
+        return NudgeWait::Gone;
+    }
+    let age = now().saturating_sub(rec.end.as_ref().map(|(_, t)| *t).unwrap_or(0));
+    if age >= after { NudgeWait::Due(rec.end_seq) } else { NudgeWait::Wait(after - age) }
+}
+
+/// Release the window's timer (the timer's own exit, even a panicking one).
+pub fn disarm_nudge(session: &str, window: &str) {
+    if let Some(rec) = store().lock().unwrap().get_mut(&(session.to_string(), window.to_string())) {
+        rec.nudge_armed = false;
     }
 }
 
-/// Claim the one nudge a run of empty turns is owed (board #355): `Some(end_seq)`
-/// of the empty end to answer, or `None` when one was already claimed since the
-/// agent last said something. A nudge that itself ends empty must not earn
-/// another: that is a retry loop.
-pub fn claim_nudge(session: &str, window: &str) -> Option<u64> {
-    let mut map = store().lock().unwrap();
-    let rec = map.get_mut(&(session.to_string(), window.to_string()))?;
-    if rec.nudged || rec.empty_end_seq == 0 || rec.empty_end_seq != rec.end_seq {
-        return None;
-    }
-    rec.nudged = true;
-    Some(rec.end_seq)
+/// Is the nudge for the empty end `end_seq` STILL due: that end is the newest
+/// fact, the window is still at rest after it, and nothing has been sent to it
+/// since — no line typed and not yet echoed, none held. The last test is for
+/// `delivery::deliver_if`, which asks it INSIDE the window's lock and the
+/// turn-fact lock, in the same step as the typing (review P1-B): a check made
+/// before a slow query and a delivery made after it can straddle a new prompt.
+pub fn nudge_still_due(session: &str, window: &str, end_seq: u64) -> bool {
+    let at_rest = store()
+        .lock()
+        .unwrap()
+        .get(&(session.to_string(), window.to_string()))
+        .is_some_and(|rec| rec.end_seq == end_seq && nudge_owed(rec));
+    at_rest && !line_in_flight(session, window) && held_rows(session, window).is_empty()
 }
 
-/// Is the window STILL at rest after the empty end `end_seq` — no turn has
-/// started since, and nothing else ended — as the delay of a nudge runs out?
-pub fn still_stalled(session: &str, window: &str, end_seq: u64) -> bool {
-    let map = store().lock().unwrap();
-    map.get(&(session.to_string(), window.to_string())).is_some_and(|rec| {
-        rec.end_seq == end_seq && rec.empty_end_seq == end_seq && {
-            let status = derive_from(rec, 0, now());
-            status.state == "idle" && status.detail == EMPTY_DETAIL
-        }
-    })
+/// A nudge was delivered: the run of empty turns has had its one.
+pub fn spend_nudge(session: &str, window: &str) {
+    if let Some(rec) = store().lock().unwrap().get_mut(&(session.to_string(), window.to_string())) {
+        rec.nudge_spent = true;
+    }
 }
 
 /// A human interrupted the turn (`hub_agent_interrupt` / `tmm agent

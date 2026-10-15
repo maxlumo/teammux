@@ -329,22 +329,20 @@ impl AgentNotificationHub {
         // concern; status derivation wants every observed fact.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
-            crate::projects::telemetry::record_notification(&session, &window, &normalized.kind, timestamp);
+            // How a completion ended (board #355: its whole reply was the CLI's
+            // placeholder) is written WITH the end, in one step: a separate
+            // "and it was empty" write could land on a different end.
+            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, timestamp, normalized.empty);
             // A turn edge (stop, ask) means the CLI just repainted its footer —
             // the context-usage number is at its freshest right here.
             crate::projects::vitals::sniff_window_soon(&session, &window);
         }
 
-        // How the turn ended is a fact of its own (board #355): a completion
-        // whose whole reply is the CLI's placeholder said nothing, and the
-        // agent may have been in the middle of its work. Recorded beside the
-        // end, and answered once by `stalls` (see there).
+        // A completion that said nothing may leave the agent in the middle of its
+        // work; `stalls` answers it once (see there).
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if normalized.kind == "completed" {
-            crate::projects::telemetry::record_end_quality(&session, &window, normalized.empty);
-            if normalized.empty {
-                crate::projects::stalls::on_empty_end(&session, &window);
-            }
+        if normalized.kind == "completed" && normalized.empty {
+            crate::projects::stalls::on_empty_end(&session, &window);
         }
 
         // Stop hook final: record the answer and deliver it to every sender
@@ -1539,9 +1537,9 @@ mod tests {
 
     /// Board #355, end to end through the consumer: a kiro Stop whose whole reply
     /// is the CLI's placeholder is recorded on the status (`last_turn_empty`) and
-    /// claims the one nudge it is owed — the claim is how the test sees that the
-    /// consumer reached `stalls`, since an empty end nobody claimed would still
-    /// be claimable — and a Stop with something to say names nothing.
+    /// arms the one timer it is owed — that is how the test sees the consumer
+    /// reached `stalls`, since an empty end nobody armed would still be armable —
+    /// and a Stop with something to say names nothing.
     #[test]
     fn an_empty_stop_reaches_the_status_and_owes_one_nudge() {
         crate::projects::tests::use_test_store();
@@ -1589,7 +1587,7 @@ mod tests {
         feed(stop(placeholder));
         let empty = status();
         assert_eq!((empty.state.as_str(), empty.detail.as_str()), ("idle", crate::projects::telemetry::EMPTY_DETAIL), "at rest, and it says the turn said nothing");
-        assert_eq!(crate::projects::telemetry::claim_nudge(&session, &win), None, "the consumer already claimed the one nudge this empty end is owed");
+        assert!(!crate::projects::telemetry::arm_nudge(&session, &win), "the consumer already armed the one timer this empty end is owed");
 
         feed(prompt("[tmm chat 2026-10-15 13:10] lead: @v ok?"));
         feed(stop("Done: the gate is green."));
