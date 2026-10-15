@@ -65,6 +65,17 @@ test('Composer retains its stacking context around the one remaining palette (#1
   assert.doesNotMatch(source, /^\s*\.(st|note-dot|live-dot) \{/mu, 'shared atoms are not copied');
 });
 
+test('/, @ and # are ONE palette: one derived value, one listbox, one accept (#242, #340)', () => {
+  // A second popover for board references would be a second species of the
+  // same job (design-language: one popover mechanism). The `#` completion is
+  // one more source chained into the same `palette`; Hub owns the board read.
+  assert.match(source, /const palette = \$derived\(paletteOff \? null\s*: commandPalette\([^)]*\) \?\? mentionPalette\(composerText, mentionCandidates\)\s*\?\? issuePalette\(composerText, issues\)\);/u);
+  assert.equal(source.split('role="listbox"').length - 1, 1, 'one listbox');
+  assert.equal(source.split('class="cmd-menu').length - 1, 1, 'one menu');
+  assert.match(source, /issues = \[\], onissues = \(\) => \{\}/u, 'the list and its refresh come from Hub');
+  assert.doesNotMatch(source, /boardList/u, 'no board RPC here');
+});
+
 test('Composer owns local UI state, while transport and capture ordering stay outside (#133)', () => {
   assert.match(source, /composerText = \$bindable\(''\)/u, 'one explicit draft binding');
   assert.doesNotMatch(source, /feedEl|cardsEl|hubPrefs|core\/ws|window\.addEventListener|popstate|pushState/u,

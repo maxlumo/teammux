@@ -91,6 +91,10 @@ test('Feed preserves reveal gates and consumes the shared rendering and path mec
   assert.doesNotMatch(source, /marked\.parse|new Marked/u);
   assert.match(source, /handlePathLinkClick\(e, routePathRef\)/u);
   assert.match(source, /onauxclick=\{openPathRef\}/u);
+  // Board #340: a `#<id>` link takes the same route, so it never also flips
+  // the action row, and only the project's own ids are linked.
+  assert.match(source, /return handlePathLinkClick\(e, routePathRef\) \|\| openIssueRef\(e\);/u);
+  assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), managedNames\), issueSet\)\}/u);
   assert.match(source, /<ChatImage \{src\} alt=\{m\.from\} onview=\{onimage\} \/>/u);
 });
 

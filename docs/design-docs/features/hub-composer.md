@@ -1090,6 +1090,32 @@ offers no names, because it is typed verbatim through `hub_command` and a
 name inside it reaches nobody (validator, #242: `/compact @b` offered
 `@bob`).
 
+### `#` completion rides the same palette (board #340, 2026-10-15)
+
+Owner: "增加一个（#）的规则吧 井号可以去引用我 board 的信息". `issuePalette`
+(`hub.ts`, pure and tested) is a third source chained into the composer's
+ONE `palette` value, after `/` and `@`: same `Palette` shape, popover, keys,
+Escape and back layer (pinned by `Composer.source.test.ts` "/, @ and # are
+ONE palette"). It reads the last token like a mention (`issueQuery`): a `#`
+at the start or after whitespace, then letters, digits, `_` or `-`, so
+`page#3`, `##` and a slash-command line (typed verbatim, the command
+palette's) open nothing. The candidates are this project's issues
+(`hub_board_list`, the existing read; no new RPC): matched with
+`fuzzyRank` on the number and on the name (`board.ts` `issueRef`: the title,
+else a body excerpt, which is also the hint); an exact number first, then
+the better match, open (not `done`) before done, newest first. Accepting
+inserts `#<id>` and a space — no title, no body: the delivered text is
+exactly what was typed, and an agent reads the issue with
+`tmm board show <id>` (orchestrator's ruling, #340). A query that already
+is the one remaining candidate offers nothing, so Enter sends.
+
+The list is Hub's, kept per project (`issueBoards`), and is READ ONLY WHEN
+NEEDED, never on a poll: each time a `#` starts being typed (the composer's
+`onissues`, so an issue filed a moment ago is offered), and when a message
+names an id above the newest known one that was not asked about yet (see
+hub-feed.md "A `#<id>` in a bubble is a door to that issue"). A room nobody
+references reads no board. A failed read keeps the last list.
+
 ### The `/` palette is transcribed, not invented
 
 `KIRO_COMMANDS` (`hub.ts`) carries kiro-cli's own names/descriptions/sub-commands copied from its TUI table — a made-up command looks authoritative in the list and then does nothing in the pane — minus cloud-only/hidden entries, with `/quit` last.

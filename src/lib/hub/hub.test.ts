@@ -2072,3 +2072,47 @@ test('continuesRun: one sender\'s adjacent messages form a run; anything else st
   assert.deepEqual(runs('status'), [false, false, false]);
   assert.deepEqual(runs('chat'), [false, true]);
 });
+
+// Board #340: `#` completes this project's board issues in the one palette.
+test('issuePalette: # at a word start offers the board, exact number first, open before done (#340)', async () => {
+  const { issuePalette, issueQuery } = await import('./hub.ts');
+  const issues = [
+    { id: 33, ref: 'Old done thing', open: false },
+    { id: 336, ref: 'kiro defaults to steer', open: true },
+    { id: 340, ref: 'composer # references', open: true },
+    { id: 12, ref: '登录页面缩放', open: true },
+  ];
+  const values = (text: string) => issuePalette(text, issues)?.items.map((i) => i.value) ?? null;
+  assert.deepEqual(values('see #'), ['#340', '#336', '#12', '#33'], 'empty query: open first, newest first, done last');
+  assert.deepEqual(values('#33'), ['#33', '#336'], 'an exact number leads, even done');
+  assert.equal(issuePalette('#33', issues)?.items[0]?.hint, 'Old done thing', 'the hint is the issue name');
+  assert.deepEqual(values('#steer'), ['#336'], 'the name is matched too');
+  assert.deepEqual(values('#登录'), ['#12'], 'in any script');
+  assert.equal(values('#340'), null, 'a finished reference offers nothing, so Enter sends');
+  const p = issuePalette('fix #34', issues)!;
+  assert.equal(p.stage, 'issue');
+  assert.equal(`${'fix #34'.slice(0, p.from)}${p.items[0]!.value}${p.more ? ' ' : ''}`, 'fix #340 ', 'inserts the token and a space, nothing else');
+  for (const text of ['page#3', '##', '/compact #3', '@alice /model #', 'a # b', '#3 ']) {
+    assert.equal(issuePalette(text, issues), null, text);
+  }
+  assert.equal(issuePalette('#', []), null, 'no board, no list');
+  assert.equal(issueQuery('ship #'), '');
+  assert.equal(issueQuery('ship'), null);
+});
+
+test('issueSpans and markIssueRefs: only a word-start #number this project has becomes a link (#340)', async () => {
+  const { issueSpans, markIssueRefs } = await import('./hub.ts');
+  assert.deepEqual(issueSpans('#1 see #340, (#12) and #9.').map((s) => s.id), [1, 340, 12, 9]);
+  assert.deepEqual(issueSpans('page#3 /#4 &#39; #5a ##6 #7_x').map((s) => s.id), [], 'a fragment, a path, an entity, a word, a double #');
+  const ids = new Set([336, 340]);
+  const html = renderMarkdown("done in #336, not #999; it's `#340` in code, [#340](x) linked, #340 here");
+  const out = markIssueRefs(html, ids);
+  assert.equal((out.match(/class="issue-ref"/gu) ?? []).length, 2, out);
+  assert.match(out, /<a class="issue-ref" href="#" data-issue="336">#336<\/a>/u);
+  assert.match(out, /#999/u, 'an id the board does not have stays text');
+  assert.match(out, /<code>#340<\/code>/u, 'code is never linked');
+  assert.match(out, /it&#39;s/u, 'the entity is untouched');
+  assert.equal(markIssueRefs(html, new Set()), html, 'no board known: the html as it was');
+  // The shared walker still serves mentions the same way.
+  assert.match(markMentions(markIssueRefs(renderMarkdown('@bob see #336'), ids), ['bob']), /<span class="m-to"[^>]*>@bob<\/span> see <a class="issue-ref"/u);
+});

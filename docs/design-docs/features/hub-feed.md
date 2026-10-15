@@ -454,6 +454,31 @@ Back handler delegates into the Files drawer before closing it. See
 [file-handling.md](file-handling.md#file-references-stay-in-files-106-2026-09-09)
 for preview/iframe routing and the event-order evidence.
 
+### A `#<id>` in a bubble is a door to that issue (board #340, 2026-10-15)
+
+A `#<id>` a person or an agent writes in a message renders as a link
+(`markIssueRefs`, `hub.ts`) only when THIS project's board has that issue;
+any other number stays text, so a deleted issue, another project's number
+or a CSS colour is never a dead link. The reading is `issueSpans`: a `#` at
+the start or after a character that is not part of a word, an HTML entity
+(`&#39;`) or a path (`/#12`), followed by digits that end the word. Like a
+mention it reads only text outside `code`, `pre` and `a`; both walk the
+rendered HTML through the one `mapTextRuns`. A tap goes through the bubble's
+one reference route (`openPathRef`, which now also routes an issue link):
+the issue opens where a board line's jump opens it (desktop: the drawer's
+Board; compact: `openBoardTab`), and the tap is not a tap on the bubble
+(no action row). System lines are not linked: a board line carries its own
+jump.
+
+Hub reads the board (`issueBoards`, shared with the composer's `#` palette;
+see hub-composer.md) when the room's messages name an id ABOVE the newest
+issue it knows that it has not asked about yet. Issue ids only grow, so a
+lower id the board lacks was deleted and asking again would find nothing;
+a number above it is a new issue (an orchestrator files one, then names it)
+or a typo, and each such id is asked about once. A room whose messages name
+no issue reads no board. Pinned by the Hub mount test "a #id this project
+has is a link…" and the `issueSpans`/`markIssueRefs` unit test.
+
 ### Right-click and long press are ONE mechanism
 
 `ui/ContextMenu.svelte` (the agent menu's popover dialect, anchored on a POINT via `placement.pointAnchor` — one placement rule with the trigger menus, but the DEFAULT alignment follows the anchor kind: a point puts the menu's TOP-LEFT at the click, the OS convention (owner, 2026-09-07: "应该都为左上角点"), while a trigger rect keeps the right-aligned dot-menu dialect; both flip above and clamp as before) + `ui/longpress.ts` (touch ONLY — a mouse has a right button, and a held left button would fire a menu mid-selection; >10px of travel is a SCROLL via the pure `isScroll`, a second finger cancels, and the following click is swallowed so a row does not both open its menu and activate itself). One App capture listener suppresses native browser context menus for every mouse/keyboard event: a surface opens its own shared menu or no-ops, never browser chrome. Wired to the agent card and the sidebar project row, each offering the verbs it ALREADY has elsewhere (a context menu with its own action set is a second source of truth). **Two reading verbs were unreachable and are menu rows now** (review, 2026-09-03): the one-agent feed FILTER (`filterBlocks`, board #3) existed only as an undocumented double-click on the card — and a selected card waits 260 ms for its menu, so the gesture fought the tap — so both card menus (the tap menu and the right-click/long-press ContextMenu, from the same `agentItems`) carry `Only its messages` / `Show everything` through ONE `toggleFilter`, a reading verb seated with Message/Watch before configure, offered for a STOPPED agent too (its history is what you narrow to once it is gone; the toggle does not seat it as recipient, unlike the double-click, which stays as the shortcut). And the feed's DETAIL LEVEL (`hubPrefs.feedLevel`: chat / + status / + tools) was reachable only from Settings, its Hub `cycleFeedLevel` control dead code: the project TITLE's menu — the one menu about "this conversation" — now lists the three levels between Rename and Close, the chosen one ticked (`check` vs hollow `circle`, radio semantics through icons the menu already has), writing the same pref Settings reads. Not a header switch: the header keeps no spare switches (board #72). **Only mine** (board #289, owner 2026-09-30: "消息比较多不太好筛选，很多都是 Agent 之间的会话") sits right after the three levels in that same menu, a toggle ticked while on. It is the SAME reading filter with the human as its subject (`toggleFilter(HUMAN)`, `filterBlocks(blocks, 'human')`): the human's own messages, a message whose recorded `to` names the human (an agent's final reply to a turn the human asked in, agent-status.md § reply edge; an `@human` send), and a body that says `@human`. `@all` means every agent and does not count; the human has no window, so no prompt/progress/steps block shows; sys lines stay only where they name the human. Being the one filter state, Only mine and an agent's "Only its messages" exclude each other, the room switch resets it, and Back peels it. No agent card wears the filter mark for it (the roster gets no filter while it is on): its state is the tick. Rows recorded before #289 carry no `to` for a reply, so older agent answers are not matched. `Hub.source.test.ts` pins both routes and that the cycle control stays gone. The message bubble has NO context menu (board #48; owner, 2026-09-04: "点击消息气泡，还是会呼出一个类似右键的 Copy 选项卡菜单……其实我们都不要了", then 2026-09-07: "我只要消息气泡下边的这两个按钮，不要出现右键那种选项卡"): its verbs live ONLY in the tap-revealed `.m-acts` row under the bubble (Copy / Raw / Reply — Reply since board #290, a quote by content, hub-composer.md § A reply quotes a message; a body carrying the quote token renders it as the bubble's own blockquote; Raw wears the `code` `</>` glyph since board #218 — owner 2026-09-20: "raw 的图标我理解不了，可以用类似源码的图标"; the ⌘ it replaced read as a key and left with it) — no `openCtx` from a bubble, no desktop right-click card. The bubble's `contextmenu` handler never calls preventDefault: it only arms the passive `selectionClickGuard` mark, so a touch/pen hold stays the system's selection gesture and its Android/WebKit compatibility click is consumed before it can open the row; a genuinely non-collapsed selection independently wins over any bubble tap. Message bodies explicitly opt into text selection. Board notes keep the same passive mark/consume `selectionClickGuard` for their `.m-acts` Copy overlay.

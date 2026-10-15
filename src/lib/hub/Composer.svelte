@@ -1,9 +1,9 @@
 <script>
-  import { onDestroy, tick as settled } from 'svelte';
+  import { onDestroy, tick as settled, untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { slashCommand, commandPalette, mentionPalette, readlineEdit } from './hub.ts';
+  import { slashCommand, commandPalette, mentionPalette, issuePalette, issueQuery, readlineEdit } from './hub.ts';
   import { attachPaste } from './attachments.svelte.ts';
   import AttachStrip from './AttachStrip.svelte';
   import { ALL_TARGET, paletteBackendFor, signatureLayout, targetTeam } from './hub-composer.ts';
@@ -19,6 +19,7 @@
     onmodels: modelsList = async () => ({ models: [] }), oninterrupt = async (_target) => {},
     onpreview = () => {}, onheightchange = () => {},
     registerBack = null, replyTo = null, onclearreply = () => {},
+    issues = [], onissues = () => {},
   } = $props();
 
   // Hub owns transport and capture-listener ordering; the palette is the
@@ -202,13 +203,19 @@
     ...agents.filter((a) => a.managed).map((a) => ({ value: a.name, hint: a.agent ?? '' })),
     { value: ALL_TARGET, hint: t('hubEveryone') },
   ]);
+  /* `#` completion rides it too (#340): this project's board issues, which
+     Hub reads. A `#` starting to be typed asks Hub for a fresh list, so a
+     just-created issue is offered. */
   const palette = $derived(paletteOff ? null
-    : commandPalette(composerText, cmdModels[paletteBackend] ?? [], paletteBackend) ?? mentionPalette(composerText, mentionCandidates));
+    : commandPalette(composerText, cmdModels[paletteBackend] ?? [], paletteBackend) ?? mentionPalette(composerText, mentionCandidates)
+      ?? issuePalette(composerText, issues));
+  const typingIssue = $derived(issueQuery(composerText) !== null);
+  $effect(() => { if (typingIssue) untrack(onissues); });
   $effect(() => { void composerText; paletteOff = false; });
   $effect(() => { void palette; paletteIdx = 0; });
   $effect(() => {
     const backend = paletteBackend;
-    if (!palette || palette.stage === 'mention' || cmdModels[backend]) return;
+    if (!palette || palette.stage === 'mention' || palette.stage === 'issue' || cmdModels[backend]) return;
     modelsList(backend || 'kiro').then((r) => { cmdModels = { ...cmdModels, [backend]: r.models ?? [] }; }).catch(() => {});
   });
 

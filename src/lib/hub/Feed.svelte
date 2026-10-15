@@ -17,10 +17,10 @@
   import { createDoubleTapDetector } from '../terminal/terminal-keyboard.ts';
   import { heldAnchor, readingDirection, refoldEligible, sameReadingSize } from './hub-reading.ts';
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
-  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
+  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
-    blocks = [], agents = [], managedNames = [], selected = '', visible = false, compact = false,
+    blocks = [], agents = [], managedNames = [], issueIds = [], selected = '', visible = false, compact = false,
     roomReady = false, justLoaded = false, openedAt = Infinity,
     loadingOlder = false, histMore = false, actMore = false, stepsRows = STEPS_ROWS,
     following = $bindable(true), newBelow = $bindable(false),
@@ -111,8 +111,23 @@
 
   /** A click inside a bubble that landed on a PATH link (board #99). Returns
    * true when the click is ours — the caller stops the bubble's own toggle. */
+  /** The bubble's ONE reference-link route: a file path opens its preview,
+   * and a `#<id>` link (board #340) opens that issue on the Board, the route
+   * a board line's jump takes. Either way the click is not a click on the
+   * bubble (it does not also flip the action row). */
   function openPathRef(e) {
-    return handlePathLinkClick(e, routePathRef);
+    return handlePathLinkClick(e, routePathRef) || openIssueRef(e);
+  }
+  /** Only ids this project has are links (`markIssueRefs`). */
+  const issueSet = $derived(new Set(issueIds));
+  function openIssueRef(e) {
+    if (e.defaultPrevented || (e.type === 'auxclick' && e.button !== 1)) return false;
+    const link = e.target?.closest?.('a.issue-ref[data-issue]');
+    if (!link) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    onboard(Number(link.dataset.issue));
+    return true;
   }
 
   /** Follow the tail — but only while the user is AT the tail. Yanking someone
@@ -907,7 +922,7 @@
                   <!-- Folded: the start of the message, cut where the
                        budget runs out, …… glued to the last kept line.
                        Raw view and agent messages render in full. -->
-                  {@html markMentions(renderMarkdown(folded ? foldBody(parts.text) : parts.text), managedNames)}
+                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text) : parts.text), managedNames), issueSet)}
                 {/if}
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->

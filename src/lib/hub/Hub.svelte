@@ -33,7 +33,8 @@
   import { t } from '../core/i18n.svelte.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
-  import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch } from './hub.ts';
+  import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
+  import { issueRef } from './board.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
   import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamTarget } from './hub-composer.ts';
@@ -64,7 +65,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, modelsList, boardList, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
   // This server's backend catalog (②b-3): the avatars and whether a running
@@ -119,6 +120,39 @@
   let lastActivityTs = 0;
   let registry = $state([]);        // RegAgent[]
   let teams = $state([]);           // RegTeam[] — configured agent teams (board #74)
+  // ── Board references (board #340) ──────────────────────────────────────
+  // Each project's issues as `#` names them: the composer's `#` palette and
+  // the feed's `#<id>` links read the open room's. Read only when needed —
+  // a `#` starting to be typed, or a message naming an id above the newest
+  // known one that was not asked about yet (ids only grow, so one below it
+  // that the board lacks was deleted) — never on a poll. Keyed by session,
+  // so a late answer lands on its own project and a revisit links at once.
+  let issueBoards = $state({});     // session → { list: IssueCandidate[], max }
+  const issueAsked = {};            // session → Set of ids a read was started for
+  const roomIssues = $derived(issueBoards[selected]?.list ?? []);
+  const roomIssueIds = $derived(roomIssues.map((i) => i.id));
+  async function loadIssues(s = selected) {
+    if (!s) return;
+    try {
+      const r = await boardList(s);
+      if (!alive) return;
+      const list = (r.issues ?? []).map((i) => ({ id: i.id, ref: issueRef(i), open: i.status !== 'done' }));
+      issueBoards = { ...issueBoards, [s]: { list, max: list.reduce((m, i) => Math.max(m, i.id), 0) } };
+    } catch { /* keep the last list: "could not ask" is not "no issues" */ }
+  }
+  // The ids a person or an agent named in this room (a system line carries
+  // its own board jump).
+  const roomIssueRefs = $derived([...new Set(feed.flatMap((m) => systemLine(m.body) ? [] : issueSpans(m.body ?? '').map((x) => x.id)))]);
+  $effect(() => {
+    const s = selected, refs = roomIssueRefs;
+    if (!visible || !s || !refs.length) return;
+    const max = issueBoards[s]?.max ?? 0;
+    const asked = (issueAsked[s] ??= new Set());
+    const fresh = refs.filter((id) => id > max && !asked.has(id));
+    if (!fresh.length) return;
+    for (const id of fresh) asked.add(id);
+    untrack(() => loadIssues(s));
+  });
   // A choice of destination never creates a second delivery path:
   //   a name    → typed into that agent's input; exactly one agent is
   //               interrupted and starts a turn. The default (the lead).
@@ -2244,7 +2278,7 @@
             <div class="empty">{managedAgents.length ? t('hubEmpty') : t('hubEmptyNoAgents')}</div>
           {/if}
       {/snippet}
-      <Feed bind:this={feedView} {blocks} {agents} {managedNames} {selected} {visible} {compact}
+      <Feed bind:this={feedView} {blocks} {agents} {managedNames} issueIds={roomIssueIds} {selected} {visible} {compact}
         {roomReady} {justLoaded} {openedAt} {loadingOlder} {histMore} {actMore}
         stepsRows={hubPrefs.stepsRows} {stateLabel} {emptyFeed} bind:following bind:newBelow
         onseen={markSeen} onolder={loadOlder} onpath={routePathRef}
@@ -2278,6 +2312,7 @@
       <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient}
         {roomReady}
         {agents} {pending} {attaching} {failed} {sendable} {interruptible} {replyTo}
+        issues={roomIssues} onissues={() => loadIssues()}
         onclearreply={() => { replyTo = null; composer?.focus(); }}
         onsend={send} onstage={stageFiles} onremove={removeAttachment}
         onmodels={modelsList} oninterrupt={interrupt} onpreview={(path) => { shotView = path; }}

@@ -1019,8 +1019,8 @@ export function offeredCommands(backend?: string | null): readonly SlashCmd[] {
 export interface PaletteItem { value: string; hint: string }
 export interface Palette {
   /** 'command' completes `/mo` → `/model`; 'arg' completes what follows it;
-   * 'mention' completes `@bo` → `@bob`. */
-  stage: 'command' | 'arg' | 'mention';
+   * 'mention' completes `@bo` → `@bob`; 'issue' completes `#33` → `#336`. */
+  stage: 'command' | 'arg' | 'mention' | 'issue';
   items: PaletteItem[];
   /** Replace `text.slice(from)` with the chosen value. */
   from: number;
@@ -1131,6 +1131,94 @@ export function mentionPalette(text: string, candidates: readonly PaletteItem[])
   return { stage: 'mention', items, from: (text ?? '').length - query.length - 1, more: true };
 }
 
+/** A board issue as the `#` palette offers it (board #340): its number, the
+ * name every surface gives it (`board.ts` `issueRef`: title, else a body
+ * excerpt) and whether it is still open (not `done`). */
+export interface IssueCandidate { id: number; ref: string; open: boolean }
+
+/** The `#` query being typed: the last token, when it is a `#` at the start
+ * or after whitespace, read like a mention (letters, digits, `_`, `-`; a `#`
+ * inside a word, a URL fragment or `##` is not one). Null when there is
+ * none, and on a slash-command line, which the command palette owns and
+ * send() types verbatim. One reading for the palette and the composer's
+ * "a `#` is being typed" (which refreshes the list). */
+export function issueQuery(text: string | null | undefined): string | null {
+  if (slashCommand(text ?? '')) return null;
+  return /(^|\s)#([\p{L}\p{N}_-]*)$/u.exec(text ?? '')?.[2] ?? null;
+}
+
+/**
+ * The `#` completion (board #340, owner: "增加一个（#）的规则吧 井号可以去引用我
+ * board 的信息"). It rides the `/` and `@` palette: the same `Palette`, the same
+ * popover and keys. The candidates are this project's issues, matched on the
+ * number AND the name (`fuzzyRank`); an exact number comes first, then the
+ * better match, open before done, newest first. Accepting inserts `#<id>`
+ * and a space, nothing else: the delivered text is what was typed, and an
+ * agent reads the issue with `tmm board show <id>`. A query that already IS
+ * the one remaining candidate offers nothing, so Enter sends.
+ */
+export function issuePalette(text: string, issues: readonly IssueCandidate[]): Palette | null {
+  const query = issueQuery(text);
+  if (query === null || !issues.length) return null;
+  const exact = /^\d+$/u.test(query) ? Number(query) : -1;
+  const rank = (i: IssueCandidate) => {
+    if (i.id === exact) return -1;
+    const r = [fuzzyRank(query, String(i.id)), fuzzyRank(query, i.ref)].filter((x) => x >= 0);
+    return r.length ? Math.min(...r) : Infinity;
+  };
+  const items = issues
+    .map((i) => ({ i, r: rank(i) }))
+    .filter((x) => x.r !== Infinity)
+    .sort((a, b) => a.r - b.r || Number(b.i.open) - Number(a.i.open) || b.i.id - a.i.id)
+    .map(({ i }) => ({ value: `#${i.id}`, hint: i.ref }));
+  if (!items.length || (items.length === 1 && items[0]!.value === `#${query}`)) return null;
+  return { stage: 'issue', items, from: text.length - query.length - 1, more: true };
+}
+
+/** Every `#<number>` a message names (board #340), in the one place a `#`
+ * counts: at the start or after a character that is not part of a word, an
+ * HTML entity (`&#39;`) or a path (`/#12`), and not followed by more of a
+ * word (`#12a`). The feed links these and Hub reads the board when one is
+ * newer than what it knows. Offsets are UTF-16 units of `text`. */
+export function issueSpans(text: string): { at: number; id: number; end: number }[] {
+  const out: { at: number; id: number; end: number }[] = [];
+  for (const m of text.matchAll(/(?<![\p{L}\p{N}_&#/])#(\d+)(?![\p{L}\p{N}_])/gu)) {
+    out.push({ at: m.index!, id: Number(m[1]), end: m.index! + m[0].length });
+  }
+  return out;
+}
+
+/** Map each text run of rendered HTML that lies OUTSIDE `code`, `pre` and
+ * `a` (a code sample or a link's text is not an address or a reference);
+ * tags pass through. Each run is read on its own, since the tag before it
+ * stood for markdown punctuation. */
+function mapTextRuns(html: string, fn: (text: string) => string): string {
+  let skip = 0;
+  return html.split(/(<[^>]*>)/u).map((part) => {
+    const tag = /^<(\/?)(code|pre|a)\b/iu.exec(part);
+    if (tag) { skip = Math.max(0, skip + (tag[1] ? -1 : 1)); return part; }
+    if (part.startsWith('<') || skip) return part;
+    return fn(part);
+  }).join('');
+}
+
+/** Link every `#<id>` of a rendered message that names an issue of THIS
+ * project (board #340): a `.issue-ref` link carrying its number, which the
+ * feed opens on the Board. A number the project has no issue for stays text. */
+export function markIssueRefs(html: string, ids: ReadonlySet<number>): string {
+  if (!ids.size) return html;
+  return mapTextRuns(html, (part) => {
+    if (!part.includes('#')) return part;
+    let out = '', from = 0;
+    for (const { at, id, end } of issueSpans(part)) {
+      if (!ids.has(id)) continue;
+      out += `${part.slice(from, at)}<a class="issue-ref" href="#" data-issue="${id}">#${id}</a>`;
+      from = end;
+    }
+    return out + part.slice(from);
+  });
+}
+
 export type FeedLevel = 'chat' | 'status' | 'tools';
 
 /** Lifecycle lines the server posts into the room (a spawn, a `tmm done`) are
@@ -1152,11 +1240,8 @@ export type FeedLevel = 'chat' | 'status' | 'tools';
  * punctuation the server read as a word break. */
 export function markMentions(html: string, names: readonly string[]): string {
   const valid = (n: string) => n === 'all' || n === 'human' || names.includes(n);
-  let skip = 0;
-  return html.split(/(<[^>]*>)/u).map((part) => {
-    const tag = /^<(\/?)(code|pre|a)\b/iu.exec(part);
-    if (tag) { skip = Math.max(0, skip + (tag[1] ? -1 : 1)); return part; }
-    if (part.startsWith('<') || skip || !part.includes('@')) return part;
+  return mapTextRuns(html, (part) => {
+    if (!part.includes('@')) return part;
     let out = '', from = 0;
     for (const { at, name } of mentionSpans(part)) {
       if (!valid(name)) continue;
@@ -1165,7 +1250,7 @@ export function markMentions(html: string, names: readonly string[]): string {
       from = end;
     }
     return out + part.slice(from);
-  }).join('');
+  });
 }
 
 /** The spawn kick's echo: `[YYYY-MM-DD HH:MM] (session start)`. Also matches

@@ -270,6 +270,12 @@ completion).
 - `@` at the start of a word opens the same palette with the room's managed
   agents and `@all` (fuzzy-matched; Enter/Tab/tap inserts `@name `, Escape
   dismisses); `a@b` does not open it.
+- `#` at the start of a word opens the same palette with this project's board
+  issues (`#id` + name; fuzzy on both, an exact number first, open before
+  done); accepting inserts `#id ` and nothing else, so the delivered text is
+  what was typed (an agent reads it with `tmm board show <id>`). In a
+  message, a `#id` the project's board has is a link that opens the issue on
+  the Board (board #340).
 - Readline editing (Ctrl-A/E/U/K/W/Y/D/H/T/F/B, one kill buffer).
 - **Interrupt**: empty-composer send button arms (amber) then fires Escape
   into the recipient's pane; double Ctrl-C same; while the recipient is

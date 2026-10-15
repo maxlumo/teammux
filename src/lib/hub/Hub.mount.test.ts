@@ -977,6 +977,91 @@ test('typing @ offers the room\'s agents in the slash palette; Enter inserts, Es
   } finally { await app.close(); }
 });
 
+// Board #340: `#` completes this project's board issues in the same palette.
+const boardIssue = (id: number, title: string, status = 'todo') =>
+  ({ id, title, body: '', status, assignee: '', created_by: 'human', created_at: 1, updated_at: 1, editable: true, notes: 0 });
+test('typing # offers this project\'s board issues in the slash palette; Enter inserts #id, and each new # reads the board (#340)', { timeout: 60000 }, async (context) => {
+  const posts: string[] = [];
+  const reads: string[] = [];
+  let board = [boardIssue(1, 'First'), boardIssue(2, 'Second', 'done'), boardIssue(3, 'Login page zoom')];
+  const app = await composerFixture(context, {
+    hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
+    boardList: async (session: string) => { reads.push(session); return { issues: board, statuses: ['todo', 'doing', 'review', 'done'] }; },
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt')].map((n) => `${n.querySelector('.cmd-name')?.textContent} ${n.querySelector('.cmd-hint')?.textContent}`);
+  try {
+    assert.deepEqual(reads, [], 'a room nobody references reads no board');
+    await app.text('fixed in #');
+    await app.flush();
+    assert.deepEqual(reads, ['fixture'], 'a # being typed reads this project\'s board');
+    assert.deepEqual(options(), ['#3 Login page zoom', '#1 First', '#2 Second'], 'open first, newest first; the name is the hint');
+    await app.text('fixed in #zoom');
+    assert.deepEqual(options(), ['#3 Login page zoom'], 'the name filters too');
+    assert.equal(await app.key('Enter'), true, 'Enter accepts, it does not send');
+    assert.equal(app.input.value, 'fixed in #3 ', 'the token and a space, no title');
+    assert.equal(app.document.querySelector('.cmd-menu'), null);
+    assert.deepEqual(posts, []);
+    board = [...board, boardIssue(4, 'Just filed')];
+    await app.text('fixed in #3 and #');
+    await app.flush();
+    assert.equal(reads.length, 2, 'the next # reads again, so a just-filed issue is offered');
+    assert.equal(options()[0], '#4 Just filed');
+    assert.equal(await app.key('Escape'), true);
+    assert.equal(app.document.querySelector('.cmd-menu'), null, 'Escape dismisses');
+    await app.text('/compact #');
+    assert.equal(app.document.querySelector('.cmd-menu .cmd-opt .cmd-name')?.textContent?.startsWith('#'), undefined, 'a slash-command line offers no issues');
+    await app.text('fixed in #3');
+    assert.equal(await app.key('Enter'), true);
+    for (let i = 0; i < 6 && !posts.length; i++) await app.flush();
+    assert.deepEqual(posts, ['@alice fixed in #3'], 'a finished reference sends exactly what was typed (to the selected agent)');
+  } finally { await app.close(); }
+});
+
+test('a #id this project has is a link in a message that opens it on the Board; reads happen only for newer ids (#340)', { timeout: 60000 }, async (context) => {
+  const fixture = await compiledHub();
+  const { rpc } = roomFixture();
+  const reads: string[] = [];
+  const routes: unknown[][] = [];
+  let board = [boardIssue(1, 'First'), boardIssue(2, 'Second')];
+  const m1 = { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'plain hello' };
+  const sys = { id: 's1', seq: 2, ts: 110, from: 'alice', body: '[tmm] board #2 todo → doing — Second' };
+  const m2 = { id: 'm2', seq: 3, ts: 120, from: 'alice', body: 'fixed in #2, see #9 and page#2; `#1` in code' };
+  const m3 = { id: 'm3', seq: 4, ts: 130, from: 'human', body: '#3 is new' };
+  let log = [m1, sys];
+  const app = await fixture.mount(context, {
+    props: { visible: true, mobile: true, openBoardTab: (...args: unknown[]) => routes.push(args) },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [{
+      ...rpc,
+      hubLog: async () => ({ messages: log, has_more: false }),
+      boardList: async (session: string) => { reads.push(session); return { issues: board, statuses: ['todo', 'doing', 'review', 'done'] }; },
+    }],
+  });
+  const links = () => [...app.document.querySelectorAll<HTMLAnchorElement>('.feed .bubble a.issue-ref')].map((a) => a.textContent);
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  try {
+    await settle();
+    assert.ok(app.document.querySelector('.feed .bubble'), 'the room rendered');
+    assert.deepEqual(reads, [], 'no message names an issue (the board line carries its own jump): no read');
+    log = [m1, sys, m2];
+    await app.advance(10000); await settle();
+    assert.deepEqual(reads, ['fixture'], 'a message naming an issue reads the board once');
+    assert.deepEqual(links(), ['#2'], 'only an id the board has, outside code, at a word start');
+    assert.match(app.document.querySelector('.feed')!.textContent ?? '', /see #9 and page#2/u, 'the rest stays text');
+    app.document.querySelector<HTMLAnchorElement>('.feed .bubble a.issue-ref')!.click();
+    await settle(4);
+    assert.deepEqual(routes, [['fixture', 2]], 'the phone opens that issue on the Board page');
+    assert.equal(app.document.querySelector('.m-acts'), null, 'the link is not a tap on the bubble');
+    await app.advance(10000); await settle();
+    assert.equal(reads.length, 1, '#9 is above the board but was already asked about: no second read');
+    board = [...board, boardIssue(3, 'Third')];
+    log = [m1, sys, m2, m3];
+    await app.advance(10000); await settle();
+    assert.equal(reads.length, 2, 'an id above the board not asked about yet reads again, though below the #9 typo');
+    assert.deepEqual(links(), ['#2', '#3']);
+  } finally { await app.close(); }
+});
+
 test('a line refused in copy-mode shows one warn note naming the agent and the reason; its bubble stays hollow (#250)', { timeout: 60000 }, async (context) => {
   const fixture = await compiledHub();
   const { rpc } = roomFixture();
