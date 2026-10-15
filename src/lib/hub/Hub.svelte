@@ -1703,7 +1703,9 @@
     } catch (e) {
       if (selected === session) commandFeedbackLifetime.update(feedbackToken, {
         kind: 'error',
-        message: t('hubForkFailed').replace('{name}', name).replace('{error}', e?.message ?? String(e)),
+        // An older server has no such verb (method-not-found, -32601): the
+        // refusal is honest and nothing was made, so say what to do about it.
+        message: t('hubForkFailed').replace('{name}', name).replace('{error}', e?.code === -32601 ? t('hubForkOldServer') : (e?.message ?? String(e))),
       });
     } finally {
       acting = false;

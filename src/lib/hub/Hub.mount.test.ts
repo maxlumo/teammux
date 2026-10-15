@@ -3135,6 +3135,20 @@ test('a refused fork says why, and a second tap while one is in flight is not a 
   } finally { await app.close(); }
 });
 
+test('an older server that has no fork verb is told to be updated, not shown a raw method name (#383, #389)', { timeout: 60000 }, async (context) => {
+  const app = await groupFixture(context, {
+    hubAgentFork: async () => { throw Object.assign(new Error('unknown hub method: hub_agent_fork'), { code: -32601 }); },
+  });
+  try {
+    await openCardMenu(app, 'solo');
+    await pickCardItem(app, 'Fork');
+    for (let i = 0; i < 12 && !app.document.querySelector('.composer-feedback [role="alert"]'); i++) await app.flush();
+    const said = app.document.querySelector('.composer-feedback [role="alert"]')?.textContent ?? '';
+    assert.match(said, /Could not fork solo: this server is older than the app\. Update the server to fork an agent\./u, said);
+    assert.ok(!/unknown hub method|hub_agent_fork/u.test(said), `no raw method name: ${said}`);
+  } finally { await app.close(); }
+});
+
 test('right-click on All opens the group verbs at any time, counted, destructive last (#258)', { timeout: 60000 }, async (context) => {
   const app = await groupFixture(context, {});
   try {
