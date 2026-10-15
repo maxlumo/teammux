@@ -203,42 +203,59 @@ warnings — Kotlin 2.x wants the `compilerOptions` DSL; non-blocking).
 
 Tauri prints the APK path as the in-project
 `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
-On this machine Gradle does not build there: its build directory is
-relocated to a global cache (set in the user's environment, not in the
-repo), and `src-tauri/gen/android/app/build` is a SYMLINK into it
-(`…/app/build -> ~/.cache/builds/gradle-builds/android-<hash>/app/` in the
-launch checkout). Whether the in-project path exists therefore depends on how
-the build was run:
+Where that file PHYSICALLY lands depends on what `app/build` is in the checkout
+you build in (re-measured 2026-10-15 with real builds in a fresh worktree and in
+the launch checkout; there is no `~/.gradle/init.d`, environment variable or
+Gradle config on this host that relocates anything):
 
-- **`npm run build:android`** ends with `scripts/preflight.mjs android-apk`,
-  which re-points that link at THIS checkout's output when it is missing,
-  dangling, or stale (pointing at another checkout), and exits 0 only when
-  the APK exists at the in-project path. After a successful
-  `npm run build:android` the path above exists. A real `app/build`
-  directory (the `.gradle-local-build` opt-out) is left alone.
-- **A bare `npx tauri android build`** skips the postflight: the in-project
-  path may be missing (a fresh git worktree has no link at all), dangling, or
-  point at another checkout's older APK. Trust the physical location below.
+- **A fresh git worktree** (where agents build): `app/build` is a real
+  directory, Gradle builds IN-TREE, and the APK is at the in-project path.
+  Nothing is written under `~/.cache/builds/gradle-builds`. Two things a fresh
+  worktree lacks: **signing** — `key.properties` and `keystore.jks` are
+  untracked, so without them Gradle finishes `app-universal-release-unsigned.apk`
+  (a different name; the postflight looks for the signed one and exits 1), see
+  *Android signing* in `docs/conventions/development.md` — and the
+  **environment** below.
+- **The launch checkout**: `app/build` is a SYMLINK (dated 2026-08-18) into
+  `~/.cache/builds/gradle-builds/android-<hash>/app/`, and Gradle writes
+  through it, so the APK is physically in the cache and visible at the
+  in-project path. That symlink is the whole "relocation"; it is not an
+  environment setting. (`scripts/preflight.mjs` used to describe a global init
+  script `00-build-dir.gradle.kts` that is not on this host; its comments were
+  corrected on 2026-10-15, behaviour unchanged.)
+
+`npm run build:android` ends with `scripts/preflight.mjs android-apk`: it
+re-points an `app/build` SYMLINK that is missing, dangling or stale (pointing at
+another checkout), leaves a real directory alone, and exits 0 only when the APK
+exists at the in-project path. A bare `npx tauri android build` skips it, which
+only matters where `app/build` is a symlink that can be dangling or stale.
 
 The cargo target is NOT relocated — it is the checkout's own `src-tauri/target`
 (no `CARGO_TARGET_DIR`, no cargo config on this host; an earlier version of
 this note put it in `~/.cache/builds/cargo-target`, which no longer exists
-here). The physical locations:
+here):
 
-- APK: `~/.cache/builds/gradle-builds/android-<hash>/app/outputs/apk/universal/release/app-universal-release.apk`
+- APK: `<checkout>/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`
+  (in the launch checkout that is the cache path above)
 - Rust `.so`: `<checkout>/src-tauri/target/aarch64-linux-android/release/libtmux_mobile.so`
-  (a git worktree builds into its own `src-tauri/target`)
 
-Each project gets its own `android-<hash>` dir. To locate the freshest
-APK: `find ~/.cache/builds -name '*.apk' -newermt '-10 minutes'`.
+To find the freshest APK: in a worktree, `find src-tauri/gen/android/app/build
+-name '*.apk' -newermt '-10 minutes'`; in the launch checkout the same command
+under `~/.cache/builds` (`find ~/.cache/builds -name '*.apk' ...`) also works,
+and misses a worktree build.
 
 ## Build Prerequisites (this machine)
 
-- `tauri android build` needs `NDK_HOME`, which a plain shell may not
+- `ANDROID_HOME` (`/home/cfu/Android/sdk`, lowercase `sdk`) and `JAVA_HOME` must
+  be set. The agents' environment sets them; a plain shell has neither, and
+  `tauri android build` then stops at once with "failed to ensure Android
+  environment" (it looks for `~/Android/Sdk`, which does not exist).
+- `tauri android build` also needs `NDK_HOME`, which a plain shell may not
   have (the agents' environment sets it). Export the newest installed NDK
   rather than a version typed here — the installed one changes (28.1 when this
-  was written, 28.2.13676358 on 2026-10-15):
-  `export NDK_HOME="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"`.
+  was written, 28.2.13676358 on 2026-10-15, the only one installed):
+  `export NDK_HOME="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"`
+  (so `ANDROID_HOME` first).
 - JDK 17 (`JAVA_HOME` → openjdk@17) and the `aarch64-linux-android`
   rustup target are present.
 

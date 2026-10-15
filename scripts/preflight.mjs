@@ -8,11 +8,17 @@
 //    "blank white page"), while a duplicate backend wastes a build first.
 //
 // 2. `preflight android-apk`: after `tauri android build`, re-point the
-//    machine-local gradle build symlink at THIS checkout's output. A global
-//    gradle init script (~/.gradle/init.d/00-build-dir.gradle.kts) redirects
-//    build/ to ~/.cache/builds/gradle-builds/<dirname>-<md5(abs path)[:12]>/,
-//    so the slug is a pure function of the gradle root path and we can compute
-//    the right answer instead of guessing.
+//    machine-local gradle build symlink (`app/build`) at THIS checkout's
+//    output, when it is a symlink. Where a build dir is relocated into
+//    ~/.cache/builds/gradle-builds/<dirname>-<md5(abs path)[:12]>/ the slug is
+//    a pure function of the gradle root path, so we can compute the right
+//    answer instead of guessing. On this host (measured 2026-10-15) nothing
+//    relocates it any more — no global gradle init script exists, an earlier
+//    version of this comment named `~/.gradle/init.d/00-build-dir.gradle.kts`
+//    — the only relocation is the launch checkout's hand-made `app/build`
+//    symlink (dated 2026-08-18), and a fresh git worktree builds in-tree: a
+//    real `app/build` directory, left alone here. The postflight then only
+//    insists that the APK exists at the in-project path.
 //
 //    Two ways the symlink goes wrong, and the second one is the nasty one:
 //    - DANGLING (cache pruned, or the path canonicalizes differently under the
@@ -79,10 +85,11 @@ if (mode in devPorts) {
   process.exit(0);
 }
 
-/** Where the gradle init script puts `:app`'s build dir for this checkout.
- *  Mirrors 00-build-dir.gradle.kts exactly: slug = "<dirname>-<md5(abs path of
- *  the GRADLE ROOT)[:12]>", and the `:app` subproject lands in `app/`. The root
- *  here is src-tauri/gen/android, NOT the repo root. */
+/** Where a relocated `:app` build dir lands for this checkout (the cache dir
+ *  the launch checkout's `app/build` symlink points into). The slug is
+ *  "<dirname>-<md5(abs path of the GRADLE ROOT)[:12]>", and the `:app`
+ *  subproject lands in `app/`. The root here is src-tauri/gen/android, NOT the
+ *  repo root. No init script produces it on this host any more (2026-10-15). */
 function expectedAppBuildDir(androidRoot) {
   const hash = createHash('md5').update(androidRoot).digest('hex').slice(0, 12);
   const slug = `${basename(androidRoot)}-${hash}`;
