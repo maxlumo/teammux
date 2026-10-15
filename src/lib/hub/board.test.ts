@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackendCatalog } from '../core/agents.ts';
-import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, ISSUE_REF_CHARS, assignNotes, chipCols, assigneeView } from './board.ts';
+import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, ISSUE_REF_CHARS, chipCols, assigneeView } from './board.ts';
 
 // Since board #15 a draft carries all four editable fields; these helpers
 // build the full shape from the short form the assertions speak.
@@ -199,73 +199,6 @@ test('boardTitle answers from the FULL list — a hidden empty board still has i
   // then the generic page name) exactly like before.
   assert.equal(boardTitle(all, 'gone'), null);
   assert.equal(boardTitle([], 'x'), null);
-});
-
-test('assignNotes: the dispatch carries the thread — chronological, authored, separated (board #42)', () => {
-  // Nothing to say appends NOTHING: no notes, an empty array, or the bare
-  // count a LIST row carries instead of the thread.
-  assert.equal(assignNotes(7, []), '');
-  assert.equal(assignNotes(7, 3), '');
-  assert.equal(assignNotes(7, null), '');
-  assert.equal(assignNotes(7, undefined), '');
-
-  // Multi-note: ordered by `at` ASCENDING whatever order the caller holds,
-  // each line keeps its author, and the block opens with a blank line + a
-  // counted header so the original description stays clearly separate.
-  const out = assignNotes(42, [
-    { author: 'builder-2', body: 'second finding', at: 20 },
-    { author: 'human', body: 'first: check the cache', at: 10 },
-    { author: 'lead', body: 'third — ship it', at: 30 },
-  ]);
-  assert.equal(out, [
-    '',
-    '',
-    'Notes (3):',
-    '- human: first: check the cache',
-    '- builder-2: second finding',
-    '- lead: third — ship it',
-  ].join('\n'), 'chronological, authored, no truncation marker when it fits');
-
-  // A note's inner newlines squash to spaces: one note stays ONE line, so
-  // the bullet grammar and the character budget both hold.
-  assert.equal(
-    assignNotes(5, [{ author: 'a', body: 'line one\n  line two\n\nline three', at: 1 }]),
-    '\n\nNotes (1):\n- a: line one line two line three',
-  );
-});
-
-test('assignNotes: an explicit budget truncates — one giant note cannot flood the pane (board #42)', () => {
-  // ONE giant note is sliced at the budget and pointed at `tmm board show`.
-  const giant = assignNotes(9, [{ author: 'a', body: 'x'.repeat(5000), at: 1 }], 200);
-  const [, , header, line, tail] = giant.split('\n');
-  assert.equal(header, 'Notes (1):');
-  assert.ok(line!.length <= 201, `the sliced line respects the budget (+ the … marker): ${line!.length}`);
-  assert.ok(line!.endsWith('…'), 'a partial note is marked');
-  assert.equal(tail, '… — `tmm board show 9`', 'no notes were fully omitted, but the pointer to the rest stands');
-
-  // Later notes past the budget are dropped and COUNTED; the tail names how
-  // many more the thread holds and where to read them.
-  const many = assignNotes(11, [
-    { author: 'a', body: 'k'.repeat(90), at: 1 },
-    { author: 'b', body: 'k'.repeat(90), at: 2 },
-    { author: 'c', body: 'unreached', at: 3 },
-    { author: 'd', body: 'unreached too', at: 4 },
-  ], 200);
-  assert.match(many, /\n… \+2 more — `tmm board show 11`$/u, 'omitted notes are counted in the tail');
-  assert.ok(!many.includes('unreached'), 'past-budget notes are not leaked');
-
-  // A useless sliver of remaining room drops the partial note outright —
-  // the marker line speaks for it instead of a fragment.
-  const sliver = assignNotes(3, [
-    { author: 'a', body: 'k'.repeat(180), at: 1 },
-    { author: 'b', body: 'a real point that matters', at: 2 },
-  ], 200);
-  assert.ok(!sliver.includes('- b:'), 'a fragment under the minimum slice is not worth emitting');
-  assert.match(sliver, /\+1 more/u);
-
-  // Within budget: identity — no marker, no pointer.
-  const fits = assignNotes(4, [{ author: 'a', body: 'short', at: 1 }], 200);
-  assert.ok(!fits.includes('tmm board show'), 'a fitting thread needs no pointer');
 });
 
 test('chipCols: one row when it fits, else 2×2, else one column — never three (board #39, owner)', () => {

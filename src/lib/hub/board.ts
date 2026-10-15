@@ -163,60 +163,6 @@ export function boardTitle(
   return rows.find((r) => r.project.session === session)?.project.name ?? null;
 }
 
-/** The note-line budget of an assignment brief (board #42). The complete
- * original title/body already ride in the message; only the historical note
- * thread gets its own explicit total so a long discussion — or ONE giant note
- * — can never inject an unbounded wall of text into the agent's pane. */
-export const ASSIGN_NOTES_BUDGET = 1200;
-/** Below this many characters of remaining budget a partial note is not
- * worth a fragment — the truncation marker speaks for it instead. */
-const NOTE_SLICE_MIN = 48;
-
-/** The note thread an assignment dispatch carries (board #42: "底下的 note
- * 好像都没有发…避免他漏掉底下的一些关键信息"). Returns a block the caller
- * APPENDS to the rendered assign message — leading blank line + `Notes (N):`
- * header keep it clearly separated from the original description — or '' when
- * there is nothing to say (no notes at birth; list rows carry a bare count).
- *
- * Chronological (`at` ascending, whatever order the caller holds), one line
- * per note with its author preserved; a note's inner newlines squash to
- * spaces so the line stays a line and the budget stays character math. Lines
- * stop at `budget` characters total — a note that does not fit whole is
- * sliced on the remaining room (dropped outright when the room is a useless
- * sliver) — and any cut ends the block with the one pointer to the rest:
- * `tmm board show <id>`. */
-export function assignNotes(
-  id: number,
-  notes: number | { author: string; body: string; at: number }[] | null | undefined,
-  budget = ASSIGN_NOTES_BUDGET,
-): string {
-  if (!Array.isArray(notes) || notes.length === 0) return '';
-  const ordered = [...notes].sort((a, b) => a.at - b.at);
-  const lines: string[] = [];
-  let used = 0;
-  let shown = 0; // notes visible at all — full, or the one budget-cut slice
-  let cut = false;
-  for (const n of ordered) {
-    const line = `- ${n.author}: ${n.body.trim().replace(/\s+/gu, ' ')}`;
-    const room = budget - used;
-    if (line.length <= room) {
-      lines.push(line);
-      used += line.length;
-      shown++;
-    } else {
-      if (room >= NOTE_SLICE_MIN) {
-        lines.push(`${line.slice(0, room).trimEnd()}…`);
-        shown++; // partially visible — the `…` speaks for its rest, not "+1 more"
-      }
-      cut = true;
-      break;
-    }
-  }
-  const more = ordered.length - shown; // notes the pane never sees at all
-  const tail = cut || more > 0 ? `\n…${more > 0 ? ` +${more} more` : ''} — \`tmm board show ${id}\`` : '';
-  return `\n\nNotes (${ordered.length}):\n${lines.join('\n')}${tail}`;
-}
-
 /** How many EQUAL grid columns the four sidebar count chips get (board #39,
  * owner 2026-09-01: "如果一行能 放下放一行也行，甚至两行放不下，就放一列，动
  * 态适配" — layered on the standing 不要 3+1 rule). The columns are 1fr, so

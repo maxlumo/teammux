@@ -407,17 +407,7 @@ async fn main() {
             // whoever typed the command. Not an error: the message IS in the
             // room, and nothing is queued for the absent agent — exit 0 with
             // a note, like the self-mention note above.
-            for row in r.get("offline").and_then(|v| v.as_array()).into_iter().flatten() {
-                let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let why = row.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                if why == "unchecked" {
-                    // tmux could not be asked, so this says what is KNOWN and
-                    // nothing about whether the agent runs (board #347).
-                    eprintln!("note: @{name} was not typed to anyone's pane — tmux could not be asked whether it is online; nothing is queued for it");
-                } else {
-                    eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
-                }
-            }
+            say_offline(&r);
         }
         // The scratch terminal's session (board #324): the same server entry
         // the desktop panel uses, so an agent can open a scratch shell for a
@@ -602,9 +592,11 @@ async fn main() {
                 // the self-claim and `add --assignee` is assignment at
                 // birth; between them there was no way to move an open
                 // issue to another agent, which the UI has always been able
-                // to do (non-negotiable 14). Same RPC as that UI, and the
-                // same @message carrier for the hand-off, so the agent
-                // actually starts instead of silently gaining a label.
+                // to do (non-negotiable 14). The SAME save as that UI: the
+                // server hands the issue over (board #377), so the room
+                // record and the @message that wakes the agent are the same
+                // whichever surface asked, and this verb carries no brief
+                // of its own.
                 "assign" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
                         fail(EXIT_USAGE, "board assign needs an issue id and a name: tmm board assign 3 builder  (`-` clears the assignee)");
@@ -614,12 +606,10 @@ async fn main() {
                     };
                     let name = assign_target(raw);
                     // The issue is read FIRST: a wrong id must fail here,
-                    // before anything is written, and the hand-off names the
-                    // issue with the same fallback every notice speaks.
+                    // before anything is written, and a clear can say who
+                    // had it.
                     let issue = rpc(&ctx, "hub_board_get", json!({ "session": session, "id": id })).await;
-                    let g = |k: &str| issue.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let title = tmux_mobile::projects::issue_ref(&g("title"), &g("body"), id);
-                    let was = g("assignee");
+                    let was = issue.get("assignee").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     // A name is checked at the door, like `tmm send`'s: an
                     // assignment to a typo is an issue nobody is doing, and
                     // it would look exactly like a success.
@@ -632,52 +622,15 @@ async fn main() {
                             ));
                         }
                     }
+                    // ONE request saves the assignee AND tells the agent. A
+                    // lost answer leaves it unknown which half ran, and the
+                    // recovery is the same either way: naming the assignee
+                    // again saves the same value and sends the hand-off
+                    // again (it may duplicate it; `tmm log --grep "board
+                    // #N"` shows whether it was posted).
                     let r = rpc(&ctx, "hub_board_save", json!({
                         "session": session, "id": id, "assignee": name, "who": who
                     })).await;
-                    // The assignment DOES something (the UI's rule since
-                    // board #11): the room line is the record, this is the
-                    // wake. `human` reads the board itself, and a clear has
-                    // nobody to tell.
-                    // The two steps are reported APART (board #367 review
-                    // P1-B): the save has already landed here, so a failed
-                    // hand-off must not read as a failed assignment — and
-                    // must not read as a success either. `assign` is
-                    // idempotent on the BOARD and deliberately not on the
-                    // notification: re-running it re-sends the hand-off,
-                    // which is the recovery path for exactly this failure.
-                    if !name.is_empty() && name != "human" {
-                        let body = assign_brief(id, &title, &who, name);
-                        if let Err((code, msg)) = try_rpc(&ctx, "hub_post", json!({
-                            "session": session, "from": who, "body": body, "status": false, "detached": false
-                        })).await {
-                            // A lost ANSWER is not a failed request (board
-                            // #367 review P1-B-1): the server may have
-                            // posted and delivered the hand-off and only the
-                            // reply went missing. So this reports what IS
-                            // known — the assignment — and names the rest as
-                            // unconfirmed, including what a re-run costs. A
-                            // machine caller gets the same facts as fields
-                            // (P1-B-2); the exit code is non-zero either way,
-                            // because the command did not finish.
-                            if ctx.json {
-                                println!("{}", json!({
-                                    "issue": id, "assignee": name, "saved": true,
-                                    "notified": "unconfirmed", "error": msg
-                                }));
-                            } else {
-                                println!("✓ #{id} → {name} (saved)");
-                            }
-                            fail(code, &format!(
-                                "the hand-off could not be confirmed: {msg}\n\
-                                 #{id} IS assigned to {name} on the board. Whether {name} was told is \
-                                 unknown — it may already have been posted, since a lost answer is not a \
-                                 failed request. Re-running `tmm board assign {id} {name}` sends it again \
-                                 and may duplicate it; `tmm log --grep \"board #{id}\"` shows whether \
-                                 the hand-off was posted."
-                            ));
-                        }
-                    }
                     if ctx.json {
                         println!("{r}");
                     } else if name.is_empty() {
@@ -686,6 +639,7 @@ async fn main() {
                     } else {
                         println!("✓ #{id} → {name}");
                     }
+                    say_offline(&r);
                 }
                 "take" | "move" | "note" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
@@ -2132,25 +2086,22 @@ fn assign_target(raw: &str) -> &str {
     if name == "-" { "" } else { name }
 }
 
-/// The hand-off line `board assign` posts: an `@mention` so the ONE delivery
-/// path types it into that agent's pane, the issue NAMED (never "an issue"),
-/// who handed it over, and the two commands that continue the flow. The body
-/// and the note thread are deliberately NOT inlined the way the UI's brief
-/// does it: the recipient of this one has `tmm` in its hands and the issue is
-/// one command away, whereas the UI briefs an agent for a human who cannot.
-fn assign_brief(id: i64, title: &str, who: &str, name: &str) -> String {
-    // The issue's TITLE is quoted text, so it carries no routing: an `@` in
-    // it becomes `＠` through the project's one de-addressing rule (board
-    // #367 review P1-A — a title like "修复 @all 的投递" would otherwise have
-    // typed a hand-off meant for one agent into every pane, because
-    // `mention_names` reads the whole body and does not care which words we
-    // wrote and which we quoted). The command's `name` argument is the only
-    // address in this line. The stored title is untouched.
-    let title = tmux_mobile::address::unaddressed(title);
-    format!(
-        "@{name} [board #{id}] {title} — assigned to you by {who}. \
-         `tmm board take {id}` to claim it, `tmm board show {id}` for the body and the notes."
-    )
+/// A mention no pane received, SAID where the sender is looking (board #347):
+/// `tmm send`'s answer and a board hand-off's (board #377) both carry the
+/// rows, and this is the one place that words them. Not an error: the line IS
+/// in the room, and nothing is queued for the absent agent.
+fn say_offline(r: &Value) {
+    for row in r.get("offline").and_then(|v| v.as_array()).into_iter().flatten() {
+        let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let why = row.get("why").and_then(|v| v.as_str()).unwrap_or("");
+        if why == "unchecked" {
+            // tmux could not be asked, so this says what is KNOWN and
+            // nothing about whether the agent runs (board #347).
+            eprintln!("note: @{name} was not typed to anyone's pane — tmux could not be asked whether it is online; nothing is queued for it");
+        } else {
+            eprintln!("note: @{name} is not online ({why}) — it was not typed to anyone's pane and nothing is queued for it");
+        }
+    }
 }
 
 /// The managed agents in a `hub_agents` answer.
@@ -2415,11 +2366,11 @@ mod tests {
     /// Board #367: there was no way to hand an OPEN issue to another agent
     /// — `take` claims it for the caller and `--assignee` only works at
     /// creation — so the orchestrator could not do from the CLI what the UI
-    /// does with its picker. `-` is how a shell spells "nobody", and the
-    /// hand-off NAMES the issue and the two commands that continue the flow,
-    /// because an @message that says only "you have #12" costs a lookup.
+    /// does with its picker. `-` is how a shell spells "nobody". (The
+    /// hand-off text is the server's since board #377 and is pinned in
+    /// `hub_rpc`.)
     #[test]
-    fn board_assign_reads_a_name_or_a_dash_and_hands_the_issue_over() {
+    fn board_assign_reads_a_name_or_a_dash() {
         // The `-` has to SURVIVE the flag parser to reach `assign_target`.
         // It did not, and only running the verb showed it: a lone `-` became
         // a flag named "" and `board assign 3 -` answered "needs a name".
@@ -2437,27 +2388,6 @@ mod tests {
         assert_eq!(super::assign_target("  @builder-2 "), "builder-2", "an @ is how the room spells a name");
         assert_eq!(super::assign_target("-"), "", "the one spelling of nobody");
         assert_eq!(super::assign_target("human"), "human");
-
-        let brief = super::assign_brief(12, "Fix the login flow", "orchestrator", "builder-2");
-        assert!(brief.starts_with("@builder-2 "), "the mention is what types it into the pane: {brief}");
-        // The TITLE is quoted text and must never route (P1-A): the only
-        // address in the line is the name the command was given, whatever
-        // the issue is called. Asserted through the parser that decides it.
-        let shouty = super::assign_brief(12, "fix the delivery to @all, ask @reviewer", "human", "builder-2");
-        assert_eq!(
-            tmux_mobile::address::mention_names(&shouty),
-            vec!["builder-2".to_string()],
-            "a title's @ is read by a person, not by the router: {shouty}"
-        );
-        assert!(shouty.contains("＠all") && shouty.contains("＠reviewer"), "still readable: {shouty}");
-        assert!(brief.contains("[board #12] Fix the login flow"), "{brief}");
-        assert!(brief.contains("by orchestrator"), "{brief}");
-        assert!(brief.contains("tmm board take 12"), "{brief}");
-        assert!(brief.contains("tmm board show 12"), "{brief}");
-        // A titleless issue is still named — issue_ref's fallback, same as
-        // every other notice.
-        let titleless = super::assign_brief(9, "#9", "human", "dev");
-        assert!(titleless.contains("[board #9] #9 —"), "{titleless}");
     }
 
     #[test]

@@ -1,9 +1,12 @@
-//! `tmm board assign` through the REAL CLI against a FAKE server (board #367
-//! review P1-B). The verb is two RPCs with a persistent write between them,
-//! so the only honest test of its failure paths is the staged one: a server
-//! that answers the reads, accepts the save, and then loses the hand-off's
-//! response. A pure test of `assign_brief` cannot see any of this — the `-`
-//! that never reached the parser was the first proof of that.
+//! `tmm board assign` through the REAL CLI against a FAKE server (board #367,
+//! reshaped by #377). The verb used to be two RPCs with a persistent write
+//! between them (save, then post the hand-off), and the only honest test of
+//! its failure paths was a server that lost the second answer. The server now
+//! makes the hand-off inside the save, so the CLI makes ONE write: what these
+//! tests watch is the calls it makes, what that write carries, and what it
+//! says when the answer is bad, lost, or reports an absent agent. The hand-off
+//! TEXT and its single delivery are pinned where they are made, in
+//! `server/hub_rpc.rs`.
 //!
 //! The fake speaks exactly what `try_rpc` speaks: plain token auth as id 1,
 //! one call as id 2, a fresh connection per RPC.
@@ -23,13 +26,18 @@ enum Act {
     Error,
     /// Accept the request and then drop the socket: the server may well have
     /// DONE it, and only the answer was lost. That is the case the CLI must
-    /// not describe as "not posted".
+    /// not describe as success.
     LoseAnswer,
+    /// Answer a save the way the server does when the hand-off reached no
+    /// pane (`offline`, board #347): the board is right, nobody was typed to.
+    Offline,
 }
 
 struct Fake {
     /// Every method the CLI called, in order.
     calls: Arc<Mutex<Vec<String>>>,
+    /// The params of every call, parallel to `calls`.
+    params: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The issue's assignee, as the fake's own state: a `hub_board_save`
     /// writes it and the next `hub_board_get` reads it back. Without this a
     /// "re-run" is only ever `"" → name` and the same-assignee contract is
@@ -48,6 +56,8 @@ fn fake(plan: Vec<(&'static str, Act)>) -> Fake {
 fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
+    let sent: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sent_in = sent.clone();
     let state: Arc<Mutex<String>> = Arc::new(Mutex::new(assignee.to_string()));
     let held = state.clone();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -59,6 +69,7 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { return };
                 let seen = seen.clone();
+                let sent_in = sent_in.clone();
                 let plan = plan.clone();
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
                 // id 1: auth.
@@ -71,6 +82,7 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
                 let call: serde_json::Value = serde_json::from_str(&raw).unwrap();
                 let method = call["method"].as_str().unwrap_or_default().to_string();
                 seen.lock().unwrap().push(method.clone());
+                sent_in.lock().unwrap().push(call["params"].clone());
                 let act = plan
                     .iter()
                     .find(|(m, _)| *m == method)
@@ -102,6 +114,9 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
                     ("hub_agents", _) => serde_json::json!({ "id": 2, "result": {
                         "agents": [{ "name": "builder-2", "managed": true }], "session": "p"
                     }}),
+                    ("hub_board_save", Act::Offline) => serde_json::json!({ "id": 2, "result": {
+                        "ok": true, "id": 12, "offline": [{ "name": "builder-2", "why": "stopped" }]
+                    }}),
                     _ => serde_json::json!({ "id": 2, "result": { "ok": true, "id": 12 } }),
                 };
                 let _ = ws.send(Message::Text(body.to_string().into())).await;
@@ -110,7 +125,7 @@ fn fake_with(plan: Vec<(&'static str, Act)>, assignee: &str) -> Fake {
         });
     });
     let addr = rx.recv().unwrap();
-    Fake { calls, assignee: state, addr: format!("ws://{addr}") }
+    Fake { calls, params: sent, assignee: state, addr: format!("ws://{addr}") }
 }
 
 impl Fake {
@@ -135,60 +150,81 @@ impl Fake {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
+    /// The params of the one call to `method`.
+    fn params_of(&self, method: &str) -> serde_json::Value {
+        let calls = self.calls();
+        let at = calls.iter().position(|m| m == method).unwrap_or_else(|| panic!("{method} was never called: {calls:?}"));
+        self.params.lock().unwrap()[at].clone()
+    }
     fn assignee(&self) -> String {
         self.assignee.lock().unwrap().clone()
     }
 }
 
-/// The save landed and the hand-off's answer was LOST. The assignment is a
-/// fact; the notification is UNKNOWN — it may well have been posted. The CLI
-/// has to say both, and must not fabricate "was not posted" (reviewer's
-/// P1-B-1: a lost response is not a failed request).
+/// The whole path when nothing goes wrong: the issue read, the name checked,
+/// ONE save — and no post of its own. The hand-off is the server's (board
+/// #377); a CLI that posted one as well would type it into the pane twice.
 #[test]
-fn a_lost_handoff_answer_is_reported_as_unconfirmed_not_as_a_failure() {
-    let f = fake(vec![("hub_post", Act::LoseAnswer)]);
+fn a_clean_assignment_is_one_save_and_posts_nothing_itself() {
+    let f = fake(vec![]);
     let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
-    assert!(!ok, "a command that could not finish exits non-zero");
-    assert!(out.contains("#12") && out.contains("builder-2"), "the assignment that landed is said: {out:?}");
-    assert!(out.contains("saved"), "{out:?}");
-    let said = format!("{out}{err}");
-    assert!(said.contains("could not be confirmed"), "the uncertainty is named: {said:?}");
-    assert!(said.contains("may already have been posted"), "{said:?}");
-    assert!(said.contains("may duplicate"), "the re-run's cost is named: {said:?}");
-    assert!(!said.contains("was NOT posted") && !said.contains("has not been told"),
-        "no fabricated certainty: {said:?}");
+    assert!(ok, "{out:?} {err:?}");
+    assert!(out.contains("✓ #12 → builder-2"), "{out:?}");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save"]);
+    assert_eq!(err, "", "nothing to warn about: {err:?}");
+    // What the write carries is what makes the server hand the issue over:
+    // the assignee, and WHO is handing it (the brief says "by orchestrator").
     assert_eq!(
-        f.calls(),
-        vec!["hub_board_get", "hub_agents", "hub_board_save", "hub_post"],
-        "the issue is read, the name checked, then saved, then handed off"
+        f.params_of("hub_board_save"),
+        serde_json::json!({ "session": "p", "id": 12, "assignee": "builder-2", "who": "orchestrator" })
     );
 }
 
-/// The same failure in `--output json`: a machine caller gets the partial
-/// result instead of a human sentence (reviewer's P1-B-2).
+/// Naming the SAME assignee again still sends the save. The server hands the
+/// issue over whenever a save names an assignee, and that is how a person
+/// re-sends a hand-off to an agent that was offline the first time or whose
+/// answer was lost (tmm-cli.md says so, and says it may duplicate). A CLI
+/// that skipped the save when the board already says `builder-2` would kill
+/// that recovery path without a sound.
 #[test]
-fn the_partial_result_is_machine_readable_in_json_mode() {
-    let f = fake(vec![("hub_post", Act::LoseAnswer)]);
-    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2", "--output", "json"]);
-    assert!(!ok);
-    let v: serde_json::Value = serde_json::from_str(out.trim()).expect(&format!("stdout must be JSON: {out:?}"));
-    assert_eq!(v["issue"], 12);
-    assert_eq!(v["assignee"], "builder-2");
-    assert_eq!(v["saved"], true);
-    assert_eq!(v["notified"], "unconfirmed");
-    assert!(err.contains("could not be confirmed"), "the explanation goes to stderr: {err:?}");
+fn naming_the_same_assignee_again_still_sends_the_save() {
+    // ALREADY assigned to the same name (the fake carries the assignee
+    // between calls).
+    let f = fake_with(vec![], "builder-2");
+    let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(ok, "{out:?}");
+    assert_eq!(f.assignee(), "builder-2", "the save is a no-op on the board");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save"]);
+    assert_eq!(f.params_of("hub_board_save")["assignee"], "builder-2");
+    // The clear-then-same sequence a human would type is the same contract.
+    let (ok, _out, _err) = f.run(&["board", "assign", "12", "-"]);
+    assert!(ok);
+    assert_eq!(f.assignee(), "", "`-` really cleared it in the fake's state");
 }
 
-/// A save that really failed is a failure with nothing to report: no
-/// hand-off is attempted, so nobody is told about an assignment that does
-/// not exist.
+/// The save landed (the fake writes it) and its ANSWER was lost. The CLI
+/// cannot know whether the server also handed the issue over, so it does not
+/// say "✓": it fails, with the transport's own words, and a re-run is the
+/// recovery.
 #[test]
-fn a_failed_save_posts_nothing() {
+fn a_lost_answer_is_a_failure_not_a_success() {
+    let f = fake(vec![("hub_board_save", Act::LoseAnswer)]);
+    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(!ok, "a command that could not finish exits non-zero");
+    assert!(!out.contains('✓'), "no success line for an answer nobody read: {out:?}");
+    assert!(!err.trim().is_empty(), "it says why: {err:?}");
+    assert_eq!(f.assignee(), "builder-2", "and the save did land, which is why a re-run is safe");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save"]);
+}
+
+/// A save that really failed is a failure with nothing else done.
+#[test]
+fn a_failed_save_changes_nothing() {
     let f = fake_with(vec![("hub_board_save", Act::Error)], "dev");
-    let (ok, _out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
     assert!(!ok);
+    assert!(!out.contains('✓'), "{out:?}");
     assert!(err.contains("boom"), "{err:?}");
-    assert!(!f.calls().contains(&"hub_post".to_string()), "{:?}", f.calls());
     assert_eq!(f.assignee(), "dev", "the save did not happen: nobody was reassigned");
 }
 
@@ -200,57 +236,29 @@ fn an_unknown_name_writes_nothing() {
     let (ok, _out, err) = f.run(&["board", "assign", "12", "buildr-2"]);
     assert!(!ok);
     assert!(err.contains("no managed agent named buildr-2"), "{err:?}");
-    let calls = f.calls();
-    assert!(!calls.contains(&"hub_board_save".to_string()), "{calls:?}");
-    assert!(!calls.contains(&"hub_post".to_string()), "{calls:?}");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents"], "read and checked, never saved");
 }
 
-/// The whole path when nothing goes wrong: the issue read, the name checked,
-/// the save, the hand-off — in that order and no more. (The hand-off's one
-/// ADDRESS is asserted where it is decided, on `assign_brief` through
-/// `mention_names`; this test watches the calls, not the text.)
+/// `-` clears: one save, no name to check.
 #[test]
-fn a_clean_assignment_makes_the_four_calls_in_order() {
-    let f = fake(vec![]);
-    let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
-    assert!(ok, "{out:?}");
-    assert!(out.contains("✓ #12 → builder-2"), "{out:?}");
-    assert_eq!(f.calls(), vec!["hub_board_get", "hub_agents", "hub_board_save", "hub_post"]);
-}
-
-/// Re-running with the SAME assignee is the documented recovery path after a
-/// hand-off whose answer was lost, so it is not a no-op: the save is idempotent
-/// and the notification is sent again (tmm-cli.md says so, and says it may
-/// duplicate). This case is what keeps that contract from being quietly
-/// "optimised" into a skip, which would leave the only recovery path dead.
-#[test]
-fn re_running_with_the_same_assignee_re_sends_the_hand_off() {
-    // ALREADY assigned to the same name, so the second run really is
-    // builder-2 → builder-2 (the fake carries the assignee between calls).
-    let f = fake_with(vec![], "builder-2");
-    let (ok, out, _err) = f.run(&["board", "assign", "12", "builder-2"]);
-    assert!(ok, "{out:?}");
-    assert_eq!(f.assignee(), "builder-2", "the save is a no-op on the board");
-    assert_eq!(
-        f.calls(),
-        vec!["hub_board_get", "hub_agents", "hub_board_save", "hub_post"],
-        "and the hand-off goes out anyway — that is the recovery path after a lost answer"
-    );
-    // The clear-then-same sequence a human would type is the same contract.
-    let (ok, _out, _err) = f.run(&["board", "assign", "12", "-"]);
-    assert!(ok);
-    assert_eq!(f.assignee(), "", "`-` really cleared it in the fake's state");
-}
-
-/// `-` clears, which needs no hand-off: nobody to tell.
-#[test]
-fn clearing_tells_nobody() {
+fn clearing_is_one_save_and_checks_no_name() {
     let f = fake(vec![]);
     let (ok, out, _err) = f.run(&["board", "assign", "12", "-"]);
     assert!(ok, "{out:?}");
     assert!(out.contains("unassigned"), "{out:?}");
-    let calls = f.calls();
-    assert!(calls.contains(&"hub_board_save".to_string()), "{calls:?}");
-    assert!(!calls.contains(&"hub_post".to_string()), "{calls:?}");
-    assert!(!calls.contains(&"hub_agents".to_string()), "no name to check: {calls:?}");
+    assert_eq!(f.calls(), vec!["hub_board_get", "hub_board_save"]);
+    assert_eq!(f.params_of("hub_board_save")["assignee"], "");
+}
+
+/// The server's answer says the hand-off reached no pane (the agent is
+/// stopped): the board is right, and the person at the keyboard is told, in
+/// the words `tmm send` uses, where they are looking (board #347).
+#[test]
+fn an_absent_assignee_is_said_on_stderr_and_the_command_still_succeeds() {
+    let f = fake(vec![("hub_board_save", Act::Offline)]);
+    let (ok, out, err) = f.run(&["board", "assign", "12", "builder-2"]);
+    assert!(ok, "the assignment landed: {out:?} {err:?}");
+    assert!(out.contains("✓ #12 → builder-2"), "{out:?}");
+    assert!(err.contains("@builder-2 is not online (stopped)"), "{err:?}");
+    assert!(err.contains("nothing is queued for it"), "{err:?}");
 }

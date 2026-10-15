@@ -39,42 +39,30 @@ test('the issue detail is a DRAFT: explicit save, clean cancel, guarded exits (b
   assert.ok(!refetch.includes('draft = draftOf(sel)'), 'and never blindly resets the draft');
 });
 
-test('assignment is ONE dispatch — the detail picker and the create dialog share it (board #11)', () => {
-  // dispatchAssign is the single carrier of assignment=dispatch semantics:
-  // saving the assignee AND typing the brief into the agent's pane. Exactly
-  // one hubPost call site proves nobody re-implements the delivery half.
-  assert.match(source, /async function dispatchAssign\(ctx: OpCtx, id: number, name: string, title = '', body = '', notes: \{ author: string; body: string; at: number \}\[\] = \[\]\)/u, 'the one dispatch function');
-  assert.equal(source.split('hubPost(').length - 1, 1, 'exactly one delivery call site, inside dispatchAssign');
-  // The brief carries the NOTE THREAD too (board #42): the delivery appends
-  // assignNotes — chronological, authored, budget-capped in board.ts — so an
-  // agent cannot miss the discussion under the issue.
-  // …and the reading order is a HANDOFF (board #51): who assigned it leads
-  // the message, the note thread follows the issue, and the tmm instructions
-  // ride LAST — never between the issue and its thread.
-  assert.match(source, /await hubPost\(ctx\.session, `@\$\{name\} \$\{msg\}\$\{assignNotes\(id, notes\)\}\\n\$\{take\}`\);/u,
-    'the dispatch order: message, notes, then the take instructions last');
-  // The ORIGINAL issue body is the task input, not a notification preview:
-  // dispatch must carry all of it. The pane path uses paste-buffer and has no
-  // 400-char transport ceiling, so a frontend excerpt silently loses context.
-  assert.match(source, /const b = body\.trim\(\) \? ` — \$\{body\.trim\(\)\}\.` : '\.';/u,
-    'assignment carries the complete issue body');
-  assert.ok(!source.includes('const EXCERPT ='), 'assignment has no body excerpt budget');
-  assert.match(source, /\.replace\('\{who\}', 'human'\)/u, 'the assigner is the subject at the front');
-  assert.match(source, /const take = t\('boardAssignTake'\)\.replaceAll\('\{id\}', String\(id\)\);/u,
-    'the instructions are their own i18n atom, filled per issue');
-  assert.match(source, /const notes = Array\.isArray\(sel\.notes\) \? sel\.notes : \[\];[\s\S]*if \(assignee !== undefined && alive\) await dispatchAssign\(ctx, id, assignee, saved\.title, saved\.body, notes\);/u,
-    'a ✓-confirmed assignee change routes through it (board #15) and carries the OPEN issue\u2019s thread (board #42)');
-  assert.match(source, /if \(wantAssign && created != null && alive\) await dispatchAssign\(ctx, created, wantAssign, title, body\);/u,
-    'create-with-assignee dispatches too — a fresh issue HAS no notes, so none ride (board #42)');
-  // The form closes the MOMENT the create succeeds — before the dispatch can
-  // fail — because a retryable form after a successful create mints
-  // duplicate issues (#11 review). Order in the source is the guarantee.
+test('assignment is ONE save the SERVER hands over — the page posts no brief of its own (board #11, #377)', () => {
+  // The hand-off (the room record and the @message that types into the
+  // agent's pane) is made by `hub_board_save`, once, for every surface. The
+  // page used to inline the whole issue and its note thread in a post of its
+  // own while `tmm board assign` sent a pointer: two wordings for one event.
+  // Nothing here may post, brief or carry the assignment text again.
+  assert.ok(!source.includes('hubPost'), 'the page does not post: no import, no call');
+  assert.ok(!source.includes('dispatchAssign'), 'the second carrier is gone, not renamed');
+  assert.ok(!/assignNotes|boardAssignMsg|boardAssignTake/u.test(source), 'and so are its note thread and its i18n atoms');
+  // A ✓-confirmed assignee change rides in the SAME request as the other
+  // changed fields — the server needs the title it will announce.
+  const save = source.slice(source.indexOf('async function saveDraft'), source.indexOf('async function createIssue'));
+  assert.match(save, /await boardSave\(ctx\.session, \{ id, \.\.\.patch \}\);/u, 'one save carries the patch, assignee included');
+  assert.equal(save.split('boardSave(').length - 1, 1, 'and it is the only save in saveDraft');
+  // Create-with-assignee is one request too.
   const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('async function addNote'));
+  assert.match(create, /await boardSave\(ctx\.session, assignee \? \{ title, body, assignee \} : \{ title, body \}\);/u,
+    'the assignee is part of the create');
+  assert.equal(create.split('boardSave(').length - 1, 1, 'one request, never create-then-assign');
+  // The form closes the MOMENT the create succeeds — a retryable form after a
+  // successful create mints duplicate issues (#11 review). Order in the
+  // source is the guarantee.
   const closes = create.indexOf('creating = false;');
-  const dispatches = create.indexOf('await dispatchAssign(ctx, created');
-  assert.ok(closes > -1 && dispatches > -1 && closes < dispatches,
-    'the form is gone before the dispatch is attempted');
-  assert.ok(create.indexOf('busy = false;\n      return;') < closes,
+  assert.ok(closes > -1 && create.indexOf('busy = false;\n      return;') < closes,
     'only a FAILED create keeps the form for an honest retry');
 });
 
@@ -933,15 +921,14 @@ test('a card names its assignee with its backend icon, and the working dot only 
   assert.equal([...source.matchAll(/agents\.map\(\(a\) => \(\{ value: a\.name, label: a\.name, icon: backendIcon\(a\.agent\) \?\? undefined \}\)\)/gu)].length, 2, 'both pickers wear the same face');
 });
 
-test('images: one materialized body per submit, given to the save AND the brief; refused while uploading or failed (board #329)', () => {
+test('images: one materialized body per submit, given to the save; refused while uploading or failed (board #329)', () => {
   const save = source.slice(source.indexOf('async function saveDraft'), source.indexOf('async function createIssue'));
   assert.match(save, /if \(!sel \|\| busy \|\| blocked\(bodyStage\)\) return;/u, 'save refuses while uploading/failed');
   assert.match(save, /const saved = \{ \.\.\.draft, body: bodyStage\.body\(draft\.body\) \};/u, 'frozen at entry');
-  assert.match(save, /dispatchAssign\(ctx, id, assignee, saved\.title, saved\.body, notes\)/u, 'the brief carries the saved text');
+  assert.match(save, /await boardSave\(ctx\.session, \{ id, \.\.\.patch \}\);/u, 'the save carries the patch of the materialized text');
   const create = source.slice(source.indexOf('async function createIssue'), source.indexOf('async function addNote'));
   assert.match(create, /const body = createStage\.body\(nBody\)\.trim\(\);/u);
-  assert.match(create, /boardSave\(ctx\.session, \{ title, body \}\)/u);
-  assert.match(create, /dispatchAssign\(ctx, created, wantAssign, title, body\)/u, 'assign-at-birth briefs the stored body');
+  assert.match(create, /boardSave\(ctx\.session, assignee \? \{ title, body, assignee \} : \{ title, body \}\)/u, 'assign-at-birth rides the create');
   const note = source.slice(source.indexOf('async function addNote'), source.indexOf('// ── Delete is CONFIRMED'));
   assert.match(note, /blocked\(noteStage\)\) return;[\s\S]*const body = noteStage\.body\(noteText\)\.trim\(\);[\s\S]*await boardNote\(ctx\.session, id, body\);/u);
   // The SAME atoms as the chat: one pipeline, one strip, one image, one viewer.

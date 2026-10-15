@@ -420,15 +420,12 @@ completion).
   default selection.
 - Cards name the REPORTER (`by human` / `by lead`) and the assignee.
   Assigning from the detail view picks a managed agent and DELIVERS the
-  assignment (`hub_post` @message typed into that agent's pane, with the
-  take/note/move instructions) — assignment is a dispatch, not a label. The
-  dispatch reads as a HANDOFF (board #51): the SUBJECT leads (`{who}
-  assigned this to you`, the operator's name at the front), then the issue
-  (original title/body), then the note thread, and the tmm take/note/move
-  instructions ride LAST — never between the issue and its thread. Notes
-  come chronological with authors preserved (board #42) under their own
-  explicit character budget, and any cut points to `tmm board show <id>`
-  so one giant note cannot flood the pane while discussion never disappears.
+  assignment — assignment is a dispatch, not a label. The server does it
+  (board #377): the same save that stores the assignee types one short
+  hand-off into that agent's pane (the issue named, who assigned it, and
+  `tmm board take` / `tmm board show`), the same text `tmm board assign`
+  sends. The page carries no brief of its own, so the body and the notes are
+  read with `tmm board show <id>`, not pasted into the pane.
 - Status changes are recorded in the room (`[tmm] board #N a → b`), and a
   move to review NOTIFIES the reporter (line typed into their pane) — the
   handoff loop: file → assign (delivered) → take → review (delivered) →

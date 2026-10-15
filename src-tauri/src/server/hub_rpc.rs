@@ -271,35 +271,24 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // for setting this when the origin is a hook.
             let record_only =
                 is_status || p.get("record_only").and_then(|v| v.as_bool()).unwrap_or(false);
-            let recipients = crate::address::mention_names(&body);
-            let mut msg = rooms::post_routed(&room, from, &body, &recipients).map_err(RpcError::Internal)?;
-            // DELIVERY: an idle agent sits at its prompt and reads
-            // nothing — @mentions are typed into the mentioned agents'
-            // panes so the chat actually reaches them. (An agent that
-            // is mid-task sees the line queued in its input box.)
-            // Hook-sourced posts skip delivery entirely to prevent
-            // reply loops (see record_only comment above).
-            if !record_only {
-                let seq = msg.get("seq").and_then(|v| v.as_i64());
-                let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let msg = if record_only {
+                let recipients = crate::address::mention_names(&body);
+                rooms::post_routed(&room, from, &body, &recipients).map_err(RpcError::Internal)?
+            } else {
+                // DELIVERY: an idle agent sits at its prompt and reads
+                // nothing — @mentions are typed into the mentioned agents'
+                // panes so the chat actually reaches them. (An agent that
+                // is mid-task sees the line queued in its input box.)
+                // Hook-sourced posts skip delivery entirely to prevent
+                // reply loops (see record_only comment above).
+                //
                 // `detached` (board #285): the CLI found the call is not the
                 // sender agent's own turn (a watcher it left behind, cron),
                 // so its copy is typed like a wake's. A courtesy flag, as
                 // `from` is: the skip only stops a turn looping into itself.
                 let detached = p.get("detached").and_then(|v| v.as_bool()).unwrap_or(false);
-                let offline = deliver_mentions(session, from, &body, &room, seq, id, detached);
-                if !offline.is_empty() {
-                    // The answer carries it so the CALLER can say it where
-                    // its user is looking — `tmm send` on stderr (#347).
-                    let rows: Vec<serde_json::Value> = offline
-                        .iter()
-                        .map(|(name, why)| serde_json::json!({ "name": name, "why": why }))
-                        .collect();
-                    if let Some(obj) = msg.as_object_mut() {
-                        obj.insert("offline".into(), serde_json::Value::Array(rows));
-                    }
-                }
-            }
+                post_and_deliver(session, &room, from, &body, detached).map_err(RpcError::Internal)?
+            };
             Ok(msg)
         }
 
@@ -523,13 +512,40 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // from whichever surface made it — the UI's picker, `tmm board
             // assign`, `tmm board take`. Before this only the status moved
             // left a trace, and a reassignment was invisible to everyone who
-            // was not the new assignee. The WAKE is not here: the UI's brief
-            // and the CLI's hand-off own that, and they carry different text
-            // for different readers.
-            if let Some(prev) = &prev {
-                if let Some(line) = board_assign_line(prev, s("assignee"), saved) {
-                    let _ = rooms::post(&room, who, &line);
-                }
+            // was not the new assignee.
+            //
+            // And it WAKES the assignee (board #377; the UI's rule since
+            // board #11, owner 2026-08-29 "Assign 给某个 Agent 去做"). The
+            // hand-off is made HERE, once, by the one place that saves an
+            // assignee, so no surface carries a brief of its own: the UI and
+            // the CLI differ only in `who`, and the room line and the
+            // delivery are the same whichever of them asked. A save that
+            // NAMES an assignee hands the issue over — also when it names the
+            // one it already has, which is how a person re-sends a hand-off
+            // to an agent that was offline the first time; the UI sends the
+            // field only when it changed.
+            let prev_text = |k: &str| prev.as_ref().and_then(|p| p[k].as_str()).unwrap_or("");
+            // The issue as it NOW reads (new values win, through the same
+            // issue_ref fallback every notice speaks): a save that edits the
+            // title and assigns in one request must not announce the old one.
+            let named = crate::projects::issue_ref(
+                s("title").unwrap_or(prev_text("title")),
+                s("body").unwrap_or(prev_text("body")),
+                saved,
+            );
+            if let Some(line) = board_assign_line(prev_text("assignee"), &named, s("assignee"), saved) {
+                let _ = rooms::post(&room, who, &line);
+            }
+            let mut offline = None;
+            if let Some(name) = board_assign_target(s("assignee"), who) {
+                let brief = board_assign_brief(saved, &named, who, name);
+                // The assignment is already saved when this runs, so a failure
+                // says both facts: the board is right, the agent was not told.
+                // Saving the same assignee again sends it again.
+                let msg = post_and_deliver(session, &room, who, &brief, false).map_err(|e| {
+                    RpcError::Internal(format!("#{saved} is assigned to {name}, but the hand-off could not be posted: {e}"))
+                })?;
+                offline = msg.get("offline").cloned();
             }
             if let (Some(prev), Some(new_status)) = (&prev, s("status")) {
                 let old_status = prev["status"].as_str().unwrap_or("");
@@ -573,9 +589,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // half (`board_change_notice`) decides; skips are part of
             // its contract — the actor never hears its own edit, an
             // unassigned issue and the human assignee have nobody to
-            // wake, and a save that CHANGES the assignee is a
-            // (re)assignment with its own dispatch channel (the UI
-            // @message), where a second line would be noise.
+            // wake, and a save that NAMES an assignee is a
+            // (re)assignment with its own hand-off (the brief above),
+            // where a second line would be noise.
             if let Some(prev) = &prev {
                 if let Some(what) = board_change_notice(prev, who, s("title"), s("body"), s("status"), s("assignee").is_some()) {
                     let assignee = prev["assignee"].as_str().unwrap_or("");
@@ -596,7 +612,14 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     deliver_chat_line(session, assignee, &line);
                 }
             }
-            Ok(serde_json::json!({ "ok": true, "id": saved }))
+            // A mention no pane received comes back in the answer, as
+            // `hub_post`'s does, so `tmm board assign` can say it where its
+            // user is looking (#347).
+            let mut answer = serde_json::json!({ "ok": true, "id": saved });
+            if let Some(offline) = offline {
+                answer["offline"] = offline;
+            }
+            Ok(answer)
         }
         "hub_board_note" => {
             let Some(issue_id) = p.get("id").and_then(|v| v.as_i64()) else {
@@ -1060,12 +1083,95 @@ pub(super) fn stamp_now() -> String {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) use crate::projects::deliver_chat_line;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// The room line an assignee CHANGE leaves (board #367), or `None` when this
+/// save does not change one. Written in the lifecycle grammar every other
+/// `[tmm]` line speaks (`sysParts`: verb, subject, detail), so the feed reads
+/// it with the atoms it already has: `assigned <name> — board #N <title>`,
+/// and `unassigned <name> — …` when the issue is handed back to nobody, which
+/// names who LOST it because that is the fact a reader needs. `was` is the
+/// stored assignee (empty for a new issue) and `named` the issue as the save
+/// leaves it, through `issue_ref`.
+fn board_assign_line(was: &str, named: &str, assignee: Option<&str>, id: i64) -> Option<String> {
+    let next = assignee?.trim();
+    let old = was.trim();
+    if next == old {
+        return None;
+    }
+    Some(if next.is_empty() {
+        format!("[tmm] unassigned {old} — board #{id} {named}")
+    } else {
+        format!("[tmm] assigned {next} — board #{id} {named}")
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// Who a save HANDS the issue to (board #377), or `None` when nobody is
+/// told: no assignee in the save, a clear (nobody to tell), `human` (reads the
+/// board itself) or the actor (`tmm board take` is a claim, and your own edit
+/// is not news).
+fn board_assign_target<'a>(assignee: Option<&'a str>, who: &str) -> Option<&'a str> {
+    let name = assignee?.trim();
+    (!name.is_empty() && name != "human" && name != who).then_some(name)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// The hand-off an assignment types into the assignee's pane (board #377):
+/// an `@mention` so the ONE delivery path routes it, the issue NAMED (never
+/// "an issue"), who handed it over, and the two commands that continue the
+/// flow. A pointer, not the issue: the assignee has `tmm` in its hands and
+/// the body and the note thread are one command away, so every surface says
+/// the same short thing and none of them inlines a copy that can go stale.
+fn board_assign_brief(id: i64, named: &str, who: &str, name: &str) -> String {
+    // The issue's title is quoted text, so it carries no routing: an `@` in
+    // it becomes `＠` through the project's one de-addressing rule (board
+    // #367 review P1-A — a title like "修复 @all 的投递" would otherwise have
+    // typed a hand-off meant for one agent into every pane, because
+    // `mention_names` reads the whole body and does not care which words we
+    // wrote and which we quoted). `name` is the only address in the line.
+    // The stored title is untouched.
+    let named = crate::address::unaddressed(named);
+    format!(
+        "@{name} [board #{id}] {named} — assigned to you by {who}. \
+         `tmm board take {id}` to claim it, `tmm board show {id}` for the body and the notes."
+    )
+}
+
+/// The ONE carrier of a posted line to its readers: store it, route it to the
+/// names it `@mention`s and type it into their panes (`deliver_mentions`).
+/// `hub_post` and an assignment's hand-off (board #377) both come through
+/// here, so a hand-off is delivered exactly as a person's message is. The
+/// answer is the stored row, with `offline` (#347) when a mention reached no
+/// pane.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn post_and_deliver(session: &str, room: &str, from: &str, body: &str, detached: bool) -> Result<serde_json::Value, String> {
+    use crate::projects::rooms;
+
+    let recipients = crate::address::mention_names(body);
+    let mut msg = rooms::post_routed(room, from, body, &recipients)?;
+    let seq = msg.get("seq").and_then(|v| v.as_i64());
+    let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let offline = deliver_mentions(session, from, body, room, seq, &id, detached);
+    if !offline.is_empty() {
+        // The answer carries it so the CALLER can say it where its user is
+        // looking — `tmm send` on stderr (#347).
+        let rows: Vec<serde_json::Value> = offline
+            .iter()
+            .map(|(name, why)| serde_json::json!({ "name": name, "why": why }))
+            .collect();
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("offline".into(), serde_json::Value::Array(rows));
+        }
+    }
+    Ok(msg)
+}
+
 /// Pure half of the assignee notification (owner, 2026-08-30): given the
 /// PREVIOUS issue row and what this save carries, decide whether the assignee
 /// should hear about it and name the change. `None` when: nobody is assigned,
 /// the assignee is the actor (your own edit is not news), the assignee is the
-/// human (who reads the board itself), the save (re)assigns (that has its own
-/// dispatch channel), the save MOVES the issue to done (board #30, owner
+/// human (who reads the board itself), the save NAMES an assignee (that has its own
+/// hand-off, the brief), the save MOVES the issue to done (board #30, owner
 /// 2026-08-31: "如果任务我标记为done可以不用给agent发送提示了" — acceptance
 /// ENDS the work, there is nothing left for the executor to act on, so even
 /// title/body riding along with the closing save stay quiet; the room's
@@ -1074,30 +1180,6 @@ pub(super) use crate::projects::deliver_chat_line;
 /// nothing actually changed (a save echoing the stored values is a no-op,
 /// not an event).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// The room line an assignee CHANGE leaves (board #367), or `None` when this
-/// save does not change one. Written in the lifecycle grammar every other
-/// `[tmm]` line speaks (`sysParts`: verb, subject, detail), so the feed reads
-/// it with the atoms it already has: `assigned <name> — board #N <title>`,
-/// and `unassigned <name> — …` when the issue is handed back to nobody, which
-/// names who LOST it because that is the fact a reader needs.
-fn board_assign_line(prev: &serde_json::Value, assignee: Option<&str>, id: i64) -> Option<String> {
-    let next = assignee?.trim();
-    let old = prev["assignee"].as_str().unwrap_or("").trim();
-    if next == old {
-        return None;
-    }
-    let title = crate::projects::issue_ref(
-        prev["title"].as_str().unwrap_or(""),
-        prev["body"].as_str().unwrap_or(""),
-        id,
-    );
-    Some(if next.is_empty() {
-        format!("[tmm] unassigned {old} — board #{id} {title}")
-    } else {
-        format!("[tmm] assigned {next} — board #{id} {title}")
-    })
-}
-
 fn board_change_notice(
     prev: &serde_json::Value,
     who: &str,
@@ -1770,6 +1852,21 @@ mod tests {
         (session, room)
     }
 
+    /// One `hub_board_save` through the RPC, the way both surfaces make it.
+    /// Answers the issue id.
+    fn save_issue(session: &str, mut params: serde_json::Value) -> i64 {
+        params["session"] = serde_json::json!(session);
+        let r = handle_hub_request(&req("hub_board_save", params), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        r.result.expect("result")["id"].as_i64().expect("the saved id")
+    }
+
+    /// The room's messages, oldest first.
+    fn room(session: &str) -> Vec<serde_json::Value> {
+        let r = handle_hub_request(&req("hub_log", serde_json::json!({ "session": session, "limit": 200 })), None);
+        r.result.expect("result")["messages"].as_array().expect("messages").clone()
+    }
+
     /// The assignee-notification decision (owner, 2026-08-30): pure, so the
     /// skips are pinned without tmux. The delivery half reuses the same
     /// `deliver_chat_line` the review handoff and done-summary edges use.
@@ -1800,31 +1897,165 @@ mod tests {
     /// already reads (verb, subject, detail).
     #[test]
     fn an_assignee_change_leaves_one_room_line() {
-        let prev = serde_json::json!({
-            "title": "Fix the login flow", "body": "B", "status": "doing",
-            "assignee": "builder", "created_by": "human",
-        });
+        let named = "Fix the login flow";
         assert_eq!(
-            super::board_assign_line(&prev, Some("builder-2"), 12).as_deref(),
+            super::board_assign_line("builder", named, Some("builder-2"), 12).as_deref(),
             Some("[tmm] assigned builder-2 — board #12 Fix the login flow")
         );
         // Handed back to nobody: the line names who LOST it.
         assert_eq!(
-            super::board_assign_line(&prev, Some(""), 12).as_deref(),
+            super::board_assign_line("builder", named, Some(""), 12).as_deref(),
             Some("[tmm] unassigned builder — board #12 Fix the login flow")
         );
         // Saves that do not change the assignee say nothing — a status move,
         // a note, a re-save of the same name.
-        assert_eq!(super::board_assign_line(&prev, None, 12), None);
-        assert_eq!(super::board_assign_line(&prev, Some("builder"), 12), None);
-        assert_eq!(super::board_assign_line(&prev, Some(" builder "), 12), None, "whitespace is not a change");
+        assert_eq!(super::board_assign_line("builder", named, None, 12), None);
+        assert_eq!(super::board_assign_line("builder", named, Some("builder"), 12), None);
+        assert_eq!(super::board_assign_line("builder", named, Some(" builder "), 12), None, "whitespace is not a change");
+        assert_eq!(super::board_assign_line("", named, Some(""), 12), None, "nobody to nobody is not a change");
         // A titleless issue is named by issue_ref's fallback, like every
         // other notice (board #31).
-        let bare = serde_json::json!({ "title": "", "body": "   ", "assignee": "" });
+        let bare = crate::projects::issue_ref("", "   ", 9);
+        assert_eq!(super::board_assign_line("", &bare, Some("dev"), 9).as_deref(), Some("[tmm] assigned dev — board #9 #9"));
+    }
+
+    /// Board #377: who a save hands the issue to. A name that is not the
+    /// actor, not `human` and not empty — and nothing else.
+    #[test]
+    fn a_save_hands_the_issue_to_a_named_agent_who_is_not_the_actor() {
+        let target = super::board_assign_target;
+        assert_eq!(target(Some("builder-2"), "human"), Some("builder-2"), "the UI's picker");
+        assert_eq!(target(Some("builder-2"), "lead"), Some("builder-2"), "tmm board assign");
+        assert_eq!(target(Some(" builder-2 "), "lead"), Some("builder-2"), "whitespace is not part of a name");
+        assert_eq!(target(Some("lead"), "lead"), None, "`take` is a claim: your own edit is not news");
+        assert_eq!(target(Some("human"), "lead"), None, "the human reads the board itself");
+        assert_eq!(target(Some(""), "lead"), None, "a clear has nobody to tell");
+        assert_eq!(target(None, "lead"), None, "a save without an assignee hands nothing over");
+    }
+
+    /// Board #367 review P1-A, moved with the brief (#377): the hand-off is
+    /// an @mention so the one delivery path types it into the pane, and it
+    /// names the issue, who handed it over and the two commands that continue
+    /// the flow. The title is quoted text and must never route.
+    #[test]
+    fn the_hand_off_is_a_pointer_whose_only_address_is_the_assignee() {
+        let brief = super::board_assign_brief(12, "Fix the login flow", "orchestrator", "builder-2");
+        assert!(brief.starts_with("@builder-2 "), "the mention is what types it into the pane: {brief}");
         assert_eq!(
-            super::board_assign_line(&bare, Some("dev"), 9).as_deref(),
-            Some("[tmm] assigned dev — board #9 #9")
+            brief,
+            "@builder-2 [board #12] Fix the login flow — assigned to you by orchestrator. \
+             `tmm board take 12` to claim it, `tmm board show 12` for the body and the notes."
         );
+        let shouty = super::board_assign_brief(12, "fix the delivery to @all, ask @reviewer", "human", "builder-2");
+        assert_eq!(
+            crate::address::mention_names(&shouty),
+            vec!["builder-2".to_string()],
+            "a title's @ is read by a person, not by the router: {shouty}"
+        );
+        assert!(shouty.contains("＠all") && shouty.contains("＠reviewer"), "still readable: {shouty}");
+        // A titleless issue is still named — issue_ref's fallback.
+        let titleless = super::board_assign_brief(9, "#9", "human", "dev");
+        assert!(titleless.contains("[board #9] #9 —"), "{titleless}");
+    }
+
+    /// Board #377. The server, not the surface, makes the hand-off: one save
+    /// through the RPC is exactly one line typed to exactly the assignee, the
+    /// same text whether the UI's picker (no `who`, so `human`) or `tmm
+    /// board assign` (`who` = the agent) asked. Before this the UI inlined
+    /// the whole issue and the CLI sent a pointer: two wordings for one
+    /// event.
+    #[test]
+    fn one_save_hands_the_issue_over_once_whichever_surface_asked() {
+        crate::projects::tests::use_test_store();
+        let (session, _) = unique("handoff");
+        let ui = save_issue(&session, serde_json::json!({ "title": "Fix the login flow" }));
+        let cli = save_issue(&session, serde_json::json!({ "title": "Fix the login flow", "who": "lead" }));
+        assert_eq!(room(&session).len(), 0, "filing an unassigned issue says nothing");
+
+        save_issue(&session, serde_json::json!({ "id": ui, "assignee": "builder-2" })); // the picker
+        save_issue(&session, serde_json::json!({ "id": cli, "assignee": "builder-2", "who": "lead" })); // tmm board assign
+
+        let rows = room(&session);
+        let told: Vec<&serde_json::Value> = rows.iter().filter(|m| m["to"].as_array().is_some_and(|t| !t.is_empty())).collect();
+        assert_eq!(told.len(), 2, "one hand-off per save, nothing else is addressed to anyone: {rows:?}");
+        for (m, id, by) in [(told[0], ui, "human"), (told[1], cli, "lead")] {
+            assert_eq!(m["to"], serde_json::json!(["builder-2"]), "exactly the assignee");
+            assert_eq!(m["from"], by, "from whoever asked");
+            assert_eq!(
+                m["body"],
+                format!(
+                    "@builder-2 [board #{id}] Fix the login flow — assigned to you by {by}. \
+                     `tmm board take {id}` to claim it, `tmm board show {id}` for the body and the notes."
+                )
+            );
+        }
+        // …and each save left its one `[tmm] assigned` record beside it.
+        let lines: Vec<&str> = rows.iter().filter_map(|m| m["body"].as_str()).filter(|b| b.starts_with("[tmm] assigned")).collect();
+        assert_eq!(lines, [
+            format!("[tmm] assigned builder-2 — board #{ui} Fix the login flow"),
+            format!("[tmm] assigned builder-2 — board #{cli} Fix the login flow"),
+        ]);
+    }
+
+    /// Board #377 (and the #367 note): the issue is named as the save LEAVES
+    /// it. A request that edits the title and assigns in one go used to
+    /// announce the old title, because the line read the stored row.
+    #[test]
+    fn a_save_that_renames_and_assigns_announces_the_new_name() {
+        crate::projects::tests::use_test_store();
+        let (session, _) = unique("rename");
+        let id = save_issue(&session, serde_json::json!({ "title": "Old name" }));
+        save_issue(&session, serde_json::json!({ "id": id, "title": "New name", "assignee": "builder-2" }));
+        let bodies: Vec<String> = room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).collect();
+        assert!(bodies.contains(&format!("[tmm] assigned builder-2 — board #{id} New name")), "{bodies:?}");
+        let brief = bodies.iter().find(|b| b.starts_with("@builder-2 ")).expect("the hand-off");
+        assert!(brief.contains("New name") && !brief.contains("Old name"), "{brief}");
+        assert!(!bodies.iter().any(|b| b.contains("Old name")), "nothing in the room still says the old title: {bodies:?}");
+    }
+
+    /// Board #377. An issue filed WITH an assignee is handed over at birth —
+    /// the UI's create dialog always did it (#11), `tmm board add --assignee`
+    /// only wrote a label.
+    #[test]
+    fn an_issue_filed_with_an_assignee_is_handed_over_at_birth() {
+        crate::projects::tests::use_test_store();
+        let (session, _) = unique("birth");
+        let id = save_issue(&session, serde_json::json!({ "title": "Ship it", "assignee": "builder-2", "who": "lead" }));
+        let bodies: Vec<String> = room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).collect();
+        assert!(bodies.contains(&format!("[tmm] assigned builder-2 — board #{id} Ship it")), "{bodies:?}");
+        assert_eq!(bodies.iter().filter(|b| b.starts_with("@builder-2 [board #")).count(), 1, "{bodies:?}");
+    }
+
+    /// Board #377. Who is NOT told, and the one case that is told again.
+    #[test]
+    fn only_a_named_agent_other_than_the_actor_is_told_and_naming_it_again_tells_it_again() {
+        crate::projects::tests::use_test_store();
+        let (session, _) = unique("who-hears");
+        let id = save_issue(&session, serde_json::json!({ "title": "T" }));
+        let told = |session: &str| room(session).iter().filter(|m| m["to"].as_array().is_some_and(|t| !t.is_empty())).count();
+        let lines = |session: &str| room(session).iter().filter(|m| m["body"].as_str().is_some_and(|b| b.starts_with("[tmm] assigned") || b.starts_with("[tmm] unassigned"))).count();
+
+        // `tmm board take`: a claim, the actor is the assignee.
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "lead", "status": "doing", "who": "lead" }));
+        assert_eq!((told(&session), lines(&session)), (0, 1), "recorded, nobody to wake");
+        // The human assignee reads the board itself.
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "human", "who": "lead" }));
+        assert_eq!((told(&session), lines(&session)), (0, 2));
+        // A clear has nobody to tell.
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "", "who": "lead" }));
+        assert_eq!((told(&session), lines(&session)), (0, 3));
+        // A save that does not touch the assignee never hands anything over.
+        save_issue(&session, serde_json::json!({ "id": id, "status": "review", "who": "lead" }));
+        assert_eq!(told(&session), 0);
+
+        // A named agent is told; naming the SAME one again tells it again
+        // (the line is a change record and says nothing the second time).
+        // That is how a person re-sends a hand-off to an agent that was
+        // offline the first time.
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "builder-2", "who": "lead" }));
+        assert_eq!((told(&session), lines(&session)), (1, 4));
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "builder-2", "who": "lead" }));
+        assert_eq!((told(&session), lines(&session)), (2, 4), "told again, no second change record");
     }
 
     #[test]

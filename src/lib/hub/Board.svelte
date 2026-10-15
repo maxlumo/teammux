@@ -32,7 +32,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, assignNotes, chipCols, assigneeView, rememberBackends } from './board.ts';
+  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
   import { flip } from 'svelte/animate';
@@ -52,7 +52,7 @@
   const serverId = guardOwner.id;
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
-  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubPost, hubRooms } = guardOwner.api;
+  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
    * for the Board family (`hub-union.svelte.ts` createBoardUnion) and the
@@ -631,44 +631,12 @@
     }
     if (owns(ctx)) await load();
   }
-  // Assigning DOES something (owner, 2026-08-29: "Assign 给某个 Agent 去做"):
-  // besides the field, a non-empty assignment posts an @message — hub_post's
-  // delivery types it into that agent's pane, so the agent actually starts.
-  // ONE function carries that semantics; the detail Select and the create
-  // dialog both route through it (board #11: create-with-assignee must
-  // dispatch, never just write a label).
-  // The brief CARRIES the issue (owner, 2026-08-30): the ORIGINAL title/body
-  // are the task input, so they ride in full and the agent starts without a
-  // lookup. Only the note thread has a separate explicit budget below.
-  async function dispatchAssign(ctx: OpCtx, id: number, name: string, title = '', body = '', notes: { author: string; body: string; at: number }[] = []) {
-    await boardSave(ctx.session, { id, assignee: name });
-    if (name) {
-      // The brief follows only while this page (this server) still owns it.
-      if (!alive) return;
-      const b = body.trim() ? ` — ${body.trim()}.` : '.';
-      // The {title} slot names the issue; with the body already riding in
-      // {body}, a titleless issue is named by its id (not the body twice).
-      // The SUBJECT leads (board #51: "前边有谁分给他一个主体名称"): who
-      // assigned it, then the issue, then the notes, then the ask — the
-      // reading order of a handoff. The UI's dispatch is the operator's act,
-      // and 'human' is the name agents know the operator by (hubPost below
-      // posts as the same identity).
-      const msg = t('boardAssignMsg')
-        .replaceAll('{id}', String(id))
-        .replace('{who}', 'human')
-        .replace('{title}', title.trim() || '#' + id)
-        .replace('{body}', b);
-      // The note thread rides along (board #42): the discussion under an
-      // issue is context the agent must not miss, appended AFTER the rendered
-      // message under its own header, chronological, authors kept, and
-      // budget-capped with the `tmm board show` pointer — assignNotes owns
-      // that shape. A fresh issue has no notes and appends nothing. The tmm
-      // instructions come LAST (board #51: "please tmm xxxx这样的顺序") —
-      // after the content, never between the issue and its thread.
-      const take = t('boardAssignTake').replaceAll('{id}', String(id));
-      await hubPost(ctx.session, `@${name} ${msg}${assignNotes(id, notes)}\n${take}`);
-    }
-  }
+  // Assigning DOES something (owner, 2026-08-29: "Assign 给某个 Agent 去做"),
+  // and the SERVER does it (board #377): `hub_board_save` records the change
+  // in the room and types the hand-off into the assignee's pane, the same
+  // text for this page and for `tmm board assign`. So the page carries no
+  // brief of its own — the assignee rides in the one save, and picking an
+  // agent here is picking it there.
   /** Explicit save of the USER's changed fields (diffed against the draft
    * base, never the live issue); a failure KEEPS the draft. The refetch's
    * rebase then normalizes: the server now carries the saved text, so base
@@ -677,23 +645,18 @@
     if (!sel || busy || blocked(bodyStage)) return;
     // Frozen at entry (board #329 review): the target, and ONE materialized
     // body — the [img:n] tokens become refs, and that SAME text is what
-    // boardSave stores and the assignment brief carries.
+    // boardSave stores.
     const ctx = freeze();
     const id = sel.id;
-    const notes = Array.isArray(sel.notes) ? sel.notes : [];
     const saved = { ...draft, body: bodyStage.body(draft.body) };
     const patch = draftPatch(saved, draftBase);
     if (!patch) return;
     busy = true; submitting = true;
     try {
-      // The assignee travels through dispatchAssign — the ONE carrier of
-      // assignment=dispatch semantics (board #11) — so a change confirmed by
-      // the ✓ briefs the agent exactly like assign-at-birth does. Everything
-      // else is an ordinary field patch.
-      const { assignee, ...rest } = patch;
-      if (Object.keys(rest).length) await boardSave(ctx.session, { id, ...rest });
-      // A reassign carries the OPEN issue's note thread (board #42).
-      if (assignee !== undefined && alive) await dispatchAssign(ctx, id, assignee, saved.title, saved.body, notes);
+      // ONE save carries every changed field, the assignee included: the
+      // server hands the issue over (board #377), and a change confirmed by
+      // the ✓ briefs the agent exactly like assign-at-birth does.
+      await boardSave(ctx.session, { id, ...patch });
       if (!owns(ctx)) return;
       err = '';
       // What was SENT is now the server's: the draft and its base both take
@@ -720,11 +683,12 @@
     const ctx = freeze();
     const title = nTitle.trim();
     const body = createStage.body(nBody).trim(); // the one materialized body
-    const wantAssign = nAssignee;
+    const assignee = nAssignee;
     busy = true; submitting = true;
-    let created: number | null = null;
     try {
-      created = (await boardSave(ctx.session, { title, body }))?.id ?? null;
+      // Create-with-assignee is ONE request too: the server files the issue
+      // and hands it over (board #11, #377).
+      await boardSave(ctx.session, assignee ? { title, body, assignee } : { title, body });
     } catch (e) {
       // The CREATE failed: the form stays, retry is honest.
       if (owns(ctx)) err = String((e as Error)?.message ?? e);
@@ -732,15 +696,8 @@
       return;
     }
     // The issue EXISTS from here on: the form closes — a retryable form after
-    // a successful create is how duplicate issues are born (#11 review). A
-    // failed dispatch is reported; the issue can be assigned from its detail.
+    // a successful create is how duplicate issues are born (#11 review).
     if (owns(ctx)) { nTitle = ''; nBody = ''; nAssignee = ''; creating = false; createStage.clear(); }
-    try {
-      // Create-with-assignee reuses the ONE dispatch semantics (board #11).
-      if (wantAssign && created != null && alive) await dispatchAssign(ctx, created, wantAssign, title, body);
-    } catch (e) {
-      if (alive && cur === ctx.session) err = `#${created}: ${String((e as Error)?.message ?? e)}`;
-    }
     if (alive && cur === ctx.session) await load();
     busy = false; submitting = false;
   }
