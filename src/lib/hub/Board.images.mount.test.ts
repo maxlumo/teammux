@@ -647,11 +647,12 @@ test('the detail chord obeys ✓: nothing changed, a bare/Shift Enter, an IME En
 const alice = { name: 'alice', managed: true, state: 'idle', agent: 'kiro' };
 const failedHandOff = () => ({ ok: true, id: 9, dispatch: 'failed', dispatch_error: 'the room is full' });
 const newIssueButton = (app: { document: Document }) => [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /new/i.test(b.getAttribute('aria-label') ?? b.title ?? ''));
-async function pickAlice(app: { q: <E extends Element>(s: string) => E | null; document: Document; flush: () => Promise<void> }, scope: string) {
+async function pickAgent(app: { q: <E extends Element>(s: string) => E | null; document: Document; flush: () => Promise<void> }, scope: string, name: string) {
   app.q<HTMLButtonElement>(`${scope} .sel-trigger, ${scope} [aria-haspopup="listbox"]`)!.click(); await app.flush();
-  [...app.document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent?.includes('alice'))!.click();
+  [...app.document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent?.includes(name))!.click();
   await app.flush();
 }
+const pickAlice = (app: Parameters<typeof pickAgent>[0], scope: string) => pickAgent(app, scope, 'alice');
 
 test('a create with an assignee is ONE request; a hand-off that failed is reported after the form has closed, and nothing can file it twice (board #377)', async (context) => {
   const app = await mount(context, { agents: [alice], answer: failedHandOff });
@@ -839,4 +840,50 @@ test('a Reassign belongs to the project it was born in: a switch drops it with i
     captured.click(); for (let i = 0; i < 6; i++) await app.flush();
     assert.equal(app.calls.saves.length, 1, 'and the captured click is still nothing');
   } finally { holdB?.(); await app.close(); }
+});
+
+test('the outcome line and Reassign end only by Reassign, Close, a project switch, or a later save of that issue that reports its own outcome (board #377)', async (context) => {
+  const bob = { name: 'bob', managed: true, state: 'idle', agent: 'kiro' };
+  let n = 0;
+  const offline = (patch: any) => ({ ok: true, id: patch.id, dispatch: 'offline', offline: [{ name: patch.assignee, why: 'stopped' }] });
+  const app = await mount(context, {
+    agents: [alice, bob], stateful: true,
+    answer: (patch) => (++n <= 1 ? offline(patch) : { ok: true, id: patch.id, dispatch: 'sent' }),
+  });
+  const line = () => [...app.document.querySelectorAll('.err')].find((e) => /Saved, but/u.test(e.textContent ?? ''));
+  const press = (re: RegExp) => [...app.document.querySelectorAll<HTMLButtonElement>('.err button')].find((b) => re.test(`${b.textContent} ${b.getAttribute('aria-label')}`))!.click();
+  const save = () => [...app.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+  const settle = async () => { for (let i = 0; i < 12; i++) await app.flush(); };
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    await pickAgent(app, '.detail', 'alice'); save(); await settle();
+    assert.ok(line(), 'offline: the line is shown');
+
+    // Polls, a roster refresh, an unrelated failed save: none of them is the delivery it waits for.
+    for (let i = 0; i < 3; i++) { context.mock.timers.tick(8000); await settle(); }
+    assert.ok(line(), 'ordinary polls leave it');
+
+    // Close ends it, and sends nothing.
+    press(/Close/u); await settle();
+    assert.ok(!line(), 'Close dismisses it');
+    assert.equal(app.calls.saves.length, 1);
+  } finally { await app.close(); }
+
+  // A LATER save of the same issue that reports its own outcome replaces it.
+  let m = 0;
+  const second = await mount(context, {
+    agents: [alice, bob], stateful: true,
+    answer: (patch) => (++m === 1 ? offline(patch) : { ok: true, id: patch.id, dispatch: 'sent' }),
+  });
+  try {
+    second.q<HTMLButtonElement>('.card')!.click(); await second.flush();
+    await pickAgent(second, '.detail', 'alice');
+    [...second.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 12; i++) await second.flush();
+    assert.ok([...second.document.querySelectorAll('.err')].some((e) => /Saved, but alice/u.test(e.textContent ?? '')), 'offline: shown');
+    await pickAgent(second, '.detail', 'bob'); // hand it to someone who IS reached
+    [...second.document.querySelectorAll<HTMLButtonElement>('.detail button')].find((b) => b.getAttribute('aria-label') === 'Save')!.click();
+    for (let i = 0; i < 12; i++) await second.flush();
+    assert.ok(![...second.document.querySelectorAll('.err')].some((e) => /Saved, but/u.test(e.textContent ?? '')), 'a later delivered save of the same issue resolves the old line');
+  } finally { await second.close(); }
 });

@@ -87,7 +87,9 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   assert.match(source, /async function reassign\(\) \{[\s\S]*if \(!alive \|\| again\.session !== cur\) \{ resend = null; return; \}[\s\S]*await boardSave\(again\.session, \{ id: again\.id, assignee: again\.name, dispatch: true \}\);/u, 'Reassign is the flagged save to the project it was born in, and a click from another project is dropped');
   assert.match(source, /let resend = \$state<\{ session: string; id: number; name: string; line: string \} \| null>\(null\);/u, 'it carries its own project');
   assert.match(source, /err = ''; resend = null; \/\/ the old board's error line and its Reassign belong to it/u, 'a project switch drops it with its error line, in the effect that resets the rest');
-  assert.match(source, /\{#if resend\}\s*<div class="err appear">\{resend\.line\}\s*<CommandButton variant="secondary" label=\{t\('boardReassign'\)\} disabled=\{busy\} onclick=\{reassign\} \/>\s*<\/div>\s*\{\/if\}/u, 'its own line, so a poll that clears the error line cannot erase it');
+  assert.match(source, /\{#if resend\}\s*<div class="err appear">\{resend\.line\}\s*<CommandButton variant="secondary" label=\{t\('boardReassign'\)\} disabled=\{busy\} onclick=\{reassign\} \/>[\s\S]*?<\/div>\s*\{\/if\}/u, 'its own line, so a poll that clears the error line cannot erase it');
+  assert.match(source, /<CommandButton variant="icon" icon="x" label=\{t\('close'\)\} onclick=\{\(\) => \(resend = null\)\} \/>/u, 'and the person can dismiss it');
+  assert.match(source, /if \(answer\?\.dispatch && resend\?\.session === ctx\.session && resend\.id === id\) resend = null;/u, 'a later save of the same issue that reports an outcome replaces it');
 });
 
 test('the layout hierarchy: one compact title line, the body visibly bigger (board #11)', () => {

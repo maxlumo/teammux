@@ -99,7 +99,9 @@
    * make an unreached assignee reached. It has
    * its own line and lifecycle, not the page's error line: a successful poll
    * is not the delivery it is waiting for, and an unrelated error must not
-   * hide it. */
+   * hide it. Only four things end it: a click on Reassign (the new outcome
+   * replaces it), Close, a project switch, or a LATER save of the same issue
+   * that reports an outcome of its own. */
   let resend = $state<{ session: string; id: number; name: string; line: string } | null>(null);
   /** `union` (board #357, owner 2026-10-13: "在 Terminal 页面和 Board 页面，都
    * 没有整合两种或几种不同连接里的所有项目"): App's one projects union source
@@ -710,6 +712,9 @@
       const answer = await boardSave(ctx.session, patch.assignee ? { id, ...patch, dispatch: true } : { id, ...patch });
       const untold = dispatchLine(answer, patch.assignee ?? '');
       if (!owns(ctx)) return;
+      // A LATER save of the same issue that reports its own outcome replaces the
+      // earlier one (board #377): delivered now, the old line is resolved.
+      if (answer?.dispatch && resend?.session === ctx.session && resend.id === id) resend = null;
       err = '';
       // What was SENT is now the server's: the draft and its base both take
       // the materialized fields (refs, not [img:n] — the map is about to be
@@ -1372,6 +1377,7 @@
   {#if resend}
     <div class="err appear">{resend.line}
       <CommandButton variant="secondary" label={t('boardReassign')} disabled={busy} onclick={reassign} />
+      <CommandButton variant="icon" icon="x" label={t('close')} onclick={() => (resend = null)} />
     </div>
   {/if}
   </div>
