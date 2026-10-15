@@ -17,6 +17,15 @@ export function isReachabilityFailure(e: unknown): boolean {
   return /timeout|connection failed|closed during auth/i.test(message);
 }
 
+/** The server ANSWERED and refused the credentials (its "invalid token", or the
+ * encrypted handshake failing to decrypt: the wrong token). Not a drop and not
+ * a reachability failure: the reconnect loop stops at once instead of retrying
+ * the same answer for its whole window (board #393). */
+export function isAuthRefusal(e: unknown): boolean {
+  const message = typeof e === 'string' ? e : String((e as { message?: unknown } | null)?.message ?? '');
+  return /^(?:auth failed$|invalid token)/i.test(message.trim());
+}
+
 /** How long ONE dial of an address of class 0 (LAN), 1 (Tailscale) or 2
  * (internet) may take before it is given up: LAN should fail fast, a far
  * region legitimately needs a handshake's worth. */

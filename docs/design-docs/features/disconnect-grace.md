@@ -133,13 +133,15 @@ connection never reloads the page (the app has no `location.reload`; a source
 test pins it) and its only cue is the existing floating reconnect bar
 (`.reconnect-bar`, "Reconnecting… (k/N · class)") — no new UI.
 
-**The rule: a lost connection is retried for the reconnect loop's whole
-watchdog window, and only then does the person land on the connect card.**
-The attempt budget is DERIVED in one place, `app/reconnect.ts`:
-`RECONNECT_MAX_ATTEMPTS = RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS` (180 000 ms
-over the 3 000 ms longest retry gap = 60 attempts), so the count can never end
-the loop before the window does; App.svelte holds no budget of its own and the
-bar counts against the same number.
+**The rule: a lost connection is retried for the reconnect loop's whole window,
+BY THE CLOCK, and only then does the person land on the connect card.** The
+window is `RECONNECT_WATCHDOG_MS` (180 s) in `app/reconnect.ts`; there is no
+attempt count to size from the backoff and get wrong. (The first cut derived one
+— 180 s over the 3 s retry cap = 60 attempts — and the reviewer measured it: with
+the gap growing 0.5, 1, 1.5, 2, 2.5 s and then 3 s, 60 attempts have 59 gaps and
+give up at 169.5 s, ~10 s early. A count rounds; the clock does not.) App.svelte
+passes the machine no budget of its own and the bar shows the attempt number only,
+no "/N" that a clock-driven loop would not honour.
 
 **Why.** The budget used to be a literal 10 attempts. With the gap growing 0.5 s
 per attempt up to 3 s, ten attempts last ~25 s: a connection that stayed down
@@ -150,13 +152,25 @@ SSH tunnel (up to 90 s to notice with `ServerAliveInterval 30 × 3`), a CloudFro
 edge change, a laptop waking and a Wi-Fi handover all outlast that. After the
 change the same rig: 5, 30 and 60 s drops reconnect with nothing but the bar,
 the hub view and the draft kept, and the gateway sees a new connection when the
-cut ends (`App.shell.mount.test.ts` § "a 60 s drop reconnects quietly" runs the
-60 s case on the fake clock; `reconnect.test.ts` pins the arithmetic).
+cut ends. Tests: `reconnect.test.ts` runs the machine with App's own budget (none)
+on a fake clock — instant refusals keep the view at 179 s and give up at 180 s, and a
+60 s and a 175 s outage both recover; `App.shell.mount.test.ts` runs the 60 s case through
+the whole App: no connect card, the existing bar as the only cue, the same editor
+with the same unsaved text and the same scroll position.
+
+**An authentication refusal is not a drop.** When the server ANSWERS and says no
+(its "invalid token", or the encrypted handshake failing to decrypt: the wrong
+token) retrying for three minutes would repeat the same answer, so the loop stops
+at once and shows the connect card with the stored address and token to correct
+(`isAuthRefusal` in `app/dial-order.ts`, tested with the default budget: one dial,
+no window of them). A timeout, a refused connection or a socket that closed during
+auth are reachability failures and keep retrying. (The first cut of this document
+said an authentication refusal "is reported at once" while the machine retried it
+like any other failure; with the longer window that would have taken three minutes.)
 
 **What does NOT change.** Beyond the window (3 minutes) the loop still gives
 up and shows the connect card, so a server that is really gone does not keep
-a device retrying for ever; an authentication refusal is not a drop and is
-reported at once; the form and a server switch still take the socket from a
+a device retrying for ever; the form and a server switch still take the socket from a
 running loop. The Vite dev client's own reload-on-reconnect, which is what
 reloaded a browser tab before the app's loop ever got a say, is a separate
 mechanism, patched in `vite.config.js` (see

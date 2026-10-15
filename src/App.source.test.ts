@@ -1558,18 +1558,18 @@ test('a switch walks the server\u2019s addresses, and the failed panel offers ea
   assert.doesNotMatch(reconnect, /connection failed\|closed during auth/u, 'no second copy of what a dead address looks like');
 });
 
-test('a dropped connection is retried for the whole watchdog window; the budget is derived in ONE place (#393)', async () => {
-  // The attempt budget is the machine's, derived from its watchdog window and retry
-  // cap (reconnect.ts); App has no second constant of its own to drift, and the
-  // hint counts against the same number.
-  assert.match(source, /import \{ createReconnectMachine, RECONNECT_MAX_ATTEMPTS \} from '\.\/lib\/app\/reconnect\.ts';/u);
-  assert.doesNotMatch(source, /const RECONNECT_(?:MAX_ATTEMPTS|WATCHDOG_MS)\b|\bmaxAttempts:|\bwatchdogMs:/u, 'App passes no budget of its own');
-  assert.match(source, /\{reconnectAttempt\}\/\{RECONNECT_MAX_ATTEMPTS\}/u, 'the existing bar counts against the same budget');
+test('a dropped connection is retried for the whole watchdog window by the clock; App holds no budget of its own (#393)', async () => {
+  // The window is the machine's watchdog, by ELAPSED TIME (reconnect.ts): App passes
+  // no attempt count or window of its own to drift, and the bar shows the attempt
+  // number only (no "/N" that a clock-driven loop would not honour).
+  assert.match(source, /import \{ createReconnectMachine \} from '\.\/lib\/app\/reconnect\.ts';/u);
+  assert.doesNotMatch(source, /RECONNECT_(?:MAX_ATTEMPTS|WATCHDOG_MS)|\bmaxAttempts:|\bwatchdogMs:/u, 'App passes no budget of its own');
+  assert.match(source, /\(\{reconnectAttempt\}\{#if reconnectClass\} · \{reconnectClass\}\{\/if\}\)/u, 'the existing bar shows the attempt number');
   const machine = await readFile(new URL('./lib/app/reconnect.ts', import.meta.url), 'utf8');
   assert.match(machine, /export const RETRY_GAP_CAP_MS = 3000;/u);
   assert.match(machine, /export const RECONNECT_WATCHDOG_MS = 180000;/u);
-  assert.match(machine, /export const RECONNECT_MAX_ATTEMPTS = RECONNECT_WATCHDOG_MS \/ RETRY_GAP_CAP_MS;/u);
-  assert.match(machine, /maxAttempts = RECONNECT_MAX_ATTEMPTS,\s*watchdogMs = RECONNECT_WATCHDOG_MS,/u, 'the machine defaults to it');
+  assert.doesNotMatch(machine, /RECONNECT_MAX_ATTEMPTS/u, 'no derived attempt count to round wrong (reviewer P2-1)');
+  assert.match(machine, /maxAttempts = Infinity,\s*watchdogMs = RECONNECT_WATCHDOG_MS,/u, 'the machine defaults to the clock');
   assert.match(machine, /Math\.min\(500 \* \(n \+ 1\), RETRY_GAP_CAP_MS\)/u, 'the backoff uses the same cap');
   assert.doesNotMatch(source, /location\.reload|window\.location\.(?:reload|assign|replace)/u, 'a lost connection never reloads the page');
 });

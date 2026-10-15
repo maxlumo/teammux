@@ -34,7 +34,7 @@
   import { normalizeUiZoom, stepUiZoom, UI_ZOOM_DEFAULT } from './lib/app/ui-zoom.ts';
   import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
-  import { createReconnectMachine, RECONNECT_MAX_ATTEMPTS } from './lib/app/reconnect.ts';
+  import { createReconnectMachine } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
   import { dialOrder, dialTimeoutMs } from './lib/app/dial-order.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
@@ -3855,7 +3855,7 @@
   {#if reconnecting && page !== 'settings'}
     <div class="reconnect-bar appear">
       <span class="reconnect-spinner"></span>
-      <span>{t('reconnecting')}{#if reconnectAttempt} ({reconnectAttempt}/{RECONNECT_MAX_ATTEMPTS}{#if reconnectClass} · {reconnectClass}{/if}){/if}</span>
+      <span>{t('reconnecting')}{#if reconnectAttempt} ({reconnectAttempt}{#if reconnectClass} · {reconnectClass}{/if}){/if}</span>
       <button class="reconnect-cancel" onclick={cancelReconnect}>{t('cancel')}</button>
     </div>
   {/if}

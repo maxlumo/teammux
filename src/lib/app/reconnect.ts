@@ -16,7 +16,7 @@
 // the loop runs (a failover just proved another one).
 
 import type { ServerTarget } from './server-target.ts';
-import { dialTimeoutMs, isReachabilityFailure } from './dial-order.ts';
+import { dialTimeoutMs, isAuthRefusal, isReachabilityFailure } from './dial-order.ts';
 
 export interface ReconnectState {
   reconnecting: boolean;
@@ -65,23 +65,23 @@ export interface ReconnectDeps {
 
 /** The longest wait between two attempts (the backoff grows 0.5 s per attempt up to this). */
 export const RETRY_GAP_CAP_MS = 3000;
-/** The hard cap on one reconnect loop: still reconnecting after this, force a reset. */
-export const RECONNECT_WATCHDOG_MS = 180000;
 /**
- * How many attempts a loop makes before it gives up — DERIVED, the one place
- * (docs/design-docs/features/disconnect-grace.md § The client's side): the
- * watchdog window over the longest retry gap, so the count can never end the
- * loop before the window does. A connection that drops reconnects quietly for
- * that whole window; only then does the person land on the connect card.
- * (Board #393: a fixed 10 gave up after ~25 s, measured live.)
+ * How long a lost connection is retried before the person lands on the connect
+ * card: the loop's watchdog, by ELAPSED TIME (docs/design-docs/features/
+ * disconnect-grace.md § The client's side). There is no attempt count: a count
+ * has to be sized from the backoff sequence (0.5 + 1 + 1.5 + 2 + 2.5 s, then
+ * 3 s gaps) and any rounding ends the loop early — the first cut, 180 s over
+ * the 3 s cap = 60 attempts, gave up at 169.5 s — so the clock decides, and
+ * `maxAttempts` stays only as an optional bound a caller may add. (Board #393:
+ * a fixed 10 attempts gave up after ~25 s, measured live.)
  */
-export const RECONNECT_MAX_ATTEMPTS = RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS;
+export const RECONNECT_WATCHDOG_MS = 180000;
 
 export function createReconnectMachine(deps: ReconnectDeps) {
   const {
     connect, findBestAddress, isAddressViable, noteAddressUnreachable,
     classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp, attempt: takeSocket,
-    maxAttempts = RECONNECT_MAX_ATTEMPTS,
+    maxAttempts = Infinity,
     watchdogMs = RECONNECT_WATCHDOG_MS,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
@@ -218,6 +218,17 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       onSuccess(useAddr, primary, handover, answer);
     }).catch((e: Error) => {
       if (!owned()) { yieldLoop(); return; }
+      // The server ANSWERED and refused the credentials: that is not a drop, and
+      // retrying for the whole window would repeat the same answer for three
+      // minutes. Stop at once; the connect card shows the stored address and
+      // token to correct (board #393 review P2-2).
+      if (isAuthRefusal(e)) {
+        reconnecting = false;
+        clearTimers();
+        emit();
+        onGiveUp();
+        return;
+      }
       // Reachability failures (timeout / refused, NOT auth errors) feed the
       // same cooldown memory the prober uses, so the next attempts skip
       // this address instead of re-burning its timeout.

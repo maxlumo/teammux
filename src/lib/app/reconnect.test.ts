@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReconnectMachine, RECONNECT_MAX_ATTEMPTS, RECONNECT_WATCHDOG_MS, RETRY_GAP_CAP_MS, type ReconnectDeps, type ReconnectState } from './reconnect.ts';
+import { createReconnectMachine, RECONNECT_WATCHDOG_MS, type ReconnectDeps, type ReconnectState } from './reconnect.ts';
 import { targetOf } from './server-target.ts';
 import { currentServerId } from './servers.ts';
 
@@ -41,12 +41,14 @@ function makeStorage(entries: Record<string, string>) {
 }
 
 type HarnessEvent = Partial<ReconnectState> & { success?: [string, string]; gaveUp?: boolean };
-function harness({ storage, connectImpl, findBest = async (a: string[]) => a[0] ?? null, viable = () => true, maxAttempts = 3 }: {
+function harness({ storage, connectImpl, findBest = async (a: string[]) => a[0] ?? null, viable = () => true, maxAttempts = 3, appBudget = false }: {
   storage: Pick<Storage, 'getItem'>;
   connectImpl: ReconnectDeps['connect'];
   findBest?: ReconnectDeps['findBestAddress'];
   viable?: ReconnectDeps['isAddressViable'];
   maxAttempts?: number;
+  /** Pass NO budget of its own, as App does: the machine's defaults decide. */
+  appBudget?: boolean;
 }) {
   const timers = fakeTimers();
   const events: HarnessEvent[] = [];
@@ -64,8 +66,7 @@ function harness({ storage, connectImpl, findBest = async (a: string[]) => a[0] 
     onStateChange: (s) => events.push({ ...s }),
     onSuccess: (use, primary) => events.push({ success: [use, primary] }),
     onGiveUp: () => events.push({ gaveUp: true }),
-    maxAttempts,
-    watchdogMs: 180000,
+    ...(appBudget ? {} : { maxAttempts, watchdogMs: 180000 }),
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
   });
@@ -117,21 +118,35 @@ test('failures retry with capped backoff, then give up after maxAttempts', async
   assert.equal(h.unreachable.length, 3);
 });
 
-test('a dropped connection is retried for the whole watchdog window, so a 60 s outage never reaches the connect card (#393)', async () => {
-  // Owner, 2026-10-15: a dropped connection "should recover quietly". The app's
-  // attempt budget is the watchdog window over the retry cap (App.svelte); 10
-  // attempts gave up after ~25 s and dropped the person to the connect card,
-  // measured live through a proxy that dropped the connection for 30 s.
-  // The budget is DERIVED in reconnect.ts (disconnect-grace.md § The client's side):
-  // attempts x the longest gap reach the watchdog, so the count cannot end the loop first.
-  assert.equal(RECONNECT_MAX_ATTEMPTS, RECONNECT_WATCHDOG_MS / RETRY_GAP_CAP_MS);
-  const budget = RECONNECT_MAX_ATTEMPTS;
-  const outage = async (maxAttempts: number, recoverAtMs: number) => {
+test('a dropped connection is retried for the whole 180 s window by the clock: kept at 179 s, given up at 180 s (#393)', async () => {
+  // The first cut sized an attempt COUNT from the backoff (60 attempts) and gave up
+  // at 169.5 s (reviewer P2-1): the clock decides. Every dial here is refused at
+  // once, App's own budget (none) is what the machine runs with.
+  const refused = () => harness({
+    storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
+    connectImpl: async () => { throw new Error('connection failed'); },
+    appBudget: true,
+  });
+  const h = refused();
+  h.machine.start();
+  let t = 0;
+  for (; t < 179000; t += 500) await h.timers.advance(500);
+  assert.ok(!h.events.some((e) => e.gaveUp), 'still retrying at 179 s: the person keeps the view');
+  assert.equal(h.machine.isActive(), true);
+  for (; t < 180500; t += 500) await h.timers.advance(500);
+  assert.ok(h.events.some((e) => e.gaveUp), 'and gave up when the 180 s window ended');
+  assert.equal(h.machine.isActive(), false);
+  assert.ok(h.unreachable.length > 55, `it kept dialling the whole time (${h.unreachable.length} dials)`);
+  assert.equal(RECONNECT_WATCHDOG_MS, 180000);
+});
+
+test('a 60 s and a 175 s outage both recover under the default budget; the old 10 attempts gave up at the connect card (#393)', async () => {
+  const outage = async (recoverAtMs: number, over: { appBudget?: boolean; maxAttempts?: number }) => {
     let up = false;
     const h = harness({
       storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
       connectImpl: async () => { if (!up) throw new Error('connection timeout'); return 'back'; },
-      maxAttempts,
+      ...over,
     });
     h.machine.start();
     for (let t = 0; t < recoverAtMs + 10000 && !h.events.some((e) => e.gaveUp || e.success); t += 500) {
@@ -140,18 +155,46 @@ test('a dropped connection is retried for the whole watchdog window, so a 60 s o
     }
     return h.events;
   };
-  const kept = await outage(budget, 60000);
-  assert.ok(kept.some((e) => e.success), 'the server is back after 60 s and the loop is still trying');
-  assert.ok(!kept.some((e) => e.gaveUp), 'and it never gave up');
-  const old = await outage(10, 60000);
+  for (const at of [60000, 175000]) {
+    const kept = await outage(at, { appBudget: true });
+    assert.ok(kept.some((e) => e.success) && !kept.some((e) => e.gaveUp), `the server is back after ${at / 1000} s and the loop was still trying`);
+  }
+  const old = await outage(60000, { maxAttempts: 10 });
   assert.ok(old.some((e) => e.gaveUp) && !old.some((e) => e.success), 'with the old budget of 10 the same outage ends at the connect card');
+});
+
+test('an auth refusal stops the loop at once: the server answered, and retrying would repeat the answer for the whole window (#393 P2-2)', async () => {
+  for (const message of ['invalid token', 'auth failed']) {
+    let dials = 0;
+    const h = harness({
+      storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 'bad' }),
+      connectImpl: async () => { dials++; throw new Error(message); },
+      appBudget: true,
+    });
+    h.machine.start();
+    await h.timers.advance(1);
+    assert.ok(h.events.some((e) => e.gaveUp), `${message}: gave up at once`);
+    assert.equal(dials, 1, `${message}: one dial, not a window of them`);
+    assert.equal(h.machine.isActive(), false);
+    assert.equal(h.unreachable.length, 0, `${message}: the address is not marked unreachable`);
+  }
+  // A network failure is NOT a refusal: it keeps retrying.
+  let dials = 0;
+  const h = harness({
+    storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
+    connectImpl: async () => { dials++; throw new Error('connection failed'); },
+    appBudget: true,
+  });
+  h.machine.start();
+  for (let t = 0; t < 20000; t += 500) await h.timers.advance(500);
+  assert.ok(dials > 5 && !h.events.some((e) => e.gaveUp), `a drop keeps retrying (${dials} dials)`);
 });
 
 test('auth errors do NOT mark the address unreachable', async () => {
   const h = harness({
     storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 'bad' }),
     connectImpl: async () => { throw new Error('auth failed'); },
-    maxAttempts: 1,
+    appBudget: true,
   });
   h.machine.start();
   await h.timers.advance(1);

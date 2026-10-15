@@ -1713,7 +1713,7 @@ async function gaveUpOnA(context: TestContext, next: (url: string, n: number) =>
   return { ...h, events, area, field, dials, dialogs };
 }
 
-test('a 60 s drop reconnects quietly: the view and the unsaved draft stay, the connect card never comes up (#393)', async (context) => {
+test('a 60 s drop reconnects quietly: the view, the unsaved draft and its scroll position stay, the connect card never comes up (#393)', async (context) => {
   // Owner, 2026-10-15: a dropped connection should "recover quietly"; measured
   // live (a proxy dropping the connection for 30 s) the app gave up after ~25 s
   // and put the connect card over the person's work. The loop now retries for the
@@ -1725,6 +1725,9 @@ test('a 60 s drop reconnects quietly: the view and the unsaved draft stay, the c
     (url) => (url.includes('//b') ? 'm-b' : 'm-a'),
     { calls: events, rpc: editorRpc, gate: (_url, n) => (n === 1 ? null : failing ? Promise.reject(new Error('refused')) : null) });
   const area = await dirtyEditor(h.app, h.settle);
+  area.scrollTop = 40;
+  const scrolled = area.scrollTop;
+  assert.equal(scrolled, 40, 'the test environment holds a scroll position, so keeping it means something');
   const card = () => h.app.document.querySelector('.card .fields input[type="text"]');
   h.net.drop();
   for (let i = 0; i < 12; i++) { await h.app.advance(5_000); await h.settle(); }
@@ -1736,6 +1739,7 @@ test('a 60 s drop reconnects quietly: the view and the unsaved draft stay, the c
   assert.equal(h.app.document.querySelector('.reconnect-bar'), null, 'and the bar is gone');
   assert.equal(h.app.document.querySelectorAll('[role=alertdialog]').length, 0, 'nothing asks');
   assert.ok(area.isConnected && area.value === '# notes\n\nunsaved', 'the draft is the same editor with the same text');
+  assert.equal(area.scrollTop, scrolled, 'and its scroll position');
 });
 
 test('a form walk freezes a reconnect loop in its backoff: no dial while it asks, and a stay starts the loop again (reviewer P1 on 4fbce02e)', async (context) => {
