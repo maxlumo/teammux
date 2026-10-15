@@ -56,6 +56,42 @@ Suppression rules (never nag):
 - Dismissal is remembered in `localStorage` (`tmux_pwa_dismissed`) for a 14-day
   cooldown. `appinstalled` clears it.
 
+## The banner never covers the page's primary action (board #387, 2026-10-15)
+Found by the validator while checking #381: at interface scale 150-180%, and
+in the CSS viewports browser zoom 200% leaves (195x422, 260x563), the fixed
+banner sat on the connect page's Connect / Share, and on narrow windows its
+actions stuck 22-36 px out past the edge. The cause was the banner's own
+layout: the actions were a fixed column beside the text, so a narrow banner
+squeezed the description to one word per line (12 lines, up to 400 px tall)
+and pushed the actions out.
+
+- **It fits the window.** The width stays `min(440px, 100vw / --ui-zoom -
+  24px)` with `box-sizing: border-box`, and the content WRAPS: the text stays
+  beside the icon with a readable measure (`flex: 1 1 0`, `min-width: 9em`,
+  `overflow-wrap: anywhere`) and the actions are what move to their own line,
+  at the end (`margin-left: auto`).
+- **The page reserves its space.** While the banner shows, `InstallPrompt`
+  publishes the space it takes on the root as `--install-reserve`: its
+  `offsetHeight` plus its computed `bottom` (its own 12 px plus `--sab`),
+  both layout values in the root zoom's units, MEASURED from the banner's box
+  and re-read by a `ResizeObserver` when it reflows; removed when the banner
+  goes. No constant stands for the banner's height. The connect page's
+  scroller ends above it (`margin-bottom: var(--install-reserve, 0px)` on
+  Settings' `.wrapper`), so Connect and Share scroll into view clear of it.
+  Other pages do not reserve: the banner shows on first run, where the
+  connect page is what is on screen.
+- Measured in Chromium (the #381 matrix plus the small viewports, a synthetic
+  `beforeinstallprompt`): before, Connect/Share were under the banner in 9 of
+  12 cells and it overhung by 24-36 px in 3; after, no overhang in any cell
+  and both buttons reachable and free in all 12. The reserve the browser
+  reported was 87 px on desktop and 128-196 px on a phone, which is the
+  measured value, not a number in the code. Where the banner is narrowest
+  (390x560 at 180%, about 190 CSS px wide) the icon takes its own line too;
+  the text still keeps its measure and the page still ends above it. Pinned by
+  `InstallPrompt.source.test.ts` (sizing, wrap, measured reserve, the page
+  rule) and `InstallPrompt.mount.test.ts` (the reserve appears with the
+  banner and goes when it is dismissed).
+
 ## Gotchas / constraints
 - **HTTPS required.** Service workers + `beforeinstallprompt` only work on
   secure origins (https or `localhost`). Plain `http://<LAN-ip>:5173` (the

@@ -397,6 +397,11 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 24px 16px;
+    /* The PWA install banner is fixed over the bottom of the window; while it
+       shows, the scroller ends above it (board #387), so it never sits on
+       Connect / Share. The reserve is the banner's measured box (pwa-install.md),
+       0 when there is no banner. */
+    margin-bottom: var(--install-reserve, 0px);
   }
 
   .card {

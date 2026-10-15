@@ -118,10 +118,36 @@
       localStorage.setItem(DISMISS_KEY, String(Date.now()));
     } catch {}
   }
+
+  // The space the banner takes at the bottom of the window, published while
+  // it shows as `--install-reserve` on the root (board #387): the page
+  // scrollers that hold a primary action at their end (the connect page)
+  // stop above it, so the banner never sits on Connect / Share at any
+  // interface scale. Its own height plus its distance from the bottom edge,
+  // read as LAYOUT values (offsetHeight and the computed `bottom`, both in
+  // the root zoom's units, like the page that reserves them), re-read when
+  // the banner reflows. Removed with the banner.
+  let banner = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = banner;
+    if (!el) return;
+    const root = document.documentElement;
+    const publish = () => {
+      const below = parseFloat(getComputedStyle(el).bottom) || 0;
+      root.style.setProperty('--install-reserve', `${el.offsetHeight + below}px`);
+    };
+    publish();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(publish) : null;
+    observer?.observe(el);
+    return () => {
+      observer?.disconnect();
+      root.style.removeProperty('--install-reserve');
+    };
+  });
 </script>
 
 {#if visible}
-  <div class="install-banner" role="dialog" aria-label={t('installTitle')}>
+  <div class="install-banner" role="dialog" aria-label={t('installTitle')} bind:this={banner}>
     <img class="install-icon" src="/pwa-192.png" alt="" width="40" height="40" />
     <div class="install-body">
       <div class="install-title">{t('installTitle')}</div>
@@ -152,7 +178,14 @@
     bottom: calc(12px + var(--sab, 0px)); /* var(--sab): env() is 0 in the APK */
     z-index: 200;
     width: min(440px, calc(100vw / var(--ui-zoom, 1) - 24px));
+    box-sizing: border-box;
+    /* Its content WRAPS inside that width (board #387): the actions were a
+       fixed column beside the text, so a narrow banner (a phone at interface
+       scale 150%+, browser zoom 200%) squeezed the text to one word per line
+       and pushed Install / Not now past the window's edge. Now the text keeps
+       a readable measure and the actions move to their own line, at the end. */
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 12px;
     padding: 12px 14px;
@@ -181,9 +214,13 @@
     border-radius: 10px;
     flex-shrink: 0;
   }
+  /* Basis 0 with a readable minimum: the text stays beside the icon and
+     takes the room left on the line, and the actions are what wrap to the
+     next line when that room would fall under 9em (board #387). */
   .install-body {
-    flex: 1;
-    min-width: 0;
+    flex: 1 1 0;
+    min-width: 9em;
+    overflow-wrap: anywhere;
   }
   .install-title {
     font-size: var(--fs-body);
@@ -201,6 +238,7 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+    margin-left: auto;
   }
   .install-btn {
     padding: 7px 14px;
