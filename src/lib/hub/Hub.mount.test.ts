@@ -2473,6 +2473,48 @@ test('a cancelled Join leaves nothing behind: the next picker starts from the ta
   } finally { await app.close(); }
 });
 
+// Reviewer P2 on b4f01642: a team start keeps the mode it was started in.
+// The empty room's one-tap team start is a START (its first member leads);
+// opening the picker in Add mode while it starts must not take that away.
+test('a team started from the empty room leads with its first member, though the picker was opened in Add mode meanwhile (#382 follow-up)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  let roster: unknown[] = [];
+  let release!: () => void;
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_hub_lead', JSON.stringify({ fixture: 'dev' }));
+    },
+    modules: [{
+      ...rpc,
+      hubAgents: async () => ({ agents: roster }),
+      teamsList: async () => ({ teams: [{ name: 'squad', description: '', members: JSON.stringify([{ name: 'lead' }, { name: 'dev' }]) }] }),
+      registryList: async () => ({ agents: [{ name: 'helper', backend: 'kiro' }] }),
+      hubSpawnTeam: () => new Promise((yes) => { release = () => {
+        roster = [
+          { name: 'lead', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+          { name: 'dev', window: 2, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+        ];
+        yes({ team: 'squad', spawned: [{ name: 'lead', window_name: 'lead' }, { name: 'dev', window_name: 'dev' }], errors: [] });
+      }; }),
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  try {
+    for (let i = 0; i < 20 && !app.document.querySelector('.start-row.team'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.start-row.team')!.click();
+    await settle(4);
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    await settle(4);
+    assert.ok(app.document.querySelector('.dlg-agents'), 'the picker is open, in Add mode');
+    release();
+    await settle();
+    assert.equal(selectedCard(app.document), 'lead', 'the started team\'s first member leads, not the stored lead the roster would pick');
+  } finally { await app.close(); }
+});
+
 test('Start a team: every row is avatar, name, action; the team avatar draws a glyph and the action holds one line (#341)', { timeout: 60000 }, async context => {
   const { rpc } = roomFixture();
   const app = await (await compiledHub()).mount(context, {

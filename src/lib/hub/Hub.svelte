@@ -1444,10 +1444,12 @@
   /** Start a configured TEAM (board #74): one RPC spawns every member with its
    * role; the first member that landed becomes the recipient (the team's own
    * order is its hierarchy — the lead is listed first). */
-  async function startTeam(name, brief = '') {
+  async function startTeam(name, brief = '', mode = pickerMode) {
     if (!selected || !name || starting) return;
     // Frozen like a batch (#382 review): a switch while the team starts
-    // neither re-targets the other project's recipient nor clears its draft.
+    // neither re-targets the other project's recipient nor clears its draft,
+    // and the MODE is the one it was started in (reviewer P2 on b4f01642): a
+    // picker opened while it starts does not decide whether it takes the lead.
     const session = selected, gen = selectionGeneration, opening = pickerOpening;
     const current = () => alive && selectionGeneration === gen && selected === session;
     starting = true;
@@ -1458,7 +1460,7 @@
       if (!current()) return;
       await Promise.all([reload(), loadAgents(), loadFeed()]);
       const first = r?.spawned?.[0]?.window_name;
-      if (first && current() && (pickerMode === 'start' || !recipient)) setRecipient(first);
+      if (first && current() && (mode === 'start' || !recipient)) setRecipient(first);
     } catch (e) {
       console.warn('team spawn failed', name, e);
     } finally {
@@ -2346,7 +2348,7 @@
                 <!-- Configured TEAMS (board #74): one tap starts every member
                      with its role. -->
                 {#each teams as tm (tm.name)}
-                  <button class="start-row team" disabled={starting} onclick={() => startTeam(tm.name)}>
+                  <button class="start-row team" disabled={starting} onclick={() => startTeam(tm.name, '', 'start')}>
                     <span class="ava tava"><Icon name="bots" size={12} /></span>
                     <span class="sr-name">{tm.name}</span>
                     <span class="sr-backend">{teamMembers(tm).join(' · ')}</span>
