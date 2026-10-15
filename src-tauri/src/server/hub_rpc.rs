@@ -504,6 +504,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         .flatten()
                         .is_some_and(|proj| crate::projects::is_managed_in(Some(&proj.path), name))
                 },
+                read: &|session, id| crate::projects::board_get(session, id),
             },
         ),
         "hub_board_note" => {
@@ -982,6 +983,9 @@ struct HandOff<'a> {
     /// launch recipe)? Declaration, not liveness: a stopped agent is still this
     /// project's agent, and "not running" is reported as `offline`.
     managed: &'a dyn Fn(&str) -> bool,
+    /// Read the issue back after the save (`board_get`). It can fail AFTER the
+    /// write committed, and that must not turn a saved issue into an error.
+    read: &'a dyn Fn(&str, i64) -> Result<serde_json::Value, String>,
 }
 
 /// `hub_board_save`: create or patch an issue, record an assignee change in the
@@ -1014,15 +1018,22 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // itself; the actor is never notified of its own move.
     let prev = issue_id.and_then(|iid| crate::projects::board_get(session, iid).ok());
     let saved = crate::projects::board_save(session, issue_id, s("title"), s("body"), s("status"), assignee, who).map_err(RpcError::InvalidParams)?;
+    // EVERYTHING from here on is the "saved" branch (board #377 review, P1-A
+    // residual): the write has committed, so no step below may leave through
+    // `?` and turn a saved issue into an RPC error — a page that kept its
+    // create form open on an error would file it twice. A step that fails
+    // says so in the answer's `dispatch`; the id always comes back.
+    //
     // The issue as it is STORED now (new values won, notes and all): the room
     // line names it and the brief is built from it, so a request that edits
-    // the title and assigns in one go cannot announce the old title.
-    let issue = crate::projects::board_get(session, saved).map_err(RpcError::Internal)?;
-    let named = crate::projects::issue_ref(
-        issue["title"].as_str().unwrap_or(""),
-        issue["body"].as_str().unwrap_or(""),
-        saved,
-    );
+    // the title and assigns in one go cannot announce the old title. If it
+    // cannot be read back, the issue is named by its id and the hand-off
+    // (which needs the whole issue) reports why it did not go.
+    let issue = (hand.read)(session, saved);
+    let named = match &issue {
+        Ok(i) => crate::projects::issue_ref(i["title"].as_str().unwrap_or(""), i["body"].as_str().unwrap_or(""), saved),
+        Err(_) => format!("#{saved}"),
+    };
     // An assignment is a board CHANGE like a status move, so it leaves the
     // same kind of record (board #367): one room line, from whichever surface
     // made it — the UI's picker, `tmm board assign`, `tmm board take`. Only
@@ -1047,7 +1058,8 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     let wants = p.get("dispatch").and_then(|v| v.as_bool()) == Some(true);
     if let (true, Some(name)) = (wants, board_assign_target(assignee, who)) {
         let outcome = board_dispatch(name, (hand.managed)(name), || {
-            let brief = board_assign_brief(saved, &issue, who, name);
+            let issue = issue.as_ref().map_err(|e| format!("#{saved} was saved but could not be read back to build the hand-off: {e}"))?;
+            let brief = board_assign_brief(saved, issue, who, name);
             (hand.post)(who, &brief)
         });
         answer["dispatch"] = serde_json::json!(outcome.state);
@@ -1184,9 +1196,12 @@ fn board_assign_target<'a>(assignee: Option<&'a str>, who: &str) -> Option<&'a s
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// How the telling went, for the save's answer (board #377 review P1-A).
 struct Dispatch {
-    /// `sent` (typed into a live pane), `offline` (saved, but nothing was
-    /// typed to anyone: the name is not this project's agent, or its agent is
-    /// stopped or could not be asked) or `failed` (the post itself failed).
+    /// `sent` (the brief was POSTED and delivery found a live pane for the
+    /// name — not proof it was typed: a pane in copy mode or a held queue is
+    /// reported separately, as for any message), `offline` (saved, but nothing
+    /// was delivered: the name is not this project's agent, or its agent is
+    /// stopped or could not be asked) or `failed` (the read-back or the post
+    /// itself failed).
     state: &'static str,
     error: Option<String>,
     /// `hub_post`'s own `offline` rows (#347), when the brief was posted.
@@ -1300,7 +1315,15 @@ fn board_assign_brief(id: i64, issue: &serde_json::Value, who: &str, name: &str)
     // A titleless issue is named by its id: its body already rides in full.
     let title = if title.is_empty() { format!("#{id}") } else { unaddressed(title) };
     let body = issue["body"].as_str().unwrap_or("").trim();
-    let body = if body.is_empty() { ".".to_string() } else { format!(" — {}.", unaddressed(body)) };
+    // A body that already ends its sentence is not given a second full stop
+    // ("…is quiet.." read as a typo to the agent; found by the validator).
+    let body = if body.is_empty() {
+        ".".to_string()
+    } else if body.ends_with(['.', '。', '!', '?', '！', '？']) {
+        format!(" — {}", unaddressed(body))
+    } else {
+        format!(" — {}.", unaddressed(body))
+    };
     let notes = issue["notes"].as_array().map(|n| board_assign_notes(id, n, ASSIGN_NOTES_BUDGET)).unwrap_or_default();
     format!(
         "@{name} [board #{id}] {} assigned this to you: {title}{body}{notes}\n\
@@ -2077,6 +2100,11 @@ mod tests {
             .collect()
     }
 
+    /// The real read-back: what the handler uses.
+    fn stored(session: &str, id: i64) -> Result<serde_json::Value, String> {
+        crate::projects::board_get(session, id)
+    }
+
     fn issue_count(session: &str) -> usize {
         crate::projects::board_list(session).expect("board")["issues"].as_array().map_or(0, |a| a.len())
     }
@@ -2197,6 +2225,11 @@ mod tests {
         let cut = super::board_assign_brief(7, &long_thread, "human", "dev");
         assert!(cut.contains("\n… +1 more — `tmm board show 7`\nPlease `tmm board take 7`"), "{cut}");
         assert!(!cut.contains("unreached") && cut.chars().count() < 1500, "bounded, however long the discussion: {} chars", cut.chars().count());
+        // A body that already ends a sentence gets no second full stop.
+        let ended = serde_json::json!({ "title": "T", "body": "It is quiet.", "notes": [] });
+        assert!(super::board_assign_brief(7, &ended, "human", "dev").contains("T — It is quiet.\nPlease"), "one full stop, not two");
+        let ended_cjk = serde_json::json!({ "title": "T", "body": "已经安静了。", "notes": [] });
+        assert!(super::board_assign_brief(7, &ended_cjk, "human", "dev").contains("T — 已经安静了。\nPlease"));
         // No notes, no title: nothing appended, the id names the issue.
         let bare = serde_json::json!({ "title": "  ", "body": "", "notes": [] });
         assert_eq!(
@@ -2405,7 +2438,7 @@ mod tests {
     fn a_failed_post_after_the_save_is_an_answer_not_an_error() {
         let session = project_with(&["builder-2"]);
         let room_name = project_room(&session);
-        let broken = HandOff { post: &|_, _| Err("the room is full".into()), managed: &|_| true };
+        let broken = HandOff { post: &|_, _| Err("the room is full".into()), managed: &|_| true, read: &stored };
 
         // The create path: one issue exists afterwards, assigned, and the answer
         // says the telling failed.
@@ -2420,7 +2453,7 @@ mod tests {
         // The recovery: saving the same assignee again tells it, and does not
         // file a second issue.
         let seen = std::cell::Cell::new(0);
-        let working = HandOff { post: &|_, brief| { seen.set(seen.get() + 1); assert!(brief.starts_with("@builder-2 ")); Ok(serde_json::json!({})) }, managed: &|_| true };
+        let working = HandOff { post: &|_, brief| { seen.set(seen.get() + 1); assert!(brief.starts_with("@builder-2 ")); Ok(serde_json::json!({})) }, managed: &|_| true, read: &stored };
         let again = serde_json::json!({ "session": session, "id": id, "assignee": "builder-2", "who": "lead", "dispatch": true });
         let answer = super::board_save(&session, &room_name, &again, &working).unwrap();
         assert_eq!((answer["dispatch"].as_str(), seen.get()), (Some("sent"), 1));
@@ -2428,8 +2461,41 @@ mod tests {
 
         // An agent the project does not declare is never posted to.
         let ghost = serde_json::json!({ "session": session, "id": id, "assignee": "ghost", "who": "lead", "dispatch": true });
-        let nobody = HandOff { post: &|_, _| panic!("no post for an undeclared agent"), managed: &|_| false };
+        let nobody = HandOff { post: &|_, _| panic!("no post for an undeclared agent"), managed: &|_| false, read: &stored };
         assert_eq!(super::board_save(&session, &room_name, &ghost, &nobody).unwrap()["dispatch"], "offline");
+    }
+
+    /// Board #377 review, P1-A residual. The read-back after the commit can
+    /// fail too, and it used to leave through `?` as an RPC error — the id
+    /// never reached the client, the create form stayed open, and the retry
+    /// filed the issue twice. Every step after the write is the "saved"
+    /// branch. A save that did NOT happen stays an error, so the two are told
+    /// apart.
+    #[test]
+    fn a_read_back_that_fails_after_the_commit_still_answers_saved() {
+        let session = project_with(&["builder-2"]);
+        let room_name = project_room(&session);
+        let unreadable = HandOff { post: &|_, _| panic!("nothing to post without the issue"), managed: &|_| true, read: &|_, _| Err("database is locked".into()) };
+
+        // Asked to hand it over: saved once, the id comes back, and the answer says why nobody was told.
+        let params = serde_json::json!({ "session": session, "title": "Ship it", "assignee": "builder-2", "who": "lead", "dispatch": true });
+        let answer = super::board_save(&session, &room_name, &params, &unreadable).expect("a committed save is never an RPC error");
+        assert_eq!((answer["ok"].as_bool(), answer["dispatch"].as_str()), (Some(true), Some("failed")));
+        assert!(answer["dispatch_error"].as_str().unwrap().contains("could not be read back") && answer["dispatch_error"].as_str().unwrap().contains("database is locked"), "{answer}");
+        let id = issue_id(&answer);
+        assert_eq!(issue_count(&session), 1, "exactly one issue exists, so a retry has nothing to create");
+        assert_eq!(crate::projects::board_get(&session, id).unwrap()["assignee"], "builder-2");
+
+        // Not asked to hand it over: still an ordinary saved answer.
+        let plain = serde_json::json!({ "session": session, "id": id, "status": "doing", "who": "lead" });
+        let answer = super::board_save(&session, &room_name, &plain, &unreadable).expect("saved");
+        assert_eq!(answer, serde_json::json!({ "ok": true, "id": id }));
+
+        // A save that did NOT happen is an error, with nothing created.
+        let gone = serde_json::json!({ "session": session, "id": 9999, "title": "No such issue", "who": "lead" });
+        let err = super::board_save(&session, &room_name, &gone, &unreadable).expect_err("the write failed");
+        assert!(matches!(err, RpcError::InvalidParams(_)), "a failed write is the client's to retry");
+        assert_eq!(issue_count(&session), 1);
     }
 
     #[test]
