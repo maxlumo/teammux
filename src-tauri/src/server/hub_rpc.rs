@@ -2185,6 +2185,18 @@ mod tests {
             vec!["builder-2".to_string()],
             "title, body, notes and who are quoted text: they route nowhere\n{brief}"
         );
+        // The brief applies the PRODUCTION budget: a long thread is cut in the
+        // brief itself, and the cut points at the rest.
+        let long_thread = serde_json::json!({
+            "title": "T", "body": "B", "notes": [
+                { "author": "a", "body": "n".repeat(700), "at": 1 },
+                { "author": "b", "body": "n".repeat(700), "at": 2 },
+                { "author": "c", "body": "unreached", "at": 3 },
+            ],
+        });
+        let cut = super::board_assign_brief(7, &long_thread, "human", "dev");
+        assert!(cut.contains("\n… +1 more — `tmm board show 7`\nPlease `tmm board take 7`"), "{cut}");
+        assert!(!cut.contains("unreached") && cut.chars().count() < 1500, "bounded, however long the discussion: {} chars", cut.chars().count());
         // No notes, no title: nothing appended, the id names the issue.
         let bare = serde_json::json!({ "title": "  ", "body": "", "notes": [] });
         assert_eq!(
