@@ -994,6 +994,7 @@ function assertNothingTookHold(conn: ReturnType<typeof createConnection>, observ
   assert.deepEqual(observed.pushes, [], `${why}: no push was delivered`);
   assert.equal(conn.isConnected(), false, `${why}: not connected`);
   assert.ok(socket.closed >= 1, `${why}: the attempt’s socket was closed`);
+  assert.deepEqual([socket.onmessage, socket.onopen, socket.onerror, socket.onclose], [null, null, null, null], `${why}: and its handlers are cut, so nothing later or already queued can reach it`);
 }
 
 test('after a failed ENCRYPTED login the same socket can never log in: a plain success and a push, queued or late, change nothing (#393 P1-B residual)', (t) => withWebCrypto(async () => {
