@@ -642,17 +642,30 @@ fn replays() -> &'static Mutex<HashMap<String, Result<(), String>>> {
 }
 
 /// Replay the session's turn facts unless that already succeeded. True when
-/// they are in memory. A failure is said once per session and error, and its
-/// recovery once; the lock is not held across the read, and two concurrent
-/// replays of one session are harmless (a window already observed is left
-/// alone).
+/// they are in memory. The lock is not held across the read; two concurrent
+/// replays of one session write the same facts (a window already observed is
+/// left alone), and their outcomes are published monotonically
+/// (`settle_replay`).
 fn replay_turns(session: &str) -> bool {
     if matches!(replays().lock().unwrap().get(session), Some(Ok(()))) {
         return true;
     }
     let result = recover_open_turns(session);
-    let mut map = replays().lock().unwrap();
-    match (&result, map.get(session)) {
+    settle_replay(&mut replays().lock().unwrap(), session, result)
+}
+
+/// Publish one replay's outcome (board #394 review P2): MONOTONIC. The read
+/// runs without the lock, so two entries can replay one session at once; a
+/// failure that finishes after another entry's success must not turn the
+/// session unknown again (its facts are in memory). Says a failure once per
+/// session and error, and a recovery once. True when the session's facts are
+/// in memory.
+fn settle_replay(map: &mut HashMap<String, Result<(), String>>, session: &str, result: Result<(), String>) -> bool {
+    let before = map.get(session);
+    if matches!(before, Some(Ok(()))) {
+        return true;
+    }
+    match (&result, before) {
         (Ok(()), Some(Err(_))) => eprintln!("turn facts of {session} replayed after an earlier failure"),
         (Err(e), before) if before != Some(&result) => {
             eprintln!("⚠  turn facts of {session} could not be replayed ({e}); its windows count as busy until a later touch replays them")
@@ -672,9 +685,10 @@ fn observed(r: &Rec) -> bool {
 /// Is this window's turn KNOWN (board #394 review P1)? Its session's log is
 /// in memory, or this process observed a turn fact of the window itself,
 /// which sorts after anything the log holds. An UNKNOWN window is never read
-/// as idle by a decision that acts on it: `turn_busy` says busy (a queue-mode
-/// line is held), the flush leaves its held lines alone however old, and the
-/// sweep reports none of its lines. A status read (`derive`) still shows what
+/// as idle by a decision that acts on it: `turn_busy` says busy, a new line
+/// for a queue or steer window is held (`delivery::deliver_gated`), no held
+/// line is released however old (`delivery::may_release`), and the sweep
+/// reports none of its lines. A status read (`derive`) still shows what
 /// memory has; the diagnostic is in the server log.
 pub fn turn_known(session: &str, window: &str) -> bool {
     let (_, replayed) = recover(session);
@@ -3015,6 +3029,37 @@ mod tests {
         simulate_restart(&session);
         sweep_deliveries(&session);
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 2, "twice more, across a restart: still once each");
+    }
+
+    /// Board #394 review P2: replay outcomes are published monotonically.
+    /// The read runs without the lock, so one entry's failure can finish
+    /// after another entry's success; published in that order, the session
+    /// stays replayed (its facts are in memory) and is not asked again.
+    /// `replay_turns` publishes through `settle_replay` only.
+    #[test]
+    fn a_late_failed_replay_never_undoes_a_published_success() {
+        crate::projects::tests::use_test_store();
+        let session = format!("settle-{}", uuid::Uuid::new_v4());
+        crate::projects::with_store(|s| s.insert_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        // Entry 1 replays and publishes Ok; entry 2's read had failed and
+        // publishes after it.
+        assert!(replay_turns(&session));
+        assert!(settle_replay(&mut replays().lock().unwrap(), &session, Err("read turn facts: injected".into())), "a late Err reports the facts in memory");
+        assert_eq!(replay_error(&session), None, "Ok stays Ok");
+        assert!(turn_known(&session, "w") && turn_busy(&session, "w"));
+        // An Err published first is replaced by a later Ok, and a repeated
+        // Err keeps the session unknown.
+        let other = format!("settle-b-{}", uuid::Uuid::new_v4());
+        let mut map = HashMap::new();
+        assert!(!settle_replay(&mut map, &other, Err("e".into())));
+        assert!(!settle_replay(&mut map, &other, Err("e".into())));
+        assert!(settle_replay(&mut map, &other, Ok(())));
+        assert!(settle_replay(&mut map, &other, Err("late".into())));
+        assert_eq!(map.get(&other), Some(&Ok(())));
+        let src = include_str!("telemetry.rs");
+        let body = &src[src.find("fn replay_turns(session: &str) -> bool {").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("settle_replay(&mut replays().lock().unwrap(), session, result)") && !body.contains(".insert("), "{body}");
     }
 
     /// Board #394 review P1: a replay that failed is asked again, and the

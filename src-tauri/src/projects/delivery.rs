@@ -436,27 +436,42 @@ fn deliver_gated(
     // second one lands in the running turn — steered, no hook. The owed
     // row itself says so (`line_in_flight`); queue mode waits for the edge
     // as before (its lines echo on their own turn).
+    //
+    // A turn that is UNKNOWN (board #394: its log could not be read and the
+    // window has no live fact) decides nothing where the mode lets the
+    // turn's state decide: the line is held, queue or steer, and nothing is
+    // typed on a guess. A backend with no mode is typed as before; its turn
+    // state is never asked. `known` is read once, here, and is what
+    // `may_release` is asked with below.
+    let known = telemetry::turn_known(session, window);
+    let unknown = mode.is_some() && !known;
     let open = mode.is_some()
-        && (telemetry::turn_busy(session, window) || (mode == Some("steer") && telemetry::line_in_flight(session, window)));
+        && (unknown || telemetry::turn_busy(session, window) || (mode == Some("steer") && telemetry::line_in_flight(session, window)));
     let busy = open && mode == Some("queue");
-    let steered = open && mode == Some("steer");
+    let steered = open && !unknown && mode == Some("steer");
     if steered && held.is_empty() {
         return type_steered(session, window, target, line, ask_at, msg_id);
     }
-    if !busy && held.is_empty() {
+    if !busy && !unknown && held.is_empty() {
         return type_now(session, window, target, line, ask_at, msg_id);
     }
     // Held — for the busy turn's end, or (idle) BEHIND lines still held from a
     // copy-mode refusal or a restart, never ahead of them. A hold that could
     // not be written is today's behaviour, never a silent loss (orchestrator
     // 04:49): type it now, as an ordinary delivery; if that fails too, the
-    // existing `undelivered` warn says so.
+    // existing `undelivered` warn says so. Not into an unknown turn (#394
+    // ruling): there the line is said undelivered, and nothing is typed.
     if let Err(e) = telemetry::record_held(session, window, line, ask_at, msg_id) {
+        if unknown {
+            eprintln!("⚠️  could not hold a delivery for {session}:{window} ({e}); its turn is unknown, so nothing is typed");
+            telemetry::record_undelivered(session, window, &crate::address::shown(line, ask_at), "its turn is unknown and the line could not be held");
+            return false;
+        }
         eprintln!("⚠️  could not hold a delivery for {session}:{window} ({e}); typing it now");
         // Into a steer turn it is steered, owing no echo (validator, #276).
         return if steered { type_steered(session, window, target, line, ask_at, msg_id) } else { type_now(session, window, target, line, ask_at, msg_id) };
     }
-    if !busy || overdue(&held) {
+    if may_release(known, busy, &held) {
         flush_locked(session, window, target, steered);
     }
     true
@@ -539,21 +554,29 @@ pub fn flush_on_start() {
 fn flush_at(session: &str, window: &str, target: &str) {
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
-    // A window whose turn is unknown (its log could not be read, board #394)
-    // keeps its lines, however long held: the overdue rule below is for a
-    // turn that READS busy, and an unread log reads nothing. Its next
-    // trigger after the log is read, or a turn fact of its own, decides.
-    if !telemetry::turn_known(session, window) {
-        return;
-    }
-    let busy = telemetry::turn_busy(session, window);
-    if busy && !overdue(&telemetry::held_rows(session, window)) {
+    let known = telemetry::turn_known(session, window);
+    let busy = known && telemetry::turn_busy(session, window);
+    if !may_release(known, busy, &telemetry::held_rows(session, window)) {
         return;
     }
     // An overdue flush into a turn still open: steered if the session now
     // runs steer (#276), so its rows are owed no echo.
     let steered = busy && input_mode(session, window) == Some("steer");
     flush_locked(session, window, target, steered);
+}
+
+/// May the window's held lines be typed now? The ONE release rule (board
+/// #257, #394 review P1 residual), asked by every path that types held
+/// lines — the delivery decision (`deliver_gated`) and every flush trigger
+/// (`flush_at`: the end edge, the feed read, the server start) — inside the
+/// window lock and, for a delivery, the turn-fact lock. A KNOWN turn
+/// releases them when it is not busy, or when the oldest has waited past
+/// `HOLD_MAX_SECS` (an Escape typed in the pane ends a turn without a hook).
+/// An UNKNOWN turn (`telemetry::turn_known`: its log could not be read and
+/// the window has no live fact) releases nothing, however old: the overdue
+/// rule is for a turn that READS busy, and an unread log reads nothing.
+fn may_release(known: bool, busy: bool, held: &[super::store::DeliveryRow]) -> bool {
+    known && (!busy || overdue(held))
 }
 
 /// Type the first combined prompt of the held lines. The rows are marked
@@ -1470,6 +1493,59 @@ mod tests {
         assert_eq!(typed(), vec![line_b.to_string(), line_a.to_string()], "known and ended: the held line goes out");
         telemetry::sweep_deliveries(&a);
         assert!(warns(&a).is_empty(), "dev's turn is open: its line is still owed, not reported");
+    }
+
+    /// Board #394 review P1 residual: the DELIVERY decision asks the same
+    /// release rule as the flush (`may_release`). Before, a new line for an
+    /// unknown window whose oldest held line was overdue went through
+    /// `deliver_gated`'s "busy but overdue, so flush" exception and typed
+    /// the whole batch into a turn nobody had read. Through the real
+    /// `deliver_with`: A's log cannot be read, A:dev holds a line past
+    /// HOLD_MAX_SECS. A queue line and a steer line arrive: nothing typed,
+    /// all three held, no warn. A hold that cannot be written while unknown
+    /// is said undelivered and not typed. After A's log is repaired, the
+    /// next line is decided by A's replayed state: an open turn with an
+    /// overdue hold, so the known overdue rule types the batch.
+    #[test]
+    fn a_new_line_for_an_unknown_window_never_releases_its_overdue_hold() {
+        let a = setup("unknown-deliver");
+        let old = crate::projects::now() - HOLD_MAX_SECS - 60;
+        let first = "[tmm chat 03:00] lead: @dev old one";
+        crate::projects::with_store(|st| {
+            st.insert_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_held_delivery(&a, "dev", first, 0, old, "")
+        })
+        .unwrap();
+        telemetry::forget_process_state(&a);
+        telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{a}'"));
+        telemetry::recover_on_start();
+        assert!(!telemetry::turn_known(&a, "dev"));
+
+        let queue_line = "[tmm chat 03:10] lead: @dev new queue";
+        let steer_line = "[tmm chat 03:11] lead: @dev new steer";
+        assert!(deliver_with(&a, "dev", "t", queue_line, 0, "", || Some("queue")), "held is delivered as queued");
+        assert!(deliver_with(&a, "dev", "t", steer_line, 0, "", || Some("steer")));
+        assert!(typed().is_empty(), "nothing typed into an unknown turn: {:?}", typed());
+        assert_eq!(held(&a, "dev"), 3, "the overdue line and both new ones stay held");
+        assert!(warns(&a).is_empty(), "no warn: {:?}", warns(&a));
+
+        // A hold that cannot be written while unknown: said, not typed.
+        sql(&format!("CREATE TEMP TRIGGER unknown_hold_fault BEFORE INSERT ON deliveries
+             WHEN NEW.held = 1 AND NEW.session = '{a}'
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
+        assert!(!deliver_with(&a, "dev", "t", "[tmm chat 03:12] lead: @dev cannot hold", 0, "", || Some("queue")));
+        sql("DROP TRIGGER unknown_hold_fault;");
+        assert!(typed().is_empty(), "no fallback typing into an unknown turn: {:?}", typed());
+        assert_eq!(held(&a, "dev"), 3, "the old held lines are kept");
+        assert!(warns(&a).iter().any(|w| w.starts_with("undelivered (its turn is unknown") && w.contains("cannot hold")), "{:?}", warns(&a));
+
+        // Repaired: A's replayed turn is open and its hold overdue, so the
+        // known overdue rule types the held batch at the next line.
+        telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS TEXT) WHERE session = '{a}'"));
+        assert!(deliver_with(&a, "dev", "t", "[tmm chat 03:13] lead: @dev after repair", 0, "", || Some("queue")));
+        assert!(telemetry::turn_known(&a, "dev") && telemetry::turn_busy(&a, "dev"), "replayed: known, and its turn open");
+        assert_eq!(typed().len(), 1, "one combined prompt: {:?}", typed());
+        assert!(typed()[0].starts_with(first) && typed()[0].contains("new queue"), "{:?}", typed());
     }
 
     /// kiro-cli 2.22.1 measured: an Escape typed IN the pane cancels the turn
