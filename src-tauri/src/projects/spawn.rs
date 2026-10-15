@@ -3668,4 +3668,45 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(seen_reserved, Some(true), "the cleanup runs while the name is still reserved");
         assert!(!flight.contains(&key), "and the name is released after it");
     }
+
+    /// The validator's live clash (board #383, 1 of 14 attempts): `tmm spawn --team clash`
+    /// planned `kiro-2` for a member while `tmm agent fork kiro` reached for `kiro-2`
+    /// too, and both got it. Here the same two requests meet at a barrier, many
+    /// rounds: the team member's explicit name and the fork's automatic one never
+    /// end up the same, whichever wins — the loser is refused (the member is
+    /// reported) or steps to the next name, never writes over the other.
+    #[test]
+    fn a_team_spawn_planning_a_name_and_a_fork_reaching_for_it_never_both_get_it() {
+        let ws = std::env::temp_dir().join(format!("tmm-fork-clash-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let (mut member_won, mut fork_won) = (0, 0);
+        for round in 0..60 {
+            let base = format!("kiro{round}");
+            let planned = format!("{base}-2");
+            let live = vec![base.clone()];
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (b1, w1, l1, b_1) = (barrier.clone(), ws_str.clone(), live.clone(), base.clone());
+            let (b2, w2, l2, p2) = (barrier, ws_str.clone(), live, planned.clone());
+            let fork = std::thread::spawn(move || { b1.wait(); claim_home(&w1, &|| l1.clone(), None, &b_1) });
+            let member = std::thread::spawn(move || {
+                b2.wait();
+                reserve_name(&w2, &|| l2.clone(), &Starting { agent_def: "", team: "clash", member: "m3" }, Some(&p2), "m3")
+            });
+            let (fork, member) = (fork.join().unwrap().unwrap(), member.join().unwrap());
+            match member {
+                Ok(member) => {
+                    member_won += 1;
+                    assert_ne!(member.name(), fork.name(), "round {round}: both got {}", fork.name());
+                    assert_eq!(fork.name(), format!("{base}-3"), "round {round}: the fork steps past the member's planned name");
+                }
+                Err(e) => {
+                    fork_won += 1;
+                    assert_eq!(fork.name(), planned, "round {round}");
+                    assert!(e.contains("being created") || e.contains("another agent's home"), "round {round}: {e}");
+                }
+            }
+        }
+        eprintln!("clash rounds: member won {member_won}, fork won {fork_won}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
