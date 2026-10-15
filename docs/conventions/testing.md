@@ -394,9 +394,14 @@ flaky wall-clock assertions in the test.
   `an_end_racing_an_echo_waits_and_keeps_the_next_command` has the same shape
   but did not fail in 320 runs (its racer does more work after the release),
   and was fixed for the same reason, not because it was seen to flake.
-  Reproduce a suspected race by looping the one test under load
-  (busy-loop processes ≥ 2x the cores, several runners at once) before and
-  after the fix.
+  Looping the one test under load can reproduce a suspected race and show a
+  fix holds; #386 did it with 8 parallel runners and 96 busy-loop processes on
+  a 48-core host (~2x oversubscription), before and after. That is the
+  configuration of one investigation, not a default every race inquiry must
+  fill a shared host with: keep it bounded in time, off the tmux server and
+  state of the live system (the isolation rules above), and clean up the
+  burners. A negative control that fails in such a run shows the test bites in
+  that run, not under every load.
 - Rust tests never see the operator's `~/.config/tmux-mobile`. Under
   `cfg(test)` the lib's `config::dirs_next()` is ONE empty temp directory
   per test process (`/tmp/tmm-config-test-<pid>`), so every
