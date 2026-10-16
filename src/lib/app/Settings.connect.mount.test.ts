@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from '../test/mount.ts';
+import { REJECTED_LINKS } from '../core/connection-link.fixtures.ts';
 
 const compiled = compileMount(new URL('./Settings.svelte', import.meta.url), []);
 // The identity layer, mocked, so the one failure that matters can happen: a
@@ -439,9 +440,9 @@ for (const [what, link, dial, sockets] of [
 // ─── #401 review round 3: every submitting action goes through the form's own gate ──
 
 const TOKEN_FIELD = '.token-wrap input';
-async function typeInto(app: Awaited<ReturnType<typeof mount>>, text: string, { leave = true } = {}) {
+async function typeInto(app: Awaited<ReturnType<typeof mount>>, text: string, { leave = true, focus = true } = {}) {
   const address = app.document.querySelector<HTMLInputElement>('input[type="text"]')!;
-  address.dispatchEvent(new app.window.Event('focus'));
+  if (focus) address.dispatchEvent(new app.window.Event('focus'));
   address.value = text;
   const event = new app.window.Event('input', { bubbles: true });
   Object.defineProperty(event, 'inputType', { value: 'insertText' });
@@ -487,8 +488,24 @@ test('lifecycle: alpha, then an accepted paste of beta\u2019s link, then a typed
   address.dispatchEvent(paste);
   await app.flush();
   assert.deepEqual(fieldsOf(app), { address: 'wss://b.test/ws', token: 'tokB', socket: '/tmp/sockB' }, 'accepted paste');
-  await typeInto(app, 'https://front.example/?token=SECRET-ONE');                  // same focus, then refused
+  await typeInto(app, 'https://front.example/?token=SECRET-ONE', { focus: false });   // the SAME focus lifetime, then refused
   assert.deepEqual(fieldsOf(app), { address: 'wss://b.test/ws', token: 'tokB', socket: '/tmp/sockB' }, 'the rollback is the accepted tuple, never alpha\u2019s address beside beta\u2019s credentials');
   await clickConnect(app);
   assert.deepEqual(app.order, [], 'and no mixed tuple was submitted');
 });
+
+for (const [what, text] of REJECTED_LINKS) {
+  test(`login: pasting ${what} and then clicking Connect dials nothing, and the form is still alpha's tuple`, async (context) => {
+    const app = await mount(context, async () => 'm-a', twoSaved('/tmp/sockB'));
+    const address = app.document.querySelector<HTMLInputElement>('input[type="text"]')!;
+    address.value = text;
+    const event = new app.window.Event('input', { bubbles: true });
+    Object.defineProperty(event, 'inputType', { value: 'insertFromPaste' });
+    address.dispatchEvent(event);
+    await app.flush();
+    await clickConnect(app);
+    assert.deepEqual(app.order, [], 'no candidate, no dial, no setSocket');
+    assert.deepEqual(fieldsOf(app), { address: 'wss://a.test/ws', token: 'tokA', socket: '/tmp/sockA' });
+    assert.equal(app.window.localStorage.getItem('tmux_servers')!.includes('SECRET') || app.window.localStorage.getItem('tmux_servers')!.includes('OUTER-TOKEN'), false, 'no secret in the registry');
+  });
+}

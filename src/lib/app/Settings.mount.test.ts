@@ -15,7 +15,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function mount(context: TestContext, copy: (link: string) => boolean | Promise<boolean>) {
+async function mount(context: TestContext, copy: (link: string) => boolean | Promise<boolean>, savedAddress = 'wss://fixture.test/ws') {
   const timers = new Set<unknown>();
   let scheduled = 0;
   const app = await (await compiled).mount(context, {
@@ -25,7 +25,7 @@ async function mount(context: TestContext, copy: (link: string) => boolean | Pro
       window.localStorage.setItem('tmux_locale', 'en');
       // The form opens on CURRENT's saved tuple (#400).
       window.localStorage.setItem('tmux_servers', JSON.stringify([
-        { id: 'a', name: 'fixture', address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' },
+        { id: 'a', name: 'fixture', address: savedAddress, token: 'fake-token&=+', socket: '/tmp/fake socket' },
       ]));
       window.localStorage.setItem('tmux_server_current', 'a');
       const set = window.setTimeout, clear = window.clearTimeout;
@@ -202,3 +202,28 @@ test('a typed link that cannot be used leaves the form as it was: Share copies t
     assert.ok(!copied[0]!.includes('SECRET-ONE') && !app.document.documentElement.outerHTML.includes('SECRET-ONE'));
   } finally { await app.close(); }
 });
+
+// The login Share is bound by the same one endpoint check as the connected Copy
+// (#401 review round 4): an address that holds its own token or socket
+// parameters is refused with the credential-free message, never copied with the
+// parameters quietly removed.
+for (const [what, address] of [
+  ['both parameters', 'wss://fixture.test/ws?token=route-secret&socket=%2Froute-socket'],
+  ['an encoded key', 'wss://fixture.test/ws?%74oken=route-secret'],
+  ['a fragment', 'wss://fixture.test/ws#frag'],
+] as const) {
+  test(`Share refuses an address that holds ${what} of its own: nothing is copied, nothing is stripped, no part of it is shown`, async context => {
+    let copies = 0;
+    const app = await mount(context, () => { copies++; return true; }, address);
+    try {
+      const field = () => app.document.querySelector<HTMLInputElement>('.addr-wrap input')!.value;
+      assert.equal(field(), address, 'the form opened on the saved address as it is');
+      await app.copy();
+      assert.equal(copies, 0, 'no link was made');
+      assert.equal(app.document.querySelector('.card > .config-error[role=alert]')?.textContent?.trim(), 'This address cannot be shared as a link');
+      assert.equal(field(), address, 'and the address was not rewritten to something shareable');
+      assert.equal(app.document.querySelector<HTMLInputElement>('.token-wrap input')!.value, 'fake-token&=+', 'nor was a credential taken out of it');
+      assert.ok(!/route-secret|route-socket/u.test(app.document.querySelector('.card > .config-error')?.textContent ?? ''), 'the message names no part of it');
+    } finally { await app.close(); }
+  });
+}

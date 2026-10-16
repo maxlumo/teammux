@@ -68,6 +68,8 @@ test('an endpoint whose query already holds token or socket cannot carry a link:
   }
   assert.equal(kindOf('wss://h/ws?token=route&token=AUTH'), 'unusable:ambiguous');
   assert.equal(kindOf('wss://h/ws?socket=a&token=T&socket=b'), 'unusable:ambiguous');
+  assert.equal(kindOf('https://front.example/?addr=ws://h:1&token=A&token=B'), 'unusable:ambiguous', 'the old form too: the first token is never taken silently');
+  assert.equal(kindOf('https://front.example/#/x?addr=ws://h:1&socket=a&socket=b'), 'unusable:ambiguous');
   assert.equal(kindOf('https://app.example/?addr=wss://h/ws?token=route&token=AUTH'), 'unusable:ambiguous');
   assert.equal(kindOf('https://app.example/?addr=wss%3A%2F%2Fh%2Fws%3Ftoken%3Droute&token=AUTH'), 'unusable:ambiguous', 'a credential key inside the endpoint itself');
 });
@@ -167,6 +169,31 @@ test('the route kept after a link is taken from the address bar never carries a 
   assert.equal(routeOfHash('#token=T'), '');
   assert.equal(routeOfHash('#%74oken=T'), '');
   assert.equal(routeOfHash('#/a&socket=%2Fs'), '');
+});
+
+test('a decoded old addr is an endpoint like any other: a fragment or a hidden credential makes the whole link unusable, and the outer token is never approval', () => {
+  for (const key of ['addr', 'address', 'server']) {
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: a credential in the fragment`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23socket%3D%252Fs&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: a socket in the fragment`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23frag&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: an ordinary fragment is no WebSocket endpoint`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%3F%2574oken%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: an encoded key in the endpoint query`);
+    assert.equal(kindOf(`https://front.example/?${key}=ws%3A%2F%2Fh%3A99999&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: a bad port`);
+  }
+});
+
+test('the invariant: every link the parser accepts carries an address that endpointOf calls an endpoint, unchanged', () => {
+  const accepted = [
+    ...TUPLES.map((t) => buildConnectionLink(t)!),
+    'wss://h/ws?token=T&socket=%2Fs', 'ws://h:9899/?token=T', '  WSS://h/ws?token=T\n', 'wss://h/ws?a=1&&b=2&token=T&&',
+    'https://app.example/x/?addr=ws%3A%2F%2Fh%3A9899&token=T', 'http://localhost:5173/?address=ws://h:9899&token=T',
+    'http://192.168.1.2:9899/?server=ws://h:9899&token=T', 'https://app.example/#/page?addr=ws://h:9899&token=T',
+    'tauri://localhost/?addr=ws://h:9899&token=T', 'https://app.example/?addr=h:9899&token=T', 'https://app.example/?addr=wss://h/&token=',
+    'https://app.example/?addr=wss%3A%2F%2Fh%2Fws%3Fa%3D1%26%26b&token=T',
+  ];
+  for (const text of accepted) {
+    const link = linkOf(text);
+    assert.deepEqual(endpointOf(link.address), { kind: 'endpoint', address: link.address }, link.address);
+  }
 });
 
 test('endpointOf: a clean ws or wss endpoint is accepted in its canonical spelling; anything carrying a credential is refused as a credential; the rest is invalid', () => {

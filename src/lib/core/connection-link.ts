@@ -109,18 +109,13 @@ function hasHost(address: string): boolean {
   try { return new URL(address).hostname !== ''; } catch { return false; }
 }
 
-/** Does this endpoint's own query already hold a credential key? */
-function endpointCollides(address: string): boolean {
-  const q = address.indexOf('?');
-  return q >= 0 && splitQuery(address.slice(q + 1)).credentials.size > 0;
-}
-
 /** The link that carries `conn` out of the app, or `null` when the endpoint
  * cannot carry one (its query already holds `token` or `socket`, or it has a
  * fragment). Both parameters are always written, empty when there is no value. */
 export function buildConnectionLink(conn: { address: string; token?: string; socket?: string }): string | null {
-  const address = conn.address.trim();
-  if (!address || address.includes('#') || endpointCollides(address)) return null;
+  const endpoint = endpointOf(conn.address);
+  if (endpoint.kind !== 'endpoint') return null;
+  const address = endpoint.address;
   const params = new URLSearchParams();
   params.set('token', conn.token ?? '');
   params.set('socket', conn.socket ?? '');
@@ -145,9 +140,12 @@ function classify(raw: string): ParsedLink {
     const { credentials, kept, repeated } = splitQuery(body.slice(q + 1));
     if (!credentials.size) return NONE;
     if (repeated) return AMBIGUOUS;
-    const address = canonicalAddress(body.slice(0, q)) + (kept.length ? `?${kept.join('&')}` : '');
-    if (!hasHost(address)) return NO_ADDRESS;
-    return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
+    // The endpoint is validated ONCE, by the same function that guards an
+    // address-only field, wherever it was extracted from: a parsed link
+    // guarantees a usable, credential-free address.
+    const endpoint = endpointOf(canonicalAddress(body.slice(0, q)) + (kept.length ? `?${kept.join('&')}` : ''));
+    if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? AMBIGUOUS : NO_ADDRESS;
+    return { kind: 'link', link: { address: endpoint.address, token: credentials.get('token'), socket: credentials.get('socket') } };
   }
   if (!/^[a-z][a-z\d+.-]*:\/\//iu.test(raw)) return NONE;                  // `host:9899?token=x` is no URL
   let url: URL;
@@ -160,10 +158,12 @@ function classify(raw: string): ParsedLink {
   if (repeated) return AMBIGUOUS;
   let address = addr;
   if (!/^wss?:\/\//iu.test(address)) address = (url.protocol === 'https:' ? 'wss://' : 'ws://') + address;
-  if (endpointCollides(address)) return AMBIGUOUS;
-  address = canonicalAddress(address);
-  if (!hasHost(address)) return NO_ADDRESS;
-  return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
+  // The decoded `addr` is an endpoint like any other: a fragment, an encoded
+  // credential key or a missing host in it makes the whole link unusable, and
+  // the outer token is never taken as approval to connect to a repaired target.
+  const endpoint = endpointOf(address);
+  if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? AMBIGUOUS : NO_ADDRESS;
+  return { kind: 'link', link: { address: endpoint.address, token: credentials.get('token'), socket: credentials.get('socket') } };
 }
 
 /**

@@ -128,7 +128,8 @@ async function openDialog(context: import('node:test').TestContext, submitted: u
 
 for (const [what, text] of REJECTED_LINKS) {
   test(`the dialog: pasting ${what} restores the field, leaves the others alone, and shows no part of it`, async context => {
-    const { app, el, set } = await openDialog(context);
+    const submitted: unknown[] = [];
+    const { app, el, set } = await openDialog(context, submitted);
     try {
       await set(FIELDS.address, 'ws://keep.example:9899');
       await set(FIELDS.token, 'KEEP-TOKEN');
@@ -139,10 +140,13 @@ for (const [what, text] of REJECTED_LINKS) {
       assert.equal(el(FIELDS.socket).value, '/keep/sock');
       const message = app.document.querySelector('.dlg .config-error[role=alert]');
       assert.match(message?.textContent ?? '', /^This link (has no server address|cannot be read: a token or socket appears twice)$/u);
-      for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket']) {
+      for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket', 'OUTER-TOKEN']) {
         assert.ok(!app.document.documentElement.outerHTML.includes(secret), `${secret} is nowhere in the page`);
         assert.ok(![...app.document.querySelectorAll('input')].some(i => i.value.includes(secret)), `or in any field`);
       }
+      [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+      await app.flush();
+      assert.deepEqual(submitted, [], 'and Connect submits nothing');
     } finally { await app.close(); }
   });
 }
