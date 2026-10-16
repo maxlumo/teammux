@@ -19,8 +19,8 @@ const TOKEN = 'input[placeholder="auth token"]';
 const SOCKET = 'input[placeholder="/tmp/tmux-1000/default"]';
 
 /** Saved servers (the registry is the only list the form suggests from, #400). */
-const saved = (...servers: { address: string; token: string }[]) => ({
-  tmux_servers: JSON.stringify(servers.map((s, i) => ({ id: `s${i}`, name: `s${i}`, address: s.address, token: s.token }))),
+const saved = (...servers: { address: string; token: string; socket?: string }[]) => ({
+  tmux_servers: JSON.stringify(servers.map((s, i) => ({ id: `s${i}`, name: `s${i}`, address: s.address, token: s.token, ...(s.socket ? { socket: s.socket } : {}) }))),
 });
 
 async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string) {
@@ -75,7 +75,7 @@ test('a fresh desktop app is filled with this machine\'s gateway', async context
 });
 
 test('a saved remote address with no token gets no local token or socket', async context => {
-  const app = await mount(context, { tmux_address: 'ws://remote.example:9899' });
+  const app = await mount(context, { ...saved({ address: 'ws://remote.example:9899', token: '' }), tmux_server_current: 's0' });
   await app.answer();
   assert.equal(app.value(ADDR), 'ws://remote.example:9899');
   assert.equal(app.value(TOKEN), '');
@@ -162,4 +162,28 @@ test('the suggestions are the saved servers, re-read each time the list opens, a
   // Another page deletes a server while this form stays mounted.
   removeServer(app.window.localStorage, 's1');
   assert.deepEqual(await rows(), ['ws://one.example:9899', 'ws://three.example:9899']);
+});
+
+test('the form opens on CURRENT\u2019s saved tuple, never on a mirror the registry does not hold (#400)', async context => {
+  const app = await mount(context, {
+    ...saved({ address: 'ws://a.example:9899', token: 'TOKEN-A', socket: '/tmp/sock-a' }, { address: 'ws://b.example:9899', token: 'TOKEN-B', socket: '/tmp/sock-b' }),
+    tmux_server_current: 's0',
+    // An unfinished attempt, and a server deleted on an older build.
+    tmux_address: 'ws://deleted.example:9899', tmux_token: 'TOKEN-DELETED', tmux_socket: '/tmp/sock-deleted',
+  });
+  await app.answer();
+  assert.equal(app.value(ADDR), 'ws://a.example:9899');
+  assert.equal(app.value(TOKEN), 'TOKEN-A');
+  assert.equal(app.value(SOCKET), '/tmp/sock-a');
+  assert.ok(!app.document.body.innerHTML.includes('deleted.example'), 'the deleted address is nowhere on the page');
+});
+
+test('one saved server with one address still has its suggestion list, and a pick brings its tuple back (#400 review P2-C)', async context => {
+  const app = await mount(context, { ...saved({ address: 'ws://only.example:9899', token: 'ONLY' }), tmux_server_current: 's0' });
+  await app.answer();
+  await app.edit(ADDR, 'ws://typed.example:9899');                  // the person moved off it
+  assert.ok(app.document.querySelector('.hist-btn'), 'the list opens with a single row');
+  await app.pick('ws://only.example:9899');
+  assert.equal(app.value(ADDR), 'ws://only.example:9899');
+  assert.equal(app.value(TOKEN), 'ONLY');
 });

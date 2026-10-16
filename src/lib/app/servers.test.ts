@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CURRENT_KEY, HISTORY_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, rememberedAddresses, residentKey,
+  CURRENT_KEY, HISTORY_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, rememberedAddresses, residentKey, reconcileMirror, currentConnection,
   activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, RESIDENT_KEYS, hostLabel, loadServers,
   focusServer, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, MOVES_KEY, resumeSlotMove,
 } from './servers.ts';
@@ -759,8 +759,8 @@ for (const fails of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_disconne
 
 // ─── #400: the registry is the only list of remembered connections ────
 
-const entry = (id: string, address: string, token: string, machineId?: string) =>
-  ({ id, name: id, address, token, ...(machineId ? { machineId } : {}) });
+const entry = (id: string, address: string, token: string, machineId?: string, socket?: string) =>
+  ({ id, name: id, address, token, ...(machineId ? { machineId } : {}), ...(socket ? { socket } : {}) });
 
 test('rememberedAddresses: CURRENT first, each server\u2019s address then its failover set, the server\u2019s token on every row, one row per address', () => {
   const s = mem({
@@ -843,52 +843,126 @@ test('migration: history is removed only once the registry is on disk, and a key
   assert.equal(migrateServers(stuck).length, 1, 'a leftover key read by nothing is not a failure');
 });
 
-test('removing a server clears the mirror when the mirror names it — the address, the token and the socket in one step', () => {
-  const base = () => mem({
-    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', 'tokA', 'ma'), entry('b', 'ws://b:1', 'tokB', 'mb')]),
-    [CURRENT_KEY]: 'a',
-    tmux_machines: JSON.stringify({ ma: ['ws://a:1'], mb: ['ws://b:1', 'ws://b-lan:1'] }),
-  });
-  // An attempt at B that never finished left B in the mirror while CURRENT is A.
-  const attempt = base();
-  attempt.setItem('tmux_address', 'ws://b:1'); attempt.setItem('tmux_token', 'tokB'); attempt.setItem('tmux_socket', '/tmp/b-sock');
+// The pre-fill mirror is a projection of the registry, matched by the WHOLE
+// tuple — address, token and socket — never by address alone (#400 review).
+const tupleServers = () => mem({
+  [SERVERS_KEY]: JSON.stringify([
+    entry('a', 'ws://a:1', 'tokA', 'ma', '/tmp/sockA'),
+    entry('b', 'ws://b:1', 'tokB', 'mb', '/tmp/sockB'),
+  ]),
+  [CURRENT_KEY]: 'a',
+  tmux_machines: JSON.stringify({ ma: ['ws://a:1', 'ws://a-lan:1'], mb: ['ws://b:1', 'ws://b-lan:1'] }),
+});
+const withMirror = (s: ReturnType<typeof mem>, address: string, token: string, socket: string) => {
+  s.setItem('tmux_address', address); s.setItem('tmux_token', token);
+  if (socket) s.setItem('tmux_socket', socket);
+  return s;
+};
+const mirrorOf = (s: ReturnType<typeof mem>) => ['tmux_address', 'tmux_token', 'tmux_socket'].map((k) => s.getItem(k));
+
+test('reconcileMirror keeps the mirror only while its whole tuple is one the registry holds', () => {
+  const cases: [string, [string, string, string], boolean][] = [
+    ['CURRENT\u2019s own tuple', ['ws://a:1', 'tokA', '/tmp/sockA'], true],
+    ['CURRENT\u2019s failover address with its token and socket', ['ws://a-lan:1', 'tokA', '/tmp/sockA'], true],
+    ['another saved server\u2019s tuple (an unfinished attempt at it)', ['ws://b:1', 'tokB', '/tmp/sockB'], true],
+    ['a saved address with the wrong socket', ['ws://b:1', 'tokB', ''], false],
+    ['A\u2019s credentials at B\u2019s address', ['ws://b:1', 'tokA', '/tmp/sockA'], false],
+    ['a saved address with a mistyped token', ['ws://a:1', 'typo', '/tmp/sockA'], false],
+    ['an address no server has', ['ws://typed:1', 'tokTyped', ''], false],
+    ['a token with no address', ['', 'tokOnly', ''], false],
+  ];
+  for (const [what, [address, token, socket], kept] of cases) {
+    const s = tupleServers();
+    if (address) withMirror(s, address, token, socket); else s.setItem('tmux_token', token);
+    reconcileMirror(s);
+    assert.deepEqual(mirrorOf(s), kept ? [address, token, socket || null] : [null, null, null], what);
+  }
+  const empty = tupleServers();
+  reconcileMirror(empty);
+  assert.deepEqual(mirrorOf(empty), [null, null, null], 'no mirror, nothing to do');
+});
+
+test('removing a server clears every mirror tuple that was only its own', () => {
+  // An attempt at B that never finished: B\u2019s full tuple, then B is deleted.
+  const attempt = withMirror(tupleServers(), 'ws://b:1', 'tokB', '/tmp/sockB');
   removeServer(attempt, 'b');
-  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) assert.equal(attempt.getItem(key), null, key);
+  assert.deepEqual(mirrorOf(attempt), [null, null, null]);
   assert.deepEqual(loadServers(attempt).map((e) => e.id), ['a']);
 
-  // Through one of its alternate addresses, with a token typed wrong.
-  const alternate = base();
-  alternate.setItem('tmux_address', 'ws://b-lan:1'); alternate.setItem('tmux_token', 'typo');
+  // Through one of its failover addresses.
+  const alternate = withMirror(tupleServers(), 'ws://b-lan:1', 'tokB', '/tmp/sockB');
   removeServer(alternate, 'b');
-  assert.equal(alternate.getItem('tmux_address'), null);
-  assert.equal(alternate.getItem('tmux_token'), null);
+  assert.deepEqual(mirrorOf(alternate), [null, null, null]);
 
-  // CURRENT's own mirror stays: it is the connection in use.
-  const own = base();
-  own.setItem('tmux_address', 'ws://a:1'); own.setItem('tmux_token', 'tokA');
+  // CURRENT\u2019s own mirror stays: it is a tuple the registry still holds.
+  const own = withMirror(tupleServers(), 'ws://a:1', 'tokA', '/tmp/sockA');
   removeServer(own, 'b');
-  assert.equal(own.getItem('tmux_address'), 'ws://a:1');
-  assert.equal(own.getItem('tmux_token'), 'tokA');
+  assert.deepEqual(mirrorOf(own), ['ws://a:1', 'tokA', '/tmp/sockA']);
 
-  // An address CURRENT shares with the removed server is still CURRENT's.
-  const shared = mem({
-    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://tunnel:1', 'tokA', 'ma'), entry('b', 'ws://tunnel:1', 'tokB', 'mb')]),
-    [CURRENT_KEY]: 'a', tmux_address: 'ws://tunnel:1', tmux_token: 'tokA',
-  });
-  removeServer(shared, 'b');
-  assert.equal(shared.getItem('tmux_address'), 'ws://tunnel:1');
-  assert.equal(shared.getItem('tmux_token'), 'tokA');
-
-  // A draft that names neither the removed server nor CURRENT is nobody's to clear.
-  const draft = base();
-  draft.setItem('tmux_address', 'ws://typed:1'); draft.setItem('tmux_token', 'tokTyped');
+  // A draft that is nobody\u2019s tuple does not outlive the next removal either.
+  const draft = withMirror(tupleServers(), 'ws://typed:1', 'tokTyped', '');
   removeServer(draft, 'b');
-  assert.equal(draft.getItem('tmux_address'), 'ws://typed:1');
-  assert.equal(draft.getItem('tmux_token'), 'tokTyped');
+  assert.deepEqual(mirrorOf(draft), [null, null, null]);
 
   // CURRENT itself is not removable, so its mirror is never at stake.
-  const current = base();
-  current.setItem('tmux_address', 'ws://a:1');
+  const current = withMirror(tupleServers(), 'ws://a:1', 'tokA', '/tmp/sockA');
   assert.equal(removeServer(current, 'a').length, 2);
-  assert.equal(current.getItem('tmux_address'), 'ws://a:1');
+  assert.deepEqual(mirrorOf(current), ['ws://a:1', 'tokA', '/tmp/sockA']);
+});
+
+test('two machines at one shared URL: the mirror is matched by token and socket, not by the address both have', () => {
+  const shared = () => mem({
+    [SERVERS_KEY]: JSON.stringify([
+      entry('a', 'ws://tunnel:1', 'tokA', 'ma', '/tmp/sockA'),
+      entry('b', 'ws://tunnel:1', 'tokB', 'mb', '/tmp/sockB'),
+    ]),
+    [CURRENT_KEY]: 'a',
+  });
+  // B\u2019s credentials at the shared URL (the failed attempt at B): deleted with B,
+  // although CURRENT has the same URL.
+  const attemptAtB = withMirror(shared(), 'ws://tunnel:1', 'tokB', '/tmp/sockB');
+  removeServer(attemptAtB, 'b');
+  assert.deepEqual(mirrorOf(attemptAtB), [null, null, null]);
+  assert.ok(![...attemptAtB.m.values()].some((v) => v.includes('tokB') || v.includes('sockB')), 'nothing of B is stored any more');
+  // A\u2019s credentials at the same URL are A\u2019s, and stay.
+  const ownAtShared = withMirror(shared(), 'ws://tunnel:1', 'tokA', '/tmp/sockA');
+  removeServer(ownAtShared, 'b');
+  assert.deepEqual(mirrorOf(ownAtShared), ['ws://tunnel:1', 'tokA', '/tmp/sockA']);
+  // One server\u2019s token with the other\u2019s socket is nobody\u2019s tuple.
+  const mixed = withMirror(shared(), 'ws://tunnel:1', 'tokB', '/tmp/sockA');
+  removeServer(mixed, 'b');
+  assert.deepEqual(mirrorOf(mixed), [null, null, null]);
+});
+
+test('dropping a failover address clears a mirror that named it', () => {
+  const viaAlternate = withMirror(tupleServers(), 'ws://a-lan:1', 'tokA', '/tmp/sockA');
+  saveMachineAddresses(viaAlternate, 'ma', ['ws://a:1']);
+  assert.deepEqual(mirrorOf(viaAlternate), [null, null, null], 'the address left the set, so did the pre-fill');
+  const viaActive = withMirror(tupleServers(), 'ws://a:1', 'tokA', '/tmp/sockA');
+  saveMachineAddresses(viaActive, 'ma', ['ws://a:1']);
+  assert.deepEqual(mirrorOf(viaActive), ['ws://a:1', 'tokA', '/tmp/sockA'], 'the active address is still held');
+});
+
+test('upgrade: a mirror that names a server already deleted on the old build is cleared with the history', () => {
+  // The old production path left this behind: B attempted, deleted in Settings,
+  // its address, token and socket still in the mirror and in the history.
+  const s = withMirror(tupleServers(), 'ws://b:1', 'tokB', '/tmp/sockB');
+  s.setItem(SERVERS_KEY, JSON.stringify([entry('a', 'ws://a:1', 'tokA', 'ma', '/tmp/sockA')]));
+  s.setItem(HISTORY_KEY, JSON.stringify([{ address: 'ws://b:1', token: 'tokB' }]));
+  migrateServers(s);
+  assert.deepEqual(mirrorOf(s), [null, null, null]);
+  assert.equal(s.getItem(HISTORY_KEY), null);
+  assert.ok(![...s.m.values()].some((v) => v.includes('tokB') || v.includes('sockB')), 'no stored value holds B\u2019s token or socket');
+  // And CURRENT\u2019s own mirror survives the same boot.
+  const own = withMirror(tupleServers(), 'ws://a:1', 'tokA', '/tmp/sockA');
+  migrateServers(own);
+  assert.deepEqual(mirrorOf(own), ['ws://a:1', 'tokA', '/tmp/sockA']);
+});
+
+test('currentConnection is CURRENT\u2019s saved tuple, whatever the mirror says', () => {
+  const s = withMirror(tupleServers(), 'ws://b:1', 'tokB', '/tmp/sockB');
+  assert.deepEqual(currentConnection(s), { address: 'ws://a:1', token: 'tokA', socket: '/tmp/sockA' });
+  assert.deepEqual(currentConnection(mem({ [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', '')]), [CURRENT_KEY]: 'a' })), { address: 'ws://a:1', token: '', socket: '' });
+  assert.equal(currentConnection(mem({ [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', '')]), [CURRENT_KEY]: 'gone' })), null, 'a dangling CURRENT offers nothing');
+  assert.equal(currentConnection(mem()), null);
 });

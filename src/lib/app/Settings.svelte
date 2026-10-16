@@ -3,7 +3,7 @@
   import { defaultConnectionAddress, dropAutofilled, hostedByGateway, localAutofill, normalizeAddress as normalizeAddressFor, type Autofilled, type LocalConfig } from '../core/connection-address.ts';
   import { isAndroid, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { localServerLine, localServer } from './server-mode.svelte.ts';
-  import { activateConnected } from './servers.ts';
+  import { activateConnected, currentConnection } from './servers.ts';
   import Icon from '../ui/Icon.svelte';
   import ConnectFields from './ConnectFields.svelte';
   import { copyText } from '../core/clipboard.ts';
@@ -77,11 +77,15 @@
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
-  // desktop autofill compares against them to tell a person's edit.
+  // desktop autofill compares against them to tell a person's edit. They are
+  // CURRENT's saved tuple (board #400): the registry is authoritative, so the
+  // form never opens on a connection that is not saved, and a draft lives
+  // only while the form is open.
+  const saved = currentConnection(localStorage);
   const opened = {
-    address: localStorage.getItem('tmux_address') || defaultConnectionAddress(location, import.meta.env.DEV, hostedByGateway(document)),
-    token: localStorage.getItem('tmux_token') || '',
-    socket: localStorage.getItem('tmux_socket') || '',
+    address: saved?.address || defaultConnectionAddress(location, import.meta.env.DEV, hostedByGateway(document)),
+    token: saved?.token ?? '',
+    socket: saved?.socket ?? '',
   };
   let address = $state(opened.address);
   let token = $state(opened.token);
@@ -105,12 +109,12 @@
   // #323). The address is the same `local_url` the gateway probe dials. A
   // migrated old host/port above counts as the person's choice, so it stays.
   if (!isAndroid && isTauriDesktop) {
-    const saved = { address: localStorage.getItem('tmux_address'), token: localStorage.getItem('tmux_token'), socket: localStorage.getItem('tmux_socket') };
+    const savedTuple = { address: saved?.address ?? null, token: saved?.token || null, socket: saved?.socket || null };
     tauriReady
       .then(() => window.__TAURI__?.core.invoke('get_local_config'))
       .then((cfg: LocalConfig | undefined) => {
         if (!cfg) return;
-        const fill = localAutofill(saved, opened, { address, token, socket }, cfg);
+        const fill = localAutofill(savedTuple, opened, { address, token, socket }, cfg);
         if (fill.address !== undefined) address = fill.address;
         if (fill.token !== undefined) token = fill.token;
         if (fill.socket !== undefined) socket = fill.socket;

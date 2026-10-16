@@ -9254,8 +9254,7 @@ test('#400: a server deleted in Settings is gone from the login page — its add
     token: doc.querySelector<HTMLInputElement>('.card .fields input[type="password"], .card .fields .token-wrap input')!.value,
   });
   gear!.click(); await first.settle();
-  assert.notEqual(fields().address, 'ws://b:9899', 'the form does not pre-fill the deleted address');
-  assert.equal(fields().token, '', 'or its token');
+  assert.deepEqual(fields(), { address: 'ws://a:9899', token: 'tokA' }, 'the form opens on alpha\u2019s saved tuple, not on the deleted beta\u2019s');
   assert.deepEqual(await suggestions(), ['ws://a:9899', 'ws://a-tailnet:9899'], 'and does not offer it');
 
   // A reload keeps it gone.
@@ -9265,9 +9264,52 @@ test('#400: a server deleted in Settings is gone from the login page — its add
   for (let i = 0; i < 4; i++) await second.settle();
   const doc2 = second.app.document;
   assert.ok(doc2.querySelector('.card .fields'), 'the login page is what a reload of a disconnected client shows');
-  assert.notEqual(doc2.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value, 'ws://b:9899');
+  assert.equal(doc2.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value, 'ws://a:9899');
   doc2.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
   await second.settle();
   assert.deepEqual([...doc2.querySelectorAll('.card .hist-item')].map((b) => b.textContent), ['ws://a:9899', 'ws://a-tailnet:9899']);
   assert.equal(second.app.window.localStorage.getItem('tmux_address_history'), null);
+});
+
+test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mirror and the history is gone after the upgrade boot, the login page opens on the one saved server, and a reload keeps it', async (context) => {
+  // The registry holds alpha only. Beta was attempted, deleted in Settings on
+  // the old build (which never touched the mirror), and its address, token and
+  // socket are still in the mirror and in the history.
+  const seed = {
+    tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true }]),
+    tmux_server_current: 'a',
+    tmux_machine_id: 'm-a',
+    tmux_state: legacyNav('work:1.0'),
+    tmux_layout_mode: 'desktop',
+    tmux_address: 'ws://b:9899', tmux_token: 'tokB', tmux_socket: '/tmp/sockB',
+    tmux_address_history: JSON.stringify([{ address: 'ws://b:9899', token: 'tokB' }, { address: 'ws://a:9899', token: 'tokA' }]),
+  };
+  const first = await bootApp(context, seed, undefined, sandbox);
+  for (let i = 0; i < 4; i++) await first.settle();
+  const ls = first.app.window.localStorage;
+  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_address_history']) assert.equal(ls.getItem(key), null, `${key}: the upgrade boot cleared what no saved server holds`);
+  assert.doesNotMatch(JSON.stringify(dumpStorage(first.app)), /tokB|sockB|ws:\/\/b:9899/u, 'nothing of beta is stored');
+
+  const doc = first.app.document;
+  await toConnection(first);
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await first.settle();
+  const fieldsOf = (d: Document) => ({
+    address: d.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value,
+    token: d.querySelector<HTMLInputElement>('.card .fields .token-wrap input')!.value,
+  });
+  assert.deepEqual(fieldsOf(doc), { address: 'ws://a:9899', token: 'tokA' }, 'the form opens on the registry tuple');
+  assert.ok(doc.querySelector('.card .hist-btn'), 'and the list opens although there is only one saved address');
+  doc.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+  await first.settle();
+  assert.deepEqual([...doc.querySelectorAll('.card .hist-item')].map((b) => b.textContent), ['ws://a:9899']);
+
+  const after = dumpStorage(first.app);
+  await first.app.close();
+  const second = await bootApp(context, after, undefined, sandbox);
+  for (let i = 0; i < 4; i++) await second.settle();
+  assert.ok(second.app.document.querySelector('.card .fields'), 'the login page is what a reload of a disconnected client shows');
+  assert.deepEqual(fieldsOf(second.app.document), { address: 'ws://a:9899', token: 'tokA' });
+  assert.ok(second.app.document.querySelector('.card .hist-btn'), 'the single-row list survives the reload');
+  assert.doesNotMatch(JSON.stringify(dumpStorage(second.app)), /tokB|sockB|ws:\/\/b:9899/u);
 });

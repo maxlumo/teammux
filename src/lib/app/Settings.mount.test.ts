@@ -22,9 +22,11 @@ async function mount(context: TestContext, copy: (link: string) => boolean | Pro
     modules: [{ copyText: copy }],
     setup(window) {
       window.localStorage.setItem('tmux_locale', 'en');
-      window.localStorage.setItem('tmux_address', 'wss://fixture.test/ws');
-      window.localStorage.setItem('tmux_token', 'fake-token&=+');
-      window.localStorage.setItem('tmux_socket', '/tmp/fake socket');
+      // The form opens on CURRENT's saved tuple (#400).
+      window.localStorage.setItem('tmux_servers', JSON.stringify([
+        { id: 'a', name: 'fixture', address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' },
+      ]));
+      window.localStorage.setItem('tmux_server_current', 'a');
       const set = window.setTimeout, clear = window.clearTimeout;
       window.setTimeout = ((run, delay, ...args) => {
         const handle = set(run, delay, ...args);

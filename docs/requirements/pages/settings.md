@@ -137,7 +137,7 @@ where Agents is a page of its own, reads as one plain list):
 - Disconnect button
 
 ## Interactions
-- Enter address + token → connect
+- Enter address + token → connect. The form opens on the CURRENT server's saved address, token and socket (the server registry is authoritative; an unfinished attempt is not remembered across a reload).
 - Open the address list and tap a saved server's address → its address and token fill the form (the list is the server registry, CURRENT's server first; it has no × — a server is forgotten in Settings › Connection)
 - Switch language → immediate UI text update, persisted to localStorage
 - Switch theme → immediate CSS variable transition

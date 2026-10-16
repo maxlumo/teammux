@@ -95,7 +95,7 @@ const alpha = (storage: Storage) => {
 test('an attempt dials its own candidate, records identity, closes it, and only then tells the app', async (context) => {
   const app = await mount(context, async () => 'm-a', alpha);
   await connectTo(app, 'wss://same.test/ws');
-  assert.deepEqual(app.order, ['candidate', 'connect:wss://same.test/ws|', 'close', 'connected:false'],
+  assert.deepEqual(app.order, ['candidate', 'connect:wss://same.test/ws|tok', 'close', 'connected:false'],
     'the server s own connection dials after this, so the candidate is closed before App is told');
   assert.match(app.window.localStorage.getItem('tmux_servers') ?? '', /m-a/u, 'and the machine was recorded first');
 });
@@ -139,7 +139,8 @@ test('a peer that authenticated but could not be identified is not a success', a
   // connected, the candidate is closed, and the form says why.
   const app = await mount(context, async () => 'm-b', () => {}, [{
     activateConnected: () => { throw new Error('storage full'); },
-    rememberedAddresses: () => [],      // the form's suggestions read the same module
+    rememberedAddresses: () => [],      // the form's suggestions and pre-fill read the same module
+    currentConnection: () => null,
   }], withIdentity);
   await connectTo(app, 'wss://stranger.test/ws');
   assert.deepEqual(app.order, ['candidate', 'connect:wss://stranger.test/ws|', 'close'],
@@ -155,7 +156,7 @@ test('an attempt the APP has moved on from writes nothing and brings nothing up 
   let release: ((machine: string) => void) | null = null;
   const app = await mount(context, () => new Promise((resolve) => { release = resolve; }), alpha);
   await connectTo(app, 'wss://same.test/ws');
-  assert.deepEqual(app.order, ['candidate', 'connect:wss://same.test/ws|'], 'the dial is in flight');
+  assert.deepEqual(app.order, ['candidate', 'connect:wss://same.test/ws|tok'], 'the dial is in flight');
   app.pool.stale();                                       // the app moved on
   const registryBefore = app.window.localStorage.getItem('tmux_servers');
   release!('m-a');
@@ -189,6 +190,7 @@ test('the credentials an attempt uses are the ones it started with', async (cont
       return { reload: false };
     },
     rememberedAddresses: () => [],
+    currentConnection: () => null,
   }], withIdentity);
   const field = (selector: string, value: string) => {
     const input = app.document.querySelector<HTMLInputElement>(selector)!;

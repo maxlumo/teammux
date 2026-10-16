@@ -190,7 +190,9 @@ export function migrateServers(storage: Store): ServerEntry[] {
   // never connected. Either way it is not a remembered connection.
   if (storage.getItem(SERVERS_KEY) != null) {
     retireHistory(storage);
-    return repairServers(storage);
+    const repaired = repairServers(storage);
+    reconcileMirror(storage);
+    return repaired;
   }
   const servers: ServerEntry[] = [];
   // machineId → its addresses (the failover map is the identity authority).
@@ -242,6 +244,7 @@ export function migrateServers(storage: Store): ServerEntry[] {
   } catch { /* malformed history — the current entry alone is the migration */ }
   saveServers(storage, servers.slice(0, MAX_SERVERS));
   retireHistory(storage);
+  reconcileMirror(storage);
   return loadServers(storage);
 }
 
@@ -315,6 +318,7 @@ export function saveMachineAddresses(storage: Store, machineId: string, addresse
   if (clean.length) machines[machineId] = clean;
   else delete machines[machineId];
   storage.setItem('tmux_machines', JSON.stringify(machines));
+  reconcileMirror(storage);       // an address dropped from the set may have been the mirror's
   return clean;
 }
 
@@ -834,30 +838,49 @@ export function renameServer(storage: Store, id: string, name: string): ServerEn
 
 /** Remove an entry and its per-server state. The CURRENT entry is not
  *  removable — the switcher offers removal only on the others, and refusing
- *  here keeps a stale UI honest.
- *
- *  The mirror keys (`tmux_address`/`tmux_token`/`tmux_socket`) are the
- *  connection the connect form pre-fills, and they must not outlive the
- *  server they name (board #400, orchestrator's condition): the connect form
- *  writes them BEFORE it dials, so after an attempt at a saved server that did
- *  not finish they name that server while CURRENT names another. Removing
- *  that server clears them in the same step. They are left alone when they
- *  are CURRENT's own, even if an address is shared. */
+ *  here keeps a stale UI honest. The mirror keys are reconciled in the same
+ *  step (`reconcileMirror`), so no credential of the removed server stays. */
 export function removeServer(storage: Store, id: string): ServerEntry[] {
   if (id === currentServerId(storage)) return loadServers(storage);
-  const all = loadServers(storage);
-  const gone = all.find((s) => s.id === id);
-  const servers = all.filter((s) => s.id !== id);
+  const servers = loadServers(storage).filter((s) => s.id !== id);
   saveServers(storage, servers);
-  if (gone) dropMirrorOf(storage, gone, servers);
+  reconcileMirror(storage);
   for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
   return servers;
 }
 
-function dropMirrorOf(storage: Store, gone: ServerEntry, remaining: ServerEntry[]): void {
-  const mirrored = storage.getItem('tmux_address') || '';
-  if (!mirrored || !addressesOf(storage, gone).includes(mirrored)) return;
-  const current = remaining.find((s) => s.id === currentServerId(storage));
-  if (current && addressesOf(storage, current).includes(mirrored)) return;
-  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) storage.removeItem(key);
+const MIRROR_KEYS = ['tmux_address', 'tmux_token', 'tmux_socket'] as const;
+
+/**
+ * The mirror keys are a projection of the registry, never a connection of
+ * their own (board #400, orchestrator's ruling on the review): they are kept
+ * only while the WHOLE tuple — address, token and socket — is one the registry
+ * holds, an entry's active address or one of its failover addresses with that
+ * entry's token and socket. Anything else is cleared: a server deleted on an
+ * older build, a server deleted just now, an address dropped from a failover
+ * set, a token or socket that belongs to another server at a shared URL, an
+ * attempt the connect form wrote before it dialled and never finished. An
+ * address is reachability, not credential ownership, so it is never matched
+ * alone. Runs wherever the registry can lose a tuple (`removeServer`,
+ * `saveMachineAddresses`) and at every boot (`migrateServers`); idempotent.
+ * What the connect form pre-fills is `currentConnection`, not these keys.
+ */
+export function reconcileMirror(storage: Store): void {
+  const address = storage.getItem('tmux_address') || '';
+  const token = storage.getItem('tmux_token') || '';
+  const socket = storage.getItem('tmux_socket') || '';
+  if (!address && !token && !socket) return;
+  const held = address !== '' && loadServers(storage).some((s) =>
+    s.token === token && (s.socket ?? '') === socket && addressesOf(storage, s).includes(address));
+  if (!held) for (const key of MIRROR_KEYS) storage.removeItem(key);
+}
+
+/** The connection the connect form opens with: CURRENT's saved entry, as one
+ * tuple, or null when there is none. The registry is authoritative (board
+ * #400): the form pre-fills nothing it cannot find here, and a draft lives
+ * only for the open form. */
+export function currentConnection(storage: Reader): { address: string; token: string; socket: string } | null {
+  const id = currentServerId(storage);
+  const entry = id ? loadServers(storage).find((s) => s.id === id) : undefined;
+  return entry ? { address: entry.address, token: entry.token, socket: entry.socket ?? '' } : null;
 }

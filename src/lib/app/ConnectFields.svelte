@@ -47,7 +47,7 @@
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
       <input type="text" bind:value={address} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
-      {#if remembered.length > 1}
+      {#if remembered.length}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
           onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>
       {/if}
