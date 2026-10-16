@@ -50,3 +50,30 @@ test('an IME-composing Escape leaves a half-typed address alone', async context 
     assert.ok(app.document.querySelector('.dlg'), 'still open');
   } finally { await app.close(); }
 });
+
+test('a pick fills the saved server\u2019s whole tuple, its socket included, and submit hands it on (#400 review P1-D)', async context => {
+  const submitted: unknown[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { oncancel: () => {}, onsubmit: (c: unknown) => { submitted.push(c); } },
+    setup(window) {
+      window.localStorage.setItem('tmux_servers', JSON.stringify([
+        { id: 'a', name: 'alpha', address: 'ws://a.test:9899', token: 'tokA', socket: '/tmp/sockA' },
+        { id: 'b', name: 'beta', address: 'ws://b.test:9899', token: 'tokB', socket: '/tmp/sockB' },
+      ]));
+      window.localStorage.setItem('tmux_server_current', 'a');
+    },
+    modules: [],
+  });
+  try {
+    for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.hist-btn')!.click();
+    await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.hist-item')].find((b) => b.textContent === 'ws://b.test:9899')!.click();
+    await app.flush();
+    const socket = app.document.querySelector<HTMLInputElement>('input[placeholder="/tmp/tmux-1000/default"]')!;
+    assert.equal(socket.value, '/tmp/sockB');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await app.flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'ws://b.test:9899', token: 'tokB', socket: '/tmp/sockB' }]);
+  } finally { await app.close(); }
+});

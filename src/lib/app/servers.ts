@@ -274,24 +274,29 @@ function addressesOf(storage: Reader, entry: ServerEntry): string[] {
   return all.filter((a, i) => typeof a === 'string' && a && all.indexOf(a) === i);
 }
 
+/** One suggestion: an address with the WHOLE tuple of the server it belongs
+ * to. A pick applies all three (review of #400: a socket left over from the
+ * previous server would be set on the picked one). */
+export interface Suggestion { address: string; token: string; socket: string }
+
 /**
  * What the connect form offers to dial (board #400): the saved servers'
- * addresses, each with its server's token, and nothing else — the registry
+ * addresses, each with its server's token and socket, and nothing else — the registry
  * is the only list of remembered connections. CURRENT's first, then the
  * registry's order; one row per address (an address two machines share —
  * a tunnel — is offered once, as the first of them has it). An attempt that
  * never connected is not here: only a connect that succeeded is recorded.
  */
-export function rememberedAddresses(storage: Reader): { address: string; token: string }[] {
+export function rememberedAddresses(storage: Reader): Suggestion[] {
   const servers = loadServers(storage);
   const current = currentServerId(storage);
   const seen = new Set<string>();
-  const rows: { address: string; token: string }[] = [];
+  const rows: Suggestion[] = [];
   for (const entry of [...servers.filter((s) => s.id === current), ...servers.filter((s) => s.id !== current)]) {
     for (const address of addressesOf(storage, entry)) {
       if (seen.has(address)) continue;
       seen.add(address);
-      rows.push({ address, token: entry.token });
+      rows.push({ address, token: entry.token, socket: entry.socket ?? '' });
     }
   }
   return rows;

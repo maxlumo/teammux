@@ -22,9 +22,12 @@ test('sharing a connection reports only a current successful copy; failure uses 
   assert.match(share, /const attempt = linkFeedback\.begin\(\);/u);
   assert.match(share, /const context = linkContext;/u);
   assert.match(share, /linkFeedback\.current\(attempt\) && context === linkContext/u);
-  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) {
-    assert.ok(share.split(`localStorage.getItem('${key}')`).length >= 3, `${key} is captured and rechecked`);
-  }
+  // The tuple is the focused saved connection's, from the registry (#400 review
+  // P2-E): never the mirror keys, which are a projection that may be cleared.
+  assert.doesNotMatch(share, /localStorage\.getItem\('tmux_(?:address|token|socket)'\)/u, 'the credentials never come from the mirror keys');
+  assert.match(share, /const conn = currentConnection\(localStorage\);/u, 'the whole tuple is taken from the registry');
+  assert.match(share, /const now = currentConnection\(localStorage\);[\s\S]*?currentServerId\(localStorage\) === id && now\?\.address === addr && now\.token === token && now\.socket === socket/u,
+    'and the same identity and tuple are rechecked after the clipboard completes');
   assert.match(share, /const copied = await copyText\(link\);\s*if \(!current\(\)\) return;\s*if \(!copied\) throw new Error\(t\('copyFailed'\)\);/u);
   assert.match(share, /linkFeedback\.update\(attempt, \{ kind: 'success', message: t\('linkCopied'\) \}\);/u);
   assert.doesNotMatch(share, /setTimeout|linkCopied = true|console\./u);

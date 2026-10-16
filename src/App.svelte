@@ -54,7 +54,7 @@
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
-  import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
+  import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentConnection, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -3005,20 +3005,24 @@
   async function shareConnectionLink() {
     const attempt = linkFeedback.begin();
     const context = linkContext;
-    const addr = localStorage.getItem('tmux_address') || activeAddress;
-    if (!addr) return;
-    const token = localStorage.getItem('tmux_token') || '';
-    const socket = localStorage.getItem('tmux_socket') || '';
+    // The focused saved connection as ONE tuple from the registry (board #400
+    // review): the mirror keys are a projection that may be cleared while this
+    // server is connected, and they are never the source of a credential.
+    const id = currentServerId(localStorage);
+    const conn = currentConnection(localStorage);
+    if (!conn?.address) return;
+    const { address: addr, token, socket } = conn;
     const params = new URLSearchParams();
     params.set('addr', addr);
     if (token) params.set('token', token);
     if (socket) params.set('socket', socket);
     const link = `${location.origin}${location.pathname}?${params.toString()}`;
-    // Storage is not reactive; recheck the captured credentials as well as the page/server.
-    const current = () => linkFeedback.current(attempt) && context === linkContext
-      && addr === (localStorage.getItem('tmux_address') || activeAddress)
-      && token === (localStorage.getItem('tmux_token') || '')
-      && socket === (localStorage.getItem('tmux_socket') || '');
+    // Storage is not reactive; recheck the captured tuple as well as the page/server.
+    const current = () => {
+      const now = currentConnection(localStorage);
+      return linkFeedback.current(attempt) && context === linkContext
+        && currentServerId(localStorage) === id && now?.address === addr && now.token === token && now.socket === socket;
+    };
     const copied = await copyText(link);
     if (!current()) return;
     if (!copied) throw new Error(t('copyFailed'));

@@ -187,3 +187,28 @@ test('one saved server with one address still has its suggestion list, and a pic
   assert.equal(app.value(ADDR), 'ws://only.example:9899');
   assert.equal(app.value(TOKEN), 'ONLY');
 });
+
+test('picking the local gateway when its saved entry has a socket applies that socket, not the auto-filled one (#400 review P1-D)', async context => {
+  const app = await mount(context, saved(
+    { address: 'ws://remote.example:9899', token: 'REMOTE-TOKEN', socket: '/remote/sock' },
+    { address: LOCAL.url, token: 'SAVED-LOCAL-TOKEN', socket: '/saved/local/sock' },
+  ));
+  await app.answer();
+  assert.equal(app.value(SOCKET), LOCAL.tmux_socket, 'the desktop autofill put the config socket in');
+  await app.pick(LOCAL.url);
+  assert.equal(app.value(TOKEN), 'SAVED-LOCAL-TOKEN');
+  assert.equal(app.value(SOCKET), '/saved/local/sock', 'the saved entry\u2019s own socket wins');
+  await app.pick('ws://remote.example:9899');
+  assert.equal(app.value(SOCKET), '/remote/sock', 'and a remote pick takes the remote\u2019s, never the previous one\u2019s');
+});
+
+test('a socket the person typed does not survive picking a saved server that has none; only the untouched auto-filled local one does (#400 review P1-D)', async context => {
+  const app = await mount(context, saved(
+    { address: 'ws://remote.example:9899', token: 'REMOTE-TOKEN' },
+    { address: LOCAL.url, token: 'OLD-LOCAL-TOKEN' },
+  ));
+  await app.answer();
+  await app.edit(SOCKET, '/typed/sock');
+  await app.pick(LOCAL.url);
+  assert.equal(app.value(SOCKET), '', 'the entry has no socket, and the typed one belongs to nobody saved');
+});

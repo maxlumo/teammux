@@ -9276,7 +9276,7 @@ test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mir
   // the old build (which never touched the mirror), and its address, token and
   // socket are still in the mirror and in the history.
   const seed = {
-    tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true }]),
+    tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', socket: '/tmp/sockA', machineId: 'm-a', named: true }]),
     tmux_server_current: 'a',
     tmux_machine_id: 'm-a',
     tmux_state: legacyNav('work:1.0'),
@@ -9284,7 +9284,11 @@ test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mir
     tmux_address: 'ws://b:9899', tmux_token: 'tokB', tmux_socket: '/tmp/sockB',
     tmux_address_history: JSON.stringify([{ address: 'ws://b:9899', token: 'tokB' }, { address: 'ws://a:9899', token: 'tokA' }]),
   };
-  const first = await bootApp(context, seed, undefined, sandbox);
+  const copied: string[] = [];
+  const first = await bootApp(context, seed, undefined, { setup(window: any) {
+    sandbox.setup(window);
+    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+  } });
   for (let i = 0; i < 4; i++) await first.settle();
   const ls = first.app.window.localStorage;
   for (const key of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_address_history']) assert.equal(ls.getItem(key), null, `${key}: the upgrade boot cleared what no saved server holds`);
@@ -9292,6 +9296,14 @@ test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mir
 
   const doc = first.app.document;
   await toConnection(first);
+  // Copy while connected, straight after the cleanup: the mirror is empty, so
+  // the link's credentials can only come from alpha's registry tuple (P2-E).
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^share connection link$/iu.test((b.textContent ?? '').trim()))!.click();
+  await first.settle();
+  assert.equal(copied.length, 1, 'the copy command ran');
+  const link = new URL(copied[0]!).searchParams;
+  assert.deepEqual([link.get('addr'), link.get('token'), link.get('socket')], ['ws://a:9899', 'tokA', '/tmp/sockA'], 'the whole tuple of the connected server');
+  assert.doesNotMatch(copied[0]!, /tokB|sockB|b:9899/u, 'and nothing of the deleted one');
   [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
   await first.settle();
   const fieldsOf = (d: Document) => ({

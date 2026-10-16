@@ -3,7 +3,7 @@
   import { defaultConnectionAddress, dropAutofilled, hostedByGateway, localAutofill, normalizeAddress as normalizeAddressFor, type Autofilled, type LocalConfig } from '../core/connection-address.ts';
   import { isAndroid, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { localServerLine, localServer } from './server-mode.svelte.ts';
-  import { activateConnected, currentConnection } from './servers.ts';
+  import { activateConnected, currentConnection, type Suggestion } from './servers.ts';
   import Icon from '../ui/Icon.svelte';
   import ConnectFields from './ConnectFields.svelte';
   import { copyText } from '../core/clipboard.ts';
@@ -134,16 +134,21 @@
   // Local credentials the autofill put in, and the local address they are
   // for: they never follow the address to another server.
   let autofilled = $state<Autofilled | null>(null);
-  /** A suggestion pick: drop the still-untouched auto values that would not
-   * belong to the picked target (the socket included — a pick carries none)
-   * and forget their record, then the server's address and token apply.
-   * Picking the local gateway keeps its socket, still tracked. */
-  function pickHistory(next: string) {
-    const { clear, keep } = dropAutofilled(autofilled, { address: next, token, socket });
-    if (clear.socket !== undefined) socket = clear.socket;
-    // Still the local gateway: the socket stays auto-filled (so it leaves if
-    // the address later moves away); the entry's token is the person's.
-    autofilled = keep ? { ...keep, token: undefined } : null;
+  /** A suggestion pick applies the saved server's WHOLE tuple — ConnectFields
+   * sets address, token and socket from it, so no value of the previous
+   * server rides along (review of #400: A's socket would have been set on B).
+   * Before that, the auto-filled local values that do not belong to the
+   * picked target are forgotten. The one thing that survives is the local
+   * gateway's own auto-filled socket, when the picked entry is that gateway
+   * and has no socket of its own: it stays, still tracked, so it leaves if
+   * the address later moves away. */
+  function pickHistory(pick: Suggestion): { socket: string } | void {
+    const { keep } = dropAutofilled(autofilled, { address: pick.address, token, socket });
+    const keepsSocket = !pick.socket && keep?.socket !== undefined && socket === keep.socket;
+    // The entry's token, and a socket it carries, are the registry's — no
+    // longer auto-filled.
+    autofilled = keep ? { ...keep, token: undefined, ...(keepsSocket ? {} : { socket: undefined }) } : null;
+    if (keepsSocket) return { socket };
   }
   $effect(() => {
     const { clear, keep } = dropAutofilled(autofilled, { address, token, socket });

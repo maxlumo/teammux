@@ -37,7 +37,7 @@ function candidates(order: string[], dial: Dial, machine = 'm-a') {
       order.push('candidate');
       return {
         connect: (url: string, token: string) => { order.push(`connect:${url}|${token}`); return dial(url, token); },
-        setSocket: async () => {},
+        setSocket: async (sock: string) => { order.push(`socket:${sock}`); },
         machineId: () => machine,
         current: () => !closed && mine === generation,
         close: () => { if (!closed) { closed = true; order.push('close'); } },
@@ -355,4 +355,56 @@ test('every action on the card renders inside the page\'s own scroller (#381)', 
   assert.deepEqual(outside(), [], 'connecting: no action outside the scroller');
   release!('m-a');
   for (let i = 0; i < 8; i++) await app.flush();
+});
+
+// ─── #400 review P1-D: a pick applies the saved server's WHOLE tuple ──────
+
+const SOCKET_INPUT = 'input[placeholder="/tmp/tmux-1000/default"]';
+const twoSaved = (socketB?: string) => (storage: Storage) => {
+  storage.setItem('tmux_servers', JSON.stringify([
+    { id: 'a', name: 'alpha', address: 'wss://a.test/ws', token: 'tokA', socket: '/tmp/sockA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'wss://b.test/ws', token: 'tokB', ...(socketB ? { socket: socketB } : {}), machineId: 'm-b', named: true },
+  ]));
+  storage.setItem('tmux_server_current', 'a');
+};
+
+async function pickThenConnect(app: Awaited<ReturnType<typeof mount>>, address: string) {
+  const value = (selector: string) => app.document.querySelector<HTMLInputElement>(selector)!.value;
+  const fields = () => ({ address: value('input[type="text"]'), token: value('.token-wrap input'), socket: value(SOCKET_INPUT) });
+  const opened = fields();
+  app.document.querySelector<HTMLButtonElement>('.hist-btn')!.click();
+  await app.flush();
+  [...app.document.querySelectorAll<HTMLButtonElement>('.hist-item')].find((b) => b.textContent === address)!.click();
+  await app.flush();
+  const picked = fields();
+  [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 8; i++) await app.flush();
+  return { opened, picked };
+}
+
+test('picking a saved server applies its address, token AND socket, and the connect sets that socket and records that tuple', async (context) => {
+  const app = await mount(context, async () => 'm-b', twoSaved('/tmp/sockB'));
+  app.pool.open = ((open) => () => ({ ...open(), machineId: () => 'm-b' }))(app.pool.open.bind(app.pool));
+  const { opened, picked } = await pickThenConnect(app, 'wss://b.test/ws');
+  assert.deepEqual(opened, { address: 'wss://a.test/ws', token: 'tokA', socket: '/tmp/sockA' }, 'the form opened on alpha\u2019s tuple');
+  assert.deepEqual(picked, { address: 'wss://b.test/ws', token: 'tokB', socket: '/tmp/sockB' }, 'and beta\u2019s pick replaced all three, not two');
+  assert.deepEqual(app.order.filter((o) => o.startsWith('connect:') || o.startsWith('socket:')),
+    ['connect:wss://b.test/ws|tokB', 'socket:/tmp/sockB'], 'the socket set on beta is beta\u2019s, never alpha\u2019s');
+  const ls = app.window.localStorage;
+  const beta = JSON.parse(ls.getItem('tmux_servers')!).find((e: { id: string }) => e.id === 'b');
+  assert.equal(beta.socket, '/tmp/sockB', 'the recorded tuple is beta\u2019s own');
+  assert.equal(ls.getItem('tmux_socket'), '/tmp/sockB');
+});
+
+test('picking a saved server that has no socket clears the previous server\u2019s socket: nothing is set on it and none is recorded', async (context) => {
+  const app = await mount(context, async () => 'm-b', twoSaved());
+  app.pool.open = ((open) => () => ({ ...open(), machineId: () => 'm-b' }))(app.pool.open.bind(app.pool));
+  const { opened, picked } = await pickThenConnect(app, 'wss://b.test/ws');
+  assert.equal(opened.socket, '/tmp/sockA');
+  assert.deepEqual(picked, { address: 'wss://b.test/ws', token: 'tokB', socket: '' }, 'alpha\u2019s socket did not follow the pick');
+  assert.deepEqual(app.order.filter((o) => o.startsWith('connect:') || o.startsWith('socket:')), ['connect:wss://b.test/ws|tokB'], 'no setSocket on beta');
+  const ls = app.window.localStorage;
+  const beta = JSON.parse(ls.getItem('tmux_servers')!).find((e: { id: string }) => e.id === 'b');
+  assert.equal('socket' in beta, false, 'beta\u2019s recorded tuple has no socket');
+  assert.equal(ls.getItem('tmux_socket'), null);
 });

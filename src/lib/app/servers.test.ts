@@ -762,11 +762,11 @@ for (const fails of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_disconne
 const entry = (id: string, address: string, token: string, machineId?: string, socket?: string) =>
   ({ id, name: id, address, token, ...(machineId ? { machineId } : {}), ...(socket ? { socket } : {}) });
 
-test('rememberedAddresses: CURRENT first, each server\u2019s address then its failover set, the server\u2019s token on every row, one row per address', () => {
+test('rememberedAddresses: CURRENT first, each server\u2019s address then its failover set, the server\u2019s token and socket on every row, one row per address', () => {
   const s = mem({
     [SERVERS_KEY]: JSON.stringify([
       entry('b', 'ws://b:1', 'tokB', 'mb'),
-      entry('a', 'ws://a:1', 'tokA', 'ma'),
+      entry('a', 'ws://a:1', 'tokA', 'ma', '/tmp/sockA'),
       entry('c', 'ws://c:1', 'tokC'),
       entry('t', 'ws://a:1', 'tokT', 'mt'),            // a tunnel two machines share
     ]),
@@ -774,11 +774,11 @@ test('rememberedAddresses: CURRENT first, each server\u2019s address then its fa
     tmux_machines: JSON.stringify({ ma: ['ws://a:1', 'wss://a.tail.ts.net/ws'], mb: ['ws://b-lan:1', 'ws://b:1'], mt: 'junk' }),
   });
   assert.deepEqual(rememberedAddresses(s), [
-    { address: 'ws://a:1', token: 'tokA' },
-    { address: 'wss://a.tail.ts.net/ws', token: 'tokA' },
-    { address: 'ws://b:1', token: 'tokB' },
-    { address: 'ws://b-lan:1', token: 'tokB' },
-    { address: 'ws://c:1', token: 'tokC' },
+    { address: 'ws://a:1', token: 'tokA', socket: '/tmp/sockA' },
+    { address: 'wss://a.tail.ts.net/ws', token: 'tokA', socket: '/tmp/sockA' },
+    { address: 'ws://b:1', token: 'tokB', socket: '' },
+    { address: 'ws://b-lan:1', token: 'tokB', socket: '' },
+    { address: 'ws://c:1', token: 'tokC', socket: '' },
   ]);
   assert.deepEqual(rememberedAddresses(mem()), [], 'no registry, nothing remembered');
 });
@@ -791,7 +791,7 @@ test('rememberedAddresses is the registry and nothing else: a history row, an or
     tmux_machines: JSON.stringify({ ma: ['ws://a:1'], gone: ['ws://old-lan:1'] }),
     tmux_address: 'ws://typed:1', tmux_token: 'tokTyped',
   });
-  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA' }]);
+  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA', socket: '' }]);
 });
 
 test('deleting a server, or one of its addresses, removes it from the suggestions, token included', () => {
@@ -804,7 +804,7 @@ test('deleting a server, or one of its addresses, removes it from the suggestion
   saveMachineAddresses(s, 'ma', ['ws://a:1']);                       // the Connection page\u2019s alternate ×
   assert.deepEqual(rememberedAddresses(s).map((r) => r.address), ['ws://a:1', 'ws://b:1', 'ws://b-lan:1']);
   removeServer(s, 'b');                                              // the server\u2019s ×
-  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA' }]);
+  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA', socket: '' }]);
   assert.ok(![...s.m.values()].some((v) => v.includes('tokB')), 'no stored value still holds the deleted server\u2019s token');
 });
 

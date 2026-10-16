@@ -8,7 +8,7 @@
   // `hist-` class names are from the list's earlier life.)
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { rememberedAddresses } from './servers.ts';
+  import { rememberedAddresses, type Suggestion } from './servers.ts';
 
   let {
     address = $bindable(''), token = $bindable(''), socket = $bindable(''),
@@ -18,9 +18,13 @@
     onenter = () => {},
   }: {
     address?: string; token?: string; socket?: string;
-    /** A suggestion is about to be applied (its address is passed):
-     * the parent clears what must not follow it, BEFORE the fields change. */
-    onpick?: (address: string) => void;
+    /** A suggestion is about to be applied (the whole saved tuple is passed):
+     * the parent clears what must not follow it, BEFORE the fields change.
+     * The tuple's three values then replace the fields' — a socket included, so
+     * the previous server's never rides along. The parent may return the one
+     * thing that survives: `{ socket }`, the local gateway's own auto-filled
+     * socket when the saved entry has none. */
+    onpick?: (pick: Suggestion) => { socket: string } | void;
     autofocus?: boolean; onenter?: () => void;
   } = $props();
 
@@ -32,6 +36,14 @@
   function toggleList() {
     if (!showHistory) remembered = rememberedAddresses(localStorage);
     showHistory = !showHistory;
+  }
+
+  function pick(row: Suggestion) {
+    const keep = onpick?.(row);
+    address = row.address;
+    token = row.token;
+    socket = keep?.socket ?? row.socket;
+    showHistory = false;
   }
 
   function focusIf(el: HTMLInputElement) { if (autofocus) el.focus(); }
@@ -56,7 +68,7 @@
       <div class="hist-list appear-rise">
         {#each remembered as h (h.address)}
           <div class="hist-row">
-            <button class="hist-item" onclick={() => { onpick?.(h.address); address = h.address; token = h.token; showHistory = false; }}>{h.address}</button>
+            <button class="hist-item" onclick={() => pick(h)}>{h.address}</button>
           </div>
         {/each}
       </div>
