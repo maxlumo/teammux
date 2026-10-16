@@ -120,6 +120,57 @@ as such, and is why the lock's own contract is now tested as state
 restoration, not as a prevented kill. `CARGO_TARGET_DIR` and worktrees are
 fine.
 
+## A hand-built rig names its tmux server on every destructive command (board #406)
+
+Incident #3, 2026-10-16 17:38:32: every tmux session on the host died again.
+The cargo path above was not involved. The cause was a validator's
+hand-written shell rig (a throwaway gateway with its own HOME and tmux for
+#404), whose `init.sh` ran, in this order:
+
+```sh
+source env.sh        # exports TMUX_TMPDIR=/tmp/val404r5/tmuxdir, which does not exist yet
+tmux kill-server     # bare, no -S
+mkdir -p $M/tmuxdir  # the directory is created only here
+```
+
+Measured on tmux 3.6a (this host), with `TMUX` unset: when `TMUX_TMPDIR`
+names a directory that does not exist, tmux does NOT fail. It falls back to
+the real default server: `tmux ls` lists the owner's sessions and exits 0,
+and `display -p '#{socket_path}'` prints `/tmp/tmux-<uid>/default`. When the
+directory exists but holds no server, `tmux ls` fails with
+`error connecting to <dir>/tmux-<uid>/default` and exits 1. So `TMUX_TMPDIR`
+isolates nothing until its directory exists, and the bare kill went to the
+owner's server. `scripts/test-rust.mjs` is safe because it `mkdtemp`s the
+directory before anything runs. An ad-hoc rig has no wrapper and no Rust
+gate, so these rules apply to every tmux command outside cargo, in scripts
+too:
+
+- **A destructive tmux command names its server.** `kill-server`,
+  `kill-session` and any sweep run as `tmux -S <absolute private socket> …`.
+  A bare `tmux kill-server` is forbidden everywhere. A rig defines its socket
+  once (for example `TSOCK=$M/tmuxdir/tmux-$(id -u)/default`), refuses to
+  continue if `TSOCK` is not under the rig's own directory, and sends every
+  tmux call through it.
+- **Create `TMUX_TMPDIR` before exporting it.** Run `mkdir -p` on the
+  directory in the same line that exports the variable, before any tmux
+  command, and stop if the `mkdir` fails. A teardown works in this order:
+  stop the rig's server through its socket and confirm it is gone, and only
+  then remove the socket and the other files. Keep the directory itself while
+  a later step can still run tmux. A kill that was only attempted, or a
+  socket path that disappeared, does not mean the server is gone; deleting
+  the socket of a live server leaves it running and unreachable.
+- **A teardown kills what the rig owns, by its own identity.** Kill the tmux
+  server by its socket path, and the rig's other processes by pid after
+  checking that the process environment carries the rig's `HOME`. Never kill
+  whatever tmux resolves on its own. A leftover server whose socket file was
+  unlinked cannot be reached with `-S`. Kill it by pid only after `ss -xlpn`
+  shows that the pid listens on the rig's socket path.
+
+The 17:37 teardown of the previous rig, whose directory existed, was scoped
+correctly. Cleanup after the incident (2026-10-16) killed the leftover rig
+servers this way: three by `-S`, and four `tmm-test-own-a-*` servers from
+10-12 by pid, since their socket files were already gone.
+
 ## Multi-server work ends in the Docker environment (board #352)
 
 Owner, 2026-10-12: "像你测试整体效果的时候，比如模拟多个连接，可以用 docker 做环境隔离来最终测试".
