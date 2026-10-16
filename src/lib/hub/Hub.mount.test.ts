@@ -1084,6 +1084,91 @@ test('Enter accepts a completion only when it changes the text; a finished item 
   } finally { await app.close(); }
 });
 
+// Review P1-A on 1b9af621: whether a command opens an argument level is its
+// DECLARATION, not whether its values are cached. grok's /model takes only
+// fetched model ids, so a cold composer has no list to show for `/model `.
+test('a typed command that declares arguments opens them before its values load; the fetch does not wait for a list (#398 review P1-A)', { timeout: 60000 }, async (context) => {
+  const commands: string[] = [];
+  const asks: string[] = [];
+  let answer: (models: string[]) => void = () => {};
+  let fail: () => void = () => {};
+  const app = await composerFixture(context, {
+    hubAgents: async () => ({ agents: [
+      { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle' },
+      { name: 'gro', window: 1, managed: true, agent: 'grok', state: 'idle' },
+    ] }),
+    modelsList: (backend: string) => { asks.push(backend); return new Promise((resolve, reject) => {
+      answer = (models) => resolve({ models });
+      fail = () => reject(new Error('down'));
+    }); },
+    hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    await app.to('gro');
+    assert.equal(selectedCard(app.document), 'gro');
+    asks.length = 0;
+    // Pasted whole, the cache cold, the fetch held.
+    await app.text('/model');
+    assert.deepEqual(options(), ['/model'], 'the typed command stays listed');
+    assert.ok(asks.includes('grok'), 'and the models are asked for');
+    assert.equal(await app.key('Enter'), true, 'Enter takes the argument level');
+    assert.equal(app.input.value, '/model ');
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(commands, [], 'nothing was sent before the models loaded');
+    assert.equal(app.document.querySelector('.cmd-menu'), null, 'no list yet: there is nothing to show');
+    // A failed answer: still nothing sent; the next keystroke asks again.
+    fail();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(commands, []);
+    const before = asks.length;
+    await app.text('/model g');
+    assert.ok(asks.length > before, 'a failed fetch is asked for again by the next keystroke');
+    // The models arrive: the argument list opens and completes.
+    answer(['grok-5', 'grok-5-fast']);
+    await app.wait(() => options().includes('grok-5'));
+    assert.deepEqual(options(), ['grok-5', 'grok-5-fast']);
+    assert.equal(await app.key('Enter'), true, 'a partial is completed');
+    assert.equal(app.input.value, '/model grok-5');
+    assert.equal(await app.key('Enter'), true);
+    for (let i = 0; i < 8 && !commands.length; i++) await app.flush();
+    assert.deepEqual(commands, ['gro:/model grok-5'], 'and the finished argument sends');
+  } finally { await app.close(); }
+});
+
+// Review P2-B on 1b9af621: two names (or two values) that differ only in case
+// are two different things, so the same spelling leads another case of it.
+test('the same spelling leads another case of it: a typed @bob or argument is sent, never rewritten (#398 review P2-B)', { timeout: 60000 }, async (context) => {
+  const posts: string[] = [], commands: string[] = [];
+  const app = await composerFixture(context, {
+    modelsList: async () => ({ models: ['Test-Model', 'test-model'] }),
+    hubAgents: async () => ({ agents: [
+      { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle' },
+      { name: 'Bob', window: 1, managed: true, agent: 'codex', state: 'idle' },
+      { name: 'bob', window: 2, managed: true, agent: 'codex', state: 'idle' },
+    ] }),
+    hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
+    hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    await app.text('ask @');
+    assert.deepEqual(options().slice(0, 3), ['@alice', '@Bob', '@bob'], 'Bob is listed before bob');
+    await app.text('ask @bob');
+    assert.deepEqual(options(), ['@bob', '@Bob'], 'the typed spelling leads');
+    assert.equal(await app.key('Enter'), true);
+    for (let i = 0; i < 8 && !posts.length; i++) await app.flush();
+    assert.deepEqual(posts, ['@alice ask @bob'], 'Enter sends @bob, never @Bob');
+    await app.text('/model ');
+    await app.wait(() => options().includes('test-model'));
+    await app.text('/model test-model');
+    assert.deepEqual(options(), ['test-model', 'Test-Model'], 'slash arguments too');
+    assert.equal(await app.key('Enter'), true);
+    for (let i = 0; i < 8 && !commands.length; i++) await app.flush();
+    assert.deepEqual(commands, ['alice:/model test-model']);
+  } finally { await app.close(); }
+});
+
 test('on the phone a finished item\'s Enter is what Enter is with no list; Tab and a partial\'s Enter still complete (#398)', { timeout: 60000 }, async (context) => {
   const commands: string[] = [];
   const app = await composerFixture(context, {

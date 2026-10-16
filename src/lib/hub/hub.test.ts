@@ -1960,14 +1960,16 @@ test('rosterMarker: a lit team down to one live member marks that member\'s card
 });
 
 test('one rule for every palette: Enter accepts only a change, and a list whose one item changes nothing is closed (#398)', async () => {
-  const { acceptChanges, acceptedText, offeredPalette, issuePalette } = await import('./hub.ts');
+  const { acceptChanges, acceptedText, offeredPalette, issuePalette, wantsFetchedArgs, GROK_COMMANDS } = await import('./hub.ts');
   // Owner: "按 tab 补全了一个，这时这个命令后边还没有空格，按回车就发不上去".
   const models = ['claude-opus-5.5', 'claude-opus-5', 'test-model'];
   const names = [{ value: 'bob', hint: 'codex' }, { value: 'bobby', hint: 'kiro' }, { value: 'all', hint: 'Everyone' }];
   const issues = [{ id: 33, ref: 'old', open: false }, { id: 336, ref: 'new', open: true }];
-  const paletteFor = (text: string) => commandPalette(text, models, 'kiro') ?? mentionPalette(text, names) ?? issuePalette(text, issues);
-  const top = (text: string) => { const p = paletteFor(text)!; return acceptChanges(p, text, p.items[0]!, paletteFor); };
-  const shown = (text: string) => offeredPalette(paletteFor(text), text, paletteFor)?.items.map((i) => i.value) ?? null;
+  const paletteFor = (text: string, values = models, backend = 'kiro') =>
+    commandPalette(text, values, backend) ?? mentionPalette(text, names) ?? issuePalette(text, issues);
+  const top = (text: string) => { const p = paletteFor(text)!; return acceptChanges(p, text, p.items[0]!); };
+  const shown = (text: string, values = models, backend = 'kiro') =>
+    offeredPalette(paletteFor(text, values, backend), text)?.items.map((i) => i.value) ?? null;
 
   // A final argument already typed: accepting rewrites the same text.
   assert.deepEqual(paletteFor('/model claude-opus-5.5')?.items.map((i) => i.value), ['claude-opus-5.5'], 'the source still offers it');
@@ -1979,20 +1981,48 @@ test('one rule for every palette: Enter accepts only a change, and a list whose 
   assert.deepEqual(commandPalette('/model claude-opus', models)?.items.map((i) => i.value), ['claude-opus-5.5', 'claude-opus-5'],
     'without an exact match the table order stands');
   assert.deepEqual(commandPalette('/model Claude-Opus-5', models)?.items.map((i) => i.value)[0], 'claude-opus-5',
-    'exact in any case: it still outranks the longer id listed first');
+    'equal but for case: with no same spelling it still outranks the longer id listed first');
   assert.equal(top('/model Claude-Opus-5'), true, 'and accepting it fixes the case, a change');
   assert.deepEqual(mentionPalette('@bob', [{ value: 'bobby', hint: '' }, { value: 'bob', hint: '' }])?.items.map((i) => i.value),
     ['@bob', '@bobby'], 'mentions too');
+  // The same spelling leads another case of it (review P2-B): two names, or
+  // two values, that differ only in case are two different things.
+  const twins = [{ value: 'Bob', hint: '' }, { value: 'bob', hint: '' }, { value: 'bobby', hint: '' }];
+  assert.deepEqual(mentionPalette('ask @bob', twins)?.items.map((i) => i.value), ['@bob', '@Bob', '@bobby']);
+  const twinPalette = mentionPalette('ask @bob', twins)!;
+  assert.equal(acceptChanges(twinPalette, 'ask @bob', twinPalette.items[0]!), false, 'so Enter sends @bob, never @Bob');
+  assert.deepEqual(mentionPalette('ask @Bob', twins)?.items.map((i) => i.value)[0], '@Bob');
+  assert.deepEqual(commandPalette('/model test-model', ['Test-Model', 'test-model'])?.items.map((i) => i.value), ['test-model', 'Test-Model'],
+    'slash arguments too');
   // A longer completion, or another case, is a change: Enter accepts.
   assert.equal(top('/model claude-op'), true);
   assert.equal(top('/model Test-model'), true, 'a different case is a change');
-  // A command that takes arguments: accepting adds the space AND opens its list.
-  assert.equal(acceptedText(paletteFor('/model')!, '/model', { value: '/model', hint: '' }), '/model ');
-  assert.equal(acceptChanges(paletteFor('/model')!, '/model', { value: '/model', hint: '' }, paletteFor), true,
+  // A command whose declaration takes arguments: accepting adds the space and
+  // opens its list, so it is a change, whether or not its values are loaded.
+  const typedModel = paletteFor('/model')!;
+  assert.equal(typedModel.items[0]?.opens, true, 'kiro /model declares arguments');
+  assert.equal(acceptedText(typedModel, '/model', typedModel.items[0]!), '/model ');
+  assert.equal(acceptChanges(typedModel, '/model', typedModel.items[0]!), true,
     'Enter on a typed /model opens its argument list, as today (orchestrator ruling)');
   assert.ok(shown('/model'), 'its list stays');
+  // Review P1-A: grok's /model takes ONLY fetched values. Cold (none loaded
+  // yet), it still opens, its list stays, and the composer still fetches.
+  assert.deepEqual(GROK_COMMANDS.find((c) => c.name === 'model'), { name: 'model', desc: GROK_COMMANDS.find((c) => c.name === 'model')!.desc, dynamic: 'models' },
+    'the case under test: no fixed arguments to mask it');
+  const cold = commandPalette('/model', [], 'grok')!;
+  assert.equal(acceptChanges(cold, '/model', cold.items[0]!), true, 'a cold grok /model is a change');
+  assert.deepEqual(shown('/model', [], 'grok'), ['/model'], 'and its list stays open');
+  assert.equal(commandPalette('/model ', [], 'grok'), null, 'its argument list is empty until the models arrive');
+  assert.equal(wantsFetchedArgs('/model ', 'grok'), true, 'so the fetch reads the declaration, not a list on screen');
+  assert.equal(wantsFetchedArgs('/model', 'grok'), true);
+  assert.equal(wantsFetchedArgs('@alice /model ', 'grok'), true, 'an addressed command line too');
+  assert.equal(wantsFetchedArgs('/model', 'codex'), false, 'codex declares no fetched values (its /model is a picker)');
+  assert.equal(wantsFetchedArgs('ask @bob', 'kiro'), false, 'not a command line');
+  assert.equal(wantsFetchedArgs('/model', 'mixed'), false, 'no table, no fetch');
   // A command with no arguments: only the separating space would be added.
-  assert.equal(acceptChanges(paletteFor('/compact')!, '/compact', { value: '/compact', hint: '' }, paletteFor), false);
+  const compact = paletteFor('/compact')!;
+  assert.equal(compact.items[0]?.opens, undefined);
+  assert.equal(acceptChanges(compact, '/compact', compact.items[0]!), false);
   // Mentions and issues: only the separating space.
   assert.equal(top('ask @bob'), false, '@bob is typed, @bobby still offered');
   assert.deepEqual(shown('ask @bob'), ['@bob', '@bobby']);
@@ -2001,7 +2031,7 @@ test('one rule for every palette: Enter accepts only a change, and a list whose 
   assert.equal(shown('ask @all'), null, 'a finished name that is the only candidate closes the list (was mentionPalette\'s own check)');
   assert.equal(top('see #33'), false, '#33 is typed, #336 still offered');
   assert.equal(shown('see #336'), null, 'a finished reference closes the list (was issuePalette\'s own check)');
-  assert.equal(offeredPalette(null, '', paletteFor), null);
+  assert.equal(offeredPalette(null, ''), null);
 });
 
 test('mentionPalette: @ at a word start offers the room\'s addressable names (#242)', () => {

@@ -1032,7 +1032,16 @@ export function offeredCommands(backend?: string | null): readonly SlashCmd[] {
   }
 }
 
-export interface PaletteItem { value: string; hint: string }
+export interface PaletteItem {
+  value: string;
+  hint: string;
+  /** Accepting this item opens a list of its own: a command whose
+   * DECLARATION takes arguments (fixed `args`, or `dynamic` values that are
+   * fetched). Read from the table, never from what is cached (board #398
+   * review P1-A: a grok `/model` before its models loaded read as "no next
+   * level", closed its list, blocked the fetch and was sent bare). */
+  opens?: true;
+}
 export interface Palette {
   /** 'command' completes `/mo` → `/model`; 'arg' completes what follows it;
    * 'mention' completes `@bo` → `@bob`; 'issue' completes `#33` → `#336`. */
@@ -1041,14 +1050,13 @@ export interface Palette {
   /** Replace `text.slice(from)` with the chosen value. */
   from: number;
   /** True when the accepted value takes a separating space (a command, a
-   * mention, an issue). Whether that opens a next level (a command's
-   * argument list) is read from the accepted text, see `acceptChanges`. */
+   * mention, an issue). */
   more: boolean;
 }
 
 /** The text accepting `item` leaves: the token replaced, plus the separating
  * space when the palette asks for one. The composer's accept writes exactly
- * this, and `acceptChanges` reads it. */
+ * this. */
 export function acceptedText(palette: Palette, text: string, item: PaletteItem): string {
   return `${text.slice(0, palette.from)}${item.value}${palette.more ? ' ' : ''}`;
 }
@@ -1059,28 +1067,23 @@ export function acceptedText(palette: Palette, text: string, item: PaletteItem):
  * Enter accepted it, the text came out identical and nothing was sent. The
  * orchestrator's rule: Enter accepts only a change, otherwise it sends as if
  * the list were closed. A change is a different token (a longer completion,
- * another case), or an accepted text that opens a list of its own (a typed
- * `/model` gains its space and its argument list). An item already typed
- * whose acceptance adds only the separating space (a no-argument command, a
- * mention, an issue) or nothing at all (a final argument) changes nothing.
- * `paletteFor` is the composer's own reading of a text, so the next level is
- * whatever the composer would offer.
+ * another case), or an item that opens a list of its own (`opens`: a typed
+ * `/model` gains its space and its argument list, whether or not the list is
+ * loaded yet). An item already typed whose acceptance adds only the
+ * separating space (a no-argument command, a mention, an issue) or nothing
+ * at all (a final argument) changes nothing.
  */
-export function acceptChanges(palette: Palette, text: string, item: PaletteItem,
-  paletteFor: (text: string) => Palette | null): boolean {
-  if (text.slice(palette.from) !== item.value) return true;
-  const next = acceptedText(palette, text, item);
-  return next !== text && !!paletteFor(next);
+export function acceptChanges(palette: Palette, text: string, item: PaletteItem): boolean {
+  return text.slice(palette.from) !== item.value || !!item.opens;
 }
 
 /** The list worth showing (board #398): none when its only item would
  * change nothing, so a finished `@bob`, `#340`, `/compact` or final argument
  * closes it and Enter sends. One rule for every source, which replaced the
  * mention and issue sources' own "the query is the one candidate" checks. */
-export function offeredPalette(palette: Palette | null, text: string,
-  paletteFor: (text: string) => Palette | null): Palette | null {
+export function offeredPalette(palette: Palette | null, text: string): Palette | null {
   if (!palette) return null;
-  return palette.items.length === 1 && !acceptChanges(palette, text, palette.items[0]!, paletteFor) ? null : palette;
+  return palette.items.length === 1 && !acceptChanges(palette, text, palette.items[0]!) ? null : palette;
 }
 
 /**
@@ -1109,18 +1112,40 @@ export function fuzzyRank(query: string, candidate: string): number {
 /** Filter + order by fuzzyRank, keeping the table's own order within a tier
  * (sort is stable): the table order is the CLI's own, and it is what makes the
  * list predictable when several candidates tie. A candidate that IS the
- * query (any case) comes before every other, the way the `#` list puts an
- * exact number first (board #398): with `claude-opus-5.5` listed before
- * `claude-opus-5`, a typed `claude-opus-5` was a prefix of both, the longer
- * one led, and Enter replaced what was typed with it. */
+ * query comes before every other, the way the `#` list puts an exact number
+ * first (board #398): with `claude-opus-5.5` listed before `claude-opus-5`, a
+ * typed `claude-opus-5` was a prefix of both, the longer one led, and Enter
+ * replaced what was typed with it. The same spelling leads a different case
+ * of it (review P2-B: `Bob` and `bob` are two names, and delivery tells them
+ * apart, so a typed `@bob` must not become `@Bob` because it was listed
+ * first); with no same spelling, an equal-but-for-case one still leads. */
 function fuzzyPick<T>(query: string, all: readonly T[], key: (t: T) => string): T[] {
-  const exact = (query ?? '').toLowerCase();
+  const lower = (query ?? '').toLowerCase();
+  const rank = (k: string, tier: number) => (!query ? tier : k === query ? -2 : k.toLowerCase() === lower ? -1 : tier);
   return all
     .map((t) => ({ t, r: fuzzyRank(query, key(t)) }))
     .filter((x) => x.r >= 0)
-    .map((x) => (exact && key(x.t).toLowerCase() === exact ? { ...x, r: -1 } : x))
+    .map((x) => ({ ...x, r: rank(key(x.t), x.r) }))
     .sort((a, b) => a.r - b.r)
     .map((x) => x.t);
+}
+
+/** The slash-command line the command palette reads: after an optional
+ * leading `@name `, a line that starts with `/`. `at` is where it starts. */
+function commandLine(text: string): { at: number; line: string } | null {
+  const at = /^(\s*@[\w][\w.-]*\s+)?/u.exec(text ?? '')?.[0]?.length ?? 0;
+  const line = (text ?? '').slice(at);
+  return line.startsWith('/') ? { at, line } : null;
+}
+
+/** Whether the composer should fetch `backend`'s values (the model ids) for
+ * `text`: it is a slash-command line, and the backend's table DECLARES a
+ * command whose values are fetched. Read from the text and the table only,
+ * never from the list on screen (board #398 review P1-A): the argument list
+ * of a typed `/model ` needs the models, so a fetch that waited for a list
+ * to show could wait forever. */
+export function wantsFetchedArgs(text: string, backend?: string | null): boolean {
+  return !!commandLine(text) && offeredCommands(backend).some((c) => c.dynamic === 'models');
 }
 
 /**
@@ -1136,9 +1161,9 @@ function fuzzyPick<T>(query: string, all: readonly T[], key: (t: T) => string): 
 export function commandPalette(text: string, models: readonly string[] = [], backend?: string | null): Palette | null {
   const table = offeredCommands(backend);
   if (!table.length) return null;
-  const at = /^(\s*@[\w][\w.-]*\s+)?/u.exec(text ?? '')?.[0]?.length ?? 0;
-  const line = (text ?? '').slice(at);
-  if (!line.startsWith('/')) return null;
+  const found = commandLine(text);
+  if (!found) return null;
+  const { at, line } = found;
   const parts = line.split(/(\s+)/u);          // keeps the separators
   const head = parts[0]!.slice(1);              // the command, without the slash
   // Still typing the command itself: `/`, `/mo`, `/mdl` with no space yet.
@@ -1146,6 +1171,7 @@ export function commandPalette(text: string, models: readonly string[] = [], bac
     const items = fuzzyPick(head, table, (c) => c.name).map((c) => ({
       value: `/${c.name}`,
       hint: c.desc,
+      ...(c.args?.length || c.dynamic ? { opens: true as const } : {}),
     }));
     return items.length ? { stage: 'command', items, from: at, more: true } : null;
   }

@@ -1139,13 +1139,25 @@ does with no list (it sends on a desktop; on the phone it is the newline,
 and Send is tapped). Tab always completes, Escape always closes, a tap
 always accepts. `acceptChanges` (`hub.ts`, pure) is the ONE reading, for
 every source: the selected token differs from what is typed (a longer
-completion, another case) is a change; so is a token already typed whose
-accepted text opens a list of its own, which is how a typed `/model` still
-gains its space and its argument list on Enter. A token already typed whose
-acceptance adds only the separating space (`/compact`, `@bob`, `#340`) or
-nothing at all (a final argument) is not. "Opens a list" asks the
-composer's own `paletteFor`, the same reading the live list comes from, so
-the rule cannot drift from what the composer would show.
+completion, another case) is a change; so is an item that opens a list of
+its own, which is how a typed `/model` still gains its space and its
+argument list on Enter. A token already typed whose acceptance adds only
+the separating space (`/compact`, `@bob`, `#340`) or nothing at all (a final
+argument) is not.
+
+**"Opens a list" is the command's DECLARATION** (review P1-A on 1b9af621,
+orchestrator): `commandPalette` marks a command item `opens` when its table
+row declares arguments (fixed `args`, or `dynamic` values that are
+fetched), never by asking whether a list for the accepted text would show
+now. The first version asked exactly that, and grok's `/model` (fetched
+model ids only, no fixed arguments) failed cold: before the models arrived
+there was no list for `/model `, so the typed `/model` read as "changes
+nothing", its list closed, Enter sent a bare `/model`, and the fetch, which
+waited for a list to show, never started. The fetch now reads the
+declaration too (`wantsFetchedArgs`: a slash-command line of a backend whose
+table declares fetched values, and no cache yet), so it does not depend on
+a list that needs it. A failed fetch is asked again by the next keystroke,
+as before.
 
 **A list whose one item changes nothing is closed** (`offeredPalette`, the
 same rule): a finished `/model claude-opus-5.5`, `/compact`, `@bob` or
@@ -1155,15 +1167,27 @@ mechanism for one job). A list with more items stays (a typed `@bob` with
 `@bobby` offered), and Enter on the typed one sends.
 
 **An exact match ranks first** (`fuzzyPick`, orchestrator, #398): a
-candidate that IS the query, in any case, leads its list, before the
-prefix tier, the way the `#` list already put an exact number first. With
-`claude-opus-5.5` listed before `claude-opus-5`, a typed `claude-opus-5` was
-a prefix of both and the longer one led, so Enter replaced what was typed.
-Without an exact match the tiers and the table order are unchanged.
+candidate that IS the query leads its list, before the prefix tier, the way
+the `#` list already put an exact number first. With `claude-opus-5.5`
+listed before `claude-opus-5`, a typed `claude-opus-5` was a prefix of both
+and the longer one led, so Enter replaced what was typed. The same spelling
+leads another case of it, which leads the tiers (review P2-B: `Bob` and
+`bob` are two valid names and delivery tells them apart, so a typed `@bob`
+must not become `@Bob` because it was listed first; with no same spelling,
+`Claude-Opus-5` still finds `claude-opus-5` first, and accepting it is a
+change). Without an exact match the tiers and the table order are
+unchanged.
 
 Pinned by `hub.test.ts` "one rule for every palette" (each stage's change
 and no-change case, a different case is a change, exact-first in commands
-and mentions) and two `Hub.mount.test.ts` cases (#398): on the desktop a
+and mentions, the same spelling before another case, a cold grok `/model`
+and `wantsFetchedArgs`) and four `Hub.mount.test.ts` cases (#398). A cold
+grok `/model` with the fetch held: the list stays, the fetch is asked, Enter
+takes the argument level and sends nothing; a failed fetch sends nothing
+and the next keystroke asks again; once the models arrive the argument list
+completes and the finished argument sends. With `Bob` listed before `bob`,
+a typed `@bob` sends `@bob`, and a typed `test-model` with `Test-Model`
+listed first sends `test-model`. On the desktop a
 partial argument is completed and not sent; the completed argument, then
 Enter, sends it; Tab then Enter sends for a slash argument, a slash command
 and a mention; a typed `/model` opens its argument list; an IME
@@ -1171,6 +1195,7 @@ composition's Enter neither sends nor accepts; ArrowDown to the longer item
 makes Enter accept it. On the phone (a hardware keyboard sends the same
 events): Tab and a partial's Enter complete, a finished item's Enter is the
 newline and does not rewrite it, and Send sends.
+
 ### The `/` palette is transcribed, not invented
 
 `KIRO_COMMANDS` (`hub.ts`) carries kiro-cli's own names/descriptions/sub-commands copied from its TUI table — a made-up command looks authoritative in the list and then does nothing in the pane — minus cloud-only/hidden entries, with `/quit` last.
