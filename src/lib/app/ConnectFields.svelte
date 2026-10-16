@@ -6,10 +6,11 @@
   // (board #400) — there is no list of its own to forget from: a server is
   // forgotten in Settings › Connection, and then it is gone from here. (The
   // `hist-` class names are from the list's earlier life.)
+  import { untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { rememberedAddresses, type Suggestion } from './servers.ts';
-  import { parseConnectionLink } from '../core/connection-link.ts';
+  import { isBulkInsert, parseConnectionLink } from '../core/connection-link.ts';
 
   let {
     address = $bindable(''), token = $bindable(''), socket = $bindable(''),
@@ -45,26 +46,64 @@
     token = row.token;
     socket = keep?.socket ?? row.socket;
     showHistory = false;
+    linkError = '';
   }
 
-  /** The address field. A pasted connection LINK (lib/core/connection-link.ts,
-   * the new form or the old front-end one) is the connection itself: it is
-   * split at once into address, token and socket, exactly as a pick of a saved
-   * server applies its tuple, and the field keeps only the address — the token
-   * never stays in plain view. Anything else is just the typed address. */
+  let field = $state<HTMLInputElement>();
+  /** The address as it stood when the person started editing it: what a link
+   * that cannot be used (and was typed, not pasted) is replaced with. */
+  let settled = untrack(() => address);
+  /** Why the last link was refused. Credential-free by construction: it names
+   * the problem, never the text. */
+  let linkError = $state('');
+
+  /** A text that is a connection LINK (lib/core/connection-link.ts, the new
+   * form or the old front-end one) is the connection itself: it is split at
+   * once into address, token and socket, exactly as a pick of a saved server
+   * applies its tuple, and the field keeps only the address — the token never
+   * stays in plain view. A recognised link that cannot be used (it names no
+   * server, or its credentials are ambiguous) is never left in the field: the
+   * field goes back to `fallback`, the other fields stay as they are, and
+   * `linkError` says why. Anything else is just an address. Returns false for
+   * "not a link", so the caller keeps the text. */
+  function absorb(input: HTMLInputElement, fallback: string): boolean {
+    const parsed = parseConnectionLink(input.value);
+    if (parsed.kind === 'none') return false;
+    if (parsed.kind === 'link') {
+      pick({ address: parsed.link.address, token: parsed.link.token ?? '', socket: parsed.link.socket ?? '' });
+      input.value = address;        // `address` may not have changed, and the DOM still holds the link
+    } else {
+      address = fallback;
+      input.value = fallback;
+      linkError = t(parsed.reason === 'no-address' ? 'linkNoAddress' : 'linkAmbiguous');
+    }
+    return true;
+  }
+
+  /** The address field. Typing stays plain editable text; a link is split
+   * only where a whole text arrives at once (a paste, a drop, a keyboard
+   * committing a clipboard suggestion) or the field is committed. */
   function typed(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
-    const link = parseConnectionLink(input.value);
-    if (!link?.address) { address = input.value; return; }
-    pick({ address: link.address, token: link.token ?? '', socket: link.socket ?? '' });
-    input.value = address;          // `address` may not have changed, and the DOM still holds the link
+    linkError = '';
+    if (isBulkInsert(e as InputEvent) && absorb(input, address)) return;
+    address = input.value;
+  }
+
+  /** The field is committed (blur, or Enter): a link typed out in full is split
+   * now. False when it was a link that could not be used. */
+  function commit(): boolean {
+    if (!field) return true;
+    if (absorb(field, settled)) return !linkError;
+    settled = address;
+    return true;
   }
 
   function focusIf(el: HTMLInputElement) { if (autofocus) el.focus(); }
   function enter(e: KeyboardEvent) {
     if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    onenter();
+    if (commit()) onenter();
   }
 </script>
 
@@ -72,12 +111,13 @@
   <label>
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
-      <input type="text" value={address} oninput={typed} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
+      <input type="text" bind:this={field} value={address} oninput={typed} onchange={commit} onfocus={() => { settled = address; }} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
       {#if remembered.length}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
           onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>
       {/if}
     </div>
+    {#if linkError}<div class="config-error appear" role="alert">{linkError}</div>{/if}
     {#if showHistory && remembered.length}
       <div class="hist-list appear-rise">
         {#each remembered as h (h.address)}

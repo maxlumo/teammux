@@ -320,6 +320,9 @@
     const attempt = shareLifetime.begin();
     const context = shareContext;
     const link = buildShareUrl();
+    // An endpoint whose own query holds token or socket cannot carry the
+    // credentials unambiguously: say so (the text is not echoed) and copy nothing.
+    if (!link) { shareLifetime.update(attempt, { kind: 'error', message: t('linkNotBuildable') }); return; }
     const copied = await copyText(link);
     if (!shareLifetime.current(attempt) || context !== shareContext) return;
     shareLifetime.update(attempt, copied

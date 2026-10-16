@@ -408,3 +408,30 @@ test('picking a saved server that has no socket clears the previous server\u2019
   assert.equal('socket' in beta, false, 'beta\u2019s recorded tuple has no socket');
   assert.equal(ls.getItem('tmux_socket'), null);
 });
+
+// ─── #401 review P1-B: a built link with nothing to carry still replaces the tuple ──
+
+for (const [what, link, dial, sockets] of [
+  ['both empty', 'wss://b.test/ws?token=&socket=', 'connect:wss://b.test/ws|', []],
+  ['an empty token', 'wss://b.test/ws?token=&socket=%2Ftmp%2Fonly', 'connect:wss://b.test/ws|', ['socket:/tmp/only']],
+  ['an empty socket', 'wss://b.test/ws?token=ONLY-TOKEN&socket=', 'connect:wss://b.test/ws|ONLY-TOKEN', []],
+] as const) {
+  test(`a pasted link with ${what} dials with exactly its tuple, never the form's previous server's token or socket`, async (context) => {
+    const app = await mount(context, async () => 'm-b', twoSaved('/tmp/sockB'));
+    app.pool.open = ((open) => () => ({ ...open(), machineId: () => 'm-b' }))(app.pool.open.bind(app.pool));
+    const address = app.document.querySelector<HTMLInputElement>('input[type="text"]')!;
+    assert.equal(app.document.querySelector<HTMLInputElement>('.token-wrap input')!.value, 'tokA', 'the form held alpha\u2019s tuple');
+    address.value = link;
+    const event = new app.window.Event('input', { bubbles: true });
+    Object.defineProperty(event, 'inputType', { value: 'insertFromPaste' });
+    address.dispatchEvent(event);
+    await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.deepEqual(app.order.filter((o) => o.startsWith('connect:') || o.startsWith('socket:')), [dial, ...sockets],
+      'the dial and the socket set carry the link\u2019s tuple only');
+    const beta = JSON.parse(app.window.localStorage.getItem('tmux_servers')!).find((e: { address: string }) => e.address === 'wss://b.test/ws');
+    assert.equal(beta.token, dial.split('|')[1], 'and that is what was recorded');
+    assert.equal(beta.socket, sockets[0]?.slice('socket:'.length), 'with its own socket or none');
+  });
+}

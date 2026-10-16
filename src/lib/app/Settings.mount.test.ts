@@ -58,7 +58,7 @@ test('Settings copy failure stays visible and directly retryable; only success e
     // as parameters, nothing of the front end that served this page.
     assert.ok(link.startsWith('wss://fixture.test/ws?'), 'the link starts at the gateway address');
     assert.doesNotMatch(link, /mount\.test|addr=/u, 'and carries no front end');
-    assert.deepEqual(parseConnectionLink(link), { address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' });
+    assert.deepEqual(parseConnectionLink(link), { kind: 'link', link: { address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' } });
     return ++calls > 1;
   });
   try {
@@ -170,4 +170,20 @@ test('a Settings copy resolving after unmount cannot publish or schedule feedbac
     for (let i = 0; i < 8; i++) await Promise.resolve();
     assert.equal(app.scheduled(), 0, 'a departed connect page has no feedback lifetime');
   } finally { pending.resolve(false); await app.close(); }
+});
+
+test('an endpoint whose own query holds token or socket cannot be shared: nothing is copied, the message names no part of it (#401 review P2-C)', async context => {
+  let copies = 0;
+  const app = await mount(context, () => { copies++; return true; });
+  try {
+    await app.edit('.addr-wrap input', 'wss://fixture.test/ws?token=route-secret');
+    await app.copy();
+    assert.equal(copies, 0, 'no link was made');
+    const error = app.document.querySelector('.card > .config-error[role=alert]');
+    assert.equal(error?.textContent?.trim(), 'This address cannot be shared as a link');
+    assert.ok(!app.document.documentElement.outerHTML.includes('route-secret'));
+    await app.edit('.addr-wrap input', 'wss://fixture.test/ws?region=eu');
+    await app.copy();
+    assert.equal(copies, 1, 'an ordinary query is carried');
+  } finally { await app.close(); }
 });

@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from '../test/mount.ts';
 import { removeServer } from './servers.ts';
+import { REJECTED_LINKS as REJECTED } from '../core/connection-link.fixtures.ts';
 
 // Board #323 (reviewer P1): the desktop app fills this machine's gateway
 // into Settings — and its token/socket NEVER end up next to another
@@ -213,17 +214,43 @@ test('a socket the person typed does not survive picking a saved server that has
   assert.equal(app.value(SOCKET), '', 'the entry has no socket, and the typed one belongs to nobody saved');
 });
 
-// ─── #401: a pasted connection link fills the fields it names ────────────
+// ─── #401: a connection link fills the fields it names ───────────────────
 
 const NEW_LINK = 'wss://paste.example/ws?token=PASTED-TOKEN&socket=%2Ftmp%2Fpasted';
 const OLD_LINK = 'https://some-front-end.example/app/?addr=wss%3A%2F%2Fpaste.example%2Fws&token=PASTED-TOKEN&socket=%2Ftmp%2Fpasted';
 const OLD_HASH_LINK = 'https://some-front-end.example/#/files?address=wss://paste.example/ws&token=PASTED-TOKEN&socket=/tmp/pasted';
 
+type Mounted = Awaited<ReturnType<typeof mount>>;
+/** A whole text arriving at once, the way a browser reports a paste. */
+async function paste(app: Mounted, selector: string, text: string) {
+  const el = app.document.querySelector<HTMLInputElement>(selector)!;
+  el.value = text;
+  const event = new app.window.Event('input', { bubbles: true });
+  Object.defineProperty(event, 'inputType', { value: 'insertFromPaste' });
+  el.dispatchEvent(event);
+  await app.flush();
+}
+/** The person types `text` one character at a time, then leaves the field. */
+async function typeOut(app: Mounted, selector: string, text: string, { commit = true } = {}) {
+  const el = app.document.querySelector<HTMLInputElement>(selector)!;
+  el.dispatchEvent(new app.window.Event('focus'));
+  el.value = '';
+  for (const char of text) {
+    el.value += char;
+    const event = new app.window.Event('input', { bubbles: true });
+    Object.defineProperty(event, 'inputType', { value: 'insertText' });
+    Object.defineProperty(event, 'data', { value: char });
+    el.dispatchEvent(event);
+  }
+  await app.flush();
+  if (commit) { el.dispatchEvent(new app.window.Event('change', { bubbles: true })); await app.flush(); }
+}
+
 for (const [form, link] of [['the new form', NEW_LINK], ['the old front-end form', OLD_LINK], ['the old front-end hash form', OLD_HASH_LINK]]) {
   test(`pasting a connection link in ${form} into the address field fills address, token and socket, and the field keeps only the address`, async context => {
     const app = await mount(context, {});
     await app.answer();
-    await app.edit(ADDR, link!);
+    await paste(app, ADDR, link!);
     assert.equal(app.value(ADDR), 'wss://paste.example/ws', 'the field shows the address alone');
     assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
     assert.equal(app.value(SOCKET), '/tmp/pasted');
@@ -236,17 +263,17 @@ test('a pasted link without a socket clears the previous one; a bare address pas
   const app = await mount(context, {});
   await app.answer();
   assert.equal(app.value(SOCKET), LOCAL.tmux_socket, 'the desktop autofill put the local socket in');
-  await app.edit(ADDR, 'wss://paste.example/ws?token=PASTED-TOKEN');
+  await paste(app, ADDR, 'wss://paste.example/ws?token=PASTED-TOKEN');
   assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
   assert.equal(app.value(SOCKET), '', 'the local socket does not follow a link to another server');
-  await app.edit(ADDR, 'ws://bare.example:9899');
+  await paste(app, ADDR, 'ws://bare.example:9899');
   assert.equal(app.value(ADDR), 'ws://bare.example:9899');
   assert.equal(app.value(TOKEN), 'PASTED-TOKEN', 'a bare address carries no credentials, so none are touched');
 });
 
 test('the Android app takes the same paste (it runs the same form)', async context => {
   const app = await mount(context, {}, 'Mozilla/5.0 (Linux; Android 14) AppleWebKit');
-  await app.edit(ADDR, NEW_LINK);
+  await paste(app, ADDR, NEW_LINK);
   assert.equal(app.value(ADDR), 'wss://paste.example/ws');
   assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
   assert.equal(app.value(SOCKET), '/tmp/pasted');
@@ -256,15 +283,76 @@ test('a link for the address already in the field still rewrites the field to th
   const app = await mount(context, {});
   await app.answer();
   await app.edit(ADDR, 'wss://paste.example/ws');                       // the state now holds exactly this address
-  await app.edit(ADDR, NEW_LINK);                                       // and a link for the same address arrives
+  await paste(app, ADDR, NEW_LINK);                                     // and a link for the same address arrives
   assert.equal(app.value(ADDR), 'wss://paste.example/ws');
   assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
 });
 
-test('a link that names no address (an old token-only link) is left as typed text and its token is not taken', async context => {
+// A built link is always a link, even with nothing to carry: pasted over a form
+// that holds ANOTHER server's token and socket it must clear them, not keep them.
+const HELD = saved({ address: 'ws://keep.example:9899', token: 'KEEP-TOKEN', socket: '/keep/sock' });
+for (const [what, link, want] of [
+  ['both empty', 'wss://paste.example/ws?token=&socket=', { token: '', socket: '' }],
+  ['an empty token', 'wss://paste.example/ws?token=&socket=%2Fonly-socket', { token: '', socket: '/only-socket' }],
+  ['an empty socket', 'wss://paste.example/ws?token=ONLY-TOKEN&socket=', { token: 'ONLY-TOKEN', socket: '' }],
+  ['an old link with an empty token', 'https://front.example/?addr=wss://paste.example/ws&token=', { token: '', socket: '' }],
+  ['no socket parameter at all', 'wss://paste.example/ws?token=ONLY-TOKEN', { token: 'ONLY-TOKEN', socket: '' }],
+] as const) {
+  test(`a pasted link with ${what} applies exactly its tuple over a form holding another server's credentials`, async context => {
+    const app = await mount(context, { ...HELD, tmux_server_current: 's0' });
+    await app.answer();
+    assert.equal(app.value(TOKEN), 'KEEP-TOKEN', 'the form opened on the held tuple');
+    await paste(app, ADDR, link);
+    assert.equal(app.value(ADDR), 'wss://paste.example/ws');
+    assert.equal(app.value(TOKEN), want.token, 'the previous server\u2019s token did not stay');
+    assert.equal(app.value(SOCKET), want.socket, 'nor its socket');
+  });
+}
+
+// What is recognised as carrying a credential but cannot be used is NEVER left
+// in the visible field: the field goes back, the other fields stay, and one
+// message that names no part of the text says why.
+for (const [what, text] of REJECTED) {
+  test(`pasting ${what} restores the field, leaves the other fields alone, and shows no part of it`, async context => {
+    const app = await mount(context, { ...HELD, tmux_server_current: 's0' });
+    await app.answer();
+    await paste(app, ADDR, text);
+    const address = app.document.querySelector<HTMLInputElement>(ADDR)!;
+    assert.equal(address.value, 'ws://keep.example:9899', 'the address element went back to its previous value');
+    assert.equal(app.value(TOKEN), 'KEEP-TOKEN');
+    assert.equal(app.value(SOCKET), '/keep/sock');
+    const message = app.document.querySelector('.fields .config-error[role=alert]');
+    assert.match(message?.textContent ?? '', /^This link (has no server address|cannot be read: a token or socket appears twice)$/u, 'one message about the problem');
+    for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket']) {
+      assert.ok(!(message?.textContent ?? '').includes(secret), `the message does not carry ${secret}`);
+      assert.ok(!app.document.documentElement.outerHTML.includes(secret), `and ${secret} is nowhere in the page`);
+      assert.ok(![...app.document.querySelectorAll('input')].some(i => i.value.includes(secret)), `or in any field`);
+    }
+  });
+}
+
+test('typing a link out is plain editing: it is not split character by character, only when the field is left', async context => {
   const app = await mount(context, {});
   await app.answer();
-  await app.edit(ADDR, 'https://some-front-end.example/?token=ONLY-A-TOKEN');
-  assert.equal(app.value(ADDR), 'https://some-front-end.example/?token=ONLY-A-TOKEN', 'the text stays as typed');
-  assert.notEqual(app.value(TOKEN), 'ONLY-A-TOKEN', 'and nothing was split off it');
+  await typeOut(app, ADDR, NEW_LINK, { commit: false });
+  assert.equal(app.value(ADDR), NEW_LINK, 'every typed character stayed in the address field');
+  assert.notEqual(app.value(TOKEN), 'P', 'the first character of the token did not start a split');
+  assert.notEqual(app.value(TOKEN), 'PASTED-TOKEN', 'and nothing was taken yet');
+  app.document.querySelector(ADDR)!.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+  await app.flush();
+  assert.equal(app.value(ADDR), 'wss://paste.example/ws', 'leaving the field splits the finished link');
+  assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
+  assert.equal(app.value(SOCKET), '/tmp/pasted');
+});
+
+test('a typed link that cannot be used is taken out of the field when it is left, back to what the field held', async context => {
+  const app = await mount(context, { ...HELD, tmux_server_current: 's0' });
+  await app.answer();
+  await typeOut(app, ADDR, 'https://front.example/?token=SECRET-ONE');
+  assert.equal(app.value(ADDR), 'ws://keep.example:9899');
+  assert.equal(app.value(TOKEN), 'KEEP-TOKEN');
+  assert.match(app.document.querySelector('.fields .config-error[role=alert]')?.textContent ?? '', /no server address/u);
+  assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+  await typeOut(app, ADDR, 'ws://other.example:9899');
+  assert.equal(app.document.querySelector('.fields .config-error'), null, 'the next edit clears the message');
 });

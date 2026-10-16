@@ -9,6 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
+import { REJECTED_LINKS } from '../core/connection-link.fixtures.ts';
 
 const compiled = compileMount(new URL('./AddServerDialog.svelte', import.meta.url), []);
 
@@ -89,11 +90,109 @@ test('a pasted connection link fills the dialog\u2019s fields and submit hands t
     for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
     const address = app.document.querySelector<HTMLInputElement>('.dlg input[type="text"]')!;
     address.value = 'https://front-end.example/?addr=ws://paste.example:9899&token=PASTED-TOKEN&socket=/tmp/pasted';
-    address.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    const paste = new app.window.Event('input', { bubbles: true });
+    Object.defineProperty(paste, 'inputType', { value: 'insertFromPaste' });
+    address.dispatchEvent(paste);
     await app.flush();
     assert.equal(address.value, 'ws://paste.example:9899', 'the field keeps the address alone');
     [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
     await app.flush();
     assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'ws://paste.example:9899', token: 'PASTED-TOKEN', socket: '/tmp/pasted' }]);
+  } finally { await app.close(); }
+});
+
+// ─── #401: the dialog refuses what carries a credential and names no server ──
+
+const FIELDS = {
+  address: '.dlg input[type="text"]',
+  token: '.dlg .token-wrap input',
+  socket: '.dlg input[placeholder="/tmp/tmux-1000/default"]',
+};
+async function openDialog(context: import('node:test').TestContext, submitted: unknown[] = []) {
+  const app = await (await compiled).mount(context, {
+    props: { oncancel: () => {}, onsubmit: (c: unknown) => { submitted.push(c); } },
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+    modules: [],
+  });
+  for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
+  const el = (selector: string) => app.document.querySelector<HTMLInputElement>(selector)!;
+  const set = async (selector: string, value: string, inputType?: string) => {
+    el(selector).value = value;
+    const event = new app.window.Event('input', { bubbles: true });
+    if (inputType) Object.defineProperty(event, 'inputType', { value: inputType });
+    el(selector).dispatchEvent(event);
+    await app.flush();
+  };
+  return { app, el, set };
+}
+
+for (const [what, text] of REJECTED_LINKS) {
+  test(`the dialog: pasting ${what} restores the field, leaves the others alone, and shows no part of it`, async context => {
+    const { app, el, set } = await openDialog(context);
+    try {
+      await set(FIELDS.address, 'ws://keep.example:9899');
+      await set(FIELDS.token, 'KEEP-TOKEN');
+      await set(FIELDS.socket, '/keep/sock');
+      await set(FIELDS.address, text, 'insertFromPaste');
+      assert.equal(el(FIELDS.address).value, 'ws://keep.example:9899');
+      assert.equal(el(FIELDS.token).value, 'KEEP-TOKEN');
+      assert.equal(el(FIELDS.socket).value, '/keep/sock');
+      const message = app.document.querySelector('.dlg .config-error[role=alert]');
+      assert.match(message?.textContent ?? '', /^This link (has no server address|cannot be read: a token or socket appears twice)$/u);
+      for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket']) {
+        assert.ok(!app.document.documentElement.outerHTML.includes(secret), `${secret} is nowhere in the page`);
+        assert.ok(![...app.document.querySelectorAll('input')].some(i => i.value.includes(secret)), `or in any field`);
+      }
+    } finally { await app.close(); }
+  });
+}
+
+test('the dialog: a pasted empty-credential link clears what the form held, and submit hands exactly that tuple on', async context => {
+  const submitted: unknown[] = [];
+  const { app, el, set } = await openDialog(context, submitted);
+  try {
+    await set(FIELDS.address, 'ws://keep.example:9899');
+    await set(FIELDS.token, 'KEEP-TOKEN');
+    await set(FIELDS.socket, '/keep/sock');
+    await set(FIELDS.address, 'wss://other.example/ws?token=&socket=', 'insertFromPaste');
+    assert.equal(el(FIELDS.address).value, 'wss://other.example/ws');
+    assert.equal(el(FIELDS.token).value, '');
+    assert.equal(el(FIELDS.socket).value, '');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await app.flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'wss://other.example/ws', token: '' }]);
+  } finally { await app.close(); }
+});
+
+test('the dialog: typing a link out is plain editing and splits only when the field is left', async context => {
+  const { app, el, set } = await openDialog(context);
+  try {
+    const link = 'wss://typed.example/ws?token=TYPED-TOKEN&socket=%2Ftmp%2Ftyped';
+    for (let n = 1; n <= link.length; n++) await set(FIELDS.address, link.slice(0, n), 'insertText');
+    assert.equal(el(FIELDS.address).value, link, 'nothing was split while typing');
+    assert.equal(el(FIELDS.token).value, '');
+    el(FIELDS.address).dispatchEvent(new app.window.Event('change', { bubbles: true }));
+    await app.flush();
+    assert.equal(el(FIELDS.address).value, 'wss://typed.example/ws');
+    assert.equal(el(FIELDS.token).value, 'TYPED-TOKEN');
+    assert.equal(el(FIELDS.socket).value, '/tmp/typed');
+  } finally { await app.close(); }
+});
+
+test('the dialog: Enter commits a typed link first — a usable one is split and submitted, an unusable one is refused and nothing is submitted', async context => {
+  const submitted: unknown[] = [];
+  const { app, el, set } = await openDialog(context, submitted);
+  try {
+    const enter = () => el(FIELDS.address).dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await set(FIELDS.address, 'https://front.example/?token=SECRET-ONE', 'insertText');     // typed out, not pasted
+    enter();
+    await app.flush();
+    assert.deepEqual(submitted, [], 'a link that names no server does not submit');
+    assert.equal(el(FIELDS.address).value, '', 'and it did not stay in the field');
+    assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+    await set(FIELDS.address, 'wss://typed.example/ws?token=TYPED-TOKEN&socket=', 'insertText');
+    enter();
+    await app.flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'wss://typed.example/ws', token: 'TYPED-TOKEN' }]);
   } finally { await app.close(); }
 });

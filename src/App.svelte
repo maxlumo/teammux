@@ -2759,10 +2759,12 @@
    * address bar either way, so a token never stays there. */
   function takeConnectLink() {
     try {
-      const link = parseConnectionLink(location.href);
-      if (!link) return null;
+      const parsed = parseConnectionLink(location.href);
+      if (parsed.kind === 'none') return null;
+      // Stripped whatever it names, so a token never stays in the address bar;
+      // a link that names no server (the old token-only one) applies nothing.
       history.replaceState(null, '', location.pathname + location.hash.split('?')[0]);
-      return link;
+      return parsed.kind === 'link' ? parsed.link : null;
     } catch { return null; } // malformed URL — ignore, fall back to saved/settings
   }
   /** Apply a deep link: the same keys the normal flow uses, so the boot dial
@@ -3008,6 +3010,7 @@
     if (!conn?.address) return;
     const { address: addr, token, socket } = conn;
     const link = buildConnectionLink(conn);
+    if (!link) throw new Error(t('linkNotBuildable'));   // an endpoint query that holds token or socket
     // Storage is not reactive; recheck the captured tuple as well as the page/server.
     const current = () => {
       const now = currentConnection(localStorage);

@@ -18,6 +18,9 @@ import type { TestContext } from 'node:test';
 import { compileMount } from './lib/test/mount.ts';
 import { recordServer } from './lib/app/servers.ts';
 import { parseConnectionLink } from './lib/core/connection-link.ts';
+
+/** The tuple a copied link carries, or null when it is not a usable link. */
+const linkTuple = (text: string) => { const parsed = parseConnectionLink(text); return parsed.kind === 'link' ? parsed.link : null; };
 import { RECONNECT_WATCHDOG_MS } from './lib/app/reconnect.ts';
 import { migrateServerState } from './lib/app/server-state-migration.ts';
 
@@ -8052,7 +8055,7 @@ test('③c-5: the owner-bound surfaces say whose they are when several servers a
   assert.equal(h.app.document.querySelector('.preferences .connection-title .server-tag')?.textContent, 'alpha', 'the Connection title names the focus');
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /share connection link/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 4; i++) await h.settle();
-  assert.equal(parseConnectionLink((h.app.window as any).__copied ?? '')?.address, 'ws://a:9899', 'A s link, the connection itself (#401)');
+  assert.equal(linkTuple((h.app.window as any).__copied ?? '')?.address, 'ws://a:9899', 'A s link, the connection itself (#401)');
   assert.doesNotMatch((h.app.window as any).__copied ?? '', /addr=|https?:/u, 'with no front end in it');
   // Focus B: the title follows; the link is B s.
   await pickServer(h, 'beta');
@@ -8061,7 +8064,7 @@ test('③c-5: the owner-bound surfaces say whose they are when several servers a
   assert.equal(h.app.document.querySelector('.preferences .connection-title .server-tag')?.textContent, 'beta');
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /share connection link/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 4; i++) await h.settle();
-  assert.equal(parseConnectionLink((h.app.window as any).__copied ?? '')?.address, 'ws://b:9899', 'B s link');
+  assert.equal(linkTuple((h.app.window as any).__copied ?? '')?.address, 'ws://b:9899', 'B s link');
 });
 
 test('③c-5 (touch): the guest Agents editor names its server too — the same tag answer App hands every tree, including a revealed OTHER member s guest, never CURRENT s name', async (context) => {
@@ -9303,7 +9306,7 @@ test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mir
   [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^share connection link$/iu.test((b.textContent ?? '').trim()))!.click();
   await first.settle();
   assert.equal(copied.length, 1, 'the copy command ran');
-  assert.deepEqual(parseConnectionLink(copied[0]!), { address: 'ws://a:9899', token: 'tokA', socket: '/tmp/sockA' }, 'the whole tuple of the connected server, as the connection link (#401)');
+  assert.deepEqual(linkTuple(copied[0]!), { address: 'ws://a:9899', token: 'tokA', socket: '/tmp/sockA' }, 'the whole tuple of the connected server, as the connection link (#401)');
   assert.match(copied[0]!, /^ws:\/\/a:9899\?/u, 'the link starts at the gateway address');
   assert.doesNotMatch(copied[0]!, /tokB|sockB|b:9899/u, 'and nothing of the deleted one');
   [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
