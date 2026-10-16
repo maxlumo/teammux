@@ -337,7 +337,8 @@ test('the classifier agrees with the standards URL parser: whenever new URL read
 test('a seeded fuzz of scheme, slash, backslash, space, percent and @ shapes: whenever new URL reads user info, the classifier does not call the text none or an endpoint (#405 agreement)', () => {
   const pieces = ['ws', 'wss', 'http', 'https', 'WS', ':', '/', '/', '\\', '@', 'u', 'p', 'h', '.', ' ', '%40', '%75', '?', '#', 'x=1', '[', ']', '::1', '9', '-', '\t'];
   const schemes = ['ws:', 'wss:', 'http:', 'https:', 'WSS:', 'ws'];
-  let seed = 12345;
+  const SEED = 12345;           // printed in every message, so a failure can be replayed
+  let seed = SEED;
   const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   let read = 0;
   for (let i = 0; i < 40_000; i++) {
@@ -348,10 +349,32 @@ test('a seeded fuzz of scheme, slash, backslash, space, percent and @ shapes: wh
     try { url = new URL(text.trim()); } catch { /* not a URL */ }
     if (!url || (url.username === '' && url.password === '')) continue;
     read++;
-    assert.notEqual(parseConnectionLink(text).kind, 'none', `not none: ${JSON.stringify(text)}`);
-    assert.notEqual(endpointOf(text).kind, 'endpoint', `not an endpoint: ${JSON.stringify(text)}`);
+    assert.notEqual(parseConnectionLink(text).kind, 'none', `not none: ${JSON.stringify(text)} (seed ${SEED}, iteration ${i})`);
+    assert.notEqual(endpointOf(text).kind, 'endpoint', `not an endpoint: ${JSON.stringify(text)} (seed ${SEED}, iteration ${i})`);
   }
-  assert.ok(read > 2000, `the fuzz did produce texts the parser reads user info from (${read})`);
+  assert.ok(read > 2000, `the fuzz did produce texts the parser reads user info from (${read}, seed ${SEED})`);
+});
+
+// Text that reaches `endpointOf` without the door: a percent-encoded character inside a link's
+// decoded `addr` is only a control or format character AFTER decoding, and a saved address or a
+// boot link is never pasted. The reason is the endpoint's: user info is `credential` wherever
+// the hidden character sits; an address that only holds one is `invalid`, and as a link's
+// address it is refused as "no server address". Nothing of either is echoed.
+test('hidden characters that skip the door: credential for user info, invalid for a clean address, and always refused', () => {
+  const hidden = ['\u0001', '\u007f', '\u0085', '\u00ad', '\u200b', '\u200d', '\u2060'];
+  for (const c of hidden) {
+    const shown = JSON.stringify(c);
+    for (const userinfo of [`wss://user:SECRET-ONE@h${c}.example/ws`, `wss://us${c}er:SECRET-ONE@h.example/ws`, `wss://user:SECRET-ONE@h.example/ws${c}`]) {
+      assert.deepEqual(endpointOf(userinfo), { kind: 'credential' }, `endpointOf ${shown} inside user info`);
+      assert.equal(kindOf(`https://front.example/?addr=${encodeURIComponent(userinfo)}&token=OUTER-TOKEN`), 'unusable:address-credential', `a decoded addr with user info and ${shown}`);
+    }
+    for (const clean of [`wss://h${c}.example/ws`, `wss://h.example/ws${c}`, `wss://h.example/w${c}s`]) {
+      assert.deepEqual(endpointOf(clean), { kind: 'invalid' }, `endpointOf ${shown} in a clean address`);
+      assert.equal(kindOf(`https://front.example/?addr=${encodeURIComponent(clean)}&token=OUTER-TOKEN`), 'unusable:no-address', `a decoded addr with ${shown}`);
+    }
+    // In front of the scheme the decoded addr is not a ws address at all (it is read as a scheme-less host and refused).
+    assert.equal(kindOf(`https://front.example/?addr=${encodeURIComponent(`${c}wss://user:SECRET-ONE@h.example/ws`)}&token=OUTER-TOKEN`), 'unusable:no-address', `${shown} in front of a decoded addr`);
+  }
 });
 
 test('an endpoint holds no hidden character anywhere: trailing and inside are refused as the leading one is', () => {
