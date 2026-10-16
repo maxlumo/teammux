@@ -23,7 +23,6 @@ test('the address field keeps the focus it took, and Escape is the shell\'s', as
       opener.id = 'opener';
       window.document.body.append(opener);
       opener.focus();
-      window.localStorage.setItem('tmux_address_history', '[]');
     },
     modules: [],
   });
@@ -42,7 +41,6 @@ test('the address field keeps the focus it took, and Escape is the shell\'s', as
 test('an IME-composing Escape leaves a half-typed address alone', async context => {
   const app = await (await compiled).mount(context, {
     props: { oncancel: () => assert.fail('that Escape belongs to the candidate window'), onsubmit: () => {} },
-    setup(window) { window.localStorage.setItem('tmux_address_history', '[]'); },
     modules: [],
   });
   try {

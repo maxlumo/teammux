@@ -3,8 +3,12 @@
 // The client always had exactly ONE server in its keys (`tmux_address` /
 // `tmux_token` / `tmux_socket`), with `tmux_address_history` as an unnamed
 // recents list behind the Settings form. This module makes the servers a
-// first-class REGISTRY (`tmux_servers`, named entries with stable ids) while
-// deliberately keeping the old keys as the ACTIVE MIRROR: everything that
+// first-class REGISTRY (`tmux_servers`, named entries with stable ids), the
+// ONLY list of remembered connections: the history key is folded in once and
+// retired (board #400), and the connect form's suggestions are read off the
+// registry (`rememberedAddresses`), so a server deleted in Settings is gone
+// from the form too. The old single-server keys stay as the ACTIVE MIRROR (the
+// connection CURRENT names, not a list): everything that
 // already reads them — ws.ts, the reconnect machine, deep links, the Settings
 // form, the boot auto-connect — keeps working unchanged, and a downgraded
 // client sees exactly the single-server world it expects.
@@ -53,6 +57,9 @@ export interface ServerEntry {
 
 export const SERVERS_KEY = 'tmux_servers';
 export const CURRENT_KEY = 'tmux_server_current';
+/** The recents list the registry replaced (board #400). Nothing reads or
+ * writes it any more; `migrateServers` folds it once and removes it. */
+export const HISTORY_KEY = 'tmux_address_history';
 export const MAX_SERVERS = 16;
 /** Which entry each ABSORBED entry was folded into, `{ [absorbed]: survivor }`
  * (board #335 ②b-2, reviewer P1-a, 2026-10-10). Written only where an
@@ -159,22 +166,32 @@ export function currentServerId(storage: Reader): string {
 /**
  * One-time, idempotent migration from the single-server keys.
  *
- * Runs before the boot auto-connect. If the registry already exists it is a
- * no-op (re-running must never duplicate or reorder). Otherwise the CURRENT
- * connection (`tmux_address`/`tmux_token`/`tmux_socket`) becomes the first,
- * current entry — the "don't lose the current user" clause — stamped with
- * `tmux_machine_id`, and the Settings recents (`tmux_address_history`) follow
- * as additional named entries — EXCEPT addresses `tmux_machines` attributes
- * to a machine that already has an entry: those are the SAME server's
- * LAN/Tailscale/WAN alternates (the failover set), and splitting them into
- * "servers" would break the multi-address semantics this feature must not
- * touch (lead review). A history machine seen for the first time yields one
- * entry (its first-seen address as the active one); unattributed addresses
- * dedupe by address as before. A client with no stored connection at all
- * migrates to an empty registry and the Settings form remains the front door.
+ * Runs before the boot auto-connect. If the registry already exists nothing
+ * is rebuilt (re-running must never duplicate or reorder): the retired
+ * recents list is dropped unread, and identity repair runs. Otherwise the
+ * CURRENT connection (`tmux_address`/`tmux_token`/`tmux_socket`) becomes the
+ * first, current entry — the "don't lose the current user" clause — stamped
+ * with `tmux_machine_id`, and the Settings recents (`tmux_address_history`)
+ * follow as additional named entries, after which that key is removed
+ * (board #400: the registry is the only list of remembered connections) —
+ * EXCEPT addresses `tmux_machines` attributes to a machine that already has
+ * an entry: those are the SAME server's LAN/Tailscale/WAN alternates (the
+ * failover set), and splitting them into "servers" would break the
+ * multi-address semantics this feature must not touch (lead review). A
+ * history machine seen for the first time yields one entry (its first-seen
+ * address as the active one); unattributed addresses dedupe by address as
+ * before. A client with no stored connection at all migrates to an empty
+ * registry and the Settings form remains the front door.
  */
 export function migrateServers(storage: Store): ServerEntry[] {
-  if (storage.getItem(SERVERS_KEY) != null) return repairServers(storage);
+  // A client that already has a registry has nothing to fold: every connect
+  // that wrote a history row also recorded its server, so a row the registry
+  // does not hold is a server the person deleted here, or an attempt that
+  // never connected. Either way it is not a remembered connection.
+  if (storage.getItem(SERVERS_KEY) != null) {
+    retireHistory(storage);
+    return repairServers(storage);
+  }
   const servers: ServerEntry[] = [];
   // machineId → its addresses (the failover map is the identity authority).
   let machines: Record<string, string[]> = {};
@@ -209,7 +226,7 @@ export function migrateServers(storage: Store): ServerEntry[] {
     storage.setItem(CURRENT_KEY, cur.id);
   }
   try {
-    const hist = JSON.parse(storage.getItem('tmux_address_history') || '[]');
+    const hist = JSON.parse(storage.getItem(HISTORY_KEY) || '[]');
     if (Array.isArray(hist)) {
       for (const h of hist) {
         const a = typeof h === 'string' ? h : (h && typeof h.address === 'string' ? h.address : '');
@@ -224,7 +241,15 @@ export function migrateServers(storage: Store): ServerEntry[] {
     }
   } catch { /* malformed history — the current entry alone is the migration */ }
   saveServers(storage, servers.slice(0, MAX_SERVERS));
+  retireHistory(storage);
   return loadServers(storage);
+}
+
+/** Remove the retired list. Best effort and idempotent: a key that cannot be
+ * removed is read by nothing and must not freeze the registry, and the next
+ * boot tries again. Called only once the registry is on disk. */
+function retireHistory(storage: Store): void {
+  try { if (storage.getItem(HISTORY_KEY) != null) storage.removeItem(HISTORY_KEY); } catch { /* retried at the next boot */ }
 }
 
 /** machineId → addresses, read off the failover map (identity authority). */
@@ -234,6 +259,39 @@ export function machinesMap(storage: Reader): Record<string, string[]> {
     if (raw && typeof raw === 'object') return raw;
   } catch { /* unreadable map — address-level matching still applies */ }
   return {};
+}
+
+/** Every address a saved server answers on: the active one first, then its
+ * machine's failover set in priority order. The ONE definition of "this
+ * server's addresses" — the connect form's suggestions and the mirror's
+ * clean-up on removal both ask it. */
+function addressesOf(storage: Reader, entry: ServerEntry): string[] {
+  const set = entry.machineId ? machinesMap(storage)[entry.machineId] : undefined;
+  const all = [entry.address, ...(Array.isArray(set) ? set : [])];
+  return all.filter((a, i) => typeof a === 'string' && a && all.indexOf(a) === i);
+}
+
+/**
+ * What the connect form offers to dial (board #400): the saved servers'
+ * addresses, each with its server's token, and nothing else — the registry
+ * is the only list of remembered connections. CURRENT's first, then the
+ * registry's order; one row per address (an address two machines share —
+ * a tunnel — is offered once, as the first of them has it). An attempt that
+ * never connected is not here: only a connect that succeeded is recorded.
+ */
+export function rememberedAddresses(storage: Reader): { address: string; token: string }[] {
+  const servers = loadServers(storage);
+  const current = currentServerId(storage);
+  const seen = new Set<string>();
+  const rows: { address: string; token: string }[] = [];
+  for (const entry of [...servers.filter((s) => s.id === current), ...servers.filter((s) => s.id !== current)]) {
+    for (const address of addressesOf(storage, entry)) {
+      if (seen.has(address)) continue;
+      seen.add(address);
+      rows.push({ address, token: entry.token });
+    }
+  }
+  return rows;
 }
 
 /**
@@ -776,11 +834,30 @@ export function renameServer(storage: Store, id: string, name: string): ServerEn
 
 /** Remove an entry and its per-server state. The CURRENT entry is not
  *  removable — the switcher offers removal only on the others, and refusing
- *  here keeps a stale UI honest. */
+ *  here keeps a stale UI honest.
+ *
+ *  The mirror keys (`tmux_address`/`tmux_token`/`tmux_socket`) are the
+ *  connection the connect form pre-fills, and they must not outlive the
+ *  server they name (board #400, orchestrator's condition): the connect form
+ *  writes them BEFORE it dials, so after an attempt at a saved server that did
+ *  not finish they name that server while CURRENT names another. Removing
+ *  that server clears them in the same step. They are left alone when they
+ *  are CURRENT's own, even if an address is shared. */
 export function removeServer(storage: Store, id: string): ServerEntry[] {
   if (id === currentServerId(storage)) return loadServers(storage);
-  const servers = loadServers(storage).filter((s) => s.id !== id);
+  const all = loadServers(storage);
+  const gone = all.find((s) => s.id === id);
+  const servers = all.filter((s) => s.id !== id);
   saveServers(storage, servers);
+  if (gone) dropMirrorOf(storage, gone, servers);
   for (const key of RESIDENT_KEYS) storage.removeItem(residentKey(key, id));
   return servers;
+}
+
+function dropMirrorOf(storage: Store, gone: ServerEntry, remaining: ServerEntry[]): void {
+  const mirrored = storage.getItem('tmux_address') || '';
+  if (!mirrored || !addressesOf(storage, gone).includes(mirrored)) return;
+  const current = remaining.find((s) => s.id === currentServerId(storage));
+  if (current && addressesOf(storage, current).includes(mirrored)) return;
+  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) storage.removeItem(key);
 }

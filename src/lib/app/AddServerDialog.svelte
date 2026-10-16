@@ -15,7 +15,6 @@
   import { t } from '../core/i18n.svelte.ts';
   import { normalizeAddress } from '../core/connection-address.ts';
 
-  type HistoryEntry = { address: string; token: string };
   type Candidate = { address: string; token: string; socket?: string };
   let {
     initial = null, compact = false, onsubmit, oncancel,
@@ -26,12 +25,6 @@
   let address = $state(seed?.address ?? '');
   let token = $state(seed?.token ?? '');
   let socket = $state(seed?.socket ?? '');
-  let history = $state<HistoryEntry[]>((() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem('tmux_address_history') || '[]');
-      return raw.map((h: string | HistoryEntry) => typeof h === 'string' ? { address: h, token: '' } : h);
-    } catch { return []; }
-  })());
 
   function submit() {
     if (!address.trim()) return;
@@ -41,7 +34,7 @@
 
 <Dialog {compact} label={t('serverAdd')} {oncancel}>
   <h2>{t('serverAdd')}</h2>
-  <ConnectFields bind:address bind:token bind:socket bind:history autofocus onenter={submit} />
+  <ConnectFields bind:address bind:token bind:socket autofocus onenter={submit} />
   <div class="dlg-actions">
     <CommandButton label={t('cancel')} onclick={oncancel} />
     <CommandButton label={t('connect')} variant="primary" icon="link" disabled={!address.trim()} onclick={submit} />

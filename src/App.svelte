@@ -2774,16 +2774,7 @@
    * picks them up, and — with an address — the registry. */
   function applyConnectLink({ address, token, socket }) {
     try {
-      if (address) {
-        localStorage.setItem('tmux_address', address);
-        try {
-          const hist = JSON.parse(localStorage.getItem('tmux_address_history') || '[]')
-            .map(h => (typeof h === 'string' ? { address: h, token: '' } : h));
-          const entry = { address, token: token || '' };
-          localStorage.setItem('tmux_address_history',
-            JSON.stringify([entry, ...hist.filter(h => h.address !== address)].slice(0, 8)));
-        } catch {}
-      }
+      if (address) localStorage.setItem('tmux_address', address);
       if (token != null) localStorage.setItem('tmux_token', token);
       if (socket) localStorage.setItem('tmux_socket', socket);
       localStorage.removeItem('tmux_disconnected'); // explicit intent to connect

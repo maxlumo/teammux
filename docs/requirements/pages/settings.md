@@ -138,7 +138,7 @@ where Agents is a page of its own, reads as one plain list):
 
 ## Interactions
 - Enter address + token → connect
-- Tap history entry → auto-fill and connect
+- Open the address list and tap a saved server's address → its address and token fill the form (the list is the server registry, CURRENT's server first; it has no × — a server is forgotten in Settings › Connection)
 - Switch language → immediate UI text update, persisted to localStorage
 - Switch theme → immediate CSS variable transition
 - Switch settings tab → remember the last tab in localStorage and restore it on the next open
@@ -157,7 +157,7 @@ where Agents is a page of its own, reads as one plain list):
 
 ## State Management
 - Connection state (disconnected/connecting/connected)
-- Address history (localStorage)
+- Saved servers (localStorage `tmux_servers`); the connect form's address list is read off them, there is no separate history
 - Locale / language preference (localStorage `tmux_locale`)
 - Interface scale, terminal font size, theme, terminal font name preference (localStorage)
 - Server info (hostname, machine_id, build)
@@ -207,9 +207,8 @@ native WebView/IME behavior and the owner's actual build remain separate gates.
 ## Motion
 State changes on this page move on the app's one vocabulary
 ([design-docs/features/motion.md](../../design-docs/features/motion.md)): the
-address-history arrow TURNS 180° (`.flip`) instead of swapping glyphs, the
-history list rises in and its rows `animate:flip` when an entry is removed,
-every error line fades in (`.appear`, opacity only — never height), address
+address-list arrow TURNS 180° (`.flip`) instead of swapping glyphs, the
+address list rises in, every error line fades in (`.appear`, opacity only — never height), address
 rows / the shortcut recorder cross-fade their selected clothes on `--t-fast`,
 every segmented row is `ui/Segmented` whose accent pill GLIDES to the chosen
 option on `--t-move` (the buttons only cross-fade their ink), and the server

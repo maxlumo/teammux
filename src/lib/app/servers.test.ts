@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CURRENT_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, residentKey,
+  CURRENT_KEY, HISTORY_KEY, MAX_SERVERS, MERGES_KEY, SERVERS_KEY, mergedInto, rememberedAddresses, residentKey,
   activateConnected, activateSwitched, adoptHostname, currentServerId, currentServerName, RESIDENT_KEYS, hostLabel, loadServers,
   focusServer, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, MOVES_KEY, resumeSlotMove,
 } from './servers.ts';
@@ -756,3 +756,139 @@ for (const fails of ['tmux_address', 'tmux_token', 'tmux_socket', 'tmux_disconne
     assert.deepEqual(new Map(s.m), before, 'nothing of B landed');
   });
 }
+
+// ─── #400: the registry is the only list of remembered connections ────
+
+const entry = (id: string, address: string, token: string, machineId?: string) =>
+  ({ id, name: id, address, token, ...(machineId ? { machineId } : {}) });
+
+test('rememberedAddresses: CURRENT first, each server\u2019s address then its failover set, the server\u2019s token on every row, one row per address', () => {
+  const s = mem({
+    [SERVERS_KEY]: JSON.stringify([
+      entry('b', 'ws://b:1', 'tokB', 'mb'),
+      entry('a', 'ws://a:1', 'tokA', 'ma'),
+      entry('c', 'ws://c:1', 'tokC'),
+      entry('t', 'ws://a:1', 'tokT', 'mt'),            // a tunnel two machines share
+    ]),
+    [CURRENT_KEY]: 'a',
+    tmux_machines: JSON.stringify({ ma: ['ws://a:1', 'wss://a.tail.ts.net/ws'], mb: ['ws://b-lan:1', 'ws://b:1'], mt: 'junk' }),
+  });
+  assert.deepEqual(rememberedAddresses(s), [
+    { address: 'ws://a:1', token: 'tokA' },
+    { address: 'wss://a.tail.ts.net/ws', token: 'tokA' },
+    { address: 'ws://b:1', token: 'tokB' },
+    { address: 'ws://b-lan:1', token: 'tokB' },
+    { address: 'ws://c:1', token: 'tokC' },
+  ]);
+  assert.deepEqual(rememberedAddresses(mem()), [], 'no registry, nothing remembered');
+});
+
+test('rememberedAddresses is the registry and nothing else: a history row, an orphan failover set and a mirror that no entry holds are not offered', () => {
+  const s = mem({
+    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', 'tokA', 'ma')]),
+    [CURRENT_KEY]: 'a',
+    [HISTORY_KEY]: JSON.stringify([{ address: 'ws://ghost:1', token: 'tokG' }]),
+    tmux_machines: JSON.stringify({ ma: ['ws://a:1'], gone: ['ws://old-lan:1'] }),
+    tmux_address: 'ws://typed:1', tmux_token: 'tokTyped',
+  });
+  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA' }]);
+});
+
+test('deleting a server, or one of its addresses, removes it from the suggestions, token included', () => {
+  const s = mem({
+    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', 'tokA', 'ma'), entry('b', 'ws://b:1', 'tokB', 'mb')]),
+    [CURRENT_KEY]: 'a',
+    tmux_machines: JSON.stringify({ ma: ['ws://a:1', 'ws://a-lan:1'], mb: ['ws://b:1', 'ws://b-lan:1'] }),
+  });
+  assert.equal(rememberedAddresses(s).length, 4);
+  saveMachineAddresses(s, 'ma', ['ws://a:1']);                       // the Connection page\u2019s alternate ×
+  assert.deepEqual(rememberedAddresses(s).map((r) => r.address), ['ws://a:1', 'ws://b:1', 'ws://b-lan:1']);
+  removeServer(s, 'b');                                              // the server\u2019s ×
+  assert.deepEqual(rememberedAddresses(s), [{ address: 'ws://a:1', token: 'tokA' }]);
+  assert.ok(![...s.m.values()].some((v) => v.includes('tokB')), 'no stored value still holds the deleted server\u2019s token');
+});
+
+test('migration: a client with a registry has its history dropped unread, and the registry is untouched', () => {
+  const servers = JSON.stringify([entry('a', 'ws://a:1', 'tokA')]);
+  const s = mem({
+    [SERVERS_KEY]: servers, [CURRENT_KEY]: 'a',
+    [HISTORY_KEY]: JSON.stringify([{ address: 'ws://deleted-here:1', token: 'tokD' }, { address: 'ws://a:1', token: 'old' }]),
+  });
+  const out = migrateServers(s);
+  assert.deepEqual(out.map((e) => e.address), ['ws://a:1'], 'a server the registry no longer has is not brought back');
+  assert.equal(s.getItem(HISTORY_KEY), null, 'the key is gone');
+  assert.equal(s.getItem(SERVERS_KEY), servers, 'and the registry is byte for byte what it was');
+  assert.deepEqual(migrateServers(s).map((e) => e.address), ['ws://a:1'], 'idempotent');
+});
+
+test('migration: a client with no registry folds its history in once, then the key is gone', () => {
+  const s = mem({
+    tmux_address: 'ws://a:1', tmux_token: 'tokA',
+    [HISTORY_KEY]: JSON.stringify([{ address: 'ws://old:1', token: 'tokO' }]),
+  });
+  assert.deepEqual(migrateServers(s).map((e) => e.address), ['ws://a:1', 'ws://old:1']);
+  assert.equal(s.getItem(HISTORY_KEY), null);
+  assert.deepEqual(rememberedAddresses(s).map((r) => r.address), ['ws://a:1', 'ws://old:1'], 'and the form offers what was folded');
+});
+
+test('migration: history is removed only once the registry is on disk, and a key that will not go never freezes the registry', () => {
+  const failing = mem({ tmux_address: 'ws://a:1', [HISTORY_KEY]: JSON.stringify([{ address: 'ws://old:1', token: '' }]) });
+  const set = failing.setItem;
+  failing.setItem = (k: string, v: string) => { if (k === SERVERS_KEY) throw new Error('QuotaExceededError'); set(k, v); };
+  assert.throws(() => migrateServers(failing), /Quota/u);
+  assert.ok(failing.getItem(HISTORY_KEY), 'the registry was not written, so the only copy of the history stays');
+
+  const stuck = mem({ [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', '')]), [CURRENT_KEY]: 'a', [HISTORY_KEY]: '[]' });
+  stuck.removeItem = (k: string) => { if (k === HISTORY_KEY) throw new Error('SecurityError'); stuck.m.delete(k); };
+  assert.equal(migrateServers(stuck).length, 1, 'a leftover key read by nothing is not a failure');
+});
+
+test('removing a server clears the mirror when the mirror names it — the address, the token and the socket in one step', () => {
+  const base = () => mem({
+    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', 'tokA', 'ma'), entry('b', 'ws://b:1', 'tokB', 'mb')]),
+    [CURRENT_KEY]: 'a',
+    tmux_machines: JSON.stringify({ ma: ['ws://a:1'], mb: ['ws://b:1', 'ws://b-lan:1'] }),
+  });
+  // An attempt at B that never finished left B in the mirror while CURRENT is A.
+  const attempt = base();
+  attempt.setItem('tmux_address', 'ws://b:1'); attempt.setItem('tmux_token', 'tokB'); attempt.setItem('tmux_socket', '/tmp/b-sock');
+  removeServer(attempt, 'b');
+  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) assert.equal(attempt.getItem(key), null, key);
+  assert.deepEqual(loadServers(attempt).map((e) => e.id), ['a']);
+
+  // Through one of its alternate addresses, with a token typed wrong.
+  const alternate = base();
+  alternate.setItem('tmux_address', 'ws://b-lan:1'); alternate.setItem('tmux_token', 'typo');
+  removeServer(alternate, 'b');
+  assert.equal(alternate.getItem('tmux_address'), null);
+  assert.equal(alternate.getItem('tmux_token'), null);
+
+  // CURRENT's own mirror stays: it is the connection in use.
+  const own = base();
+  own.setItem('tmux_address', 'ws://a:1'); own.setItem('tmux_token', 'tokA');
+  removeServer(own, 'b');
+  assert.equal(own.getItem('tmux_address'), 'ws://a:1');
+  assert.equal(own.getItem('tmux_token'), 'tokA');
+
+  // An address CURRENT shares with the removed server is still CURRENT's.
+  const shared = mem({
+    [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://tunnel:1', 'tokA', 'ma'), entry('b', 'ws://tunnel:1', 'tokB', 'mb')]),
+    [CURRENT_KEY]: 'a', tmux_address: 'ws://tunnel:1', tmux_token: 'tokA',
+  });
+  removeServer(shared, 'b');
+  assert.equal(shared.getItem('tmux_address'), 'ws://tunnel:1');
+  assert.equal(shared.getItem('tmux_token'), 'tokA');
+
+  // A draft that names neither the removed server nor CURRENT is nobody's to clear.
+  const draft = base();
+  draft.setItem('tmux_address', 'ws://typed:1'); draft.setItem('tmux_token', 'tokTyped');
+  removeServer(draft, 'b');
+  assert.equal(draft.getItem('tmux_address'), 'ws://typed:1');
+  assert.equal(draft.getItem('tmux_token'), 'tokTyped');
+
+  // CURRENT itself is not removable, so its mirror is never at stake.
+  const current = base();
+  current.setItem('tmux_address', 'ws://a:1');
+  assert.equal(removeServer(current, 'a').length, 2);
+  assert.equal(current.getItem('tmux_address'), 'ws://a:1');
+});

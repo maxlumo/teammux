@@ -10,8 +10,6 @@
   import { t } from '../core/i18n.svelte.ts';
   import { createFeedbackLifetime, type FeedbackValue } from '../ui/feedback-lifetime.ts';
 
-  type HistoryEntry = { address: string; token: string };
-
   /** One connect attempt's own connection (board #335 ②b-4): App's
    * CANDIDATE, not the socket any server's pages are using. It reaches
    * whatever answers at the address, and nobody knows which server that is
@@ -93,12 +91,6 @@
   /** The attempt passed its point of no return: still busy, no Cancel. */
   let committing = $state(false);
 
-  let history = $state<HistoryEntry[]>((() => {
-    const raw = JSON.parse(localStorage.getItem('tmux_address_history') || '[]');
-    // Migrate: old format was string[], new is {address, token}[]
-    return raw.map((h: string | HistoryEntry) => typeof h === 'string' ? { address: h, token: '' } : h);
-  })());
-
   // Migrate old host+port (one-time)
   const oldHost = localStorage.getItem('tmux_host');
   if (oldHost) {
@@ -138,10 +130,10 @@
   // Local credentials the autofill put in, and the local address they are
   // for: they never follow the address to another server.
   let autofilled = $state<Autofilled | null>(null);
-  /** A history pick: drop the still-untouched auto values that would not
-   * belong to the picked target (the socket included — history entries
-   * carry none) and forget their record, then the entry's address and
-   * token apply. Picking the local gateway keeps its socket, still tracked. */
+  /** A suggestion pick: drop the still-untouched auto values that would not
+   * belong to the picked target (the socket included — a pick carries none)
+   * and forget their record, then the server's address and token apply.
+   * Picking the local gateway keeps its socket, still tracked. */
   function pickHistory(next: string) {
     const { clear, keep } = dropAutofilled(autofilled, { address: next, token, socket });
     if (clear.socket !== undefined) socket = clear.socket;
@@ -157,12 +149,6 @@
   });
 
   const normalizeAddress = (addr: string) => normalizeAddressFor(addr, location.protocol);
-
-  function saveHistory(addr: string, tok: string) {
-    const entry = { address: addr.trim(), token: tok || '' };
-    history = [entry, ...history.filter(h => h.address !== entry.address)].slice(0, 8);
-    localStorage.setItem('tmux_address_history', JSON.stringify(history));
-  }
 
   let cancelled = false;
   /** Attempts started by THIS instance. Only the latest may conclude: a
@@ -227,7 +213,6 @@
       localStorage.setItem('tmux_token', tok);
       if (sock) localStorage.setItem('tmux_socket', sock);
       else localStorage.removeItem('tmux_socket');
-      saveHistory(url, tok);
       await own.connect(url, tok);
       // A superseded, cancelled or unmounted attempt owns nothing from here
       // on: not the registry, not `onConnected`.
@@ -345,7 +330,7 @@
       <p class="subtitle">{t('connectTitle')}</p>
     </div>
 
-    <ConnectFields bind:address bind:token bind:socket bind:history onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
+    <ConnectFields bind:address bind:token bind:socket onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
 
     {#if frozen || error || notice}
       <div class="error appear">{frozen || error || notice}</div>

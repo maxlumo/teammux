@@ -139,6 +139,7 @@ test('a peer that authenticated but could not be identified is not a success', a
   // connected, the candidate is closed, and the form says why.
   const app = await mount(context, async () => 'm-b', () => {}, [{
     activateConnected: () => { throw new Error('storage full'); },
+    rememberedAddresses: () => [],      // the form's suggestions read the same module
   }], withIdentity);
   await connectTo(app, 'wss://stranger.test/ws');
   assert.deepEqual(app.order, ['candidate', 'connect:wss://stranger.test/ws|', 'close'],
@@ -187,6 +188,7 @@ test('the credentials an attempt uses are the ones it started with', async (cont
       activated.push(`${entry.address}|${entry.token}`);
       return { reload: false };
     },
+    rememberedAddresses: () => [],
   }], withIdentity);
   const field = (selector: string, value: string) => {
     const input = app.document.querySelector<HTMLInputElement>(selector)!;

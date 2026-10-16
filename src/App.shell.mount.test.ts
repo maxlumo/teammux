@@ -9182,3 +9182,92 @@ test('when no address answers the failed panel lists them all and a tap dials ex
   assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'the pick arrived');
   assert.equal(storedAddress(h, 'b'), 'ws://b:9899');
 });
+
+// ─── #400: one list of remembered connections ────────────────────────────
+
+test('#400: a server deleted in Settings is gone from the login page — its address, its token, and the pre-filled fields of an attempt at it — and a reload keeps it gone', async (context) => {
+  // Alpha is current. Beta is saved and DEAD, and the stale history holds
+  // beta, alpha, and a server the person already deleted ("ghost").
+  const dead = new Set(['ws://b:9899']);
+  const seed = {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-tailnet:9899'] }),
+    tmux_address_history: JSON.stringify([
+      { address: 'ws://b:9899', token: 'tokB' },
+      { address: 'ws://ghost:9899', token: 'tokGHOST' },
+      { address: 'ws://a:9899', token: 'tokA' },
+    ]),
+  };
+  const gate = (url: string) => (dead.has(url) ? Promise.reject(new Error('connection timeout')) : null);
+  const first = await bootApp(context, seed, undefined, { ...sandbox, gate });
+  for (let i = 0; i < 4; i++) await first.settle();
+  const ls = first.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_address_history'), null, 'the boot migration retired the history');
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).length, 2, 'and folded nothing into the registry that was not there');
+
+  const doc = first.app.document;
+  const suggestions = async () => {
+    doc.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+    await first.settle();
+    const rows = [...doc.querySelectorAll('.card .hist-item')].map((b) => b.textContent);
+    doc.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+    await first.settle();
+    return rows;
+  };
+  // Disconnect: the login page offers what the registry holds, current first,
+  // its failover address after it, and nothing the history alone knew.
+  await toConnection(first);
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await first.settle();
+  assert.deepEqual(await suggestions(), ['ws://a:9899', 'ws://a-tailnet:9899', 'ws://b:9899']);
+  assert.equal(doc.querySelector('.card .hist-del'), null, 'a suggestion has no forget button of its own: Settings is the one door');
+
+  // Try beta from the form: it is dead, and the form wrote it to the mirror
+  // before dialling, so the login page now pre-fills beta's URL and token.
+  doc.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+  await first.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.card .hist-item')].find((b) => b.textContent === 'ws://b:9899')!.click();
+  await first.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.equal(ls.getItem('tmux_address'), 'ws://b:9899', 'the failed attempt is what the mirror names');
+  assert.equal(ls.getItem('tmux_token'), 'tokB');
+
+  // Delete beta in Settings › Connection, through its confirm.
+  const gear = [...doc.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+    .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+  gear!.click(); await first.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences .side-row')].find((b) => /connection/iu.test(b.textContent ?? ''))!.click();
+  await first.settle();
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Remove beta"]')!.click(); await first.settle();
+  answerDialog(first.app, /^remove$/iu);
+  for (let i = 0; i < 4; i++) await first.settle();
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_servers')!).map((e: { id: string }) => e.id), ['a'], 'beta is gone from the registry');
+  for (const key of ['tmux_address', 'tmux_token', 'tmux_socket']) assert.equal(ls.getItem(key), null, `${key} did not outlive its server`);
+  const left = JSON.stringify(dumpStorage(first.app));
+  assert.doesNotMatch(left, /tokB|tokGHOST|ws:\/\/b:9899|ghost/u, 'neither beta\u2019s token nor its address is stored anywhere');
+
+  // Back on the login page: the pre-filled fields and the list.
+  const fields = () => ({
+    address: doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value,
+    token: doc.querySelector<HTMLInputElement>('.card .fields input[type="password"], .card .fields .token-wrap input')!.value,
+  });
+  gear!.click(); await first.settle();
+  assert.notEqual(fields().address, 'ws://b:9899', 'the form does not pre-fill the deleted address');
+  assert.equal(fields().token, '', 'or its token');
+  assert.deepEqual(await suggestions(), ['ws://a:9899', 'ws://a-tailnet:9899'], 'and does not offer it');
+
+  // A reload keeps it gone.
+  const after = dumpStorage(first.app);
+  await first.app.close();
+  const second = await bootApp(context, after, undefined, { ...sandbox, gate });
+  for (let i = 0; i < 4; i++) await second.settle();
+  const doc2 = second.app.document;
+  assert.ok(doc2.querySelector('.card .fields'), 'the login page is what a reload of a disconnected client shows');
+  assert.notEqual(doc2.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value, 'ws://b:9899');
+  doc2.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+  await second.settle();
+  assert.deepEqual([...doc2.querySelectorAll('.card .hist-item')].map((b) => b.textContent), ['ws://a:9899', 'ws://a-tailnet:9899']);
+  assert.equal(second.app.window.localStorage.getItem('tmux_address_history'), null);
+});

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from '../test/mount.ts';
+import { removeServer } from './servers.ts';
 
 // Board #323 (reviewer P1): the desktop app fills this machine's gateway
 // into Settings — and its token/socket NEVER end up next to another
@@ -16,6 +17,11 @@ const LOCAL = { url: 'ws://[::1]:19900', token: 'LOCAL-TOKEN', tmux_socket: '/lo
 const ADDR = 'input[placeholder="ws://host:port"]';
 const TOKEN = 'input[placeholder="auth token"]';
 const SOCKET = 'input[placeholder="/tmp/tmux-1000/default"]';
+
+/** Saved servers (the registry is the only list the form suggests from, #400). */
+const saved = (...servers: { address: string; token: string }[]) => ({
+  tmux_servers: JSON.stringify(servers.map((s, i) => ({ id: `s${i}`, name: `s${i}`, address: s.address, token: s.token }))),
+});
 
 async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string) {
   const calls: string[] = [];
@@ -49,7 +55,7 @@ async function mount(context: TestContext, saved: Record<string, string>, userAg
       app.document.querySelector<HTMLButtonElement>('.hist-btn')!.click();
       await app.flush();
       const row = [...app.document.querySelectorAll<HTMLButtonElement>('.hist-item')].find(b => b.textContent === address);
-      assert.ok(row, `history has ${address}`);
+      assert.ok(row, `the suggestions have ${address}`);
       row!.click();
       await app.flush();
     },
@@ -104,11 +110,11 @@ test('the Android app never fills a phone with its own loopback config', async c
   assert.equal(app.value(TOKEN), '');
 });
 
-test('a history pick keeps its own token, and the auto-filled local socket does not follow it', async context => {
-  const app = await mount(context, { tmux_address_history: JSON.stringify([
+test('a pick keeps its own token, and the auto-filled local socket does not follow it', async context => {
+  const app = await mount(context, saved(
     { address: 'ws://remote.example:9899', token: 'REMOTE-TOKEN' },
     { address: 'ws://other.example:9899', token: '' },
-  ]) });
+  ));
   await app.answer();
   assert.equal(app.value(SOCKET), LOCAL.tmux_socket, 'filled for the local gateway');
   await app.pick('ws://remote.example:9899');
@@ -117,11 +123,11 @@ test('a history pick keeps its own token, and the auto-filled local socket does 
   assert.equal(app.value(SOCKET), '', 'the local socket does not ride along to the remote');
 });
 
-test('picking the local gateway from history keeps its socket', async context => {
-  const app = await mount(context, { tmux_address_history: JSON.stringify([
+test('picking the local gateway from the suggestions keeps its socket', async context => {
+  const app = await mount(context, saved(
     { address: 'ws://remote.example:9899', token: 'REMOTE-TOKEN' },
     { address: LOCAL.url, token: 'OLD-LOCAL-TOKEN' },
-  ]) });
+  ));
   await app.answer();
   await app.pick(LOCAL.url);
   assert.equal(app.value(TOKEN), 'OLD-LOCAL-TOKEN', "the entry's token is the person's choice");
@@ -129,4 +135,31 @@ test('picking the local gateway from history keeps its socket', async context =>
   await app.pick('ws://remote.example:9899');
   assert.equal(app.value(TOKEN), 'REMOTE-TOKEN');
   assert.equal(app.value(SOCKET), '', 'then a remote pick: the local socket still does not follow');
+});
+
+test('the suggestions are the saved servers, re-read each time the list opens, and a row has no forget button (#400)', async context => {
+  const app = await mount(context, {
+    ...saved(
+      { address: 'ws://one.example:9899', token: 'ONE' },
+      { address: 'ws://two.example:9899', token: 'TWO' },
+      { address: 'ws://three.example:9899', token: 'THREE' },
+    ),
+    tmux_server_current: 's0',
+    // Left over from before the registry was the only list: not offered.
+    tmux_address_history: JSON.stringify([{ address: 'ws://stale.example:9899', token: 'STALE' }]),
+  });
+  const rows = async () => {
+    app.document.querySelector<HTMLButtonElement>('.hist-btn')!.click();
+    await app.flush();
+    const out = [...app.document.querySelectorAll('.hist-item')].map(b => b.textContent);
+    const forget = app.document.querySelector('.hist-del');
+    app.document.querySelector<HTMLButtonElement>('.hist-btn')!.click();
+    await app.flush();
+    assert.equal(forget, null, 'forgetting is Settings › Connection\u2019s, not the form\u2019s');
+    return out;
+  };
+  assert.deepEqual(await rows(), ['ws://one.example:9899', 'ws://two.example:9899', 'ws://three.example:9899']);
+  // Another page deletes a server while this form stays mounted.
+  removeServer(app.window.localStorage, 's1');
+  assert.deepEqual(await rows(), ['ws://one.example:9899', 'ws://three.example:9899']);
 });

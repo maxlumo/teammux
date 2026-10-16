@@ -1,25 +1,24 @@
 <script lang="ts">
-  // The connection FIELDS (address with its recents, token, tmux socket),
+  // The connection FIELDS (address with its suggestions, token, tmux socket),
   // shared by the disconnected connect page and the Add server dialog (board
   // 315), so the two ways to name a server cannot drift: one field set, one
-  // recents list, one way to forget a recent.
+  // list. The list is the saved servers' addresses, read off the registry
+  // (board #400) — there is no list of its own to forget from: a server is
+  // forgotten in Settings › Connection, and then it is gone from here. (The
+  // `hist-` class names are from the list's earlier life.)
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { flip } from 'svelte/animate';
-  import { moveMs } from '../ui/motion.ts';
-
-  type HistoryEntry = { address: string; token: string };
+  import { rememberedAddresses } from './servers.ts';
 
   let {
     address = $bindable(''), token = $bindable(''), socket = $bindable(''),
-    history = $bindable<HistoryEntry[]>([]),
     onpick,
     /** Focus the address field when mounted (the dialog). */
     autofocus = false,
     onenter = () => {},
   }: {
-    address?: string; token?: string; socket?: string; history?: HistoryEntry[];
-    /** A history entry is about to be applied (its address is passed):
+    address?: string; token?: string; socket?: string;
+    /** A suggestion is about to be applied (its address is passed):
      * the parent clears what must not follow it, BEFORE the fields change. */
     onpick?: (address: string) => void;
     autofocus?: boolean; onenter?: () => void;
@@ -27,24 +26,19 @@
 
   let showToken = $state(false);
   let showHistory = $state(false);
+  // Read when the form mounts and again each time the list opens, so a form
+  // held across another page never offers what that page deleted.
+  let remembered = $state(rememberedAddresses(localStorage));
+  function toggleList() {
+    if (!showHistory) remembered = rememberedAddresses(localStorage);
+    showHistory = !showHistory;
+  }
 
   function focusIf(el: HTMLInputElement) { if (autofocus) el.focus(); }
   function enter(e: KeyboardEvent) {
     if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     onenter();
-  }
-  function forget(addr: string) {
-    history = history.filter(x => x.address !== addr);
-    localStorage.setItem('tmux_address_history', JSON.stringify(history));
-    try {
-      const machines = JSON.parse(localStorage.getItem('tmux_machines') || '{}');
-      for (const mid in machines) {
-        machines[mid] = machines[mid].filter((u: string) => u !== addr);
-        if (!machines[mid].length) delete machines[mid];
-      }
-      localStorage.setItem('tmux_machines', JSON.stringify(machines));
-    } catch {}
   }
 </script>
 
@@ -53,17 +47,16 @@
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
       <input type="text" bind:value={address} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
-      {#if history.length > 1}
+      {#if remembered.length > 1}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
-          onclick={() => showHistory = !showHistory}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>
+          onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>
       {/if}
     </div>
-    {#if showHistory && history.length}
+    {#if showHistory && remembered.length}
       <div class="hist-list appear-rise">
-        {#each history as h (h.address)}
-          <div class="hist-row" animate:flip={{ duration: moveMs() }}>
+        {#each remembered as h (h.address)}
+          <div class="hist-row">
             <button class="hist-item" onclick={() => { onpick?.(h.address); address = h.address; token = h.token; showHistory = false; }}>{h.address}</button>
-            <button class="hist-del" onclick={(e) => { e.stopPropagation(); forget(h.address); }}><Icon name="x" size={11} /></button>
           </div>
         {/each}
       </div>
@@ -125,12 +118,6 @@
     transition: background var(--t-fast), color var(--t-fast);
   }
   .hist-item:active { background: var(--accent-bg); color: var(--accent); }
-  .hist-del {
-    padding: 8px 10px; border: none; background: none;
-    color: var(--text3); cursor: pointer; -webkit-tap-highlight-color: transparent;
-    transition: color var(--t-fast);
-  }
-  .hist-del:active { color: var(--danger); }
 
   label {
     display: flex;
