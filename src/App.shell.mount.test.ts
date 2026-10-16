@@ -9937,3 +9937,41 @@ test('#403: the code comes from the registry tuple, not from the mirror keys —
   const expected = qrPath(qrMatrix(buildConnectionLink({ address: 'ws://a:9899', token: 'tokA', socket: '' })!));
   assert.equal(h.app.document.querySelector('.dlg svg.qr path.ink')?.getAttribute('d'), expected);
 });
+
+// ─── #403: scanning, hosted once by the shell ────────────────────────────
+
+test('#403: the login page\u2019s Scan command opens the one scan dialog; Cancel, Back and the app going to the background each close it and leave the form as it was', async (context) => {
+  const h = await bootApp(context, { tmux_layout_mode: 'mobile' }, undefined, sandbox);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const doc = h.app.document;
+  const scan = () => [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()));
+  const dialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^scan qr code/iu.test((d.getAttribute('aria-label') ?? d.querySelector('h2,.dlg-title')?.textContent ?? '').trim()));
+  const address = () => doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value;
+  const before = address();
+  assert.ok(scan(), 'a touch layout has the command');
+  assert.equal(dialog(), undefined, 'and no dialog until the tap');
+
+  const open = async () => { scan()!.click(); await h.settle(); await h.settle(); };
+  await open();
+  assert.ok(dialog(), 'the tap opened the scan dialog');
+  assert.match(dialog()!.textContent ?? '', /The camera is only used to read a connection QR code\. Nothing is recorded or sent\./u, 'and it says what the camera is for');
+  [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^cancel$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  assert.equal(dialog(), undefined, 'Cancel closes it');
+
+  await open();
+  assert.ok(dialog());
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  await h.settle();
+  assert.equal(dialog(), undefined, 'Back peels it');
+
+  await open();
+  assert.ok(dialog());
+  Object.defineProperty(doc, 'hidden', { configurable: true, get: () => true });
+  doc.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  assert.equal(dialog(), undefined, 'the app going to the background closes it, which also releases the camera');
+  Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
+  assert.equal(address(), before, 'the form was never touched');
+  assert.equal(h.app.window.localStorage.getItem('tmux_servers'), '[]', 'and nothing was recorded');
+});

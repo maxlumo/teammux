@@ -52,6 +52,17 @@ test('the connection QR code is the shell\u2019s own dialog: Back peels it, and 
   assert.match(source, /<QrDialog matrix=\{qr\} compact=\{narrowVp\} oncancel=\{\(\) => \(qr = null\)\} \/>/u, 'and Hide drops them');
 });
 
+test('the scan dialog is hosted once by the shell: Back peels it first, the background closes it, a second request settles the first, and the result is text that fills a form, never a connection (#403)', () => {
+  assert.match(source, /if \(scan\) \{ finishScan\(null\); navPush\(\); return; \}\s*if \(addServer\)/u, 'first in the popstate chain, above the Add server dialog it can be opened from');
+  assert.match(source, /new Promise\(\(resolve\) => \{ scan\?\.settle\(null\); scan = \{ settle: resolve \}; \}\)/u, 'a second request settles the first with nothing');
+  assert.match(source, /const hide = \(\) => \{ if \(document\.hidden\) finishScan\(null\); \};\s*document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'the camera is released when the app goes to the background');
+  assert.match(source, /<ScanDialog compact=\{narrowVp\} onscanned=\{finishScan\} oncancel=\{\(\) => finishScan\(null\)\} \/>/u);
+  assert.match(source, /onscan=\{scanQr\}/u, 'the Add server dialog uses it');
+  assert.match(source, /onScan=\{scanQr\}/u, 'and so does the login page');
+  const scanning = source.match(/function finishScan\(text\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.doesNotMatch(scanning, /onConnected|connect|submit|recordServer/u, 'finishing a scan hands back text and nothing else');
+});
+
 test('App link feedback belongs to its page and connection, and disposes with App (#167)', () => {
   // Polling can replace serverInfo without changing the machine. A primitive
   // descriptor keeps that refresh from invalidating the copy or its timer.
@@ -630,7 +641,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
   assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
+  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} onScan=\{scanQr\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what

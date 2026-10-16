@@ -251,3 +251,35 @@ test('the dialog: hidden characters are refused with their own message, naming n
     assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
   } finally { await app.close(); }
 });
+
+// ─── #403: scanning fills the dialog's form and never submits ───────────
+
+const scanButton = (app: { document: Document }) => [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()));
+async function scanDialog(context: import('node:test').TestContext, layout: string, scan: (() => Promise<string | null>) | null, submitted: unknown[] = []) {
+  const app = await (await compiled).mount(context, {
+    props: { oncancel: () => {}, onsubmit: (c: unknown) => { submitted.push(c); }, onscan: scan },
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); window.localStorage.setItem('tmux_layout_mode', layout); },
+    modules: [],
+  });
+  for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
+  return app;
+}
+
+test('the dialog: on a touch layout a scanned link fills address, token and socket and submits nothing; on a desktop layout there is no Scan command', async context => {
+  const submitted: unknown[] = [];
+  const app = await scanDialog(context, 'mobile', async () => 'wss://scan.example/ws?token=SCANNED-TOKEN&socket=%2Ftmp%2Fscanned', submitted);
+  try {
+    assert.ok(scanButton(app), 'the command is there');
+    scanButton(app)!.click();
+    await app.flush(); await app.flush();
+    assert.equal(app.document.querySelector<HTMLInputElement>(FIELDS.address)!.value, 'wss://scan.example/ws');
+    assert.equal(app.document.querySelector<HTMLInputElement>(FIELDS.token)!.value, 'SCANNED-TOKEN');
+    assert.equal(app.document.querySelector<HTMLInputElement>(FIELDS.socket)!.value, '/tmp/scanned');
+    assert.deepEqual(submitted, [], 'the person taps Connect');
+  } finally { await app.close(); }
+});
+
+test('the dialog: no Scan command on a desktop layout, nor when the host offers no scanner', async context => {
+  const desktop = await scanDialog(context, 'desktop', async () => null);
+  try { assert.equal(scanButton(desktop), undefined); } finally { await desktop.close(); }
+});

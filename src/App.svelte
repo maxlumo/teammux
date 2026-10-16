@@ -63,6 +63,7 @@
   import { buildConnectionLink, parseConnectionLink, routeOfHash } from './lib/core/connection-link.ts';
   import { qrMatrix } from './lib/core/qr.ts';
   import QrDialog from './lib/app/QrDialog.svelte';
+  import ScanDialog from './lib/app/ScanDialog.svelte';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -3055,6 +3056,26 @@
   const linkContext = $derived(JSON.stringify({ page, connected, activeAddress, serverCurId, machineId: serverInfo.machineId }));
   $effect(() => { void linkContext; linkFeedback.clear(); });
   onDestroy(() => linkFeedback.dispose());
+  /** Scan a connection QR code (board #403): the host of the one scan dialog, so
+   * the login page and the Add server dialog share it. Resolves with the decoded
+   * text, or null when it was cancelled, closed by Back, or the app went to the
+   * background (which also releases the camera). A second request settles the first. */
+  let scan = $state(null);        // { settle } | null
+  function scanQr() {
+    return new Promise((resolve) => { scan?.settle(null); scan = { settle: resolve }; });
+  }
+  function finishScan(text) {
+    const open = scan;
+    scan = null;
+    open?.settle(text);
+  }
+  $effect(() => {
+    if (!scan) return;
+    const hide = () => { if (document.hidden) finishScan(null); };
+    document.addEventListener('visibilitychange', hide);
+    return () => document.removeEventListener('visibilitychange', hide);
+  });
+
   /** The connection QR code (board #403): open only by an explicit command, since
    * the code carries the token. What is held is the code's MODULES, never the
    * link; it is dropped when the dialog closes, when the app goes to the
@@ -3327,6 +3348,7 @@
       // the reader cannot even see. Every other dialog in the app is peeled
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
+      if (scan) { finishScan(null); navPush(); return; }
       if (addServer) { addServer = null; navPush(); return; }
       // So is a saved server's Addresses and token dialog (board #402 review
       // P2-C): Back closes it, writes nothing, and Connection stays behind it.
@@ -3928,8 +3950,12 @@
   {/if}
 
   {#if addServer}
-    <AddServerDialog initial={addServer.initial} compact={narrowVp}
+    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={scanQr}
       onsubmit={submitAddServer} oncancel={() => (addServer = null)} />
+  {/if}
+
+  {#if scan}
+    <ScanDialog compact={narrowVp} onscanned={finishScan} oncancel={() => finishScan(null)} />
   {/if}
 
   {#if reconnecting && page !== 'settings'}
@@ -3994,7 +4020,7 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if (page === 'settings' || holdPages) && !switching}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} {openCandidate} confirmLeave={confirmFormLeave} notice={reconnectError}
+      <Settings {onConnected} {openCandidate} onScan={scanQr} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}
