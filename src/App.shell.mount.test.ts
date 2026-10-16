@@ -9656,6 +9656,9 @@ test('#402 review P1-B residual: an old link whose credential sits only inside i
   const add = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!;
   const alert = () => dialog.querySelector('[role=alert]')?.textContent ?? '';
   const SECRET = 'FAKE-SECRET-402';
+  // The reason the shared classification gives (#401, #405), worded as the
+  // connect form words it: a credential in the link's address, or a link.
+  const REFUSED = /this link.s address contains a credential|that is a connection link, not an address/iu;
   const before = JSON.stringify(dumpStorage(h.app));
   const links = [
     `https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3D${SECRET}`,
@@ -9668,13 +9671,13 @@ test('#402 review P1-B residual: an old link whose credential sits only inside i
     field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: link }));
     await h.settle();
     assert.equal(field.value, '', `pasted: cleared at once (${link.slice(0, 40)}…)`);
-    assert.match(alert(), /that is a connection link, not an address/iu);
+    assert.match(alert(), REFUSED, 'refused with the shared classification s reason');
     field.value = link;
     field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
     await h.settle();
     add().click(); await h.settle();
     assert.equal(field.value, '', 'typed and submitted: refused and cleared');
-    assert.match(alert(), /that is a connection link, not an address/iu);
+    assert.match(alert(), REFUSED);
     assert.ok(!doc.body.innerHTML.includes(SECRET) && !alert().includes(SECRET), 'the secret is never in the page');
   }
   assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing stored');
@@ -9792,4 +9795,55 @@ for (const when of ['before the write (the snapshot cannot be read)', 'after a f
   const said = dialog()!.querySelector('[role=alert]')?.textContent ?? '';
   if (when.startsWith('before')) assert.match(said, /not saved: this device could not use its storage/iu, 'no write was attempted: nothing changed is true');
   else assert.match(said, /could not confirm the save/iu, 'the re-read could not be made: uncertain, never "nothing changed"');
+});
+
+// #405: URL user info is a credential. builder-2's order: the link parse,
+// then endpointOf; the Add address field clears it at once.
+test('#402 + #405: user info pasted or typed into Add address (user:pass@h, user@h, wss:////user:pw@h, an old link whose addr holds it) is cleared at once, its reason said, nothing echoed or stored; an @ in a path or query is a clean endpoint', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, sandbox);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  const add = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!;
+  const alert = () => dialog.querySelector('[role=alert]')?.textContent ?? '';
+  const rows = () => [...dialog.querySelectorAll('.details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim());
+  const PW = 'FAKE-PW-405';
+  const before = JSON.stringify(dumpStorage(h.app));
+  for (const text of [`me:${PW}@b-ts:9899`, `ws://me:${PW}@b-ts:9899`, `wss:////me:${PW}@b-ts/ws`, `${PW}@b-ts:9899`,
+    `https://front.example/?addr=ws%3A%2F%2Fme%3A${PW}%40b-ts%3A9899`, `ws://b-ts:9899?token=${PW}&socket=`,
+    // Text with a space inside is no link to parseConnectionLink, so only the
+    // endpointOf step (builder-2's step 2) sees the user info in it.
+    `server me:${PW}@b-ts:9899`]) {
+    field.value = text;
+    field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: text }));
+    await h.settle();
+    assert.equal(field.value, '', `pasted, cleared at once: ${text.replace(PW, '<pw>')}`);
+    assert.match(alert(), /this link.s address contains a credential|that is a connection link, not an address/iu);
+    field.value = text;
+    field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await h.settle();
+    add().click(); await h.settle();
+    assert.equal(field.value, '', 'typed and submitted: cleared too');
+    assert.ok(!doc.body.innerHTML.includes(PW) && !alert().includes(PW), 'never echoed');
+  }
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing stored, beta s token untouched');
+  // A hidden character: refused with its own reason, not stored.
+  field.value = 'ws://b-ts\u200b:9899';
+  field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: field.value }));
+  await h.settle();
+  assert.match(alert(), /hidden characters/iu);
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before);
+  // An @ in a path or a query is not user info.
+  for (const ok of ['ws://b-ts:9899/a@b', 'ws://b-wan:9899?x=a@b']) {
+    field.value = ok; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle();
+    add().click(); await h.settle();
+  }
+  assert.deepEqual(rows(), ['ws://b:9899 In use', 'ws://b-ts:9899/a@b', 'ws://b-wan:9899?x=a@b']);
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB');
 });
