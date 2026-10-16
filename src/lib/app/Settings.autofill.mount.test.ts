@@ -483,6 +483,25 @@ test('a refusal is cleared by the next scan, and the next scan fills the form', 
   assert.equal(app.value(TOKEN), 'GOOD-TOKEN');
 });
 
+test('the form hands its own lifetime to the scan: unmounting Settings aborts it whatever the page is, and a result that arrives afterwards fills nothing', async context => {
+  const signals: AbortSignal[] = [];
+  let later!: (text: string) => void;
+  const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, {
+    onScan: (signal: AbortSignal) => { signals.push(signal); return new Promise<string | null>((resolve) => { later = resolve; }); },
+  });
+  await app.answer();
+  scanButton(app)!.click();
+  await app.flush();
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.aborted, false, 'alive while the form is');
+  const address = app.document.querySelector<HTMLInputElement>(ADDR)!;
+  await app.close();
+  assert.equal(signals[0]!.aborted, true, 'the form going away ended the scan it started');
+  later('wss://late.example/ws?token=LATE-TOKEN&socket=');
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(address.value, 'ws://keep.example:9899', 'a stale consumer never receives a result');
+});
+
 test('a cancelled scan changes nothing', async context => {
   const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, scanning(null));
   await app.answer();

@@ -18,7 +18,7 @@
   type Candidate = { address: string; token: string; socket?: string };
   let {
     initial = null, compact = false, onsubmit, oncancel, onscan = null,
-  }: { initial?: Candidate | null; compact?: boolean; onsubmit: (c: Candidate) => void; oncancel: () => void; onscan?: (() => Promise<string | null>) | null } = $props();
+  }: { initial?: Candidate | null; compact?: boolean; onsubmit: (c: Candidate) => void; oncancel: () => void; onscan?: ((signal: AbortSignal) => Promise<string | null>) | null } = $props();
 
   // The dialog is mounted per opening, so the prefill is read once on purpose.
   const seed = untrack(() => initial);

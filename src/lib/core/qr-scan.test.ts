@@ -47,14 +47,14 @@ test('the module keeps nothing and says nothing about what it reads', async () =
 
 // ─── the camera is owned from the moment it is acquired (review P1-C) ─────
 
-function stage(over: { createElement?: () => unknown } = {}) {
+function stage(over: { createElement?: () => unknown; play?: () => Promise<void> } = {}) {
   const track = { stopped: 0, stop() { this.stopped++; } };
   const stream = { getTracks: () => [track] } as unknown as MediaStream;
   let giveStream!: (s: MediaStream) => void;
   const acquiring = new Promise<MediaStream>((resolve) => { giveStream = resolve; });
   let letPlay!: () => void;
   const playing = new Promise<void>((resolve) => { letPlay = resolve; });
-  const video = { srcObject: null as unknown, muted: false, videoWidth: 0, videoHeight: 0, setAttribute() {}, play: () => playing } as unknown as HTMLVideoElement;
+  const video = { srcObject: null as unknown, muted: false, videoWidth: 0, videoHeight: 0, setAttribute() {}, play: over.play ?? (() => playing) } as unknown as HTMLVideoElement;
   const g = globalThis as Record<string, unknown>;
   const saved = { window: g.window, document: g.document, navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator') };
   g.window = { isSecureContext: true };
@@ -125,5 +125,37 @@ test('an open camera stops once on stop(), and a later abort has nothing left to
     lifetime.abort();
     assert.equal(s.track.stopped, 1);
     assert.equal(camera.readFrame(), null, 'a stopped camera reads nothing');
+  } finally { s.restore(); }
+});
+
+test('a rejected play() is a failed camera, not an open one: the stream is released and the reason is "failed"; a rejection caused by the abort stays quiet', async () => {
+  const s = stage({ play: () => Promise.reject(new Error('NotAllowedError')) });
+  try {
+    const opening = openCamera(s.video, new AbortController().signal);
+    s.giveStream(s.stream);
+    await assert.rejects(opening, (e) => reasonOf(e) === 'failed');
+    assert.equal(s.track.stopped, 1);
+    assert.equal(s.video.srcObject, null);
+  } finally { s.restore(); }
+  const quiet = stage({ play: () => Promise.reject(new Error('AbortError')) });
+  try {
+    const lifetime = new AbortController();
+    const opening = openCamera(quiet.video, lifetime.signal);
+    quiet.giveStream(quiet.stream);
+    lifetime.abort();
+    await assert.rejects(opening, (e) => reasonOf(e) === 'cancelled');
+    assert.equal(quiet.track.stopped, 1);
+  } finally { quiet.restore(); }
+});
+
+test('a canvas with no 2d context is a failed camera: the stream is released rather than returning a reader that could only ever miss', async () => {
+  const s = stage({ createElement: () => ({ getContext: () => null }) });
+  try {
+    const opening = openCamera(s.video, new AbortController().signal);
+    s.giveStream(s.stream);
+    s.letPlay();
+    await assert.rejects(opening, (e) => reasonOf(e) === 'failed');
+    assert.equal(s.track.stopped, 1);
+    assert.equal(s.video.srcObject, null);
   } finally { s.restore(); }
 });

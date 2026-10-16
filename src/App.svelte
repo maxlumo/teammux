@@ -3060,23 +3060,26 @@
   /** Scan a connection QR code (board #403): the host of the one scan, so the
    * login page and the Add server dialog share it, on every platform: the Android
    * app's webview asks for the camera like a browser does (wry bridges the
-   * permission), so there is one scan, `ScanDialog`. A scan is an OPERATION with
-   * an owner (scan-operation.ts), registered synchronously at the tap and ended
-   * by Back, the background, Cancel, a second tap or the owner form going away;
-   * it resolves with the decoded text, or null. */
+   * permission), so there is one scan, `ScanDialog`. A scan is an OPERATION
+   * (scan-operation.ts) registered synchronously at the tap, with the asking
+   * form's own lifetime (`signal`): it ends on Back, the background, Cancel, a
+   * second tap, that form going away, or this shell going away, and it resolves
+   * with the decoded text, or null. The one exception to the background: while a
+   * photo picker THIS scan opened is up, the page may be hidden for it. */
   let scanOp = $state.raw(null);
   const scans = new ScanHost((op) => { scanOp = op; });
-  const scanQr = (owner) => scans.begin(owner).result;
+  const scanQr = (signal) => scans.begin(signal).result;
+  onDestroy(() => scans.end());
   $effect(() => {
     if (!scanOp) return;
-    const hide = () => { if (document.hidden) scans.end(); };
-    document.addEventListener('visibilitychange', hide);
-    return () => document.removeEventListener('visibilitychange', hide);
+    const op = scanOp;
+    const changed = () => {
+      if (document.hidden) { if (!op.picking) scans.end(); }
+      else op.picking = false;       // back from the picker (its result, or its cancel, is handled by the dialog)
+    };
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
   });
-  // The owner form's teardown ends its scan: the Add server dialog closing, the
-  // login page being replaced by a connected one.
-  $effect(() => { if (!addServer) scans.endOwner('addServer'); });
-  $effect(() => { if (page !== 'settings') scans.endOwner('settings'); });
 
   /** The connection QR code (board #403): open only by an explicit command, since
    * the code carries the token. What is held is the code's MODULES, never the
@@ -3952,14 +3955,14 @@
   {/if}
 
   {#if addServer}
-    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={() => scanQr('addServer')}
+    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={scanQr}
       onsubmit={submitAddServer} oncancel={() => (addServer = null)} />
   {/if}
 
   <!-- Keyed by the operation: a second tap mounts a fresh dialog, and a callback
        can only end the operation it was made for, never its successor. -->
   {#each scanOp ? [scanOp] : [] as op (op)}
-    <ScanDialog compact={narrowVp} onscanned={(text) => op.end(text)} oncancel={() => op.end(null)} />
+    <ScanDialog compact={narrowVp} onscanned={(text) => op.end(text)} oncancel={() => op.end(null)} onpicking={(on) => { op.picking = on; }} />
   {/each}
 
   {#if reconnecting && page !== 'settings'}
@@ -4024,7 +4027,7 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if (page === 'settings' || holdPages) && !switching}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} {openCandidate} onScan={() => scanQr('settings')} confirmLeave={confirmFormLeave} notice={reconnectError}
+      <Settings {onConnected} {openCandidate} onScan={scanQr} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}

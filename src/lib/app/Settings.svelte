@@ -76,7 +76,7 @@
      */
     confirmLeave?: ((address: string) => Promise<boolean>) | undefined;
     /** Scan a connection QR code (board #403): the decoded text, or null when cancelled. */
-    onScan?: (() => Promise<string | null>) | null;
+    onScan?: ((signal: AbortSignal) => Promise<string | null>) | null;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the

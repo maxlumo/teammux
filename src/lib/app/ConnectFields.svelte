@@ -6,7 +6,7 @@
   // (board #400) — there is no list of its own to forget from: a server is
   // forgotten in Settings › Connection, and then it is gone from here. (The
   // `hist-` class names are from the list's earlier life.)
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { rememberedAddresses, type Suggestion } from './servers.ts';
@@ -32,7 +32,9 @@
      * thing that survives: `{ socket }`, the local gateway's own auto-filled
      * socket when the saved entry has none. */
     onpick?: (pick: Suggestion) => { socket: string } | void;
-    onscan?: (() => Promise<string | null>) | null;
+    /** Asked with this form's own lifetime: it is aborted when the form is unmounted,
+     * so a scan the form started cannot outlive it or hand it a result. */
+    onscan?: ((signal: AbortSignal) => Promise<string | null>) | null;
     autofocus?: boolean; onenter?: () => void;
   } = $props();
 
@@ -72,13 +74,17 @@
     return t(reason === 'no-address' ? 'linkNoAddress' : reason === 'ambiguous' ? 'linkAmbiguous' : reason === 'hidden' ? 'linkHidden' : 'linkAddressCredential');
   }
 
+  /** This form's lifetime, for a scan it starts (see `onscan`). */
+  const lifetime = new AbortController();
+  onDestroy(() => lifetime.abort());
+
   /** Scan a QR code and take what it says as a pasted link would be taken: a
    * usable link fills address, token and socket; a bare gateway address fills the
    * address alone; anything else is refused with a message that names none of it.
    * Scanning never connects: the person taps Connect. */
   async function scan() {
-    const text = await onscan?.();
-    if (text == null) return;
+    const text = await onscan?.(lifetime.signal);
+    if (text == null) return;           // cancelled, or this form is gone (its scan ended with nothing)
     const parsed = parseConnectionLink(text);
     if (parsed.kind === 'link') { pick({ address: parsed.link.address, token: parsed.link.token ?? '', socket: parsed.link.socket ?? '' }); return; }
     if (parsed.kind === 'unusable') { linkError = refusal(parsed.reason); return; }

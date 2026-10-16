@@ -10040,3 +10040,51 @@ for (const [owner, ending] of [
     assert.equal(win.localStorage.getItem('tmux_servers') === '[]' || owner !== 'the login page', true, 'nothing was recorded');
   });
 }
+
+test('#403: Choose a photo is the scan\u2019s own state: the camera request is let go first, the page going hidden for the picker does not end the scan, a cancelled picker leaves it, and ordinary backgrounding after the return still ends it', async (context) => {
+  let camera!: ReturnType<typeof heldCamera>;
+  const h = await bootApp(context, { tmux_layout_mode: 'mobile' }, undefined, { setup(window: any) { sandbox.setup(window); camera = heldCamera(window); } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const doc = h.app.document;
+  const win = h.app.window as any;
+  const scanDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^scan qr code/iu.test((d.getAttribute('aria-label') ?? '').trim()));
+  const hidden = (value: boolean) => { Object.defineProperty(doc, 'hidden', { configurable: true, get: () => value }); doc.dispatchEvent(new win.Event('visibilitychange')); };
+  [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle(); await h.settle();
+  assert.ok(scanDialog());
+  const input = scanDialog()!.querySelector<HTMLInputElement>('input[type="file"]')!;
+  assert.equal(input.hasAttribute('capture'), false, 'a plain image picker');
+  let picked = 0;
+  input.addEventListener('click', (e) => { picked++; e.preventDefault(); });         // jsdom has no picker
+  [...scanDialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /photo/iu.test(b.textContent ?? ''))!.click();
+  await h.settle();
+  assert.equal(picked, 1, 'the picker was opened');
+
+  hidden(true); await h.settle();                                   // the picker's Activity covers the page
+  assert.ok(scanDialog(), 'hidden for the picker: the scan is not ended');
+  hidden(false); await h.settle();                                  // back from the picker
+  input.dispatchEvent(new win.Event('cancel', { bubbles: true })); await h.settle();
+  assert.ok(scanDialog(), 'a cancelled picker leaves the scan as it was');
+  assert.equal(camera.requests(), 1);
+
+  camera.give(); for (let i = 0; i < 4; i++) await h.settle();      // the camera request the picker overtook finally answers
+  assert.equal(camera.track.stopped, 1, 'a camera that opens after the picker took over is stopped');
+  assert.equal(doc.querySelector('video')?.srcObject ?? null, null, 'and never attached');
+
+  hidden(true); await h.settle();                                   // ordinary backgrounding, outside the hand-off
+  assert.equal(scanDialog(), undefined, 'ends the scan');
+  hidden(false);
+});
+
+test('#403: the app being torn down while the camera permission is held releases the camera that answers late (the scan promise settling with nothing is pinned in scan-operation.test.ts and by the onDestroy in App.source.test.ts)', async (context) => {
+  let camera!: ReturnType<typeof heldCamera>;
+  const h = await bootApp(context, { tmux_layout_mode: 'mobile' }, undefined, { setup(window: any) { sandbox.setup(window); camera = heldCamera(window); } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle(); await h.settle();
+  assert.equal(camera.requests(), 1);
+  await h.app.close();
+  camera.give();
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  assert.equal(camera.track.stopped, 1, 'released');
+});

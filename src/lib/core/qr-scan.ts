@@ -76,13 +76,14 @@ export async function openCamera(video: HTMLVideoElement, signal?: AbortSignal):
     video.muted = true;
     video.setAttribute('playsinline', '');
     video.srcObject = stream;
-    await video.play().catch(() => {});
+    try { await video.play(); } catch { throw new CameraError(signal?.aborted ? 'cancelled' : 'failed'); }
     if (signal?.aborted) throw new CameraError('cancelled');
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new CameraError('failed');                          // a reader that could only ever miss
     return {
       readFrame() {
-        if (signal?.aborted || !context || !video.videoWidth || !video.videoHeight) return null;
+        if (signal?.aborted || !video.videoWidth || !video.videoHeight) return null;
         const scale = Math.min(1, LIVE_SIDE / Math.max(video.videoWidth, video.videoHeight));
         canvas.width = Math.round(video.videoWidth * scale);
         canvas.height = Math.round(video.videoHeight * scale);

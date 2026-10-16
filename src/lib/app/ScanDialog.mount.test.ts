@@ -85,7 +85,7 @@ test('a camera that cannot be used says why, and the photo path is still there',
       [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /photo/iu.test(b.textContent ?? ''))!.click();
       assert.equal(picked, 1, 'a Photo command is there and opens the picker');
       assert.equal(input.getAttribute('accept'), 'image/*');
-      assert.equal(input.getAttribute('capture'), 'environment', 'the photo opens the rear camera app where there is one');
+      assert.equal(input.hasAttribute('capture'), false, 'a plain picker of existing images: capture would send wry to the camera branch, which needs the permission that was refused');
       Object.defineProperty(input, 'files', { configurable: true, value: [new app.window.Blob(['x'], { type: 'image/png' })] });
       input.dispatchEvent(new app.window.Event('change', { bubbles: true }));
       await settle(app, 4);
@@ -206,5 +206,51 @@ test('a camera that is still opening when a photo finishes the scan reports noth
     await settle(app, 6);
     assert.deepEqual(scanned, [LINK]);
     assert.equal(app.document.querySelector('.scan-status')?.textContent?.trim(), 'Starting the camera…', 'no "could not be started" for a camera we stopped ourselves');
+  } finally { await app.close(); }
+});
+
+// ─── the photo picker is its own state within the scan (review P2-B) ─────
+
+test('Choose a photo lets the camera go BEFORE the picker opens, stops the frame loop, and tells the host the picker is ours; a cancelled picker leaves the dialog as it is', async context => {
+  const events: string[] = [];
+  let signal: AbortSignal | undefined;
+  const camera = fakeCamera(1_000_000);
+  const app = await mountDialog(context, {
+    camera: (video: HTMLVideoElement, given: AbortSignal) => { signal = given; return camera.open(); },
+    onpicking: (on: boolean) => events.push(`picking:${on}`), onscanned: () => assert.fail('nothing was scanned'), oncancel: () => {},
+  });
+  try {
+    await settle(app, 4);
+    assert.ok(camera.calls.opened === 1 && camera.calls.reads > 0, 'live and reading');
+    const input = app.document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    input.addEventListener('click', () => events.push(`picker opened; camera stopped=${camera.calls.stopped}; aborted=${signal!.aborted}`));
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /photo/iu.test(b.textContent ?? ''))!.click();
+    await app.flush();
+    assert.deepEqual(events, ['picking:true', 'picker opened; camera stopped=1; aborted=true'], 'released before the picker opened');
+    const reads = camera.calls.reads;
+    await settle(app, 8);
+    assert.equal(camera.calls.reads, reads, 'no live frame is read while the picker is up');
+    assert.equal(app.document.querySelector('.scan-status')?.textContent?.trim(), 'Choose a photo of the code');
+    input.dispatchEvent(new app.window.Event('cancel', { bubbles: true }));
+    await app.flush();
+    assert.equal(events.at(-1), 'picking:false', 'the picker returned without a file');
+    assert.ok(app.document.querySelector('.dlg'), 'and the dialog is still there');
+    assert.ok([...app.document.querySelectorAll('.dlg button')].some((b) => /photo/iu.test(b.textContent ?? '')), 'Choose a photo and Cancel are still offered');
+  } finally { await app.close(); }
+});
+
+test('a camera that opens after the picker took over is stopped and never read', async context => {
+  let open!: (camera: Camera) => void;
+  const opening = new Promise<Camera>((resolve) => { open = resolve; });
+  let stopped = 0;
+  const app = await mountDialog(context, { camera: () => opening, onscanned: () => assert.fail('nothing was scanned'), oncancel: () => {} });
+  try {
+    await settle(app, 3);
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /photo/iu.test(b.textContent ?? ''))!.click();
+    await app.flush();
+    open({ readFrame: () => assert.fail('no frame'), stop: () => { stopped++; } });
+    await settle(app, 4);
+    assert.equal(stopped, 1);
+    assert.equal(app.document.querySelector('.scan-status')?.textContent?.trim(), 'Choose a photo of the code', 'and the camera finishing does not replace the picker state');
   } finally { await app.close(); }
 });

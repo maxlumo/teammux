@@ -283,3 +283,20 @@ test('the dialog: no Scan command on a desktop layout, nor when the host offers 
   const desktop = await scanDialog(context, 'desktop', async () => null);
   try { assert.equal(scanButton(desktop), undefined); } finally { await desktop.close(); }
 });
+
+test('the dialog hands its own lifetime to the scan: closing the dialog aborts it', async context => {
+  const signals: AbortSignal[] = [];
+  const again = await (await compiled).mount(context, {
+    props: { oncancel: () => {}, onsubmit: () => {}, onscan: (signal: AbortSignal) => { signals.push(signal); return new Promise<string | null>(() => {}); } },
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); window.localStorage.setItem('tmux_layout_mode', 'mobile'); },
+    modules: [],
+  });
+  try {
+    for (let i = 0; i < 8 && !again.document.querySelector('.dlg input'); i++) await again.flush();
+    scanButton(again)!.click();
+    await again.flush();
+    assert.equal(signals.length, 1);
+    assert.equal(signals[0]!.aborted, false);
+  } finally { await again.close(); }
+  assert.equal(signals[0]!.aborted, true, 'the dialog closing ended the scan it started');
+});

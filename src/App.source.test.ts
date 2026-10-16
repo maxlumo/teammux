@@ -52,14 +52,14 @@ test('the connection QR code is the shell\u2019s own dialog: Back peels it, and 
   assert.match(source, /<QrDialog matrix=\{qr\} compact=\{narrowVp\} oncancel=\{\(\) => \(qr = null\)\} \/>/u, 'and Hide drops them');
 });
 
-test('a scan is one operation, registered synchronously at the tap and ended by Back, the background, Cancel, a second tap or its owner form; the dialog is keyed by it (#403)', () => {
-  assert.match(source, /const scans = new ScanHost\(\(op\) => \{ scanOp = op; \}\);\s*const scanQr = \(owner\) => scans\.begin\(owner\)\.result;/u, 'begun in the tap itself: no async function, no await before it is registered');
+test('a scan is one operation, registered synchronously at the tap and ended by Back, the background, Cancel, a second tap, its consumer form or the shell; a picker it opened is not an ending; the dialog is keyed by it (#403)', () => {
+  assert.match(source, /const scans = new ScanHost\(\(op\) => \{ scanOp = op; \}\);\s*const scanQr = \(signal\) => scans\.begin\(signal\)\.result;\s*onDestroy\(\(\) => scans\.end\(\)\);/u, 'begun in the tap itself (no async, no await before it is registered), with the asking form\u2019s lifetime, and ended with the shell');
   assert.match(source, /if \(scanOp\) \{ scans\.end\(\); navPush\(\); return; \}\s*if \(addServer\)/u, 'Back is first in the popstate chain, above the Add server dialog it can be opened from');
-  assert.match(source, /const hide = \(\) => \{ if \(document\.hidden\) scans\.end\(\); \};\s*document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'the background ends it');
-  assert.match(source, /\$effect\(\(\) => \{ if \(!addServer\) scans\.endOwner\('addServer'\); \}\);\s*\$effect\(\(\) => \{ if \(page !== 'settings'\) scans\.endOwner\('settings'\); \}\);/u, 'and so does its owner form going away');
-  assert.match(source, /\{#each scanOp \? \[scanOp\] : \[\] as op \(op\)\}\s*<ScanDialog compact=\{narrowVp\} onscanned=\{\(text\) => op\.end\(text\)\} oncancel=\{\(\) => op\.end\(null\)\} \/>/u, 'a callback can only end the operation it was made for');
-  assert.match(source, /onscan=\{\(\) => scanQr\('addServer'\)\}/u);
-  assert.match(source, /onScan=\{\(\) => scanQr\('settings'\)\}/u);
+  assert.match(source, /if \(document\.hidden\) \{ if \(!op\.picking\) scans\.end\(\); \}\s*else op\.picking = false;[\s\S]*?document\.addEventListener\('visibilitychange', changed\);[\s\S]*?document\.removeEventListener\('visibilitychange', changed\);/u, 'the background ends it, except while the picker it opened is up; coming back clears that');
+  assert.doesNotMatch(source, /endOwner|scans\.begin\('/u, 'the owner is the form\u2019s lifetime, not a page name');
+  assert.match(source, /\{#each scanOp \? \[scanOp\] : \[\] as op \(op\)\}\s*<ScanDialog compact=\{narrowVp\} onscanned=\{\(text\) => op\.end\(text\)\} oncancel=\{\(\) => op\.end\(null\)\} onpicking=\{\(on\) => \{ op\.picking = on; \}\} \/>/u, 'a callback can only end the operation it was made for');
+  assert.match(source, /onscan=\{scanQr\}/u);
+  assert.match(source, /onScan=\{scanQr\}/u);
   assert.doesNotMatch(source, /isAndroid|barcode|startNativeScan/u, 'one scan on every platform: the Android webview asks for the camera like a browser (wry bridges the permission)');
   const ending = source.match(/const scanQr = [^\n]*/u)?.[0] ?? '';
   assert.doesNotMatch(ending, /onConnected|connect|submit|recordServer/u, 'a scan hands back text and nothing else');
@@ -643,7 +643,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
   assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} onScan=\{\(\) => scanQr\('settings'\)\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
+  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} onScan=\{scanQr\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what
