@@ -64,6 +64,8 @@
   import { qrMatrix } from './lib/core/qr.ts';
   import QrDialog from './lib/app/QrDialog.svelte';
   import ScanDialog from './lib/app/ScanDialog.svelte';
+  import NativeScanSheet from './lib/app/NativeScanSheet.svelte';
+  import { startNativeScan } from './lib/core/qr-native.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -73,7 +75,7 @@
   import { cycleItem, dispatchShortcut, shortcutLabel } from './lib/app/shortcuts.ts';
   import { isShortcutInputTarget, shortcuts } from './lib/app/shortcuts.svelte.ts';
   import { installExternalLinkHandler } from './lib/core/external-links.ts';
-  import { isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
+  import { isAndroid, isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
   import { localServerLine, localServer } from './lib/app/server-mode.svelte.ts';
   import { flip } from 'svelte/animate';
   import { moveMs } from './lib/ui/motion.ts';
@@ -3056,22 +3058,43 @@
   const linkContext = $derived(JSON.stringify({ page, connected, activeAddress, serverCurId, machineId: serverInfo.machineId }));
   $effect(() => { void linkContext; linkFeedback.clear(); });
   onDestroy(() => linkFeedback.dispose());
-  /** Scan a connection QR code (board #403): the host of the one scan dialog, so
-   * the login page and the Add server dialog share it. Resolves with the decoded
+  /** Scan a connection QR code (board #403): the host of the one scan, so the
+   * login page and the Add server dialog share it. Resolves with the decoded
    * text, or null when it was cancelled, closed by Back, or the app went to the
-   * background (which also releases the camera). A second request settles the first. */
+   * background (which also releases the camera). On the Android app the camera
+   * is the native plugin's (a preview behind the transparent page, `nativeScan`);
+   * a refused permission or a plugin that fails falls through to the browser
+   * dialog, whose photo path needs no camera at all. A second request settles
+   * the first. */
   let scan = $state(null);        // { settle } | null
-  function scanQr() {
+  let nativeScan = $state.raw(null);  // { cancel } | null: the native preview is up
+  async function scanQr() {
+    if (nativeScan) return null;
+    if (isAndroid) {
+      await tauriReady;
+      const run = startNativeScan(() => { nativeScan = run; });
+      const outcome = await run.done;
+      nativeScan = null;
+      if (outcome.kind === 'text') return outcome.text;
+      if (outcome.kind === 'cancelled') return null;
+    }
     return new Promise((resolve) => { scan?.settle(null); scan = { settle: resolve }; });
   }
+  // The native preview is drawn behind the webview: while it is up the page is
+  // transparent and only the scan sheet is painted (app.css `.scan-native`).
+  $effect(() => {
+    if (!nativeScan) return;
+    document.documentElement.classList.add('scan-native');
+    return () => document.documentElement.classList.remove('scan-native');
+  });
   function finishScan(text) {
     const open = scan;
     scan = null;
     open?.settle(text);
   }
   $effect(() => {
-    if (!scan) return;
-    const hide = () => { if (document.hidden) finishScan(null); };
+    if (!scan && !nativeScan) return;
+    const hide = () => { if (document.hidden) { finishScan(null); nativeScan?.cancel(); } };
     document.addEventListener('visibilitychange', hide);
     return () => document.removeEventListener('visibilitychange', hide);
   });
@@ -3348,6 +3371,7 @@
       // the reader cannot even see. Every other dialog in the app is peeled
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
+      if (nativeScan) { nativeScan.cancel(); navPush(); return; }
       if (scan) { finishScan(null); navPush(); return; }
       if (addServer) { addServer = null; navPush(); return; }
       // So is a saved server's Addresses and token dialog (board #402 review
@@ -3956,6 +3980,10 @@
 
   {#if scan}
     <ScanDialog compact={narrowVp} onscanned={finishScan} oncancel={() => finishScan(null)} />
+  {/if}
+
+  {#if nativeScan}
+    <NativeScanSheet oncancel={() => nativeScan?.cancel()} />
   {/if}
 
   {#if reconnecting && page !== 'settings'}

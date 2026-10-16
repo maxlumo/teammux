@@ -334,7 +334,12 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // The QR scan reads the camera natively on a phone (board #403); a desktop
+    // build never compiles the plugin, and its webview scans through getUserMedia.
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())

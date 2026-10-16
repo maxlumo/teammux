@@ -40,6 +40,11 @@
     role = 'dialog',
     /** Phone: a bottom sheet instead of a centred card. */
     compact = false,
+    /** `false` leaves the page behind the sheet undimmed, for the one caller
+     * that sits over a live camera preview (the Android scan, #403): dimming it
+     * would be dimming the thing being pointed at a code. A tap on the preview then
+     * cancels nothing: only the Cancel command, Escape and Back do. */
+    scrim = true,
     /** An operation is running: Escape and the scrim stop cancelling, and
      * assistive tech is told. */
     busy = false,
@@ -64,6 +69,7 @@
     label: string;
     role?: 'dialog' | 'alertdialog';
     compact?: boolean;
+    scrim?: boolean;
     busy?: boolean;
     escapeGuard?: () => boolean;
     describedby?: string | undefined;
@@ -126,7 +132,7 @@
 </script>
 
 {#if open}
-  <div class="dlg-backdrop" onclick={cancel} role="presentation"></div>
+  <div class="dlg-backdrop" class:clear={!scrim} onclick={scrim ? cancel : undefined} role="presentation"></div>
   <!-- The ROLE is the only dialog species there is: a confirmation is an
        `alertdialog`, and app.css keys its one paint difference
        (`corner-shape: round`, #161) off that attribute. No `class` prop —
@@ -144,6 +150,7 @@
      desktop dialog only FADES (--t-fast) — it is centred BY a transform, so a
      transform keyframe on it would fight its own placement. */
   .dlg-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.45); animation: fade-in var(--t-move) ease-out; }
+  .dlg-backdrop.clear { background: transparent; }
   .dlg {
     position: fixed; z-index: 61; left: 50%; top: 50%; transform: translate(-50%, -50%);
     animation: fade-in var(--t-fast) ease-out;

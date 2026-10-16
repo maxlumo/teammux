@@ -55,12 +55,22 @@ test('the connection QR code is the shell\u2019s own dialog: Back peels it, and 
 test('the scan dialog is hosted once by the shell: Back peels it first, the background closes it, a second request settles the first, and the result is text that fills a form, never a connection (#403)', () => {
   assert.match(source, /if \(scan\) \{ finishScan\(null\); navPush\(\); return; \}\s*if \(addServer\)/u, 'first in the popstate chain, above the Add server dialog it can be opened from');
   assert.match(source, /new Promise\(\(resolve\) => \{ scan\?\.settle\(null\); scan = \{ settle: resolve \}; \}\)/u, 'a second request settles the first with nothing');
-  assert.match(source, /const hide = \(\) => \{ if \(document\.hidden\) finishScan\(null\); \};\s*document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'the camera is released when the app goes to the background');
+  assert.match(source, /const hide = \(\) => \{ if \(document\.hidden\) \{ finishScan\(null\); nativeScan\?\.cancel\(\); \} \};\s*document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'the camera is released when the app goes to the background');
   assert.match(source, /<ScanDialog compact=\{narrowVp\} onscanned=\{finishScan\} oncancel=\{\(\) => finishScan\(null\)\} \/>/u);
   assert.match(source, /onscan=\{scanQr\}/u, 'the Add server dialog uses it');
   assert.match(source, /onScan=\{scanQr\}/u, 'and so does the login page');
   const scanning = source.match(/function finishScan\(text\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
   assert.doesNotMatch(scanning, /onConnected|connect|submit|recordServer/u, 'finishing a scan hands back text and nothing else');
+});
+
+test('the Android app scans with the native plugin, only there, after tauriReady; Back and the background cancel it; a refused camera falls through to the dialog (#403)', () => {
+  const scanning = source.match(/async function scanQr\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(scanning, /if \(nativeScan\) return null;\s*if \(isAndroid\) \{\s*await tauriReady;\s*const run = startNativeScan\(\(\) => \{ nativeScan = run; \}\);/u, 'Android only, after the plugin gate, and the page turns transparent when there is a preview');
+  assert.match(scanning, /outcome\.kind === 'text'\) return outcome\.text;\s*if \(outcome\.kind === 'cancelled'\) return null;\s*\}\s*return new Promise/u, 'a denied or failed native scan reaches the browser dialog');
+  assert.match(source, /if \(nativeScan\) \{ nativeScan\.cancel\(\); navPush\(\); return; \}\s*if \(scan\) \{ finishScan\(null\)/u, 'Back peels the preview before anything else');
+  assert.match(source, /classList\.add\('scan-native'\);\s*return \(\) => document\.documentElement\.classList\.remove\('scan-native'\);/u, 'the transparent page is undone with the preview');
+  assert.match(source, /<NativeScanSheet oncancel=\{\(\) => nativeScan\?\.cancel\(\)\} \/>/u);
+  assert.doesNotMatch(source, /plugin-barcode-scanner/u, 'the plugin is imported by qr-native.ts alone');
 });
 
 test('App link feedback belongs to its page and connection, and disposes with App (#167)', () => {
