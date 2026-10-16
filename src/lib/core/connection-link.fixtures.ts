@@ -13,4 +13,9 @@ export const REJECTED_LINKS: [string, string][] = [
   ['a bare token parameter', 'token=SECRET-ONE'],
   ['an empty token value and no address', 'https://front.example/?token='],
   ['a repeated token', 'wss://other.example/ws?token=SECRET-ONE&token=SECRET-TWO'],
+  ['a credential in the hash of a ws link', 'ws://other.example/ws#?token=SECRET-ONE'],
+  ['a credential in the hash after a query', 'wss://other.example/ws?x=1#token=SECRET-ONE'],
+  ['a credential in a front end hash', 'https://front.example/#token=SECRET-ONE'],
+  ['text with an encoded credential key', 'connect to it ?%74oken=SECRET-ONE'],
+  ['an upper-case credential key', 'https://front.example/?TOKEN=SECRET-ONE'],
 ];

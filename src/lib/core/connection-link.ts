@@ -23,10 +23,15 @@
 // app spells either. Pure, framework-free, and it never logs or throws on
 // its input: a token is a secret.
 //
-// The endpoint's own query (`wss://h/ws?x=1`) survives byte for byte. What it
+// The endpoint's own query (`wss://h/ws?x=1&&y`) survives byte for byte. What it
 // cannot hold is a `token` or `socket` key: that would be indistinguishable
 // from the credentials, so the builder refuses it and the parser calls such a
 // link unusable. Neither ever echoes the text it was given.
+//
+// ONE reading of a credential key (`credentialKeyOf`: percent-decoded, case
+// folded) serves every boundary, so a `none` answer is PROVABLY free of
+// credentials: whatever the parser does not take as a link is checked once
+// more, whole (query, hash and free text), and refused if it carries one.
 
 export interface ConnectionLink {
   /** The gateway address, canonical (a lone trailing `/` dropped). Never empty. */
@@ -38,20 +43,57 @@ export interface ConnectionLink {
 }
 
 /** What `parseConnectionLink` found in a text.
- *  - `none`: not a link (a bare address, plain text): leave it as typed.
+ *  - `none`: not a link and carrying no credential: leave it as typed.
  *  - `link`: a usable connection.
  *  - `unusable`: carries a credential, but must not be used or kept in view:
  *    `no-address` (credentials without a usable server: the old token-only
- *    link, a link naming no host, free text with a `?token=` in it) or
- *    `ambiguous` (a repeated `token`/`socket` key, or an endpoint query that
- *    already holds one). */
+ *    link, a link naming no host, free text with a `?token=` in it, a
+ *    credential in a hash) or `ambiguous` (a repeated `token`/`socket` key, or
+ *    an endpoint query that already holds one). */
 export type ParsedLink =
   | { kind: 'none' }
   | { kind: 'link'; link: ConnectionLink }
   | { kind: 'unusable'; reason: 'no-address' | 'ambiguous' };
 
 const NONE: ParsedLink = { kind: 'none' };
-const CREDENTIAL_KEYS = new Set(['token', 'socket']);
+const NO_ADDRESS: ParsedLink = { kind: 'unusable', reason: 'no-address' };
+const AMBIGUOUS: ParsedLink = { kind: 'unusable', reason: 'ambiguous' };
+
+/** THE reading of a credential key: the key of one `a=b` query segment,
+ * percent-decoded and case-folded, is `token` or `socket`. (`?%74oken=` is a
+ * token key; so is `TOKEN=`.) */
+function credentialKeyOf(segment: string): 'token' | 'socket' | null {
+  const key = (new URLSearchParams(segment).keys().next().value ?? '').toLowerCase();
+  return key === 'token' || key === 'socket' ? key : null;
+}
+
+/** A raw query split into the segments that carry credentials and the rest,
+ * which stays VERBATIM — empty segments and a lone `?` included — so an
+ * endpoint query survives byte for byte. */
+function splitQuery(rawQuery: string): { credentials: URLSearchParams; kept: string[]; repeated: boolean } {
+  const kept: string[] = [];
+  const credentials = new URLSearchParams();
+  for (const segment of rawQuery.split('&')) {
+    const key = credentialKeyOf(segment);
+    if (key) credentials.append(key, new URLSearchParams(segment).values().next().value ?? '');
+    else kept.push(segment);
+  }
+  return { credentials, kept, repeated: credentials.getAll('token').length > 1 || credentials.getAll('socket').length > 1 };
+}
+
+/** Does this text carry a credential parameter anywhere — in a query, in a
+ * hash, in free text? The same key reading as the parser. */
+export function carriesCredentialKey(text: string): boolean {
+  return text.split(/[?&#\s]/u).some((piece) => piece.includes('=') && credentialKeyOf(piece) !== null);
+}
+
+/** The part of a location hash that is safe to keep as a route after a link
+ * was taken from the address bar: what precedes any `?`, and nothing at all
+ * when that still carries a credential (`#token=T`). */
+export function routeOfHash(hash: string): string {
+  const route = hash.split('?')[0] ?? '';
+  return carriesCredentialKey(route) ? '' : route;
+}
 
 /** `ws://host:9899/` and `ws://host:9899` name the same gateway; the saved
  * registry holds the second spelling, so the link yields it. A path
@@ -59,36 +101,6 @@ const CREDENTIAL_KEYS = new Set(['token', 'socket']);
  * connect form's own check is case-sensitive). */
 function canonicalAddress(base: string): string {
   return base.replace(/^(wss?:\/\/[^/?#]+)\/$/iu, '$1').replace(/^(wss?):\/\//iu, (_, scheme: string) => `${scheme.toLowerCase()}://`);
-}
-
-/** The key of one `a=b` query segment, decoded the way `URLSearchParams` does. */
-function keyOf(segment: string): string {
-  return new URLSearchParams(segment).keys().next().value ?? '';
-}
-
-/** A raw query split into the segments that carry credentials and the rest,
- * which stays VERBATIM (so an endpoint query survives byte for byte). */
-function splitQuery(rawQuery: string): { credentials: URLSearchParams; rest: string; repeated: boolean } {
-  const kept: string[] = [];
-  const cred: string[] = [];
-  for (const segment of rawQuery.split('&')) {
-    if (!segment) continue;
-    (CREDENTIAL_KEYS.has(keyOf(segment)) ? cred : kept).push(segment);
-  }
-  const credentials = new URLSearchParams(cred.join('&'));
-  return {
-    credentials,
-    rest: kept.join('&'),
-    repeated: credentials.getAll('token').length > 1 || credentials.getAll('socket').length > 1,
-  };
-}
-
-/** Text that is not a usable link but carries a credential parameter
- * (`text ?token=T`, `token=T`, `host:9899?token=x`, a malformed URL): it must
- * never stay in a visible field, so it is unusable rather than plain text. */
-const CREDENTIAL_PARAM = /(?:^|[?&#\s])(?:token|socket)=/iu;
-function carriesCredential(raw: string): ParsedLink {
-  return CREDENTIAL_PARAM.test(raw) ? { kind: 'unusable', reason: 'no-address' } : NONE;
 }
 
 /** Does the address name a host at all? `ws://?token=T`, `wss:///?token=T` and
@@ -123,6 +135,37 @@ function frontEndQuery(url: URL): string {
   return at >= 0 ? url.hash.slice(at + 1) : '';
 }
 
+function classify(raw: string): ParsedLink {
+  if (/\s/u.test(raw)) return NONE;
+  if (/^wss?:\/\//iu.test(raw)) {
+    const hash = raw.indexOf('#');
+    const body = hash >= 0 ? raw.slice(0, hash) : raw;
+    const q = body.indexOf('?');
+    if (q < 0) return NONE;
+    const { credentials, kept, repeated } = splitQuery(body.slice(q + 1));
+    if (!credentials.size) return NONE;
+    if (repeated) return AMBIGUOUS;
+    const address = canonicalAddress(body.slice(0, q)) + (kept.length ? `?${kept.join('&')}` : '');
+    if (!hasHost(address)) return NO_ADDRESS;
+    return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
+  }
+  if (!/^[a-z][a-z\d+.-]*:\/\//iu.test(raw)) return NONE;                  // `host:9899?token=x` is no URL
+  let url: URL;
+  try { url = new URL(raw); } catch { return NONE; }
+  const query = frontEndQuery(url);
+  const params = new URLSearchParams(query);
+  const addr = (params.get('addr') || params.get('address') || params.get('server') || '').trim();
+  const { credentials, repeated } = splitQuery(query);
+  if (!addr) return credentials.size ? NO_ADDRESS : NONE;
+  if (repeated) return AMBIGUOUS;
+  let address = addr;
+  if (!/^wss?:\/\//iu.test(address)) address = (url.protocol === 'https:' ? 'wss://' : 'ws://') + address;
+  if (endpointCollides(address)) return AMBIGUOUS;
+  address = canonicalAddress(address);
+  if (!hasHost(address)) return NO_ADDRESS;
+  return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
+}
+
 /**
  * What a pasted or opened text is. A bare address (`ws://host:9899`,
  * `host:9899`) is `none`: it carries no credential parameter, and the field
@@ -135,37 +178,45 @@ function frontEndQuery(url: URL): string {
  *     front-end form. An address without a scheme is read with the link's own
  *     (`https:` → `wss://`, else `ws://`). Without an address, a `token` or
  *     `socket` key makes it `unusable` (`no-address`): the old token-only link.
+ *   - anything else that still carries a credential key — in a hash, in free
+ *     text — is `unusable` too: a `none` answer is provably credential-free.
  */
 export function parseConnectionLink(text: string): ParsedLink {
   const raw = text.trim();
   if (!raw) return NONE;
-  if (/\s/u.test(raw)) return carriesCredential(raw);
-  if (/^wss?:\/\//iu.test(raw)) {
-    const hash = raw.indexOf('#');
-    const body = hash >= 0 ? raw.slice(0, hash) : raw;
-    const q = body.indexOf('?');
-    if (q < 0) return NONE;
-    const { credentials, rest, repeated } = splitQuery(body.slice(q + 1));
-    if (!credentials.size) return NONE;
-    if (repeated) return { kind: 'unusable', reason: 'ambiguous' };
-    const address = canonicalAddress(body.slice(0, q)) + (rest ? `?${rest}` : '');
-    if (!hasHost(address)) return { kind: 'unusable', reason: 'no-address' };
-    return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
-  }
-  if (!/^[a-z][a-z\d+.-]*:\/\//iu.test(raw)) return carriesCredential(raw);   // `host:9899?token=x` is no link
-  let url: URL;
-  try { url = new URL(raw); } catch { return carriesCredential(raw); }
-  const params = new URLSearchParams(frontEndQuery(url));
-  const addr = (params.get('addr') || params.get('address') || params.get('server') || '').trim();
-  const { credentials, repeated } = splitQuery(frontEndQuery(url));
-  if (!addr) return credentials.size ? { kind: 'unusable', reason: 'no-address' } : carriesCredential(raw);
-  if (repeated) return { kind: 'unusable', reason: 'ambiguous' };
-  let address = addr;
-  if (!/^wss?:\/\//iu.test(address)) address = (url.protocol === 'https:' ? 'wss://' : 'ws://') + address;
-  if (endpointCollides(address)) return { kind: 'unusable', reason: 'ambiguous' };
-  address = canonicalAddress(address);
-  if (!hasHost(address)) return { kind: 'unusable', reason: 'no-address' };
-  return { kind: 'link', link: { address, token: credentials.get('token'), socket: credentials.get('socket') } };
+  const parsed = classify(raw);
+  return parsed.kind === 'none' && carriesCredentialKey(raw) ? NO_ADDRESS : parsed;
+}
+
+/** What `endpointOf` found in a text. */
+export type Endpoint =
+  | { kind: 'endpoint'; address: string }
+  | { kind: 'credential' }
+  | { kind: 'invalid' };
+
+/**
+ * Is this text a clean gateway endpoint — the kind of address a form may keep
+ * as an address (board #402's "Add address")? Exported and stable: it is the
+ * one validator of an address-only field.
+ *
+ *   - `endpoint`: a whole `ws://` or `wss://` URL with a usable host and, if
+ *     it has one, a valid port; no whitespace, no fragment, and no credential
+ *     key anywhere. `address` is canonical (lower-case scheme, a lone `/`
+ *     after the host dropped, everything else byte for byte), so it compares
+ *     with a saved address.
+ *   - `credential`: the text carries a `token` or `socket` key — a new link, an
+ *     old front-end link, free text — read with the one key reading. It is
+ *     never an address, and nothing here echoes it.
+ *   - `invalid`: everything else (`http://`, a bare host, a bad port, an empty
+ *     host, a fragment, an empty string). No scheme guessing: a caller that
+ *     wants `host:port` read as `ws://host:port` adds the scheme first.
+ */
+export function endpointOf(text: string): Endpoint {
+  const raw = text.trim();
+  if (carriesCredentialKey(raw)) return { kind: 'credential' };
+  if (!/^wss?:\/\//iu.test(raw) || /\s/u.test(raw) || raw.includes('#')) return { kind: 'invalid' };
+  const address = canonicalAddress(raw);
+  return hasHost(address) ? { kind: 'endpoint', address } : { kind: 'invalid' };
 }
 
 /** Did this `input` event insert a whole text at once — a paste, a drop, or an

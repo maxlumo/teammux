@@ -47,11 +47,15 @@
     socket = keep?.socket ?? row.socket;
     showHistory = false;
     linkError = '';
+    settled = row.address;          // the last ACCEPTED address moves with the tuple it belongs to
   }
 
   let field = $state<HTMLInputElement>();
-  /** The address as it stood when the person started editing it: what a link
-   * that cannot be used (and was typed, not pasted) is replaced with. */
+  /** The last ACCEPTED address: where the field started, or the address of the
+   * last pick or usable link, or the last plain edit that was committed. What a
+   * link that cannot be used (and was typed, not pasted) is replaced with —
+   * moved by every accepted tuple, so a rejection never restores an address
+   * that belongs to an earlier server than the token and socket beside it. */
   let settled = untrack(() => address);
   /** Why the last link was refused. Credential-free by construction: it names
    * the problem, never the text. */
@@ -90,10 +94,16 @@
     address = input.value;
   }
 
-  /** The field is committed (blur, or Enter): a link typed out in full is split
-   * now. False when it was a link that could not be used. */
-  function commit(): boolean {
+  /** THE gate of every action that submits the form (Enter, the Connect button,
+   * the Add server submit, an assistive or programmatic activation): the parents
+   * call it before they read a field. A link typed out in full is split now
+   * (or refused, and taken out of the field); and while a refusal is pending —
+   * its message is showing and nothing was edited or picked since — nothing is
+   * submitted, so a rejected input can never make the form act on the value it
+   * was restored to. True when the form may go ahead. */
+  export function commit(): boolean {
     if (!field) return true;
+    if (linkError) return false;
     if (absorb(field, settled)) return !linkError;
     settled = address;
     return true;
@@ -111,7 +121,7 @@
   <label>
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
-      <input type="text" bind:this={field} value={address} oninput={typed} onchange={commit} onfocus={() => { settled = address; }} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
+      <input type="text" bind:this={field} value={address} oninput={typed} onchange={() => { commit(); }} onfocus={() => { settled = address; }} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
       {#if remembered.length}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
           onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { buildConnectionLink, isBulkInsert, parseConnectionLink, type ConnectionLink } from './connection-link.ts';
+import { buildConnectionLink, carriesCredentialKey, endpointOf, isBulkInsert, parseConnectionLink, routeOfHash, type ConnectionLink } from './connection-link.ts';
 
 // Fixture credentials are fake. The link is a secret in real use; nothing in
 // the module logs or throws on it.
@@ -130,6 +130,60 @@ test('a text is split only where it arrives whole: a paste, a drop, a clipboard 
   assert.equal(isBulkInsert({ inputType: 'insertCompositionText', data: 'abc' }), false, 'an IME composition');
   assert.equal(isBulkInsert({ inputType: 'deleteContentBackward' }), false);
   assert.equal(isBulkInsert({}), false, 'an event that says nothing is not a paste');
+});
+
+test('ONE reading of a credential key: a hash, an encoded key or another case never turns credential text into plain text', () => {
+  for (const text of [
+    'ws://h/ws#?token=SECRET', 'ws://h/ws?x=1#token=SECRET', 'https://front.example/#token=SECRET', 'https://front.example/#/files?socket=%2Fs',
+    'text ?%74oken=SECRET', 'text &%53OCKET=%2Fs', 'ws://h/ws#?TOKEN=SECRET', 'a=b token=SECRET',
+  ]) assert.equal(kindOf(text), 'unusable:no-address', text);
+  // The same key reading inside a real link.
+  assert.deepEqual(linkOf('wss://h/ws?%74oken=T&SOCKET=%2Fs'), { address: 'wss://h/ws', token: 'T', socket: '/s' });
+  assert.equal(buildConnectionLink({ address: 'wss://h/ws?%74oken=route', token: 'AUTH' }), null, 'an encoded credential key in the endpoint collides too');
+  assert.equal(kindOf('wss://h/ws?%74oken=route&token=AUTH'), 'unusable:ambiguous');
+  // A hash that carries nothing is ignored, and one beside a link does not stop it.
+  assert.deepEqual(linkOf('ws://h:9899?token=T#frag'), { address: 'ws://h:9899', token: 'T', socket: null });
+  assert.deepEqual(linkOf('ws://h:9899?token=T#token=Z'), { address: 'ws://h:9899', token: 'T', socket: null }, 'the hash is dropped, not read');
+  // Anything the parser calls none is credential-free by the same reading.
+  for (const text of ['ws://h:9899', 'wss://h/ws?x=1', 'plain words', 'https://front.example/#/files', 'a=b c=d', 'mytoken=1', 'token', '?tokens=1']) {
+    assert.equal(kindOf(text), 'none', text);
+    assert.equal(carriesCredentialKey(text), false, text);
+  }
+});
+
+test('the endpoint query survives byte for byte: empty segments and a lone ? included', () => {
+  for (const endpoint of ['wss://h/ws?a=1&&b=2&', 'wss://h/ws?', 'wss://h/ws?&', 'wss://h/ws?a=1&', 'wss://h/ws?&a=1', 'wss://h/ws?a&b=%20', 'wss://h/ws?x=1&&']) {
+    const built = buildConnectionLink({ address: endpoint, token: 'T', socket: '/s' })!;
+    assert.ok(built, endpoint);
+    assert.deepEqual(linkOf(built), { address: endpoint, token: 'T', socket: '/s' }, endpoint);
+  }
+  assert.deepEqual(linkOf('wss://h/ws?a=1&&token=T&&b=2'), { address: 'wss://h/ws?a=1&&&b=2', token: 'T', socket: null }, 'only the credential segment leaves; the separators around it stay');
+});
+
+test('the route kept after a link is taken from the address bar never carries a credential', () => {
+  assert.equal(routeOfHash(''), '');
+  assert.equal(routeOfHash('#/files'), '#/files');
+  assert.equal(routeOfHash('#/files?addr=ws://h:1&token=T'), '#/files');
+  assert.equal(routeOfHash('#token=T'), '');
+  assert.equal(routeOfHash('#%74oken=T'), '');
+  assert.equal(routeOfHash('#/a&socket=%2Fs'), '');
+});
+
+test('endpointOf: a clean ws or wss endpoint is accepted in its canonical spelling; anything carrying a credential is refused as a credential; the rest is invalid', () => {
+  for (const [text, address] of [
+    ['ws://h:9899', 'ws://h:9899'], ['  wss://mac.tail.ts.net/ws  ', 'wss://mac.tail.ts.net/ws'], ['WSS://h/ws', 'wss://h/ws'],
+    ['ws://h:9899/', 'ws://h:9899'], ['wss://h/ws/', 'wss://h/ws/'], ['ws://[::1]:19900', 'ws://[::1]:19900'],
+    ['wss://h/ws?region=eu&&x', 'wss://h/ws?region=eu&&x'], ['ws://192.168.1.5:9899', 'ws://192.168.1.5:9899'],
+  ] as const) assert.deepEqual(endpointOf(text), { kind: 'endpoint', address }, text);
+  for (const text of [
+    'ws://h:9899?token=T', 'ws://h:9899?token=&socket=', 'https://app.example/?addr=ws://h:1&token=T', 'https://app.example/?token=T',
+    'ws://h/ws#?token=T', 'wss://h/ws?%74oken=T', 'text ?token=T', 'token=T', 'wss://h/ws?x=1&TOKEN=T', 'ws://?token=T',
+  ]) assert.deepEqual(endpointOf(text), { kind: 'credential' }, 'a credential, and nothing echoed');
+  for (const text of [
+    '', '   ', 'h:9899', '192.168.1.5:9899', 'http://h:9899', 'https://h/ws', 'ftp://h', 'ws://', 'ws:///', 'ws://%ZZ', 'ws://h:99999',
+    'ws://h:9899 extra', 'ws://h/ws#frag', 'https://app.example/?addr=ws://h:1',
+  ]) assert.deepEqual(endpointOf(text), { kind: 'invalid' }, JSON.stringify(text));
+  assert.doesNotMatch(JSON.stringify(endpointOf('ws://h:9899?token=SECRET')), /SECRET/u, 'the result never carries the text');
 });
 
 test('the module neither logs nor leaves a trace of what it parses', async () => {

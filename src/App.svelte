@@ -58,7 +58,7 @@
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
-  import { buildConnectionLink, parseConnectionLink } from './lib/core/connection-link.ts';
+  import { buildConnectionLink, parseConnectionLink, routeOfHash } from './lib/core/connection-link.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -2763,7 +2763,7 @@
       if (parsed.kind === 'none') return null;
       // Stripped whatever it names, so a token never stays in the address bar;
       // a link that names no server (the old token-only one) applies nothing.
-      history.replaceState(null, '', location.pathname + location.hash.split('?')[0]);
+      history.replaceState(null, '', location.pathname + routeOfHash(location.hash));
       return parsed.kind === 'link' ? parsed.link : null;
     } catch { return null; } // malformed URL — ignore, fall back to saved/settings
   }

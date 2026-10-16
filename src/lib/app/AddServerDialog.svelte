@@ -26,7 +26,11 @@
   let token = $state(seed?.token ?? '');
   let socket = $state(seed?.socket ?? '');
 
+  let fields = $state<{ commit(): boolean }>();
+
   function submit() {
+    // The form's own gate: a typed link is split (or refused) before any field is read.
+    if (fields && !fields.commit()) return;
     if (!address.trim()) return;
     onsubmit({ address: normalizeAddress(address, location.protocol), token, ...(socket.trim() ? { socket: socket.trim() } : {}) });
   }
@@ -34,7 +38,7 @@
 
 <Dialog {compact} label={t('serverAdd')} {oncancel}>
   <h2>{t('serverAdd')}</h2>
-  <ConnectFields bind:address bind:token bind:socket autofocus onenter={submit} />
+  <ConnectFields bind:this={fields} bind:address bind:token bind:socket autofocus onenter={submit} />
   <div class="dlg-actions">
     <CommandButton label={t('cancel')} onclick={oncancel} />
     <CommandButton label={t('connect')} variant="primary" icon="link" disabled={!address.trim()} onclick={submit} />

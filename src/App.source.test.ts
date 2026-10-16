@@ -39,8 +39,8 @@ test('sharing a connection reports only a current successful copy; failure uses 
 
 test('the boot reads a deep link through the one parser, and strips it from the address bar (#401)', () => {
   const take = source.match(/function takeConnectLink\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
-  assert.match(take, /const parsed = parseConnectionLink\(location\.href\);\s*if \(parsed\.kind === 'none'\) return null;[\s\S]*?history\.replaceState\(null, '', location\.pathname \+ location\.hash\.split\('\?'\)\[0\]\);\s*return parsed\.kind === 'link' \? parsed\.link : null;/u,
-    'stripped whatever it names; a link that names no server applies nothing');
+  assert.match(take, /const parsed = parseConnectionLink\(location\.href\);\s*if \(parsed\.kind === 'none'\) return null;[\s\S]*?history\.replaceState\(null, '', location\.pathname \+ routeOfHash\(location\.hash\)\);\s*return parsed\.kind === 'link' \? parsed\.link : null;/u,
+    'stripped whatever it names, the credential-bearing hash included; a link that names no server applies nothing');
   assert.doesNotMatch(take, /URLSearchParams|q\.get\(/u, 'no second parser of the link');
 });
 

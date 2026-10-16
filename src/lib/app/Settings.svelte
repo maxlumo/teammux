@@ -91,6 +91,7 @@
   let address = $state(opened.address);
   let token = $state(opened.token);
   let socket = $state(opened.socket);
+  let fields = $state<{ commit(): boolean }>();
   let error = $state('');
   let connecting = $state(false);
   /** The attempt passed its point of no return: still busy, no Cancel. */
@@ -177,6 +178,8 @@
 
   async function doConnect() {
     if (frozen) return;
+    // The form's own gate: a typed link is split (or refused) before any field is read.
+    if (fields && !fields.commit()) return;
     error = '';
     connecting = true;
     committing = false;
@@ -339,7 +342,7 @@
       <p class="subtitle">{t('connectTitle')}</p>
     </div>
 
-    <ConnectFields bind:address bind:token bind:socket onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
+    <ConnectFields bind:this={fields} bind:address bind:token bind:socket onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
 
     {#if frozen || error || notice}
       <div class="error appear">{frozen || error || notice}</div>

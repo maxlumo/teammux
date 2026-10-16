@@ -9330,3 +9330,25 @@ test('#400 review P1-A + P2-C: a server deleted on the OLD build left in the mir
   assert.ok(second.app.document.querySelector('.card .hist-btn'), 'the single-row list survives the reload');
   assert.doesNotMatch(JSON.stringify(dumpStorage(second.app)), /tokB|sockB|ws:\/\/b:9899/u);
 });
+
+// ─── #401 review round 3: the address bar never keeps a credential ───────
+
+for (const [what, url] of [
+  ['a token-only link in the query', '/?token=SECRET-BOOT'],
+  ['a token in the hash', '/#token=SECRET-BOOT'],
+  ['a token after a hash route', '/#/files?token=SECRET-BOOT&socket=%2Fsecret-boot'],
+  ['an encoded credential key', '/#%74oken=SECRET-BOOT'],
+  ['a link that names no host', '/?addr=wss%3A%2F%2F%25ZZ&token=SECRET-BOOT'],
+] as const) {
+  test(`boot: ${what} is taken out of the address bar and applies nothing`, async (context) => {
+    const h = await bootApp(context, { tmux_layout_mode: 'desktop' }, undefined, {
+      setup(window: any) { sandbox.setup(window); window.history.replaceState(null, '', url); },
+    });
+    for (let i = 0; i < 4; i++) await h.settle();
+    const loc = h.app.window.location;
+    assert.ok(!`${loc.search}${loc.hash}`.includes('SECRET-BOOT'), `the address bar holds no secret: ${loc.search}${loc.hash}`);
+    assert.ok(!/secret-boot/iu.test(`${loc.search}${loc.hash}`));
+    assert.ok(!JSON.stringify(dumpStorage(h.app)).includes('SECRET-BOOT'), 'and nothing was stored');
+    assert.equal(h.app.window.localStorage.getItem('tmux_servers'), '[]', 'no server was recorded');
+  });
+}

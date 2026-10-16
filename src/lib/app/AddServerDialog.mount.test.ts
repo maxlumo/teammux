@@ -196,3 +196,43 @@ test('the dialog: Enter commits a typed link first — a usable one is split and
     assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'wss://typed.example/ws', token: 'TYPED-TOKEN' }]);
   } finally { await app.close(); }
 });
+
+test('the dialog: submit goes through the same gate — a typed link that cannot be used submits nothing, with or without a blur', async context => {
+  for (const leave of [true, false]) {
+    const submitted: unknown[] = [];
+    const { app, el, set } = await openDialog(context, submitted);
+    try {
+      await set(FIELDS.address, 'ws://keep.example:9899', 'insertText');
+      await set(FIELDS.token, 'KEEP-TOKEN');
+      await set(FIELDS.address, 'https://front.example/?token=SECRET-ONE', 'insertText');
+      if (leave) { el(FIELDS.address).dispatchEvent(new app.window.Event('change', { bubbles: true })); await app.flush(); }
+      [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+      await app.flush();
+      assert.deepEqual(submitted, [], `nothing submitted (blur: ${leave})`);
+      assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+    } finally { await app.close(); }
+  }
+});
+
+test('the dialog lifecycle: an accepted paste of a link, then a typed refusal in the same focus — the accepted tuple stays and nothing mixed is submitted', async context => {
+  const submitted: unknown[] = [];
+  const { app, el, set } = await openDialog(context, submitted);
+  try {
+    await set(FIELDS.address, 'ws://first.example:9899', 'insertText');
+    await set(FIELDS.token, 'FIRST-TOKEN');
+    await set(FIELDS.address, 'wss://second.example/ws?token=SECOND-TOKEN&socket=%2Ftmp%2Fsecond', 'insertFromPaste');
+    await set(FIELDS.address, 'https://front.example/?token=SECRET-ONE', 'insertText');
+    el(FIELDS.address).dispatchEvent(new app.window.Event('change', { bubbles: true }));
+    await app.flush();
+    assert.equal(el(FIELDS.address).value, 'wss://second.example/ws');
+    assert.equal(el(FIELDS.token).value, 'SECOND-TOKEN');
+    assert.equal(el(FIELDS.socket).value, '/tmp/second');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await app.flush();
+    assert.deepEqual(submitted, [], 'the refusal is pending, so nothing is submitted until the next edit');
+    await set(FIELDS.address, 'wss://second.example/ws', 'insertText');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await app.flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'wss://second.example/ws', token: 'SECOND-TOKEN', socket: '/tmp/second' }]);
+  } finally { await app.close(); }
+});

@@ -187,3 +187,18 @@ test('an endpoint whose own query holds token or socket cannot be shared: nothin
     assert.equal(copies, 1, 'an ordinary query is carried');
   } finally { await app.close(); }
 });
+
+test('a typed link that cannot be used leaves the form as it was: Share copies the restored address, not the refused text (#401 review round 3)', async context => {
+  const copied: string[] = [];
+  const app = await mount(context, link => { copied.push(link); return true; });
+  try {
+    await app.edit('.addr-wrap input', 'https://front.example/?token=SECRET-ONE');
+    app.document.querySelector('.addr-wrap input')!.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+    await app.flush();
+    assert.equal(app.document.querySelector<HTMLInputElement>('.addr-wrap input')!.value, 'wss://fixture.test/ws');
+    await app.copy();
+    assert.equal(copied.length, 1);
+    assert.deepEqual(parseConnectionLink(copied[0]!), { kind: 'link', link: { address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' } });
+    assert.ok(!copied[0]!.includes('SECRET-ONE') && !app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+  } finally { await app.close(); }
+});

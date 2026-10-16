@@ -435,3 +435,60 @@ for (const [what, link, dial, sockets] of [
     assert.equal(beta.socket, sockets[0]?.slice('socket:'.length), 'with its own socket or none');
   });
 }
+
+// ─── #401 review round 3: every submitting action goes through the form's own gate ──
+
+const TOKEN_FIELD = '.token-wrap input';
+async function typeInto(app: Awaited<ReturnType<typeof mount>>, text: string, { leave = true } = {}) {
+  const address = app.document.querySelector<HTMLInputElement>('input[type="text"]')!;
+  address.dispatchEvent(new app.window.Event('focus'));
+  address.value = text;
+  const event = new app.window.Event('input', { bubbles: true });
+  Object.defineProperty(event, 'inputType', { value: 'insertText' });
+  Object.defineProperty(event, 'data', { value: text.slice(-1) });
+  address.dispatchEvent(event);
+  await app.flush();
+  if (leave) { address.dispatchEvent(new app.window.Event('change', { bubbles: true })); await app.flush(); }
+}
+const clickConnect = async (app: Awaited<ReturnType<typeof mount>>) => {
+  [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 8; i++) await app.flush();
+};
+const fieldsOf = (app: Awaited<ReturnType<typeof mount>>) => ({
+  address: app.document.querySelector<HTMLInputElement>('input[type="text"]')!.value,
+  token: app.document.querySelector<HTMLInputElement>(TOKEN_FIELD)!.value,
+  socket: app.document.querySelector<HTMLInputElement>(SOCKET_INPUT)!.value,
+});
+
+for (const [how, leave] of [['after the field was left (blur)', true], ['with no blur at all (an assistive or programmatic activation)', false]] as const) {
+  test(`a typed link that cannot be used and a click on Connect ${how}: nothing is dialled, and the restored server is not connected to`, async (context) => {
+    const app = await mount(context, async () => 'm-a', twoSaved('/tmp/sockB'));
+    await typeInto(app, 'https://front.example/?token=SECRET-ONE', { leave });
+    await clickConnect(app);
+    assert.deepEqual(app.order, [], 'no candidate was opened, no dial, no setSocket');
+    assert.deepEqual(fieldsOf(app), { address: 'wss://a.test/ws', token: 'tokA', socket: '/tmp/sockA' }, 'the form shows alpha\u2019s tuple again');
+    assert.match(app.document.querySelector('.fields .config-error[role=alert]')?.textContent ?? '', /no server address/u);
+    assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+    // An explicit valid edit afterwards goes ahead.
+    await typeInto(app, 'wss://same.test/ws');
+    await clickConnect(app);
+    assert.deepEqual((app.order as string[]).filter((o) => o.startsWith('connect:')), ['connect:wss://same.test/ws|tokA'], 'the next explicit edit connects');
+  });
+}
+
+test('lifecycle: alpha, then an accepted paste of beta\u2019s link, then a typed refusal in the same focus — beta\u2019s whole tuple stays and nothing is dialled', async (context) => {
+  const app = await mount(context, async () => 'm-b', twoSaved('/tmp/sockB'));
+  assert.deepEqual(fieldsOf(app), { address: 'wss://a.test/ws', token: 'tokA', socket: '/tmp/sockA' }, 'initial tuple');
+  const address = app.document.querySelector<HTMLInputElement>('input[type="text"]')!;
+  address.dispatchEvent(new app.window.Event('focus'));
+  address.value = 'wss://b.test/ws?token=tokB&socket=%2Ftmp%2FsockB';
+  const paste = new app.window.Event('input', { bubbles: true });
+  Object.defineProperty(paste, 'inputType', { value: 'insertFromPaste' });
+  address.dispatchEvent(paste);
+  await app.flush();
+  assert.deepEqual(fieldsOf(app), { address: 'wss://b.test/ws', token: 'tokB', socket: '/tmp/sockB' }, 'accepted paste');
+  await typeInto(app, 'https://front.example/?token=SECRET-ONE');                  // same focus, then refused
+  assert.deepEqual(fieldsOf(app), { address: 'wss://b.test/ws', token: 'tokB', socket: '/tmp/sockB' }, 'the rollback is the accepted tuple, never alpha\u2019s address beside beta\u2019s credentials');
+  await clickConnect(app);
+  assert.deepEqual(app.order, [], 'and no mixed tuple was submitted');
+});
