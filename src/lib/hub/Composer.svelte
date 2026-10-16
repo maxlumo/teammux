@@ -3,7 +3,8 @@
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { slashCommand, commandPalette, mentionPalette, issuePalette, issueQuery, readlineEdit } from './hub.ts';
+  import { slashCommand, commandPalette, mentionPalette, issuePalette, issueQuery, readlineEdit,
+    acceptedText, acceptChanges, offeredPalette } from './hub.ts';
   import { attachPaste } from './attachments.svelte.ts';
   import AttachStrip from './AttachStrip.svelte';
   import { ALL_TARGET, paletteBackendFor, signatureLayout, targetTeam } from './hub-composer.ts';
@@ -208,9 +209,14 @@
      just-created issue is offered: once per entry and per room (a draft that
      already holds a `#` restored in another room asks for THAT room;
      reviewer P2-B), never per keystroke. */
-  const palette = $derived(paletteOff ? null
-    : commandPalette(composerText, cmdModels[paletteBackend] ?? [], paletteBackend) ?? mentionPalette(composerText, mentionCandidates)
-      ?? issuePalette(composerText, issues));
+  /** What the composer offers for a text: the ONE reading, used for the live
+   * list and, by `acceptChanges`, for the text an accept would leave. */
+  function paletteFor(text) {
+    const backend = paletteBackendFor(text, recipient, agents);
+    return commandPalette(text, cmdModels[backend] ?? [], backend) ?? mentionPalette(text, mentionCandidates)
+      ?? issuePalette(text, issues);
+  }
+  const palette = $derived(paletteOff ? null : offeredPalette(paletteFor(composerText), composerText, paletteFor));
   const issueRoom = $derived(issueQuery(composerText) !== null ? selected : '');
   $effect(() => { const room = issueRoom; if (room) untrack(() => onissues(room)); });
   $effect(() => { void composerText; paletteOff = false; });
@@ -223,8 +229,7 @@
 
   function acceptCompletion(item) {
     if (!palette) return;
-    const head = composerText.slice(0, palette.from);
-    composerText = `${head}${item.value}${palette.more ? ' ' : ''}`;
+    composerText = acceptedText(palette, composerText, item);
     paletteIdx = 0;
     composerEl?.focus();
     requestAnimationFrame(() => composerEl?.setSelectionRange(composerText.length, composerText.length));
@@ -281,9 +286,14 @@
         paletteIdx = (paletteIdx + step + palette.items.length) % palette.items.length;
         return;
       }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
+      const item = palette.items[paletteIdx] ?? palette.items[0];
+      // Tab always completes; Enter only when that changes the text (board
+      // #398): an item already typed falls through, and Enter does what it
+      // does with no list (sends; a newline on the phone).
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing
+          && acceptChanges(palette, composerText, item, paletteFor))) {
         e.preventDefault();
-        acceptCompletion(palette.items[paletteIdx] ?? palette.items[0]);
+        acceptCompletion(item);
         return;
       }
       if (e.key === 'Escape') { e.preventDefault(); paletteOff = true; return; }

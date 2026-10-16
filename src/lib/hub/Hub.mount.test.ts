@@ -984,6 +984,135 @@ test('typing @ offers the room\'s agents in the slash palette; Enter inserts, Es
   } finally { await app.close(); }
 });
 
+// Board #398. Owner: "按 tab 补全了一个，这时这个命令后边还没有空格，按回车就发不上去，
+// 要这时也能够按回车". Enter accepts an item only when accepting changes the
+// text; an item already typed falls through to what Enter does with no list.
+test('Enter accepts a completion only when it changes the text; a finished item sends, on every palette (#398)', { timeout: 60000 }, async (context) => {
+  const posts: string[] = [], commands: string[] = [];
+  const app = await composerFixture(context, {
+    // The owner's list: the longer id first, so exact-first ranking is exercised.
+    modelsList: async () => ({ models: ['claude-opus-5.5', 'claude-opus-5'] }),
+    hubAgents: async () => ({ agents: [
+      { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle' },
+      { name: 'bob', window: 1, managed: true, agent: 'codex', state: 'idle' },
+      { name: 'bobby', window: 2, managed: true, agent: 'codex', state: 'idle' },
+    ] }),
+    hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
+    hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  const settle = async (n: number) => { for (let i = 0; i < 8 && commands.length + posts.length < n; i++) await app.flush(); };
+  try {
+    // The models arrive once the argument stage is open.
+    await app.text('/model ');
+    await app.wait(() => options().includes('claude-opus-5'));
+
+    // A partial argument: Enter completes it, as today.
+    await app.text('/model claude-op');
+    assert.equal(await app.key('Enter', { isComposing: true }), false, 'an IME composition Enter on a partial neither accepts');
+    assert.equal(app.input.value, '/model claude-op');
+    assert.deepEqual(commands, [], 'nor sends');
+    assert.equal(await app.key('Enter'), true, 'a partial is completed');
+    assert.equal(app.input.value, '/model claude-opus-5.5');
+    assert.deepEqual(commands, [], 'and not sent');
+    // The owner's state: the completed argument, no trailing space. The list
+    // whose one item is what was typed is closed, and Enter sends.
+    assert.equal(app.document.querySelector('.cmd-menu'), null, 'a finished final argument closes the list');
+    assert.equal(await app.key('Enter'), true);
+    await settle(1);
+    assert.deepEqual(commands, ['alice:/model claude-opus-5.5'], 'Enter sends what Tab or Enter completed');
+
+    // Tab, then Enter: the same.
+    await app.text('/model claude-opus-5.');
+    await app.key('Tab');
+    assert.equal(app.input.value, '/model claude-opus-5.5');
+    assert.equal(await app.key('Enter'), true);
+    await settle(2);
+    assert.equal(commands.at(-1), 'alice:/model claude-opus-5.5', 'Tab then Enter sends (slash argument)');
+
+    // Typed exactly, with a longer one still offered: the exact item leads
+    // (it is listed second), the list stays, and Enter sends what was typed.
+    await app.text('/model claude-opus-5');
+    assert.deepEqual(options(), ['claude-opus-5', 'claude-opus-5.5'], 'an exact match ranks first');
+    assert.equal(await app.key('Enter', { isComposing: true }), false, 'an IME composition Enter is never a send');
+    assert.equal(commands.length, 2);
+    assert.equal(app.input.value, '/model claude-opus-5', 'nor an accept');
+    assert.equal(await app.key('Enter'), true);
+    await settle(3);
+    assert.equal(commands.at(-1), 'alice:/model claude-opus-5', 'Enter sends the typed id, not the longer one');
+    // Arrowing down to the longer one makes Enter a change again.
+    await app.text('/model claude-opus-5');
+    await app.key('ArrowDown');
+    assert.equal(await app.key('Enter'), true);
+    assert.equal(app.input.value, '/model claude-opus-5.5', 'the selected longer item is accepted');
+    assert.equal(commands.length, 3);
+
+    // A typed command that takes arguments: Enter opens its list, as today.
+    await app.text('/model');
+    assert.equal(await app.key('Enter'), true);
+    assert.equal(app.input.value, '/model ', 'the space, and its argument list');
+    assert.ok(app.document.querySelector('.cmd-menu'));
+    assert.equal(commands.length, 3, 'not sent');
+    // A command with no arguments: completing adds only the space, so it sends.
+    await app.text('/comp');
+    await app.key('Tab');
+    assert.equal(app.input.value, '/compact ');
+    assert.equal(await app.key('Enter'), true);
+    await settle(4);
+    assert.equal(commands.at(-1), 'alice:/compact', 'Tab then Enter sends (slash command)');
+    await app.text('/compact');
+    assert.equal(await app.key('Enter'), true);
+    await settle(5);
+    assert.equal(commands.at(-1), 'alice:/compact', 'a typed no-argument command sends');
+
+    // Mentions: the typed name with a longer one still offered.
+    await app.text('ask @bob');
+    assert.deepEqual(options(), ['@bob', '@bobby']);
+    assert.equal(await app.key('Enter'), true);
+    await settle(6);
+    assert.deepEqual(posts, ['@alice ask @bob'], 'a typed mention sends');
+    await app.text('ask @bo');
+    await app.key('Tab');
+    assert.equal(app.input.value, 'ask @bob ');
+    assert.equal(await app.key('Enter'), true);
+    await settle(7);
+    assert.deepEqual(posts, ['@alice ask @bob', '@alice ask @bob'], 'Tab then Enter sends (mention)');
+    await app.text('ask @bobb');
+    assert.equal(await app.key('Enter'), true);
+    assert.equal(app.input.value, 'ask @bobby ', 'a partial mention is still completed');
+    assert.equal(posts.length, 2);
+  } finally { await app.close(); }
+});
+
+test('on the phone a finished item\'s Enter is what Enter is with no list; Tab and a partial\'s Enter still complete (#398)', { timeout: 60000 }, async (context) => {
+  const commands: string[] = [];
+  const app = await composerFixture(context, {
+    modelsList: async () => ({ models: ['claude-opus-5.5', 'claude-opus-5'] }),
+    hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
+  }, true);
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    // A hardware keyboard on a phone sends these same key events.
+    await app.text('/model ');
+    await app.wait(() => options().includes('claude-opus-5'));
+    await app.text('/model claude-op');
+    assert.equal(await app.key('Tab'), true);
+    assert.equal(app.input.value, '/model claude-opus-5.5', 'Tab completes');
+    await app.text('/model claude-op');
+    assert.equal(await app.key('Enter'), true, 'a partial\'s Enter completes');
+    assert.equal(app.input.value, '/model claude-opus-5.5');
+    await app.text('/model claude-opus-5');
+    assert.deepEqual(options(), ['claude-opus-5', 'claude-opus-5.5']);
+    assert.equal(await app.key('Enter'), false, 'a finished item: Enter is the phone\'s newline, as with no list (tap Send)');
+    assert.equal(app.input.value, '/model claude-opus-5', 'not rewritten to the longer one');
+    assert.equal(await app.key('Enter', { isComposing: true }), false);
+    assert.deepEqual(commands, []);
+    app.send.click();
+    for (let i = 0; i < 8 && !commands.length; i++) await app.flush();
+    assert.deepEqual(commands, ['alice:/model claude-opus-5']);
+  } finally { await app.close(); }
+});
+
 // Board #340: `#` completes this project's board issues in the same palette.
 const boardIssue = (id: number, title: string, status = 'todo') =>
   ({ id, title, body: '', status, assignee: '', created_by: 'human', created_at: 1, updated_at: 1, editable: true, notes: 0 });

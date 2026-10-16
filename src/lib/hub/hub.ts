@@ -1040,8 +1040,47 @@ export interface Palette {
   items: PaletteItem[];
   /** Replace `text.slice(from)` with the chosen value. */
   from: number;
-  /** True when accepting an item should keep the palette open for its argument. */
+  /** True when the accepted value takes a separating space (a command, a
+   * mention, an issue). Whether that opens a next level (a command's
+   * argument list) is read from the accepted text, see `acceptChanges`. */
   more: boolean;
+}
+
+/** The text accepting `item` leaves: the token replaced, plus the separating
+ * space when the palette asks for one. The composer's accept writes exactly
+ * this, and `acceptChanges` reads it. */
+export function acceptedText(palette: Palette, text: string, item: PaletteItem): string {
+  return `${text.slice(0, palette.from)}${item.value}${palette.more ? ' ' : ''}`;
+}
+
+/**
+ * Whether accepting `item` changes the text (board #398). Owner: after Tab
+ * completed `/model claude-opus-5.5`, the list still offered that same item,
+ * Enter accepted it, the text came out identical and nothing was sent. The
+ * orchestrator's rule: Enter accepts only a change, otherwise it sends as if
+ * the list were closed. A change is a different token (a longer completion,
+ * another case), or an accepted text that opens a list of its own (a typed
+ * `/model` gains its space and its argument list). An item already typed
+ * whose acceptance adds only the separating space (a no-argument command, a
+ * mention, an issue) or nothing at all (a final argument) changes nothing.
+ * `paletteFor` is the composer's own reading of a text, so the next level is
+ * whatever the composer would offer.
+ */
+export function acceptChanges(palette: Palette, text: string, item: PaletteItem,
+  paletteFor: (text: string) => Palette | null): boolean {
+  if (text.slice(palette.from) !== item.value) return true;
+  const next = acceptedText(palette, text, item);
+  return next !== text && !!paletteFor(next);
+}
+
+/** The list worth showing (board #398): none when its only item would
+ * change nothing, so a finished `@bob`, `#340`, `/compact` or final argument
+ * closes it and Enter sends. One rule for every source, which replaced the
+ * mention and issue sources' own "the query is the one candidate" checks. */
+export function offeredPalette(palette: Palette | null, text: string,
+  paletteFor: (text: string) => Palette | null): Palette | null {
+  if (!palette) return null;
+  return palette.items.length === 1 && !acceptChanges(palette, text, palette.items[0]!, paletteFor) ? null : palette;
 }
 
 /**
@@ -1069,11 +1108,17 @@ export function fuzzyRank(query: string, candidate: string): number {
 
 /** Filter + order by fuzzyRank, keeping the table's own order within a tier
  * (sort is stable): the table order is the CLI's own, and it is what makes the
- * list predictable when several candidates tie. */
+ * list predictable when several candidates tie. A candidate that IS the
+ * query (any case) comes before every other, the way the `#` list puts an
+ * exact number first (board #398): with `claude-opus-5.5` listed before
+ * `claude-opus-5`, a typed `claude-opus-5` was a prefix of both, the longer
+ * one led, and Enter replaced what was typed with it. */
 function fuzzyPick<T>(query: string, all: readonly T[], key: (t: T) => string): T[] {
+  const exact = (query ?? '').toLowerCase();
   return all
     .map((t) => ({ t, r: fuzzyRank(query, key(t)) }))
     .filter((x) => x.r >= 0)
+    .map((x) => (exact && key(x.t).toLowerCase() === exact ? { ...x, r: -1 } : x))
     .sort((a, b) => a.r - b.r)
     .map((x) => x.t);
 }
@@ -1130,8 +1175,9 @@ export function commandPalette(text: string, models: readonly string[] = [], bac
  * (an email address) does not open it. The query is the run `mentionTokens` would read (no second
  * `@`, no whitespace). `candidates` are the names `deliver_mentions` delivers
  * to: the room's managed agents plus `all`, with the caller's hint text.
- * A query that already IS the one remaining candidate offers nothing, so
- * Enter after a finished `@bob` sends instead of completing it again.
+ * A query that already IS the one remaining candidate is closed by the
+ * composer (`offeredPalette`, board #398), so Enter after a finished `@bob`
+ * sends instead of completing it again.
  * A slash-command line offers no names: send() types it verbatim through
  * `hub_command`, so an `@bob` inside it would reach nobody (validator, #242).
  * `slashCommand` is the same test send() uses.
@@ -1142,7 +1188,7 @@ export function mentionPalette(text: string, candidates: readonly PaletteItem[])
   if (!m || !candidates.length) return null;
   const query = m[2]!;
   const items = fuzzyPick(query, candidates, (c) => c.value).map((c) => ({ value: `@${c.value}`, hint: c.hint }));
-  if (!items.length || (items.length === 1 && items[0]!.value === `@${query}`)) return null;
+  if (!items.length) return null;
   // `more`: the accepted mention takes its separating space, like a command.
   return { stage: 'mention', items, from: (text ?? '').length - query.length - 1, more: true };
 }
@@ -1171,7 +1217,8 @@ export function issueQuery(text: string | null | undefined): string | null {
  * better match, open before done, newest first. Accepting inserts `#<id>`
  * and a space, nothing else: the delivered text is what was typed, and an
  * agent reads the issue with `tmm board show <id>`. A query that already IS
- * the one remaining candidate offers nothing, so Enter sends.
+ * the one remaining candidate is closed by the composer (`offeredPalette`,
+ * board #398), so Enter sends.
  */
 export function issuePalette(text: string, issues: readonly IssueCandidate[]): Palette | null {
   const query = issueQuery(text);
@@ -1187,7 +1234,7 @@ export function issuePalette(text: string, issues: readonly IssueCandidate[]): P
     .filter((x) => x.r !== Infinity)
     .sort((a, b) => a.r - b.r || Number(b.i.open) - Number(a.i.open) || b.i.id - a.i.id)
     .map(({ i }) => ({ value: `#${i.id}`, hint: i.ref }));
-  if (!items.length || (items.length === 1 && items[0]!.value === `#${query}`)) return null;
+  if (!items.length) return null;
   return { stage: 'issue', items, from: text.length - query.length - 1, more: true };
 }
 

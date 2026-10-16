@@ -1959,6 +1959,51 @@ test('rosterMarker: a lit team down to one live member marks that member\'s card
   assert.equal(rosterMarker({ all: false, team: null, groups: one, addressed: false }), '');
 });
 
+test('one rule for every palette: Enter accepts only a change, and a list whose one item changes nothing is closed (#398)', async () => {
+  const { acceptChanges, acceptedText, offeredPalette, issuePalette } = await import('./hub.ts');
+  // Owner: "按 tab 补全了一个，这时这个命令后边还没有空格，按回车就发不上去".
+  const models = ['claude-opus-5.5', 'claude-opus-5', 'test-model'];
+  const names = [{ value: 'bob', hint: 'codex' }, { value: 'bobby', hint: 'kiro' }, { value: 'all', hint: 'Everyone' }];
+  const issues = [{ id: 33, ref: 'old', open: false }, { id: 336, ref: 'new', open: true }];
+  const paletteFor = (text: string) => commandPalette(text, models, 'kiro') ?? mentionPalette(text, names) ?? issuePalette(text, issues);
+  const top = (text: string) => { const p = paletteFor(text)!; return acceptChanges(p, text, p.items[0]!, paletteFor); };
+  const shown = (text: string) => offeredPalette(paletteFor(text), text, paletteFor)?.items.map((i) => i.value) ?? null;
+
+  // A final argument already typed: accepting rewrites the same text.
+  assert.deepEqual(paletteFor('/model claude-opus-5.5')?.items.map((i) => i.value), ['claude-opus-5.5'], 'the source still offers it');
+  assert.equal(top('/model claude-opus-5.5'), false, 'the owner\'s screenshot: accepting changes nothing');
+  assert.equal(shown('/model claude-opus-5.5'), null, 'so the list closes and Enter sends');
+  assert.equal(top('/model claude-opus-5'), false, 'typed, with a longer one still offered below it');
+  assert.deepEqual(shown('/model claude-opus-5'), ['claude-opus-5', 'claude-opus-5.5'],
+    'listed AFTER claude-opus-5.5, the exact match still leads (fuzzyPick); the list stays for the longer one and Enter on the typed one sends');
+  assert.deepEqual(commandPalette('/model claude-opus', models)?.items.map((i) => i.value), ['claude-opus-5.5', 'claude-opus-5'],
+    'without an exact match the table order stands');
+  assert.deepEqual(commandPalette('/model Claude-Opus-5', models)?.items.map((i) => i.value)[0], 'claude-opus-5',
+    'exact in any case: it still outranks the longer id listed first');
+  assert.equal(top('/model Claude-Opus-5'), true, 'and accepting it fixes the case, a change');
+  assert.deepEqual(mentionPalette('@bob', [{ value: 'bobby', hint: '' }, { value: 'bob', hint: '' }])?.items.map((i) => i.value),
+    ['@bob', '@bobby'], 'mentions too');
+  // A longer completion, or another case, is a change: Enter accepts.
+  assert.equal(top('/model claude-op'), true);
+  assert.equal(top('/model Test-model'), true, 'a different case is a change');
+  // A command that takes arguments: accepting adds the space AND opens its list.
+  assert.equal(acceptedText(paletteFor('/model')!, '/model', { value: '/model', hint: '' }), '/model ');
+  assert.equal(acceptChanges(paletteFor('/model')!, '/model', { value: '/model', hint: '' }, paletteFor), true,
+    'Enter on a typed /model opens its argument list, as today (orchestrator ruling)');
+  assert.ok(shown('/model'), 'its list stays');
+  // A command with no arguments: only the separating space would be added.
+  assert.equal(acceptChanges(paletteFor('/compact')!, '/compact', { value: '/compact', hint: '' }, paletteFor), false);
+  // Mentions and issues: only the separating space.
+  assert.equal(top('ask @bob'), false, '@bob is typed, @bobby still offered');
+  assert.deepEqual(shown('ask @bob'), ['@bob', '@bobby']);
+  assert.equal(top('ask @bo'), true);
+  assert.equal(top('ask @Bob'), true, 'another case is a change: delivery reads @bob, and @Bob reaches nobody');
+  assert.equal(shown('ask @all'), null, 'a finished name that is the only candidate closes the list (was mentionPalette\'s own check)');
+  assert.equal(top('see #33'), false, '#33 is typed, #336 still offered');
+  assert.equal(shown('see #336'), null, 'a finished reference closes the list (was issuePalette\'s own check)');
+  assert.equal(offeredPalette(null, '', paletteFor), null);
+});
+
 test('mentionPalette: @ at a word start offers the room\'s addressable names (#242)', () => {
   const names = [{ value: 'alice', hint: 'kiro' }, { value: 'bob', hint: 'codex' }, { value: 'all', hint: 'Everyone' }];
   assert.deepEqual(mentionPalette('@', names)?.items.map((i) => i.value), ['@alice', '@bob', '@all']);
@@ -1969,7 +2014,8 @@ test('mentionPalette: @ at a word start offers the room\'s addressable names (#2
   assert.equal(mid.more, true, 'the accepted name takes its separating space');
   assert.deepEqual(mentionPalette('@al', names)?.items.map((i) => i.value), ['@alice', '@all'], 'prefix tier keeps table order');
   assert.equal(mentionPalette('mail a@b', names), null, 'an address is not a mention');
-  assert.equal(mentionPalette('@bob', names), null, 'a finished name offers nothing, so Enter sends');
+  // A finished name is closed by the composer's one rule (#398, offeredPalette), not here.
+  assert.deepEqual(mentionPalette('@bob', names)?.items.map((i) => i.value), ['@bob']);
   assert.equal(mentionPalette('@bob ', names), null, 'only the last token is completed');
   assert.equal(mentionPalette('@zz', names), null);
   assert.equal(mentionPalette('@', []), null, 'no managed agents: nothing to offer');
@@ -2121,7 +2167,8 @@ test('issuePalette: # at a word start offers the board, exact number first, open
   assert.equal(issuePalette('#33', issues)?.items[0]?.hint, 'Old done thing', 'the hint is the issue name');
   assert.deepEqual(values('#steer'), ['#336'], 'the name is matched too');
   assert.deepEqual(values('#登录'), ['#12'], 'in any script');
-  assert.equal(values('#340'), null, 'a finished reference offers nothing, so Enter sends');
+  // A finished reference is closed by the composer's one rule (#398, offeredPalette), not here.
+  assert.deepEqual(values('#340'), ['#340']);
   const p = issuePalette('fix #34', issues)!;
   assert.equal(p.stage, 'issue');
   assert.equal(`${'fix #34'.slice(0, p.from)}${p.items[0]!.value}${p.more ? ' ' : ''}`, 'fix #340 ', 'inserts the token and a space, nothing else');

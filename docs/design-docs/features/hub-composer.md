@@ -1083,7 +1083,8 @@ candidates are exactly what delivery reaches: the room's
 managed agents (hint: backend) and `all`. Team names are not offered: a
 body `@team` names no window and reaches nobody; a team is addressed by
 its tab (orchestrator, #242). A query that already equals the only
-remaining candidate offers nothing, so Enter after a finished `@bob`
+remaining candidate offers nothing (since #398 by the composer's one rule,
+`offeredPalette`), so Enter after a finished `@bob`
 sends instead of re-completing. A slash-command line (the same
 `slashCommand` test `send()` uses, with or without a leading `@name`)
 offers no names, because it is typed verbatim through `hub_command` and a
@@ -1107,7 +1108,8 @@ the better match, open (not `done`) before done, newest first. Accepting
 inserts `#<id>` and a space — no title, no body: the delivered text is
 exactly what was typed, and an agent reads the issue with
 `tmm board show <id>` (orchestrator's ruling, #340). A query that already
-is the one remaining candidate offers nothing, so Enter sends.
+is the one remaining candidate offers nothing (since #398 by the
+composer's one rule, `offeredPalette`), so Enter sends.
 
 The list is Hub's, kept per project (`issueBoards`), and is READ ONLY WHEN
 NEEDED, never on a poll: each time a `#` query is entered in a room (the
@@ -1119,13 +1121,63 @@ is a door to that issue", which also says what is kept apart: the last
 successful snapshot, the reads, the triggers). A room nobody references
 reads no board. A failed read keeps the last snapshot.
 
+### Enter accepts only a change; a finished item sends (board #398, 2026-10-16)
+
+Owner (screenshot: `/model claude-opus-5.5`, caret at the end, the list
+still showing `claude-opus-5.5 · model`): "按 tab 补全了一个，这时这个命令后边还
+没有空格，按回车就发不上去，要这时也能够按回车". The cause, read in code and
+in the composer: the argument stage of `commandPalette` keeps offering an
+argument that is already typed whole, the composer's Enter accepted
+whatever item was selected, and accepting rewrote the text to itself (an
+argument takes no trailing space), so Enter did nothing. The `@` and `#`
+sources hid the same shape with their own "the query is the one candidate"
+checks; the slash sources had none.
+
+**The rule** (orchestrator, #398): Enter accepts the selected item only
+when accepting CHANGES the text; otherwise it falls through to what Enter
+does with no list (it sends on a desktop; on the phone it is the newline,
+and Send is tapped). Tab always completes, Escape always closes, a tap
+always accepts. `acceptChanges` (`hub.ts`, pure) is the ONE reading, for
+every source: the selected token differs from what is typed (a longer
+completion, another case) is a change; so is a token already typed whose
+accepted text opens a list of its own, which is how a typed `/model` still
+gains its space and its argument list on Enter. A token already typed whose
+acceptance adds only the separating space (`/compact`, `@bob`, `#340`) or
+nothing at all (a final argument) is not. "Opens a list" asks the
+composer's own `paletteFor`, the same reading the live list comes from, so
+the rule cannot drift from what the composer would show.
+
+**A list whose one item changes nothing is closed** (`offeredPalette`, the
+same rule): a finished `/model claude-opus-5.5`, `/compact`, `@bob` or
+`#340` shows no list, so nothing on screen suggests Enter would do
+something else. It replaced the `@` and `#` sources' own checks (one
+mechanism for one job). A list with more items stays (a typed `@bob` with
+`@bobby` offered), and Enter on the typed one sends.
+
+**An exact match ranks first** (`fuzzyPick`, orchestrator, #398): a
+candidate that IS the query, in any case, leads its list, before the
+prefix tier, the way the `#` list already put an exact number first. With
+`claude-opus-5.5` listed before `claude-opus-5`, a typed `claude-opus-5` was
+a prefix of both and the longer one led, so Enter replaced what was typed.
+Without an exact match the tiers and the table order are unchanged.
+
+Pinned by `hub.test.ts` "one rule for every palette" (each stage's change
+and no-change case, a different case is a change, exact-first in commands
+and mentions) and two `Hub.mount.test.ts` cases (#398): on the desktop a
+partial argument is completed and not sent; the completed argument, then
+Enter, sends it; Tab then Enter sends for a slash argument, a slash command
+and a mention; a typed `/model` opens its argument list; an IME
+composition's Enter neither sends nor accepts; ArrowDown to the longer item
+makes Enter accept it. On the phone (a hardware keyboard sends the same
+events): Tab and a partial's Enter complete, a finished item's Enter is the
+newline and does not rewrite it, and Send sends.
 ### The `/` palette is transcribed, not invented
 
 `KIRO_COMMANDS` (`hub.ts`) carries kiro-cli's own names/descriptions/sub-commands copied from its TUI table — a made-up command looks authoritative in the list and then does nothing in the pane — minus cloud-only/hidden entries, with `/quit` last.
 
 **Only commands that DO something are offered**: kiro's `inputType: "panel"` ones (plus those that open $EDITOR or a recorder) would park the agent inside a view nobody here can see or dismiss, so `/tools`, `/help`, `/mcp`, `/context`, `/code`… carry `view: true` — they stay in the table WITH the reason and `OFFERED_COMMANDS` filters them out (owner, 2026-08-19); re-enabling one is deleting a flag. Ten remain, and `/agent` offers only `swap` because create/edit open an editor.
 
-**The palette speaks the ADDRESSEE's dialect** (2026-08-22): `offeredCommands(backend)` picks the table by the explicit `@name`'s backend, else the recipient — `GROK_COMMANDS` (transcribed from grok 1.0.5's own docs; its `/model` completes inline since grok models enumerate) and `CODEX_COMMANDS` (transcribed live from codex 0.148.0's `/` popup; there `/model`/`/permissions`/`/review` are PICKERS = views, and `/delete` is flagged destructive, never offered); `@all` over a mixed roster gets none. `commandPalette()` (pure + tested) decides stage/items/replace-slice: `/` → commands, `/model ` → its values (fetched via `models_list` PER BACKEND, the same call the agent editor uses), and only the LAST token + FIRST argument are completed because what follows one is a path or free text. Matching is FUZZY in three strict tiers — prefix, substring, subsequence (`fuzzyRank`, pure + tested; stable table order within a tier) — so `/mdl` finds `/model` and `son` finds `claude-sonnet-4.5` (owner, 2026-08-24: "不一定从第一个字符开始匹配"), while Enter stays safe because a looser match never outranks a tighter one (`/co` still means `/compact`). The palette owns ↑↓/Tab/Enter while open, Escape dismisses until the text changes, hover and the keyboard cursor share ONE highlight. The composer SPEAKS READLINE: Ctrl-A/E/U/K/W/Y/D/H/T/F/B via `readlineEdit()` (pure + tested) — one kill buffer, consecutive kills accumulate (backward prepends), any other key breaks the chain, A/E are line-scoped, Ctrl-K at line end joins, empty-buffer Ctrl-Y is a handled no-op (Chromium's default is REDO), Ctrl-C/V/X/Z fall through to the browser; the caret is set after Svelte writes the value back. A command-shaped draft STYLES the composer (accent-tinted capsule, tool-lane monospace) via `composerIsCmd`, which mirrors send()'s branch exactly; the measuring mirror flips font with the input in ONE rule, and `growComposer` re-measures on the flip (a font change rewraps).
+**The palette speaks the ADDRESSEE's dialect** (2026-08-22): `offeredCommands(backend)` picks the table by the explicit `@name`'s backend, else the recipient — `GROK_COMMANDS` (transcribed from grok 1.0.5's own docs; its `/model` completes inline since grok models enumerate) and `CODEX_COMMANDS` (transcribed live from codex 0.148.0's `/` popup; there `/model`/`/permissions`/`/review` are PICKERS = views, and `/delete` is flagged destructive, never offered); `@all` over a mixed roster gets none. `commandPalette()` (pure + tested) decides stage/items/replace-slice: `/` → commands, `/model ` → its values (fetched via `models_list` PER BACKEND, the same call the agent editor uses), and only the LAST token + FIRST argument are completed because what follows one is a path or free text. Matching is FUZZY in three strict tiers — prefix, substring, subsequence (`fuzzyRank`, pure + tested; stable table order within a tier), with a candidate that equals the query ahead of all three (#398) — so `/mdl` finds `/model` and `son` finds `claude-sonnet-4.5` (owner, 2026-08-24: "不一定从第一个字符开始匹配"), while Enter stays safe because a looser match never outranks a tighter one (`/co` still means `/compact`). The palette owns ↑↓/Tab/Enter while open (Enter only when accepting changes the text, #398), Escape dismisses until the text changes, hover and the keyboard cursor share ONE highlight. The composer SPEAKS READLINE: Ctrl-A/E/U/K/W/Y/D/H/T/F/B via `readlineEdit()` (pure + tested) — one kill buffer, consecutive kills accumulate (backward prepends), any other key breaks the chain, A/E are line-scoped, Ctrl-K at line end joins, empty-buffer Ctrl-Y is a handled no-op (Chromium's default is REDO), Ctrl-C/V/X/Z fall through to the browser; the caret is set after Svelte writes the value back. A command-shaped draft STYLES the composer (accent-tinted capsule, tool-lane monospace) via `composerIsCmd`, which mirrors send()'s branch exactly; the measuring mirror flips font with the input in ONE rule, and `growComposer` re-measures on the flip (a font change rewraps).
 
 **Every backend has a table since board #243** (owner, 2026-09-27: "斜杠命令…对于 claude Code 好像还不太支持，包括其他的也检查一下"). Measured in a throwaway project on this host with the composer's own door: a `hub_command` RPC typed each line into a real managed pane, and the pane was read back.
 

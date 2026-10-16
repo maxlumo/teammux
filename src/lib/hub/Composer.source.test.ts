@@ -69,7 +69,10 @@ test('/, @ and # are ONE palette: one derived value, one listbox, one accept (#2
   // A second popover for board references would be a second species of the
   // same job (design-language: one popover mechanism). The `#` completion is
   // one more source chained into the same `palette`; Hub owns the board read.
-  assert.match(source, /const palette = \$derived\(paletteOff \? null\s*: commandPalette\([^)]*\) \?\? mentionPalette\(composerText, mentionCandidates\)\s*\?\? issuePalette\(composerText, issues\)\);/u);
+  assert.match(source, /function paletteFor\(text\) \{\s*const backend = paletteBackendFor\(text, recipient, agents\);\s*return commandPalette\(text, cmdModels\[backend\] \?\? \[\], backend\) \?\? mentionPalette\(text, mentionCandidates\)\s*\?\? issuePalette\(text, issues\);\s*\}/u,
+    'one reading of a text, every source chained');
+  assert.match(source, /const palette = \$derived\(paletteOff \? null : offeredPalette\(paletteFor\(composerText\), composerText, paletteFor\)\);/u,
+    'the live list is that reading, through the one "would accepting change anything" rule (#398)');
   assert.equal(source.split('role="listbox"').length - 1, 1, 'one listbox');
   assert.equal(source.split('class="cmd-menu').length - 1, 1, 'one menu');
   assert.match(source, /issues = \[\], onissues = \(\) => \{\}/u, 'the list and its refresh come from Hub');

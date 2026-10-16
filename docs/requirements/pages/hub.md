@@ -310,6 +310,12 @@ completion).
   what was typed (an agent reads it with `tmm board show <id>`). In a
   message, a `#id` the project's board has is a link that opens the issue on
   the Board (board #340).
+- In every palette an exact match ranks first, and **Enter accepts only a
+  change**: a partial is completed, a typed command that takes arguments
+  opens their list, and an item already typed whole (a final argument,
+  `/compact`, `@bob`, `#340`) is not re-accepted, so Enter does what it does
+  with no list (sends on a desktop). Tab always completes; a list whose only
+  item is already typed closes (board #398).
 - Readline editing (Ctrl-A/E/U/K/W/Y/D/H/T/F/B, one kill buffer).
 - **Interrupt**: empty-composer send button arms (amber) then fires Escape
   into the recipient's pane; double Ctrl-C same; while the recipient is
