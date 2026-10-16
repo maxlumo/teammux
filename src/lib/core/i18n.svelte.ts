@@ -563,6 +563,7 @@ const msgs: Record<string, Record<string, string>> = {
     linkNoAddress: 'This link has no server address',
     linkAmbiguous: 'This link cannot be read: a token or socket appears twice',
     linkAddressCredential: "This link's address contains a credential",
+    linkHidden: 'This text contains hidden characters',
     linkNotBuildable: 'This address cannot be shared as a link',
     // About page + the Connection rows (board #368).
     aboutThisApp: 'This app',
@@ -1332,6 +1333,7 @@ const msgs: Record<string, Record<string, string>> = {
     linkNoAddress: '这个链接里没有服务器地址',
     linkAmbiguous: '这个链接无法读取：token 或 socket 出现了两次',
     linkAddressCredential: '这个链接的地址里带有凭证',
+    linkHidden: '这段文字里带有隐藏字符',
     linkNotBuildable: '这个地址无法生成分享链接',
     aboutThisApp: '本应用',
     aboutServer: '服务端',

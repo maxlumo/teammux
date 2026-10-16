@@ -322,7 +322,7 @@ for (const [what, text] of REJECTED) {
     assert.equal(app.value(TOKEN), 'KEEP-TOKEN');
     assert.equal(app.value(SOCKET), '/keep/sock');
     const message = app.document.querySelector('.fields .config-error[role=alert]');
-    assert.match(message?.textContent ?? '', /^This link(?:'s address contains a credential| has no server address| cannot be read: a token or socket appears twice)$/u, 'one message about the problem');
+    assert.match(message?.textContent ?? '', /^(?:This link(?:'s address contains a credential| has no server address| cannot be read: a token or socket appears twice)|This text contains hidden characters)$/u, 'one message about the problem');
     for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket', 'OUTER-TOKEN']) {
       assert.ok(!(message?.textContent ?? '').includes(secret), `the message does not carry ${secret}`);
       assert.ok(!app.document.documentElement.outerHTML.includes(secret), `and ${secret} is nowhere in the page`);

@@ -79,7 +79,7 @@
     } else {
       address = fallback;
       input.value = fallback;
-      linkError = t(parsed.reason === 'no-address' ? 'linkNoAddress' : parsed.reason === 'ambiguous' ? 'linkAmbiguous' : 'linkAddressCredential');
+      linkError = t(parsed.reason === 'no-address' ? 'linkNoAddress' : parsed.reason === 'ambiguous' ? 'linkAmbiguous' : parsed.reason === 'hidden' ? 'linkHidden' : 'linkAddressCredential');
     }
     return true;
   }

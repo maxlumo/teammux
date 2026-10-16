@@ -238,7 +238,7 @@ test('disguised user info is still user info: extra slashes, scheme-relative and
   for (const text of DISGUISED) {
     const shown = text.replace(/SECRET-ONE/u, '<secret>');
     assert.deepEqual(endpointOf(text), { kind: 'credential' }, `endpointOf ${shown}`);
-    assert.equal(kindOf(text), 'unusable:address-credential', `parse ${shown}`);
+    assert.equal(kindOf(text), refusedKind(text), `parse ${shown}`);
     assert.ok(kindOf(`${text}?token=OUTER-TOKEN`).startsWith('unusable'), `inside a new link ${shown}`);
     assert.ok(kindOf(`https://front.example/?addr=${encodeURIComponent(text)}&token=OUTER-TOKEN`).startsWith('unusable:'), `inside a decoded old addr ${shown}`);
     assert.equal(buildConnectionLink({ address: text, token: 'T' }), null, `the builder ${shown}`);
@@ -273,14 +273,22 @@ test('whatever the parser deletes or reads around a start of ws, wss, http or ht
     parsed++;
     assert.equal(url.username + url.password, '', `user info hidden in ${JSON.stringify(text)}`);
   }
-  assert.ok(parsed > 20, `the sweep did parse clean text (${parsed})`);
+  assert.ok(parsed > 10, `the sweep did parse clean text (${parsed})`);
 });
+
+// Characters that hide a credential from a reading that starts at the scheme: the C0 controls,
+// and the ones the URL parser itself does NOT strip (DEL, NEL, the soft hyphen, zero-width and
+// direction marks, the word joiner), plus the whitespace String.trim already forgives at the ends.
+const EXTRA = ['\u007f', '\u0085', '\u00ad', '\u200b', '\u200c', '\u200d', '\u200e', '\u2060', '\ufeff', '\u00a0', '\u3000'];
+const HIDING = [...Array.from({ length: 33 }, (_, code) => String.fromCharCode(code)), ...EXTRA];
+const hiddenIn = (text: string) => /[\p{Cc}\p{Cf}]/u.test(text.trim());
+const refusedKind = (text: string) => (hiddenIn(text) ? 'unusable:hidden' : 'unusable:address-credential');
 
 // The classifier and the standards URL parser must agree. This is the invariant, asserted over
 // a grid rather than argued: for every fixture, if `new URL` reads a username or a password,
 // the text is NOT classified as none, is not an endpoint, and is not a usable link. C0
 // characters U+0000 to U+0020 are put around each (the parser trims them; String.trim does not).
-const C0 = Array.from({ length: 33 }, (_, code) => String.fromCharCode(code));
+const C0 = HIDING;
 const AGREEMENT_BASES = [
   'wss://user:SECRET-ONE@h/ws', 'ws://user@h:9899', 'wss://:SECRET-ONE@h', 'wss:////user:SECRET-ONE@h/ws', 'wss:\\\\user:SECRET-ONE@h/ws',
   'WSS://user:SECRET-ONE@h/ws?token=OUTER-TOKEN', 'wss://user:SECRET-ONE@h/ws?token=OUTER-TOKEN&socket=%2Fs', 'http://user:SECRET-ONE@h/', 'ws:\t//user:SECRET-ONE@h',
@@ -326,13 +334,29 @@ test('the classifier agrees with the standards URL parser: whenever new URL read
   assert.ok(withUserInfo > 200 && clean > 200, `the grid covers both sides (${withUserInfo} with user info, ${clean} without)`);
 });
 
-test('every disguised user-info form stays credential-bearing with any C0 character around it, including the forms the URL parser does not read (scheme-relative, scheme-less)', () => {
-  for (const base of [...DISGUISED, 'user:SECRET-ONE@h:9899']) for (const c of C0) {
-    for (const text of [`${c}${base}`, `${base}${c}`, `${c}${base}${c}`]) {
+test('every disguised user-info form is refused with any hiding character before, after, around or inside it: as hidden characters, or as a credential when only trimmed whitespace is there (#405)', () => {
+  for (const base of [...DISGUISED, 'user:SECRET-ONE@h:9899']) for (const c of HIDING) {
+    const inside = /\s/u.test(c) ? [] : [`${base.slice(0, 2)}${c}${base.slice(2)}`];   // a space inside is prose, not a hidden character
+    for (const text of [`${c}${base}`, `${base}${c}`, `${c}${base}${c}`, ...inside]) {
       const shown = JSON.stringify(text).replace(/SECRET-ONE/gu, '<secret>');
-      assert.equal(kindOf(text), 'unusable:address-credential', `parse ${shown}`);
+      assert.equal(kindOf(text), refusedKind(text), `parse ${shown}`);
       assert.deepEqual(endpointOf(text), { kind: 'credential' }, `endpointOf ${shown}`);
     }
+  }
+});
+
+test('the validator\u2019s measured list: one invisible character before ws://user:PW@h.example/ws is refused whole, whatever it is, and the whitespace trim already handles stays handled', () => {
+  const leaks = ['\u0000', '\u0001', '\u0008', '\u000e', '\u001f', '\u007f', '\u0085', '\u00ad', '\u200b', '\u200c', '\u200d', '\u200e', '\u2060'];
+  for (const c of leaks) {
+    assert.equal(kindOf(`${c}ws://user:SECRET-ONE@h.example/ws`), 'unusable:hidden', JSON.stringify(c));
+    assert.equal(kindOf(`ws://user:SECRET-ONE@h.example/ws${c}`), 'unusable:hidden', `after ${JSON.stringify(c)}`);
+    assert.equal(kindOf(`${c}wss://h.example/ws`), 'unusable:hidden', `a clean address is refused too: ${JSON.stringify(c)}`);
+    assert.deepEqual(endpointOf(`${c}wss://h.example/ws`), { kind: 'invalid' }, 'and is no endpoint');
+  }
+  for (const c of ['\t', '\n', '\u000b', '\u000c', '\r', ' ', '\u00a0', '\ufeff', '\u3000']) {
+    assert.equal(kindOf(`${c}ws://user:SECRET-ONE@h.example/ws${c}`), 'unusable:address-credential', `trimmed: ${JSON.stringify(c)}`);
+    assert.equal(kindOf(`${c}wss://h.example/ws?token=T${c}`), 'link', `a clean link with ${JSON.stringify(c)} around it is still a link`);
+    assert.deepEqual(endpointOf(`${c}wss://h.example/ws${c}`), { kind: 'endpoint', address: 'wss://h.example/ws' });
   }
 });
 

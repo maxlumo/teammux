@@ -50,17 +50,30 @@ export interface ConnectionLink {
  *    user info, e.g. a credential in the fragment of a decoded `addr`),
  *    `no-address` (credentials without a usable server: the old token-only
  *    link, a link naming no host, free text with a `?token=` in it, a
- *    credential in a hash) or `ambiguous` (a repeated `token`/`socket` key, or
- *    an endpoint query that already holds one). */
+ *    credential in a hash), `ambiguous` (a repeated `token`/`socket` key, or
+ *    an endpoint query that already holds one) or `hidden` (the text holds a
+ *    control or format character, which no address has: see `HIDDEN`). */
 export type ParsedLink =
   | { kind: 'none' }
   | { kind: 'link'; link: ConnectionLink }
-  | { kind: 'unusable'; reason: 'no-address' | 'ambiguous' | 'address-credential' };
+  | { kind: 'unusable'; reason: 'no-address' | 'ambiguous' | 'address-credential' | 'hidden' };
 
 const NONE: ParsedLink = { kind: 'none' };
 const NO_ADDRESS: ParsedLink = { kind: 'unusable', reason: 'no-address' };
 const AMBIGUOUS: ParsedLink = { kind: 'unusable', reason: 'ambiguous' };
 const ADDRESS_CREDENTIAL: ParsedLink = { kind: 'unusable', reason: 'address-credential' };
+const HIDDEN_CHARACTERS: ParsedLink = { kind: 'unusable', reason: 'hidden' };
+
+/** A control (Cc) or format (Cf) character: U+0000-001F, U+007F-009F, the soft
+ * hyphen, the zero-width and direction marks, the word joiner. No address has
+ * one, the URL parser does not strip most of them (it strips C0 only at the
+ * ends, and not DEL, NEL, the soft hyphen or the zero-width characters), and
+ * one in front of a scheme hides a whole `user:pw@host` from every reading
+ * that starts at the scheme. So the door refuses them, whole, before anything
+ * is read or shown. The whitespace `String.trim` takes off the ends is not
+ * affected: it is gone before this is asked. */
+const HIDDEN = /[\p{Cc}\p{Cf}]/u;
+const HIDDEN_EVERYWHERE = /[\p{Cc}\p{Cf}]/gu;
 
 /** THE reading of a credential key: the key of one `a=b` query segment,
  * percent-decoded and case-folded, is `token` or `socket`. (`?%74oken=` is a
@@ -120,17 +133,19 @@ function canonicalAddress(base: string): string {
  * cannot disagree about a text that passes). An `@` later in a path or query is
  * not user info.
  *
- * Whatever the standards URL parser can read is asked of the parser itself: it
- * trims leading and trailing C0 controls and spaces (U+0000 to U+0020, which
- * `String.trim` does not: `\u0001wss://user:pw@h`), deletes tabs and newlines
- * anywhere, and treats a backslash as a slash, so no second copy of those rules
- * is kept here. The tolerant reading below covers what is not a URL to the
- * parser (`user:pw@h`, `//user:pw@h`, `@h`, `mailto:a@b`). Free text with
- * spaces is not an address and is not judged — except behind a `ws:`/`wss:`/
- * `http:`/`https:` start, which the parser reads whatever follows
- * (`ws:// user:pw@h` is user ` user`). */
+ * Whatever the standards URL parser can read is asked of the parser itself
+ * (`new URL`: a backslash is a slash, tabs and newlines vanish, a space in user
+ * info is encoded), so no second copy of those rules is kept here. The
+ * tolerant reading below covers what is not a URL to the parser (`user:pw@h`,
+ * `//user:pw@h`, `@h`, `mailto:a@b`). Hidden characters are dropped first: this
+ * only classifies, and a credential must not escape by being wrapped in them
+ * (`parseConnectionLink` refuses such text outright; a decoded `addr` and a
+ * saved address reach here without that door). Free text with spaces is not an
+ * address and is not judged — except behind a `ws:`/`wss:`/`http:`/`https:`
+ * start, which the parser reads whatever follows (`ws:// user:pw@h` is user
+ * ` user`). */
 function hasUserInfo(raw: string): boolean {
-  const text = raw.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/gu, '').replace(/[\t\n\r]/gu, '');
+  const text = raw.replace(HIDDEN_EVERYWHERE, '').trim();
   try {
     const url = new URL(text);
     if (url.username !== '' || url.password !== '') return true;
@@ -227,6 +242,7 @@ function classify(raw: string): ParsedLink {
 export function parseConnectionLink(text: string): ParsedLink {
   const raw = text.trim();
   if (!raw) return NONE;
+  if (HIDDEN.test(raw)) return HIDDEN_CHARACTERS;
   const parsed = classify(raw);
   if (parsed.kind !== 'none') return parsed;
   if (carriesCredentialKey(raw)) return NO_ADDRESS;
@@ -263,7 +279,7 @@ export function endpointOf(text: string): Endpoint {
   // A canonical endpoint is `ws://` or `wss://` and then a host: no surplus
   // slashes, no backslash, no whitespace, no fragment — syntax the URL parser would
   // quietly repair into something other than what was typed.
-  if (!/^wss?:\/\/[^/\\]/iu.test(raw) || /\s/u.test(raw) || raw.includes('#') || raw.includes('\\')) return { kind: 'invalid' };
+  if (!/^wss?:\/\/[^/\\]/iu.test(raw) || /\s/u.test(raw) || HIDDEN.test(raw) || raw.includes('#') || raw.includes('\\')) return { kind: 'invalid' };
   const address = canonicalAddress(raw);
   return hasHost(address) ? { kind: 'endpoint', address } : { kind: 'invalid' };
 }
