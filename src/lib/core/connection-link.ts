@@ -118,9 +118,15 @@ function canonicalAddress(base: string): string {
  * one is removed from view; what is approved as an endpoint is stricter (see
  * `endpointOf`: exactly `scheme://host`, so the URL parser and this reading
  * cannot disagree about a text that passes). An `@` later in a path or query is
- * not user info. Free text with spaces is not an address and is not judged. */
-function hasUserInfo(text: string): boolean {
-  if (/\s/u.test(text)) return false;
+ * not user info. The URL parser also deletes every tab and newline before it
+ * reads anything (`ws:<TAB>//user:pw@h`), so this does too (callers pass text
+ * already trimmed).
+ * Free text with spaces is not an address and is not judged — except behind a
+ * `ws:`/`wss:`/`http:`/`https:` start, which the parser reads whatever follows
+ * (`ws:// user:pw@h` is user ` user`). */
+function hasUserInfo(raw: string): boolean {
+  const text = raw.replace(/[\t\n\r]/gu, '');
+  if (!/^(?:wss?|https?):/iu.test(text) && /\s/u.test(text)) return false;
   const rest = text.replace(/^[a-z][a-z\d+.-]*:/iu, '').replace(/^[/\\]+/u, '');
   return (rest.split(/[/\\?#]/u, 1)[0] ?? '').includes('@');
 }

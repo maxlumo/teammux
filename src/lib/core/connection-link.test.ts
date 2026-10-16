@@ -228,6 +228,10 @@ test('URL user info is a credential: the gateway authenticates by token, so user
 const DISGUISED = [
   'wss:////user:SECRET-ONE@h/ws', 'wss:///user:SECRET-ONE@h/ws', 'ws://////user:SECRET-ONE@h:9899', '//user:SECRET-ONE@h/ws',
   'wss:\\\\user:SECRET-ONE@h/ws', 'wss:/\\user:SECRET-ONE@h/ws', 'wss://\\user:SECRET-ONE@h/ws', 'wss:\\/user:SECRET-ONE@h/ws', 'WSS:////USER:SECRET-ONE@h/ws',
+  // The URL parser deletes tabs and newlines anywhere and percent-encodes a space in user info.
+  'ws:\t//user:SECRET-ONE@h', 'ws:\n//user:SECRET-ONE@h', 'w\ts://user:SECRET-ONE@h', 'ws://\tuser:SECRET-ONE@h', 'ws:// user:SECRET-ONE@h',
+  // Percent-encoded user and password, and a scheme-less one: refused for the @, whatever is in front of it.
+  '%75ser:SECRET-ONE@h', 'u%40x:SECRET-ONE@h', 'ws:\\\\user:SECRET-ONE@h',
 ];
 
 test('disguised user info is still user info: extra slashes, scheme-relative and backslash forms, direct, inside a link, inside a decoded old addr, and in the builder (#405)', () => {
@@ -256,6 +260,20 @@ test('a successful endpoint implies its parsed URL has no username and no passwo
     assert.match(result.address, /^wss?:\/\/[^/\\]/u, 'and the canonical shape: scheme://host');
   }
   assert.ok(endpoints > 20, `the sweep did accept real endpoints (${endpoints})`);
+});
+
+test('whatever the parser deletes or reads around a start of ws, wss, http or https, text it calls none carries no user info (#405 sweep)', () => {
+  const gaps = ['', '\t', '\n', ' ', '\t\t'];
+  let parsed = 0;
+  for (const scheme of ['ws:', 'wss:', 'WSS:', 'http:']) for (const a of gaps) for (const slash of ['//', '///', '\\\\', '/\\', '']) for (const b of gaps) for (const authority of ['h', 'user@h', 'user:pw@h', '@h', 'u:@h']) {
+    const text = `${scheme}${a}${slash}${b}${authority}/ws`;
+    if (kindOf(text) !== 'none') continue;
+    let url: URL;
+    try { url = new URL(text); } catch { continue; }
+    parsed++;
+    assert.equal(url.username + url.password, '', `user info hidden in ${JSON.stringify(text)}`);
+  }
+  assert.ok(parsed > 20, `the sweep did parse clean text (${parsed})`);
 });
 
 test('non-canonical syntax with no user info is not an endpoint either, and is not credential-bearing text', () => {
