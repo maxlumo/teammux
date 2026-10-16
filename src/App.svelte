@@ -19,6 +19,7 @@
   import { createFeedbackLifetime } from './lib/ui/feedback-lifetime.ts';
   import SystemStatus from './lib/system/SystemStatus.svelte';
   import ServerList from './lib/app/ServerList.svelte';
+  import ServerDetailsDialog from './lib/app/ServerDetailsDialog.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
   import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
@@ -54,7 +55,8 @@
   import { createHandleEnds } from './lib/app/handle-end.ts';
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
-  import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentConnection, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers } from './lib/app/servers.ts';
+  import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentConnection, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers,
+    serverAddresses, addServerAddress, removeServerAddress, setServerToken, MAX_ADDRESSES } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -2390,6 +2392,31 @@
 
   // Frozen with the rest of the registry while the migration is blocked.
   function serverRename(id, name) { if (!migrationBlocked) serverList = renameServer(localStorage, id, name); }
+  // A saved server's addresses and token (board #402): the dialog is open
+  // for ONE entry id, read fresh from storage on each change (the version
+  // bump the current server's address list already uses).
+  let detailsId = $state('');
+  const detailsEntry = $derived(detailsId ? serverList.find((s) => s.id === detailsId) ?? null : null);
+  const detailsAddresses = $derived.by(() => { void addrSetVersion; return detailsId ? serverAddresses(localStorage, detailsId) : []; });
+  $effect(() => { if (detailsId && (!detailsEntry || migrationBlocked)) detailsId = ''; });
+  function serverAddressAdd(address) {
+    if (migrationBlocked || !detailsId) return 'missing';
+    const result = addServerAddress(localStorage, detailsId, address);
+    if ('refused' in result) return result.refused;
+    addrSetVersion++;
+    return null;
+  }
+  function serverAddressRemove(address) {
+    if (migrationBlocked || !detailsId) return 'missing';
+    const result = removeServerAddress(localStorage, detailsId, address);
+    if ('refused' in result) return result.refused;
+    addrSetVersion++;
+    return null;
+  }
+  function serverTokenSet(token) {
+    if (migrationBlocked || !detailsId) return;
+    serverList = setServerToken(localStorage, detailsId, token);
+  }
   async function serverRemove(id) {
     if (migrationBlocked) return;
     // Removing a member destroys its tree (#335 ③b-2): that tree's guards
@@ -3832,9 +3859,16 @@
   {#snippet savedServers()}
     <!-- Settings › Connection: the same ServerList as the popover (board 315). -->
     <ServerList variant="page" servers={serverList} currentId={serverCurId} link={serverLink}
-      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
+      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} ondetails={(id) => { detailsId = id; }}
+      frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
       members={memberRows} notice={membershipError} builds={buildOf} />
   {/snippet}
+
+  {#if detailsEntry}
+    <ServerDetailsDialog name={detailsEntry.name} addresses={detailsAddresses} active={detailsEntry.address}
+      machineKnown={!!detailsEntry.machineId} max={MAX_ADDRESSES} compact={narrowVp}
+      onadd={serverAddressAdd} onremove={serverAddressRemove} ontoken={serverTokenSet} onclose={() => { detailsId = ''; }} />
+  {/if}
 
   {#if addServer}
     <AddServerDialog initial={addServer.initial} compact={narrowVp}

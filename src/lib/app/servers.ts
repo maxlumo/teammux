@@ -841,6 +841,88 @@ export function renameServer(storage: Store, id: string, name: string): ServerEn
   return servers;
 }
 
+/** How many addresses one server keeps (board #402): the cap the connect
+ * path already applies to a machine's failover set (`activateSwitched`). */
+export const MAX_ADDRESSES = 8;
+
+/**
+ * A saved server's addresses as Settings › Connection edits them (board
+ * #402): its machine's failover set in its stored order (the order every
+ * dial walks after the address it was asked to dial, server-target
+ * `addressesOf`), with the active address in it. A server whose machine is
+ * not known yet (never connected here) has only its active address.
+ */
+export function serverAddresses(storage: Reader, id: string): string[] {
+  const entry = loadServers(storage).find((s) => s.id === id);
+  if (!entry) return [];
+  const set = entry.machineId ? machinesMap(storage)[entry.machineId] : undefined;
+  const list = Array.isArray(set) ? set.filter((a) => typeof a === 'string' && a) : [];
+  return list.includes(entry.address) ? list : [entry.address, ...list];
+}
+
+/** Why an address edit was refused, for the dialog to say. */
+export type AddressRefusal = 'missing' | 'no-machine' | 'full' | 'invalid' | 'duplicate' | 'active';
+
+/** A ws(s) URL with a host: the shape every dial can try. */
+const DIALABLE = /^wss?:\/\/[^\s/?#]+/u;
+
+/**
+ * Add `address` to server `id` (board #402, owner: "为某一个 server 添加一个
+ * 新的 url"). It joins the end of that machine's failover set through the
+ * ONE writer (`saveMachineAddresses`), so the next dial of that server walks
+ * it when the addresses before it do not answer, and a connect through it
+ * makes it the active one. `address` is already normalized by the caller
+ * (`normalizeAddress`, as the connect form does). Refused, writing nothing,
+ * when the server is not saved, its machine is not known yet (the set is
+ * keyed by the machine; connect once first), the set is full, the address is
+ * not a ws(s) URL, or the server already has it.
+ */
+export function addServerAddress(storage: Store, id: string, address: string): { addresses: string[] } | { refused: AddressRefusal } {
+  const entry = loadServers(storage).find((s) => s.id === id);
+  if (!entry) return { refused: 'missing' };
+  if (!entry.machineId) return { refused: 'no-machine' };
+  const a = address.trim();
+  if (!DIALABLE.test(a)) return { refused: 'invalid' };
+  const list = serverAddresses(storage, id);
+  if (list.includes(a)) return { refused: 'duplicate' };
+  if (list.length >= MAX_ADDRESSES) return { refused: 'full' };
+  return { addresses: saveMachineAddresses(storage, entry.machineId, [...list, a]) };
+}
+
+/**
+ * Remove `address` from server `id` (board #402). The ACTIVE address — the
+ * one the last connect proved — is never removed (the rule the current
+ * server's address list already keeps): to replace it, add the new one,
+ * connect through it, then remove the old one.
+ */
+export function removeServerAddress(storage: Store, id: string, address: string): { addresses: string[] } | { refused: AddressRefusal } {
+  const entry = loadServers(storage).find((s) => s.id === id);
+  if (!entry) return { refused: 'missing' };
+  if (address === entry.address) return { refused: 'active' };
+  if (!entry.machineId) return { refused: 'no-machine' };
+  return { addresses: saveMachineAddresses(storage, entry.machineId, serverAddresses(storage, id).filter((a) => a !== address)) };
+}
+
+/**
+ * Replace server `id`'s token (board #402). An empty token is not a change:
+ * the dialog's field starts empty and never holds the saved one. Nothing is
+ * re-dialled (orchestrator): every dial reads its token from the entry
+ * (server-runtime), so the next connection uses it, and a wrong one is
+ * refused there (board #393). The active mirror goes through #400's one
+ * rule, `reconcileMirror`: a mirror that held this server's old tuple is no
+ * tuple the registry holds any more, so it is cleared, and the connect form
+ * pre-fills the new token from the registry (`currentConnection`).
+ */
+export function setServerToken(storage: Store, id: string, token: string): ServerEntry[] {
+  const servers = loadServers(storage);
+  const entry = servers.find((s) => s.id === id);
+  if (!entry || !token) return servers;
+  entry.token = token;
+  saveServers(storage, servers);
+  reconcileMirror(storage);
+  return servers;
+}
+
 /** Remove an entry and its per-server state. The CURRENT entry is not
  *  removable — the switcher offers removal only on the others, and refusing
  *  here keeps a stale UI honest. The mirror keys are reconciled in the same

@@ -966,3 +966,103 @@ test('currentConnection is CURRENT\u2019s saved tuple, whatever the mirror says'
   assert.equal(currentConnection(mem({ [SERVERS_KEY]: JSON.stringify([entry('a', 'ws://a:1', '')]), [CURRENT_KEY]: 'gone' })), null, 'a dangling CURRENT offers nothing');
   assert.equal(currentConnection(mem()), null);
 });
+
+// Board #402 (owner: "connection 里，我可以直接在这个配置页面进行连接的更改，比如为某一个
+// server 添加一个新的 url"): a saved server's addresses and token, edited in place.
+test('a saved server s addresses are its machine s failover set with the active one in it; a server never connected has only its active address (#402)', async () => {
+  const { serverAddresses } = await import('./servers.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a-lan:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'gamma', address: 'ws://c:9899', token: 'tokC', named: true },
+    ]),
+    tmux_server_current: 'a',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a-ts:9899', 'ws://a-lan:9899'], 'm-b': ['ws://b-ts:9899'] }),
+  });
+  assert.deepEqual(serverAddresses(s, 'a'), ['ws://a-ts:9899', 'ws://a-lan:9899'], 'the stored order, the dial order after the asked address');
+  assert.deepEqual(serverAddresses(s, 'b'), ['ws://b:9899', 'ws://b-ts:9899'], 'the active address is always in it');
+  assert.deepEqual(serverAddresses(s, 'c'), ['ws://c:9899'], 'no machine yet: only the active address');
+  assert.deepEqual(serverAddresses(s, 'gone'), []);
+});
+
+test('adding an address to a NON-current server joins its failover set and the next dial of that server walks it (#402)', async () => {
+  const { addServerAddress, MAX_ADDRESSES } = await import('./servers.ts');
+  const { addressesOf } = await import('./server-target.ts');
+  const { dialOrder } = await import('./dial-order.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b-lan:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'gamma', address: 'ws://c:9899', token: 'tokC', named: true },
+    ]),
+    tmux_server_current: 'a',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://b-lan:9899'] }),
+  });
+  const registry = s.getItem('tmux_servers');
+  assert.deepEqual(addServerAddress(s, 'b', 'wss://b.tail.ts.net/ws'), { addresses: ['ws://b-lan:9899', 'wss://b.tail.ts.net/ws'] });
+  assert.deepEqual(JSON.parse(s.getItem('tmux_machines')!)['m-b'], ['ws://b-lan:9899', 'wss://b.tail.ts.net/ws'], 'written to the failover set');
+  assert.equal(s.getItem('tmux_servers'), registry, 'the entry itself is untouched: the active address stays the proven one');
+  assert.equal(s.getItem(CURRENT_KEY), 'a', 'and nothing switched');
+  // A switch to B asks for its active address first; when that fails the new one is next.
+  const walk = dialOrder(addressesOf(s, 'b', 'ws://b-lan:9899'), (addr) => addr !== 'ws://b-lan:9899');
+  assert.deepEqual(walk, ['wss://b.tail.ts.net/ws', 'ws://b-lan:9899'], 'the dead active address is tried last, the added one first');
+  // Refusals write nothing.
+  const after = new Map(s.m);
+  assert.deepEqual(addServerAddress(s, 'b', 'ws://b-lan:9899'), { refused: 'duplicate' });
+  assert.deepEqual(addServerAddress(s, 'b', 'b-lan:9899'), { refused: 'invalid' }, 'the caller normalizes; a bare host is not dialable');
+  assert.deepEqual(addServerAddress(s, 'b', 'http://b:1'), { refused: 'invalid' });
+  assert.deepEqual(addServerAddress(s, 'c', 'ws://c-ts:9899'), { refused: 'no-machine' }, 'never connected here: no failover set to join yet');
+  assert.deepEqual(addServerAddress(s, 'gone', 'ws://x:1'), { refused: 'missing' });
+  assert.deepEqual(new Map(s.m), after);
+  for (let i = 2; i < MAX_ADDRESSES; i++) assert.ok('addresses' in addServerAddress(s, 'b', `ws://b-${i}:9899`));
+  assert.deepEqual(addServerAddress(s, 'b', 'ws://b-9:9899'), { refused: 'full' }, `at most ${MAX_ADDRESSES}`);
+});
+
+test('removing an address never removes the active one; the token is replaced only by a typed one (#402)', async () => {
+  const { removeServerAddress, setServerToken, serverAddresses } = await import('./servers.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b-lan:9899', token: 'tokB', socket: 'work', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'a',
+    tmux_machines: JSON.stringify({ 'm-b': ['ws://b-lan:9899', 'ws://b-ts:9899', 'ws://b-wan:9899'] }),
+  });
+  assert.deepEqual(removeServerAddress(s, 'b', 'ws://b-ts:9899'), { addresses: ['ws://b-lan:9899', 'ws://b-wan:9899'] });
+  const kept = new Map(s.m);
+  assert.deepEqual(removeServerAddress(s, 'b', 'ws://b-lan:9899'), { refused: 'active' }, 'the proven address: add the new one, connect, then remove');
+  assert.deepEqual(new Map(s.m), kept);
+  assert.deepEqual(serverAddresses(s, 'b'), ['ws://b-lan:9899', 'ws://b-wan:9899']);
+  // Token: an empty field is not a change; a typed one replaces it, and nothing else moves.
+  setServerToken(s, 'b', '');
+  assert.equal(loadServers(s).find((e) => e.id === 'b')?.token, 'tokB');
+  setServerToken(s, 'b', 'tokB2');
+  assert.deepEqual(loadServers(s).find((e) => e.id === 'b'),
+    { id: 'b', name: 'beta', address: 'ws://b-lan:9899', token: 'tokB2', socket: 'work', machineId: 'm-b', named: true });
+  assert.equal(s.getItem(CURRENT_KEY), 'a');
+  assert.equal(s.getItem('tmux_token'), null, 'B is not the mirrored connection: the mirror is untouched');
+});
+
+test('a new token for the CURRENT server reaches the connect form through the registry; the old tuple leaves the mirror; nothing connects (#402)', async () => {
+  const { setServerToken, currentConnection } = await import('./servers.ts');
+  const seed = {
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA', tmux_disconnected: '1',
+  };
+  const s = mem(seed);
+  setServerToken(s, 'a', 'tokA2');
+  assert.equal(loadServers(s).find((e) => e.id === 'a')?.token, 'tokA2');
+  assert.deepEqual(currentConnection(s), { address: 'ws://a:9899', token: 'tokA2', socket: '' }, 'the form pre-fills the new token');
+  assert.equal(s.getItem('tmux_token'), null, 'the old token is not left in the mirror (#400 reconcileMirror)');
+  assert.equal(s.getItem('tmux_address'), null);
+  assert.equal(s.getItem('tmux_disconnected'), '1', 'and nothing connects: a disconnected person stays disconnected');
+  // Another server's token: the current server's mirror is its own tuple and stays.
+  const t = mem(seed);
+  setServerToken(t, 'b', 'tokB2');
+  assert.equal(t.getItem('tmux_token'), 'tokA');
+  assert.equal(t.getItem('tmux_address'), 'ws://a:9899');
+});

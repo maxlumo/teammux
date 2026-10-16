@@ -18,7 +18,7 @@ where Agents is a page of its own, reads as one plain list):
 - **Chat** — how much of the conversation the feed shows: chat detail and tool rows (moved out of Appearance 2026-09-25: they set what is said, not how it looks)
 - **Notifications** — message notifications On/Off, the level (Finished / Replies / Everything) and a test row (its own category, owner 2026-09-02)
 - **Shortcuts** — configurable bindings for pages, servers, panels (including the scratch terminal toggle, board #324 — its other door is the system status bar control, #326) and Terminal windows (every desktop form factor: browser, PWA and the desktop app; absent on the touch layout)
-- **Connection** — every saved server (switch/rename/remove/add), then the current server's addresses, optimize/share/disconnect (the global debug switch and its floating log panel were retired 2026-09-26)
+- **Connection** — every saved server (switch/rename/remove/add, and its addresses and token, board #402), then the current server's addresses, optimize/share/disconnect (the global debug switch and its floating log panel were retired 2026-09-26)
 
 **Agent** (phone only, where Agents is not a page of its own)
 - **Agents / Teams / Skills / MCP servers** — four second-level pages, each the real AgentsPage narrowed to one section (owner, 2026-09-02)
@@ -42,7 +42,13 @@ where Agents is a page of its own, reads as one plain list):
   renames, non-current rows removable, `+` row opens the Add server dialog
   (cancel changes nothing; connect is the same switch). Settings ›
   Connection lists every saved server with the same component and actions
-  (the current one marked, its address list below it). A LIVE row (the focused
+  (the current one marked, its address list below it), plus one more row
+  command, **Addresses and token**, that opens a dialog for that server:
+  its addresses in dial order (the one in use marked and not removable), an
+  Add address field with its button (the next dial of that server tries it),
+  remove for the others, and a New token field that starts empty, never
+  shows the saved token, and applies from the next connection (board #402).
+  Adding waits until the server has connected here once, and says so. A LIVE row (the focused
   server, or a connected Aggregate member) adds a third line, on this page
   only, naming ITS build: `server v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC`,
   or `server: unknown` for a server older than #368 that names none (board

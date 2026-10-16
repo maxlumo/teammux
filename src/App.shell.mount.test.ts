@@ -9360,3 +9360,171 @@ for (const [what, url] of [
     assert.equal(h.app.window.localStorage.getItem('tmux_servers'), '[]', 'no server was recorded');
   });
 }
+
+// Board #402 (owner: "connection 里，我可以直接在这个配置页面进行连接的更改，比如为某一个
+// server 添加一个新的 url"): a saved server's addresses and token, edited from
+// its row in Settings › Connection. Rename stays the row's inline pencil.
+for (const layout of ['desktop', 'mobile'] as const) test(`#402 (${layout}): add an address to a non-current server and its next dial walks it; remove one; the active one stays; the token is never in the page`, async (context) => {
+  const calls: string[] = [];
+  // B's proven address is down; anything else answers.
+  const gate: DialGate = (url) => (url === 'ws://b:9899' ? Promise.reject(new Error('timeout')) : null);
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: layout },
+    undefined, { calls, gate, setup(window) { window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const ls = h.app.window.localStorage;
+  const doc = h.app.document;
+  if (layout === 'desktop') await toConnection(h); else await settingsTab(h, /^connection/iu);
+  const open = async () => {
+    doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+    await h.settle();
+    const dialog = doc.querySelector<HTMLElement>('[role=dialog]');
+    assert.ok(dialog, 'the row command opens the dialog');
+    return dialog;
+  };
+  const rows = (dialog: HTMLElement) => [...dialog.querySelectorAll('.details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim());
+  const field = (dialog: HTMLElement, label: string) => dialog.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+  const type = async (input: HTMLInputElement, value: string) => { input.value = value; input.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle(); };
+  const button = (dialog: HTMLElement, name: RegExp) => [...dialog.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!;
+  assert.ok(doc.querySelector('.preferences .server-list button[aria-label="Rename beta"]'), 'rename stays the inline pencil');
+
+  let dialog = await open();
+  assert.deepEqual(rows(dialog), ['ws://b:9899 In use'], 'the active address, marked, with no remove');
+  assert.equal(field(dialog, 'New token').value, '', 'the token field starts empty');
+  assert.ok(!doc.body.innerHTML.includes('tokB') && !doc.body.innerHTML.includes('tokA'), 'no saved token anywhere in the page');
+  // A typed address that is not added is dropped by Close: nothing written.
+  const machines = ls.getItem('tmux_machines');
+  await type(field(dialog, 'Add address'), 'b-unsaved:9899');
+  button(dialog, /^close$/iu).click(); await h.settle();
+  assert.equal(doc.querySelector('[role=dialog]'), null);
+  assert.equal(ls.getItem('tmux_machines'), machines, 'Close wrote nothing');
+
+  // The owner's step: type the URL, Add address.
+  dialog = await open();
+  assert.equal(field(dialog, 'Add address').value, '', 'a dropped draft does not come back');
+  await type(field(dialog, 'Add address'), 'ws://b-ts:9899');
+  button(dialog, /^add address$/iu).click(); await h.settle();
+  assert.deepEqual(rows(dialog), ['ws://b:9899 In use', 'ws://b-ts:9899'], 'after the active one');
+  assert.deepEqual(JSON.parse(ls.getItem('tmux_machines')!)['m-b'], ['ws://b:9899', 'ws://b-ts:9899'], 'it joined B s failover set');
+  const scheme = h.app.window.location.protocol === 'https:' ? 'wss' : 'ws';
+  await type(field(dialog, 'Add address'), 'b-wan:9899');
+  field(dialog, 'Add address').dispatchEvent(new h.app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await h.settle();
+  assert.deepEqual(rows(dialog), ['ws://b:9899 In use', 'ws://b-ts:9899', `${scheme}://b-wan:9899`],
+    'Enter adds too; a bare host takes the page s scheme, as the connect form gives it');
+  await type(field(dialog, 'Add address'), 'ws://b-ts:9899');
+  button(dialog, /^add address$/iu).click(); await h.settle();
+  assert.match(dialog.querySelector('[role=alert]')?.textContent ?? '', /already has that address/iu, 'a refusal says why');
+  // Remove one; the active address has no remove.
+  button(dialog, new RegExp(`^delete ${scheme}://b-wan:9899$`, 'iu')).click(); await h.settle();
+  assert.deepEqual(rows(dialog), ['ws://b:9899 In use', 'ws://b-ts:9899']);
+  assert.equal(button(dialog, /^delete ws:\/\/b:9899$/iu), undefined, 'the proven address cannot be removed');
+  // The token: typed, applied, never shown.
+  await type(field(dialog, 'New token'), 'tokB-new');
+  button(dialog, /^change token$/iu).click(); await h.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB-new');
+  assert.equal(field(dialog, 'New token').value, '', 'the field empties again');
+  assert.match(dialog.textContent ?? '', /applies from the next connection/iu);
+  assert.ok(!doc.body.innerHTML.includes('tokB-new'), 'the new token is not in the page either');
+  assert.equal(ls.getItem('tmux_server_current'), 'a', 'nothing switched, nothing re-dialled');
+  button(dialog, /^close$/iu).click(); await h.settle();
+
+  // The next dial of B: its proven address is down (the switch's probe finds
+  // it so, #353), and the added one is dialled and answers.
+  const mark = calls.length;
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  const dialled = calls.slice(mark).filter((c) => c.startsWith('connect:') || c.startsWith('answered:'));
+  assert.ok(dialled.some((c) => c.startsWith('answered:ws://b-ts:9899')), `the added address answered: ${dialled}`);
+  assert.ok(!dialled.some((c) => c.startsWith('answered:ws://b:9899')), 'the dead one did not');
+  assert.equal(ls.getItem('tmux_server_current'), 'b');
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').address, 'ws://b-ts:9899', 'and it is the active one now');
+});
+
+test('#402: a server never connected here cannot take an address yet, and says why; the edits persist across a reload', async (context) => {
+  const seed = {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+      { id: 'c', name: 'gamma', address: 'ws://c:9899', token: 'tokC', named: true },
+    ]),
+    tmux_machines: JSON.stringify({ 'm-b': ['ws://b:9899', 'ws://b-ts:9899'] }),
+    tmux_layout_mode: 'desktop',
+  };
+  const h = await bootApp(context, seed);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token gamma"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const add = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  assert.ok(add.disabled, 'no failover set to join before the first connect');
+  assert.match(dialog.textContent ?? '', /connect to this server once/iu, 'the reason is on the dialog');
+  dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"], .dlg-actions button')!.click();
+  await h.settle();
+  // A reload (a fresh App over the same storage) shows B's saved addresses.
+  const stored = Object.fromEntries(Object.keys(h.app.window.localStorage).map((k) => [k, h.app.window.localStorage.getItem(k)!]));
+  await h.app.close?.();
+  const again = await bootApp(context, stored);
+  for (let i = 0; i < 4; i++) { await again.app.advance(500); await again.settle(); }
+  await toConnection(again);
+  again.app.document.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await again.settle();
+  const rows = [...again.app.document.querySelectorAll('[role=dialog] .details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim());
+  assert.deepEqual(rows, ['ws://b:9899 In use', 'ws://b-ts:9899']);
+});
+
+test('#402 + #400: what the Addresses and token dialog saves is what the login page offers: a new address of beta, with beta s new token; alpha s new token pre-fills; a removed address is gone', async (context) => {
+  const seed = {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://b:9899', 'ws://b-old:9899'] }),
+  };
+  const h = await bootApp(context, seed, undefined, sandbox);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  await toConnection(h);
+  const edit = async (name: string, steps: (dialog: HTMLElement) => Promise<void>) => {
+    doc.querySelector<HTMLButtonElement>(`.preferences .server-list button[aria-label="Addresses and token ${name}"]`)!.click();
+    await h.settle();
+    const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+    await steps(dialog);
+    [...dialog.querySelectorAll<HTMLButtonElement>('.dlg-actions button')].find((b) => /^close$/iu.test((b.textContent ?? '').trim()))!.click();
+    await h.settle();
+  };
+  const type = async (input: HTMLInputElement, value: string) => { input.value = value; input.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle(); };
+  const press = (dialog: HTMLElement, name: RegExp) => [...dialog.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+  await edit('beta', async (dialog) => {
+    await type(dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!, 'ws://b-new:9899');
+    press(dialog, /^add address$/iu); await h.settle();
+    press(dialog, /^delete ws:\/\/b-old:9899$/iu); await h.settle();
+    await type(dialog.querySelector<HTMLInputElement>('input[aria-label="New token"]')!, 'tokB-new');
+    press(dialog, /^change token$/iu); await h.settle();
+  });
+  await edit('alpha', async (dialog) => {
+    await type(dialog.querySelector<HTMLInputElement>('input[aria-label="New token"]')!, 'tokA-new');
+    press(dialog, /^change token$/iu); await h.settle();
+  });
+  for (const old of ['tokA', 'tokB']) {
+    assert.ok(!JSON.stringify(dumpStorage(h.app)).includes(`"${old}"`), `${old} is stored nowhere: the registry and the mirror both moved on`);
+  }
+
+  // The login page.
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  const tokenField = () => doc.querySelector<HTMLInputElement>('.card .fields input[type="password"], .card .fields .token-wrap input')!;
+  assert.equal(doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!.value, 'ws://a:9899');
+  assert.equal(tokenField().value, 'tokA-new', 'alpha s new token pre-fills the form');
+  doc.querySelector<HTMLButtonElement>('.card .hist-btn')!.click();
+  await h.settle();
+  const rows = [...doc.querySelectorAll<HTMLButtonElement>('.card .hist-item')];
+  assert.deepEqual(rows.map((b) => b.textContent), ['ws://a:9899', 'ws://b:9899', 'ws://b-new:9899'], 'the added address is offered, the removed one is not');
+  rows.find((b) => b.textContent === 'ws://b-new:9899')!.click();
+  await h.settle();
+  assert.equal(tokenField().value, 'tokB-new', 'and picking it fills beta s new token');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+});

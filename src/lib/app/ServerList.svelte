@@ -35,6 +35,9 @@
     onrename: (id: string, name: string) => void;
     onremove: (id: string) => void;
     onadd: () => void;
+    /** The page variant's second row command (board #402): open this
+     * server's addresses and token. Rename stays the inline pencil. */
+    ondetails?: (id: string) => void;
     /** A deferred close (asked while an IME composition was still open). */
     onclose?: () => void;
     /** The element focus returns to after a rename/remove (the popover or page). */
@@ -66,7 +69,7 @@
   }
   let {
     servers, currentId, link = { connected: true }, variant = 'menu',
-    onpick, onrename, onremove, onadd, onclose = () => {}, container = null, frozen = '',
+    onpick, onrename, onremove, onadd, ondetails, onclose = () => {}, container = null, frozen = '',
     members = null, notice = '', builds,
   }: Props = $props();
 
@@ -261,6 +264,10 @@
       {/if}
       <CommandButton variant="icon" icon="edit" label={`${t('serverRename')} ${s.name}`}
         disabled={renaming === s.id || !!frozen} onclick={(e: MouseEvent) => { e.stopPropagation(); start(s, e.currentTarget as HTMLElement); }} />
+      {#if variant === 'page' && ondetails}
+        <CommandButton variant="icon" icon="link" label={`${t('serverDetails')} ${s.name}`}
+          disabled={!!frozen} onclick={(e: MouseEvent) => { e.stopPropagation(); ondetails(s.id); }} />
+      {/if}
       {#if cur}
         <span class="sm-check" title={t('serverCurrent')}><Icon name="check" size={13} /></span>
       {:else}
