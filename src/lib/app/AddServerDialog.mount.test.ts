@@ -77,3 +77,23 @@ test('a pick fills the saved server\u2019s whole tuple, its socket included, and
     assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'ws://b.test:9899', token: 'tokB', socket: '/tmp/sockB' }]);
   } finally { await app.close(); }
 });
+
+test('a pasted connection link fills the dialog\u2019s fields and submit hands the tuple on (#401)', async context => {
+  const submitted: unknown[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { oncancel: () => {}, onsubmit: (c: unknown) => { submitted.push(c); } },
+    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+    modules: [],
+  });
+  try {
+    for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
+    const address = app.document.querySelector<HTMLInputElement>('.dlg input[type="text"]')!;
+    address.value = 'https://front-end.example/?addr=ws://paste.example:9899&token=PASTED-TOKEN&socket=/tmp/pasted';
+    address.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.flush();
+    assert.equal(address.value, 'ws://paste.example:9899', 'the field keeps the address alone');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+    await app.flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'ws://paste.example:9899', token: 'PASTED-TOKEN', socket: '/tmp/pasted' }]);
+  } finally { await app.close(); }
+});

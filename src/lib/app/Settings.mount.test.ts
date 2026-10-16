@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from '../test/mount.ts';
 import { COMPLETION_FEEDBACK_MS } from '../ui/feedback-lifetime.ts';
+import { parseConnectionLink } from '../core/connection-link.ts';
 
 const compiled = compileMount(new URL('./Settings.svelte', import.meta.url), [
   new URL('../core/clipboard.ts', import.meta.url),
@@ -53,11 +54,11 @@ async function mount(context: TestContext, copy: (link: string) => boolean | Pro
 test('Settings copy failure stays visible and directly retryable; only success expires (#167)', async context => {
   let calls = 0;
   const app = await mount(context, link => {
-    const url = new URL(link);
-    assert.equal(url.origin, 'https://mount.test');
-    assert.equal(url.searchParams.get('addr'), 'wss://fixture.test/ws');
-    assert.equal(url.searchParams.get('token'), 'fake-token&=+');
-    assert.equal(url.searchParams.get('socket'), '/tmp/fake socket');
+    // The connection itself (#401): the gateway address with the credentials
+    // as parameters, nothing of the front end that served this page.
+    assert.ok(link.startsWith('wss://fixture.test/ws?'), 'the link starts at the gateway address');
+    assert.doesNotMatch(link, /mount\.test|addr=/u, 'and carries no front end');
+    assert.deepEqual(parseConnectionLink(link), { address: 'wss://fixture.test/ws', token: 'fake-token&=+', socket: '/tmp/fake socket' });
     return ++calls > 1;
   });
   try {

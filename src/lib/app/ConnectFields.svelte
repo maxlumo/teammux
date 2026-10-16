@@ -9,6 +9,7 @@
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { rememberedAddresses, type Suggestion } from './servers.ts';
+  import { parseConnectionLink } from '../core/connection-link.ts';
 
   let {
     address = $bindable(''), token = $bindable(''), socket = $bindable(''),
@@ -46,6 +47,19 @@
     showHistory = false;
   }
 
+  /** The address field. A pasted connection LINK (lib/core/connection-link.ts,
+   * the new form or the old front-end one) is the connection itself: it is
+   * split at once into address, token and socket, exactly as a pick of a saved
+   * server applies its tuple, and the field keeps only the address — the token
+   * never stays in plain view. Anything else is just the typed address. */
+  function typed(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const link = parseConnectionLink(input.value);
+    if (!link?.address) { address = input.value; return; }
+    pick({ address: link.address, token: link.token ?? '', socket: link.socket ?? '' });
+    input.value = address;          // `address` may not have changed, and the DOM still holds the link
+  }
+
   function focusIf(el: HTMLInputElement) { if (autofocus) el.focus(); }
   function enter(e: KeyboardEvent) {
     if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
@@ -58,7 +72,7 @@
   <label>
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
-      <input type="text" bind:value={address} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
+      <input type="text" value={address} oninput={typed} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
       {#if remembered.length}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
           onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>

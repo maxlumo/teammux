@@ -139,6 +139,7 @@ where Agents is a page of its own, reads as one plain list):
 ## Interactions
 - Enter address + token → connect. The form opens on the CURRENT server's saved address, token and socket (the server registry is authoritative; an unfinished attempt is not remembered across a reload).
 - Open the address list and tap a saved server's address → its address and token fill the form (the list is the server registry, CURRENT's server first; it has no × — a server is forgotten in Settings › Connection)
+- Paste a connection link into an address field (the login page, Add server; the Android app is the same form) → address, token and socket are filled and the field keeps the address alone. The link is the gateway address with `?token=…&socket=…`, independent of any front end; the old `<front end>/?addr=…&token=…` form is accepted too ([format](../../design-docs/features/websocket-client.md#the-connection-link-is-the-connection-not-a-page-401-2026-10-16))
 - Switch language → immediate UI text update, persisted to localStorage
 - Switch theme → immediate CSS variable transition
 - Switch settings tab → remember the last tab in localStorage and restore it on the next open

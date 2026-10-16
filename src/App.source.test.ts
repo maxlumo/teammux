@@ -32,8 +32,15 @@ test('sharing a connection reports only a current successful copy; failure uses 
   assert.match(share, /linkFeedback\.update\(attempt, \{ kind: 'success', message: t\('linkCopied'\) \}\);/u);
   assert.doesNotMatch(share, /setTimeout|linkCopied = true|console\./u);
   assert.match(source, /onShare=\{shareConnectionLink\}/u, 'the existing command error channel receives rejection');
-  assert.match(share, /const params = new URLSearchParams\(\);/u);
-  for (const field of ['addr', 'token', 'socket']) assert.ok(share.includes(`params.set('${field}', ${field})`));
+  // The link is the connection itself (#401): the one builder, no front end in it.
+  assert.match(share, /const link = buildConnectionLink\(conn\);/u);
+  assert.doesNotMatch(share, /location\.|URLSearchParams|addr=|params\.set/u, 'no front-end origin and no second spelling of the link');
+});
+
+test('the boot reads a deep link through the one parser, and strips it from the address bar (#401)', () => {
+  const take = source.match(/function takeConnectLink\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.match(take, /const link = parseConnectionLink\(location\.href\);\s*if \(!link\) return null;\s*history\.replaceState\(null, '', location\.pathname \+ location\.hash\.split\('\?'\)\[0\]\);\s*return link;/u);
+  assert.doesNotMatch(take, /URLSearchParams|q\.get\(/u, 'no second parser of the link');
 });
 
 test('App link feedback belongs to its page and connection, and disposes with App (#167)', () => {

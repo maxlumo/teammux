@@ -212,3 +212,59 @@ test('a socket the person typed does not survive picking a saved server that has
   await app.pick(LOCAL.url);
   assert.equal(app.value(SOCKET), '', 'the entry has no socket, and the typed one belongs to nobody saved');
 });
+
+// ─── #401: a pasted connection link fills the fields it names ────────────
+
+const NEW_LINK = 'wss://paste.example/ws?token=PASTED-TOKEN&socket=%2Ftmp%2Fpasted';
+const OLD_LINK = 'https://some-front-end.example/app/?addr=wss%3A%2F%2Fpaste.example%2Fws&token=PASTED-TOKEN&socket=%2Ftmp%2Fpasted';
+const OLD_HASH_LINK = 'https://some-front-end.example/#/files?address=wss://paste.example/ws&token=PASTED-TOKEN&socket=/tmp/pasted';
+
+for (const [form, link] of [['the new form', NEW_LINK], ['the old front-end form', OLD_LINK], ['the old front-end hash form', OLD_HASH_LINK]]) {
+  test(`pasting a connection link in ${form} into the address field fills address, token and socket, and the field keeps only the address`, async context => {
+    const app = await mount(context, {});
+    await app.answer();
+    await app.edit(ADDR, link!);
+    assert.equal(app.value(ADDR), 'wss://paste.example/ws', 'the field shows the address alone');
+    assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
+    assert.equal(app.value(SOCKET), '/tmp/pasted');
+    assert.equal(app.document.querySelector(TOKEN)!.getAttribute('type'), 'password', 'and the token stays masked');
+    assert.ok(!app.document.body.textContent!.includes('PASTED-TOKEN'), 'the token is not on the page as text');
+  });
+}
+
+test('a pasted link without a socket clears the previous one; a bare address pasted is left exactly as typed', async context => {
+  const app = await mount(context, {});
+  await app.answer();
+  assert.equal(app.value(SOCKET), LOCAL.tmux_socket, 'the desktop autofill put the local socket in');
+  await app.edit(ADDR, 'wss://paste.example/ws?token=PASTED-TOKEN');
+  assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
+  assert.equal(app.value(SOCKET), '', 'the local socket does not follow a link to another server');
+  await app.edit(ADDR, 'ws://bare.example:9899');
+  assert.equal(app.value(ADDR), 'ws://bare.example:9899');
+  assert.equal(app.value(TOKEN), 'PASTED-TOKEN', 'a bare address carries no credentials, so none are touched');
+});
+
+test('the Android app takes the same paste (it runs the same form)', async context => {
+  const app = await mount(context, {}, 'Mozilla/5.0 (Linux; Android 14) AppleWebKit');
+  await app.edit(ADDR, NEW_LINK);
+  assert.equal(app.value(ADDR), 'wss://paste.example/ws');
+  assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
+  assert.equal(app.value(SOCKET), '/tmp/pasted');
+});
+
+test('a link for the address already in the field still rewrites the field to the address alone (the token is never left in view)', async context => {
+  const app = await mount(context, {});
+  await app.answer();
+  await app.edit(ADDR, 'wss://paste.example/ws');                       // the state now holds exactly this address
+  await app.edit(ADDR, NEW_LINK);                                       // and a link for the same address arrives
+  assert.equal(app.value(ADDR), 'wss://paste.example/ws');
+  assert.equal(app.value(TOKEN), 'PASTED-TOKEN');
+});
+
+test('a link that names no address (an old token-only link) is left as typed text and its token is not taken', async context => {
+  const app = await mount(context, {});
+  await app.answer();
+  await app.edit(ADDR, 'https://some-front-end.example/?token=ONLY-A-TOKEN');
+  assert.equal(app.value(ADDR), 'https://some-front-end.example/?token=ONLY-A-TOKEN', 'the text stays as typed');
+  assert.notEqual(app.value(TOKEN), 'ONLY-A-TOKEN', 'and nothing was split off it');
+});

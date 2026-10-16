@@ -2058,6 +2058,39 @@ Owner, #399: "设置里记录的连接，和我登录页面缓存的所有登录
 - **Known limits.** The failover sets of servers deleted before this change stay in `tmux_machines` (nothing offers them; `removeServer` does not prune a deleted machine's set, so re-adding that machine brings its alternates back). A token-only deep link (no address) used to set the pre-fill token through the mirror; the pre-fill no longer reads it. The most-recently-used order and the cap of eight went with the history.
 - **Pinned by** (the pick and copy tests are the review-round-3 additions: Settings.connect.mount.test.ts with distinct A and B sockets and a B with none, AddServerDialog.mount.test.ts, App.source.test.ts, and the copy step inside the App.shell.mount.test.ts upgrade fixture) servers.test.ts (`rememberedAddresses` order, dedupe and registry-only; deletion of a server or an address; the three migration shapes and the failing-write case; `reconcileMirror` over the full tuple, both removal paths, the shared-URL A-token and B-token cases with distinct sockets, the failover-address drop and the upgrade boot), Settings.autofill.mount.test.ts (the list is the registry, re-read on open, one row opens, the form opens on CURRENT's tuple and not on a mirror, no forget button), remembered.source.test.ts (only servers.ts names the retired key) and App.shell.mount.test.ts (#400: a dead saved server tried and deleted, and the upgrade fixture with beta left in the mirror and the history — both through a reload).
 
+### The connection link is the connection, not a page (#401, 2026-10-16)
+
+Owner, #399: "connection 页面不是有一个 copy 链接吗，但是链接里好像还包含了前端的地址，其他应用里应该能直接粘贴这个链接，忽略前端链接". The copied link was `<front end origin>/<path>?addr=<gateway>&token=…&socket=…`, spelled twice (the login page's `Settings.buildShareUrl` and App's `shareConnectionLink`) and read once (App's `takeConnectLink`), so it only worked by opening that page. Now one module, `src/lib/core/connection-link.ts`, builds and parses it, and nothing else spells either form.
+
+**The format (normative):** the gateway address a person would type, with the credentials as query parameters.
+
+```
+<ws|wss>://host[:port][/path]?token=<token>&socket=<tmux socket>
+```
+
+`token` and `socket` are optional and percent-encoded (`URLSearchParams`), the scheme is lower case, and a lone `/` after the host is dropped (`ws://h:9899/` and `ws://h:9899` are the same gateway, and the registry holds the second). Any other query parameter on the address stays part of the address. A link without credentials is just the address. A client never dials the link itself: it splits it first.
+
+**Accepted on input (compatibility matrix).** `parseConnectionLink` returns `{ address, token, socket }`, with `null` for a parameter the link does not have (an empty `token=` is `''`), or `null` for text that is not a link:
+
+| form | example | address | token | socket |
+|---|---|---|---|---|
+| new | `wss://h/ws?token=T&socket=%2Fs` | `wss://h/ws` | `T` | `/s` |
+| old, query | `https://app/x/?addr=ws://h:9899&token=T&socket=/s` | `ws://h:9899` | `T` | `/s` |
+| old, aliases | `?address=…` or `?server=…` instead of `addr` | same | same | same |
+| old, hash | `https://app/#/page?addr=…&token=…` | same | same | same |
+| old, any front end | `tauri://localhost/?addr=…` | same | same | same |
+| old, no scheme in `addr` | `https://app/?addr=h:9899` | `wss://h:9899` (the link's own scheme: https gives wss, else ws) | | |
+| old, token only | `https://app/?token=T` | `''` | `T` | `null` |
+| bare address, no credentials | `ws://h:9899`, `h:9899`, a web page without parameters | not a link: the field keeps it as typed | | |
+
+**Where it is accepted.** (1) The address field of `ConnectFields`, on every `input` event, whether typed, pasted or dropped: the login page, the Add server dialog, and the Android app, which runs the same component. A link fills address, token AND socket exactly as a pick of a saved server applies its tuple (a link with no socket clears the previous one; the local-gateway auto-filled socket exception is the same), and the field is rewritten to the address alone, so the token never stays in plain view: it lands in the masked token field. A token-only old link names no address, so pasting it leaves the text as typed. (2) The page URL at boot (`takeConnectLink`), the old form only, since a browser cannot open a `ws://` link: the parameters are applied and stripped from the address bar as before, so **opening an old link in the browser keeps working**.
+
+**Written by** the login page's Share button (from the form's fields) and the connected Connection page's Copy (from the registry tuple, #400); both call `buildConnectionLink`. The feedback is "Link copied"; the link is never displayed.
+
+**The token is a secret.** The module has no logging, storage or DOM access (a test pins it), fixtures use fake tokens, and nothing shows the token unless the person reveals the token field. **Limits:** a new-form link is not a web URL, so opening it from another app does nothing: it is copied and pasted (no OS-level link handler was added); a gateway address given as `http(s)://host:port?token=…` (no `addr`) is not recognised; and the old token-only link, which used to pre-fill the token through the mirror keys, no longer does since the form's pre-fill is the registry's (#400).
+
+Pinned by connection-link.test.ts (build/parse round trip for IPv6, a path, awkward characters, no credentials; every row of the matrix; what is not a link; no logging), Settings.autofill.mount.test.ts (a paste of each form into the login form, the local socket not following a remote link, the Android user agent), AddServerDialog.mount.test.ts, Settings.mount.test.ts (the Share link) and App.source.test.ts (one builder, one parser, nothing else spells the link).
+
 ### The failover set's order is the priority, edited through one writer
 
 (board #222): the Connection page's address list is the machine's `tmux_machines` failover set, and its stored order is what the reconnect round-robin walks — so reordering IS setting priority, no new concept. A row's × removes an alternate (never the ACTIVE address — the live connection), and the grip drags a row to its new place (Arrow keys on the focused grip are the keyboard form); the drag reuses the rail's idiom via the generic `moveBefore`/`listDropAt` in nav-order.ts, with the grip — not the row — as the handle because the row is already the switch command and a whole-row touch drag would fight the page's scroll. Both edits go to App's `onAddressesChange`, which persists through `saveMachineAddresses` (the map's ONE writer: sanitized, deduped, an empty set drops the key) and bumps a version counter so the derived list re-reads. The hooks-management row that used to sit under the list retired in the same task — managed agents carry hooks in their isolated homes, so the global install/remove surface and its `agent_hooks_*` RPCs were deleted whole (agent-notifications.md § Hook Management).

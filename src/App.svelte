@@ -58,6 +58,7 @@
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
+  import { buildConnectionLink, parseConnectionLink } from './lib/core/connection-link.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -2743,31 +2744,25 @@
     }
   }
 
-  // Deep-link connect: a shareable URL can pre-fill the connection and auto-jump
+  // Deep-link connect: a front-end URL can name the connection and auto-jump
   // in, e.g.  https://app/?addr=ws://host:9899&token=XXX  (also accepts
-  // address=/server=, an optional socket=, and params inside the #hash). We copy
-  // them into the same localStorage keys the normal flow uses — so the existing
-  // auto-connect effect below picks them up — then STRIP them from the URL so the
-  // token isn't left sitting in the address bar or re-applied on refresh.
-  // (Caveat: a token in a link can still land in browser/proxy history before we
-  // strip it — only share such links over trusted channels.)
+  // address=/server=, an optional socket=, and params inside the #hash). That
+  // is the OLD share-link form, still opened here; the form the app copies now
+  // is the connection itself (lib/core/connection-link.ts), which a browser
+  // cannot open and which is pasted into an address field instead. We copy the
+  // parameters into the same localStorage keys the normal flow uses — so the
+  // existing auto-connect effect below picks them up — then STRIP them from the
+  // URL so the token isn't left sitting in the address bar or re-applied on
+  // refresh. (Caveat: a token in a link can still land in browser/proxy
+  // history before we strip it — only share such links over trusted channels.)
   /** The connection a deep link names, or null; the link is stripped from the
    * address bar either way, so a token never stays there. */
   function takeConnectLink() {
     try {
-      const hashQ = location.hash.includes('?') ? location.hash.split('?')[1] : '';
-      const q = new URLSearchParams(location.search || hashQ);
-      const addrRaw = q.get('addr') || q.get('address') || q.get('server');
-      const token = q.get('token');
-      const socket = q.get('socket');
-      if (!addrRaw && token == null) return null;
+      const link = parseConnectionLink(location.href);
+      if (!link) return null;
       history.replaceState(null, '', location.pathname + location.hash.split('?')[0]);
-      let address = '';
-      if (addrRaw) {
-        address = addrRaw.trim();
-        if (!/^wss?:\/\//.test(address)) address = (location.protocol === 'https:' ? 'wss://' : 'ws://') + address;
-      }
-      return { address, token, socket };
+      return link;
     } catch { return null; } // malformed URL — ignore, fall back to saved/settings
   }
   /** Apply a deep link: the same keys the normal flow uses, so the boot dial
@@ -3012,11 +3007,7 @@
     const conn = currentConnection(localStorage);
     if (!conn?.address) return;
     const { address: addr, token, socket } = conn;
-    const params = new URLSearchParams();
-    params.set('addr', addr);
-    if (token) params.set('token', token);
-    if (socket) params.set('socket', socket);
-    const link = `${location.origin}${location.pathname}?${params.toString()}`;
+    const link = buildConnectionLink(conn);
     // Storage is not reactive; recheck the captured tuple as well as the page/server.
     const current = () => {
       const now = currentConnection(localStorage);

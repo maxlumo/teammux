@@ -7,6 +7,7 @@
   import Icon from '../ui/Icon.svelte';
   import ConnectFields from './ConnectFields.svelte';
   import { copyText } from '../core/clipboard.ts';
+  import { buildConnectionLink } from '../core/connection-link.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { createFeedbackLifetime, type FeedbackValue } from '../ui/feedback-lifetime.ts';
 
@@ -304,20 +305,16 @@
     secondHalf = null;
   }
 
-  // Build a deep link that pre-fills + auto-connects (consumed by App.svelte's
-  // consumeConnectUrlParams). Includes the token so the link connects on its own.
+  // The connection link of what the form holds (lib/core/connection-link.ts):
+  // the gateway address with the token and socket as parameters, independent of
+  // any front end, so it pastes into any address field. Shown nowhere; only copied.
   let shareFeedback = $state<FeedbackValue | null>(null);
   const shareLifetime = createFeedbackLifetime(value => { shareFeedback = value; });
   const shareContext = $derived({ address, token, socket });
   $effect(() => { void shareContext; shareLifetime.clear(); });
   onDestroy(() => shareLifetime.dispose());
   function buildShareUrl() {
-    const url = normalizeAddress(address);
-    const params = new URLSearchParams();
-    params.set('addr', url);
-    if (token) params.set('token', token);
-    if (socket.trim()) params.set('socket', socket.trim());
-    return `${location.origin}${location.pathname}?${params.toString()}`;
+    return buildConnectionLink({ address: normalizeAddress(address), token, socket: socket.trim() });
   }
   async function shareLink() {
     const attempt = shareLifetime.begin();
