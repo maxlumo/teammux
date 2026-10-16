@@ -9717,6 +9717,8 @@ test('#402 review P2-D round 3: when the save fails AND putting it back fails, t
   plan.armed = false;
   const text = dialog.textContent ?? '';
   assert.match(text, /could not confirm the save/iu, 'the re-read showed a partial change');
+  assert.match(text, /the new token may or may not have been saved/iu, 'a token change names the token (validator P3)');
+  assert.doesNotMatch(text, /check the addresses below/iu, 'and not the addresses it could not have changed');
   assert.doesNotMatch(text, /nothing was changed|token changed\./iu, 'neither "nothing changed" nor success');
   assert.equal(token.value, 'tokA-new', 'the draft is kept');
   assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'a').token, 'tokA-new', 'what the re-read found: the registry write landed');
@@ -9794,7 +9796,10 @@ for (const when of ['before the write (the snapshot cannot be read)', 'after a f
     ['ws://b:9899 In use'], 'the last addresses read are still shown');
   const said = dialog()!.querySelector('[role=alert]')?.textContent ?? '';
   if (when.startsWith('before')) assert.match(said, /not saved: this device could not use its storage/iu, 'no write was attempted: nothing changed is true');
-  else assert.match(said, /could not confirm the save/iu, 'the re-read could not be made: uncertain, never "nothing changed"');
+  else {
+    assert.match(said, /could not confirm the save/iu, 'the re-read could not be made: uncertain, never "nothing changed"');
+    assert.doesNotMatch(said, /token/iu, 'an address operation does not name the token (validator P3)');
+  }
 });
 
 // #405: URL user info is a credential. builder-2's order: the link parse,
@@ -9846,4 +9851,38 @@ test('#402 + #405: user info pasted or typed into Add address (user:pass@h, user
   }
   assert.deepEqual(rows(), ['ws://b:9899 In use', 'ws://b-ts:9899/a@b', 'ws://b-wan:9899?x=a@b']);
   assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB');
+});
+
+test('#402 review P2 on ebd198c6: after a refused paste, a Remove owns the alert: its failure is said, and a success clears the old message', async (context) => {
+  const store = refusing(['tmux_machines']);
+  store.state.failing = false;
+  const h = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-b': ['ws://b:9899', 'ws://b-ts:9899', 'ws://b-wan:9899'] }),
+  }, undefined, { setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  const alert = () => dialog.querySelector('[role=alert]')?.textContent ?? '';
+  const remove = (addr: string) => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === `Delete ${addr}`)!.click();
+  const paste = async () => {
+    field.value = 'ws://b-x:9899?token=FAKE-402&socket=';
+    field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: field.value }));
+    await h.settle();
+    assert.match(alert(), /connection link, not an address/iu, 'the paste was refused');
+  };
+  await paste();
+  store.state.failing = true;
+  remove('ws://b-ts:9899'); await h.settle();
+  store.state.failing = false;
+  assert.match(alert(), /not saved: this device could not use its storage/iu, 'the failed Remove is what the alert says');
+  assert.doesNotMatch(alert(), /connection link/iu);
+  await paste();
+  remove('ws://b-wan:9899'); await h.settle();
+  assert.equal(alert(), '', 'a successful Remove clears the old message');
+  assert.deepEqual(JSON.parse(h.app.window.localStorage.getItem('tmux_machines')!)['m-b'], ['ws://b:9899', 'ws://b-ts:9899']);
 });

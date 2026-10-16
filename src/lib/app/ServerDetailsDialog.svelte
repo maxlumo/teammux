@@ -124,6 +124,13 @@
     refusal = null;  // typing again clears the last refusal
     linkRefusal = '';
   }
+  /** The address list has ONE alert, and it belongs to the latest operation
+   * (#402 review P2 on ebd198c6): a Remove replaces whatever an earlier Add
+   * or paste said, so a refused link's message never hides its outcome. */
+  function removeAddress(address: string) {
+    linkRefusal = '';
+    refusal = onremove(address);
+  }
   function addKey(e: KeyboardEvent) {
     if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
@@ -156,7 +163,7 @@
           <span class="details-in-use">{t('serverAddressInUse')}</span>
         {:else}
           <CommandButton variant="danger" iconOnly bare icon="x" label={`${t('delete')} ${address}`}
-            onclick={() => { refusal = onremove(address); }} />
+            onclick={() => removeAddress(address)} />
         {/if}
       </div>
     {/each}
@@ -176,7 +183,10 @@
       aria-label={t('serverTokenNew')} bind:value={token} onkeydown={tokenKey} />
     <CommandButton icon="key" label={t('serverTokenChange')} disabled={!token} onclick={applyToken} />
   </div>
-  {#if tokenFailure}<p class="dlg-error config-error appear" role="alert">{t(REASON[tokenFailure])}</p>{/if}
+  <!-- Each message names only what its action could have changed (#402
+       validator P3): an address operation the addresses, the token change
+       the token. -->
+  {#if tokenFailure}<p class="dlg-error config-error appear" role="alert">{t(tokenFailure === 'uncertain' ? 'serverTokenUncertain' : REASON[tokenFailure])}</p>{/if}
   <p class="dlg-note" role="status">{tokenDone ? t('serverTokenChanged') : t('serverTokenNote')}</p>
   <div class="dlg-actions">
     <CommandButton label={t('close')} onclick={onclose} />
