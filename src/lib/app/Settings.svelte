@@ -33,7 +33,7 @@
   let {
     onConnected,
     openCandidate,
-    confirmLeave, onScan = null,
+    confirmLeave,
     notice = '',
     frozen = '',
     onRetry,
@@ -75,8 +75,6 @@
      * with the address this attempt froze, which is the one it will dial.
      */
     confirmLeave?: ((address: string) => Promise<boolean>) | undefined;
-    /** Scan a connection QR code (board #403): the decoded text, or null when cancelled. */
-    onScan?: ((signal: AbortSignal) => Promise<string | null>) | null;
   } = $props();
 
   // The fields as the page opens: the state starts from them, and the
@@ -344,7 +342,7 @@
       <p class="subtitle">{t('connectTitle')}</p>
     </div>
 
-    <ConnectFields bind:this={fields} bind:address bind:token bind:socket onpick={pickHistory} onscan={onScan} onenter={() => { if (address && !connecting) doConnect(); }} />
+    <ConnectFields bind:this={fields} bind:address bind:token bind:socket onpick={pickHistory} onenter={() => { if (address && !connecting) doConnect(); }} />
 
     {#if frozen || error || notice}
       <div class="error appear">{frozen || error || notice}</div>

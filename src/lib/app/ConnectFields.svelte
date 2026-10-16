@@ -6,20 +6,15 @@
   // (board #400) — there is no list of its own to forget from: a server is
   // forgotten in Settings › Connection, and then it is gone from here. (The
   // `hist-` class names are from the list's earlier life.)
-  import { onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { rememberedAddresses, type Suggestion } from './servers.ts';
-  import { endpointOf, isBulkInsert, parseConnectionLink } from '../core/connection-link.ts';
-  import { layout } from './layout.svelte.ts';
-  import CommandButton from '../ui/CommandButton.svelte';
+  import { isBulkInsert, parseConnectionLink } from '../core/connection-link.ts';
 
   let {
     address = $bindable(''), token = $bindable(''), socket = $bindable(''),
     onpick,
-    /** Scan a connection QR code (board #403): resolves with the decoded text, or null when
-     * the person cancelled. Offered on touch layouts only; the host owns the camera. */
-    onscan = null,
     /** Focus the address field when mounted (the dialog). */
     autofocus = false,
     onenter = () => {},
@@ -32,9 +27,6 @@
      * thing that survives: `{ socket }`, the local gateway's own auto-filled
      * socket when the saved entry has none. */
     onpick?: (pick: Suggestion) => { socket: string } | void;
-    /** Asked with this form's own lifetime: it is aborted when the form is unmounted,
-     * so a scan the form started cannot outlive it or hand it a result. */
-    onscan?: ((signal: AbortSignal) => Promise<string | null>) | null;
     autofocus?: boolean; onenter?: () => void;
   } = $props();
 
@@ -69,30 +61,6 @@
    * the problem, never the text. */
   let linkError = $state('');
 
-  /** The one message per refusal reason: it names the problem, never the text. */
-  function refusal(reason: 'no-address' | 'ambiguous' | 'address-credential' | 'hidden'): string {
-    return t(reason === 'no-address' ? 'linkNoAddress' : reason === 'ambiguous' ? 'linkAmbiguous' : reason === 'hidden' ? 'linkHidden' : 'linkAddressCredential');
-  }
-
-  /** This form's lifetime, for a scan it starts (see `onscan`). */
-  const lifetime = new AbortController();
-  onDestroy(() => lifetime.abort());
-
-  /** Scan a QR code and take what it says as a pasted link would be taken: a
-   * usable link fills address, token and socket; a bare gateway address fills the
-   * address alone; anything else is refused with a message that names none of it.
-   * Scanning never connects: the person taps Connect. */
-  async function scan() {
-    const text = await onscan?.(lifetime.signal);
-    if (text == null) return;           // cancelled, or this form is gone (its scan ended with nothing)
-    const parsed = parseConnectionLink(text);
-    if (parsed.kind === 'link') { pick({ address: parsed.link.address, token: parsed.link.token ?? '', socket: parsed.link.socket ?? '' }); return; }
-    if (parsed.kind === 'unusable') { linkError = refusal(parsed.reason); return; }
-    const endpoint = endpointOf(text);
-    if (endpoint.kind === 'endpoint') pick({ address: endpoint.address, token: '', socket: '' });
-    else linkError = t('scanNotConnection');
-  }
-
   /** A text that is a connection LINK (lib/core/connection-link.ts, the new
    * form or the old front-end one) is the connection itself: it is split at
    * once into address, token and socket, exactly as a pick of a saved server
@@ -111,7 +79,7 @@
     } else {
       address = fallback;
       input.value = fallback;
-      linkError = refusal(parsed.reason);
+      linkError = t(parsed.reason === 'no-address' ? 'linkNoAddress' : parsed.reason === 'ambiguous' ? 'linkAmbiguous' : parsed.reason === 'hidden' ? 'linkHidden' : 'linkAddressCredential');
     }
     return true;
   }
@@ -170,10 +138,6 @@
       </div>
     {/if}
   </label>
-
-  {#if onscan && layout.isTouchDevice}
-    <CommandButton label={t('scanQr')} icon="maximize" onclick={scan} />
-  {/if}
 
   <label>
     <span class="label-text">{t('token')}</span>

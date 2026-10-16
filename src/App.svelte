@@ -61,10 +61,6 @@
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
   import { buildConnectionLink, parseConnectionLink, routeOfHash } from './lib/core/connection-link.ts';
-  import { qrMatrix } from './lib/core/qr.ts';
-  import QrDialog from './lib/app/QrDialog.svelte';
-  import ScanDialog from './lib/app/ScanDialog.svelte';
-  import { ScanHost } from './lib/app/scan-operation.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -3057,50 +3053,6 @@
   const linkContext = $derived(JSON.stringify({ page, connected, activeAddress, serverCurId, machineId: serverInfo.machineId }));
   $effect(() => { void linkContext; linkFeedback.clear(); });
   onDestroy(() => linkFeedback.dispose());
-  /** Scan a connection QR code (board #403): the host of the one scan, so the
-   * login page and the Add server dialog share it, on every platform: the Android
-   * app's webview asks for the camera like a browser does (wry bridges the
-   * permission), so there is one scan, `ScanDialog`. A scan is an OPERATION
-   * (scan-operation.ts) registered synchronously at the tap, with the asking
-   * form's own lifetime (`signal`): it ends on Back, the background, Cancel, a
-   * second tap, that form going away, or this shell going away, and it resolves
-   * with the decoded text, or null. The one exception to the background: while a
-   * photo picker THIS scan opened is up, the page may be hidden for it. */
-  let scanOp = $state.raw(null);
-  const scans = new ScanHost((op) => { scanOp = op; });
-  const scanQr = (signal) => scans.begin(signal).result;
-  onDestroy(() => scans.end());
-  $effect(() => {
-    if (!scanOp) return;
-    const op = scanOp;
-    const changed = () => {
-      if (document.hidden) { if (!op.picking) scans.end(); }
-      else op.picking = false;       // back from the picker (its result, or its cancel, is handled by the dialog)
-    };
-    document.addEventListener('visibilitychange', changed);
-    return () => document.removeEventListener('visibilitychange', changed);
-  });
-
-  /** The connection QR code (board #403): open only by an explicit command, since
-   * the code carries the token. What is held is the code's MODULES, never the
-   * link; it is dropped when the dialog closes, when the app goes to the
-   * background, and when the page, the connection or the focused server
-   * changes (the same context the copy feedback belongs to). */
-  let qr = $state(null);          // boolean[][] | null
-  $effect(() => { void linkContext; qr = null; });
-  $effect(() => {
-    if (!qr) return;
-    const hide = () => { if (document.hidden) qr = null; };
-    document.addEventListener('visibilitychange', hide);
-    return () => document.removeEventListener('visibilitychange', hide);
-  });
-  function showConnectionQr() {
-    const conn = currentConnection(localStorage);
-    const link = conn?.address ? buildConnectionLink(conn) : null;
-    if (!link) throw new Error(t('qrNotBuildable'));       // an endpoint that cannot carry the credentials, or no connection
-    qr = qrMatrix(link);
-  }
-
   async function shareConnectionLink() {
     const attempt = linkFeedback.begin();
     const context = linkContext;
@@ -3343,29 +3295,20 @@
   $effect(() => {
     if (!layout.isTouchDevice) return; // desktop: the browser's Back is the browser's
     const handler = (e) => {
-      // The shell's OWN dialogs are the first layers (#317): a dialog is modal,
-      // so a Back that peeled a page layer behind it would act on something
-      // the reader cannot even see. Every other dialog in the app is peeled
-      // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
-      // goBack) — the one mechanism, one registration per host.
-      //
-      // They are asked BEFORE the bottom-of-stack branch below, whatever state
-      // this pop carries (board #403, validator): on a fresh login page the stack
-      // is only [initial, seed], so the first Back arrives with state null, and a
-      // dialog opened there (the scan, with its camera live) was swallowed by the
-      // re-push without ever being closed. Closing it and re-pushing is exactly
-      // what a pop that carries state does, so no entry of its own is needed.
-      if (scanOp) { scans.end(); navPush(); return; }
-      if (addServer) { addServer = null; navPush(); return; }
-      // So is a saved server's Addresses and token dialog (board #402 review
-      // P2-C): Back closes it, writes nothing, and Connection stays behind it.
-      if (detailsId) { detailsId = ''; navPush(); return; }
-      if (qr) { qr = null; navPush(); return; }
       if (!e.state?.app) {
         // Reached bottom of our stack, re-push to prevent exit
         navPush();
         return;
       }
+      // The shell's OWN dialog is the first layer (#317): a dialog is modal,
+      // so a Back that peeled a page layer behind it would act on something
+      // the reader cannot even see. Every other dialog in the app is peeled
+      // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
+      // goBack) — the one mechanism, one registration per host.
+      if (addServer) { addServer = null; navPush(); return; }
+      // So is a saved server's Addresses and token dialog (board #402 review
+      // P2-C): Back closes it, writes nothing, and Connection stays behind it.
+      if (detailsId) { detailsId = ''; navPush(); return; }
       // A held tree takes no input, programmatic or not (reviewer P1-2): its
       // pages' Back chains are not asked while the app is blocked. The Retry
       // panel is the content area then; Back just stays (re-push).
@@ -3957,20 +3900,10 @@
       onadd={serverAddressAdd} onremove={serverAddressRemove} ontoken={serverTokenSet} onclose={() => { detailsId = ''; }} />
   {/if}
 
-  {#if qr}
-    <QrDialog matrix={qr} compact={narrowVp} oncancel={() => (qr = null)} />
-  {/if}
-
   {#if addServer}
-    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={scanQr}
+    <AddServerDialog initial={addServer.initial} compact={narrowVp}
       onsubmit={submitAddServer} oncancel={() => (addServer = null)} />
   {/if}
-
-  <!-- Keyed by the operation: a second tap mounts a fresh dialog, and a callback
-       can only end the operation it was made for, never its successor. -->
-  {#each scanOp ? [scanOp] : [] as op (op)}
-    <ScanDialog compact={narrowVp} onscanned={(text) => op.end(text)} oncancel={() => op.end(null)} onpicking={(on) => { op.picking = on; }} />
-  {/each}
 
   {#if reconnecting && page !== 'settings'}
     <div class="reconnect-bar appear">
@@ -4034,7 +3967,7 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if (page === 'settings' || holdPages) && !switching}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} {openCandidate} onScan={scanQr} confirmLeave={confirmFormLeave} notice={reconnectError}
+      <Settings {onConnected} {openCandidate} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}
@@ -4060,7 +3993,7 @@
       {uiZoom} showUiZoom={true} showShortcuts={shortcutsOn} {shortcutHost} onUiZoom={setUiZoom}
       onFontSize={setFontSize}
       onOptimize={optimizeConnection}
-      onShare={shareConnectionLink} onShowQr={showConnectionQr}
+      onShare={shareConnectionLink}
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={frontHub && agentsLivesInSettings(layout.isTouchDevice)}
