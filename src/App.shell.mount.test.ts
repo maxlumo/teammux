@@ -9590,3 +9590,54 @@ test('#402 review P2-D: a storage failure on add or token is said on the dialog,
   assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB-new');
   assert.match(dialog.textContent ?? '', /token changed/iu);
 });
+
+test('#402 review P1-B: through the real dialog a pasted or typed connection link is refused and cleared, its token stored nowhere; http and junk are refused, not turned into ws://; an IPv6 path endpoint is added', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, sandbox);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  const add = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!;
+  const alert = () => dialog.querySelector('[role=alert]')?.textContent ?? '';
+  const rows = () => [...dialog.querySelectorAll('.details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim());
+  const SECRET = 'FAKE-SECRET-402';
+  const paste = async (text: string) => {
+    field.value = text;
+    field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: text }));
+    await h.settle();
+  };
+  const type = async (text: string) => { field.value = text; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle(); };
+  const before = JSON.stringify(dumpStorage(h.app));
+  // A pasted link (new form, then the old front-end form): cleared at once.
+  for (const link of [`ws://b-ts:9899?token=${SECRET}&socket=`, `https://front.example/?addr=ws://b-ts:9899&token=${SECRET}`]) {
+    await paste(link);
+    assert.equal(field.value, '', 'the link does not stay in the field');
+    assert.match(alert(), /connection link with a token/iu);
+    assert.ok(!alert().includes(SECRET) && !doc.body.innerHTML.includes(SECRET), 'the message and the page never echo it');
+  }
+  // Typed (not pasted) and submitted: refused and cleared too.
+  await type(`ws://b-ts:9899?token=${SECRET}`);
+  add().click(); await h.settle();
+  assert.equal(field.value, '');
+  assert.match(alert(), /connection link with a token/iu);
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing stored, beta s token untouched');
+  // http and junk: refused as invalid, the draft kept for an edit, nothing converted.
+  for (const junk of ['http://example.com:9899', 'javascript:alert(1)', 'ws://h:99999']) {
+    await type(junk);
+    add().click(); await h.settle();
+    assert.match(alert(), /not a ws:\/\/ or wss:\/\/ address/iu, junk);
+    assert.equal(field.value, junk, 'an invalid address stays to be corrected');
+  }
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before);
+  // A clean IPv6 endpoint with a path is added, in its canonical spelling.
+  await type('ws://[::1]:9899/ws');
+  add().click(); await h.settle();
+  assert.deepEqual(rows(), ['ws://b:9899 In use', 'ws://[::1]:9899/ws']);
+  assert.ok(!JSON.stringify(dumpStorage(h.app)).includes(SECRET));
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB');
+});

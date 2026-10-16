@@ -1101,3 +1101,37 @@ for (const [what, failing] of [
     assert.equal(s.getItem('tmux_token'), null, 'and reconciles the mirror');
   }
 });
+
+// Board #402 review P1-B: Add address keeps a clean endpoint only, validated by
+// #401's endpointOf; a connection link never becomes an address nor a token.
+test('adding refuses a connection link as a credential, writing nothing; a malformed URL is invalid; an IPv6 or path endpoint is kept canonical (#402 review P1-B)', async () => {
+  const { addServerAddress, serverAddresses } = await import('./servers.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'a', tmux_machines: JSON.stringify({ 'm-b': ['ws://b:9899'] }),
+  });
+  const before = new Map(s.m);
+  const SECRET = 'FAKE-SECRET-402';
+  for (const link of [
+    `wss://b.tail.ts.net/ws?token=${SECRET}&socket=`,
+    `ws://b2:9899?token=${SECRET}`,
+    `https://front.example/?addr=ws://b2:9899&token=${SECRET}`,
+    `https://front.example/#/?addr=ws://b2:9899&TOKEN=${SECRET}`,
+    `ws://b2:9899?%74oken=${SECRET}`,
+  ]) {
+    assert.deepEqual(addServerAddress(s, 'b', link), { refused: 'credential' }, 'a link is a credential');
+  }
+  for (const junk of ['http://example.com:9899', 'ftp://files.example/x', 'javascript:alert(1)', 'ws://', 'ws://h:99999', 'ws://h:abc', 'ws://h:9899#frag', 'ws://h :1', '']) {
+    assert.deepEqual(addServerAddress(s, 'b', junk), { refused: 'invalid' }, JSON.stringify(junk));
+  }
+  assert.deepEqual(new Map(s.m), before, 'nothing was written by any refusal');
+  assert.ok(![...s.m.values()].some((v) => v.includes(SECRET)), 'no secret anywhere in storage');
+  assert.equal(loadServers(s).find((e) => e.id === 'b')?.token, 'tokB', 'the server s token is untouched');
+  assert.ok('addresses' in addServerAddress(s, 'b', 'ws://[::1]:9899/ws'));
+  assert.ok('addresses' in addServerAddress(s, 'b', 'WSS://b.tail.ts.net/'));
+  assert.deepEqual(serverAddresses(s, 'b'), ['ws://b:9899', 'ws://[::1]:9899/ws', 'wss://b.tail.ts.net'], 'stored in endpointOf s canonical spelling');
+  assert.deepEqual(addServerAddress(s, 'b', 'wss://b.tail.ts.net/'), { refused: 'duplicate' }, 'the canonical spelling is what duplicates compare');
+});

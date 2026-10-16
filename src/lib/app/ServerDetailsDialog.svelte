@@ -15,6 +15,7 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { normalizeAddress } from '../core/connection-address.ts';
+  import { carriesCredentialKey, isBulkInsert } from '../core/connection-link.ts';
   import type { AddressRefusal } from './servers.ts';
 
   type Failure = AddressRefusal | 'storage';
@@ -54,18 +55,37 @@
   const REASON: Record<Failure, string> = {
     missing: 'serverAddressInvalid', 'no-machine': 'serverAddressNoMachine', full: 'serverAddressFull',
     invalid: 'serverAddressInvalid', duplicate: 'serverAddressDuplicate', active: 'serverAddressesNote',
-    storage: 'serverEditFailed',
+    credential: 'serverAddressCredential', storage: 'serverEditFailed',
   };
   const said = $derived(refusal ? t(REASON[refusal]).replace('{n}', String(max)) : '');
 
-  $effect(() => { void draft; refusal = null; });
   $effect(() => { if (token) tokenDone = false; });
 
+  /** A typed host with no scheme takes the page's (`host:9899`), as the
+   * connect form gives it; a text that names a scheme of its own is passed
+   * as typed, so `http://…` is refused, never turned into `ws://http://…`
+   * (board #402 review P1-B). The store validates it (`endpointOf`). */
+  const withScheme = (text: string) => (/^[a-z][a-z\d+.-]*:\/\//iu.test(text) ? text : normalizeAddress(text, location.protocol));
   function add() {
     if (blocked || !draft.trim()) return;
-    const result = onadd(normalizeAddress(draft, location.protocol));
+    const result = onadd(withScheme(draft.trim()));
+    // A connection link is a secret: refused with a message that does not
+    // echo it, and it does not stay in the field (review P1-B).
+    if (result === 'credential') draft = '';
+    else if (!result) draft = '';
     refusal = result;
-    if (!result) draft = '';
+  }
+  /** A pasted link is cleared at once, before anything is pressed: the token
+   * never sits in plain view (#401's rule for an address field). */
+  function addInput(e: Event) {
+    const field = e.currentTarget as HTMLInputElement;
+    if (isBulkInsert(e as InputEvent) && carriesCredentialKey(field.value)) {
+      field.value = '';
+      draft = '';
+      refusal = 'credential';
+      return;
+    }
+    refusal = null;  // typing again clears the last refusal
   }
   function addKey(e: KeyboardEvent) {
     if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
@@ -108,7 +128,7 @@
   <div class="details-line">
     <input class="config-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
       placeholder="ws://host:9899" aria-label={t('serverAddressAdd')} disabled={!!blocked}
-      bind:value={draft} onkeydown={addKey} />
+      bind:value={draft} onkeydown={addKey} oninput={addInput} />
     <CommandButton variant="primary" icon="plus" label={t('serverAddressAdd')} disabled={!!blocked || !draft.trim()} onclick={add} />
   </div>
   {#if blocked}<p class="dlg-note">{blocked}</p>{/if}

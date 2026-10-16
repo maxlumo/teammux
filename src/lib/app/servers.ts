@@ -31,6 +31,7 @@
 // plan are unit-testable without a browser.
 
 import { fingerprint, mergeSlot, recordLost } from './slot-merge.ts';
+import { endpointOf } from '../core/connection-link.ts';
 
 export interface ServerEntry {
   id: string;
@@ -915,29 +916,33 @@ export function serverAddresses(storage: Reader, id: string): string[] {
   return list.includes(entry.address) ? list : [entry.address, ...list];
 }
 
-/** Why an address edit was refused, for the dialog to say. */
-export type AddressRefusal = 'missing' | 'no-machine' | 'full' | 'invalid' | 'duplicate' | 'active';
-
-/** A ws(s) URL with a host: the shape every dial can try. */
-const DIALABLE = /^wss?:\/\/[^\s/?#]+/u;
+/** Why an address edit was refused, for the dialog to say. `credential`:
+ * the text carried a token or socket (a connection link), which an address
+ * never holds (board #402 review P1-B). */
+export type AddressRefusal = 'missing' | 'no-machine' | 'full' | 'invalid' | 'credential' | 'duplicate' | 'active';
 
 /**
  * Add `address` to server `id` (board #402, owner: "为某一个 server 添加一个
  * 新的 url"). It joins the end of that machine's failover set through the
  * ONE writer (`saveMachineAddresses`), so the next dial of that server walks
  * it when the addresses before it do not answer, and a connect through it
- * makes it the active one. `address` is already normalized by the caller
- * (`normalizeAddress`, as the connect form does). Refused, writing nothing,
- * when the server is not saved, its machine is not known yet (the set is
- * keyed by the machine; connect once first), the set is full, the address is
- * not a ws(s) URL, or the server already has it.
+ * makes it the active one. It is validated here, before anything is
+ * written, by the ONE validator of an address-only field, #401's
+ * `endpointOf` (board #402 review P1-B): a whole ws(s) URL with a usable host
+ * and a valid port, no fragment, no credential key anywhere; it is stored in
+ * that function's canonical spelling. A connection link (old or new, with a
+ * token) is refused as `credential` and never changes the server's token.
+ * Also refused, writing nothing: the server is not saved, its machine is not
+ * known yet (the set is keyed by the machine; connect once first), the set is
+ * full, or the server already has it.
  */
 export function addServerAddress(storage: Store, id: string, address: string): { addresses: string[] } | { refused: AddressRefusal } {
   const entry = loadServers(storage).find((s) => s.id === id);
   if (!entry) return { refused: 'missing' };
   if (!entry.machineId) return { refused: 'no-machine' };
-  const a = address.trim();
-  if (!DIALABLE.test(a)) return { refused: 'invalid' };
+  const endpoint = endpointOf(address);
+  if (endpoint.kind !== 'endpoint') return { refused: endpoint.kind };
+  const a = endpoint.address;
   const list = serverAddresses(storage, id);
   if (list.includes(a)) return { refused: 'duplicate' };
   if (list.length >= MAX_ADDRESSES) return { refused: 'full' };
