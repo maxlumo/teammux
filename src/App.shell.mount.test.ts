@@ -9343,6 +9343,7 @@ for (const [what, url] of [
   ['an old address with an ordinary fragment', '/?address=wss%3A%2F%2Fh%2Fws%23frag&token=OUTER-BOOT'],
   ['an old addr with user info and a password', '/?addr=wss%3A%2F%2Fu%3ASECRET-BOOT%40h%2Fws&token=OUTER-BOOT'],
   ['an old addr that is mailto:a@b', '/?addr=mailto%3Aa%40b&token=OUTER-BOOT'],
+  ['an old addr with user info behind extra slashes', '/?addr=wss%3A%2F%2F%2F%2Fu%3ASECRET-BOOT%40h%2Fws&token=OUTER-BOOT'],
 ] as const) {
   test(`boot: ${what} is taken out of the address bar and applies nothing`, async (context) => {
     const h = await bootApp(context, { tmux_layout_mode: 'desktop' }, undefined, {

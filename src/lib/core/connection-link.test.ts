@@ -221,6 +221,54 @@ test('URL user info is a credential: the gateway authenticates by token, so user
   assert.deepEqual(endpointOf('h:9899'), { kind: 'invalid' });
 });
 
+// One grammar (review of #405): the user-info check and the URL parser that
+// approves an endpoint must not disagree. `new URL` skips surplus slashes after a
+// special scheme and treats a backslash as a slash, and reads a username and a
+// password out of what is left.
+const DISGUISED = [
+  'wss:////user:SECRET-ONE@h/ws', 'wss:///user:SECRET-ONE@h/ws', 'ws://////user:SECRET-ONE@h:9899', '//user:SECRET-ONE@h/ws',
+  'wss:\\\\user:SECRET-ONE@h/ws', 'wss:/\\user:SECRET-ONE@h/ws', 'wss://\\user:SECRET-ONE@h/ws', 'wss:\\/user:SECRET-ONE@h/ws', 'WSS:////USER:SECRET-ONE@h/ws',
+];
+
+test('disguised user info is still user info: extra slashes, scheme-relative and backslash forms, direct, inside a link, inside a decoded old addr, and in the builder (#405)', () => {
+  for (const text of DISGUISED) {
+    const shown = text.replace(/SECRET-ONE/u, '<secret>');
+    assert.deepEqual(endpointOf(text), { kind: 'credential' }, `endpointOf ${shown}`);
+    assert.equal(kindOf(text), 'unusable:address-credential', `parse ${shown}`);
+    assert.ok(kindOf(`${text}?token=OUTER-TOKEN`).startsWith('unusable'), `inside a new link ${shown}`);
+    assert.ok(kindOf(`https://front.example/?addr=${encodeURIComponent(text)}&token=OUTER-TOKEN`).startsWith('unusable:'), `inside a decoded old addr ${shown}`);
+    assert.equal(buildConnectionLink({ address: text, token: 'T' }), null, `the builder ${shown}`);
+  }
+});
+
+test('a successful endpoint implies its parsed URL has no username and no password, whatever slashes, backslashes and @ are thrown at it', () => {
+  const schemes = ['ws:', 'wss:', 'WS:', 'http:', ''];
+  const slashes = ['//', '///', '////', '\\', '/\\', '\\/', ''];
+  const authorities = ['h', 'h:9899', 'user@h', 'user:pw@h:1', '@h', 'u:@h', ':p@h', '[::1]:19900', 'a.b.c'];
+  const tails = ['', '/', '/ws', '/ws@x', '?y=a@b', '/p?q=@'];
+  let endpoints = 0;
+  for (const scheme of schemes) for (const slash of slashes) for (const authority of authorities) for (const tail of tails) {
+    const result = endpointOf(`${scheme}${slash}${authority}${tail}`);
+    if (result.kind !== 'endpoint') continue;
+    endpoints++;
+    const url = new URL(result.address);
+    assert.equal(url.username + url.password, '', `no user info in ${result.address}`);
+    assert.match(result.address, /^wss?:\/\/[^/\\]/u, 'and the canonical shape: scheme://host');
+  }
+  assert.ok(endpoints > 20, `the sweep did accept real endpoints (${endpoints})`);
+});
+
+test('non-canonical syntax with no user info is not an endpoint either, and is not credential-bearing text', () => {
+  for (const text of ['wss:////h/ws', 'wss://h\\ws', 'ws:\\\\h', 'wss:///h']) {
+    assert.deepEqual(endpointOf(text), { kind: 'invalid' }, text);
+    assert.equal(kindOf(text), 'none', text);
+  }
+  // A backslash ends the authority, as a slash does: this @ is in the path, not user info.
+  assert.deepEqual(endpointOf('wss://h\\ws@x'), { kind: 'invalid' });
+  // The legitimate @ stays legitimate.
+  assert.deepEqual(endpointOf('wss://h/ws@x?y=a@b'), { kind: 'endpoint', address: 'wss://h/ws@x?y=a@b' });
+});
+
 test('endpointOf: a clean ws or wss endpoint is accepted in its canonical spelling; anything carrying a credential is refused as a credential; the rest is invalid', () => {
   for (const [text, address] of [
     ['ws://h:9899', 'ws://h:9899'], ['  wss://mac.tail.ts.net/ws  ', 'wss://mac.tail.ts.net/ws'], ['WSS://h/ws', 'wss://h/ws'],

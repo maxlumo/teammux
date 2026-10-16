@@ -109,13 +109,20 @@ function canonicalAddress(base: string): string {
 /** Does this single-token text carry URL user info (`user@host`,
  * `user:pass@host`, `@host`)? The gateway authenticates by token, never by URL
  * user info, so user info is never a valid part of an endpoint — and a password
- * in one would be stored and shown in plain text in the address field. Reads the
- * authority only (what follows an optional `scheme://`, up to `/`, `?` or `#`),
- * so an `@` later in a path or query is not user info. Free text with spaces is
- * not an address and is not judged here. */
+ * in one would be stored and shown in plain text in the address field.
+ *
+ * The authority is read as the standards URL parser reads it, TOLERANTLY: what
+ * follows the scheme and ANY run of slashes or backslashes (a special scheme
+ * ignores surplus ones: `wss:////user:pw@h` is user `user` at `h`), up to the
+ * next `/`, `\`, `?` or `#`. This only CLASSIFIES text so a credential-bearing
+ * one is removed from view; what is approved as an endpoint is stricter (see
+ * `endpointOf`: exactly `scheme://host`, so the URL parser and this reading
+ * cannot disagree about a text that passes). An `@` later in a path or query is
+ * not user info. Free text with spaces is not an address and is not judged. */
 function hasUserInfo(text: string): boolean {
   if (/\s/u.test(text)) return false;
-  return (text.replace(/^[a-z][a-z\d+.-]*:\/\//iu, '').split(/[/?#]/u, 1)[0] ?? '').includes('@');
+  const rest = text.replace(/^[a-z][a-z\d+.-]*:/iu, '').replace(/^[/\\]+/u, '');
+  return (rest.split(/[/\\?#]/u, 1)[0] ?? '').includes('@');
 }
 
 /** Does the address name a host at all? `ws://?token=T`, `wss:///?token=T` and
@@ -238,7 +245,10 @@ export type Endpoint =
 export function endpointOf(text: string): Endpoint {
   const raw = text.trim();
   if (carriesCredentialKey(raw) || hasUserInfo(raw)) return { kind: 'credential' };
-  if (!/^wss?:\/\//iu.test(raw) || /\s/u.test(raw) || raw.includes('#')) return { kind: 'invalid' };
+  // A canonical endpoint is `ws://` or `wss://` and then a host: no surplus
+  // slashes, no backslash, no whitespace, no fragment — syntax the URL parser would
+  // quietly repair into something other than what was typed.
+  if (!/^wss?:\/\/[^/\\]/iu.test(raw) || /\s/u.test(raw) || raw.includes('#') || raw.includes('\\')) return { kind: 'invalid' };
   const address = canonicalAddress(raw);
   return hasHost(address) ? { kind: 'endpoint', address } : { kind: 'invalid' };
 }
