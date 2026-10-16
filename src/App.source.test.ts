@@ -44,6 +44,14 @@ test('the boot reads a deep link through the one parser, and strips it from the 
   assert.doesNotMatch(take, /URLSearchParams|q\.get\(/u, 'no second parser of the link');
 });
 
+test('the connection QR code is the shell\u2019s own dialog: Back peels it, and it closes with the page, the connection and the background (#403)', () => {
+  assert.match(source, /if \(addServer\) \{ addServer = null; navPush\(\); return; \}(?:\s*\/\/[^\n]*)*\s*if \(detailsId\) \{ detailsId = ''; navPush\(\); return; \}\s*if \(qr\) \{ qr = null; navPush\(\); return; \}/u, 'registered in the popstate chain, after the Add server and the saved server\u2019s details dialogs (#402), a modal like them');
+  assert.match(source, /\$effect\(\(\) => \{ void linkContext; qr = null; \}\);/u, 'closed when the copy feedback context changes');
+  assert.match(source, /document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'and when the app goes to the background');
+  assert.match(source, /qr = qrMatrix\(link\);/u, 'what is held is the code\u2019s modules');
+  assert.match(source, /<QrDialog matrix=\{qr\} compact=\{narrowVp\} oncancel=\{\(\) => \(qr = null\)\} \/>/u, 'and Hide drops them');
+});
+
 test('App link feedback belongs to its page and connection, and disposes with App (#167)', () => {
   // Polling can replace serverInfo without changing the machine. A primitive
   // descriptor keeps that refresh from invalidating the copy or its timer.

@@ -61,6 +61,8 @@
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
   import { buildConnectionLink, parseConnectionLink, routeOfHash } from './lib/core/connection-link.ts';
+  import { qrMatrix } from './lib/core/qr.ts';
+  import QrDialog from './lib/app/QrDialog.svelte';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -3053,6 +3055,26 @@
   const linkContext = $derived(JSON.stringify({ page, connected, activeAddress, serverCurId, machineId: serverInfo.machineId }));
   $effect(() => { void linkContext; linkFeedback.clear(); });
   onDestroy(() => linkFeedback.dispose());
+  /** The connection QR code (board #403): open only by an explicit command, since
+   * the code carries the token. What is held is the code's MODULES, never the
+   * link; it is dropped when the dialog closes, when the app goes to the
+   * background, and when the page, the connection or the focused server
+   * changes (the same context the copy feedback belongs to). */
+  let qr = $state(null);          // boolean[][] | null
+  $effect(() => { void linkContext; qr = null; });
+  $effect(() => {
+    if (!qr) return;
+    const hide = () => { if (document.hidden) qr = null; };
+    document.addEventListener('visibilitychange', hide);
+    return () => document.removeEventListener('visibilitychange', hide);
+  });
+  function showConnectionQr() {
+    const conn = currentConnection(localStorage);
+    const link = conn?.address ? buildConnectionLink(conn) : null;
+    if (!link) throw new Error(t('qrNotBuildable'));       // an endpoint that cannot carry the credentials, or no connection
+    qr = qrMatrix(link);
+  }
+
   async function shareConnectionLink() {
     const attempt = linkFeedback.begin();
     const context = linkContext;
@@ -3309,6 +3331,7 @@
       // So is a saved server's Addresses and token dialog (board #402 review
       // P2-C): Back closes it, writes nothing, and Connection stays behind it.
       if (detailsId) { detailsId = ''; navPush(); return; }
+      if (qr) { qr = null; navPush(); return; }
       // A held tree takes no input, programmatic or not (reviewer P1-2): its
       // pages' Back chains are not asked while the app is blocked. The Retry
       // panel is the content area then; Back just stays (re-push).
@@ -3900,6 +3923,10 @@
       onadd={serverAddressAdd} onremove={serverAddressRemove} ontoken={serverTokenSet} onclose={() => { detailsId = ''; }} />
   {/if}
 
+  {#if qr}
+    <QrDialog matrix={qr} compact={narrowVp} oncancel={() => (qr = null)} />
+  {/if}
+
   {#if addServer}
     <AddServerDialog initial={addServer.initial} compact={narrowVp}
       onsubmit={submitAddServer} oncancel={() => (addServer = null)} />
@@ -3993,7 +4020,7 @@
       {uiZoom} showUiZoom={true} showShortcuts={shortcutsOn} {shortcutHost} onUiZoom={setUiZoom}
       onFontSize={setFontSize}
       onOptimize={optimizeConnection}
-      onShare={shareConnectionLink}
+      onShare={shareConnectionLink} onShowQr={showConnectionQr}
       onGoBack={(fn) => prefsGoBack = fn}
       onDrill={() => navPush()}
       showAgents={frontHub && agentsLivesInSettings(layout.isTouchDevice)}

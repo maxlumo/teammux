@@ -52,6 +52,7 @@
     onFontSize = () => {},
     onOptimize = () => {},
     onShare = () => {},
+    onShowQr = () => {},
     onGoBack = null,
     onDrill = () => {},
     showAgents = false,
@@ -112,6 +113,8 @@
     onFontSize?: (size: number) => void;
     onOptimize?: () => void | Promise<void>;
     onShare?: () => void | Promise<void>;
+    /** Open the connection QR code (board #403): an explicit command, because the code carries the token. */
+    onShowQr?: () => void | Promise<void>;
     onGoBack?: ((fn: () => boolean) => void) | null;
     onDrill?: () => boolean | void;
     /** Touch only: the agent configuration is a CATEGORY here rather than a page
@@ -342,7 +345,7 @@
   let shortcutError = $state('');
   const commandState = () => ({ pending: false, error: '' });
   const connectionCommands = () => ({
-    optimize: commandState(), share: commandState(), address: commandState(),
+    optimize: commandState(), share: commandState(), qr: commandState(), address: commandState(),
     disconnect: commandState(), setup: commandState(),
   });
   let commands = $state(connectionCommands());
@@ -1050,9 +1053,11 @@
                   onclick={() => { if (!optimizing) void runCommand(commands.optimize, onOptimize); }} />{/if}
                 <CommandButton label={t('shareLink')} icon={linkCopied ? 'check' : 'copy'}
                   pending={commands.share.pending} onclick={() => runCommand(commands.share, onShare)} />
+                <CommandButton label={t('showQr')} icon="eye"
+                  pending={commands.qr.pending} onclick={() => runCommand(commands.qr, onShowQr)} />
               </div>
             </div>
-            {#each [commands.optimize, commands.share] as command}
+            {#each [commands.optimize, commands.share, commands.qr] as command}
               {#if command.error}<div class="config-error appear" role="alert">{command.error}</div>{/if}
             {/each}
             <!-- One status-dot language (design-language.md §Colour): at rest

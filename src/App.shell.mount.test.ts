@@ -17,7 +17,8 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { compileMount } from './lib/test/mount.ts';
 import { recordServer } from './lib/app/servers.ts';
-import { parseConnectionLink } from './lib/core/connection-link.ts';
+import { buildConnectionLink, parseConnectionLink } from './lib/core/connection-link.ts';
+import { qrMatrix, qrPath } from './lib/core/qr.ts';
 
 /** The tuple a copied link carries, or null when it is not a usable link. */
 const linkTuple = (text: string) => { const parsed = parseConnectionLink(text); return parsed.kind === 'link' ? parsed.link : null; };
@@ -9885,4 +9886,54 @@ test('#402 review P2 on ebd198c6: after a refused paste, a Remove owns the alert
   remove('ws://b-wan:9899'); await h.settle();
   assert.equal(alert(), '', 'a successful Remove clears the old message');
   assert.deepEqual(JSON.parse(h.app.window.localStorage.getItem('tmux_machines')!)['m-b'], ['ws://b:9899', 'ws://b-ts:9899']);
+});
+
+// ─── #403: the connection QR code, only after an explicit tap ────────────
+
+test('#403: Settings › Connection shows the QR of the connected server only after a tap, never holds the link in the page, and closes when it should', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' }, undefined, sandbox);
+  for (let i = 0; i < 4; i++) await h.settle();
+  const doc = h.app.document;
+  await toConnection(h);
+  const button = () => [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^show qr code$/iu.test((b.textContent ?? '').trim()));
+  const dialog = () => doc.querySelector('.dlg svg.qr');
+  assert.ok(button(), 'the command is on the Connection page');
+  assert.equal(dialog(), null, 'and nothing is drawn before the tap');
+  assert.ok(!doc.documentElement.outerHTML.includes('tokA'));
+
+  button()!.click(); await h.settle();
+  const expected = qrPath(qrMatrix(buildConnectionLink({ address: 'ws://a:9899', token: 'tokA', socket: '' })!));
+  assert.equal(dialog()?.querySelector('path.ink')?.getAttribute('d'), expected, 'the code of the focused server\u2019s link, from the registry tuple');
+  assert.ok(!/tokA|a:9899/u.test(doc.querySelector('.dlg')!.outerHTML), 'the dialog carries the modules, not the link');
+
+  const hide = () => [...doc.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^hide$/iu.test((b.textContent ?? '').trim()))!.click();
+  hide(); await h.settle();
+  assert.equal(dialog(), null, 'Hide closes it');
+
+  button()!.click(); await h.settle();
+  assert.ok(dialog(), 'a second tap shows it again');
+  Object.defineProperty(doc, 'hidden', { configurable: true, get: () => true });
+  doc.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  await h.settle();
+  assert.equal(dialog(), null, 'the app going to the background closes it');
+  Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
+
+  button()!.click(); await h.settle();
+  assert.ok(dialog());
+  [...doc.querySelectorAll<HTMLButtonElement>('.tabbar button, .rail-btn')].find((b) => /^terminal$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  assert.equal(dialog(), null, 'a change of page closes it');
+});
+
+test('#403: the code comes from the registry tuple, not from the mirror keys — with the mirror gone it is the same code', async (context) => {
+  const seed: Record<string, string> = { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' };
+  delete seed.tmux_address; delete seed.tmux_token;
+  const h = await bootApp(context, seed, undefined, sandbox);
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_address'), null, 'no mirror');
+  await toConnection(h);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^show qr code$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  const expected = qrPath(qrMatrix(buildConnectionLink({ address: 'ws://a:9899', token: 'tokA', socket: '' })!));
+  assert.equal(h.app.document.querySelector('.dlg svg.qr path.ink')?.getAttribute('d'), expected);
 });
