@@ -211,6 +211,7 @@ for (const [what, address] of [
   ['both parameters', 'wss://fixture.test/ws?token=route-secret&socket=%2Froute-socket'],
   ['an encoded key', 'wss://fixture.test/ws?%74oken=route-secret'],
   ['a fragment', 'wss://fixture.test/ws#frag'],
+  ['user info and a password', 'wss://user:route-secret@fixture.test/ws'],
 ] as const) {
   test(`Share refuses an address that holds ${what} of its own: nothing is copied, the saved address is left as it was, and the error message names no part of it`, async context => {
     let copies = 0;

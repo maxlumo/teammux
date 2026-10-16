@@ -322,7 +322,7 @@ for (const [what, text] of REJECTED) {
     assert.equal(app.value(TOKEN), 'KEEP-TOKEN');
     assert.equal(app.value(SOCKET), '/keep/sock');
     const message = app.document.querySelector('.fields .config-error[role=alert]');
-    assert.match(message?.textContent ?? '', /^This link(?:'s address contains a token or socket| has no server address| cannot be read: a token or socket appears twice)$/u, 'one message about the problem');
+    assert.match(message?.textContent ?? '', /^This link(?:'s address contains a credential| has no server address| cannot be read: a token or socket appears twice)$/u, 'one message about the problem');
     for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket', 'OUTER-TOKEN']) {
       assert.ok(!(message?.textContent ?? '').includes(secret), `the message does not carry ${secret}`);
       assert.ok(!app.document.documentElement.outerHTML.includes(secret), `and ${secret} is nowhere in the page`);
@@ -360,8 +360,9 @@ test('a typed link that cannot be used is taken out of the field when it is left
 // Each refusal says what is actually wrong (a validator P3 on #401): a credential
 // inside the decoded address is not "a token or socket appears twice".
 for (const [what, text, message] of [
-  ['a credential inside the decoded addr', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN', "This link's address contains a token or socket"],
+  ['a credential inside the decoded addr', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN', "This link's address contains a credential"],
   ['a repeated token', 'wss://other.example/ws?token=SECRET-ONE&token=SECRET-TWO', 'This link cannot be read: a token or socket appears twice'],
+  ['an endpoint with user info and a password', 'wss://user:SECRET-ONE@h.example/ws', "This link's address contains a credential"],
   ['an http address in an old link', 'https://front.example/?addr=http%3A%2F%2Fh%3A1&token=SECRET-ONE', 'This link has no server address'],
   ['a token-only old link', 'https://front.example/?token=SECRET-ONE', 'This link has no server address'],
 ] as const) {

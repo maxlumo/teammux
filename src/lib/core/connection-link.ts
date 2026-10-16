@@ -46,8 +46,8 @@ export interface ConnectionLink {
  *  - `none`: not a link and carrying no credential: leave it as typed.
  *  - `link`: a usable connection.
  *  - `unusable`: carries a credential, but must not be used or kept in view:
- *    `address-credential` (the endpoint itself holds a token or socket, e.g. a
- *    credential in the fragment of a decoded `addr`),
+ *    `address-credential` (the endpoint itself holds a token or socket or URL
+ *    user info, e.g. a credential in the fragment of a decoded `addr`),
  *    `no-address` (credentials without a usable server: the old token-only
  *    link, a link naming no host, free text with a `?token=` in it, a
  *    credential in a hash) or `ambiguous` (a repeated `token`/`socket` key, or
@@ -104,6 +104,18 @@ export function routeOfHash(hash: string): string {
  * connect form's own check is case-sensitive). */
 function canonicalAddress(base: string): string {
   return base.replace(/^(wss?:\/\/[^/?#]+)\/$/iu, '$1').replace(/^(wss?):\/\//iu, (_, scheme: string) => `${scheme.toLowerCase()}://`);
+}
+
+/** Does this single-token text carry URL user info (`user@host`,
+ * `user:pass@host`, `@host`)? The gateway authenticates by token, never by URL
+ * user info, so user info is never a valid part of an endpoint — and a password
+ * in one would be stored and shown in plain text in the address field. Reads the
+ * authority only (what follows an optional `scheme://`, up to `/`, `?` or `#`),
+ * so an `@` later in a path or query is not user info. Free text with spaces is
+ * not an address and is not judged here. */
+function hasUserInfo(text: string): boolean {
+  if (/\s/u.test(text)) return false;
+  return (text.replace(/^[a-z][a-z\d+.-]*:\/\//iu, '').split(/[/?#]/u, 1)[0] ?? '').includes('@');
 }
 
 /** Does the address name a host at all? `ws://?token=T`, `wss:///?token=T` and
@@ -194,7 +206,9 @@ export function parseConnectionLink(text: string): ParsedLink {
   const raw = text.trim();
   if (!raw) return NONE;
   const parsed = classify(raw);
-  return parsed.kind === 'none' && carriesCredentialKey(raw) ? NO_ADDRESS : parsed;
+  if (parsed.kind !== 'none') return parsed;
+  if (carriesCredentialKey(raw)) return NO_ADDRESS;
+  return hasUserInfo(raw) ? ADDRESS_CREDENTIAL : parsed;
 }
 
 /** What `endpointOf` found in a text. */
@@ -214,15 +228,16 @@ export type Endpoint =
  *     after the host dropped, everything else byte for byte), so it compares
  *     with a saved address.
  *   - `credential`: the text carries a `token` or `socket` key — a new link, an
- *     old front-end link, free text — read with the one key reading. It is
- *     never an address, and nothing here echoes it.
+ *     old front-end link, free text — read with the one key reading, or URL user
+ *     info (`user@host`, `user:pass@host`; the gateway authenticates by token,
+ *     never by user info). It is never an address, and nothing here echoes it.
  *   - `invalid`: everything else (`http://`, a bare host, a bad port, an empty
  *     host, a fragment, an empty string). No scheme guessing: a caller that
  *     wants `host:port` read as `ws://host:port` adds the scheme first.
  */
 export function endpointOf(text: string): Endpoint {
   const raw = text.trim();
-  if (carriesCredentialKey(raw)) return { kind: 'credential' };
+  if (carriesCredentialKey(raw) || hasUserInfo(raw)) return { kind: 'credential' };
   if (!/^wss?:\/\//iu.test(raw) || /\s/u.test(raw) || raw.includes('#')) return { kind: 'invalid' };
   const address = canonicalAddress(raw);
   return hasHost(address) ? { kind: 'endpoint', address } : { kind: 'invalid' };

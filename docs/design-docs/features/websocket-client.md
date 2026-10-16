@@ -2087,7 +2087,8 @@ A BUILT link always carries BOTH parameters, empty when there is nothing for the
 | old, token only | `https://app/?token=T` | **unusable** (`no-address`) | | |
 | no host | `ws://?token=T`, `wss:///?token=T`, `?addr=wss://%ZZ&token=T` | **unusable** (`no-address`) | | |
 | credential in free text | `connect to it ?token=T`, `token=T` | **unusable** (`no-address`) | | |
-| old, hidden in `addr` | `https://app/?addr=wss%3A%2F%2Fh%2Fws%23token%3DS&token=T` (a credential in the decoded endpoint) | **unusable** (`address-credential`: "This link's address contains a token or socket"; an ordinary fragment is `no-address`) | | |
+| old, hidden in `addr` | `https://app/?addr=wss%3A%2F%2Fh%2Fws%23token%3DS&token=T` (a credential in the decoded endpoint) | **unusable** (`address-credential`: "This link's address contains a credential"; an ordinary fragment is `no-address`) | | |
+| user info | `wss://user:pass@h/ws`, `user:pass@h:9899`, `?addr=mailto%3Aa%40b`, `?addr=wss%3A%2F%2Fu%3Ap%40h%2Fws` | **unusable** (`address-credential`) | | |
 | old, `addr` is not a WebSocket address | `https://app/?addr=http%3A%2F%2Fh%3A1&token=T` | **unusable** (`no-address`); it is never turned into `wss://http://h:1` | | |
 | credential in a hash | `ws://h/ws#?token=T`, `ws://h/ws?x=1#token=T`, `https://app/#token=T` | **unusable** (`no-address`) | | |
 | encoded or upper-case key | `text ?%74oken=T`, `https://app/?TOKEN=T` (no address) | **unusable** (`no-address`); inside a real link the key is read the same way | | |
@@ -2099,6 +2100,8 @@ A BUILT link always carries BOTH parameters, empty when there is nothing for the
 **`endpointOf(text)` — the one validator of an address-only field** (board #402's "Add address"). Exported from the same module and stable: it returns `{ kind: 'endpoint', address }` for a whole `ws://` or `wss://` URL with a usable host, a valid port if any, no whitespace, no fragment and no credential key anywhere (the address is canonical: lower-case scheme, a lone `/` after the host dropped, the rest byte for byte); `{ kind: 'credential' }` for any text carrying a `token` or `socket` key (a new link, an old link, free text; nothing is echoed); and `{ kind: 'invalid' }` for everything else (`http://`, a bare host, a bad port, an empty host, an empty string). It never guesses a scheme.
 
 **Written by** the login page's Share button (from the form's fields) and the connected Connection page's Copy (from the registry tuple, #400); both call `buildConnectionLink`. The feedback is "Link copied"; the link is never displayed.
+
+**User info is a credential (#405).** The gateway authenticates by token, never by URL user info, so `user@` or `user:pass@` is never a valid part of an endpoint: `endpointOf` answers `credential` for it, the parser refuses it (in a pasted address, in a link, and in a decoded old `addr`, where `mailto:a@b` is no longer read as `wss://mailto:a@b`), and nothing is stored or shown. It reads the authority only, so an `@` later in a path or query is not user info, and a bare host or `host:port` is unchanged.
 
 **Share and Copy never strip.** Both go through the one builder, which asks `endpointOf` first: an address that holds its own `token` or `socket` parameter (a saved endpoint from before these rules) or a fragment is refused with "This address cannot be shared as a link", nothing is copied, and nothing is rewritten into something shareable. (An address TYPED or PASTED into the field with such parameters is a link by the input rules above and is split into address, token and socket when it arrives, so what Share then sees is that tuple.)
 

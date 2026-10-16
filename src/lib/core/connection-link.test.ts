@@ -198,6 +198,29 @@ test('the invariant: every link the parser accepts carries an address that endpo
   }
 });
 
+test('URL user info is a credential: the gateway authenticates by token, so user:pass@ is never part of an endpoint (#405)', () => {
+  for (const text of [
+    'ws://user@h:9899', 'wss://user:SECRET-ONE@h/ws', 'ws://@h:9899', 'wss://u:p@[::1]:19900/ws', 'user:SECRET-ONE@h:9899', 'user@h', 'mailto:a@b',
+    'wss://user:pw@h/ws?x=1',
+  ]) {
+    assert.deepEqual(endpointOf(text), { kind: 'credential' }, `endpointOf ${text.replace(/SECRET-ONE/u, '<secret>')}`);
+    assert.equal(kindOf(text), 'unusable:address-credential', `parse ${text.replace(/SECRET-ONE/u, '<secret>')}`);
+  }
+  // Inside a link: the new form with a real query, and the old addr, after decoding.
+  assert.equal(kindOf('wss://user:pw@h/ws?token=T&socket=%2Fs'), 'unusable:address-credential');
+  assert.equal(kindOf('https://front.example/?addr=mailto%3Aa%40b&token=OUTER-TOKEN'), 'unusable:address-credential', 'mailto:a@b is not turned into wss://mailto:a@b');
+  assert.equal(kindOf('https://front.example/?addr=wss%3A%2F%2Fu%3Apw%40h%2Fws&token=OUTER-TOKEN'), 'unusable:address-credential');
+  assert.equal(kindOf('https://front.example/?address=u%40h%3A1&token=OUTER-TOKEN'), 'unusable:address-credential', 'a scheme-less user@host:port too');
+  assert.equal(buildConnectionLink({ address: 'wss://user:pw@h/ws', token: 'T' }), null, 'and the builder refuses it');
+  // Unchanged: a bare host or host:port, and an @ that is not user info.
+  assert.deepEqual(endpointOf('wss://h/ws@x?y=a@b'), { kind: 'endpoint', address: 'wss://h/ws@x?y=a@b' }, 'an @ after the authority is not user info');
+  assert.equal(kindOf('h:9899'), 'none');
+  assert.equal(kindOf('192.168.1.5:9899'), 'none');
+  assert.equal(kindOf('ws://h:9899'), 'none');
+  assert.equal(kindOf('mail me at a@b.example'), 'none', 'free text with spaces is not judged as an address');
+  assert.deepEqual(endpointOf('h:9899'), { kind: 'invalid' });
+});
+
 test('endpointOf: a clean ws or wss endpoint is accepted in its canonical spelling; anything carrying a credential is refused as a credential; the rest is invalid', () => {
   for (const [text, address] of [
     ['ws://h:9899', 'ws://h:9899'], ['  wss://mac.tail.ts.net/ws  ', 'wss://mac.tail.ts.net/ws'], ['WSS://h/ws', 'wss://h/ws'],
