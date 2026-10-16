@@ -56,7 +56,7 @@
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentConnection, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers,
-    serverAddresses, addServerAddress, removeServerAddress, setServerToken, MAX_ADDRESSES } from './lib/app/servers.ts';
+    serverAddresses, addServerAddress, removeServerAddress, setServerToken, editSnapshot, MAX_ADDRESSES } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -2398,20 +2398,27 @@
   let detailsId = $state('');
   const detailsEntry = $derived(detailsId ? serverList.find((s) => s.id === detailsId) ?? null : null);
   const detailsAddresses = $derived.by(() => { void addrSetVersion; return detailsId ? serverAddresses(localStorage, detailsId) : []; });
-  $effect(() => { if (detailsId && (!detailsEntry || migrationBlocked)) detailsId = ''; });
-  // A write that fails (a full or refused storage) changes nothing
-  // (servers.ts allOrNothing), is said on the dialog, and is reported to the
-  // one storage gate, which blocks only when the migration cannot record
-  // (board #402 review P2-D).
+  // Closed when its server goes, NOT when the storage gate blocks (review
+  // P2-D round 3): the typed address or token stays in the open dialog.
+  $effect(() => { if (detailsId && !detailsEntry) detailsId = ''; });
+  // A write that fails (a full or refused storage) is put back as far as the
+  // storage lets it (servers.ts `compensated`, best effort, not atomic), is
+  // reported to the one storage gate, and the dialog is told what a RE-READ
+  // shows (review P2-D round 3): `storage` (nothing changed) only when the
+  // re-read is what it was before, else `uncertain` (could not confirm).
+  // While the gate is blocked nothing is attempted, and nothing changed.
   function detailsEdit(edit) {
-    if (migrationBlocked || !detailsId) return 'missing';
+    if (!detailsId) return 'missing';
+    if (migrationBlocked) return 'storage';
+    const before = editSnapshot(localStorage);
     try {
       const result = edit(detailsId);
       if (result && 'refused' in result) return result.refused;
       return null;
     } catch {
+      const unchanged = (() => { try { return editSnapshot(localStorage) === before; } catch { return false; } })();
       storageFailed();
-      return 'storage';
+      return unchanged ? 'storage' : 'uncertain';
     } finally {
       addrSetVersion++;
       serverList = loadServers(localStorage);
@@ -2715,7 +2722,8 @@
     const known = loadServers(localStorage).find((s) => s.address === c.address);
     // A known address is that entry (same token/socket edits apply); a new
     // one is a CANDIDATE with no id until the server says which machine it is.
-    void switchTo(known ? { ...known, token: c.token, socket: c.socket } : { id: '', name: hostLabel(c.address), ...c });
+    // The form's token and socket are the person's, typed for this switch.
+    void switchTo(known ? { ...known, token: c.token, socket: c.socket, explicit: true } : { id: '', name: hostLabel(c.address), ...c });
   }
 
   // --- Optimal address selection ---

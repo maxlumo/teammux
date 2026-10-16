@@ -22,13 +22,19 @@
 // it, `from` (its identity) stays frozen for Retry and Back, and its state,
 // in its own slots, was never touched.
 
-import { activateSwitched, observe, restoreCurrent, type ServerEntry } from './servers.ts';
+import { activateSwitched, loadServers, observe, restoreCurrent, type ServerEntry } from './servers.ts';
 import { isReachabilityFailure } from './dial-order.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-/** A saved entry, or a candidate from Add server (`id: ''` until auth). */
-export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & { id: string; name: string };
+/** A saved entry, or a candidate from Add server (`id: ''` until auth).
+ * `explicit`: the token and socket were typed by the person for THIS switch
+ * (Add server's form over a saved address): they are dialled as given.
+ * Without it a saved target is dialled with its entry as the entry is when
+ * the switch dials (board #402 review P1-A residual): a target object taken
+ * earlier (a Retry's, a deferred one's, one picked before a leave prompt)
+ * never carries a token or address the person has changed since. */
+export type SwitchTarget = Pick<ServerEntry, 'address' | 'token' | 'socket'> & { id: string; name: string; explicit?: true };
 
 export interface SwitchState {
   intent: number;
@@ -146,12 +152,25 @@ export function createServerSwitch(d: SwitchDeps) {
   async function run(target: SwitchTarget, pick?: string): Promise<void> {
     const fromConnected = d.connected() && !state;
     if (fromConnected && target.id && target.id === d.currentId()) return;
+    // What the commit protects (board #402 review P1-A): the entry as it is
+    // when the configuration to dial is fixed, so an edit made while the
+    // switch dials wins over what it dialled. Typed credentials are fixed
+    // NOW, with this observation, before the first await.
+    let seen = observe(d.storage);
     if (fromConnected && !(await guard(() => d.confirmLeave()))) return;
     const intent = ++seq;
-    // What the target's entry holds as the switch begins (board #402 review
-    // P1-A): an edit made while it dials wins at the commit. A candidate
-    // (no id) has nothing saved to observe; what it carries is the person's.
-    const seen = target.id ? observe(d.storage, target.id) : undefined;
+    // A saved target is read again after the leave prompt, its credentials
+    // and the observation TOGETHER (review P1-A residual (a)): an edit made
+    // while the prompt was up is what is dialled, never one snapshot dialled
+    // and another protected. A candidate (no id) carries the person's typed
+    // credentials, fixed with the first observation.
+    if (target.id && !target.explicit) {
+      const entry = loadServers(d.storage).find((s) => s.id === target.id);
+      if (entry) {
+        target = { ...target, address: entry.address, token: entry.token, socket: entry.socket };
+        seen = observe(d.storage);
+      }
+    }
     d.stopReconnect();
     const from = fromConnected ? { id: d.currentId(), name: d.currentName() } : state?.from ?? null;
     const left = d.currentId();

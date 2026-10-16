@@ -1135,3 +1135,35 @@ test('adding refuses a connection link as a credential, writing nothing; a malfo
   assert.deepEqual(serverAddresses(s, 'b'), ['ws://b:9899', 'ws://[::1]:9899/ws', 'wss://b.tail.ts.net'], 'stored in endpointOf s canonical spelling');
   assert.deepEqual(addServerAddress(s, 'b', 'wss://b.tail.ts.net/'), { refused: 'duplicate' }, 'the canonical spelling is what duplicates compare');
 });
+
+// Review P2-D round 3: the compensation is best effort. When putting the old
+// values back fails too, the re-read shows the change landed in part, and the
+// caller must not say "nothing changed".
+test('the operation fails AND the restore fails: the re-read shows a partial change, so it cannot be reported as nothing changed (#402 review P2-D)', async () => {
+  const { setServerToken, editSnapshot } = await import('./servers.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true }]),
+    tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA',
+  });
+  const before = editSnapshot(s);
+  const set = s.setItem, remove = s.removeItem;
+  let serversWrites = 0;
+  let removeFails = true;
+  // 1st registry write lands; the mirror reconcile fails; the registry restore fails.
+  s.setItem = (k: string, v: string) => { if (k === 'tmux_servers' && ++serversWrites === 2) throw new Error('QuotaExceededError'); set(k, v); };
+  s.removeItem = (k: string) => { if (k === 'tmux_address' && removeFails) { removeFails = false; throw new Error('SecurityError'); } remove(k); };
+  assert.throws(() => setServerToken(s, 'a', 'tokA-new'), /SecurityError/u);
+  assert.notEqual(editSnapshot(s), before, 'the re-read is honest: the new token landed and could not be put back');
+  assert.equal(loadServers(s)[0]!.token, 'tokA-new');
+  // One fault only (the restore works): the re-read equals what was there.
+  const t = mem({
+    tmux_servers: JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true }]),
+    tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA',
+  });
+  const was = editSnapshot(t);
+  const tremove = t.removeItem;
+  let once = true;
+  t.removeItem = (k: string) => { if (k === 'tmux_address' && once) { once = false; throw new Error('SecurityError'); } tremove(k); };
+  assert.throws(() => setServerToken(t, 'a', 'tokA-new'));
+  assert.equal(editSnapshot(t), was, 'restored: nothing changed');
+});

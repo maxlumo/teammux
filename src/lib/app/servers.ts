@@ -530,11 +530,13 @@ export function recordServer(
   // address that now reaches B must not rename A's entry into B.
   if (!entry) entry = servers.find((s) => s.address === conn.address && (!mid || !s.machineId || s.machineId === mid));
   if (entry) {
-    const stale = seen?.id === entry.id ? seen : undefined;
-    // The address that just worked is the active one, unless it was removed
-    // while the dial was in flight.
-    if (!(stale && removedSince(storage, stale, conn.address))) entry.address = conn.address;
-    if (!(stale && entry.token !== stale.token)) entry.token = conn.token;
+    // The entry this answer RESOLVED to is the one protected, whichever was
+    // dialled (review P1-A residual (b)). The address that just worked is the
+    // active one unless it was removed from it while the dial was in flight;
+    // its token is the dial's unless it was changed meanwhile.
+    const was = seen?.entries[entry.id];
+    if (!(seen && removedSince(storage, seen, entry.id, conn.address))) entry.address = conn.address;
+    if (!(was && entry.token !== was.token)) entry.token = conn.token;
     if (conn.socket) entry.socket = conn.socket; else delete entry.socket;
     if (mid) entry.machineId = mid;
   } else {
@@ -791,10 +793,11 @@ export function activateSwitched(
   conn: { address: string; token: string; socket?: string; machineId?: string },
   seen?: Observed,
 ): ServerEntry {
-  // Taken before the record, which may move the active address: an address
-  // removed while the switch was in flight is not put back into the set.
-  const removed = !!seen && removedSince(storage, seen, conn.address);
   const { entry } = recordServer(storage, conn, seen);
+  // An address removed from the resolved entry while the switch was in
+  // flight is not put back into its set (the record did not write it either,
+  // so this reads the same after it).
+  const removed = !!seen && removedSince(storage, seen, entry.id, conn.address);
   if (conn.machineId && !removed) {
     const map = machinesMap(storage);
     const addrs = Array.isArray(map[conn.machineId]) ? map[conn.machineId]! : [];
@@ -862,36 +865,53 @@ export function renameServer(storage: Store, id: string, name: string): ServerEn
   return servers;
 }
 
-/** What a dial or switch read from a saved entry before it awaited its
- * answer (board #402 review P1-A): its token and its addresses at that
- * moment. `observe` takes it; `recordServer` and `activateSwitched` compare
- * it with the registry at the commit, so an edit made in between wins. */
-export interface Observed { id: string; token: string; addresses: string[] }
+/** What a dial or switch read from the registry before it awaited its
+ * answer (board #402 review P1-A): every saved entry's token and addresses
+ * at that moment. The whole registry, not the requested entry alone (review
+ * P1-A residual (b)): the answer may resolve to ANOTHER saved entry (a B
+ * address answering as saved A), and the commit protects the entry it
+ * actually writes. `observe` takes it; `recordServer` and `activateSwitched`
+ * compare it with the registry at the commit, so an edit made in between
+ * wins. */
+export interface Observed { entries: Record<string, { token: string; addresses: string[] }> }
 
-export function observe(storage: Reader, id: string): Observed | undefined {
-  const entry = loadServers(storage).find((s) => s.id === id);
-  return entry ? { id, token: entry.token, addresses: serverAddresses(storage, id) } : undefined;
+export function observe(storage: Reader): Observed {
+  const entries: Observed['entries'] = {};
+  for (const e of loadServers(storage)) entries[e.id] = { token: e.token, addresses: serverAddresses(storage, e.id) };
+  return { entries };
 }
 
-/** Was `address` one of the server's addresses when `seen` was taken, and
+/** Was `address` one of entry `id`'s addresses when `seen` was taken, and
  * removed from them since? */
-function removedSince(storage: Reader, seen: Observed, address: string): boolean {
-  return seen.addresses.includes(address) && !serverAddresses(storage, seen.id).includes(address);
+function removedSince(storage: Reader, seen: Observed, id: string, address: string): boolean {
+  const was = seen.entries[id];
+  return !!was && was.addresses.includes(address) && !serverAddresses(storage, id).includes(address);
 }
 
-/** Run one edit of a saved server all or nothing (board #402 review P2-D):
- * the keys it may write are read first, and a write that throws — a full
- * or refused storage — puts back what it had already changed (best effort,
- * as `focusServer` does) and rethrows, so the caller reports a failure and
- * never a half-done edit (the token saved but its mirror reconcile not). */
+/** The keys an edit of a saved server may write (board #402): the registry,
+ * the failover map and the active mirror. */
 const EDIT_KEYS = [SERVERS_KEY, 'tmux_machines', 'tmux_address', 'tmux_token', 'tmux_socket'];
-function allOrNothing<T>(storage: Store, edit: () => T): T {
+
+/** Those keys as stored now, to compare a re-read with (review P2-D round 3:
+ * a failed save is reported as "nothing changed" only when a re-read says
+ * so). */
+export function editSnapshot(storage: Reader): string {
+  return JSON.stringify(EDIT_KEYS.map((k) => storage.getItem(k)));
+}
+
+/** Run one edit of a saved server, and when a write throws (a full or
+ * refused storage) put back what it had already changed and rethrow (board
+ * #402 review P2-D), so a token saved whose mirror reconcile then failed is
+ * undone too. This is a best-effort COMPENSATION, not an atomic write: the
+ * restore can fail as well (review P2-D round 3). The caller re-reads
+ * (`editSnapshot`) and says "not saved" only when nothing changed. */
+function compensated<T>(storage: Store, edit: () => T): T {
   const before = EDIT_KEYS.map((k) => [k, storage.getItem(k)] as const);
   try {
     return edit();
   } catch (error) {
     for (const [k, v] of before) {
-      try { if (v == null) storage.removeItem(k); else storage.setItem(k, v); } catch { /* best effort */ }
+      try { if (v == null) storage.removeItem(k); else storage.setItem(k, v); } catch { /* the caller re-reads */ }
     }
     throw error;
   }
@@ -947,7 +967,7 @@ export function addServerAddress(storage: Store, id: string, address: string): {
   if (list.includes(a)) return { refused: 'duplicate' };
   if (list.length >= MAX_ADDRESSES) return { refused: 'full' };
   const machineId = entry.machineId;
-  return { addresses: allOrNothing(storage, () => saveMachineAddresses(storage, machineId, [...list, a])) };
+  return { addresses: compensated(storage, () => saveMachineAddresses(storage, machineId, [...list, a])) };
 }
 
 /**
@@ -963,7 +983,7 @@ export function removeServerAddress(storage: Store, id: string, address: string)
   if (!entry.machineId) return { refused: 'no-machine' };
   const machineId = entry.machineId;
   const next = serverAddresses(storage, id).filter((a) => a !== address);
-  return { addresses: allOrNothing(storage, () => saveMachineAddresses(storage, machineId, next)) };
+  return { addresses: compensated(storage, () => saveMachineAddresses(storage, machineId, next)) };
 }
 
 /**
@@ -981,7 +1001,7 @@ export function setServerToken(storage: Store, id: string, token: string): Serve
   const entry = servers.find((s) => s.id === id);
   if (!entry || !token) return servers;
   entry.token = token;
-  allOrNothing(storage, () => { saveServers(storage, servers); reconcileMirror(storage); });
+  compensated(storage, () => { saveServers(storage, servers); reconcileMirror(storage); });
   return servers;
 }
 

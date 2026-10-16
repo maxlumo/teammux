@@ -618,3 +618,81 @@ test('a switch in flight to an alternate that is removed meanwhile does not make
   await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
   assert.ok(!t.dials.slice(mark).some((d) => d.startsWith('ws://b-wan:3')), `the removed address is not dialled: ${t.dials.slice(mark)}`);
 });
+
+// Board #402 review P1-A residual (a): the leave prompt is an await before
+// the dial. A target picked before it (or a Retry's, taken at the failure)
+// must not dial one snapshot while the commit protects another.
+test('an edit made while the leave prompt is up is what the switch dials, and the commit keeps it (#402 review P1-A residual)', async () => {
+  const { setServerToken } = await import('./servers.ts');
+  const t = app();
+  const picked = loadServers(t.storage).find((s) => s.id === t.b.id)!;   // the row the person clicked, before the edit
+  let answer!: (leave: boolean) => void;
+  const off = registerLeaveGuard({ runtime: null, page: 'files', dirty: () => true, ask: () => new Promise<boolean>((r) => { answer = r; }) });
+  const switching = t.sw.switchTo(picked);
+  for (let i = 0; i < 5 && !answer; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(answer, 'the leave prompt is up');
+  setServerToken(t.storage, t.b.id, 'tb-new');
+  answer(true);
+  await switching;
+  off();
+  assert.deepEqual(t.tokens, ['tb-new'], 'the switch dials the token saved during the prompt, not the picked row s');
+  assert.equal(currentServerId(t.storage), t.b.id);
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.token, 'tb-new', 'and the commit keeps it');
+  assert.equal(t.storage.getItem('tmux_token'), 'tb-new');
+});
+
+test('a Retry dials the entry as it is now, not the target the failure kept (#402 review P1-A residual)', async () => {
+  const { setServerToken } = await import('./servers.ts');
+  const t = app();
+  t.w.fail('ws://b:2', 1);
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  assert.equal(t.sw.state?.phase, 'failed');
+  setServerToken(t.storage, t.b.id, 'tb-new');
+  await t.sw.retry();
+  assert.equal(t.tokens.at(-1), 'tb-new', 'the Retry dials the saved token');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.token, 'tb-new');
+});
+
+test('typed credentials (Add server over a saved address) are dialled as given and an edit made meanwhile still wins (#402 review P1-A residual)', async () => {
+  const { setServerToken } = await import('./servers.ts');
+  const t = app();
+  const b = loadServers(t.storage).find((s) => s.id === t.b.id)!;
+  let answer!: (leave: boolean) => void;
+  const off = registerLeaveGuard({ runtime: null, page: 'files', dirty: () => true, ask: () => new Promise<boolean>((r) => { answer = r; }) });
+  const switching = t.sw.switchTo({ ...b, token: 'tb-typed', explicit: true });
+  for (let i = 0; i < 5 && !answer; i++) await new Promise((r) => setTimeout(r, 0));
+  setServerToken(t.storage, t.b.id, 'tb-settings');
+  answer(true);
+  await switching;
+  off();
+  assert.deepEqual(t.tokens, ['tb-typed'], 'the typed token is what was submitted');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.token, 'tb-settings', 'the edit made after it is the newest and is kept');
+  // Without an edit, the typed token is recorded, as before.
+  const u = app();
+  const ub = loadServers(u.storage).find((s) => s.id === u.b.id)!;
+  await u.sw.switchTo({ ...ub, token: 'tb-typed', explicit: true });
+  assert.equal(loadServers(u.storage).find((s) => s.id === u.b.id)!.token, 'tb-typed');
+});
+
+test('an address added while the leave prompt is up and removed while the dial is held does not become active (#402 review P1-A residual: the observation is taken with the re-read target)', async () => {
+  const { addServerAddress, removeServerAddress, serverAddresses } = await import('./servers.ts');
+  const t = app();
+  t.w.fail('ws://b:2', 1);                 // beta's proven address is down
+  let answer!: (leave: boolean) => void;
+  const off = registerLeaveGuard({ runtime: null, page: 'files', dirty: () => true, ask: () => new Promise<boolean>((r) => { answer = r; }) });
+  let release!: () => void;
+  t.onDial((addr) => (addr === 'ws://b-wan:3' ? new Promise<void>((r) => { release = r; }) : null));
+  const switching = t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  for (let i = 0; i < 5 && !answer; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok('addresses' in addServerAddress(t.storage, t.b.id, 'ws://b-wan:3'), 'added during the prompt');
+  answer(true);
+  for (let i = 0; i < 10 && !release; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(release, 'the switch walks to the added address, held');
+  assert.deepEqual(removeServerAddress(t.storage, t.b.id, 'ws://b-wan:3'), { addresses: ['ws://b:2'] }, 'removed during the dial');
+  t.onDial(() => null);
+  release();
+  await switching;
+  off();
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b:2', 'the removed address is not made active');
+  assert.deepEqual(serverAddresses(t.storage, t.b.id), ['ws://b:2'], 'nor put back');
+});

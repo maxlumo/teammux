@@ -9617,14 +9617,14 @@ test('#402 review P1-B: through the real dialog a pasted or typed connection lin
   for (const link of [`ws://b-ts:9899?token=${SECRET}&socket=`, `https://front.example/?addr=ws://b-ts:9899&token=${SECRET}`]) {
     await paste(link);
     assert.equal(field.value, '', 'the link does not stay in the field');
-    assert.match(alert(), /connection link with a token/iu);
+    assert.match(alert(), /that is a connection link, not an address/iu);
     assert.ok(!alert().includes(SECRET) && !doc.body.innerHTML.includes(SECRET), 'the message and the page never echo it');
   }
   // Typed (not pasted) and submitted: refused and cleared too.
   await type(`ws://b-ts:9899?token=${SECRET}`);
   add().click(); await h.settle();
   assert.equal(field.value, '');
-  assert.match(alert(), /connection link with a token/iu);
+  assert.match(alert(), /that is a connection link, not an address/iu);
   assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing stored, beta s token untouched');
   // http and junk: refused as invalid, the draft kept for an edit, nothing converted.
   for (const junk of ['http://example.com:9899', 'javascript:alert(1)', 'ws://h:99999']) {
@@ -9640,4 +9640,118 @@ test('#402 review P1-B: through the real dialog a pasted or typed connection lin
   assert.deepEqual(rows(), ['ws://b:9899 In use', 'ws://[::1]:9899/ws']);
   assert.ok(!JSON.stringify(dumpStorage(h.app)).includes(SECRET));
   assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB');
+});
+
+test('#402 review P1-B residual: an old link whose credential sits only inside its encoded addr, address or server value is refused and cleared through the real field, pasted or typed, never echoed', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, sandbox);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  const add = () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!;
+  const alert = () => dialog.querySelector('[role=alert]')?.textContent ?? '';
+  const SECRET = 'FAKE-SECRET-402';
+  const before = JSON.stringify(dumpStorage(h.app));
+  const links = [
+    `https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3D${SECRET}`,
+    `https://front.example/?address=ws%3A%2F%2Fh%3A9899%3Ftoken%3D${SECRET}`,
+    `https://front.example/?server=ws%3A%2F%2Fh%3A9899%3Fsocket%3D${SECRET}`,
+    'https://front.example/?addr=ws%3A%2F%2Fh%3A9899',   // an old link with no credential at all is a link too, not an address
+  ];
+  for (const link of links) {
+    field.value = link;
+    field.dispatchEvent(new h.app.window.InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: link }));
+    await h.settle();
+    assert.equal(field.value, '', `pasted: cleared at once (${link.slice(0, 40)}…)`);
+    assert.match(alert(), /that is a connection link, not an address/iu);
+    field.value = link;
+    field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+    await h.settle();
+    add().click(); await h.settle();
+    assert.equal(field.value, '', 'typed and submitted: refused and cleared');
+    assert.match(alert(), /that is a connection link, not an address/iu);
+    assert.ok(!doc.body.innerHTML.includes(SECRET) && !alert().includes(SECRET), 'the secret is never in the page');
+  }
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing stored');
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB', 'the token is untouched');
+});
+
+test('#402 review P2-D round 3: when the save fails AND putting it back fails, the dialog says it could not confirm, never "nothing changed", keeps the token draft and re-reads', async (context) => {
+  // alpha is current: its new token makes the mirror reconcile remove the old
+  // tuple. The plan: that removal fails, then restoring the registry fails.
+  const plan = { armed: false, serversWrites: 0, removeFailed: false };
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      const set = window.Storage.prototype.setItem, remove = window.Storage.prototype.removeItem;
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (plan.armed && k === 'tmux_servers' && ++plan.serversWrites === 2) throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+      window.Storage.prototype.removeItem = function (this: Storage, k: string) {
+        if (plan.armed && k === 'tmux_address' && !plan.removeFailed) { plan.removeFailed = true; throw new Error('SecurityError'); }
+        return remove.call(this, k);
+      };
+    } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token alpha"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const token = dialog.querySelector<HTMLInputElement>('input[aria-label="New token"]')!;
+  token.value = 'tokA-new'; token.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  plan.armed = true;
+  [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^change token$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  plan.armed = false;
+  const text = dialog.textContent ?? '';
+  assert.match(text, /could not confirm the save/iu, 'the re-read showed a partial change');
+  assert.doesNotMatch(text, /nothing was changed|token changed\./iu, 'neither "nothing changed" nor success');
+  assert.equal(token.value, 'tokA-new', 'the draft is kept');
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'a').token, 'tokA-new', 'what the re-read found: the registry write landed');
+  assert.ok(doc.querySelector('[role=dialog]'), 'and the dialog is still open');
+});
+
+test('#402 review P2-D round 3: a failure that blocks the storage gate keeps the dialog open with the typed address', async (context) => {
+  // The add fails (the failover map refused), and the gate's preparation
+  // cannot finish either (an open move journal it cannot read, MOVES_KEY):
+  // storageFailed blocks, the case where the dialog used to close.
+  const store = refusing(['tmux_machines']);
+  store.state.failing = false;
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  field.value = 'ws://b-ts:9899'; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  h.app.window.localStorage.setItem('tmux_slot_moves', '{');
+  store.state.failing = true;
+  [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  // The gate blocked: the whole app is frozen with its reason (the blocked
+  // panel or the frozen list says it), the branch where the dialog closed.
+  assert.match(doc.body.textContent ?? '', /server pages are paused/iu, 'the storage gate blocked');
+  assert.ok(doc.querySelector('[role=dialog]'), 'the dialog stays open');
+  assert.equal(field.value, 'ws://b-ts:9899', 'with the typed address');
+  assert.match(dialog.textContent ?? '', /not saved/iu);
+  // While blocked nothing is attempted: a second Add writes nothing, even
+  // with the storage writable again, until Retry unblocks the app.
+  store.state.failing = false;
+  [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  assert.deepEqual(JSON.parse(h.app.window.localStorage.getItem('tmux_machines') ?? '{}')['m-b'] ?? [], [], 'frozen: nothing added');
+  assert.equal(field.value, 'ws://b-ts:9899');
 });

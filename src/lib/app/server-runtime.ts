@@ -305,7 +305,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     const token = route ? route.token : target.token;
     // What this dial read, for the commit below: an edit of the token or the
     // addresses made while it awaits wins over it (board #402 review P1-A).
-    const seen = observe(storage, id);
+    const seen = observe(storage);
     let reported: string | null;
     try {
       reported = await connection.connect(address, token, how.timeoutMs ?? connectTimeoutMs);

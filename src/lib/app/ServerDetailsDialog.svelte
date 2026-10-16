@@ -15,10 +15,13 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { normalizeAddress } from '../core/connection-address.ts';
-  import { carriesCredentialKey, isBulkInsert } from '../core/connection-link.ts';
+  import { isBulkInsert, parseConnectionLink } from '../core/connection-link.ts';
   import type { AddressRefusal } from './servers.ts';
 
-  type Failure = AddressRefusal | 'storage';
+  /** `storage`: the save failed and a re-read shows nothing changed;
+   * `uncertain`: it failed and the re-read shows something did (review P2-D
+   * round 3: putting the old values back is best effort, not atomic). */
+  type Failure = AddressRefusal | 'storage' | 'uncertain';
 
   let {
     name, addresses, active, machineKnown, max, compact = false,
@@ -45,7 +48,7 @@
   let token = $state('');
   let refusal = $state<Failure | null>(null);
   let tokenDone = $state(false);
-  let tokenFailed = $state(false);
+  let tokenFailure = $state<Failure | null>(null);
 
   const title = $derived(t('serverDetailsTitle').replace('{name}', name));
   // Why adding is not possible right now, said beside the field (a touch
@@ -55,7 +58,7 @@
   const REASON: Record<Failure, string> = {
     missing: 'serverAddressInvalid', 'no-machine': 'serverAddressNoMachine', full: 'serverAddressFull',
     invalid: 'serverAddressInvalid', duplicate: 'serverAddressDuplicate', active: 'serverAddressesNote',
-    credential: 'serverAddressCredential', storage: 'serverEditFailed',
+    credential: 'serverAddressCredential', storage: 'serverEditFailed', uncertain: 'serverEditUncertain',
   };
   const said = $derived(refusal ? t(REASON[refusal]).replace('{n}', String(max)) : '');
 
@@ -66,23 +69,33 @@
    * as typed, so `http://…` is refused, never turned into `ws://http://…`
    * (board #402 review P1-B). The store validates it (`endpointOf`). */
   const withScheme = (text: string) => (/^[a-z][a-z\d+.-]*:\/\//iu.test(text) ? text : normalizeAddress(text, location.protocol));
+  /** A connection link of ANY form is not an address (review P1-B residual):
+   * #401's one classification decides, so an old link whose token sits only
+   * inside its encoded `addr`, `address` or `server` value is a link too.
+   * `none` is provably credential-free (its final check reads the whole
+   * text); anything else is refused, cleared, and never echoed. */
+  const isLink = (text: string) => parseConnectionLink(text).kind !== 'none';
+  function refuseLink() {
+    draft = '';
+    refusal = 'credential';
+  }
   function add() {
     if (blocked || !draft.trim()) return;
+    if (isLink(draft)) { refuseLink(); return; }
+    // The store validates again (endpointOf, its own gate). Every link form
+    // was refused above with the same classification, so what comes back
+    // here is an ordinary refusal of an address, left to be corrected.
     const result = onadd(withScheme(draft.trim()));
-    // A connection link is a secret: refused with a message that does not
-    // echo it, and it does not stay in the field (review P1-B).
-    if (result === 'credential') draft = '';
-    else if (!result) draft = '';
+    if (!result) draft = '';
     refusal = result;
   }
-  /** A pasted link is cleared at once, before anything is pressed: the token
-   * never sits in plain view (#401's rule for an address field). */
+  /** A pasted link is cleared at once, before anything is pressed: it never
+   * sits in plain view (#401's rule for an address field). */
   function addInput(e: Event) {
     const field = e.currentTarget as HTMLInputElement;
-    if (isBulkInsert(e as InputEvent) && carriesCredentialKey(field.value)) {
+    if (isBulkInsert(e as InputEvent) && isLink(field.value)) {
       field.value = '';
-      draft = '';
-      refusal = 'credential';
+      refuseLink();
       return;
     }
     refusal = null;  // typing again clears the last refusal
@@ -97,7 +110,7 @@
     // Success is said only when the save completed; a failure keeps the
     // typed token in its field (a password field: never shown) for a retry.
     const failed = ontoken(token);
-    tokenFailed = !!failed;
+    tokenFailure = failed;
     if (failed) return;
     token = '';
     tokenDone = true;
@@ -139,7 +152,7 @@
       aria-label={t('serverTokenNew')} bind:value={token} onkeydown={tokenKey} />
     <CommandButton icon="key" label={t('serverTokenChange')} disabled={!token} onclick={applyToken} />
   </div>
-  {#if tokenFailed}<p class="dlg-error config-error appear" role="alert">{t('serverEditFailed')}</p>{/if}
+  {#if tokenFailure}<p class="dlg-error config-error appear" role="alert">{t(REASON[tokenFailure])}</p>{/if}
   <p class="dlg-note" role="status">{tokenDone ? t('serverTokenChanged') : t('serverTokenNote')}</p>
   <div class="dlg-actions">
     <CommandButton label={t('close')} onclick={onclose} />
