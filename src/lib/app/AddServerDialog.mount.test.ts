@@ -240,3 +240,14 @@ test('the dialog lifecycle: an accepted paste of a link, then a typed refusal in
     assert.deepEqual(JSON.parse(JSON.stringify(submitted)), [{ address: 'wss://second.example/ws', token: 'SECOND-TOKEN', socket: '/tmp/second' }]);
   } finally { await app.close(); }
 });
+
+test('the dialog: hidden characters are refused with their own message, naming neither a credential nor any part of the text', async context => {
+  const { app, el, set } = await openDialog(context);
+  try {
+    await set(FIELDS.address, 'ws://keep.example:9899');
+    await set(FIELDS.address, '\u200bwss://user:SECRET-ONE@h.example/ws', 'insertFromPaste');
+    assert.equal(el(FIELDS.address).value, 'ws://keep.example:9899');
+    assert.equal(app.document.querySelector('.dlg .config-error[role=alert]')?.textContent, 'This text contains hidden characters');
+    assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+  } finally { await app.close(); }
+});

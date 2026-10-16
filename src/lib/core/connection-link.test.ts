@@ -334,6 +334,35 @@ test('the classifier agrees with the standards URL parser: whenever new URL read
   assert.ok(withUserInfo > 200 && clean > 200, `the grid covers both sides (${withUserInfo} with user info, ${clean} without)`);
 });
 
+test('a seeded fuzz of scheme, slash, backslash, space, percent and @ shapes: whenever new URL reads user info, the classifier does not call the text none or an endpoint (#405 agreement)', () => {
+  const pieces = ['ws', 'wss', 'http', 'https', 'WS', ':', '/', '/', '\\', '@', 'u', 'p', 'h', '.', ' ', '%40', '%75', '?', '#', 'x=1', '[', ']', '::1', '9', '-', '\t'];
+  const schemes = ['ws:', 'wss:', 'http:', 'https:', 'WSS:', 'ws'];
+  let seed = 12345;
+  const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  let read = 0;
+  for (let i = 0; i < 40_000; i++) {
+    let text = schemes[Math.floor(next() * schemes.length)]!;
+    for (let k = 2 + Math.floor(next() * 9); k > 0; k--) text += pieces[Math.floor(next() * pieces.length)];
+    if (next() < 0.7) text = text.replace(/h/u, 'u:p@h');
+    let url: URL | null = null;
+    try { url = new URL(text.trim()); } catch { /* not a URL */ }
+    if (!url || (url.username === '' && url.password === '')) continue;
+    read++;
+    assert.notEqual(parseConnectionLink(text).kind, 'none', `not none: ${JSON.stringify(text)}`);
+    assert.notEqual(endpointOf(text).kind, 'endpoint', `not an endpoint: ${JSON.stringify(text)}`);
+  }
+  assert.ok(read > 2000, `the fuzz did produce texts the parser reads user info from (${read})`);
+});
+
+test('an endpoint holds no hidden character anywhere: trailing and inside are refused as the leading one is', () => {
+  for (const c of ['\u0001', '\u007f', '\u0085', '\u00ad', '\u200b', '\u200d', '\u2060']) {
+    for (const text of [`wss://h.example/ws${c}`, `wss://h${c}.example/ws`, `wss://h.example/w${c}s`, `ws://h:9899${c}`]) {
+      assert.deepEqual(endpointOf(text), { kind: 'invalid' }, JSON.stringify(text));
+      assert.equal(kindOf(text), 'unusable:hidden', JSON.stringify(text));
+    }
+  }
+});
+
 test('every disguised user-info form is refused with any hiding character before, after, around or inside it: as hidden characters, or as a credential when only trimmed whitespace is there (#405)', () => {
   for (const base of [...DISGUISED, 'user:SECRET-ONE@h:9899']) for (const c of HIDING) {
     const inside = /\s/u.test(c) ? [] : [`${base.slice(0, 2)}${c}${base.slice(2)}`];   // a space inside is prose, not a hidden character

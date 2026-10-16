@@ -331,6 +331,15 @@ for (const [what, text] of REJECTED) {
   });
 }
 
+test('hidden characters are refused with their own message, which names neither a credential nor any part of the text', async context => {
+  const app = await mount(context, { ...HELD, tmux_server_current: 's0' });
+  await app.answer();
+  await paste(app, ADDR, '\u200bwss://user:SECRET-ONE@h.example/ws');
+  assert.equal(app.value(ADDR), 'ws://keep.example:9899');
+  assert.equal(app.document.querySelector('.fields .config-error[role=alert]')?.textContent, 'This text contains hidden characters');
+  assert.ok(!app.document.documentElement.outerHTML.includes('SECRET-ONE'));
+});
+
 test('typing a link out is plain editing: it is not split character by character, only when the field is left', async context => {
   const app = await mount(context, {});
   await app.answer();

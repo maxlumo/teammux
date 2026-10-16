@@ -133,23 +133,19 @@ function canonicalAddress(base: string): string {
  * cannot disagree about a text that passes). An `@` later in a path or query is
  * not user info.
  *
- * Whatever the standards URL parser can read is asked of the parser itself
- * (`new URL`: a backslash is a slash, tabs and newlines vanish, a space in user
- * info is encoded), so no second copy of those rules is kept here. The
- * tolerant reading below covers what is not a URL to the parser (`user:pw@h`,
- * `//user:pw@h`, `@h`, `mailto:a@b`). Hidden characters are dropped first: this
- * only classifies, and a credential must not escape by being wrapped in them
- * (`parseConnectionLink` refuses such text outright; a decoded `addr` and a
+ * The reading is tolerant on purpose and is checked AGAINST the standards
+ * parser rather than by it: a test asks `new URL` for the username and password
+ * of a grid of texts and of a seeded fuzz (a backslash is a slash, surplus
+ * slashes are skipped, tabs and newlines vanish, a space in user info is
+ * encoded), and requires this to agree. Hidden characters are dropped first:
+ * this only classifies, and a credential must not escape by being wrapped in
+ * them (`parseConnectionLink` refuses such text outright; a decoded `addr` and a
  * saved address reach here without that door). Free text with spaces is not an
  * address and is not judged — except behind a `ws:`/`wss:`/`http:`/`https:`
  * start, which the parser reads whatever follows (`ws:// user:pw@h` is user
  * ` user`). */
 function hasUserInfo(raw: string): boolean {
   const text = raw.replace(HIDDEN_EVERYWHERE, '').trim();
-  try {
-    const url = new URL(text);
-    if (url.username !== '' || url.password !== '') return true;
-  } catch { /* not a URL to the parser: read it as text below */ }
   if (!/^(?:wss?|https?):/iu.test(text) && /\s/u.test(text)) return false;
   const rest = text.replace(/^[a-z][a-z\d+.-]*:/iu, '').replace(/^[/\\]+/u, '');
   return (rest.split(/[/\\?#]/u, 1)[0] ?? '').includes('@');
