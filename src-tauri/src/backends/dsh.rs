@@ -737,7 +737,9 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 /// when that pid is the LIVE input owner (review P1-A2): alive, and the
 /// pane's own process (`pane_pid`; the managed zsh replaced the pane's shell
 /// at launch). A file a dead shell left behind, or one naming any other
-/// process, is never a ready pane.
+/// process, is never a ready pane. Alive excludes a ZOMBIE (board #413): a
+/// killed shell its parent has not reaped yet still answers signal 0, but it
+/// can read nothing — see `owns_input`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn input_ready(home: &Path, pane_pid: Option<u32>) -> bool {
     let Ok(text) = std::fs::read_to_string(home.join("dsh").join("tmm").join("ready")) else { return false };
@@ -745,9 +747,73 @@ pub(crate) fn input_ready(home: &Path, pane_pid: Option<u32>) -> bool {
     if pane_pid != Some(pid as u32) {
         return false;
     }
+    owns_input(pid)
+}
+
+/// Can process `pid` still read its TTY: it exists and is not a zombie (board
+/// #413). Signal 0 answers "exists" for a zombie too. That is the INFERRED
+/// cause of the one `the_pane_ends_…` failure in 17 runs (not captured with
+/// a `Z` state): tmux closes a pane on its pty's EOF, which can come before
+/// the SIGCHLD that reaps the shell, so for a moment the pane is gone and its
+/// killed shell is still in the process table. The state comes from
+/// `/proc/<pid>/stat` (the field after the `)` that ends the command name,
+/// which may itself hold spaces or parens), else from `ps -o stat=` where
+/// there is no /proc (macOS) — the same two doors as tmm's `parent_pid`.
+/// Anything not read cleanly is UNKNOWN, and unknown is not live. Out of
+/// scope: a pid reused by a new process, and a death right after the check.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn owns_input(pid: i32) -> bool {
     // Signal 0 only asks whether the process exists (EPERM: it does).
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let exists = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !exists {
+        return false;
+    }
+    let state = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().next()).map(str::to_string),
+        // A /proc without this pid: it went between the two questions.
+        Err(_) if Path::new("/proc/self/stat").exists() => return false,
+        Err(_) => ps_state(std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().ok()),
+    };
+    owner_verdict(state.as_deref())
+}
+
+/// The owner question's answer from what was observed: a live state is an
+/// owner; a zombie, a dead task, no observation or a word that is not a state
+/// is not — unknown is never taken for live.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn owner_verdict(state: Option<&str>) -> bool {
+    state.and_then(state_is_live).unwrap_or(false)
+}
+
+/// `ps -o stat=`'s answer for one pid, or `None` when there is no clean one:
+/// ps failed, or printed anything but one state word.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ps_state(out: Option<std::process::Output>) -> Option<String> {
+    let out = out.filter(|o| o.status.success())?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let mut words = text.split_whitespace();
+    let word = words.next()?;
+    words.next().is_none().then(|| word.to_string())
+}
+
+/// A process state word: `/proc/<pid>/stat` field 3 (one letter), or ps's
+/// `stat` (the letter, then flags: `Ss+`, `Z+`). `Some(false)` for a zombie
+/// (`Z`) or a dead task (`X`, older kernels `x`), `Some(true)` for any other
+/// KNOWN state letter followed only by known flags, and `None` for anything
+/// else — `ERROR` or a `STAT` header is a word, not a state. The letters are
+/// Linux's (`proc(5)`: R S D Z T t X x K W P I) and macOS's `U`; the flags
+/// are procps's (`< N L s l +`) and macOS ps's (`> A E S V W X`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn state_is_live(word: &str) -> Option<bool> {
+    const STATES: &[char] = &['R', 'S', 'D', 'Z', 'T', 't', 'X', 'x', 'K', 'W', 'P', 'I', 'U'];
+    const FLAGS: &[char] = &['<', 'N', 'L', 's', 'l', '+', '>', 'A', 'E', 'S', 'V', 'W', 'X'];
+    let mut chars = word.chars();
+    let first = chars.next().filter(|c| STATES.contains(c))?;
+    if !chars.all(|c| FLAGS.contains(&c)) {
+        return None;
+    }
+    Some(!matches!(first, 'Z' | 'X' | 'x'))
 }
 
 /// dsh resume dialect, read by the managed shell at start: an exact id, or
@@ -1299,9 +1365,45 @@ pub(crate) mod tests {
         assert_eq!(pane.stops().len(), 2);
     }
 
+    /// Board #413 review P2-A: a process state is read only from a clean
+    /// observation. ps must succeed and print exactly one state word; a
+    /// state word must start with a state letter. Anything else is unknown,
+    /// and `owns_input` takes unknown as not live.
+    #[test]
+    fn a_process_state_is_believed_only_from_a_clean_observation() {
+        use std::os::unix::process::ExitStatusExt;
+        let ps = |code: i32, out: &str| Some(std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: out.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        });
+        assert_eq!(ps_state(ps(0, "Ss+\n")).as_deref(), Some("Ss+"));
+        assert_eq!(ps_state(ps(0, "  Z\n")).as_deref(), Some("Z"));
+        assert_eq!(ps_state(ps(1, "")), None, "ps found no such pid");
+        assert_eq!(ps_state(ps(1, "S\n")), None, "a failed ps is no answer, whatever it printed");
+        assert_eq!(ps_state(ps(0, "")), None);
+        assert_eq!(ps_state(ps(0, "S\nZ\n")), None, "two answers for one pid");
+        assert_eq!(ps_state(ps(0, "STAT S\n")), None, "a header is not a state");
+        assert_eq!(ps_state(ps(0, "S garbage\n")), None, "a state and more is not one answer");
+        assert_eq!(ps_state(None), None, "ps could not run");
+        for live in ["S", "R", "D", "T", "t", "I", "W", "Ss+", "R+", "S<l", "SN", "Ss", "U", "S+", "I<"] {
+            assert_eq!(state_is_live(live), Some(true), "{live}");
+        }
+        for dead in ["Z", "Z+", "X", "x", "Zs"] {
+            assert_eq!(state_is_live(dead), Some(false), "{dead}");
+        }
+        for junk in ["", "z", "1234", "+S", "S\u{7}", "é", "ERROR", "STAT", "Sgarbage", "S1", "Q", "RUNNING"] {
+            assert_eq!(state_is_live(junk), None, "{junk:?}");
+            assert!(!owner_verdict(Some(junk)), "unknown is not live: {junk:?}");
+        }
+        assert!(!owner_verdict(None), "no observation is not live");
+        assert!(!owner_verdict(Some("Z+")));
+        assert!(owner_verdict(Some("Ss+")));
+    }
+
     /// Review P1-A2: the ready file is believed only while the shell it names
     /// is alive — a stale file (its shell killed) or a nameless one is not
-    /// readiness.
+    /// readiness. Board #413: nor is a zombie (exited, not yet reaped).
     #[test]
     fn a_ready_file_is_believed_only_while_its_owner_lives() {
         let home = std::env::temp_dir().join(format!("tmm-dsh-owner-{}", uuid::Uuid::new_v4()));
@@ -1318,6 +1420,21 @@ pub(crate) mod tests {
         gone.wait().unwrap();
         std::fs::write(&file, format!("{dead} %3")).unwrap();
         assert!(!input_ready(&home, Some(dead)), "its owner is dead");
+        // Board #413: an owner that has exited but is not reaped yet — a
+        // zombie, which signal 0 still finds — is not alive either. A child
+        // of this test that exits and is not waited for is exactly that.
+        let mut zombie = std::process::Command::new("true").spawn().unwrap();
+        let z = zombie.id();
+        wait_for("the child to become a zombie", 5, || {
+            std::fs::read_to_string(format!("/proc/{z}/stat")).ok().and_then(|s| s.rsplit_once(')').map(|(_, r)| r.trim_start().starts_with('Z'))).unwrap_or_else(|| {
+                // No /proc (macOS): ps's state column.
+                std::process::Command::new("ps").args(["-o", "stat=", "-p", &z.to_string()]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
+            })
+        });
+        assert_eq!(unsafe { libc::kill(z as i32, 0) }, 0, "signal 0 still finds a zombie");
+        std::fs::write(&file, format!("{z} %3")).unwrap();
+        assert!(!input_ready(&home, Some(z)), "a zombie owner reads nothing");
+        zombie.wait().unwrap();
         for junk in ["", "abc", "1 %1", "0"] {
             std::fs::write(&file, junk).unwrap();
             assert!(!input_ready(&home, Some(me)), "{junk:?}");
