@@ -84,7 +84,7 @@
    * Scanning never connects: the person taps Connect. */
   async function scan() {
     const text = await onscan?.(lifetime.signal);
-    if (text == null) return;           // cancelled, or this form is gone (its scan ended with nothing)
+    if (text == null || lifetime.signal.aborted) return;   // cancelled, or this form went away between the result and this line: apply nothing to a disposed form
     const parsed = parseConnectionLink(text);
     if (parsed.kind === 'link') { pick({ address: parsed.link.address, token: parsed.link.token ?? '', socket: parsed.link.socket ?? '' }); return; }
     if (parsed.kind === 'unusable') { linkError = refusal(parsed.reason); return; }

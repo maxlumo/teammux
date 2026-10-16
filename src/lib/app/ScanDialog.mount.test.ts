@@ -254,3 +254,72 @@ test('a camera that opens after the picker took over is stopped and never read',
     assert.equal(app.document.querySelector('.scan-status')?.textContent?.trim(), 'Choose a photo of the code', 'and the camera finishing does not replace the picker state');
   } finally { await app.close(); }
 });
+
+// ─── two photo selections in one scan: only the one still owned may finish it (review P2-2) ──
+
+const OTHER = buildConnectionLink({ address: 'wss://other.example/ws', token: 'OTHER-TOKEN', socket: '' })!;
+function twoPhotos(context: import('node:test').TestContext) {
+  const held: Record<string, (frame: Frame) => void> = {};
+  const scanned: string[] = [];
+  let app!: Awaited<ReturnType<typeof mountDialog>>;
+  const ready = mountDialog(context, {
+    camera: () => new Promise<Camera>(() => {}),
+    toFrame: (file: Blob) => new Promise<Frame>((resolve) => { held[(file as File).name] = resolve; }),
+    onscanned: (text: string) => scanned.push(text), oncancel: () => {},
+  }).then((mounted) => { app = mounted; return mounted; });
+  const choose = async (name: string) => {
+    const input = app.document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: [new app.window.File(['x'], name, { type: 'image/png' })] });
+    input.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+    await settle(app, 3);
+  };
+  const reopen = async () => {
+    [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /photo/iu.test(b.textContent ?? ''))!.click();
+    await settle(app, 2);
+  };
+  const finish = async (name: string, link: string) => { held[name]!(inRealm(app, raster(qrMatrix(link)))); await settle(app, 6); };
+  return { ready, scanned, choose, reopen, finish, cancelPicker: async () => { app.document.querySelector('input[type="file"]')!.dispatchEvent(new app.window.Event('cancel', { bubbles: true })); await settle(app, 2); }, app: () => app };
+}
+
+test('photo A is still being read when the picker is opened again and B is selected: the late A fills nothing and does not close the scan; only B does', async context => {
+  const s = twoPhotos(context);
+  const app = await s.ready;
+  try {
+    await settle(app, 3);
+    await s.reopen();
+    await s.choose('A.png');
+    await s.reopen();                                  // the person picks again while A is still decoding
+    await s.choose('B.png');
+    await s.finish('A.png', LINK);                     // A finishes late
+    assert.deepEqual(s.scanned, [], 'a stale selection neither fills nor finishes the scan');
+    await s.finish('B.png', OTHER);
+    assert.deepEqual(s.scanned, [OTHER], 'B, the selection still owned, did');
+  } finally { await app.close(); }
+});
+
+test('photo A is still being read when the picker is opened again and cancelled: the late A fills nothing', async context => {
+  const s = twoPhotos(context);
+  const app = await s.ready;
+  try {
+    await settle(app, 3);
+    await s.reopen();
+    await s.choose('A.png');
+    await s.reopen();
+    await s.cancelPicker();
+    await s.finish('A.png', LINK);
+    assert.deepEqual(s.scanned, [], 'the cancelled second picker withdrew A');
+    assert.ok(app.document.querySelector('.dlg'), 'and the dialog is still there');
+  } finally { await app.close(); }
+});
+
+test('a single photo that is not replaced still finishes the scan', async context => {
+  const s = twoPhotos(context);
+  const app = await s.ready;
+  try {
+    await settle(app, 3);
+    await s.reopen();
+    await s.choose('A.png');
+    await s.finish('A.png', LINK);
+    assert.deepEqual(s.scanned, [LINK]);
+  } finally { await app.close(); }
+});

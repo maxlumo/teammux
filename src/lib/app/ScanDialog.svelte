@@ -100,20 +100,26 @@
    * its frame loop stopped BEFORE the picker takes over (the picker is an Activity
    * that may cover this page), and the host is told the picker is ours. */
   function pickPhoto() {
+    photoRead++;                                   // a photo still being read is no longer the one wanted
     releaseCamera();
     status = 'photo';
     photoNote = '';
     onpicking(true);
     picker?.click();
   }
+  /** Identity of the photo read in flight: opening the picker again advances it
+   * (see `pickPhoto`), so an older decode that finishes late is not the selection
+   * still wanted and may neither fill nor finish the scan. */
+  let photoRead = 0;
   async function chosen() {
     onpicking(false);
     const file = picker?.files?.[0];
     if (picker) picker.value = '';                 // the same photo can be chosen again
     if (!file) return;
     photoNote = '';
+    const mine = photoRead;
     const text = await decodePhoto(file, toFrame);
-    if (stopped) return;
+    if (stopped || mine !== photoRead) return;     // closed, or a newer picker/selection took over
     if (text) done(text); else photoNote = t('scanPhotoNone');
   }
 </script>
