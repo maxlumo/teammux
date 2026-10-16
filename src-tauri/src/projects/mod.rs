@@ -21,6 +21,7 @@ pub mod agents;
 pub mod board;
 pub mod capture;
 pub mod delivery;
+pub mod live_config;
 pub mod global_prompt;
 pub mod managed;
 pub mod models;
@@ -43,7 +44,7 @@ pub mod wakes;
 // Every path a caller names stays `projects::X` (board #152).
 pub use board::{BOARD_STATUSES, ISSUE_REF_CHARS, board_counts, board_delete, board_get, board_list, board_note, board_save, issue_ref};
 pub use rooms::{archive_msg, archived_ids, archived_msgs, unarchive_msgs};
-pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, team_get, teams_delete, teams_list, teams_save};
+pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, registry_set_model_effort, team_get, teams_delete, teams_list, teams_save};
 pub(crate) use registry::{with_registry_mcp, with_registry_skills};
 pub use managed::{agent_remove, deliver_chat_line, is_managed_in, joined_team, managed_home, member_of, spawned_by, team_of};
 pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_read, skill_refresh, skill_save, skills_list};
@@ -99,9 +100,15 @@ fn agent_sessions() -> &'static (dyn capture::AgentSessions + Send + Sync) {
 /// Projects page is unavailable" instead of taking the server down.
 fn with_store<T>(f: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
     let cell = open_once(&STORE, || Store::open(&db_path()))?;
-    let mut guard = cell.lock().map_err(|_| "state.db lock poisoned".to_string())?;
+    #[cfg(test)]
+    tests::STORE_WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let locked = cell.lock();
+    #[cfg(test)]
+    tests::STORE_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    let mut guard = locked.map_err(|_| "state.db lock poisoned".to_string())?;
     f(&mut guard)
 }
+
 
 /// First use opens the store; every later use finds it. Exactly ONE caller
 /// opens (board #150): the cold path is serialised by `OPENING`, and a caller
@@ -184,6 +191,10 @@ use crate::tmux;
 // the user's real state.db.
 pub(crate) mod tests {
     use super::*;
+
+    /// Threads between asking for the store and holding it (tests observe this
+    /// instead of sleeping, to know a caller is really waiting on a holder).
+    pub(crate) static STORE_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     /// Point the process-wide store at a throwaway database, wiped once per
     /// test process. `STORE` is a `OnceLock`, so every test that touches it must

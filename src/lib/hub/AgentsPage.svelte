@@ -228,9 +228,12 @@
     const importSource = kind === 'skill' && creating && !payload.name;
     pendingOperation = 'save'; error = ''; info = '';
     let imported;
+    // The homes a saved definition could not be applied to (a running agent that
+    // reads its config every turn, board #411): the save itself succeeded.
+    let notApplied = [];
     try {
-      if (kind === 'agent') await registrySave(payload);
-      else if (kind === 'team') await teamsSave(payload);
+      if (kind === 'agent') notApplied = (await registrySave(payload))?.unapplied ?? [];
+      else if (kind === 'team') notApplied = (await teamsSave(payload))?.unapplied ?? [];
       else if (kind === 'mcp') await mcpSave(payload);
       else if (kind === 'global') await globalPromptSet(payload.text);
       else if (importSource) imported = await skillsImport(payload.source);
@@ -243,6 +246,18 @@
     }
     if (generation !== epoch) return;
     closeAll(false);
+    // Saved is not applied: name the running agents that still use the old
+    // settings and what to do, without undoing the saved declaration. The editor
+    // is closed by now, so the alert is the front page's (both placeholders show
+    // `error`).
+    if (notApplied.length) {
+      const where = (u) => `${u.window || '—'}${u.project ? ` (${String(u.project).split('/').filter(Boolean).pop() ?? u.project})` : ''}: ${u.error}`;
+      // A write that failed is told apart from a home whose state could not be
+      // confirmed: the second is not proof of an old model, nor of a known agent.
+      const unconfirmed = notApplied.filter(u => u.kind === 'unknown'), failed = notApplied.filter(u => u.kind !== 'unknown');
+      error = [failed.length && `${t('savedNotApplied')} ${failed.map(where).join(' · ')}`,
+        unconfirmed.length && `${t('savedNotConfirmed')} ${unconfirmed.map(where).join(' · ')}`].filter(Boolean).join(' ');
+    }
     if (imported) {
       const skipped = imported.skipped?.length ? ` · ${t('skillsSkipped')}: ${imported.skipped.join(', ')}` : '';
       info = `${t('skillsImported')}: ${(imported.imported ?? []).join(', ') || '—'}${skipped}`;
@@ -1186,12 +1201,14 @@
         </div>
       </div>
       <div class="placeholder">
+        {#if error}<div class="err config-error appear" role="alert">{error}</div>{/if}
         {#if info}<p class="hint appear">{info}</p>{/if}
         <p class="hint">{t(CAT_META[cat].hint)}</p>
       </div>
     {:else}
       <div class="page-head"><h1>{t(SECTION_META[section]?.[0] ?? 'agentsTitle')}<ServerTag name={scope?.tag} /></h1></div>
       <div class="placeholder">
+        {#if error}<div class="err config-error appear" role="alert">{error}</div>{/if}
         <p class="hint">{t(SECTION_META[section]?.[1] ?? 'agentsHint')}</p>
       </div>
     {/if}

@@ -188,6 +188,24 @@ pub(crate) fn inherit_codex_system_files(home: &Path) -> Result<(), String> {
     inherit_codex_system_files_from(home, &super::codex::codex_user_home())
 }
 
+/// Replace `path` WHOLE: the text goes to a sibling temp file that is renamed
+/// over it, so a reader (a process starting while this runs) sees all of the
+/// old file or all of the new, never a truncated or half-written one. For the
+/// owned files a running agent may read at any moment (board #411: dsh reads
+/// its profile at the start of every turn).
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&tmp, text)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", path.display())
+        })
+}
+
 /// A config file the render OWNS: `Some` writes it, `None` removes it. A home
 /// is re-rendered on every spawn, so "nothing to declare" must leave nothing
 /// behind; skipping the write kept the previous render's file, and the CLI

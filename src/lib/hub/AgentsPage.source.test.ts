@@ -130,6 +130,6 @@ test('the editable description preview keeps the body role and full touch target
 });
 
 test('entity errors use the same readable alert atom as Settings (#156)', () => {
-  assert.equal((source.match(/class="err config-error appear" role="alert"/gu) ?? []).length, 5);
+  assert.equal((source.match(/class="err config-error appear" role="alert"/gu) ?? []).length, 7);
   assert.doesNotMatch(source, /\.err \{/u, 'no private error frame or low-contrast ink');
 });

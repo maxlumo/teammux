@@ -3,7 +3,7 @@ import { ALL_TARGET, teamTarget } from './hub-composer.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import type { FeedBlock } from './hub.ts';
-import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
+import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, DSH_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
 import type { HubActivityEvent, HubAgent } from '../core/ws.ts';
 import { renderMarkdown } from '../core/markdown.ts';
 import { drawerWindowPills, mentionPalette, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
@@ -1253,11 +1253,32 @@ test('the palette speaks the addressee backend dialect', () => {
   // Delivery-breaking modes are recorded but never offered.
   assert.ok(!names('grok').includes('/multiline') && !names('codex').includes('/vim'));
   assert.ok(names('codex').includes('/pwd'), 'codex 0.154.0 re-read');
-  for (const b of ['claude', 'omp', 'kimi', 'grok', 'codex', 'kiro']) {
+  for (const b of ['claude', 'omp', 'kimi', 'grok', 'codex', 'kiro', 'dsh']) {
     assert.equal(new Set(names(b)).size, names(b).length, `${b}: no duplicate names`);
   }
+  // dsh (#411): the APP's commands, since dsh-headless has none. Exactly the
+  // three the server runs (Backend::app_command), their arguments from the
+  // backend file, and no /compact (dsh cannot compact between headless turns).
+  assert.deepEqual(names('dsh'), ['/model', '/effort', '/new']);
+  assert.deepEqual(commandPalette('/effort ', [], 'dsh')?.items.map((i) => i.value), ['off', 'low', 'high', 'max']);
+  assert.deepEqual(commandPalette('/model ', [], 'dsh')?.items.map((i) => i.value), ['deepseek-flash', 'deepseek-v4-pro']);
+  assert.equal(commandPalette('/model deepseek-v5-x', [], 'dsh')?.items.length ?? 0, 0, 'any other id is typed, not completed');
+  assert.ok(!names('dsh').includes('/compact'));
   // A mixed @all roster has no single dialect: no palette beats a wrong one.
   assert.equal(commandPalette('/', [], 'mixed'), null);
+});
+
+test('the dsh palette is the table the server runs: the same three commands, the backend file\u2019s effort levels and model ids (#411)', () => {
+  const rust = readFileSync(new URL('../../../src-tauri/src/backends/dsh.rs', import.meta.url), 'utf8');
+  const list = (fn: string) => {
+    const body = rust.match(new RegExp(`fn ${fn}\\(\\)[^{]*\\{\\s*&\\[([^\\]]*)\\]`, 'u'))?.[1] ?? '';
+    return [...body.matchAll(/"([^"]+)"/gu)].map((m) => m[1]!);
+  };
+  const handled = [...(rust.match(/fn app_command\([^)]*\)[^{]*\{[\s\S]*?match name \{([\s\S]*?)_ => None/u)?.[1] ?? '').matchAll(/"\/([a-z]+)" =>/gu)].map((m) => m[1]!);
+  assert.deepEqual(DSH_COMMANDS.map((c) => c.name).sort(), [...handled].sort(), 'every offered command is run by the app, and every one the app runs is offered');
+  assert.deepEqual(DSH_COMMANDS.find((c) => c.name === 'effort')!.args, list('effort_values'), 'the effort levels are the backend file\u2019s');
+  assert.deepEqual(DSH_COMMANDS.find((c) => c.name === 'model')!.args, list('known_models'), 'the model ids are the backend file\u2019s catalog');
+  assert.equal(DSH_COMMANDS.find((c) => c.name === 'new')!.args, undefined);
 });
 
 test('ctxColor uses four discrete theme colours without intermediate hues (#180)', () => {

@@ -96,6 +96,11 @@ pub fn validate(backend: &str, model: &str) -> Result<(), String> {
     if model.is_empty() {
         return Ok(());
     }
+    // The syntax a backend demands of an id even when no list can be asked
+    // (dsh: the id goes to the wire unparsed; board #411).
+    if let Some(error) = crate::backends::Backend::parse(backend).and_then(|b| b.model_id_error(model)) {
+        return Err(error);
+    }
     let Some(known) = list(backend) else { return Ok(()) };
     if known.is_empty() || known.iter().any(|m| m == model) {
         return Ok(());

@@ -1011,6 +1011,22 @@ export const KIMI_COMMANDS: readonly SlashCmd[] = [
   { name: 'undo', desc: 'Withdraws the last prompt from the transcript — not offered', view: true },
 ];
 
+/** DeepSeek Harness 0.2.0-rc.2 (board #411, owner 2026-10-17). dsh-headless has
+ * NO slash commands of its own (`dsh-commands` serves its UI clients), so these
+ * are the APP's: `hub_command` does not type them, it changes the agent's
+ * definition (or its session) and the NEXT turn — a fresh process that reads
+ * the profile — is the changed one, with no restart. Transcribed from the
+ * backend's own file (`backends/dsh.rs`): the effort levels are the
+ * deepseek-official route's (`off | low | high | max`), the model ids are the
+ * two its catalog lists (advisory: any id is accepted, "the model id passes
+ * through to the wire"). `/compact` is not offered because dsh cannot run it
+ * between headless turns (see `dsh.rs`), and none is faked. */
+export const DSH_COMMANDS: readonly SlashCmd[] = [
+  { name: 'model', desc: 'Set the model for the next turn (any model id)', args: ['deepseek-flash', 'deepseek-v4-pro'] },
+  { name: 'effort', desc: 'Set the reasoning effort for the next turn', args: ['off', 'low', 'high', 'max'] },
+  { name: 'new', desc: 'Start a new conversation with the next line' },
+];
+
 /** The palette's table for a recipient's backend. kiro is the default dialect
  * (and the empty string is "backend unknown", which historically meant kiro).
  * Every backend has its own transcribed table since #243 (2026-09-27); a
@@ -1027,6 +1043,7 @@ export function offeredCommands(backend?: string | null): readonly SlashCmd[] {
     case 'claude': return CLAUDE_COMMANDS.filter((c) => !c.view);
     case 'omp': return OMP_COMMANDS.filter((c) => !c.view);
     case 'kimi': return KIMI_COMMANDS.filter((c) => !c.view);
+    case 'dsh': return DSH_COMMANDS;
     // A mixed @all roster, anything else: no palette beats a wrong one.
     default: return [];
   }

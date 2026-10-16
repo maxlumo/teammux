@@ -526,18 +526,18 @@ fn plan_respawn(workspace: &str, window_name: &str, recipe: Option<&Value>) -> R
 
 /// Where a managed window's definition comes from: the provenance its launch
 /// recipe records (board #113).
-struct Provenance {
-    by: String,
-    team: String,
-    member: String,
-    agent_def: String,
+pub(super) struct Provenance {
+    pub(super) by: String,
+    pub(super) team: String,
+    pub(super) member: String,
+    pub(super) agent_def: String,
     /// Set on a fork of a team member (board #383): `<team path>/<member>`, the
     /// member whose definition it copies.
-    from_member: String,
+    pub(super) from_member: String,
 }
 
 /// The provenance a recipe value records.
-fn provenance_of(recipe: &Value) -> Provenance {
+pub(super) fn provenance_of(recipe: &Value) -> Provenance {
     let field = |k: &str| recipe.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     Provenance { by: field("spawned_by"), team: field("team"), member: field("member"), agent_def: field("agent_def"), from_member: field("from_member") }
 }
@@ -545,7 +545,7 @@ fn provenance_of(recipe: &Value) -> Provenance {
 /// The window's recipe provenance, read WITHOUT the recipe section (a reader that
 /// takes no section sees a whole recipe, the writer being atomic); `None` when it
 /// has no readable recipe, which is also what "not one of ours" looks like.
-fn recipe_provenance(project_path: &str, window_name: &str) -> Option<Provenance> {
+pub(super) fn recipe_provenance(project_path: &str, window_name: &str) -> Option<Provenance> {
     let recipe: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(project_path, window_name).join("launch.json")).ok()?).ok()?;
     Some(provenance_of(&recipe))
 }
@@ -557,18 +557,64 @@ fn recipe_provenance(project_path: &str, window_name: &str) -> Option<Provenance
 /// team (`team` + `member`), a solo spawn follows `agent_def` (so a uniquified
 /// `lead-2` still finds `lead`), and a pre-#113 recipe falls back to the window
 /// name. `None` when the def (or its team/base) is gone.
-fn effective_def(project_path: &str, window_name: &str, p: &Provenance) -> Option<RegAgent> {
-    if !p.team.is_empty() && !p.member.is_empty() {
-        refresh_team_def(project_path, &p.team, &p.member, window_name)
+pub(super) fn effective_def(project_path: &str, window_name: &str, p: &Provenance) -> Option<RegAgent> {
+    effective_def_kind(project_path, window_name, p).0
+}
+
+/// `effective_def`, with where its model and effort came from (`MemberKind`),
+/// taken from the one member the resolution found.
+pub(super) fn effective_def_kind(project_path: &str, window_name: &str, p: &Provenance) -> (Option<RegAgent>, MemberKind) {
+    let mut kind = MemberKind::Unresolved;
+    let def = if !p.team.is_empty() && !p.member.is_empty() {
+        refresh_team_def_kind(project_path, &p.team, &p.member, window_name, &mut kind)
     } else if let Some((team_path, member)) = p.from_member.rsplit_once('/') {
         // A joined fork of a team member: the member's CURRENT def, without
         // holding its slot and without a team section of its own (board #383).
-        fork_member_def(team_path, member, window_name)
+        fork_member_def_kind(team_path, member, window_name, &mut kind)
     } else if !p.agent_def.is_empty() {
+        kind = MemberKind::NotTeam;
         super::registry_get(&p.agent_def).ok().flatten()
     } else {
         // Pre-#113 recipe: the window name IS the def name or nothing.
+        kind = MemberKind::NotTeam;
         super::registry_get(window_name).ok().flatten()
+    };
+    (def, kind)
+}
+
+/// The team whose member's definition this window runs: the SAME two branches
+/// `effective_def` takes (a team member, a joined fork of one), and nothing
+/// else. A runtime-joined SOLO agent has a `team` too (board #113 membership)
+/// but follows its own registry definition, so it is not team-defined.
+pub(super) fn team_defining(p: &Provenance) -> Option<String> {
+    if !p.team.is_empty() && !p.member.is_empty() {
+        Some(p.team.clone())
+    } else {
+        p.from_member.rsplit_once('/').map(|(team_path, _)| team_path.to_string())
+    }
+}
+
+/// Where a window's model and effort come from, as the SAME resolved member
+/// `effective_def` read (board #411 review): never a second expansion, and a
+/// failed lookup is `Unresolved`, which is not the same as "no base".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MemberKind {
+    /// Not team-defined: a solo agent follows its own registry definition.
+    NotTeam,
+    /// A team member (or a fork of one) with an inline definition: no registry base.
+    Inline,
+    /// A team member derived from a registry base, and which of model and effort it inherits rather than overrides.
+    Based { base: String, model_inherited: bool, effort_inherited: bool },
+    /// The team, its expansion or the member could not be resolved: what it derives from is not known.
+    Unresolved,
+}
+
+fn member_kind(f: &super::teams::Flat) -> MemberKind {
+    let base = f.member.base.trim();
+    if base.is_empty() {
+        MemberKind::Inline
+    } else {
+        MemberKind::Based { base: base.to_string(), model_inherited: f.member.model.trim().is_empty(), effort_inherited: f.member.effort.trim().is_empty() }
     }
 }
 
@@ -887,12 +933,17 @@ fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, Strin
 /// no recipe here (removed, or spawned before provenance existed): that is
 /// the name spawn itself would have used had the window not been taken.
 fn refresh_team_def(workspace: &str, team_path: &str, member: &str, window_name: &str) -> Option<RegAgent> {
+    refresh_team_def_kind(workspace, team_path, member, window_name, &mut MemberKind::Unresolved)
+}
+
+fn refresh_team_def_kind(workspace: &str, team_path: &str, member: &str, window_name: &str, kind: &mut MemberKind) -> Option<RegAgent> {
     let root = team_path.split('/').next()?;
     let team = super::team_get(root).ok().flatten()?;
     let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).ok()?;
     let f = flat
         .iter()
         .find(|f| f.path == team_path && f.member.name.trim() == member)?;
+    *kind = member_kind(f);
     let assigned = team_windows_from_recipes(workspace, root);
     let roster: Vec<super::teams::RosterEntry> = flat
         .iter()
@@ -914,10 +965,15 @@ fn refresh_team_def(workspace: &str, team_path: &str, member: &str, window_name:
 /// definition and role from the team (`teams::forked_def`), with no team section
 /// — the joined block is built once, by `materialize`.
 fn fork_member_def(team_path: &str, member: &str, window_name: &str) -> Option<RegAgent> {
+    fork_member_def_kind(team_path, member, window_name, &mut MemberKind::Unresolved)
+}
+
+fn fork_member_def_kind(team_path: &str, member: &str, window_name: &str, kind: &mut MemberKind) -> Option<RegAgent> {
     let root = team_path.split('/').next()?;
     let team = super::team_get(root).ok().flatten()?;
     let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).ok()?;
     let f = flat.iter().find(|f| f.path == team_path && f.member.name.trim() == member)?;
+    *kind = member_kind(f);
     let base = if f.member.base.trim().is_empty() { None } else { super::registry_get(f.member.base.trim()).ok().flatten() };
     super::teams::forked_def(f, base.as_ref(), window_name).ok()
 }

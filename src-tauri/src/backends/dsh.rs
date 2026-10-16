@@ -456,6 +456,9 @@ pub(crate) fn zshenv() -> &'static str {
 ///   Stop would ever come for it, and its held lines would wait forever.
 /// * `TMM_DSH_SESSION` (the launch line's resume dialect): unset = a fresh
 ///   conversation, `recent` = keep the recorded session, an id = that one.
+/// * `tmm/new` (the app's `/new`): consumed by the next turn this shell
+///   starts, which then has no `--session-id`; a resume id handed back by a
+///   restart does not outrank it.
 /// * Tab inserts itself: a delivered line is typed with send-keys, and a
 ///   literal tab must not run completion.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -567,7 +570,11 @@ _tmm_accept() {{
   if [[ $BUFFER == '!'* ]]; then
     BUFFER=${{BUFFER#!}}
   elif [[ -n ${{BUFFER//[[:space:]]/}} ]]; then
-    local sid=$(_tmm_session)
+    local sid=
+    # The new conversation the app asked for (tmm/new) is consumed HERE, by the
+    # turn it applies to: it outranks the session the previous shell recorded
+    # and a resume id a restart handed back (TMM_DSH_SESSION wrote it above).
+    if [[ -e $_tmm_state/new ]]; then rm -f -- $_tmm_state/session $_tmm_state/new; else sid=$(_tmm_session); fi
     rm -f -- $_tmm_state/prompted $_tmm_state/stop.json $_tmm_state/vitals
     print -rn -- $BUFFER >| $_tmm_state/line
     BUFFER="dsh --profile {PROFILE}${{sid:+ --session-id $sid}} -- ${{(q+)BUFFER}}"
@@ -677,7 +684,7 @@ pub(crate) fn render_dsh(
     shared::write_owned(&profile.join("package.json"), Some(profile_package_json()))?;
     shared::write_owned(&profile.join("pnpm-workspace.yaml"), Some(profile_workspace_yaml()))?;
     shared::write_owned(&profile.join("cordis.yml"), Some(profile_cordis_yml()))?;
-    shared::write_owned(&profile.join("cordis.patch.yml"), Some(&profile_patch_yml(&entry, &def.model, &def.effort)))?;
+    shared::write_atomic(&profile.join("cordis.patch.yml"), &profile_patch_yml(&entry, &def.model, &def.effort))?;
 
     // The prompt is the harness home's user-global AGENTS.md (dsh-agent-
     // instructions reads `$DSH_HOME/AGENTS.md` first); DSH_AGENTS_HOME points
@@ -714,6 +721,65 @@ pub(crate) fn render_dsh(
             timeout: std::time::Duration::from_secs(60),
         }),
     })
+}
+
+/// Re-render ONLY the profile's patch layer — the model and the effort — in a
+/// home that already has its profile (board #411). Every dsh turn is a fresh
+/// process that reads the profile, so this is all a model or effort change
+/// needs for the NEXT turn: no restart, no other file rewritten under a running
+/// agent. The patch is replaced whole (`write_atomic`). `NoConfig` when the
+/// home has no profile (never rendered): nothing was written, and nothing is
+/// known about what the agent runs; `AlreadyCurrent` when the text is right.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn write_profile_patch(home: &Path, model: &str, effort: &str) -> Result<super::LiveWrite, String> {
+    use super::LiveWrite;
+    let dsh_home = home.join("dsh");
+    let profile = dsh_home.join("profiles").join(PROFILE);
+    if !profile.is_dir() {
+        return Ok(LiveWrite::NoConfig);
+    }
+    let entry = dsh_home.join("plugins").join(PLUGIN_NAME).join("index.mjs");
+    let text = profile_patch_yml(&entry, model, effort);
+    let path = profile.join("cordis.patch.yml");
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+        return Ok(LiveWrite::AlreadyCurrent);
+    }
+    shared::write_atomic(&path, &text)?;
+    Ok(LiveWrite::Written)
+}
+
+/// Whether `home` was rendered for dsh (it has the `dsh` directory).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn has_rendered_files(home: &Path) -> bool {
+    home.join("dsh").is_dir()
+}
+
+/// `/new`: the NEXT turn starts a new conversation, durably (board #411
+/// review). The marker `tmm/new` IS the command-side commit, and the only thing
+/// the command writes: the managed shell consumes it when it starts the next
+/// turn (`_tmm_accept`), removes the recorded session itself and starts the run
+/// with no `--session-id`, whatever was recorded or a restart handed back as
+/// `TMM_DSH_SESSION`. The command never deletes `tmm/session` after
+/// publishing: a shell that consumed the marker meanwhile, and a plugin that
+/// recorded the FRESH id, would otherwise lose it to a late delete and the turn
+/// after would start fresh again. The old session stays on disk under dsh's
+/// `sessions/`. `true` when there was a recorded session to leave.
+///
+/// REFUSED while a turn runs (`tmm/open` exists from the shell's accept to its
+/// prompt): the running turn's plugin records its session when its first event
+/// arrives, which could land after the command and be taken for the new
+/// conversation; refusing removes that race instead of racing it. The caller
+/// sends `/new` again when the prompt is back.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn new_conversation(home: &Path) -> Result<bool, String> {
+    let state = home.join("dsh").join("tmm");
+    if state.join("open").exists() {
+        return Err("a turn is running: wait for it to end, then send /new again".into());
+    }
+    std::fs::create_dir_all(&state).map_err(|e| e.to_string())?;
+    let had = state.join("session").exists();
+    shared::write_atomic(&state.join("new"), "")?;
+    Ok(had)
 }
 
 /// The dsh half of `refresh_hooks`: the plugin and the shell are generated
@@ -825,9 +891,68 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     }
 }
 
-/// No slash commands: a line is a task for one headless turn.
+/// No prompt hook echoes a command: a line is a task for one headless turn.
 pub(crate) fn command_echo(_name: &str, _args: &str) -> Option<String> {
     None
+}
+
+/// A running dsh agent re-reads its profile at the start of every turn (each
+/// turn is a fresh process), so a saved model or effort reaches it without a
+/// restart (board #411). `registry_save` projects the definition into the
+/// running homes on this word.
+pub(crate) const CONFIG_READ_EVERY_TURN: bool = true;
+
+/// The slash commands the APP runs for a dsh agent (board #411). dsh-headless
+/// has none (`dsh-commands`, `dsh-command-compact` and `dsh-command-goal` serve
+/// its UI clients; a `/word` typed into the pane is just a task string for the
+/// model), so `hub_command` does not type these into the pane: it changes the
+/// agent's definition, or asks for a new conversation, and the NEXT turn — a
+/// fresh process that reads the profile and the recorded session — is the
+/// changed one. `None` for anything else: typed verbatim as before. A
+/// `Some(Err)` is the command's own usage error, refused to the caller.
+///
+/// `/compact` is NOT here, on purpose: `dsh-command-compact` calls
+/// `ctx.compaction.compactNow(agent, …)` with the running AGENT of a live
+/// process and fails with "the agent is not idle" otherwise. A headless turn
+/// is one process that starts a model turn the moment it has a task; between
+/// turns no process exists to compact, and a plugin cannot call it from inside
+/// a run without racing the turn it is part of. dsh compacts under context
+/// pressure by itself (`compaction-basic`'s automatic trigger).
+pub(crate) fn app_command(name: &str, args: &str) -> Option<Result<super::AppCommand, String>> {
+    let args = args.trim();
+    let one = |what: &str| -> Result<String, String> {
+        if args.is_empty() || args.split_whitespace().count() != 1 {
+            Err(format!("usage: {name} <{what}>"))
+        } else {
+            Ok(args.to_string())
+        }
+    };
+    match name {
+        "/model" => Some(one("model").map(super::AppCommand::Model)),
+        "/effort" => Some(one("off|low|high|max").map(super::AppCommand::Effort)),
+        "/new" => Some(if args.is_empty() { Ok(super::AppCommand::NewConversation) } else { Err("usage: /new".to_string()) }),
+        _ => None,
+    }
+}
+
+/// Model ids the deepseek-official route lists in its own catalog (dsh-llm-
+/// deepseek 0.2.0-rc.2 README: "omitted `models` advertises … `deepseek-flash`
+/// alongside … `deepseek-v4-pro`"). Advisory only: "the model id passes through
+/// to the wire, so new DeepSeek models need no re-registration", so any id of
+/// `model_id_error` allows and the palette just offers these two.
+pub(crate) fn known_models() -> &'static [&'static str] {
+    &["deepseek-flash", "deepseek-v4-pro"]
+}
+
+/// The syntax a model id must have, checked at the SHARED validation door
+/// (`models::validate`, so the editor, `tmm registry save`, a team member and
+/// `/model` agree): one token of letters, digits and `._:/-`, at most 100 long.
+/// The route passes the id to the wire and nothing here parses it, so no list
+/// is consulted (`models_fetch` is `None`: dsh has nothing to ask without a
+/// request).
+pub(crate) fn model_id_error(model: &str) -> Option<String> {
+    let ok = model.len() <= 100 && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));
+    (!ok).then(|| format!("'{model}' is not a dsh model id (letters, digits and . _ : / - only, at most 100)"))
 }
 
 /// Detection row (board #129): `dsh` runs as `node …/bin/dsh`. An unmanaged
@@ -892,6 +1017,7 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::backends::LiveWrite;
     use serde_json::json;
 
     #[test]
@@ -934,25 +1060,11 @@ pub(crate) mod tests {
         assert!(odd.contains("    model: \"a\\\"b: c\"\n"), "a value is one JSON string, never YAML syntax");
     }
 
-    /// Board #408, through the REAL dsh when one is installed, against a
-    /// loopback stand-in for the Messages API (a fake key; zero model
-    /// calls): a run of the rendered managed profile sends ONE request, the
-    /// model request, with neither of dsh's default-on extra fields —
-    /// `dsh_session_log` (the session's events, tool results included) and
-    /// `dsh_plugin_packages` (the plugin inventory). Measured on 0.2.0-rc.2:
-    /// the shipped headless profile sends both, plus a title request.
-    #[test]
-    fn the_managed_profile_sends_the_model_request_only() {
+    /// A loopback stand-in for the Messages API (a fake key; zero model calls):
+    /// answers every request with one text reply and records `(request line,
+    /// JSON body)`. Returns its port and the record.
+    fn loopback_messages_api() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
         use std::io::{BufRead, Read, Write};
-        let Some(dsh) = which("dsh") else {
-            eprintln!("skipped: no dsh on PATH");
-            return;
-        };
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-408-{}", uuid::Uuid::new_v4()));
-        let home = ws.join(".tmm/agents/d1");
-        std::fs::create_dir_all(&home).unwrap();
-        let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh"})).unwrap();
-        let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
@@ -989,6 +1101,28 @@ pub(crate) mod tests {
                 let _ = write!(conn, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}", sse.len());
             }
         });
+        (port, seen)
+    }
+
+    /// Board #408, through the REAL dsh when one is installed, against a
+    /// loopback stand-in for the Messages API (a fake key; zero model
+    /// calls): a run of the rendered managed profile sends ONE request, the
+    /// model request, with neither of dsh's default-on extra fields —
+    /// `dsh_session_log` (the session's events, tool results included) and
+    /// `dsh_plugin_packages` (the plugin inventory). Measured on 0.2.0-rc.2:
+    /// the shipped headless profile sends both, plus a title request.
+    #[test]
+    fn the_managed_profile_sends_the_model_request_only() {
+        let Some(dsh) = which("dsh") else {
+            eprintln!("skipped: no dsh on PATH");
+            return;
+        };
+        let ws = std::env::temp_dir().join(format!("tmm-dsh-408-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/d1");
+        std::fs::create_dir_all(&home).unwrap();
+        let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh"})).unwrap();
+        let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
+        let (port, seen) = loopback_messages_api();
         let mut cmd = std::process::Command::new(&dsh);
         cmd.args(["--profile", PROFILE, "--", "Reply with exactly: OK"])
             .current_dir(&ws)
@@ -1011,6 +1145,53 @@ pub(crate) mod tests {
         for field in ["dsh_session_log", "dsh_plugin_packages"] {
             assert!(!keys.iter().any(|k| *k == field), "{field} left the machine: {keys:?}");
         }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #411, through the REAL dsh when one is installed, against the
+    /// loopback stand-in (zero model calls): after the profile's patch layer is
+    /// re-rendered, the NEXT run sends its request with the new model and
+    /// effort. The model on the wire is what answers, so this is the live fact
+    /// the commands promise, measured without a key or a token.
+    #[test]
+    fn a_rerendered_profile_changes_the_model_and_effort_on_the_wire_of_the_next_run() {
+        let Some(dsh) = which("dsh") else {
+            eprintln!("skipped: no dsh on PATH");
+            return;
+        };
+        let ws = std::env::temp_dir().join(format!("tmm-dsh-411-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/d1");
+        std::fs::create_dir_all(&home).unwrap();
+        let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh","model":"deepseek-flash"})).unwrap();
+        let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
+        let (port, seen) = loopback_messages_api();
+        let run = || {
+            let mut cmd = std::process::Command::new(&dsh);
+            cmd.args(["--profile", PROFILE, "--", "Reply with exactly: OK"])
+                .current_dir(&ws)
+                .env_clear()
+                .env("HOME", &ws)
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("DEEPSEEK_API_KEY", "not-a-key")
+                .env("DEEPSEEK_BASE_URL", format!("http://127.0.0.1:{port}"))
+                .stdin(std::process::Stdio::null());
+            for (k, v) in &r.env {
+                cmd.env(k, v);
+            }
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            seen.lock().unwrap().last().cloned().expect("a request").1
+        };
+        let first = run();
+        assert_eq!(first["model"], "deepseek-flash");
+        assert_eq!(first.pointer("/output_config/effort").and_then(Value::as_str), Some("high"), "no effort named: dsh's own default");
+
+        // Between runs, as `/model` and `/effort` do it.
+        assert_eq!(write_profile_patch(&home, "deepseek-v4-pro", "max").unwrap(), crate::backends::LiveWrite::Written);
+        let second = run();
+        assert_eq!(second["model"], "deepseek-v4-pro", "the next run answered from the new model: {second}");
+        assert_eq!(second.pointer("/output_config/effort").and_then(Value::as_str), Some("max"), "{second}");
+        assert_eq!(seen.lock().unwrap().len(), 2, "one request per run");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1167,15 +1348,17 @@ pub(crate) mod tests {
             std::fs::write(zdot.join(".zshrc"), zshrc(&seq_sink(&dir.join("hooks")))).unwrap();
             let fake = "#!/bin/sh\n\
                 n=$(ls \"$FAKE_D\" | grep -c '^argv-'); n=$((n+1))\n\
+                [ -f \"$DSH_HOME/profiles/tmm/cordis.patch.yml\" ] && cp \"$DSH_HOME/profiles/tmm/cordis.patch.yml\" \"$FAKE_D/patch-$n\"\n\
                 : > \"$FAKE_D/argv-$n.part\"\n\
                 for a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$FAKE_D/argv-$n.part\"; done\n\
                 mv \"$FAKE_D/argv-$n.part\" \"$FAKE_D/argv-$n\"\n\
-                case \"$(cat \"$FAKE_D/mode\" 2>/dev/null)\" in kill) exit 130 ;; fail) exit 3 ;; hang) : > \"$DSH_HOME/tmm/prompted\"; exec sleep 600 ;; esac\n\
-                mkdir -p \"$DSH_HOME/tmm\" \"$DSH_HOME/sessions/k/session-0000-test\"\n\
-                printf session-0000-test > \"$DSH_HOME/tmm/session\"\n\
+                case \"$(cat \"$FAKE_D/mode\" 2>/dev/null)\" in kill) exit 130 ;; fail) exit 3 ;; hang) : > \"$DSH_HOME/tmm/prompted\"; exec sleep 600 ;; slow) while [ ! -f \"$FAKE_D/release\" ]; do sleep 0.1; done ;; esac\n\
+                sid=session-0000-test; [ -f \"$FAKE_D/per-run\" ] && sid=$(printf 'session-%04d-test' \"$n\")\n\
+                mkdir -p \"$DSH_HOME/tmm\" \"$DSH_HOME/sessions/k/$sid\"\n\
+                printf '%s' \"$sid\" > \"$DSH_HOME/tmm/session\"\n\
                 : > \"$DSH_HOME/tmm/prompted\"\n\
                 printf '[dsh] · fake-model · ctx %s/1000000' $((n * 250000)) > \"$DSH_HOME/tmm/vitals\"\n\
-                printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"session-0000-test\",\"last_assistant_message\":\"ok %s\",\"dsh_reason\":\"completed\"}' \"$n\" > \"$DSH_HOME/tmm/stop.json\"\n";
+                printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"%s\",\"last_assistant_message\":\"ok %s\",\"dsh_reason\":\"completed\"}' \"$sid\" \"$n\" > \"$DSH_HOME/tmm/stop.json\"\n";
             std::fs::write(bin.join("dsh"), fake).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1202,6 +1385,15 @@ pub(crate) mod tests {
         fn relaunch(&mut self) {
             let _ = crate::tmux::run_tmux(&["kill-session", "-t", &self.session]);
             crate::tmux::run_tmux(&["new-session", "-d", "-s", &self.session, "-x", "200", "-y", "50", "-c", &self.dir.to_string_lossy(), &self.cmd]).unwrap();
+            self.target = pane_id(&self.session);
+            wait_for("the relaunched prompt", 15, || self.screen().contains(READY_MARKER));
+        }
+        /// A restart that hands the old conversation back, the way
+        /// `relaunch_line` does (`TMM_DSH_SESSION=<id>` on the launch line).
+        fn relaunch_resuming(&mut self, id: &str) {
+            let _ = crate::tmux::run_tmux(&["kill-session", "-t", &self.session]);
+            let cmd = self.cmd.replacen("env -i ", &format!("env -i TMM_DSH_SESSION={id} "), 1);
+            crate::tmux::run_tmux(&["new-session", "-d", "-s", &self.session, "-x", "200", "-y", "50", "-c", &self.dir.to_string_lossy(), &cmd]).unwrap();
             self.target = pane_id(&self.session);
             wait_for("the relaunched prompt", 15, || self.screen().contains(READY_MARKER));
         }
@@ -1292,13 +1484,193 @@ pub(crate) mod tests {
         assert_eq!((pane.runs(), pane.hooks().len()), (runs, hooks), "a shell line is no turn");
     }
 
-    /// Board #404 condition 6 and P2-D: every run ends its turn exactly
-    /// once, by its exit. Killed before it reported anything (Escape, ^C:
-    /// 130): the prompt is reported for it, then a reply-less Stop that ends
-    /// the turn as completed. Any other exit without the plugin's Stop is a
-    /// FAILED launch — dsh exits 3, or the REAL dsh cannot load its profile
-    /// (it exits before any plugin or request) — each the prompt
-    /// (JSON-escaped, byte-exact) and one failed Stop with the code.
+    /// Board #411: a model or effort change is the NEXT turn's, in the same
+    /// pane, with no restart. Every dsh turn is a fresh process that reads the
+    /// profile, so re-rendering the patch layer is all it takes; the fake dsh
+    /// copies the patch it was started with, which is what the real one reads.
+    /// `/new` forgets the recorded session and the turn after it has no
+    /// `--session-id`, while an ordinary turn resumes.
+    #[test]
+    fn a_model_effort_and_new_conversation_reach_the_next_turn_without_a_restart() {
+        let Some(pane) = ScratchPane::start("live411", &[]) else {
+            eprintln!("skipped: no zsh or no tmux server");
+            return;
+        };
+        let profile = pane.dir.join("dsh").join("profiles").join(PROFILE);
+        assert_eq!(write_profile_patch(&pane.dir, "x", "").unwrap(), LiveWrite::NoConfig, "a home with no profile is rendered by spawn: nothing is written, and nothing is known about what runs");
+        assert!(!profile.exists(), "and nothing was created");
+        std::fs::create_dir_all(&profile).unwrap();
+        assert_eq!(write_profile_patch(&pane.dir, "deepseek-flash", "").unwrap(), LiveWrite::Written);
+        let patch = |n: usize| std::fs::read_to_string(pane.dir.join(format!("patch-{n}"))).unwrap();
+
+        let n = pane.deliver("one");
+        assert!(patch(n).contains("model: \"deepseek-flash\"") && !patch(n).contains("reasoningEffort"), "{}", patch(n));
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"), "the first turn starts a conversation");
+
+        // The change lands between turns, in the running pane.
+        assert_eq!(write_profile_patch(&pane.dir, "deepseek-v4-pro", "max").unwrap(), LiveWrite::Written, "the patch changed");
+        assert_eq!(write_profile_patch(&pane.dir, "deepseek-v4-pro", "max").unwrap(), LiveWrite::AlreadyCurrent, "and the same text is not rewritten");
+        let n = pane.deliver("two");
+        assert!(patch(n).contains("model: \"deepseek-v4-pro\"") && patch(n).contains("reasoningEffort: \"max\""), "the next turn read the new profile: {}", patch(n));
+        assert_eq!(pane.argv(n)[..4], ["--profile", "tmm", "--session-id", "session-0000-test"], "and it is still the same conversation");
+
+        // /new: the next line starts another one.
+        assert!(new_conversation(&pane.dir).unwrap(), "there was a session to leave");
+        let n = pane.deliver("three");
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"), "a fresh conversation: {:?}", pane.argv(n));
+        assert!(patch(n).contains("deepseek-v4-pro"), "the model change persists across /new");
+        assert!(!pane.dir.join("dsh/tmm/new").exists(), "and the shell consumed the request with that turn");
+        assert_eq!(pane.runs(), 3);
+    }
+
+    /// Board #411 review P1-D: `/new` is a decision that outlives what could
+    /// undo a bare deletion of the recorded session — a restart handing the old
+    /// conversation back, and a running turn's plugin writing the session after
+    /// the command (cold start, a turn in flight). The next turn is fresh, the
+    /// one after resumes THAT fresh session, and the old one stays on disk.
+    #[test]
+    fn a_new_conversation_survives_a_restart_and_is_refused_while_a_turn_runs() {
+        let Some(mut pane) = ScratchPane::start("new411", &[]) else {
+            eprintln!("skipped: no zsh or no tmux server");
+            return;
+        };
+        std::fs::write(pane.dir.join("per-run"), "").unwrap();
+        let sessions = pane.dir.join("dsh/sessions/k");
+        let id = |n: usize| format!("session-{n:04}-test");
+
+        let n = pane.deliver("one");
+        assert_eq!(n, 1);
+        assert!(sessions.join(id(1)).is_dir(), "the first conversation");
+
+        // Idle /new, then a restart that hands the old conversation back.
+        new_conversation(&pane.dir).unwrap();
+        pane.relaunch_resuming(&id(1));
+        let n = pane.deliver("two");
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"), "the restart did not bring the old conversation back: {:?}", pane.argv(n));
+        let n = pane.deliver("three");
+        assert_eq!(pane.argv(n)[..4], ["--profile", "tmm", "--session-id", id(2).as_str()], "and the next turn resumes the FRESH session");
+        assert!(sessions.join(id(1)).is_dir(), "the old conversation is kept on disk");
+
+        // /new while a turn runs is REFUSED: the run records its session after the command, and
+        // refusing removes that race. Nothing is written; the turn ends; then it is accepted.
+        pane.mode(Some("slow"));
+        let before = pane.runs();
+        crate::tmux::send_command(&pane.target(), "slow turn").unwrap();
+        wait_for("the slow run to start", 10, || pane.runs() > before);
+        let err = new_conversation(&pane.dir).unwrap_err();
+        assert!(err.contains("wait for it to end"), "{err}");
+        assert!(!pane.dir.join("dsh/tmm/new").exists(), "a refused /new leaves no request behind");
+        let stops = pane.stops().len();
+        std::fs::write(pane.dir.join("release"), "").unwrap();
+        wait_for("the slow run's Stop", 10, || pane.stops().len() > stops);
+        pane.mode(None);
+        wait_for("the prompt", 10, || !pane.dir.join("dsh/tmm/open").exists());
+        assert!(new_conversation(&pane.dir).unwrap(), "at the prompt it is accepted");
+        let n = pane.deliver("five");
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"), "{:?}", pane.argv(n));
+        let last = pane.runs();
+        let n = pane.deliver("six");
+        assert_eq!(n, last + 1);
+        assert_eq!(pane.argv(n)[..4], ["--profile", "tmm", "--session-id", id(last).as_str()], "resumes the fresh one");
+    }
+
+    /// Review P1-D residual: the command's only write is the marker. The shell
+    /// that consumes it owns the session cleanup, so a delayed command-side
+    /// delete cannot remove the id the plugin recorded for the FRESH
+    /// conversation: publish, let the shell consume it and record a fresh id,
+    /// "finish the command" (it has nothing left to do), and the next turn
+    /// resumes that fresh id.
+    #[test]
+    fn the_command_publishes_the_marker_and_the_shell_owns_the_cleanup() {
+        let Some(pane) = ScratchPane::start("commit411", &[]) else {
+            eprintln!("skipped: no zsh or no tmux server");
+            return;
+        };
+        std::fs::write(pane.dir.join("per-run"), "").unwrap();
+        let session = pane.dir.join("dsh/tmm/session");
+        let id = |n: usize| format!("session-{n:04}-test");
+        pane.deliver("one");
+        assert_eq!(std::fs::read_to_string(&session).unwrap(), id(1));
+
+        assert!(new_conversation(&pane.dir).unwrap());
+        assert_eq!(std::fs::read_to_string(&session).unwrap(), id(1), "the command did not touch the recorded session: only the shell does, when it consumes the marker");
+        assert!(pane.dir.join("dsh/tmm/new").exists());
+
+        // The shell consumes the marker with the next turn; the plugin records the fresh id.
+        let n = pane.deliver("two");
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"));
+        assert_eq!(std::fs::read_to_string(&session).unwrap(), id(2), "the fresh conversation is recorded");
+
+        // The command's tail, had it a delayed delete, would land here: it has none, so the
+        // next turn resumes the fresh id (this is the barrier after publication).
+        let n = pane.deliver("three");
+        assert_eq!(pane.argv(n)[..4], ["--profile", "tmm", "--session-id", id(2).as_str()]);
+        // Saying /new when the marker already stands is harmless and still one request.
+        assert!(new_conversation(&pane.dir).unwrap());
+        assert!(new_conversation(&pane.dir).unwrap());
+        let n = pane.deliver("four");
+        assert!(!pane.argv(n).iter().any(|a| a == "--session-id"));
+    }
+
+    /// Review P1-B: the live patch is replaced WHOLE. A reader that opens it
+    /// while it is being rewritten — a dsh turn starting — sees all of one
+    /// document or all of the other, never an empty or half-written file.
+    #[test]
+    fn a_reader_at_publication_sees_a_whole_patch() {
+        let dir = std::env::temp_dir().join(format!("tmm-dsh-atomic-{}", uuid::Uuid::new_v4()));
+        let profile = dir.join("dsh").join("profiles").join(PROFILE);
+        std::fs::create_dir_all(&profile).unwrap();
+        let entry = dir.join("dsh").join("plugins").join(PLUGIN_NAME).join("index.mjs");
+        let (a, b) = (profile_patch_yml(&entry, "deepseek-flash", ""), profile_patch_yml(&entry, "deepseek-v4-pro", "max"));
+        assert_eq!(write_profile_patch(&dir, "deepseek-flash", "").unwrap(), crate::backends::LiveWrite::Written);
+        let path = profile.join("cordis.patch.yml");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (reader_stop, reader_path, docs) = (stop.clone(), path.clone(), [a.clone(), b.clone()]);
+        let reader = std::thread::spawn(move || {
+            let mut reads = 0usize;
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let text = std::fs::read_to_string(&reader_path).expect("the file is never absent");
+                assert!(docs.contains(&text), "a torn read ({} bytes): {text:?}", text.len());
+                reads += 1;
+            }
+            reads
+        });
+        for i in 0..400 {
+            let (m, e) = if i % 2 == 0 { ("deepseek-v4-pro", "max") } else { ("deepseek-flash", "") };
+            write_profile_patch(&dir, m, e).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.join().unwrap() > 0, "the reader ran");
+        let leftovers: Vec<_> = std::fs::read_dir(&profile).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).filter(|n| n.contains(".tmp-")).collect();
+        assert!(leftovers.is_empty(), "no temp file is left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_commands_the_app_runs_and_the_model_ids_it_accepts() {
+        use super::super::AppCommand::*;
+        let parse = |n: &str, a: &str| app_command(n, a);
+        assert_eq!(parse("/model", "deepseek-v4-pro"), Some(Ok(Model("deepseek-v4-pro".into()))));
+        assert_eq!(parse("/model", "  deepseek-flash  "), Some(Ok(Model("deepseek-flash".into()))));
+        assert_eq!(parse("/effort", "max"), Some(Ok(Effort("max".into()))));
+        assert_eq!(parse("/new", ""), Some(Ok(NewConversation)));
+        for (n, a) in [("/model", ""), ("/model", "a b"), ("/effort", ""), ("/effort", "high low"), ("/new", "now")] {
+            assert!(matches!(parse(n, a), Some(Err(e)) if e.starts_with("usage: ")), "{n} {a}");
+        }
+        for c in ["/compact", "/clear", "/goal", "/models", "model", "/MODEL", "/"] {
+            assert_eq!(parse(c, ""), None, "{c} is not ours: typed as before");
+        }
+        for m in ["", "deepseek-flash", "deepseek-v4-pro", "vendor/model:1.5_x"] {
+            assert_eq!(model_id_error(m), None, "{m}");
+        }
+        for m in ["a b", "a;b", "$(x)", "a\nb", "m'", &"x".repeat(101)] {
+            assert!(model_id_error(m).is_some(), "{m:?}");
+        }
+        for k in known_models() {
+            assert_eq!(model_id_error(k), None);
+        }
+    }
+
     #[test]
     fn every_run_ends_its_turn_once_and_a_failed_launch_is_failed() {
         let node_dir = which("node").and_then(|n| n.parent().map(Path::to_path_buf));

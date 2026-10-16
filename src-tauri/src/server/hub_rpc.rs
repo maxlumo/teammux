@@ -190,6 +190,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             };
             let mut sent: Vec<String> = Vec::new();
             let mut refused: Vec<String> = Vec::new();
+            // Other windows an app-run command could not reach (board #411): said on the room line.
+            let mut notes: Vec<String> = Vec::new();
+            let mut app_refused: Vec<String> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for pane in &panes {
                 if !seen.insert(pane.window) || !pane.active {
@@ -205,11 +208,39 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     continue;
                 }
                 let target = format!("{}:{}.{}", session, pane.window, pane.pane);
+                let backend = crate::projects::agents::detect_pane(ws.as_deref(), pane)
+                    .and_then(|a| crate::backends::Backend::parse(a.backend));
+                // A command the APP runs for this backend (board #411: dsh has
+                // none of its own, so `/model`, `/effort` and `/new` change its
+                // definition or its session, and the next turn is the changed
+                // one) is not typed: a `/word` in a dsh pane is a task for the
+                // model. Its refusal is this window's, like a refused typing.
+                if let (Some(b), Some(ws)) = (backend, ws.as_deref()) {
+                    if let Some(parsed) = b.app_command(name, args) {
+                        // A refusal of the command's own arguments, or a profile it could not
+                        // update, answers the caller: it is no undelivered chat line.
+                        match parsed.and_then(|cmd| crate::projects::live_config::run(ws, &pane.window_name, b, cmd)) {
+                            Ok(done) => {
+                                sent.push(pane.window_name.clone());
+                                // Said exactly: THIS window is applied; these others of its definition are not.
+                                if !done.others_unapplied.is_empty() {
+                                    notes.push(format!("{} applied; not updated: {}", pane.window_name, done.others_unapplied.join("; ")));
+                                }
+                            }
+                            // No undelivered row exists for a command the app ran: a failure that
+                            // other targets outlive is carried by the room line and the answer.
+                            Err(e) => {
+                                refused.push(format!("{}: {}", pane.window_name, e.trim()));
+                                app_refused.push(format!("{}: {}", pane.window_name, e.trim()));
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // The receipt, recorded BEFORE typing like every delivery:
                 // only where this backend declares what its prompt hook
                 // echoes for a command (`Backend::command_echo`).
-                let receipt = crate::projects::agents::detect_pane(ws.as_deref(), pane)
-                    .and_then(|a| crate::backends::Backend::parse(a.backend))
+                let receipt = backend
                     .and_then(|b| b.command_echo(name, args))
                     .and_then(|echo| {
                         crate::projects::telemetry::record_command_delivery(session, &pane.window_name, &echo, &msg_id)
@@ -235,8 +266,13 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             if sent.is_empty() {
                 return Err(RpcError::InvalidParams(format!("no managed agent named '{agent}' in session '{session}'")));
             }
-            let _ = rooms::post_routed_as(&room, &msg_id, from, &format!("[tmm] {} → {}", text, sent.join(", ")), &[]);
-            Ok(serde_json::json!({ "sent": sent, "command": text }))
+            // A target whose app command failed while another succeeded: said, not dropped.
+            if !app_refused.is_empty() {
+                notes.push(format!("not run for {}", app_refused.join("; ")));
+            }
+            let tail = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+            let _ = rooms::post_routed_as(&room, &msg_id, from, &format!("[tmm] {} → {}{}", text, sent.join(", "), tail), &[]);
+            Ok(serde_json::json!({ "sent": sent, "command": text, "refused": refused }))
         }
 
         "hub_post" => {
@@ -4209,6 +4245,122 @@ mod tests {
         assert_eq!(owed.len(), 1, "only the /goal receipt is a typed row; /effort has none: {owed:?}");
         assert_eq!(owed[0].line, "goal next step", "kiro's declared echo");
         assert_eq!(owed[0].command, Some(crate::projects::store::CommandLife::Queued), "typed into a running turn");
+    }
+
+    /// Board #411: `/model`, `/effort` and `/new` for a dsh agent are the APP's
+    /// commands. They are NOT typed (a `/word` in a dsh pane is a task for the
+    /// model): the definition changes, the profile is the new one at once, the
+    /// room records the usual `[tmm] /cmd → name` line; an invalid argument is
+    /// refused to the caller and types nothing. Any other `/word` is typed
+    /// verbatim as before, and a kiro agent is untouched by all of it.
+    #[test]
+    fn a_dsh_agents_model_effort_and_new_are_run_by_the_app_not_typed() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-cmd-dsh-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-cmd-dsh-ws-{}", uuid::Uuid::new_v4()));
+        let name = format!("dshcmd{}", &uuid::Uuid::new_v4().to_string()[..6]);
+        crate::projects::registry_save(&serde_json::json!({ "name": name, "backend": "dsh", "model": "deepseek-flash", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        let def = crate::projects::registry_get(&name).unwrap().unwrap();
+        let home = ws.join(".tmm/agents").join(&name);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::backends::dsh::render_dsh(&def, &name, &home, "x", &[]).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "dsh", "agent_def": name, "team": "" }).to_string()).unwrap();
+        let kiro_home = ws.join(".tmm/agents/kirow");
+        std::fs::create_dir_all(&kiro_home).unwrap();
+        std::fs::write(kiro_home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent kirow", "team": "" }).to_string()).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", &name, "-c", &ws.to_string_lossy(), "cat"])
+            .status().map(|s| s.success()).unwrap_or(false)
+            && std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", "kirow", "-c", &ws.to_string_lossy(), "cat"]).status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("cmd-dsh-test")).expect("adopt project");
+        let call = |agent: &str, text: &str| handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": agent, "text": text })), None);
+        let screen = |w: &str| crate::tmux::capture_pane_plain(&format!("{session}:{w}"), Some(0)).unwrap_or_default();
+        let patch = || std::fs::read_to_string(home.join("dsh/profiles/tmm/cordis.patch.yml")).unwrap();
+
+        let r = call(&name, "/model deepseek-v4-pro");
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(patch().contains("model: \"deepseek-v4-pro\""), "the next turn's profile is the new one at once: {}", patch());
+        assert_eq!(crate::projects::registry_get(&name).unwrap().unwrap().model, "deepseek-v4-pro");
+        let r = call(&name, "/effort max");
+        assert!(r.error.is_none());
+        assert!(patch().contains("reasoningEffort: \"max\""));
+        let state = home.join("dsh/tmm");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("session"), "session-1").unwrap();
+        assert!(call(&name, "/new").error.is_none());
+        assert!(state.join("session").exists() && state.join("new").exists(), "/new wrote only the marker; the shell owns the session cleanup");
+
+        // Refused to the caller, nothing typed, nothing changed.
+        let bad = call(&name, "/effort medium");
+        assert!(bad.error.as_ref().is_some_and(|e| e.message.contains("effort") && e.message.contains(&name)), "{:?}", bad.error.map(|e| e.message));
+        assert!(patch().contains("reasoningEffort: \"max\""));
+
+        // Any other /word goes to the pane verbatim, as before; a kiro agent's /model is typed.
+        assert!(call(&name, "/compact now").error.is_none());
+        assert!(call("kirow", "/model sonnet").error.is_none());
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let dsh_screen = screen(&name);
+        assert!(dsh_screen.contains("/compact now"), "an unknown /word is still typed verbatim: {dsh_screen:?}");
+        assert!(!dsh_screen.contains("/model") && !dsh_screen.contains("/effort") && !dsh_screen.contains("/new"), "the app's commands are never typed: {dsh_screen:?}");
+        assert!(screen("kirow").contains("/model sonnet"), "kiro is untouched");
+        let log = handle_hub_request(&req("hub_log", serde_json::json!({ "session": session, "limit": 20 })), None);
+        let bodies: Vec<String> = log.result.unwrap()["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect();
+        assert!(bodies.iter().any(|b| b == &format!("[tmm] /model deepseek-v4-pro → {name}")), "the usual room line: {bodies:?}");
+        crate::projects::registry_delete(&name).ok();
+    }
+
+    /// Board #411 review: an `all` command where one dsh window is updated and
+    /// another is not says both. The answer carries `refused`, the room line names
+    /// the window that was not run, and the success is not reported alone.
+    #[test]
+    fn an_all_command_that_one_window_could_not_apply_says_so() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root writes through a read-only directory");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-cmd-all-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-cmd-all-ws-{}", uuid::Uuid::new_v4()));
+        let tag = &uuid::Uuid::new_v4().to_string()[..6];
+        let (good, bad) = (format!("allgood{tag}"), format!("allbad{tag}"));
+        for n in [&good, &bad] {
+            crate::projects::registry_save(&serde_json::json!({ "name": n, "backend": "dsh", "model": "deepseek-flash", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+            let def = crate::projects::registry_get(n).unwrap().unwrap();
+            let home = ws.join(".tmm/agents").join(n);
+            std::fs::create_dir_all(&home).unwrap();
+            crate::backends::dsh::render_dsh(&def, n, &home, "x", &[]).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "dsh", "agent_def": n, "team": "" }).to_string()).unwrap();
+        }
+        let bad_profile = ws.join(".tmm/agents").join(&bad).join("dsh/profiles/tmm");
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", &good, "-c", &ws.to_string_lossy(), "cat"])
+            .status().map(|s| s.success()).unwrap_or(false)
+            && std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", &bad, "-c", &ws.to_string_lossy(), "cat"]).status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("cmd-all-test")).expect("adopt project");
+        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "all", "text": "/effort low" })), None);
+        let result = r.result.expect("one window took it, so the call answers");
+        assert_eq!(result["sent"], serde_json::json!([good]), "{result}");
+        let refused = result["refused"].as_array().unwrap();
+        assert!(refused.len() == 1 && refused[0].as_str().unwrap().starts_with(&format!("{bad}: ")), "the window that was not run is in the answer: {result}");
+        let log = handle_hub_request(&req("hub_log", serde_json::json!({ "session": session, "limit": 20 })), None);
+        let bodies: Vec<String> = log.result.unwrap()["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect();
+        assert!(bodies.iter().any(|b| b.contains("/effort low") && b.contains(&format!("not run for {bad}"))), "the room line names it: {bodies:?}");
+        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for n in [&good, &bad] { crate::projects::registry_delete(n).ok(); }
     }
 
     /// Board #274: a command an AGENT sends (`tmm send "@bob /compact"`)

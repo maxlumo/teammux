@@ -26,6 +26,30 @@ pub enum EndQuality {
     Unknown,
 }
 
+/// What projecting a definition into a home's config came to. Three outcomes
+/// that look alike from outside and are not: it was written, it was already
+/// right, or the home has no config at all to be right or wrong (never
+/// rendered), which is NOT proof that the agent runs the definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveWrite {
+    Written,
+    AlreadyCurrent,
+    NoConfig,
+}
+
+/// A slash command the app runs for a backend whose CLI has none (board
+/// #411); the backend parses and validates the arguments
+/// (`Backend::app_command`), the generic side executes the meaning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppCommand {
+    /// Set the agent definition's model.
+    Model(String),
+    /// Set the agent definition's reasoning effort.
+    Effort(String),
+    /// The next turn starts a new conversation.
+    NewConversation,
+}
+
 /// The closed set of agent CLIs this app can spawn (board #101/#127). An enum
 /// rather than a trait object on purpose: the set is closed, and every
 /// per-concern method below is an EXHAUSTIVE match with one-line arms into
@@ -144,6 +168,75 @@ impl Backend {
     /// as its own turn (ack + reply edge). Each backend file says why it is or
     /// is not one. A backend that cannot switch runs `queue` semantics or its
     /// CLI's own behaviour, and the editor does not offer the choice.
+    /// The slash command `name args` as the APP runs it for this backend
+    /// instead of typing it into the pane (board #411): `None` where the CLI
+    /// has commands of its own (typed verbatim) or none the app implements;
+    /// `Some(Err)` is the command's usage error. Only dsh, whose headless CLI
+    /// has no commands and whose definition is the door. Declared in the
+    /// backend's own file.
+    pub fn app_command(self, name: &str, args: &str) -> Option<Result<AppCommand, String>> {
+        match self {
+            Backend::Dsh => dsh::app_command(name, args),
+            _ => None,
+        }
+    }
+
+    /// A syntax rule for a model id that holds even when the CLI cannot be
+    /// asked for a list (`models_fetch` is `None`), checked at the shared
+    /// validation door so the editor, `tmm registry save`, a team member and a
+    /// command agree. `None` = no extra rule. Declared in the backend's file.
+    pub fn model_id_error(self, model: &str) -> Option<String> {
+        match self {
+            Backend::Dsh => dsh::model_id_error(model),
+            _ => None,
+        }
+    }
+
+    /// Whether a RUNNING agent of this backend reads its config again at the
+    /// start of every turn, so a saved definition reaches it with no restart
+    /// (board #411): dsh, whose turns are fresh processes. Every other CLI
+    /// reads its config once, and `refresh_agent` applies a saved model on
+    /// restart. Declared in the backend's own file.
+    pub fn config_read_every_turn(self) -> bool {
+        match self {
+            Backend::Dsh => dsh::CONFIG_READ_EVERY_TURN,
+            _ => false,
+        }
+    }
+
+    /// Whether `home` holds this backend's rendered files, even when its launch
+    /// recipe cannot be read: a home like that is a home of this backend whose
+    /// state is unknown, not a home of none (board #411 review).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn has_rendered_files(self, home: &std::path::Path) -> bool {
+        match self {
+            Backend::Dsh => dsh::has_rendered_files(home),
+            _ => false,
+        }
+    }
+
+    /// Project a definition's model and effort into a running home, for a
+    /// backend that reads them every turn: `Some(Ok(_))` says what became of
+    /// the home's config (`LiveWrite`), `Some(Err)` that it could not be
+    /// written, `None` that the backend does not read its config every turn.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn write_live_config(self, home: &std::path::Path, model: &str, effort: &str) -> Option<Result<LiveWrite, String>> {
+        match self {
+            Backend::Dsh => Some(dsh::write_profile_patch(home, model, effort)),
+            _ => None,
+        }
+    }
+
+    /// `/new` for a backend whose conversation the app can leave (dsh): the
+    /// next turn starts a fresh one. `true` when there was one to leave.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn new_conversation(self, home: &std::path::Path) -> Result<bool, String> {
+        match self {
+            Backend::Dsh => dsh::new_conversation(home),
+            _ => Err(format!("{} has no app-run /new", self.name())),
+        }
+    }
+
     /// The prompt-hook echo of the slash command `name args` on this CLI, or
     /// `None` when it reports none we can match (board #264). One shape per
     /// backend, declared in its own file; `hub_command` records a receipt row

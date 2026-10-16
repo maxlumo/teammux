@@ -73,6 +73,73 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
         store.reg_save(&agent, now())?;
         Ok(json!({ "ok": true, "name": agent.name }))
     })
+    .map(|saved| with_unapplied(saved, project_live_config(&agent.backend, live_config::Change::Definition { name: &agent.name, model: true, effort: true })))
+}
+
+/// A saved definition reaches a RUNNING agent of a backend that reads its
+/// config every turn (dsh, board #411) by being projected into its home, with
+/// no restart; the other backends apply it at restart. Called outside the
+/// store section (the projection reads the registry itself). What could not be
+/// brought to it is returned, never swallowed, and scoped by ONE rule
+/// (`live_config::affected`): the windows that follow the saved definition, the
+/// team members that inherit from it, and what could not be placed at all; a
+/// failed home of an UNRELATED definition or team is not this change's.
+fn project_live_config(backend: &str, change: live_config::Change) -> Vec<live_config::Unapplied> {
+    if !crate::backends::Backend::parse(backend).is_some_and(crate::backends::Backend::config_read_every_turn) {
+        return Vec::new();
+    }
+    live_config::rerender_all().into_iter().filter(|u| live_config::affected(u, &change)).collect()
+}
+
+/// The save's answer, with the homes its definition could not be applied to
+/// (`unapplied`: `[{project, window, definition, error}]`, absent when there are
+/// none). The definition IS saved either way; this is the difference between
+/// "saved" and "the next turn uses it".
+fn with_unapplied(mut saved: Value, unapplied: Vec<live_config::Unapplied>) -> Value {
+    if !unapplied.is_empty() {
+        saved["unapplied"] = Value::Array(
+            unapplied.into_iter().map(|u| { let definition = u.definition();
+                let (team, bases) = u.lineage.as_ref().map(|l| (l.team.clone(), l.bases.iter().map(|b| b.name.clone()).collect::<Vec<_>>())).unwrap_or_default();
+                json!({ "project": u.project, "window": u.window, "definition": definition, "team": team, "bases": bases, "kind": u.kind, "error": u.error }) }).collect(),
+        );
+    }
+    saved
+}
+
+/// Set the model and/or the effort of a stored definition, and nothing else:
+/// the CURRENT row is read in the same store section that writes it, so a
+/// concurrent edit of another field (an editor save of the skills, MCP or
+/// system text, another command's field) is kept, never restored from an
+/// earlier snapshot (board #411 review). The same validation as `registry_save`
+/// (`models::validate`, `validate_effort`), then the same live projection.
+pub fn registry_set_model_effort(name: &str, model: Option<&str>, effort: Option<&str>) -> Result<Value, String> {
+    let agent = with_store(|store| {
+        let mut agent = store.reg_get(name)?.ok_or_else(|| format!("no agent definition '{name}'"))?;
+        if let Some(m) = model { agent.model = m.trim().to_string(); }
+        if let Some(e) = effort { agent.effort = e.trim().to_string(); }
+        #[cfg(test)]
+        after_field_read();
+        // Validation under the store section is cheap for the one backend that
+        // uses this (a syntax rule and a fixed list; no CLI is asked).
+        models::validate(&agent.backend, &agent.model)?;
+        models::validate_effort(&agent.backend, &agent.effort)?;
+        store.reg_save(&agent, now())?;
+        Ok(agent)
+    })?;
+    let change = live_config::Change::Definition { name: &agent.name, model: model.is_some(), effort: effort.is_some() };
+    Ok(with_unapplied(json!({ "ok": true, "name": agent.name }), project_live_config(&agent.backend, change)))
+}
+
+/// Test seam: runs inside the store section of `registry_set_model_effort`,
+/// after the row was read and before it is written, so a test can hold a field
+/// update exactly there and observe that no other writer gets in.
+#[cfg(test)]
+pub(crate) static FIELD_UPDATE_PAUSE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn after_field_read() {
+    let hook = FIELD_UPDATE_PAUSE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(hook) = hook { hook(); }
 }
 
 /// A team's bare members that name no input mode (board #336, reviewer P1-B):
@@ -182,6 +249,9 @@ pub fn teams_save(def: &Value) -> Result<Value, String> {
         store.team_save(&team, now())?;
         Ok(json!({ "ok": true, "name": team.name, "members": members.len() }))
     })
+    // A team's member model/effort is what its running windows follow, so a
+    // team save is projected into them like a definition save (board #411).
+    .map(|saved| with_unapplied(saved, live_config::rerender_all().into_iter().filter(|u| live_config::affected(u, &live_config::Change::Team(&team.name))).collect()))
 }
 
 pub fn teams_delete(name: &str) -> Result<Value, String> {

@@ -32,11 +32,20 @@ use std::sync::{Condvar, Mutex};
 struct Table {
     held: Mutex<BTreeSet<PathBuf>>,
     freed: Condvar,
+    /// Keys a thread is blocked on right now, so a test observes "waiting"
+    /// instead of sleeping and hoping.
+    #[cfg(test)]
+    waiting: Mutex<Vec<PathBuf>>,
 }
 
 impl Table {
     const fn new() -> Self {
-        Table { held: Mutex::new(BTreeSet::new()), freed: Condvar::new() }
+        Table {
+            held: Mutex::new(BTreeSet::new()),
+            freed: Condvar::new(),
+            #[cfg(test)]
+            waiting: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -62,8 +71,20 @@ impl Drop for Held {
 fn enter(table: &'static Table, home: &Path) -> Held {
     let key = key(home);
     let mut held = table.held.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(test)]
+    let mut registered = false;
     while held.contains(&key) {
+        #[cfg(test)]
+        if !registered {
+            table.waiting.lock().unwrap_or_else(|e| e.into_inner()).push(key.clone());
+            registered = true;
+        }
         held = table.freed.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+    #[cfg(test)]
+    if registered {
+        let mut waiting = table.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = waiting.iter().position(|k| *k == key) { waiting.remove(i); }
     }
     held.insert(key.clone());
     Held { table, key }
@@ -71,6 +92,13 @@ fn enter(table: &'static Table, home: &Path) -> Held {
 
 static RECIPES: Table = Table::new();
 static ANNOUNCEMENTS: Table = Table::new();
+
+/// How many threads are blocked on `home`'s recipe section now (tests).
+#[cfg(test)]
+pub(crate) fn recipe_waiters(home: &Path) -> usize {
+    let key = key(home);
+    RECIPES.waiting.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|k| **k == key).count()
+}
 
 /// Proof that the caller holds `home`'s recipe section: the only way to
 /// read-for-write or write a recipe.

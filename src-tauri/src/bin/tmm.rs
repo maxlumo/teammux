@@ -190,6 +190,42 @@ struct Ctx {
     json: bool,
 }
 
+/// A save's `unapplied` (board #411): the definition IS saved, but these running
+/// agents (dsh reads its config every turn) still use the old settings. Said on
+/// stderr after the checkmark, naming the project and window and what to do; the
+/// exit status stays 0, because the declaration was saved.
+fn print_unapplied(saved: &serde_json::Value) {
+    for line in unapplied_lines(saved) {
+        eprintln!("{line}");
+    }
+}
+
+/// The lines `print_unapplied` says: a write that FAILED (those agents still use
+/// the old settings) is told apart from a home whose state could not be
+/// CONFIRMED (a recipe that cannot be read, a discovery that failed: not proof of
+/// an old model, nor of a known agent), each with one line per home.
+fn unapplied_lines(saved: &serde_json::Value) -> Vec<String> {
+    let Some(list) = saved.get("unapplied").and_then(|v| v.as_array()).filter(|l| !l.is_empty()) else { return Vec::new() };
+    let kind = |u: &serde_json::Value| u.get("kind").and_then(|v| v.as_str()).unwrap_or("failed").to_string();
+    let line = |u: &serde_json::Value| {
+        let s = |k: &str| u.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let window = if s("window").is_empty() { "(discovery)" } else { s("window") };
+        format!("  {window} [{}]: {}", s("project"), s("error"))
+    };
+    let mut lines = Vec::new();
+    let failed: Vec<_> = list.iter().filter(|u| kind(u) != "unknown").collect();
+    let unknown: Vec<_> = list.iter().filter(|u| kind(u) == "unknown").collect();
+    if !failed.is_empty() {
+        lines.push(format!("! saved, but {} running agent(s) still use the old settings; restart them or save again:", failed.len()));
+        lines.extend(failed.into_iter().map(line));
+    }
+    if !unknown.is_empty() {
+        lines.push("! saved; application not confirmed (save again or restart the agent):".to_string());
+        lines.extend(unknown.into_iter().map(line));
+    }
+    lines
+}
+
 fn fail(code: i32, msg: &str) -> ! {
     eprintln!("tmm: {msg}");
     std::process::exit(code);
@@ -745,7 +781,7 @@ async fn main() {
             }
             let description = flags.get("description").cloned().flatten().unwrap_or_default();
             let r = rpc(&ctx, "teams_save", json!({ "def": { "name": name, "description": description, "members": members } })).await;
-            if ctx.json { println!("{r}"); } else { println!("✓ saved team {name} ({} members)", r.get("members").and_then(|v| v.as_u64()).unwrap_or(0)); }
+            if ctx.json { println!("{r}"); } else { println!("✓ saved team {name} ({} members)", r.get("members").and_then(|v| v.as_u64()).unwrap_or(0)); print_unapplied(&r); }
         }
         ("teams", rest) if rest.first().map(String::as_str) == Some("delete") => {
             let Some(name) = rest.get(1).cloned() else {
@@ -1002,7 +1038,7 @@ async fn main() {
             let backend = flags.get("backend").cloned().flatten().unwrap_or_default();
             let def = registry_def(&name, &backend, &flags);
             let r = rpc(&ctx, "registry_save", json!({ "def": def })).await;
-            if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); }
+            if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); print_unapplied(&r); }
         }
         ("skills", rest) if rest.first().map(String::as_str) == Some("list") => {
             let r = rpc(&ctx, "skills_list", json!({})).await;
@@ -2600,6 +2636,25 @@ mod tests {
         assert_eq!(flags.get("image").cloned().flatten().as_deref(), Some("b.png"), "map keeps the last");
         let images: Vec<&str> = repeated.iter().filter(|(k, _)| k == "image").map(|(_, v)| v.as_str()).collect();
         assert_eq!(images, vec!["a.png", "b.png"], "both reach the sender");
+    }
+
+    /// Board #411: a save that reached the registry but not a running agent
+    /// says so after the checkmark, naming the window, the project and the
+    /// error; a clean save says nothing more.
+    #[test]
+    fn a_saved_but_unapplied_definition_is_said_with_its_window_and_project() {
+        let clean = json!({ "ok": true, "name": "d1" });
+        assert!(unapplied_lines(&clean).is_empty());
+        let partial = json!({ "ok": true, "name": "d1", "unapplied": [
+            { "project": "/ws/a", "window": "bad", "definition": "d1", "kind": "failed", "error": "write failed" },
+            { "project": "", "window": "", "definition": "", "kind": "unknown", "error": "the projects could not be listed" },
+        ] });
+        let lines = unapplied_lines(&partial);
+        assert_eq!(lines[0], "! saved, but 1 running agent(s) still use the old settings; restart them or save again:");
+        assert_eq!(lines[1], "  bad [/ws/a]: write failed");
+        assert_eq!(lines[2], "! saved; application not confirmed (save again or restart the agent):");
+        assert_eq!(lines[3], "  (discovery) []: the projects could not be listed", "a discovery error is not counted as an agent");
+        assert_eq!(lines.len(), 4);
     }
 
     #[test]

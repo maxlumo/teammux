@@ -714,3 +714,47 @@ test('a committed host section change invalidates old delete completion and clea
     assert.match(app.document.querySelector('[role=alertdialog] [role=alert]')?.textContent ?? '', /Current rejection/);
   } finally { await app.close(); }
 });
+
+test('a save the server could not apply to running agents is said on the page, and is not undone (#411)', async context => {
+  for (const props of [{ visible: true }, { visible: true, section: 'agents' }]) {
+    const writes: any[] = [];
+    const app = await (await compiled).mount(context, {
+      props,
+      modules: [rpc({
+        registrySave: async (value: unknown) => {
+          writes.push(value);
+          return { ok: true, name: 'alpha', unapplied: [
+            { project: '/work/tmux-mobile', window: 'dsh-1', definition: 'alpha', kind: 'failed', error: 'permission denied' },
+            { project: '/work/other', window: 'dsh-2', definition: '', kind: 'unknown', error: 'its recipe is not readable' },
+          ] };
+        },
+      })],
+    });
+    try {
+      await openAgent(app); await text(app, 'Edited persona');
+      command(app, 'Save').click();
+      for (let i = 0; i < 8 && !app.document.querySelector('[role=alert]'); i++) await app.flush();
+      assert.equal(writes.length, 1, 'the save went through');
+      assert.equal(app.document.querySelector('.editor'), null, 'the editor closed: the declaration is saved, not rolled back');
+      const alert = app.document.querySelector('[role=alert]')?.textContent ?? '';
+      assert.match(alert, /Saved, but running agents still use the old settings/u, JSON.stringify(props));
+      assert.match(alert, /dsh-1 \(tmux-mobile\): permission denied/u, 'it names the window, its project and the reason');
+      const [failed = '', unconfirmed = ''] = alert.split('application not confirmed');
+      assert.ok(!failed.includes('dsh-2') && unconfirmed.includes('dsh-2 (other): its recipe is not readable') && !unconfirmed.includes('dsh-1'), 'a home that could not be confirmed is not claimed to run the old settings');
+    } finally { await app.close(); }
+  }
+});
+
+test('a save every running agent took shows no alert (#411)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { visible: true },
+    modules: [rpc({ registrySave: async () => ({ ok: true, name: 'alpha' }) })],
+  });
+  try {
+    await openAgent(app); await text(app, 'Edited persona');
+    command(app, 'Save').click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.equal(app.document.querySelector('.editor'), null);
+    assert.equal(app.document.querySelector('[role=alert]'), null);
+  } finally { await app.close(); }
+});

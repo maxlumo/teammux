@@ -122,6 +122,8 @@ spawn; the per-project cap alone bounds fan-out. `project up/down/archive` accep
 project id via project_list), because the session is what agents and humans
 actually see.
 
+**dsh models are live on the next turn** (board #411). `tmm registry save --model/--effort` for a dsh definition re-renders the profile of every running window of it at save time, so the change applies to the next turn with no restart; the answer carries `unapplied: [{project, window, definition, team, bases, kind, error}]` for any home it could not update or confirm (scoped by provenance: the definition's own windows and the team members that inherit from it), and `tmm registry save` / `tmm teams save` print each on stderr after the saved line (the definition is saved either way, the exit code stays 0) (the other backends apply a saved model at restart). The composer's `/model`, `/effort` and `/new` for a dsh agent are the same operation, and an agent reaches a teammate the same way with `tmm send "@dsh1 /model deepseek-v4-pro"`; there is no separate command, because the registry save IS the door.
+
 Verified with a real agent: a spawned lead briefed to "create a project at
 /tmp/evolve" ran `tmm project create /tmp/evolve --session evolve`, verified
 with `tmm project list`, and reported done — 21s end to end.
