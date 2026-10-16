@@ -273,12 +273,7 @@ async fn main() {
     }
 
     let cfg = tmux_mobile::config::Config::load();
-    let server = flags
-        .get("server")
-        .cloned()
-        .flatten()
-        .or_else(|| std::env::var("TMM_SERVER").ok())
-        .unwrap_or_else(|| format!("ws://127.0.0.1:{}", cfg.port));
+    let server = server_for(flags.get("server").cloned().flatten(), std::env::var("TMM_SERVER").ok(), cfg.port);
     let ctx = Ctx {
         server,
         token: std::env::var("TMM_TOKEN").ok().unwrap_or(cfg.token),
@@ -2049,6 +2044,15 @@ async fn follow_log(ctx: &Ctx, session: &str, mut since: i64, limit: i64) {
     }
 }
 
+/// The server tmm talks to: `--server`, else a non-empty `$TMM_SERVER`, else
+/// this host's gateway on the configured port. Empty reads as unset, as for
+/// `TMM_PROJECT`/`TMM_AGENT`: a task whose starter had no server carries
+/// `TMM_SERVER=''` (board #407).
+fn server_for(flag: Option<String>, env: Option<String>, port: u16) -> String {
+    flag.or_else(|| env.filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| format!("ws://127.0.0.1:{port}"))
+}
+
 /// The last lines of a finished task a wake carries (board #275).
 const WAKE_TAIL_LINES: usize = 15;
 
@@ -2492,10 +2496,23 @@ mod tests {
         assert_eq!(task_end_body("dev", "t", "", "15", None, ""), "@dev task t killed:15. Continue the work this task was for: read the output and post the result.");
         assert!(body.ends_with("```\nContinue the work this task was for: read the output and post the result."), "the instruction rides last, after the log: {body}");
         let shell = wake_shell("build", "lead", "/bin/tmm", &tasks::starter_env(Some("my proj"), Some("dev"), None, None));
-        assert_eq!(shell, "TMM_PROJECT='my proj' TMM_AGENT='dev' '/bin/tmm' task wake 'build' --to 'lead' --code '#{pane_dead_status}' --signal '#{pane_dead_signal}' >/dev/null 2>&1");
+        assert_eq!(shell, "TMM_PROJECT='my proj' TMM_AGENT='dev' TMM_SERVER='' '/bin/tmm' task wake 'build' --to 'lead' --code '#{pane_dead_status}' --signal '#{pane_dead_signal}' >/dev/null 2>&1");
         let human = wake_shell("a#b", "x", "/t", &tasks::starter_env(Some("p"), None, Some("/c"), Some("ws://s")));
         assert!(human.contains("'a##b'"), "a literal # is escaped for tmux");
         assert!(human.starts_with("TMM_PROJECT='p' TMM_AGENT='' XDG_CONFIG_HOME='/c' TMM_SERVER='ws://s' "), "{human}");
+    }
+
+    /// Board #407: a task started without a server carries `TMM_SERVER=''`
+    /// (`tasks::starter_env`), so tmm reads an empty one as unset, exactly as
+    /// it reads `TMM_PROJECT`/`TMM_AGENT`, and falls back to config.
+    #[test]
+    fn an_empty_tmm_server_reads_as_unset() {
+        assert_eq!(server_for(None, Some(String::new()), 9899), "ws://127.0.0.1:9899");
+        assert_eq!(server_for(None, None, 7), "ws://127.0.0.1:7");
+        assert_eq!(server_for(None, Some("ws://e:1".into()), 7), "ws://e:1");
+        assert_eq!(server_for(Some("ws://f:2".into()), Some("ws://e:1".into()), 7), "ws://f:2");
+        let shell = wake_shell("t", "x", "/t", &tasks::starter_env(Some("p"), None, None, None));
+        assert!(shell.starts_with("TMM_PROJECT='p' TMM_AGENT='' TMM_SERVER='' "), "a starter without a server gives the wake none: {shell}");
     }
 
     /// Board #277: the built-in tmm-cli skill is how an agent learns tmm, so

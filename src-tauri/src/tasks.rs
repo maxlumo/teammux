@@ -452,15 +452,18 @@ fn create_window(session: &str, name: &str, cwd: &str) -> Result<String> {
 /// `--wake` hook carry. `TMM_PROJECT` and `TMM_AGENT` are always present, EMPTY
 /// when the starter has none (tmm reads empty as unset), so a stale identity in
 /// the tmux server's environment never leaks in: a task the human starts
-/// speaks as the human. Config dir and server travel only when the starter has
-/// them — an empty `TMM_SERVER` would be read as a server address.
+/// speaks as the human. `TMM_SERVER` is always present too, for the same
+/// reason (board #407: a server inherited from the tmux server's environment
+/// sent a human's task to a gateway its starter never named). The config dir
+/// travels only when the starter has one: it is not ours to blank for every
+/// program the task runs.
 pub fn starter_env(project: Option<&str>, agent: Option<&str>, config: Option<&str>, server: Option<&str>) -> Vec<(String, String)> {
     let mut env = vec![
         ("TMM_PROJECT".to_string(), project.unwrap_or_default().to_string()),
         ("TMM_AGENT".to_string(), agent.unwrap_or_default().to_string()),
     ];
     if let Some(c) = config { env.push(("XDG_CONFIG_HOME".into(), c.into())); }
-    if let Some(s) = server { env.push(("TMM_SERVER".into(), s.into())); }
+    env.push(("TMM_SERVER".into(), server.unwrap_or_default().into()));
     env
 }
 
@@ -946,7 +949,9 @@ mod tests {
     /// Board #291: a task runs as its starter — `TMM_PROJECT`/`TMM_AGENT`
     /// from `starter_env` reach the command, over whatever the tmux server's
     /// environment says, in a fresh window and in a reused one; a task the
-    /// human starts has an empty `TMM_AGENT`, never a stale one.
+    /// human starts has an empty `TMM_AGENT`, never a stale one. Board #407:
+    /// the same for `TMM_SERVER` — a starter with no server gives the task
+    /// none, whatever the server's environment (or the test runner's) says.
     #[test]
     fn a_task_runs_with_its_starters_identity() {
         let scope = GlobalSocket::hold();
@@ -962,6 +967,7 @@ mod tests {
         tmux::ensure_session(session, "/tmp").unwrap();
         tmux::run_tmux(&["set-environment", "-g", "TMM_AGENT", "stale"]).unwrap();
         tmux::run_tmux(&["set-environment", "-g", "TMM_PROJECT", "stale"]).unwrap();
+        tmux::run_tmux(&["set-environment", "-g", "TMM_SERVER", "ws://stale:1"]).unwrap();
 
         let dev = starter_env(Some("my proj#x"), Some("dev"), None, Some("ws://h:1"));
         start(&name, &print, Some(session), true, None, &dev).unwrap();

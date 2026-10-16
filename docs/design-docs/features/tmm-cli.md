@@ -332,9 +332,15 @@ consumers take it: the task command gets it as `respawn-window -e KEY=VAL`
 else `$TMM_PROJECT`) and `TMM_AGENT` (`--agent`, else `$TMM_AGENT`). Both are
 always set, and empty when the starter has none, because tmm reads empty as
 unset: a stale identity in the server's environment cannot leak in, and a task
-the human starts speaks as the human. `XDG_CONFIG_HOME` and `TMM_SERVER`
-travel only when the starter has them, because an empty `TMM_SERVER` would be
-read as an address. A task pane is not its starter's turn (board #285), so a
+the human starts speaks as the human. `TMM_SERVER` is always set too (empty
+when the starter has none, and tmm reads an empty one as unset, `server_for`):
+before board #407 it travelled only when the starter had one, so a task the
+human started inherited whatever server the tmux server's environment
+carried: a test runner with `TMM_SERVER=ws://127.0.0.1:9899` exported seeded
+its private tmux server with it, and the task read `server=[ws://127.0.0.1:9899]`
+for a starter with none.
+`XDG_CONFIG_HOME` travels only when the starter has it, because it is read by
+every program the task runs, not only tmm. A task pane is not its starter's turn (board #285), so a
 task's `@<starter>` send reaches the starter too. A task no longer has to
 export `TMM_PROJECT`/`TMM_AGENT` itself. Rows already recorded as `human`
 (state.db seq 10820, 10962, 11123) are not rewritten. Pinned by

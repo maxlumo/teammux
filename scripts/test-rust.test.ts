@@ -49,6 +49,18 @@ test('the test process cannot see the real tmux: TMUX/TMUX_PANE gone, TMUX_TMPDI
   assert.equal(env.PATH, '/bin', 'everything else is kept');
 });
 
+test('the test process cannot see its caller\'s gateway, identity or token: every TMM_* and TOKEN gone (#407)', () => {
+  const env = isolatedEnv({
+    TMM_SERVER: 'ws://127.0.0.1:9899', TMM_TOKEN: 'fake-tmm-token', TMM_PROJECT: 'tmux-mobile', TMM_AGENT: 'validator',
+    TMM_STATE_DB: '/home/x/state.db', TOKEN: 'fake-token', TMUX_MOBILE_GATEWAY_TMM: '/x/tmm', XDG_CONFIG_HOME: '/c', PATH: '/bin',
+  }, '/tmp/iso-x');
+  assert.deepEqual(Object.keys(env).filter((k) => k.startsWith('TMM_')), []);
+  assert.equal(env.TOKEN, undefined, 'Config::load reads bare TOKEN');
+  assert.equal(env.TMUX_MOBILE_GATEWAY_TMM, '/x/tmm', 'only the TMM_ prefix');
+  assert.equal(env.XDG_CONFIG_HOME, '/c');
+  assert.equal(env.PATH, '/bin');
+});
+
 test('a run creates the dir, hands it to cargo, kills only servers under it by -S, and removes it', async () => {
   const { existsSync, mkdirSync } = await import('node:fs');
   const { spawnSync: realSpawn } = await import('node:child_process');
@@ -56,7 +68,7 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
   let dirSeen = '';
   const code = runTestRust({
     extra: ['tmux::tests'],
-    env: { TMUX: '/tmp/tmux-1000/default,1,0', HOME: '/home/x' },
+    env: { TMUX: '/tmp/tmux-1000/default,1,0', TMM_SERVER: 'ws://127.0.0.1:9899', TOKEN: 'fake-token', HOME: '/home/x' },
     log: () => {},
     spawn: ((cmd: string, args: string[], opts: { env?: Record<string, string | undefined> }) => {
       calls.push({ cmd, args, env: opts.env });
@@ -77,6 +89,9 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
   assert.ok(dirSeen.includes('tmm-test-rust-'), dirSeen);
   assert.equal(calls[0].env?.TMUX, undefined);
   assert.equal(calls[0].env?.TMUX_PANE, undefined);
+  assert.equal(calls[0].env?.TMM_SERVER, undefined, 'what cargo gets is isolatedEnv');
+  assert.equal(calls[0].env?.TOKEN, undefined);
+  assert.equal(calls[0].env?.HOME, '/home/x');
   // The cleanup: exactly one kill, carrying -S, aimed inside the run dir.
   const kills = calls.filter((x) => x.cmd === 'tmux');
   assert.deepEqual(kills.map((k) => k.args), [['-S', join(dirSeen, 'tmux-1000', 'default'), 'kill-server']]);

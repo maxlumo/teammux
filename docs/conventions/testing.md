@@ -39,8 +39,8 @@ Four mechanical rules replaced the comment, the first in `scripts/test-rust.mjs`
 and the rest in `tmux::test_support`:
 
 - **`npm run test:rust` isolates the test process from every real tmux.** It
-  runs cargo with `TMUX` and `TMUX_PANE` unset and `TMUX_TMPDIR` set to a fresh
-  `mkdtemp` directory, with `--test-threads=1` FIRST in libtest's option region
+  runs cargo with `TMUX`, `TMUX_PANE`, every `TMM_*` and `TOKEN` unset and
+  `TMUX_TMPDIR` set to a fresh `mkdtemp` directory, with `--test-threads=1` FIRST in libtest's option region
   (right after the cargo/harness `--`, before any second `--` the caller
   passes — libtest stops reading options there and treats the rest as test
   filters, measured 2026-10-12) and any `--test-threads` the caller wrote in
@@ -49,9 +49,23 @@ and the rest in `tmux::test_support`:
   server a test left under that directory, then removes it. The "default"
   server a test could reach is an empty throwaway that did not exist before
   the run. The real server's socket is simply not where the process will look.
-  Any other cargo test invocation on this host wraps itself the same way:
-  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo
-  test … -- --test-threads=1`. The split of guarantees: the wrapper guarantees
+  `TMM_*` and `TOKEN` go one layer up (board #407, 2026-10-16): a runner
+  whose environment carried `TMM_SERVER=ws://127.0.0.1:9899` (measured on
+  tasks run before 17:38 that day; an agent pane carries `TMM_PROJECT`,
+  `TMM_AGENT` and `TMM_MCP_CONFIG`, not `TMM_SERVER`) made
+  `a_task_runs_with_its_starters_identity` read that real gateway as the
+  server of a task whose starter had none; `TOKEN` is the
+  credential `Config::load` reads before `config.toml`. This removes the
+  caller's inherited routing, identity and credential, nothing more: it is
+  not a network sandbox, and `HOME`, `XDG_CONFIG_HOME`, `HOST`/`PORT` and
+  `config.toml` still resolve, so a test that talks to a gateway sets its own
+  endpoint, token and config dir on its child process.
+  Any other cargo test invocation on this host goes through the wrapper,
+  which takes cargo's own arguments: `npm run test:rust -- <filter|--lib|-p …>
+  [-- <harness args>]`. When cargo must be run by hand, the equivalent is
+  `env -u TMUX -u TMUX_PANE -u TOKEN $(env | sed -n 's/^\(TMM_[A-Za-z0-9_]*\)=.*/-u \1/p')
+  TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo test … -- --test-threads=1`
+  (every `TMM_*` the shell has, not a list; checked in bash and zsh). The split of guarantees: the wrapper guarantees
   the directory is FRESH; the Rust gate guarantees only that the process is
   NOT looking at the real tmux (`$TMUX`/`$TMUX_PANE` unset, some
   `TMUX_TMPDIR` set) — it cannot tell a fresh dir from a reused one, and the

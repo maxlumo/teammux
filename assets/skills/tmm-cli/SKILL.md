@@ -137,8 +137,9 @@ tmux window; a window you start is yours to finish.
 
 Each task is a tmux window with window-scoped `remain-on-exit`, so status and
 logs survive the command exiting. It works even when the server is down.
-A task runs as you: it gets your `TMM_PROJECT` and `TMM_AGENT` (and
-`TMM_SERVER`/`XDG_CONFIG_HOME` if you have them), so a `tmm send` inside it
+A task runs as you: it gets your `TMM_PROJECT`, `TMM_AGENT` and
+`TMM_SERVER` (empty when you have none) and your `XDG_CONFIG_HOME` if you
+have one, so a `tmm send` inside it
 is from you and an `@<you>` in it reaches your own pane. Do not export them
 in the task's script.
 

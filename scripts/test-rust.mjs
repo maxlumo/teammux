@@ -20,6 +20,15 @@
 //   - TMUX_TMPDIR is a fresh `mkdtemp`, so the "default" server tmux resolves
 //     is an empty one under that dir, created on demand and killed with it.
 // Nothing here reaches the developer's tmux at all.
+// One layer up (board #407): every TMM_* variable (TMM_SERVER, TMM_TOKEN,
+// TMM_PROJECT, TMM_AGENT, TMM_STATE_DB, …) and the bare TOKEN that
+// Config::load reads are unset too: a runner whose environment carried
+// TMM_SERVER=ws://127.0.0.1:9899 made a starter-identity test read a server
+// it was never given (an agent pane carries TMM_PROJECT/TMM_AGENT; whatever
+// the caller has, the suite must not inherit it). This removes the
+// caller's inherited routing, identity and credential; it is not a network
+// sandbox (HOME, XDG_CONFIG_HOME, HOST/PORT and config.toml still resolve), so
+// a test that talks to a gateway sets its own endpoint and config on its child.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -63,18 +72,22 @@ export function cargoArgs(extra = []) {
 }
 
 /** The environment the cargo process gets: the caller's, minus the two
- * variables that point at a real tmux, plus TMUX_TMPDIR = `dir`. */
+ * variables that point at a real tmux, every `TMM_*` (the caller's gateway,
+ * identity and state) and `TOKEN` (the credential Config::load reads), plus
+ * TMUX_TMPDIR = `dir`. */
 export function isolatedEnv(base, dir) {
   const env = { ...base };
   delete env.TMUX;
   delete env.TMUX_PANE;
+  delete env.TOKEN;
+  for (const key of Object.keys(env)) if (key.startsWith('TMM_')) delete env[key];
   env.TMUX_TMPDIR = dir;
   return env;
 }
 
 export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, env = process.env, log = console.error } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'tmm-test-rust-'));
-  log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir} (TMUX/TMUX_PANE unset), --test-threads=1`);
+  log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir} (TMUX/TMUX_PANE/TMM_*/TOKEN unset), --test-threads=1`);
   try {
     const result = spawn('cargo', cargoArgs(extra), { cwd: repoRoot, env: isolatedEnv(env, dir), stdio: 'inherit' });
     if (result.error) {
