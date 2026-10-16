@@ -252,6 +252,23 @@ pub(crate) const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// a bare `N%` is the context segment and not, say, a percentage in a diff.
 pub(crate) const PIE: [char; 6] = ['○', '◔', '◑', '◕', '●', '◯'];
 
+/// Share of a context window used, 0–100, from token counts: the ONE formula
+/// for a backend that reports counts rather than a percentage (grok's header
+/// ratio, dsh's vitals row, board #409). `None` for a non-finite operand, an
+/// empty or negative window, a negative count, or more used than the window
+/// holds — a reading that cannot be right is not shown. `used × 100 / window`
+/// as before (it rounds a half exactly: 23500 of 100000 is 24, where the
+/// ratio-first `0.235 × 100` is 23.499… and rounds to 23); only a count too
+/// big for that product takes the ratio first, which cannot overflow once
+/// used ≤ window. The result is always 0..=100.
+pub(crate) fn used_pct(used: f64, window: f64) -> Option<u8> {
+    if !used.is_finite() || !window.is_finite() || window <= 0.0 || used < 0.0 || used > window {
+        return None;
+    }
+    let pct = if used <= f64::MAX / 100.0 { used * 100.0 / window } else { used / window * 100.0 };
+    Some(pct.round().clamp(0.0, 100.0) as u8)
+}
+
 /// `◕ 69%` (TUI) or `69% ctx` (lite) — a percentage that is about the context.
 /// A bare `69%` is deliberately NOT accepted: percentages are everywhere in a
 /// terminal, and a wrong reading here is worse than a missing one.
@@ -547,6 +564,21 @@ mod tests {
         // Full window reads 100, empty reads 0.
         assert_eq!(grok_context_ratio("  /w  500K / 500K"), Some(100));
         assert_eq!(grok_context_ratio("  /w  0K / 500K"), Some(0));
+        // Board #409 P2-1: the shared formula's edges. Grok's ordinary
+        // rounding stays as it was (47K of 500K = 9.4 → 9, 0.5% → 1).
+        assert_eq!(used_pct(47_000.0, 500_000.0), Some(9));
+        assert_eq!(used_pct(1.0, 200.0), Some(1));
+        assert_eq!(used_pct(23_500.0, 100_000.0), Some(24), "a half rounds up, as before");
+        assert_eq!(used_pct(11_766.0, 1_000_000.0), Some(1));
+        for (used, window) in [
+            (1.0, 0.0), (0.0, 0.0), (1.0, -5.0), (-1.0, 10.0), (11.0, 10.0),
+            (f64::NAN, 10.0), (1.0, f64::NAN), (f64::INFINITY, f64::INFINITY), (1.0, f64::INFINITY), (f64::NEG_INFINITY, 10.0),
+        ] {
+            assert_eq!(used_pct(used, window), None, "{used} / {window}");
+        }
+        assert_eq!(used_pct(1e308, 1e308), Some(100), "no overflow past 100");
+        assert_eq!(used_pct(f64::MAX, f64::MAX), Some(100));
+        assert_eq!(used_pct(f64::MIN_POSITIVE, f64::MAX), Some(0));
     }
 
     #[test]

@@ -112,12 +112,7 @@ pub(crate) fn grok_context_ratio(line: &str) -> Option<u8> {
     if !total_txt.ends_with(['K', 'M']) {
         return None;
     }
-    let used = grok_tokens(used_txt)?;
-    let total = grok_tokens(total_txt)?;
-    if total == 0.0 || used > total {
-        return None;
-    }
-    Some((used * 100.0 / total).round().clamp(0.0, 100.0) as u8)
+    crate::projects::vitals::used_pct(grok_tokens(used_txt)?, grok_tokens(total_txt)?)
 }
 
 /// `47K` → 47_000, `1.2M` → 1_200_000, `800` → 800.

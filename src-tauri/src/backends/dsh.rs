@@ -24,8 +24,13 @@
 //! * `session/event (session, ev)` carries every durable event: `turn/start`,
 //!   `user/message` (`source.kind == "user"` is the prompt), `tool/call`
 //!   `{name, arguments}`, `tool/result`, `assistant/message`
-//!   (`message.content[]` text parts), `turn/end` (`reason.kind` completed |
-//!   error). `session.header.id` is `session-<uuid>`.
+//!   (`message.content[]` text parts, and the step's `usage`: `inputTokens`,
+//!   `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`,
+//!   where input EXCLUDES the cache reads — 11382 + 384 + 70 = 11836),
+//!   `request/context` (`model`, `contextWindow`: 1000000 for deepseek-flash),
+//!   `turn/end` (`reason.kind` completed | error). `session.header.id` is
+//!   `session-<uuid>`. (Usage and context measured 2026-10-17 on the live
+//!   `deepseek` agent's session, board #409.)
 //! * `--session-id` resumes exactly (the next turn saw the previous one); an
 //!   unknown id fails at once, before any request. Sessions live in
 //!   `sessions/<cwd-key>/<id>/`.
@@ -102,6 +107,14 @@ pub(crate) const PROMPT_WAIT: &str = "dsh · ";
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) const READY_MARKER: &str = "dsh ›";
 
+/// The first segment of the vitals row our plugin writes and our shell
+/// paints (board #409): `[dsh] · <model> · ctx <used>/<window>`. Only a line
+/// that STARTS with it, at column zero, is read — the same rule as claude's
+/// `[CC]` row. That rejects an indented, prompt-prefixed or chat-stamped
+/// copy, NOT every copy: an output line that itself starts exactly with
+/// `[dsh] · ` is read too, and while a run prints it is the newest.
+pub(crate) const VITALS_ANCHOR: &str = "[dsh]";
+
 use serde_json::Value;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::path::Path;
@@ -134,6 +147,12 @@ use super::shared;
 ///   typed on Stop, and typed while dsh still owns the TTY they would be lost;
 /// * the session id goes to `$DSH_HOME/tmm/session`, the id the next turn
 ///   resumes;
+/// * the vitals row (`VITALS_ANCHOR`, board #409) goes to
+///   `$DSH_HOME/tmm/vitals` after every `assistant/message`: the model and
+///   window from the last `request/context`, and the context USED, which is
+///   the step's `inputTokens + cacheReadTokens + cacheWriteTokens` (what the
+///   request carried). The shell paints it when its prompt is back and
+///   `sniff_dsh` reads it there;
 /// * `requireEnv` (the provider's key variable) unset: the prompt is
 ///   reported, the Stop is written as an error, ONE plain line goes to
 ///   stderr and the process exits before any request is made;
@@ -262,6 +281,27 @@ function resendUnsent() {{
   else try {{ unlinkSync(file) }} catch {{}}
 }}
 
+// The vitals row the shell paints when its prompt is back (`sniff_dsh` reads
+// it): `[dsh] · <model> · ctx <used>/<window>`, exact token counts — the
+// percentage is computed on the hub, by the one formula every backend that
+// reports counts goes through. Without a window or a usage yet: no ctx
+// segment; a step without usage keeps the last one.
+const count = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : null)
+// What the step's request carried: input (which EXCLUDES cache reads) plus
+// the cached prefix read and written. Output is not in it.
+function contextUsed(usage) {{
+  const input = count(usage?.inputTokens)
+  if (input === null) return null
+  return input + (count(usage?.cacheReadTokens) ?? 0) + (count(usage?.cacheWriteTokens) ?? 0)
+}}
+function vitalsRow(model, window, used) {{
+  const m = String(model ?? '').replace(/[\u0000-\u001f\u007f\u00b7]/g, '').trim()
+  if (!m) return ''
+  const parts = ['{VITALS_ANCHOR}', m]
+  if (window && used !== null) parts.push(`ctx ${{used}}/${{window}}`)
+  return parts.join(' · ')
+}}
+
 export function apply(ctx, config) {{
   const required = typeof config?.requireEnv === 'string' ? config.requireEnv : ''
   resendUnsent()
@@ -270,6 +310,9 @@ export function apply(ctx, config) {{
   let sid = ''
   let awaitingPrompt = false
   let reply = ''
+  let model = ''
+  let window = 0
+  let used = null
   ctx.on('session/event', (session, ev) => {{
     try {{
       if (root === null) {{
@@ -309,9 +352,16 @@ export function apply(ctx, config) {{
         case 'tool/result':
           send({{ hook_event_name: 'PostToolUse', tool_name: 'tool', session_id: sid }})
           break
+        case 'request/context':
+          if (typeof d?.model === 'string') model = d.model
+          if (count(d?.contextWindow)) window = count(d.contextWindow)
+          break
         case 'assistant/message': {{
           const t = textOf(d?.message?.content)
           if (t.trim()) reply = t
+          used = contextUsed(d?.usage) ?? used
+          const row = vitalsRow(model, window, used)
+          if (row) put('vitals', row)
           break
         }}
         case 'turn/end':
@@ -399,6 +449,8 @@ pub(crate) fn zshenv() -> &'static str {
 ///   its prompt gets it reported first, so the delivery is acknowledged.
 ///   Both go out after everything the plugin sent (the shared sequence).
 ///   Held lines are typed on that Stop and arrive as one bracketed paste.
+/// * `precmd`: the run's vitals row (the plugin's `tmm/vitals`) is printed
+///   once, just above the prompt, where `sniff_dsh` reads it (board #409).
 /// * a run the previous shell left open (the window was killed or restarted
 ///   mid-turn) is ended at this shell's first prompt, as an interrupt: no
 ///   Stop would ever come for it, and its held lines would wait forever.
@@ -516,7 +568,7 @@ _tmm_accept() {{
     BUFFER=${{BUFFER#!}}
   elif [[ -n ${{BUFFER//[[:space:]]/}} ]]; then
     local sid=$(_tmm_session)
-    rm -f -- $_tmm_state/prompted $_tmm_state/stop.json
+    rm -f -- $_tmm_state/prompted $_tmm_state/stop.json $_tmm_state/vitals
     print -rn -- $BUFFER >| $_tmm_state/line
     BUFFER="dsh --profile {PROFILE}${{sid:+ --session-id $sid}} -- ${{(q+)BUFFER}}"
     : >| $_tmm_state/open
@@ -525,7 +577,16 @@ _tmm_accept() {{
 }}
 zle -N accept-line _tmm_accept
 
-_tmm_status_of_run() {{ _tmm_status=$?; PS1='{PROMPT_WAIT}' }}
+# The run's vitals row, printed once just above the prompt (the card reads it
+# there, board #409).
+_tmm_status_of_run() {{
+  _tmm_status=$?
+  PS1='{PROMPT_WAIT}'
+  if [[ -r $_tmm_state/vitals ]]; then
+    print -r -- "$(<$_tmm_state/vitals)"
+    rm -f -- $_tmm_state/vitals
+  fi
+}}
 precmd_functions=(_tmm_status_of_run $precmd_functions)
 
 # The prompt is back: end the run's turn, exactly once. The plugin's own Stop
@@ -718,11 +779,30 @@ pub(crate) fn known() -> crate::projects::agents::KnownAgent {
     }
 }
 
-/// The pane paints no status furniture of its own (a prompt and dsh's
-/// stderr): nothing to read.
+/// dsh paints no status furniture of its own, so the managed shell paints
+/// ours: the vitals row the plugin built from dsh's own events, printed once
+/// above the prompt after every run (board #409). It is the LAST COMPLETED
+/// RUN's input, not a live figure: nothing is painted while a run lasts. The
+/// NEWEST row wins (read bottom-up), and only one that starts at column zero
+/// with `VITALS_ANCHOR` (see there for what that does not exclude).
+/// The percentage comes from `vitals::used_pct`, the one formula for a
+/// backend that reports token counts. No effort: dsh's levels (`off`…) are
+/// not the card's effort words, and the row does not carry one.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn sniff_dsh(_pane: &str) -> Vitals {
-    Vitals::default()
+pub fn sniff_dsh(pane: &str) -> Vitals {
+    let mut v = Vitals::default();
+    let Some(row) = pane.lines().rev().take(24).find(|l| {
+        l.strip_prefix(VITALS_ANCHOR).is_some_and(|rest| rest.starts_with(" · "))
+    }) else {
+        return v;
+    };
+    let segs: Vec<&str> = row.trim_end().split(" · ").collect();
+    v.model = segs.get(1).map(|m| m.trim()).filter(|m| !m.is_empty() && !m.starts_with("ctx ")).map(str::to_string);
+    v.context_pct = segs.iter().skip(2).find_map(|seg| {
+        let (used, window) = seg.trim().strip_prefix("ctx ")?.split_once('/')?;
+        crate::projects::vitals::used_pct(used.parse().ok()?, window.parse().ok()?)
+    });
+    v
 }
 
 /// The payload dialect our plugin and shell write: claude's keys. `Stop`
@@ -1028,6 +1108,7 @@ pub(crate) mod tests {
                 mkdir -p \"$DSH_HOME/tmm\" \"$DSH_HOME/sessions/k/session-0000-test\"\n\
                 printf session-0000-test > \"$DSH_HOME/tmm/session\"\n\
                 : > \"$DSH_HOME/tmm/prompted\"\n\
+                printf '[dsh] · fake-model · ctx %s/1000000' $((n * 250000)) > \"$DSH_HOME/tmm/vitals\"\n\
                 printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"session-0000-test\",\"last_assistant_message\":\"ok %s\",\"dsh_reason\":\"completed\"}' \"$n\" > \"$DSH_HOME/tmm/stop.json\"\n";
             std::fs::write(bin.join("dsh"), fake).unwrap();
             use std::os::unix::fs::PermissionsExt;
@@ -1523,6 +1604,108 @@ pub(crate) mod tests {
         assert_eq!(stop["last_assistant_message"], "root answer");
         assert_eq!(stop["session_id"], "session-root-1");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #409: the plugin turns dsh's own numbers into the vitals row —
+    /// the model and window from `request/context`, the context USED from the
+    /// step's `usage` (input + cache read + cache write; output is not in
+    /// it). A step without usage keeps the last one; a subagent's usage and
+    /// window never reach the row.
+    #[test]
+    fn the_plugin_writes_the_vitals_row_from_dshs_own_usage() {
+        let usage = json!({"inputTokens": 11382, "outputTokens": 70, "cacheReadTokens": 384, "cacheWriteTokens": 0, "totalTokens": 11836});
+        // A second root step that WROTE cache: dsh's totalTokens is input +
+        // output + cacheRead + cacheWrite (dsh-llm-deepseek updateUsage), so
+        // the context used is total − output = 20000 + 500 + 3000.
+        let written = json!({"inputTokens": 20000, "outputTokens": 900, "cacheReadTokens": 500, "cacheWriteTokens": 3000, "totalTokens": 24400});
+        let events_in = json!([
+            ["root", {"type":"turn/start","data":{"turn":1}}],
+            ["root", {"type":"request/context","data":{"provider":"deepseek-official","model":"deepseek-flash","contextWindow":1000000}}],
+            ["root", {"type":"assistant/message","data":{"turn":1,"step":1,"usage":usage,"message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}}],
+            ["child", {"type":"request/context","data":{"model":"child-model","contextWindow":64000}}],
+            ["child", {"type":"assistant/message","data":{"usage":{"inputTokens":60000},"message":{"role":"assistant","content":[{"type":"text","text":"child"}]}}}],
+            ["root", {"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":"no usage on this step"}]}}}],
+            ["root", {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}]
+        ]);
+        let Some((code, _, _, dir)) = run_plugin(json!({}), root_and_child(), events_in) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_eq!(code, Some(0));
+        let row = std::fs::read_to_string(dir.join("tmm/vitals")).unwrap();
+        assert_eq!(row, "[dsh] · deepseek-flash · ctx 11766/1000000");
+        let v = sniff_dsh(&row);
+        assert_eq!((v.model.as_deref(), v.context_pct), (Some("deepseek-flash"), Some(1)));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let cached = json!([
+            ["root", {"type":"request/context","data":{"model":"deepseek-flash","contextWindow":100000}}],
+            ["root", {"type":"assistant/message","data":{"usage":written,"message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}}]
+        ]);
+        let (_, _, _, dir) = run_plugin(json!({}), root_and_child(), cached).unwrap();
+        let row = std::fs::read_to_string(dir.join("tmm/vitals")).unwrap();
+        assert_eq!(row, "[dsh] · deepseek-flash · ctx 23500/100000", "cache writes count");
+        assert_eq!(sniff_dsh(&row).context_pct, Some(24));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Before any usage there is no ctx segment, only the model.
+        let early = json!([
+            ["root", {"type":"request/context","data":{"model":"deepseek-flash","contextWindow":1000000}}],
+            ["root", {"type":"assistant/message","data":{"message":{"role":"assistant","content":[]}}}]
+        ]);
+        let (_, _, _, dir) = run_plugin(json!({}), root_and_child(), early).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("tmm/vitals")).unwrap(), "[dsh] · deepseek-flash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #409: only a row at column zero, `[dsh] · ` first, is read, and
+    /// the newest one wins. An indented, prompt-prefixed, chat-stamped or
+    /// mid-line copy is not; an output line starting exactly with `[dsh] · `
+    /// would be (the anchor's stated limit). An impossible ratio is no
+    /// percentage.
+    #[test]
+    fn only_a_column_zero_vitals_row_is_read() {
+        let pane = "[dsh] · deepseek-flash · ctx 100000/1000000\nanswer text\n[dsh] · deepseek-pro · ctx 333000/1000000\ndsh › ";
+        let v = sniff_dsh(pane);
+        assert_eq!((v.model.as_deref(), v.context_pct), (Some("deepseek-pro"), Some(33)), "the newest row");
+        assert!(v.effort.is_none() && v.branch.is_none());
+        for quoted in [
+            "  [dsh] · m · ctx 1/2\n",
+            "dsh › [dsh] · m · ctx 1/2\n",
+            "[tmm chat 2026-10-17 02:10] human: [dsh] · m · ctx 1/2\n",
+            "[dsh]· m · ctx 1/2\n",
+            "the row looks like [dsh] · m · ctx 1/2\n",
+        ] {
+            assert!(sniff_dsh(quoted).is_empty(), "{quoted:?}");
+        }
+        let over = sniff_dsh("[dsh] · m · ctx 3/2\n");
+        assert_eq!((over.model.as_deref(), over.context_pct), (Some("m"), None), "more than the window is no reading");
+        assert_eq!(sniff_dsh("[dsh] · m · ctx 1/0\n").context_pct, None);
+        assert_eq!(sniff_dsh("[dsh] · m · ctx x/9\n").context_pct, None);
+        assert_eq!(sniff_dsh("[dsh] · m · ctx 1000000/1000000\n").context_pct, Some(100));
+        assert_eq!(crate::backends::Backend::Dsh.sniff("[dsh] · m · ctx 5/10\n", "deepseek").context_pct, Some(50), "the dispatch reaches it");
+    }
+
+    /// Board #409, end to end in a real pane: the shell prints the run's
+    /// vitals row once, above the prompt, and the sniff reads the newest.
+    /// A shell line (`!true`) after it prints no second copy.
+    #[test]
+    fn the_shell_paints_each_runs_vitals_row_once_above_the_prompt() {
+        let Some(pane) = ScratchPane::start("vitals", &[]) else {
+            eprintln!("skipped: no zsh or no tmux server");
+            return;
+        };
+        pane.deliver("first");
+        pane.deliver("second");
+        wait_for("the prompt after the second run", 10, || pane.screen().trim_end().ends_with(READY_MARKER));
+        let screen = pane.screen();
+        assert_eq!(screen.matches("[dsh] · fake-model · ctx 250000/1000000").count(), 1, "{screen}");
+        assert_eq!(screen.matches("[dsh] · fake-model · ctx 500000/1000000").count(), 1, "{screen}");
+        assert_eq!(sniff_dsh(&screen).context_pct, Some(50), "the newest row: {screen}");
+        assert!(!pane.dir.join("dsh/tmm/vitals").exists(), "printed once, then gone");
+        crate::tmux::send_command(&pane.target(), "!true").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(pane.screen().matches("[dsh] · fake-model").count(), 2, "a shell line repaints nothing");
     }
 
     /// Board #404 condition 3: with the provider's key unset, the first
