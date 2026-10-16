@@ -22,6 +22,7 @@ export const REJECTED_LINKS: [string, string][] = [
   ['an upper-case credential key', 'https://front.example/?TOKEN=SECRET-ONE'],
   ['an old addr that hides a token in its fragment', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN'],
   ['an old address that hides a socket in its fragment', 'https://front.example/?address=wss%3A%2F%2Fh%2Fws%23socket%3D%252Fsecret-socket&token=OUTER-TOKEN'],
+  ['an old link whose addr is an http address', 'https://front.example/?addr=http%3A%2F%2Fh%3A1&token=SECRET-ONE'],
   ['an old server with an ordinary fragment', 'https://front.example/?server=wss%3A%2F%2Fh%2Fws%23frag&token=OUTER-TOKEN'],
   ['an old addr that hides an encoded token key in its query', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%3F%2574oken%3DSECRET-ONE&token=OUTER-TOKEN'],
 ];

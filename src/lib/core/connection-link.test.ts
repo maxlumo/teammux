@@ -70,8 +70,8 @@ test('an endpoint whose query already holds token or socket cannot carry a link:
   assert.equal(kindOf('wss://h/ws?socket=a&token=T&socket=b'), 'unusable:ambiguous');
   assert.equal(kindOf('https://front.example/?addr=ws://h:1&token=A&token=B'), 'unusable:ambiguous', 'the old form too: the first token is never taken silently');
   assert.equal(kindOf('https://front.example/#/x?addr=ws://h:1&socket=a&socket=b'), 'unusable:ambiguous');
-  assert.equal(kindOf('https://app.example/?addr=wss://h/ws?token=route&token=AUTH'), 'unusable:ambiguous');
-  assert.equal(kindOf('https://app.example/?addr=wss%3A%2F%2Fh%2Fws%3Ftoken%3Droute&token=AUTH'), 'unusable:ambiguous', 'a credential key inside the endpoint itself');
+  assert.equal(kindOf('https://app.example/?addr=wss://h/ws?token=route&token=AUTH'), 'unusable:address-credential');
+  assert.equal(kindOf('https://app.example/?addr=wss%3A%2F%2Fh%2Fws%3Ftoken%3Droute&token=AUTH'), 'unusable:address-credential', 'a credential key inside the endpoint itself');
 });
 
 test('new form: a trailing slash after the host is dropped, the hash is ignored, the scheme is lower case', () => {
@@ -171,13 +171,15 @@ test('the route kept after a link is taken from the address bar never carries a 
   assert.equal(routeOfHash('#/a&socket=%2Fs'), '');
 });
 
-test('a decoded old addr is an endpoint like any other: a fragment or a hidden credential makes the whole link unusable, and the outer token is never approval', () => {
+test('a decoded old addr is an endpoint like any other: a fragment, a hidden credential or a foreign scheme makes the whole link unusable (a hidden credential has its own reason), and the outer token is never approval', () => {
   for (const key of ['addr', 'address', 'server']) {
-    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: a credential in the fragment`);
-    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23socket%3D%252Fs&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: a socket in the fragment`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:address-credential', `${key}: a credential in the fragment`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23socket%3D%252Fs&token=OUTER-TOKEN`), 'unusable:address-credential', `${key}: a socket in the fragment`);
     assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%23frag&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: an ordinary fragment is no WebSocket endpoint`);
-    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%3F%2574oken%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:ambiguous', `${key}: an encoded key in the endpoint query`);
+    assert.equal(kindOf(`https://front.example/?${key}=wss%3A%2F%2Fh%2Fws%3F%2574oken%3DSECRET-ONE&token=OUTER-TOKEN`), 'unusable:address-credential', `${key}: an encoded key in the endpoint query`);
     assert.equal(kindOf(`https://front.example/?${key}=ws%3A%2F%2Fh%3A99999&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: a bad port`);
+    assert.equal(kindOf(`https://front.example/?${key}=http%3A%2F%2Fh%3A1&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: an http address is no WebSocket gateway, and is not turned into wss://http://`);
+    assert.equal(kindOf(`https://front.example/?${key}=ftp%3A%2F%2Fh&token=OUTER-TOKEN`), 'unusable:no-address', `${key}: nor is any other scheme`);
   }
 });
 

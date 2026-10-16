@@ -212,7 +212,7 @@ for (const [what, address] of [
   ['an encoded key', 'wss://fixture.test/ws?%74oken=route-secret'],
   ['a fragment', 'wss://fixture.test/ws#frag'],
 ] as const) {
-  test(`Share refuses an address that holds ${what} of its own: nothing is copied, nothing is stripped, no part of it is shown`, async context => {
+  test(`Share refuses an address that holds ${what} of its own: nothing is copied, the saved address is left as it was, and the error message names no part of it`, async context => {
     let copies = 0;
     const app = await mount(context, () => { copies++; return true; }, address);
     try {
@@ -221,7 +221,7 @@ for (const [what, address] of [
       await app.copy();
       assert.equal(copies, 0, 'no link was made');
       assert.equal(app.document.querySelector('.card > .config-error[role=alert]')?.textContent?.trim(), 'This address cannot be shared as a link');
-      assert.equal(field(), address, 'and the address was not rewritten to something shareable');
+      assert.equal(field(), address, 'the saved address stays in the input exactly as saved (it is not rewritten into something shareable; only the MESSAGE is proven credential-free)');
       assert.equal(app.document.querySelector<HTMLInputElement>('.token-wrap input')!.value, 'fake-token&=+', 'nor was a credential taken out of it');
       assert.ok(!/route-secret|route-socket/u.test(app.document.querySelector('.card > .config-error')?.textContent ?? ''), 'the message names no part of it');
     } finally { await app.close(); }

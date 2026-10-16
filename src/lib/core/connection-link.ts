@@ -46,6 +46,8 @@ export interface ConnectionLink {
  *  - `none`: not a link and carrying no credential: leave it as typed.
  *  - `link`: a usable connection.
  *  - `unusable`: carries a credential, but must not be used or kept in view:
+ *    `address-credential` (the endpoint itself holds a token or socket, e.g. a
+ *    credential in the fragment of a decoded `addr`),
  *    `no-address` (credentials without a usable server: the old token-only
  *    link, a link naming no host, free text with a `?token=` in it, a
  *    credential in a hash) or `ambiguous` (a repeated `token`/`socket` key, or
@@ -53,11 +55,12 @@ export interface ConnectionLink {
 export type ParsedLink =
   | { kind: 'none' }
   | { kind: 'link'; link: ConnectionLink }
-  | { kind: 'unusable'; reason: 'no-address' | 'ambiguous' };
+  | { kind: 'unusable'; reason: 'no-address' | 'ambiguous' | 'address-credential' };
 
 const NONE: ParsedLink = { kind: 'none' };
 const NO_ADDRESS: ParsedLink = { kind: 'unusable', reason: 'no-address' };
 const AMBIGUOUS: ParsedLink = { kind: 'unusable', reason: 'ambiguous' };
+const ADDRESS_CREDENTIAL: ParsedLink = { kind: 'unusable', reason: 'address-credential' };
 
 /** THE reading of a credential key: the key of one `a=b` query segment,
  * percent-decoded and case-folded, is `token` or `socket`. (`?%74oken=` is a
@@ -144,7 +147,7 @@ function classify(raw: string): ParsedLink {
     // address-only field, wherever it was extracted from: a parsed link
     // guarantees a usable, credential-free address.
     const endpoint = endpointOf(canonicalAddress(body.slice(0, q)) + (kept.length ? `?${kept.join('&')}` : ''));
-    if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? AMBIGUOUS : NO_ADDRESS;
+    if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? ADDRESS_CREDENTIAL : NO_ADDRESS;
     return { kind: 'link', link: { address: endpoint.address, token: credentials.get('token'), socket: credentials.get('socket') } };
   }
   if (!/^[a-z][a-z\d+.-]*:\/\//iu.test(raw)) return NONE;                  // `host:9899?token=x` is no URL
@@ -157,12 +160,18 @@ function classify(raw: string): ParsedLink {
   if (!addr) return credentials.size ? NO_ADDRESS : NONE;
   if (repeated) return AMBIGUOUS;
   let address = addr;
-  if (!/^wss?:\/\//iu.test(address)) address = (url.protocol === 'https:' ? 'wss://' : 'ws://') + address;
+  if (!/^wss?:\/\//iu.test(address)) {
+    // A scheme-less `host:port` is read with the link's own scheme; an address
+    // that HAS another scheme (`http://h`) is not a WebSocket gateway, and is not
+    // turned into `wss://http://h`.
+    if (/^[a-z][a-z\d+.-]*:\/\//iu.test(address)) return NO_ADDRESS;
+    address = (url.protocol === 'https:' ? 'wss://' : 'ws://') + address;
+  }
   // The decoded `addr` is an endpoint like any other: a fragment, an encoded
   // credential key or a missing host in it makes the whole link unusable, and
   // the outer token is never taken as approval to connect to a repaired target.
   const endpoint = endpointOf(address);
-  if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? AMBIGUOUS : NO_ADDRESS;
+  if (endpoint.kind !== 'endpoint') return endpoint.kind === 'credential' ? ADDRESS_CREDENTIAL : NO_ADDRESS;
   return { kind: 'link', link: { address: endpoint.address, token: credentials.get('token'), socket: credentials.get('socket') } };
 }
 

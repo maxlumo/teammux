@@ -139,7 +139,7 @@ for (const [what, text] of REJECTED_LINKS) {
       assert.equal(el(FIELDS.token).value, 'KEEP-TOKEN');
       assert.equal(el(FIELDS.socket).value, '/keep/sock');
       const message = app.document.querySelector('.dlg .config-error[role=alert]');
-      assert.match(message?.textContent ?? '', /^This link (has no server address|cannot be read: a token or socket appears twice)$/u);
+      assert.match(message?.textContent ?? '', /^This link(?:'s address contains a token or socket| has no server address| cannot be read: a token or socket appears twice)$/u);
       for (const secret of ['SECRET-ONE', 'SECRET-TWO', 'secret-socket', 'OUTER-TOKEN']) {
         assert.ok(!app.document.documentElement.outerHTML.includes(secret), `${secret} is nowhere in the page`);
         assert.ok(![...app.document.querySelectorAll('input')].some(i => i.value.includes(secret)), `or in any field`);
