@@ -59,6 +59,26 @@ rewrite the running Vite optimizer's dependency tree. The client-mount
 helper also uses its own disposable build cache and never starts another
 dev server; see [testing.md](testing.md#3-client-behavior-componentmounttestts).
 
+**A dependency change merges only after the live main checkout has the
+dependency installed, with the owner's OK.** This covers a new or changed
+entry in `package.json` (and its lock) and in the Cargo dependencies. The
+live checkout's `node_modules` is what the supervised dev Vite on :5173
+serves, and what `gateway:update`'s `vite build` uses, so a dependency
+that is in the branch but not installed there breaks both at once: the dev
+app gets a 500 on the import and does not load, and `gateway:update`
+refuses to build and leaves the gateway on the previous version. A green
+gate in a worktree proves nothing about it, because the worktree ran its
+own `npm ci`. Incident (10-16): #403 added `qr` 0.7.2, passed review and
+validation, was merged as 9845e69f, broke :5173 at once, and was reverted
+as 39dd125e until the owner approves the install; #392's `css-tree` was
+caught before its merge by a read-only check of the live checkout. The
+owner's checkout is installed with pnpm, a different layout from the
+`package-lock.json` that `npm ci` installs (#396, #392), so the review of a
+dependency change names the exact install step for that checkout (add
+these packages, or a full `bash -c 'npm ci'`, which empties `node_modules`
+and needs the dev server restarted), and the owner runs it or approves it
+before the merge.
+
 ## Commands
 
 ```bash
