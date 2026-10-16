@@ -9344,6 +9344,7 @@ for (const [what, url] of [
   ['an old addr with user info and a password', '/?addr=wss%3A%2F%2Fu%3ASECRET-BOOT%40h%2Fws&token=OUTER-BOOT'],
   ['an old addr that is mailto:a@b', '/?addr=mailto%3Aa%40b&token=OUTER-BOOT'],
   ['an old addr with user info behind extra slashes', '/?addr=wss%3A%2F%2F%2F%2Fu%3ASECRET-BOOT%40h%2Fws&token=OUTER-BOOT'],
+  ['an old addr behind a leading control character', '/?addr=%01wss%3A%2F%2Fu%3ASECRET-BOOT%40h%2Fws&token=OUTER-BOOT'],
   ['an old addr with a tab after the scheme', '/?addr=ws%3A%09%2F%2Fu%3ASECRET-BOOT%40h&token=OUTER-BOOT'],
 ] as const) {
   test(`boot: ${what} is taken out of the address bar and applies nothing`, async (context) => {

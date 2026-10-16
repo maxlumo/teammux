@@ -118,14 +118,23 @@ function canonicalAddress(base: string): string {
  * one is removed from view; what is approved as an endpoint is stricter (see
  * `endpointOf`: exactly `scheme://host`, so the URL parser and this reading
  * cannot disagree about a text that passes). An `@` later in a path or query is
- * not user info. The URL parser also deletes every tab and newline before it
- * reads anything (`ws:<TAB>//user:pw@h`), so this does too (callers pass text
- * already trimmed).
- * Free text with spaces is not an address and is not judged — except behind a
- * `ws:`/`wss:`/`http:`/`https:` start, which the parser reads whatever follows
+ * not user info.
+ *
+ * Whatever the standards URL parser can read is asked of the parser itself: it
+ * trims leading and trailing C0 controls and spaces (U+0000 to U+0020, which
+ * `String.trim` does not: `\u0001wss://user:pw@h`), deletes tabs and newlines
+ * anywhere, and treats a backslash as a slash, so no second copy of those rules
+ * is kept here. The tolerant reading below covers what is not a URL to the
+ * parser (`user:pw@h`, `//user:pw@h`, `@h`, `mailto:a@b`). Free text with
+ * spaces is not an address and is not judged — except behind a `ws:`/`wss:`/
+ * `http:`/`https:` start, which the parser reads whatever follows
  * (`ws:// user:pw@h` is user ` user`). */
 function hasUserInfo(raw: string): boolean {
-  const text = raw.replace(/[\t\n\r]/gu, '');
+  const text = raw.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/gu, '').replace(/[\t\n\r]/gu, '');
+  try {
+    const url = new URL(text);
+    if (url.username !== '' || url.password !== '') return true;
+  } catch { /* not a URL to the parser: read it as text below */ }
   if (!/^(?:wss?|https?):/iu.test(text) && /\s/u.test(text)) return false;
   const rest = text.replace(/^[a-z][a-z\d+.-]*:/iu, '').replace(/^[/\\]+/u, '');
   return (rest.split(/[/\\?#]/u, 1)[0] ?? '').includes('@');

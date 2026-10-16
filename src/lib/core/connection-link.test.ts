@@ -276,6 +276,76 @@ test('whatever the parser deletes or reads around a start of ws, wss, http or ht
   assert.ok(parsed > 20, `the sweep did parse clean text (${parsed})`);
 });
 
+// The classifier and the standards URL parser must agree. This is the invariant, asserted over
+// a grid rather than argued: for every fixture, if `new URL` reads a username or a password,
+// the text is NOT classified as none, is not an endpoint, and is not a usable link. C0
+// characters U+0000 to U+0020 are put around each (the parser trims them; String.trim does not).
+const C0 = Array.from({ length: 33 }, (_, code) => String.fromCharCode(code));
+const AGREEMENT_BASES = [
+  'wss://user:SECRET-ONE@h/ws', 'ws://user@h:9899', 'wss://:SECRET-ONE@h', 'wss:////user:SECRET-ONE@h/ws', 'wss:\\\\user:SECRET-ONE@h/ws',
+  'WSS://user:SECRET-ONE@h/ws?token=OUTER-TOKEN', 'wss://user:SECRET-ONE@h/ws?token=OUTER-TOKEN&socket=%2Fs', 'http://user:SECRET-ONE@h/', 'ws:\t//user:SECRET-ONE@h',
+  'https://front.example/?addr=wss%3A%2F%2Fuser%3ASECRET-ONE%40h%2Fws&token=OUTER-TOKEN',
+  // controls: the same text with no user info, and the legitimate @ in a path or query
+  'wss://h/ws', 'wss://h/ws@x?y=a@b', 'wss://h/ws?token=T', 'user:SECRET-ONE@h:9899', '//user:SECRET-ONE@h/ws', 'mailto:a@b', '@h:9899',
+];
+
+function agreementFixtures(): string[] {
+  const out: string[] = [];
+  for (const base of [...AGREEMENT_BASES, ...DISGUISED]) {
+    out.push(base);
+    for (const c of C0) out.push(`${c}${base}`, `${base}${c}`, `${c}${base}${c}`);
+    out.push(`\u0001${base}\u001f`, ` ${base} `, `\u0001 ${base} \u001f`);
+  }
+  return out;
+}
+
+test('the classifier agrees with the standards URL parser: whenever new URL reads a username or password, the text is not none, not an endpoint, and not a usable link (#405 agreement)', () => {
+  let withUserInfo = 0;
+  let clean = 0;
+  for (const text of agreementFixtures()) {
+    const shown = JSON.stringify(text).replace(/SECRET-ONE/gu, '<secret>');
+    let read = false;
+    try { const url = new URL(text); read = url.username !== '' || url.password !== ''; } catch { /* not a URL */ }
+    const parsed = parseConnectionLink(text);
+    const endpoint = endpointOf(text);
+    if (read) {
+      withUserInfo++;
+      assert.notEqual(parsed.kind, 'none', `new URL reads user info, so it is not none: ${shown}`);
+      assert.notEqual(endpoint.kind, 'endpoint', `nor an endpoint: ${shown}`);
+      assert.equal(buildConnectionLink({ address: text, token: 'T' }), null, `nor buildable: ${shown}`);
+    } else clean++;
+    if (parsed.kind === 'link') {
+      const url = new URL(parsed.link.address);
+      assert.equal(url.username + url.password, '', `a usable link carries no user info: ${shown}`);
+    }
+    if (endpoint.kind === 'endpoint') {
+      const url = new URL(endpoint.address);
+      assert.equal(url.username + url.password, '', `an endpoint carries no user info: ${shown}`);
+    }
+  }
+  assert.ok(withUserInfo > 200 && clean > 200, `the grid covers both sides (${withUserInfo} with user info, ${clean} without)`);
+});
+
+test('every disguised user-info form stays credential-bearing with any C0 character around it, including the forms the URL parser does not read (scheme-relative, scheme-less)', () => {
+  for (const base of [...DISGUISED, 'user:SECRET-ONE@h:9899']) for (const c of C0) {
+    for (const text of [`${c}${base}`, `${base}${c}`, `${c}${base}${c}`]) {
+      const shown = JSON.stringify(text).replace(/SECRET-ONE/gu, '<secret>');
+      assert.equal(kindOf(text), 'unusable:address-credential', `parse ${shown}`);
+      assert.deepEqual(endpointOf(text), { kind: 'credential' }, `endpointOf ${shown}`);
+    }
+  }
+});
+
+test('control characters around a text never make an endpoint: only the whitespace String.trim removes is forgiven', () => {
+  for (const c of C0) {
+    for (const base of ['wss://h/ws', 'ws://h:9899']) {
+      const result = endpointOf(`${c}${base}${c}`);
+      if (/\s/u.test(c)) assert.equal(result.kind, 'endpoint', `whitespace ${JSON.stringify(c)} is trimmed`);
+      else assert.notEqual(result.kind, 'endpoint', `control ${JSON.stringify(c)} is not an endpoint`);
+    }
+  }
+});
+
 test('non-canonical syntax with no user info is not an endpoint either, and is not credential-bearing text', () => {
   for (const text of ['wss:////h/ws', 'wss://h\\ws', 'ws:\\\\h', 'wss:///h']) {
     assert.deepEqual(endpointOf(text), { kind: 'invalid' }, text);
