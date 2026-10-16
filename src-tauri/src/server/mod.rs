@@ -47,25 +47,28 @@ struct HubRoomPoster;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl crate::agent_notifications::RoomPoster for HubRoomPoster {
-    fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) {
+    fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
         post_final_with(session, agent, body, reply_to, |target, line| {
             hub_rpc::deliver_chat_line(session, target, line);
-        });
+        })
     }
 }
 
 /// `post_final` with the typing injected (board #289, validator 11:34: the
 /// rule must be pinned where it is applied, not only in `pane_targets`).
 /// Recorded to every edge target; typed only to the ones with a pane — the
-/// human has none, and reads the room.
+/// human has none, and reads the room. The room row is the posting outcome
+/// (board #404 round 6): when it cannot be written nothing is typed and the
+/// error is returned, so a numbered consumer retries the post.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn post_final_with(session: &str, agent: &str, body: &str, reply_to: &[String], mut deliver: impl FnMut(&str, &str)) {
+fn post_final_with(session: &str, agent: &str, body: &str, reply_to: &[String], mut deliver: impl FnMut(&str, &str)) -> Result<(), String> {
     let room = hub_rpc::project_room(session);
-    let _ = crate::projects::rooms::post_routed(&room, agent, body, reply_to);
+    crate::projects::rooms::post_routed(&room, agent, body, reply_to)?;
     for target in crate::address::pane_targets(reply_to) {
         let line = format!("[tmm chat {}] {agent}: [reply] {body}", hub_rpc::stamp_now());
         deliver(target, &line);
     }
+    Ok(())
 }
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
@@ -78,12 +81,35 @@ mod reply_edge_tests {
         let session = format!("tmm-reply-rec-{}", uuid::Uuid::new_v4());
         let mut typed = Vec::new();
         let edge = vec!["lead".to_string(), "human".to_string()];
-        super::post_final_with(&session, "dev", "done", &edge, |target, line| typed.push((target.to_string(), line.to_string())));
+        super::post_final_with(&session, "dev", "done", &edge, |target, line| typed.push((target.to_string(), line.to_string()))).unwrap();
         assert_eq!(typed.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), vec!["lead"], "never typed to the human");
         assert!(typed[0].1.ends_with("dev: [reply] done"));
         let room = super::hub_rpc::project_room(&session);
         let page = crate::projects::rooms::history_page(&room, None, 5);
         assert_eq!(page["messages"][0]["to"], serde_json::json!(["lead", "human"]), "recorded to both");
+    }
+
+    /// Board #404 round 6: the room row IS the posting outcome. When it
+    /// cannot be written the error is returned and nothing is typed, so a
+    /// numbered consumer retries the whole post; once it can, one row and
+    /// one typed line.
+    #[test]
+    fn a_reply_the_room_did_not_record_is_an_error_and_types_nothing() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-reply-fail-{}", uuid::Uuid::new_v4());
+        let room = super::hub_rpc::project_room(&session);
+        let sql = |q: String| crate::projects::telemetry::exec_test_sql(&q);
+        sql(format!("CREATE TEMP TRIGGER room404 BEFORE INSERT ON hub_msgs WHEN NEW.room = '{room}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
+        let mut typed = Vec::new();
+        let edge = vec!["lead".to_string()];
+        let out = super::post_final_with(&session, "dev", "done", &edge, |target, _| typed.push(target.to_string()));
+        sql("DROP TRIGGER room404;".into());
+        assert!(out.is_err());
+        assert!(typed.is_empty(), "nothing typed for a reply the room does not hold");
+        assert_eq!(crate::projects::rooms::history_page(&room, None, 5)["messages"].as_array().map_or(0, |m| m.len()), 0);
+        super::post_final_with(&session, "dev", "done", &edge, |target, _| typed.push(target.to_string())).unwrap();
+        assert_eq!(typed, ["lead"]);
+        assert_eq!(crate::projects::rooms::history_page(&room, None, 5)["messages"].as_array().unwrap().len(), 1);
     }
 }
 

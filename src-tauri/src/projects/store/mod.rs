@@ -27,7 +27,7 @@ mod registry;
 mod rooms;
 mod schema;
 mod wakes;
-pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLife, DeliveryRow, TurnFact, TurnFacts};
+pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts};
 pub use projects::{Project, Slot, SlotKind};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
 pub use rooms::HubMsg;

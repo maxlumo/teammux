@@ -8,6 +8,7 @@
 
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod dsh;
 pub(crate) mod grok;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
@@ -42,6 +43,7 @@ pub enum Backend {
     Grok,
     Omp,
     Kimi,
+    Dsh,
 }
 
 /// Where a spawn's first prompt goes — see `Backend::first_prompt`.
@@ -56,13 +58,13 @@ pub enum FirstPrompt {
 
 impl Backend {
     /// Every backend, in the one canonical order (seeds, pickers, caps).
-    pub const ALL: [Backend; 6] =
-        [Backend::Kiro, Backend::Claude, Backend::Codex, Backend::Grok, Backend::Omp, Backend::Kimi];
+    pub const ALL: [Backend; 7] =
+        [Backend::Kiro, Backend::Claude, Backend::Codex, Backend::Grok, Backend::Omp, Backend::Kimi, Backend::Dsh];
 
     /// `ALL` as the string names — kept literally beside it so a `const` can
     /// borrow it (`SPAWNABLE_BACKENDS`); the roundtrip test pins the two in
     /// sync.
-    pub const NAMES: [&'static str; 6] = ["kiro", "claude", "codex", "grok", "omp", "kimi"];
+    pub const NAMES: [&'static str; 7] = ["kiro", "claude", "codex", "grok", "omp", "kimi", "dsh"];
 
     /// The documented fallback where an absent backend means kiro (the
     /// registry dispatch's old inline `unwrap_or("kiro")`).
@@ -76,6 +78,7 @@ impl Backend {
             "grok" => Some(Backend::Grok),
             "omp" => Some(Backend::Omp),
             "kimi" => Some(Backend::Kimi),
+            "dsh" => Some(Backend::Dsh),
             _ => None,
         }
     }
@@ -88,6 +91,7 @@ impl Backend {
             Backend::Grok => "grok",
             Backend::Omp => "omp",
             Backend::Kimi => "kimi",
+            Backend::Dsh => "dsh",
         }
     }
 
@@ -129,6 +133,7 @@ impl Backend {
             Backend::Grok => grok::effort_values(),
             Backend::Omp => omp::effort_values(),
             Backend::Kimi => kimi::effort_values(),
+            Backend::Dsh => dsh::effort_values(),
         }
     }
 
@@ -151,6 +156,7 @@ impl Backend {
             Backend::Grok => grok::command_echo(name, args),
             Backend::Omp => omp::command_echo(name, args),
             Backend::Kimi => kimi::command_echo(name, args),
+            Backend::Dsh => dsh::command_echo(name, args),
         }
     }
 
@@ -256,6 +262,37 @@ impl Backend {
             Backend::Grok => grok::SWITCHES_INPUT_MODE,
             Backend::Omp => omp::SWITCHES_INPUT_MODE,
             Backend::Kimi => kimi::SWITCHES_INPUT_MODE,
+            Backend::Dsh => dsh::SWITCHES_INPUT_MODE,
+        }
+    }
+
+    /// Is a line typed while this CLI's turn runs LOST (board #404)? dsh's
+    /// run owns the TTY in raw mode until it exits, so text typed into it
+    /// never reaches a turn. Such a backend has no queue|steer choice, yet
+    /// delivery still holds for it — a fixed queue the gate honours
+    /// (`delivery::input_mode_seen`), never released early by the overdue
+    /// rule (which assumes a CLI that queues typed text itself), and a line
+    /// typed at rest that has not echoed yet already counts as the open
+    /// turn (the run is cold-starting). Every other backend takes typed text
+    /// at any time.
+    pub fn loses_busy_input(self) -> bool {
+        match self {
+            Backend::Dsh => dsh::LOSES_BUSY_INPUT,
+            _ => false,
+        }
+    }
+
+    /// For a backend that loses typed text (`loses_busy_input`): is its pane
+    /// ready for a typed line now, by the CLI side's own fact (dsh: the managed
+    /// shell's ready file, written once ZLE owns the TTY and removed when a
+    /// line runs)? `None` for every other backend, whose turn edges answer.
+    /// `pane_pid` is the pane's own process (`#{pane_pid}`), the one input
+    /// owner a readiness claim may name.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn input_ready(self, home: &std::path::Path, pane_pid: Option<u32>) -> Option<bool> {
+        match self {
+            Backend::Dsh => Some(dsh::input_ready(home, pane_pid)),
+            _ => None,
         }
     }
 
@@ -333,6 +370,7 @@ impl Backend {
             Backend::Grok => grok::normalize_kind(payload),
             Backend::Omp => omp::normalize_kind(payload),
             Backend::Kimi => kimi::normalize_kind(payload),
+            Backend::Dsh => dsh::normalize_kind(payload),
         }
     }
 
@@ -346,6 +384,7 @@ impl Backend {
             Backend::Grok => grok::is_user_prompt_submit(payload),
             Backend::Omp => omp::is_user_prompt_submit(payload),
             Backend::Kimi => kimi::is_user_prompt_submit(payload),
+            Backend::Dsh => dsh::is_user_prompt_submit(payload),
         }
     }
 
@@ -391,6 +430,7 @@ impl Backend {
             Backend::Grok => grok::known(),
             Backend::Omp => omp::known(),
             Backend::Kimi => kimi::known(),
+            Backend::Dsh => dsh::known(),
         }
     }
 
@@ -415,6 +455,7 @@ impl Backend {
             Backend::Grok => grok::render_grok(def, window_name, home, system_prompt, skills),
             Backend::Omp => omp::render_omp(def, window_name, home, system_prompt, skills),
             Backend::Kimi => kimi::render_kimi(def, window_name, home, workspace, system_prompt, skills),
+            Backend::Dsh => dsh::render_dsh(def, window_name, home, system_prompt, skills),
         }
     }
 
@@ -424,10 +465,12 @@ impl Backend {
     /// command …" and the pane falls back to the shell — measured live by
     /// claude, board #224) and its `-p` is one-shot non-interactive, so the
     /// brief is TYPED into the pane once the composer is up — the same
-    /// delivery primitive every later message uses (tenet 5).
+    /// delivery primitive every later message uses (tenet 5). dsh's pane is a
+    /// shell whose typed line IS the turn (board #404), so its brief is typed
+    /// at the prompt the same way.
     pub fn first_prompt(self) -> FirstPrompt {
         match self {
-            Backend::Kimi => FirstPrompt::Typed,
+            Backend::Kimi | Backend::Dsh => FirstPrompt::Typed,
             _ => FirstPrompt::LaunchLine,
         }
     }
@@ -444,6 +487,7 @@ impl Backend {
             Backend::Grok => grok::resume_command(cmd, id),
             Backend::Omp => omp::resume_command(cmd, id),
             Backend::Kimi => kimi::resume_command(cmd, id),
+            Backend::Dsh => dsh::resume_command(cmd, id),
         }
     }
 
@@ -465,6 +509,7 @@ impl Backend {
             Backend::Grok => grok::refresh(home, &notifications.helper_command("grok")),
             Backend::Omp => omp::refresh(home, &notifications.helper_command("omp")),
             Backend::Kimi => kimi::refresh(home, &notifications.helper_command("kimi")),
+            Backend::Dsh => dsh::refresh(home, &notifications.helper_command("dsh")),
         }
     }
 
@@ -482,6 +527,7 @@ impl Backend {
             Backend::Grok => grok::sniff_grok(pane),
             Backend::Omp => omp::sniff_omp(pane),
             Backend::Kimi => kimi::sniff_kimi(pane),
+            Backend::Dsh => dsh::sniff_dsh(pane),
         }
     }
 
@@ -496,6 +542,7 @@ impl Backend {
             Backend::Grok => grok::models_fetch(),
             Backend::Omp => omp::models_fetch(),
             Backend::Kimi => kimi::models_fetch(),
+            Backend::Dsh => dsh::models_fetch(),
         }
     }
 }
@@ -619,7 +666,7 @@ mod tests {
         assert_eq!(Backend::parse(" kiro "), Some(Backend::Kiro), "boundary input is trimmed");
         // kimi is the one CLI without a positional prompt (board #224).
         for b in Backend::ALL {
-            let expected = if b == Backend::Kimi { FirstPrompt::Typed } else { FirstPrompt::LaunchLine };
+            let expected = if matches!(b, Backend::Kimi | Backend::Dsh) { FirstPrompt::Typed } else { FirstPrompt::LaunchLine };
             assert_eq!(b.first_prompt(), expected, "{}", b.name());
         }
         assert_eq!(Backend::parse("openclaw"), None, "detection-only, never spawnable");

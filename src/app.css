@@ -415,6 +415,7 @@ button:disabled {
      in hub.ts, which used to return these as literals (review C, 2026-09-03). */
   --backend-kiro: #a78bfa; --backend-claude: #fb923c; --backend-codex: #94a3b8;
   --backend-kimi: #4ade80; --backend-grok: #e2e8f0; --backend-omp: #ed4abf;
+  --backend-dsh: #4d6bfe;
   --backend-other: #818cf8;
   /* Type scale + motion + metadata ink — APP-WIDE (born Hub-scoped, promoted
      2026-08-18: the settings/connect surfaces had re-grown ad-hoc values).

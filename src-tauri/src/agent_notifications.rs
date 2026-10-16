@@ -28,7 +28,9 @@ const OWNER_MARKER: &str = "tmux-mobile-agent-notify";
 pub trait RoomPoster: Send + Sync {
     /// Record `body` in the room, then deliver it once to each reply target.
     /// `[reply]` deliveries create no reverse edge, preventing ping-pong.
-    fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]);
+    /// `Err` = the room row was not written (board #404 round 6): a numbered
+    /// consumer retries the post; everyone else logs it.
+    fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String>;
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,26 @@ struct State {
     /// was built in (`telemetry::turn_epoch`, the window's last end fact):
     /// a memo from an earlier epoch belongs to a turn that has ended.
     reply_targets: HashMap<String, (u64, Vec<String>)>,
+    /// window key → the highest `tmm_seq` ACCEPTED (board #404 P1-C), a
+    /// cache of the durable mark (`telemetry::hook_mark`) that never runs
+    /// ahead of it. A producer that numbers its envelopes (dsh's plugin and
+    /// shell) can have one published late — a notifier that outlived its
+    /// run, a helper past its bound; anything not above this mark belongs to
+    /// a turn already ended and is dropped instead of reopening it.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    seq_marks: HashMap<String, u64>,
+    /// Inbox files whose fact and effects all succeeded but whose durable
+    /// mark could not be written (review round 5 P1-A): kept, and retried
+    /// for the mark ALONE — a known failure never repeats a visible effect.
+    /// In memory: a restart re-reads such a file whole, like a crash.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    effects_done: std::collections::HashSet<PathBuf>,
+    /// Inbox files whose end fact is written but whose room post failed
+    /// (board #404 round 6): kept, and the next pass retries the end's TAIL
+    /// alone — the post, then the flush — never the end fact again. In
+    /// memory: a restart re-reads such a file whole, like a crash.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    owed: HashMap<PathBuf, Box<EndTail>>,
     /// Injected by the server after the team bus is ready. `None` on mobile.
     /// Box'd pointer stored here so it shares the Mutex with the rest of state.
     poster: Option<Arc<dyn RoomPoster>>,
@@ -184,19 +206,45 @@ impl AgentNotificationHub {
     }
 
     fn consume_inbox(&self) {
+        // Producers (panes) with an envelope not yet accepted in this pass:
+        // their later envelopes wait behind it (review round 5 P1-B).
+        let mut blocked = std::collections::HashSet::new();
         for path in inbox_files(&self.root.join("inbox")) {
-            if let Err(error) = self.consume_file(&path) {
-                eprintln!(
+            match self.consume_file(&path, &mut blocked) {
+                Ok(()) => {}
+                // A numbered envelope that is not yet ACCEPTED stays in the
+                // inbox and is consumed again at the next pass (board #404).
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Err(Consume::Retain(why)) => {
+                    retain_note(&path, &why);
+                    continue;
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Err(Consume::Defer) => continue,
+                // Only a numbered consumption owes a tail, and it keeps it
+                // (`consume_numbered`); never reached, kept all the same.
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Err(Consume::Owed(_, why)) => {
+                    retain_note(&path, &why);
+                    continue;
+                }
+                Err(Consume::Drop(error)) => eprintln!(
                     "⚠️  agent notification ignored ({}): {}",
                     path.display(),
                     error
-                );
+                ),
+            }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                let mut state = self.state.lock().unwrap();
+                state.effects_done.remove(&path);
+                state.owed.remove(&path);
             }
             let _ = std::fs::remove_file(path);
         }
     }
 
-    fn consume_file(&self, path: &Path) -> Result<(), String> {
+    fn consume_file(&self, path: &Path, blocked: &mut std::collections::HashSet<String>) -> Result<(), Consume> {
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
         if metadata.len() > MAX_INBOX_BYTES {
             return Err("payload too large".into());
@@ -204,6 +252,81 @@ impl AgentNotificationHub {
         let envelope: InboxEnvelope =
             serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("invalid envelope: {e}"))?;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(seq) = envelope.payload.get("tmm_seq").and_then(Value::as_u64) {
+            let pane = envelope.pane_id.clone();
+            if blocked.contains(&pane) {
+                return Err(Consume::Defer);
+            }
+            let out = self.consume_numbered(path, envelope, seq);
+            if matches!(out, Err(Consume::Retain(_))) {
+                blocked.insert(pane);
+            }
+            return out;
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let _ = blocked;
+        self.consume_envelope(envelope)
+    }
+
+    /// A numbered envelope (board #404: dsh's plugin and shell) is ACCEPTED,
+    /// and leaves the inbox, only once its turn fact, its effects and its
+    /// durable mark have all succeeded (orchestrator, round 5). Anything
+    /// short of that keeps it (`Retain`), and the producer's later envelopes
+    /// wait behind it (`consume_inbox`), so the fence never passes it:
+    /// * the mark cannot be read (or holds no number) → nothing guessed;
+    /// * a turn fact of its window did not reach the log → stopped BEFORE
+    ///   the room post, the flush and the mark (`consume_envelope`), so a
+    ///   retry repeats no visible effect;
+    /// * the mark cannot be written → its effects are done
+    ///   (`effects_done`): the retry writes the mark alone.
+    /// Only a crash re-reads a file whose effects ran — the at-least-once
+    /// window every backend has (agent-notifications.md).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn consume_numbered(&self, path: &Path, envelope: InboxEnvelope, seq: u64) -> Result<(), Consume> {
+        let (session, window, _) = tmux::resolve_pane_id(&envelope.pane_id).map_err(Consume::Drop)?;
+        let key = window_key(&session, &window);
+        let cached = self.state.lock().unwrap().seq_marks.get(&key).copied();
+        let mark = match cached {
+            Some(m) => m,
+            None => {
+                let m = crate::projects::telemetry::hook_mark(&session, &window).map_err(|e| Consume::Retain(format!("its window's mark cannot be read ({e})")))?;
+                self.state.lock().unwrap().seq_marks.insert(key.clone(), m);
+                m
+            }
+        };
+        if seq <= mark {
+            eprintln!("agent notification dropped: {} came after the edge it precedes (tmm_seq {seq} <= {mark})", path.display());
+            return Ok(());
+        }
+        if !self.state.lock().unwrap().effects_done.contains(path) {
+            // A turn fact that does not reach the log stops consume_envelope
+            // itself, before any visible effect (`numbered_write_failed`); a
+            // room post that fails leaves the end's tail owed, retried alone.
+            let owed = self.state.lock().unwrap().owed.remove(path);
+            let done = crate::projects::telemetry::with_numbered(Some((&session, &window)), || match owed {
+                Some(tail) => self.finish_end(*tail),
+                None => self.consume_envelope(envelope),
+            });
+            if let Err(Consume::Owed(tail, why)) = done {
+                self.state.lock().unwrap().owed.insert(path.to_path_buf(), tail);
+                return Err(Consume::Retain(format!("its reply could not be posted ({why})")));
+            }
+            done?;
+            self.state.lock().unwrap().effects_done.insert(path.to_path_buf());
+            #[cfg(test)]
+            if crash_at("before_mark") {
+                return Err(Consume::Retain("test: the gateway died before the mark".into()));
+            }
+        }
+        crate::projects::telemetry::set_hook_mark(&session, &window, seq).map_err(|e| Consume::Retain(format!("its mark could not be written ({e})")))?;
+        let mut state = self.state.lock().unwrap();
+        state.effects_done.remove(path);
+        state.seq_marks.insert(key, seq);
+        Ok(())
+    }
+
+    fn consume_envelope(&self, envelope: InboxEnvelope) -> Result<(), Consume> {
         // A SUB-AGENT thread's event is the agent's own work, like a tool call
         // (board #169; codex 0.153.4 runs spawn_agent children in-process and
         // the managed hooks fire for every thread — see backends/codex.rs for
@@ -287,6 +410,11 @@ impl AgentNotificationHub {
                 if !prompt.trim().is_empty() {
                     self.start_turn(&session, &window, &prompt);
                     crate::projects::telemetry::record_prompt(&session, &window, &prompt);
+                    // A numbered producer's prompt that did not reach the log
+                    // stops here: not accepted, retried (round 5 P1-C).
+                    if crate::projects::telemetry::numbered_write_failed() {
+                        return Err(Consume::Retain("its prompt did not reach the log".into()));
+                    }
                 }
             }
             // A turn just opened: sniff while the pane is fresh.
@@ -339,6 +467,18 @@ impl AgentNotificationHub {
             crate::projects::vitals::sniff_window_soon(&session, &window);
         }
 
+        // A numbered producer's end fact that did not reach the log stops
+        // BEFORE the room post and the flush (round 5 P1-C): retrying a known
+        // failure repeats no visible effect; only a crash may.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if crate::projects::telemetry::numbered_write_failed() {
+            return Err(Consume::Retain("its end fact did not reach the log".into()));
+        }
+        #[cfg(test)]
+        if crash_at("after_end") {
+            return Err(Consume::Retain("test: the gateway died between the end row and the reply".into()));
+        }
+
         // A completion that said nothing may leave the agent in the middle of its
         // work; `stalls` answers it once (see there).
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -346,54 +486,68 @@ impl AgentNotificationHub {
             crate::projects::stalls::on_empty_end(&session, &window);
         }
 
-        // Stop hook final: record the answer and deliver it to every sender
-        // whose addressed request this turn carried:
-        //   1. Only managed windows (constraint 3): a .tmm/agents/<name> dir
-        //      must exist, so direct or adopted agents never auto-post.
-        //   2. There must be a reply body worth posting.
-        //   3. `[reply]` inputs create no reverse edge, so delivery is one hop.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if normalized.kind == "completed" {
-            self.maybe_auto_post(&session, &window, &normalized, &reply_to);
-        }
-        // The turn's end edge is the first flush trigger (board #257): lines
-        // held for this busy queue-mode agent are typed now, as one prompt.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if matches!(normalized.kind.as_str(), "completed" | "failed") {
-            crate::projects::delivery::flush(&session, &window);
-        }
-
-        // Remember the agent's own conversation id (even across duplicate
-        // events): this map is how a restored window resumes the exact
-        // conversation instead of starting a blank one. The unread-inbox UI
-        // that used to be recorded here retired 2026-09-01 (owner: "原来我用的
-        // 感觉不是很好用") — the project room's auto-post + read cursor and the
-        // derived status dots are the one notification language now.
         let _ = pane;
-        if let Some(id) = normalized.agent_session_id {
-            self.state
-                .lock()
-                .unwrap()
-                .sessions
-                .insert(window_key(&session, &window), id);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let post = if normalized.kind == "completed" { self.auto_post_body(&session, &window, &normalized) } else { None };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let post = None;
+        self.finish_end(EndTail {
+            session,
+            window,
+            post,
+            reply_to,
+            flush: matches!(normalized.kind.as_str(), "completed" | "failed"),
+            agent_session_id: normalized.agent_session_id,
+        })
+    }
+
+    /// What an end does after its fact is written, in order, as ONE step a
+    /// numbered consumer can retry alone (board #404 round 6):
+    /// * Stop hook final: record the answer in the room and deliver it to
+    ///   every sender whose addressed request this turn carried (`[reply]`
+    ///   inputs create no reverse edge, so delivery is one hop). A room row
+    ///   that was not written is a failed effect for a numbered producer:
+    ///   `Consume::Owed`, nothing after it runs, and the next pass retries
+    ///   from here. Anyone else logs it and goes on, as before.
+    /// * the turn's end edge is the first flush trigger (board #257): lines
+    ///   held for this busy queue-mode agent are typed now, as one prompt.
+    /// * the agent's own conversation id is remembered (even across
+    ///   duplicate events): this map is how a restored window resumes the
+    ///   exact conversation instead of starting a blank one.
+    fn finish_end(&self, tail: EndTail) -> Result<(), Consume> {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(body) = &tail.post {
+            let poster = self.state.lock().unwrap().poster.clone();
+            if let Some(p) = poster {
+                if let Err(e) = p.post_final(&tail.session, &tail.window, body, &tail.reply_to) {
+                    if crate::projects::telemetry::numbered_active() {
+                        return Err(Consume::Owed(Box::new(tail), e));
+                    }
+                    eprintln!("⚠  the final reply of {}:{} was not recorded in the room: {e}", tail.session, tail.window);
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if tail.flush {
+            crate::projects::delivery::flush(&tail.session, &tail.window);
+        }
+        let EndTail { session, window, agent_session_id, .. } = tail;
+        if let Some(id) = agent_session_id {
+            self.state.lock().unwrap().sessions.insert(window_key(&session, &window), id);
         }
         Ok(())
     }
 
-    /// Record a managed agent's final reply and deliver it along this turn's
-    /// reply edge.
+    /// The body a managed agent's final reply is posted with, if any: only
+    /// managed windows (constraint 3: a .tmm/agents/<name> dir must exist,
+    /// so direct or adopted agents never auto-post) and a reply worth
+    /// posting, truncated at the chat-path budget.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn maybe_auto_post(
-        &self,
-        session: &str,
-        window: &str,
-        normalized: &Normalized,
-        reply_to: &[String],
-    ) {
+    fn auto_post_body(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
         // Nothing to post — skip.
         let reply = normalized.full_reply.as_deref().unwrap_or_default();
         if reply.is_empty() {
-            return;
+            return None;
         }
         // Constraint 3: managed-only gate. `projects::managed_home` is the ONE
         // definition of "an agent this app created" — shared with hub_agents'
@@ -401,16 +555,8 @@ impl AgentNotificationHub {
         // The resolved window IS the name now (board #120), so the old
         // index → list_panes → name round-trip (which lost the post when a
         // rename landed between hook fire and consume) is gone.
-        let window_name = window;
-        if crate::projects::managed_home(session, window_name).is_none() {
-            return;
-        }
-        // Truncate at the chat-path budget.
-        let body = truncate(reply, MAX_REPLY_CHARS);
-        let poster = self.state.lock().unwrap().poster.clone();
-        if let Some(p) = poster {
-            p.post_final(session, &window_name, &body, reply_to);
-        }
+        crate::projects::managed_home(session, window)?;
+        Some(truncate(reply, MAX_REPLY_CHARS))
     }
 
     pub fn helper_command(&self, backend: &str) -> String {
@@ -442,19 +588,31 @@ impl AgentNotificationHub {
             r#"#!/bin/sh
 umask 077
 exec 2>/dev/null
+# A producer that numbers its envelopes (board #404: TMM_HOOK_SEQ, digits)
+# gets a RECEIPT: exit 0 only once the envelope is in the inbox, 1 if it is
+# not, so it can keep and resend it. Every other caller keeps the fail-soft
+# contract: always 0, a hook never fails its CLI.
+case "${{TMM_HOOK_SEQ:-}}" in ''|*[!0-9]*) fail=0 ;; *) fail=1 ;; esac
 backend="${{1:-}}"
-case "$backend" in {backends}) ;; *) exit 0 ;; esac
+case "$backend" in {backends}) ;; *) exit $fail ;; esac
 pane="${{TMUX_PANE:-}}"
-case "$pane" in %*[!0-9]*|%|"") exit 0 ;; esac
+case "$pane" in %*[!0-9]*|%|"") exit $fail ;; esac
 inbox={inbox}
-mkdir -p "$inbox" || exit 0
-tmp=$(mktemp "$inbox/.tmp.XXXXXX") || exit 0
+mkdir -p "$inbox" || exit $fail
+tmp=$(mktemp "$inbox/.tmp.XXXXXX") || exit $fail
 trap 'rm -f "$tmp"' EXIT
 payload=
 IFS= read -r payload || true
-[ -n "$payload" ] || exit 0
-printf '{{"backend":"%s","pane_id":"%s","payload":%s}}\n' "$backend" "$pane" "$payload" > "$tmp" || exit 0
-mv "$tmp" "$inbox/$(date +%s)-$$.json" || exit 0
+[ -n "$payload" ] || exit $fail
+printf '{{"backend":"%s","pane_id":"%s","payload":%s}}\n' "$backend" "$pane" "$payload" > "$tmp" || exit $fail
+# The number also rides the file name, zero-padded, so two envelopes of one
+# pane written in the same second are consumed in the order they were made.
+# Without one the name keeps its old `<secs>-<pid>` shape.
+case "${{TMM_HOOK_SEQ:-}}" in
+  ''|*[!0-9]*) name="$(date +%s)-$$" ;;
+  *) name="$(date +%s)-$(printf '%020d' "$TMM_HOOK_SEQ")-$$" ;;
+esac
+mv "$tmp" "$inbox/$name.json" || exit $fail
 trap - EXIT
 exit 0
 "#
@@ -468,6 +626,81 @@ exit 0
         }
         Ok(())
     }
+}
+
+/// Why an inbox file was not consumed: `Drop` = it never will be (invalid,
+/// unknown pane) and the file goes; `Retain` = a numbered envelope not yet
+/// accepted (its mark unreadable or unwritten, a fact not persisted) — the
+/// file stays, is retried at the next pass, and its producer's later
+/// envelopes wait behind it (board #404).
+enum Consume {
+    Drop(String),
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Retain(String),
+    /// Kept, silently: an earlier envelope of the same producer is not yet
+    /// accepted, and this one waits behind it (round 5 P1-B).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Defer,
+    /// A numbered end whose room post failed: its tail is owed and retried
+    /// alone (round 6); turned into `Retain` by `consume_numbered`.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Owed(Box<EndTail>, String),
+}
+
+/// The part of an end that runs after its fact (`finish_end`). Mobile
+/// builds post and flush nothing.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+struct EndTail {
+    session: String,
+    window: String,
+    post: Option<String>,
+    reply_to: Vec<String>,
+    flush: bool,
+    agent_session_id: Option<String>,
+}
+
+impl From<String> for Consume {
+    fn from(e: String) -> Self {
+        Consume::Drop(e)
+    }
+}
+
+impl From<&str> for Consume {
+    fn from(e: &str) -> Self {
+        Consume::Drop(e.to_string())
+    }
+}
+
+
+/// Say once per file that it is being kept for a retry, not at every poll.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn retain_note(path: &Path, why: &str) {
+    static SEEN: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut seen = seen.lock().unwrap();
+    if seen.len() > 1024 {
+        seen.clear();
+    }
+    if seen.insert(path.to_path_buf()) {
+        eprintln!("⚠  agent notification kept for a retry ({}): {why}", path.display());
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the named point at which consumption "crashes" once.
+    static CRASH: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn crash_at(point: &str) -> bool {
+    CRASH.with(|c| {
+        let hit = c.borrow().is_some_and(|p| p == point);
+        if hit {
+            *c.borrow_mut() = None;
+        }
+        hit
+    })
 }
 
 /// Bridge to the project capturer, which asks by (session, window) because that
@@ -497,12 +730,23 @@ fn inbox_files(dir: &Path) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
         .collect();
-    files.sort_by_key(|p| {
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let secs = name.split('-').next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-        (secs, name)
-    });
+    files.sort_by_key(|p| inbox_order(p));
     files
+}
+
+/// The consume order of one inbox file (board #404): the second it was
+/// published, then the producer's own sequence (`<secs>-<seq>-<pid>`; an
+/// envelope without one — every other backend, and any written by an older
+/// helper — counts as 0), then the name, exactly as before. One rule for a
+/// directory that mixes both shapes; a backend that names no sequence keeps
+/// today's order (`inbox_is_consumed_in_the_order_the_hooks_wrote_it`).
+fn inbox_order(path: &Path) -> (u64, u64, String) {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    let stem = name.strip_suffix(".json").unwrap_or(&name);
+    let parts: Vec<&str> = stem.split('-').collect();
+    let secs = parts.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let seq = if parts.len() == 3 { parts[1].parse::<u64>().unwrap_or(0) } else { 0 };
+    (secs, seq, name)
 }
 
 /// PreToolUse/PostToolUse across backends → `(tool name, detail)`
@@ -1420,10 +1664,11 @@ mod tests {
         // A poster that records what it was asked to post.
         struct Spy(std::sync::Mutex<Vec<(String, String, String, Vec<String>)>>);
         impl RoomPoster for Spy {
-            fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) {
+            fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
                 self.0.lock().unwrap().push((
                     session.into(), agent.into(), body.into(), reply_to.to_vec()
                 ));
+                Ok(())
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
@@ -1510,8 +1755,9 @@ mod tests {
         ).unwrap().trim().to_string();
         struct Spy(std::sync::Mutex<Vec<Vec<String>>>);
         impl RoomPoster for Spy {
-            fn post_final(&self, _s: &str, _a: &str, _b: &str, reply_to: &[String]) {
+            fn post_final(&self, _s: &str, _a: &str, _b: &str, reply_to: &[String]) -> Result<(), String> {
                 self.0.lock().unwrap().push(reply_to.to_vec());
+                Ok(())
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
@@ -1750,8 +1996,9 @@ mod tests {
 
         struct Spy(std::sync::Mutex<Vec<(String, String, Vec<String>)>>);
         impl RoomPoster for Spy {
-            fn post_final(&self, _session: &str, agent: &str, body: &str, reply_to: &[String]) {
+            fn post_final(&self, _session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
                 self.0.lock().unwrap().push((agent.into(), body.into(), reply_to.to_vec()));
+                Ok(())
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
@@ -1817,6 +2064,817 @@ mod tests {
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A managed dsh agent for real, minus the model (board #404): a pane
+    /// running the rendered dsh shell; the generated plugin under node as a
+    /// stand-in dsh that replays one ROOT turn whose prompt is its task and
+    /// waits for `release-<n>`; the REAL notify helper behind a gate whose
+    /// behaviour for the next envelopes of a kind is the file `mode-prompt` /
+    /// `mode-stop`, one mode per line, each line consumed by one envelope:
+    /// `fail` (exit 1, nothing published),
+    /// `hold` (1.5 s, inside the plugin's 3 s bound), `hang` (10 s, past every
+    /// bound), `late` (fail now, publish 4 s later from a child that outlives
+    /// the invoker); this inbox and its hub; `deliver_chat_line`.
+    struct DshRig {
+        ws: PathBuf,
+        root: PathBuf,
+        hub: AgentNotificationHub,
+        spy: std::sync::Arc<RigSpy>,
+        session: String,
+        target: String,
+    }
+
+    /// The rig's room: records each post; `fail` posts are refused first
+    /// (a room write that failed), one per call.
+    struct RigSpy(std::sync::Mutex<Vec<(String, String, Vec<String>)>>, std::sync::atomic::AtomicUsize);
+    impl RoomPoster for RigSpy {
+        fn post_final(&self, _session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
+            use std::sync::atomic::Ordering;
+            if self.1.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                return Err("room write failed".into());
+            }
+            self.0.lock().unwrap().push((agent.into(), body.into(), reply_to.to_vec()));
+            Ok(())
+        }
+    }
+
+    impl DshRig {
+        fn start() -> Option<DshRig> {
+            use crate::backends::dsh::tests::{pane_id, wait_for, which};
+            crate::projects::tests::use_test_store();
+            let (zsh, node) = (which("zsh")?, which("node")?);
+            let ws_raw = std::env::temp_dir().join(format!("tmm-dsh-e2e-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&ws_raw).unwrap();
+            let ws = ws_raw.canonicalize().unwrap();
+            let home = ws.join(".tmm/agents/d1");
+            let (dsh_home, zdot, bin) = (home.join("dsh"), home.join("zsh"), ws.join("bin"));
+            for d in [&dsh_home, &zdot, &bin] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            std::fs::write(home.join("launch.json"), json!({"backend": "dsh", "input_mode": "queue", "cmd": "x"}).to_string()).unwrap();
+            let root = std::env::temp_dir().join(format!("tmm-dsh-hub-{}", uuid::Uuid::new_v4()));
+            let hub = AgentNotificationHub::load_at(root.clone());
+            hub.ensure_helper().unwrap();
+            let spy = std::sync::Arc::new(RigSpy(std::sync::Mutex::new(Vec::new()), std::sync::atomic::AtomicUsize::new(0)));
+            hub.set_room_poster(spy.clone());
+            let q = |p: &Path| crate::shell::quote_always(&p.to_string_lossy());
+            // Without its trailing `# marker` comment, which would swallow the
+            // rest of a line it is embedded in.
+            let full = hub.helper_command("dsh");
+            let helper = full.split(" # ").next().unwrap().to_string();
+            std::fs::write(
+                ws.join("notify.sh"),
+                format!(
+                    "p=$(cat)\nkind=other\ncase \"$p\" in *UserPromptSubmit*) kind=prompt ;; *'\"Stop\"'*) kind=stop ;; esac\n\
+                     f={ws}/mode-$kind\nm=$(head -n 1 $f 2>/dev/null)\n[ -e $f ] && {{ tail -n +2 $f > $f.n; mv $f.n $f; [ -s $f ] || rm -f $f; }}\n\
+                     case \"$m\" in\n  hold) sleep 1.5 ;;\n  hang) sleep 10 ;;\n  fail) exit 1 ;;\n  late) ( sleep 4; printf '%s\\n' \"$p\" | {helper} ) >/dev/null 2>&1 & exit 1 ;;\nesac\n\
+                     printf '%s\\n' \"$p\" | {helper}\n",
+                    ws = q(&ws),
+                ),
+            )
+            .unwrap();
+            let notify = format!("/bin/sh {}", q(&ws.join("notify.sh")));
+            let plugin = dsh_home.join("plugins/tmm-telemetry/index.mjs");
+            std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+            std::fs::write(&plugin, crate::backends::dsh::plugin_js(&notify)).unwrap();
+            std::fs::write(zdot.join(".zshenv"), crate::backends::dsh::zshenv()).unwrap();
+            std::fs::write(zdot.join(".zshrc"), crate::backends::dsh::zshrc(&notify)).unwrap();
+            std::fs::write(
+                ws.join("driver.mjs"),
+                format!(
+                    "import * as p from {plugin}\nimport fs from 'node:fs'\nconst dir = {dir}\n\
+                     const task = process.argv[process.argv.indexOf('--') + 1]\n\
+                     const n = fs.readdirSync(dir).filter((f) => f.startsWith('task-')).length + 1\n\
+                     fs.writeFileSync(`${{dir}}/task-${{n}}`, task)\n\
+                     let h\np.apply({{ on: (e, f) => {{ if (e === 'session/event') h = f }} }}, {{}})\n\
+                     const root = {{ header: {{ id: 'session-e2e-1' }} }}\n\
+                     h(root, {{ type: 'turn/start', data: {{ turn: n }} }})\n\
+                     h(root, {{ type: 'user/message', data: {{ role: 'user', source: {{ kind: 'user' }}, content: [{{ type: 'text', text: task }}] }} }})\n\
+                     const t = setInterval(() => {{ if (fs.existsSync(`${{dir}}/release-${{n}}`)) {{ clearInterval(t)\n\
+                     h(root, {{ type: 'assistant/message', data: {{ message: {{ role: 'assistant', content: [{{ type: 'text', text: `done ${{n}}` }}] }} }} }})\n\
+                     h(root, {{ type: 'turn/end', data: {{ turn: n, reason: {{ kind: 'completed' }} }} }})\nprocess.exit(0) }} }}, 30)\n",
+                    plugin = serde_json::to_string(&plugin.to_string_lossy()).unwrap(),
+                    dir = serde_json::to_string(&ws.to_string_lossy()).unwrap(),
+                ),
+            )
+            .unwrap();
+            std::fs::write(bin.join("dsh"), format!("#!/bin/sh\nexec {} {} \"$@\"\n", q(&node), q(&ws.join("driver.mjs")))).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            let session = format!("tmm-dsh-e2e-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let cmd = format!(
+                "env -i HOME={} TERM=xterm-256color LANG=C.UTF-8 TMUX_PANE=\"$TMUX_PANE\" PATH={}:/usr/bin:/bin ZDOTDIR={} DSH_HOME={} {} -i",
+                q(&ws), q(&bin), q(&zdot), q(&dsh_home), q(&zsh)
+            );
+            if crate::tmux::run_tmux(&["new-session", "-d", "-s", &session, "-n", "d1", "-c", &ws.to_string_lossy(), &cmd]).is_err() {
+                let _ = std::fs::remove_dir_all(&ws);
+                return None;
+            }
+            crate::projects::adopt(&session, Some(&session)).expect("adopt the scratch session as a project");
+            let target = pane_id(&session);
+            let rig = DshRig { ws, root, hub, spy, session, target };
+            wait_for("the dsh prompt", 15, || rig.ready());
+            Some(rig)
+        }
+        fn ready(&self) -> bool {
+            crate::tmux::capture_pane_plain(&self.target, Some(20)).unwrap_or_default().contains(crate::backends::dsh::READY_MARKER)
+        }
+        /// What a gateway restart does to the hub: a new one over the same
+        /// inbox, its memory empty.
+        fn restart_gateway(&mut self) {
+            self.hub = AgentNotificationHub::load_at(self.root.clone());
+            self.hub.set_room_poster(self.spy.clone());
+        }
+        fn mode(&self, kind: &str, mode: Option<&str>) {
+            let f = self.ws.join(format!("mode-{kind}"));
+            match mode {
+                Some(m) => std::fs::write(f, m).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(f);
+                }
+            }
+        }
+        fn release(&self, n: usize) {
+            std::fs::write(self.ws.join(format!("release-{n}")), "").unwrap();
+        }
+        fn tasks(&self) -> usize {
+            std::fs::read_dir(&self.ws).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("task-")).count()
+        }
+        fn task(&self, n: usize) -> String {
+            std::fs::read_to_string(self.ws.join(format!("task-{n}"))).unwrap()
+        }
+        fn inbox(&self) -> Vec<Value> {
+            inbox_files(&self.root.join("inbox"))
+                .iter()
+                .map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f).unwrap()).unwrap()["payload"].clone())
+                .collect()
+        }
+        /// Every inbox file is named by its own payload's sequence
+        /// (`<secs>-<seq, 20 digits>-<pid>.json`): a publisher that lost the
+        /// number (a record it could not parse) writes an unsequenced name,
+        /// whose ORDER is only wrong when no second boundary falls between
+        /// two writes — so the order alone pins it only sometimes. The name
+        /// pins it on every run.
+        fn assert_numbered_names(&self) {
+            for f in inbox_files(&self.root.join("inbox")) {
+                let name = f.file_stem().unwrap().to_string_lossy().to_string();
+                let payload = serde_json::from_str::<Value>(&std::fs::read_to_string(&f).unwrap()).unwrap()["payload"].clone();
+                let seq = payload["tmm_seq"].as_u64().unwrap_or_else(|| panic!("{name}: no tmm_seq in {payload}"));
+                let parts: Vec<&str> = name.split('-').collect();
+                assert_eq!(parts.len(), 3, "{name}: an unsequenced name for tmm_seq {seq}");
+                assert_eq!(parts[1], format!("{seq:020}"), "{name}: named by another number than its tmm_seq {seq}");
+            }
+        }
+        fn inbox_has(&self, event: &str) -> bool {
+            self.inbox().iter().any(|p| p["hook_event_name"] == event)
+        }
+        fn held(&self) -> usize {
+            crate::projects::telemetry::held_rows(&self.session, "d1").len()
+        }
+        fn busy(&self) -> bool {
+            crate::projects::telemetry::turn_busy(&self.session, "d1")
+        }
+        fn posts(&self) -> Vec<(String, String, Vec<String>)> {
+            self.spy.0.lock().unwrap().clone()
+        }
+        fn deliver(&self, line: &str) -> bool {
+            crate::projects::deliver_chat_line(&self.session, "d1", line)
+        }
+        /// What `hub_agent_interrupt` does, in its order: the turn is ended and
+        /// its held lines dropped app-side FIRST, then Escape goes in.
+        fn hub_interrupt(&self) {
+            crate::projects::delivery::interrupt(&self.session, "d1", || crate::projects::telemetry::record_interrupt(&self.session, "d1"));
+            self.hub.end_turn(&self.session, "d1");
+            crate::tmux::send_keys(&self.target, "Escape", false).unwrap();
+        }
+    }
+
+    impl Drop for DshRig {
+        fn drop(&mut self) {
+            let _ = crate::tmux::run_tmux(&["kill-session", "-t", &self.session]);
+            let _ = std::fs::remove_dir_all(&self.ws);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Board #404 P1-A and P1-C, end to end through production code.
+    ///
+    /// * P1-A: a line delivered while run 1 is cold-starting and one while
+    ///   its turn is open are HELD — a feed-read flush in between types
+    ///   nothing — then typed after its Stop as ONE combined prompt, one run;
+    ///   the reply goes to the first sender.
+    /// * the ACTUAL hub interrupt path, while run 2's prompt envelope is still
+    ///   in its notifier: the app ends the turn first; a line delivered
+    ///   before the shell is back is held (not typed into the raw TTY), and
+    ///   typed once it is; the prompt published before the shell's Stop never
+    ///   reopens the ended turn.
+    #[test]
+    fn a_busy_dsh_turn_holds_lines_and_ends_in_order() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let l1 = "[tmm chat 2026-10-16 12:00] lead: @d1 first";
+        let l2 = "[tmm chat 2026-10-16 12:00] reviewer: @d1 during the cold start";
+        let l3 = "[tmm chat 2026-10-16 12:01] lead: @d1 during the turn\nwith a second line";
+        assert!(rig.deliver(l1));
+        assert!(rig.deliver(l2));
+        assert_eq!(rig.held(), 1, "the run owns the TTY from its Enter on");
+        crate::projects::delivery::flush_idle(&rig.session);
+        assert_eq!(rig.held(), 1, "a feed-read flush before the prompt edge types nothing");
+        wait_for("run 1's prompt envelope", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        assert!(rig.busy());
+        assert!(rig.deliver(l3));
+        assert_eq!(rig.held(), 2);
+        crate::projects::delivery::flush_idle(&rig.session);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(rig.tasks(), 1, "nothing was typed into the running turn");
+        assert_eq!(rig.task(1), l1);
+
+        rig.mode("prompt", Some("hold"));
+        rig.release(1);
+        wait_for("run 1's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts(), vec![("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()])]);
+        assert_eq!(rig.held(), 0);
+        wait_for("run 2", 10, || rig.tasks() == 2);
+        assert_eq!(rig.task(2), format!("{l2}\n\n{l3}"), "the held lines, whole, in order, as one prompt");
+
+        // The hub interrupt while run 2's prompt envelope is held 1.5 s in its
+        // notifier (Escape is read after it, never inside a publish).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        rig.hub_interrupt();
+        assert!(!rig.busy(), "the app ended the turn");
+        let l4 = "[tmm chat 2026-10-16 12:02] validator: @d1 right after the interrupt";
+        assert!(rig.deliver(l4));
+        assert_eq!(rig.held(), 1, "the shell is not back yet: held, not typed into the raw TTY");
+        wait_for("run 2's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        rig.mode("prompt", None);
+        assert_eq!(rig.held(), 0);
+        wait_for("run 3, typed once the shell was back", 10, || rig.tasks() == 3);
+        assert_eq!(rig.task(3), l4);
+        assert_eq!(rig.posts().len(), 1, "an interrupted turn posts nothing");
+        wait_for("run 3's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.release(3);
+        wait_for("run 3's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 3".to_string(), vec!["validator".to_string()])));
+        assert!(!rig.busy());
+    }
+
+    /// Board #404 P1-C, the failure outcomes of publication, each consumed
+    /// BEFORE and AFTER the late event:
+    /// * a prompt publish that FAILS now and is published 4 s later by a child
+    ///   that outlived it: the shell reports the prompt itself (the plugin
+    ///   only marks a publish that succeeded), the turn ends and replies to
+    ///   its sender, and the late copy is dropped (tmm_seq at or below the
+    ///   window's mark): the turn stays ended, no second reply;
+    /// * a prompt notifier that HANGS past the plugin's 3 s bound: killed, the
+    ///   run goes on, the shell reports the prompt;
+    /// * a shell Stop whose notifier hangs: killed after 3 s, the prompt is
+    ///   usable at once; the Stop is kept and published first by the next
+    ///   run, so that turn still ends and answers its sender, in order.
+    #[test]
+    fn dsh_publication_failures_never_reopen_a_turn_or_hang_the_shell() {
+        use crate::backends::dsh::tests::wait_for;
+        // The durable log is written (to the throwaway test store): the fence
+        // a gateway restart must keep is read back from it.
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(mut rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let events = || {
+            crate::projects::telemetry::recent_events(&session, 0)
+                .into_iter()
+                .filter(|e| e.kind == "prompt" || e.kind == "notif")
+                .map(|e| e.kind)
+                .collect::<Vec<_>>()
+        };
+
+        rig.mode("prompt", Some("late"));
+        assert!(rig.deliver("[tmm chat 2026-10-16 12:10] lead: @d1 late prompt"));
+        wait_for("run 1", 10, || rig.tasks() == 1);
+        rig.release(1);
+        wait_for("the shell's prompt and Stop", 10, || rig.inbox_has("Stop"));
+        assert_eq!(rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["UserPromptSubmit", "Stop"]);
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts(), vec![("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()])]);
+        assert!(!rig.busy());
+        // P1-C1: the gateway restarts before the late copy lands — the fence
+        // is durable (meta, written once the Stop was wholly consumed), not
+        // the hub's memory.
+        assert!(crate::projects::telemetry::hook_mark(&rig.session, "d1").unwrap() > 0, "written after the envelope's consumption");
+        rig.restart_gateway();
+        wait_for("the late copy", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        assert!(!rig.busy(), "the late prompt did not reopen the ended turn across a gateway restart");
+        assert_eq!(events(), ["prompt", "notif"]);
+        rig.mode("prompt", None);
+
+        rig.mode("prompt", Some("hang"));
+        assert!(rig.deliver("[tmm chat 2026-10-16 12:11] reviewer: @d1 hanging notifier"));
+        wait_for("run 2", 10, || rig.tasks() == 2);
+        rig.release(2);
+        wait_for("run 2's Stop", 15, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 2".to_string(), vec!["reviewer".to_string()])));
+        assert!(!rig.busy());
+        rig.mode("prompt", None);
+
+        rig.mode("stop", Some("hang"));
+        assert!(rig.deliver("[tmm chat 2026-10-16 12:12] lead: @d1 hanging Stop"));
+        wait_for("run 3", 10, || rig.tasks() == 3);
+        wait_for("run 3's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        let at = std::time::Instant::now();
+        rig.release(3);
+        wait_for("the shell's ready file", 8, || rig.ws.join(".tmm/agents/d1/dsh/tmm/ready").is_file());
+        assert!(rig.busy(), "run 3's Stop has not been published: its turn has not ended yet");
+        // The shell must be READING again within the bound: a line typed now
+        // starts its run at once, not when the hung notifier lets go (10 s).
+        assert!(rig.deliver("[tmm chat 2026-10-16 12:13] validator: @d1 after it"));
+        wait_for("run 4", 15, || rig.tasks() == 4);
+        assert!(at.elapsed() < std::time::Duration::from_secs(7), "the hung Stop publish was bounded: {:?}", at.elapsed());
+        // The killed Stop is kept (tmm/unsent) and published FIRST by the next
+        // run, under its own number: run 3 ends and answers its sender before
+        // run 4's prompt opens the next turn.
+        wait_for("run 4's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        let kinds: Vec<String> = rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(kinds, ["Stop", "UserPromptSubmit"], "run 3's Stop before run 4's prompt");
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 3".to_string(), vec!["lead".to_string()])));
+        assert!(rig.busy(), "run 4 is running");
+        rig.release(4);
+        wait_for("run 4's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 4".to_string(), vec!["validator".to_string()])));
+        assert!(!rig.busy());
+        assert_eq!(events(), ["prompt", "notif", "prompt", "notif", "prompt", "notif", "prompt", "notif"]);
+    }
+
+    /// Board #404 P1-C2: a publication is believed only on a RECEIPT (the
+    /// helper's exit 0 once the envelope is in the inbox), and every terminal
+    /// fact that was not published is kept and published once, in order:
+    /// * the shell's Stop fails at once → kept; the next run's plugin sends
+    ///   it before its own prompt: turn 1 ends and answers its sender once;
+    /// * that resend fails again → the plugin's own prompt queues BEHIND it
+    ///   (a plugin-written unsent record), and the shell, at run 2's end,
+    ///   retries both, oldest first, then its Stop;
+    /// * the REAL helper cannot write (inbox not writable) → exit 1, kept;
+    ///   once it can, the next publisher sends it first.
+    ///
+    /// Every retried record keeps its own number, checked on the inbox NAME
+    /// (`assert_numbered_names`), not only on the order: a record the shell
+    /// could not read the number from (the plugin wrote `tmm_seq` last) is
+    /// published unsequenced, and that reorders only within one second —
+    /// the order alone caught it on some runs (the 66-control run, 20:29).
+    #[test]
+    fn dsh_publication_receipts_keep_every_terminal_fact() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let kinds = || rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let unsent = rig.ws.join(".tmm/agents/d1/dsh/tmm/unsent");
+        let ready_file = rig.ws.join(".tmm/agents/d1/dsh/tmm/ready");
+
+        // Stop fails at once.
+        assert!(rig.deliver("[tmm chat 2026-10-16 13:50] lead: @d1 one"));
+        wait_for("run 1's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        rig.mode("stop", Some("fail\nfail"));
+        rig.release(1);
+        wait_for("the failed Stop kept", 10, || std::fs::read_to_string(&unsent).unwrap_or_default().contains("\"Stop\""));
+        wait_for("the shell back", 10, || ready_file.is_file());
+        assert!(rig.inbox().is_empty() && rig.busy(), "nothing published: turn 1 has not ended");
+        // Run 2: its plugin's resend fails too (second `fail`) → its prompt
+        // queues behind; the shell retries both at the end, then its Stop.
+        assert!(rig.deliver("[tmm chat 2026-10-16 13:51] reviewer: @d1 two"));
+        wait_for("run 2", 10, || rig.tasks() == 2);
+        wait_for("the plugin's queued prompt", 10, || std::fs::read_to_string(&unsent).unwrap_or_default().contains("UserPromptSubmit"));
+        assert!(rig.inbox().is_empty(), "nothing overtook the unsent Stop");
+        rig.release(2);
+        wait_for("run 2's Stop", 10, || rig.inbox_has("Stop") && kinds().len() == 3);
+        rig.assert_numbered_names();
+        assert_eq!(kinds(), ["Stop", "UserPromptSubmit", "Stop"], "turn 1's Stop, then turn 2 — the plugin's own record retried by the shell");
+        assert!(!unsent.exists());
+        rig.hub.consume_inbox();
+        assert_eq!(
+            rig.posts(),
+            vec![
+                ("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()]),
+                ("d1".to_string(), "done 2".to_string(), vec!["reviewer".to_string()]),
+            ],
+            "each turn answered once, its own sender"
+        );
+        assert!(!rig.busy());
+
+        // The real helper cannot write.
+        assert!(rig.deliver("[tmm chat 2026-10-16 13:52] validator: @d1 three"));
+        wait_for("run 3's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        use std::os::unix::fs::PermissionsExt;
+        let inbox = rig.root.join("inbox");
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o500)).unwrap();
+        rig.release(3);
+        wait_for("the unwritten Stop kept", 10, || std::fs::read_to_string(&unsent).unwrap_or_default().contains("\"Stop\""));
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(rig.busy());
+        wait_for("the shell back", 10, || ready_file.is_file());
+        assert!(rig.deliver("[tmm chat 2026-10-16 13:53] lead: @d1 four"));
+        wait_for("run 4's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        assert_eq!(kinds(), ["Stop", "UserPromptSubmit"]);
+        rig.assert_numbered_names();
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 3".to_string(), vec!["validator".to_string()])));
+        rig.release(4);
+        wait_for("run 4's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 4".to_string(), vec!["lead".to_string()])));
+        assert_eq!(rig.posts().len(), 4, "every turn answered exactly once");
+        assert!(!rig.busy());
+    }
+
+    /// Board #404 review round 5 (orchestrator 16:00, option 2): consumption
+    /// is AT LEAST ONCE, the window every backend has — a numbered envelope's
+    /// fence is durable only after its whole consumption, and nothing is
+    /// accepted on a guess:
+    /// * the gateway dies between the end row and the reply → the Stop is
+    ///   still in the inbox; the next gateway posts the reply (never zero);
+    /// * it dies after the reply, before the mark → read again: the reply may
+    ///   be posted twice, never lost;
+    /// * the end fact's INSERT fails → not accepted, kept, retried: the turn
+    ///   is ended exactly once in the log;
+    /// * a fresh gateway cannot read the window's mark → kept, not consumed
+    ///   past an unknown fence; consumed once the mark reads.
+    #[test]
+    fn dsh_consumption_is_at_least_once_and_never_guesses_a_fence() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(mut rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let crash = |point: &'static str| CRASH.with(|c| *c.borrow_mut() = Some(point));
+        let session = rig.session.clone();
+        let kinds = || crate::projects::telemetry::durable_kinds(&session).into_iter().filter(|k| k == "prompt" || k == "notif").collect::<Vec<_>>();
+        let replies = |rig: &DshRig, body: &str| rig.posts().iter().filter(|p| p.1 == body).count();
+        let run = |rig: &DshRig, n: usize, line: &str| {
+            assert!(rig.deliver(line));
+            wait_for("the run's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+            rig.hub.consume_inbox();
+            assert!(rig.busy());
+            rig.release(n);
+            wait_for("the run's Stop", 10, || rig.inbox_has("Stop"));
+        };
+
+        // Dies between the end row and the reply.
+        run(&rig, 1, "[tmm chat 2026-10-16 16:10] lead: @d1 one");
+        crash("after_end");
+        rig.hub.consume_inbox();
+        assert_eq!(replies(&rig, "done 1"), 0);
+        assert!(rig.inbox_has("Stop"), "not accepted: the Stop is still in the inbox");
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        assert_eq!(replies(&rig, "done 1"), 1, "the reply is posted, never zero times");
+        assert!(rig.inbox().is_empty() && !rig.busy());
+
+        // Dies after the reply, before the mark.
+        run(&rig, 2, "[tmm chat 2026-10-16 16:11] reviewer: @d1 two");
+        crash("before_mark");
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 2".to_string(), vec!["reviewer".to_string()])));
+        assert!(rig.inbox_has("Stop"), "the fence never precedes the whole consumption");
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        assert!(replies(&rig, "done 2") >= 1, "at least once");
+        assert!(rig.inbox().is_empty() && !rig.busy());
+
+        // The end fact's INSERT fails.
+        run(&rig, 3, "[tmm chat 2026-10-16 16:12] validator: @d1 three");
+        crate::projects::telemetry::exec_test_sql(&format!(
+            "CREATE TEMP TRIGGER end404 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'notif'
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ));
+        rig.hub.consume_inbox();
+        assert!(rig.inbox_has("Stop"), "a turn fact that did not reach the log does not accept its envelope");
+        assert_eq!(replies(&rig, "done 3"), 0, "a known failure posts nothing");
+        crate::projects::telemetry::exec_test_sql("DROP TRIGGER end404;");
+        rig.hub.consume_inbox();
+        assert!(rig.inbox().is_empty() && !rig.busy());
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 3".to_string(), vec!["validator".to_string()])));
+        assert_eq!(replies(&rig, "done 3"), 1);
+        let k = kinds();
+        assert_eq!(&k[k.len() - 2..], ["prompt", "notif"], "retried, and turn 3 ended exactly once in the log: {k:?}");
+
+        // A fresh gateway cannot read the mark (a temp table shadows meta).
+        rig.restart_gateway();
+        assert!(rig.deliver("[tmm chat 2026-10-16 16:13] lead: @d1 four"));
+        wait_for("run 4's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        crate::projects::telemetry::exec_test_sql("CREATE TEMP TABLE meta (shadow INTEGER);");
+        rig.hub.consume_inbox();
+        crate::projects::telemetry::exec_test_sql("DROP TABLE temp.meta;");
+        assert!(rig.inbox_has("UserPromptSubmit"), "kept: never consumed past a fence it could not read");
+        assert!(!rig.busy());
+        rig.hub.consume_inbox();
+        assert!(rig.inbox().is_empty() && rig.busy());
+        rig.release(4);
+        wait_for("run 4's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 4".to_string(), vec!["lead".to_string()])));
+        assert!(!rig.busy());
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #404 round 5, the reviewer's combinations (orchestrator 17:30:
+    /// a numbered envelope leaves the inbox only once its fact, its effects
+    /// and its durable mark all succeeded; the producer's later envelopes
+    /// wait behind it).
+    ///
+    /// A failed fact with repeated polling, a held line, and N+1 queued
+    /// behind N: run 1's Stop (N) cannot write its end row. Polls post
+    /// nothing, type nothing and change no live state; a feed-read flush
+    /// (the shell IS back) types the held line, whose prompt (N+1) then waits
+    /// behind N, never accepted past it. Repaired and restarted, both land in
+    /// order, each answered once, the prompt with its delivery receipt. Then
+    /// a prompt whose row cannot be written keeps the receipt it settled.
+    #[test]
+    fn a_numbered_window_waits_behind_its_unaccepted_envelope() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(mut rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let rows = || crate::projects::telemetry::durable_turn_rows(&session);
+        let kinds = || rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let sql = crate::projects::telemetry::exec_test_sql;
+        let fail = |kind: &str| {
+            sql(&format!(
+                "CREATE TEMP TRIGGER fail404 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = '{kind}'
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+            ))
+        };
+
+        assert!(rig.deliver("[tmm chat 2026-10-16 17:40] lead: @d1 one"));
+        wait_for("run 1's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        assert!(rig.deliver("[tmm chat 2026-10-16 17:40] reviewer: @d1 two"));
+        assert_eq!(rig.held(), 1);
+        rig.release(1);
+        wait_for("run 1's Stop", 10, || rig.inbox_has("Stop"));
+        fail("notif");
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+        }
+        assert!(rig.posts().is_empty(), "no reply while its end fact is unwritten");
+        assert_eq!((rig.held(), rig.tasks()), (1, 1), "the hub flushed nothing");
+        assert!(rig.busy(), "a fact that did not reach the log changes no live state");
+        assert_eq!(rows(), [("prompt".to_string(), "app".to_string())]);
+        crate::projects::delivery::flush_idle(&rig.session);
+        wait_for("run 2", 10, || rig.tasks() == 2);
+        wait_for("run 2's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+        }
+        assert_eq!(kinds(), ["Stop", "UserPromptSubmit"], "N+1 waits behind N; N is never dropped as old");
+        assert!(rig.posts().is_empty());
+        assert_eq!(rows().len(), 1, "nothing accepted past N");
+        sql("DROP TRIGGER fail404;");
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        assert!(rig.inbox().is_empty());
+        assert_eq!(rig.posts(), vec![("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()])]);
+        assert_eq!(rows().iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["prompt", "notif", "prompt"], "both landed, in order");
+        assert_eq!(rows()[2].1, "app", "run 2's prompt took its delivery receipt");
+        assert!(rig.busy());
+        rig.release(2);
+        wait_for("run 2's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 2".to_string(), vec!["reviewer".to_string()])));
+        assert_eq!(rig.posts().len(), 2);
+
+        // A prompt whose row cannot be written, while any write back into
+        // deliveries fails too (a best-effort restore would lose the receipt
+        // there): the settlement and the row are one transaction, so the
+        // receipt stays pending through every retry and a restart, and the
+        // prompt that finally lands acknowledges it — never local input.
+        assert!(rig.deliver("[tmm chat 2026-10-16 17:41] validator: @d1 three"));
+        wait_for("run 3's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        let receipts = crate::projects::telemetry::pending_receipts(&session, "d1");
+        assert_eq!(receipts.len(), 1);
+        fail("prompt");
+        sql(&format!("CREATE TEMP TRIGGER nodel404 BEFORE INSERT ON deliveries WHEN NEW.session = '{session}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+            assert_eq!(crate::projects::telemetry::pending_receipts(&session, "d1"), receipts, "the receipt is still pending, its id and message");
+        }
+        assert!(rig.inbox_has("UserPromptSubmit") && !rig.busy());
+        sql("DROP TRIGGER fail404; DROP TRIGGER nodel404;");
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        assert!(rig.busy());
+        assert!(crate::projects::telemetry::pending_receipts(&session, "d1").is_empty());
+        let (via, refs) = crate::projects::telemetry::durable_prompts(&session).pop().unwrap();
+        assert_eq!(via, "app", "never converted to local input");
+        assert!(refs.contains(&format!("\"id\":{}", receipts[0].0)), "the prompt names the receipt it settled: {refs}");
+        assert_eq!(crate::projects::telemetry::durable_prompts(&session).len(), 3, "one row per prompt");
+        rig.release(3);
+        wait_for("run 3's Stop", 10, || rig.inbox_has("Stop"));
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts().last().cloned(), Some(("d1".to_string(), "done 3".to_string(), vec!["validator".to_string()])));
+        assert_eq!(rig.posts().len(), 3);
+        assert_eq!(rows().iter().filter(|r| r.0 == "notif").count(), 3, "every turn ended exactly once in the log");
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #404 round 6 (orchestrator 21:20, the P2): the room row is an
+    /// effect, so a post the room refused is a failed effect. The Stop is
+    /// kept, its mark is not written, the held line is not typed (the flush
+    /// comes after the post), and the next pass retries the post ALONE —
+    /// the end row is written once. When the room takes it: exactly one
+    /// post, then the flush, then the mark.
+    #[test]
+    fn a_room_post_that_failed_is_retried_alone() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let notifs = || crate::projects::telemetry::durable_kinds(&session).iter().filter(|k| *k == "notif").count();
+        assert!(rig.deliver("[tmm chat 2026-10-16 21:40] lead: @d1 one"));
+        wait_for("run 1's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.hub.consume_inbox();
+        let mark = crate::projects::telemetry::hook_mark(&session, "d1").unwrap();
+        assert!(rig.deliver("[tmm chat 2026-10-16 21:40] reviewer: @d1 two"));
+        assert_eq!(rig.held(), 1);
+        rig.release(1);
+        wait_for("run 1's Stop", 10, || rig.inbox_has("Stop"));
+        rig.spy.1.store(3, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+            assert!(rig.posts().is_empty(), "the room refused it");
+            assert!(rig.inbox_has("Stop"), "kept");
+            assert_eq!(crate::projects::telemetry::hook_mark(&session, "d1").unwrap(), mark, "no mark before the post");
+            assert_eq!((rig.held(), rig.tasks()), (1, 1), "nothing flushed before the post");
+            assert_eq!(notifs(), 1, "the end fact is written once");
+        }
+        rig.hub.consume_inbox();
+        assert_eq!(rig.posts(), vec![("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()])], "exactly one post");
+        assert!(rig.inbox().is_empty());
+        assert!(crate::projects::telemetry::hook_mark(&session, "d1").unwrap() > mark);
+        assert_eq!(notifs(), 1);
+        wait_for("the held line typed on the flush", 10, || rig.tasks() == 2);
+        assert_eq!(rig.held(), 0);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// The reviewer's combination A: the durable mark cannot be WRITTEN,
+    /// the gateway restarts, then an old prompt (a late copy, numbered below
+    /// the run's own envelopes) arrives. The envelope whose mark failed stays
+    /// in the inbox, its later envelopes wait behind it, and polling retries
+    /// the mark alone (no effect repeats); after the restart the old prompt
+    /// is never accepted, and once the mark can be written everything lands,
+    /// the old prompt dropped.
+    #[test]
+    fn a_failed_mark_write_keeps_its_envelope_across_a_restart() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(mut rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let rows = || crate::projects::telemetry::durable_turn_rows(&session);
+        let sql = crate::projects::telemetry::exec_test_sql;
+        let prompts = |rig: &DshRig| rig.inbox().iter().filter(|p| p["hook_event_name"] == "UserPromptSubmit").count();
+
+        rig.mode("prompt", Some("late"));
+        assert!(rig.deliver("[tmm chat 2026-10-16 17:42] lead: @d1 one"));
+        wait_for("run 1", 10, || rig.tasks() == 1);
+        rig.release(1);
+        wait_for("the shell's prompt and Stop", 10, || rig.inbox_has("Stop"));
+        sql(&format!(
+            "CREATE TEMP TRIGGER mark404i BEFORE INSERT ON meta WHEN NEW.key LIKE 'hook_seq:{session}:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+             CREATE TEMP TRIGGER mark404u BEFORE UPDATE ON meta WHEN NEW.key LIKE 'hook_seq:{session}:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ));
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+        }
+        assert_eq!(rig.inbox().len(), 2, "the prompt whose mark failed is kept; the Stop waits behind it");
+        assert_eq!(rows().len(), 1, "polling retried the mark alone");
+        assert!(rig.posts().is_empty());
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        wait_for("the late copy", 10, || prompts(&rig) == 2);
+        for _ in 0..3 {
+            rig.hub.consume_inbox();
+        }
+        assert_eq!(prompts(&rig), 2, "the old prompt is never accepted while the fence is unwritten");
+        assert!(rig.posts().is_empty());
+        sql("DROP TRIGGER mark404i; DROP TRIGGER mark404u;");
+        rig.hub.consume_inbox();
+        assert!(rig.inbox().is_empty(), "repaired: kept envelopes land, the old prompt is dropped");
+        assert_eq!(rig.posts(), vec![("d1".to_string(), "done 1".to_string(), vec!["lead".to_string()])]);
+        assert!(!rig.busy());
+        rig.restart_gateway();
+        rig.hub.consume_inbox();
+        assert!(!rig.busy());
+        assert_eq!(rows().last().map(|r| r.0.clone()), Some("notif".to_string()), "nothing reopened the turn");
+        rig.mode("prompt", None);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #404 P1-C2, the helper contract itself: with `TMM_HOOK_SEQ` its
+    /// exit status is a receipt (1 when the envelope did not reach the
+    /// inbox); without one it stays fail-soft (0 always), as every other
+    /// backend's hooks rely on.
+    #[test]
+    fn the_helpers_exit_is_a_receipt_only_for_a_numbered_producer() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("tmm-receipt-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        let run = |seq: Option<&str>, pane: Option<&str>| {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg(hub.helper_command("dsh")).env_remove("TMM_HOOK_SEQ").env_remove("TMUX_PANE");
+            if let Some(seq) = seq {
+                cmd.env("TMM_HOOK_SEQ", seq);
+            }
+            if let Some(pane) = pane {
+                cmd.env("TMUX_PANE", pane);
+            }
+            let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"{\"hook_event_name\":\"Stop\"}\n").unwrap();
+            child.wait().unwrap().code()
+        };
+        assert_eq!(run(Some("5"), Some("%7")), Some(0), "published");
+        assert_eq!(run(Some("6"), None), Some(1), "no pane: nothing published, and it says so");
+        assert_eq!(run(None, None), Some(0), "an unnumbered caller is never failed");
+        std::fs::set_permissions(root.join("inbox"), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(run(Some("7"), Some("%7")), Some(1), "the write failed: no receipt");
+        assert_eq!(run(None, Some("%7")), Some(0), "fail-soft for every other backend");
+        std::fs::set_permissions(root.join("inbox"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Board #404 P1-C / P2-E: a producer's `TMM_HOOK_SEQ` names the inbox
+    /// file (digits only, zero-padded); without one the name keeps its old
+    /// `<secs>-<pid>` shape. One order for a mixed directory: the second,
+    /// then the sequence (missing = 0), then arrival.
+    #[test]
+    fn the_helper_names_a_producers_sequence_and_the_inbox_honours_it() {
+        let root = std::env::temp_dir().join(format!("tmm-seq-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        let run = |seq: Option<&str>| {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg(hub.helper_command("dsh")).env("TMUX_PANE", "%7").env_remove("TMM_HOOK_SEQ");
+            if let Some(seq) = seq {
+                cmd.env("TMM_HOOK_SEQ", seq);
+            }
+            let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"{\"hook_event_name\":\"Stop\"}\n").unwrap();
+            child.wait().unwrap();
+        };
+        run(Some("1792123456789012"));
+        run(Some("12; rm -rf x"));
+        run(None);
+        let names: Vec<String> = std::fs::read_dir(root.join("inbox")).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        let shapes: Vec<usize> = { let mut v: Vec<usize> = names.iter().map(|n| n.split('-').count()).collect(); v.sort(); v };
+        assert_eq!(shapes, [2, 2, 3], "only a valid sequence changes the name: {names:?}");
+        assert!(names.iter().any(|n| n.split('-').nth(1) == Some("00001792123456789012")), "{names:?}");
+
+        // A mixed directory within one second: two unsequenced names (an older
+        // helper's, or another backend's) and two sequenced ones whose pids
+        // run against their sequence.
+        let dir = root.join("order");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["100-900.json", "100-00000000000000000002-1.json", "100-100.json", "100-00000000000000000001-9.json", "99-00000000000000000009-5.json"] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        let order: Vec<String> = inbox_files(&dir).iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(
+            order,
+            ["99-00000000000000000009-5.json", "100-100.json", "100-900.json", "100-00000000000000000001-9.json", "100-00000000000000000002-1.json"],
+            "the second; then the sequence, none = 0 (an unsequenced pair keeps today's order); then the name"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

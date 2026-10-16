@@ -391,6 +391,7 @@ fn persist_now(session: &str, ev: &ActivityEvent) -> Option<i64> {
         s.insert_activity_with(session, &ev.window, ev.ts, &ev.kind, &ev.text, &ev.tool, &ev.via, &ev.state, &refs, requesters.as_deref())
     });
     if let Err(e) = &written {
+        note_failed_write(session, &ev.window, &ev.kind);
         // Fail-soft, but not SILENT: a lost write is a hole in the trace, and the
         // whole point of the log is that it is complete. Reported on the first
         // failure and every 100th after that, so a broken database is visible in
@@ -881,6 +882,12 @@ fn turn_fact_held(
     let row = event.and_then(|(kind, text, tool, via, deliveries)| {
         push_full_with(session, window, ts * 1000 + now_ms() % 1000, kind, text, tool, via, deliveries, requesters)
     });
+    // A numbered producer's fact that did not reach the log changes no live
+    // state either (board #404 round 5): its envelope is retried, and until
+    // then the window reads as it did, so nothing is released on it.
+    if numbered_write_failed() {
+        return false;
+    }
     // Tests widen the gap between the row and the order, so a lost lock
     // shows up as a reordering instead of a lucky pass.
     #[cfg(test)]
@@ -952,6 +959,9 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64
             }
         }
     }, None);
+    if numbered_write_failed() {
+        return;
+    }
     #[cfg(test)]
     if let Some(hook) = IN_END_HOOK.lock().unwrap().take() {
         hook();
@@ -1252,6 +1262,129 @@ pub fn held_sessions() -> Vec<String> {
     queue(|s| s.held_sessions()).unwrap_or_default()
 }
 
+thread_local! {
+    /// The numbered hook envelope being consumed on this thread (board #404):
+    /// its producer's session and window, and whether every one of that
+    /// window's turn facts it wrote reached the log.
+    static NUMBERED: std::cell::RefCell<Option<(String, String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` — the consumption of one numbered envelope from `session`:`window`
+/// — with its TURN FACTS watched: one whose INSERT fails makes
+/// `numbered_write_failed` true inside `f`, and the consumer stops there,
+/// before any visible effect (review C1b, round 5b P1-C). Facts written for
+/// other windows on the way (a delivery warning for a recipient) and
+/// non-turn rows are not the producer's acceptance.
+pub fn with_numbered<T>(producer: Option<(&str, &str)>, f: impl FnOnce() -> T) -> T {
+    let before = NUMBERED.with(|n| n.replace(producer.map(|(s, w)| (s.to_string(), w.to_string(), true))));
+    let out = f();
+    NUMBERED.with(|n| n.replace(before));
+    out
+}
+
+/// Is a numbered envelope of exactly this window being consumed on this
+/// thread, with the durable log on? Its prompt settles in one transaction.
+fn numbered_persists(session: &str, window: &str) -> bool {
+    (!cfg!(test) || PERSIST_IN_TEST.with(|p| p.get()))
+        && NUMBERED.with(|n| n.borrow().as_ref().is_some_and(|(s, w, _)| s == session && w == window))
+}
+
+/// Is a numbered envelope being consumed on this thread?
+pub fn numbered_active() -> bool {
+    NUMBERED.with(|n| n.borrow().is_some())
+}
+
+/// Has a turn fact of the numbered envelope being consumed on this thread
+/// failed to reach the log? Its consumer stops before any visible effect.
+pub fn numbered_write_failed() -> bool {
+    NUMBERED.with(|n| n.borrow().as_ref().is_some_and(|(_, _, ok)| !ok))
+}
+
+/// A durable write failed: if it was a turn fact of the numbered envelope's
+/// own window, that envelope is not accepted.
+fn note_failed_write(session: &str, window: &str, kind: &str) {
+    if !matches!(kind, "prompt" | "notif") {
+        return;
+    }
+    NUMBERED.with(|n| {
+        if let Some((s, w, ok)) = &mut *n.borrow_mut() {
+            if s == session && w == window {
+                *ok = false;
+            }
+        }
+    });
+}
+
+/// The highest `tmm_seq` this window's numbered producer has had ACCEPTED
+/// (board #404), durable in the store's `meta` — written only after the
+/// envelope's whole consumption (`set_hook_mark`). `Err` when it cannot be
+/// read: the caller keeps the envelope rather than guess a fence.
+pub fn hook_mark(session: &str, window: &str) -> Result<u64, String> {
+    if cfg!(test) && !PERSIST_IN_TEST.with(|p| p.get()) {
+        return Ok(0);
+    }
+    match queue(|s| s.meta_get(&hook_mark_key(session, window)))? {
+        None => Ok(0),
+        // A stored value that is not a number is UNKNOWN, never 0 (round 5).
+        Some(v) => v.parse().map_err(|_| format!("the stored mark {v:?} is not a number")),
+    }
+}
+
+/// Advance the mark, after the envelope was fully consumed — never before.
+pub fn set_hook_mark(session: &str, window: &str, seq: u64) -> Result<(), String> {
+    if cfg!(test) && !PERSIST_IN_TEST.with(|p| p.get()) {
+        return Ok(());
+    }
+    queue(|s| s.meta_set(&hook_mark_key(session, window), &seq.to_string()))
+}
+
+fn hook_mark_key(session: &str, window: &str) -> String {
+    format!("hook_seq:{session}:{window}")
+}
+
+/// Test seam for modules outside `projects`: run SQL (a temp trigger that
+/// fails one kind of INSERT) on the store's connection.
+#[cfg(test)]
+pub(crate) fn exec_test_sql(sql: &str) {
+    super::with_store(|s| s.exec_test_sql(sql)).unwrap();
+}
+
+/// Test seam: the kinds of a session's DURABLE rows, oldest first (the ring
+/// keeps a row whose INSERT failed; the log does not).
+#[cfg(test)]
+pub(crate) fn durable_kinds(session: &str) -> Vec<String> {
+    super::with_store(|s| s.activity_since(session, 0, 1000)).unwrap().into_iter().map(|r| r.kind).collect()
+}
+
+/// Test seam: a session's durable prompt/notif rows as (kind, via).
+#[cfg(test)]
+pub(crate) fn durable_turn_rows(session: &str) -> Vec<(String, String)> {
+    super::with_store(|s| s.activity_since(session, 0, 1000))
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == "prompt" || r.kind == "notif")
+        .map(|r| (r.kind, r.via))
+        .collect()
+}
+
+/// Test seam: a window's outstanding (typed, not yet echoed) delivery rows,
+/// as (id, msg id).
+#[cfg(test)]
+pub(crate) fn pending_receipts(session: &str, window: &str) -> Vec<(i64, String)> {
+    queue(|s| s.pending_deliveries(session, Some(window))).unwrap().into_iter().map(|r| (r.id, r.msg_id)).collect()
+}
+
+/// Test seam: a session's durable prompt rows as (via, delivery refs JSON).
+#[cfg(test)]
+pub(crate) fn durable_prompts(session: &str) -> Vec<(String, String)> {
+    super::with_store(|s| s.activity_since(session, 0, 1000))
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == "prompt")
+        .map(|r| (r.via, r.deliveries))
+        .collect()
+}
+
 /// Windows of a session with held lines.
 pub fn held_windows(session: &str) -> Vec<String> {
     queue(|s| s.held_windows(session)).unwrap_or_default()
@@ -1295,9 +1428,14 @@ pub fn record_held_blocked(session: &str, window: &str, rows: &[super::store::De
 /// the same way). Each is said once as `undelivered (interrupted)` — no row
 /// id, no retry, exactly like a copy-mode refusal (#250): senders resend.
 pub fn drop_held(session: &str, window: &str) {
+    drop_held_because(session, window, "interrupted");
+}
+
+/// Retire the window's held lines, each said once as `undelivered (reason)`.
+fn drop_held_because(session: &str, window: &str, reason: &str) {
     for row in held_rows(session, window) {
         if queue(|s| s.delete_delivery_id(row.id)).unwrap_or(false) {
-            record_undelivered(session, window, &row.shown(), "interrupted");
+            record_undelivered(session, window, &row.shown(), reason);
         }
     }
 }
@@ -1369,6 +1507,12 @@ pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
     if command_hit {
         settled.extend(next_command.map(|row| Settled { row, span: None }));
     }
+    // A NUMBERED producer's prompt (board #404 round 6) settles its receipts
+    // and writes its row in ONE store transaction: retried after a failure,
+    // it finds exactly the receipts it matched, never a deleted one.
+    if numbered_persists(session, window) {
+        return record_numbered_prompt(&order, session, window, ts, prompt, settled, next_command, command_hit);
+    }
     // A row counts only if THIS echo deleted it: two echoes racing for one
     // row cannot both call it theirs.
     let won: Vec<Settled> = settled
@@ -1382,20 +1526,7 @@ pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
     }
     let refs: Vec<DeliveryRef> = won.iter().map(|hit| DeliveryRef::of(hit.row)).collect();
     let text = truncate_chars(&stored_prompt(&won, prompt), MAX_PROMPT_CHARS);
-    // A prompt that carried neither the candidate command nor any chat line
-    // of ours proves that command echoes nothing: that ONE row is dropped,
-    // the rows behind it stay owed. A prompt that was a chat line of ours
-    // (a held batch released at the turn's end, say) leaves it alone.
-    // A prompt that only QUOTES the command ("please do goal a", typed by a
-    // person) is not its echo and no proof it echoed nothing (orchestrator
-    // 11:43): the command waits behind the turn that prompt opened.
-    if let Some(row) = next_command.filter(|_| !command_hit && won.is_empty()) {
-        if strip_ws(prompt).contains(&strip_ws(&row.line)) {
-            let _ = queue(|s| s.requeue_command(row.id));
-        } else {
-            let _ = queue(|s| s.delete_delivery_id(row.id));
-        }
-    }
+    settle_next_command(prompt, next_command, command_hit, won.is_empty());
     // A turn just opened. This is the ONE honest "it started working" signal:
     // pane activity cannot be it, because an agent TUI repaints its prompt
     // (spinner, status line, cursor) long after it finished.
@@ -1411,6 +1542,95 @@ pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
         r.prompt_seq = seq;
     }, Some(requesters));
     acked
+}
+
+/// A prompt that carried neither the candidate command nor any chat line
+/// of ours proves that command echoes nothing: that ONE row is dropped,
+/// the rows behind it stay owed. A prompt that was a chat line of ours
+/// (a held batch released at the turn's end, say) leaves it alone.
+/// A prompt that only QUOTES the command ("please do goal a", typed by a
+/// person) is not its echo and no proof it echoed nothing (orchestrator
+/// 11:43): the command waits behind the turn that prompt opened.
+fn settle_next_command(prompt: &str, next_command: Option<&super::store::DeliveryRow>, command_hit: bool, none_won: bool) {
+    if let Some(row) = next_command.filter(|_| !command_hit && none_won) {
+        if strip_ws(prompt).contains(&strip_ws(&row.line)) {
+            let _ = queue(|s| s.requeue_command(row.id));
+        } else {
+            let _ = queue(|s| s.delete_delivery_id(row.id));
+        }
+    }
+}
+
+/// `record_prompt` for a NUMBERED producer whose facts are durable (board
+/// #404 round 6): the settlement and the row in one transaction
+/// (`Store::settle_prompt`). On failure nothing changed — no receipt
+/// retired, no row, no live state — and the consumer retries the envelope
+/// (`numbered_write_failed`).
+#[allow(clippy::too_many_arguments)]
+fn record_numbered_prompt(
+    order: &std::sync::MutexGuard<'static, ()>,
+    session: &str,
+    window: &str,
+    ts: u64,
+    prompt: &str,
+    settled: Vec<Settled>,
+    next_command: Option<&super::store::DeliveryRow>,
+    command_hit: bool,
+) -> bool {
+    let ids: Vec<i64> = settled.iter().map(|h| h.row.id).collect();
+    let requesters = crate::address::requesters(prompt);
+    let ts_ms = ts * 1000 + now_ms() % 1000;
+    let mut event = None;
+    let written = queue(|s| {
+        s.settle_prompt(&ids, |won_ids| {
+            let won: Vec<Settled> = settled.iter().filter(|h| won_ids.contains(&h.row.id)).cloned().collect();
+            let refs: Vec<DeliveryRef> = won.iter().map(|hit| DeliveryRef::of(hit.row)).collect();
+            let ev = ActivityEvent {
+                id: 0,
+                ts: ts_ms,
+                window: window.to_string(),
+                kind: "prompt".into(),
+                text: truncate_chars(&stored_prompt(&won, prompt), MAX_PROMPT_CHARS),
+                tool: String::new(),
+                via: if won.is_empty() { "local" } else { "app" }.into(),
+                state: String::new(),
+                deliveries: refs,
+                requesters: Some(requesters.clone()),
+            };
+            let row = super::store::PromptRow {
+                session: session.to_string(),
+                window: window.to_string(),
+                ts: ts_ms,
+                text: ev.text.clone(),
+                via: ev.via.clone(),
+                deliveries: if ev.deliveries.is_empty() { String::new() } else { serde_json::to_string(&ev.deliveries).unwrap_or_default() },
+                requesters: Some(serde_json::to_string(&requesters).unwrap_or_default()),
+            };
+            event = Some(ev);
+            row
+        })
+    });
+    #[cfg(test)]
+    if let Some(hook) = IN_PROMPT_SETTLED_HOOK.lock().unwrap().take() {
+        hook();
+    }
+    let (won_ids, row_id) = match written {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("⚠  a numbered prompt for {session}:{window} did not reach the log ({e}); its receipts stay pending, it is retried");
+            note_failed_write(session, window, "prompt");
+            return false;
+        }
+    };
+    let mut ev = event.expect("built inside the transaction");
+    ev.id = row_id;
+    ring_push(session, ev);
+    settle_next_command(prompt, next_command, command_hit, won_ids.is_empty());
+    turn_fact_held(order, session, window, ts, |_| false, None, |r, ts, seq| {
+        r.prompt = Some(ts);
+        r.prompt_seq = seq;
+    }, None);
+    !won_ids.is_empty()
 }
 
 /// The prompt as the activity log stores it for DISPLAY (board #279,
@@ -1449,6 +1669,7 @@ fn stored_prompt(won: &[Settled], prompt: &str) -> String {
 /// range of the echo's own characters (its whitespace as it came back), or
 /// `None` for a row settled without a place (an all-whitespace line, a
 /// command, a line whose every occurrence another row already claimed).
+#[derive(Clone)]
 struct Settled<'a> {
     row: &'a super::store::DeliveryRow,
     span: Option<std::ops::Range<usize>>,
@@ -1861,9 +2082,14 @@ pub fn turn_fact_since(session: &str, window: &str, t: u64) -> bool {
 }
 
 /// Drop records for windows that no longer exist (called opportunistically
-/// with the live window set whenever someone lists a session's agents).
+/// with the live window set whenever someone lists a session's agents —
+/// only from a pane listing that SUCCEEDED: a failed read is not proof that
+/// a window is gone). Lines still HELD for a window that is gone are said
+/// `undelivered (its window closed)` before they go (board #404 review: they
+/// used to vanish silently, the sweep never reads held rows) — including a
+/// window this process holds no record for, found by its held rows.
 pub fn retain_windows(session: &str, live: &[String]) {
-    let dead: Vec<String> = {
+    let mut dead: Vec<String> = {
         let mut map = store().lock().unwrap();
         let dead = map
             .iter()
@@ -1873,6 +2099,11 @@ pub fn retain_windows(session: &str, live: &[String]) {
         map.retain(|(s, w), _| s != session || live.contains(w));
         dead
     };
+    for w in held_windows(session) {
+        if !live.contains(&w) && !dead.contains(&w) {
+            dead.push(w);
+        }
+    }
     if dead.is_empty() {
         return;
     }
@@ -1881,6 +2112,7 @@ pub fn retain_windows(session: &str, live: &[String]) {
     // which reports them once and settles them — this path costs nothing on the
     // roster poll that calls it several times a minute.
     for w in &dead {
+        drop_held_because(session, w, "its window closed");
         forget_window_deliveries(session, w);
     }
 }
@@ -2062,6 +2294,60 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// Review C3 and C1b, the attribution of one numbered envelope from
+    /// window A. Its acceptance is A's TURN FACTS alone: a delivery warning
+    /// for B written in the same call (an auto-post refused by B's pane) or a
+    /// prompt fact of B whose INSERT fails, or A's own warn row failing, never
+    /// refuses A; A's own notif failing does. And the fence is per window: A's
+    /// mark never fences B, across a restart (it is read back from meta).
+    #[test]
+    fn a_numbered_envelope_is_accepted_by_its_own_windows_turn_facts_only() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("tmm-404-attr-{}", uuid::Uuid::new_v4().simple());
+        let sql = |q: String| crate::projects::with_store(|s| s.exec_test_sql(&q)).unwrap();
+        sql(format!(
+            "CREATE TEMP TRIGGER attr404 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND (NEW.win = 'B' OR NEW.kind = 'warn')
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ));
+        let failed = with_numbered(Some((&session, "A")), || {
+            record_prompt(&session, "A", "[tmm chat 2026-10-16 16:00] lead: @A go");
+            record_undelivered(&session, "B", "[tmm chat 2026-10-16 16:00] A: [reply] done", "pane in copy mode");
+            record_prompt(&session, "B", "a prompt fact of another window");
+            push_event(&session, "A", "warn", "a warn row of A itself".into());
+            record_notification(&session, "A", "completed", now());
+            numbered_write_failed()
+        });
+        sql("DROP TRIGGER attr404;".into());
+        assert!(!failed, "only A's own turn facts decide A's acceptance");
+        sql(format!(
+            "CREATE TEMP TRIGGER attr404b BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.win = 'A' AND NEW.kind = 'notif'
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ));
+        let failed = with_numbered(Some((&session, "A")), || {
+            record_prompt(&session, "A", "[tmm chat 2026-10-16 16:01] lead: @A again");
+            record_notification(&session, "A", "completed", now());
+            numbered_write_failed()
+        });
+        sql("DROP TRIGGER attr404b;".into());
+        assert!(failed, "A's own end fact did not reach the log: not accepted");
+        assert!(!with_numbered(None, || {
+            sql(format!("CREATE TEMP TRIGGER attr404c BEFORE INSERT ON activity WHEN NEW.session = '{session}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
+            record_notification(&session, "A", "completed", now());
+            sql("DROP TRIGGER attr404c;".into());
+            numbered_write_failed()
+        }), "an unnumbered consumption stays fail-soft");
+
+        set_hook_mark(&session, "A", 1792000000000042).unwrap();
+        // A restart reads the store, not this process's memory.
+        assert_eq!(hook_mark(&session, "A"), Ok(1792000000000042));
+        assert_eq!(hook_mark(&session, "B"), Ok(0), "A's sequence never fences B");
+        // A stored value that is not a number is unknown, never a 0 fence.
+        crate::projects::with_store(|s| s.meta_set(&hook_mark_key(&session, "C"), "junk")).unwrap();
+        assert!(hook_mark(&session, "C").is_err());
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
     use super::*;
 
     fn rec() -> Rec {

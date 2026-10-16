@@ -2234,7 +2234,9 @@ fn agent_states(session: &str) -> serde_json::Value {
         .ok()
         .flatten()
         .map(|p| p.path);
-    let panes = crate::tmux::list_panes(session).unwrap_or_default();
+    let listed = crate::tmux::list_panes(session);
+    let read_ok = listed.is_ok();
+    let panes = listed.unwrap_or_default();
     let activity: std::collections::HashMap<usize, u64> =
         crate::tmux::window_activity_times(session).into_iter().collect();
 
@@ -2252,8 +2254,13 @@ fn agent_states(session: &str) -> serde_json::Value {
             .or_insert(p);
     }
     let live: Vec<String> = windows.values().map(|p| p.window_name.clone()).collect();
-    telemetry::retain_windows(session, &live);
-    crate::projects::vitals::retain_windows(session, &live);
+    // Only a listing that succeeded says which windows are gone: a failed
+    // read would otherwise retire every window's records and report every
+    // held line undelivered (board #404 review).
+    if read_ok {
+        telemetry::retain_windows(session, &live);
+        crate::projects::vitals::retain_windows(session, &live);
+    }
 
     // Each window's pane id: the live input mode is remembered per pane (#271).
     let pane_ids: std::collections::HashMap<String, String> = crate::tmux::list_named_windows(session).into_iter().collect();
@@ -4725,6 +4732,27 @@ mod tests {
         }
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #404 review: only a pane listing that SUCCEEDED retires windows.
+    /// A session tmux cannot list (here: none by that name) proves nothing
+    /// about its windows — their held lines stay held, nothing is reported
+    /// undelivered — while a listing that succeeds without the window
+    /// reports them once.
+    #[test]
+    fn a_failed_pane_read_is_not_proof_that_a_window_is_gone() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-404-read-{}", uuid::Uuid::new_v4().simple());
+        telemetry::record_held(&session, "dev", "[tmm chat 2026-10-16 12:30] lead: @dev held", 0, "").unwrap();
+        let undelivered = || {
+            telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "warn" && e.text.starts_with("undelivered")).count()
+        };
+        let _ = agent_states(&session);
+        assert_eq!(telemetry::held_rows(&session, "dev").len(), 1, "a failed read retired nothing");
+        assert_eq!(undelivered(), 0);
+        telemetry::retain_windows(&session, &["other".to_string()]);
+        assert_eq!(telemetry::held_rows(&session, "dev").len(), 0);
+        assert_eq!(undelivered(), 1, "a confirmed absence reports it once");
     }
 
     /// Interrupt, against real tmux: the window SURVIVES (Escape cancels a

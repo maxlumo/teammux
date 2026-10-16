@@ -81,11 +81,13 @@ fn seen_modes() -> &'static Mutex<HashMap<(String, String), (String, &'static st
 /// the one reading, in the backend file), else what the screen said last in
 /// this same pane, else the launch recipe's start mode. `pane` is the
 /// window's pane id and `screen` a capture of it. `None` for a window this
-/// app did not start or a backend without the choice.
+/// app did not start or a backend without the choice — except a backend
+/// that LOSES text typed mid-turn (`Backend::loses_busy_input`, dsh, board
+/// #404): it runs a fixed `queue`, so the gate below holds for it.
 pub fn input_mode_seen(session: &str, window: &str, pane: &str, screen: &str) -> Option<&'static str> {
     let (backend, start) = recipe_mode(session, window)?;
     if !backend.switches_input_mode() {
-        return None;
+        return backend.loses_busy_input().then_some("queue");
     }
     let key = (session.to_string(), window.to_string());
     let mut seen = seen_modes().lock().unwrap();
@@ -102,6 +104,45 @@ pub fn input_mode_seen(session: &str, window: &str, pane: &str, screen: &str) ->
             seen.remove(&key);
             Some(start)
         }
+    }
+}
+
+/// For a managed window whose CLI LOSES a typed line while it runs (board
+/// #404, `Backend::loses_busy_input`): is it occupied — not ready for a
+/// typed line — now? `None` for every other backend. ONE answer for the
+/// delivery decision and every flush trigger: occupied unless the CLI side
+/// says it is ready (`Backend::input_ready`: dsh's shell is back at its
+/// prompt), and while a line typed there has not echoed yet. Never inferred
+/// from turn state: an app-side end (an interrupt ends the turn before the
+/// shell returns), a lost Stop or an expired receipt clock is not readiness.
+fn strict_occupied(session: &str, window: &str) -> Option<bool> {
+    let (backend, _) = recipe_mode(session, window)?;
+    if !backend.loses_busy_input() {
+        return None;
+    }
+    let ws = super::project_for_session(session).ok().flatten()?.path;
+    // The live input owner: the window's pane process, read now.
+    let pane_pid = crate::tmux::find_window_by_name(session, window)
+        .and_then(|pane| crate::tmux::pane_format(&pane, "#{pane_pid}"))
+        .and_then(|p| p.parse::<u32>().ok());
+    let ready = super::agents::home_dir(&ws, window).and_then(|home| backend.input_ready(&home, pane_pid)).unwrap_or(false);
+    Some(!ready || telemetry::line_in_flight(session, window))
+}
+
+/// What a strict window's held lines say when they have waited past
+/// `HOLD_MAX_SECS` with its CLI still not ready (board #404): one warn per
+/// row, through the copy-mode report's `warned` mark — the line stays held
+/// and nothing is typed or ended on its behalf.
+const NOT_READY: &str = "the agent has not returned to its prompt";
+
+fn warn_if_overdue(session: &str, window: &str) {
+    let now = super::now();
+    let late: Vec<_> = telemetry::held_rows(session, window)
+        .into_iter()
+        .filter(|r| now.saturating_sub(r.ts) >= HOLD_MAX_SECS)
+        .collect();
+    if !late.is_empty() {
+        telemetry::record_held_blocked(session, window, &late, NOT_READY);
     }
 }
 
@@ -444,11 +485,23 @@ fn deliver_gated(
     // state is never asked. `known` is read once, here, and is what
     // `may_release` is asked with below.
     let known = telemetry::turn_known(session, window);
-    let unknown = mode.is_some() && !known;
-    let open = mode.is_some()
-        && (unknown || telemetry::turn_busy(session, window) || (mode == Some("steer") && telemetry::line_in_flight(session, window)));
-    let busy = open && mode == Some("queue");
-    let steered = open && !unknown && mode == Some("steer");
+    // A CLI that loses typed text (board #404) is open whenever its own side
+    // does not say it is ready — `strict_occupied`, the one rule every flush
+    // trigger asks too. Its turn log is not consulted: readiness is a direct
+    // fact, so an unknown log (#394) changes nothing for it.
+    let strict = strict_occupied(session, window);
+    let unknown = strict.is_none() && mode.is_some() && !known;
+    let open = match strict {
+        Some(occupied) => occupied,
+        None => {
+            mode.is_some()
+                && (unknown
+                    || telemetry::turn_busy(session, window)
+                    || (mode == Some("steer") && telemetry::line_in_flight(session, window)))
+        }
+    };
+    let busy = open && (strict.is_some() || mode == Some("queue"));
+    let steered = open && !unknown && strict.is_none() && mode == Some("steer");
     if steered && held.is_empty() {
         return type_steered(session, window, target, line, ask_at, msg_id);
     }
@@ -462,6 +515,13 @@ fn deliver_gated(
     // existing `undelivered` warn says so. Not into an unknown turn (#394
     // ruling): there the line is said undelivered, and nothing is typed.
     if let Err(e) = telemetry::record_held(session, window, line, ask_at, msg_id) {
+        // Typed into an occupied strict window the line is gone: never call
+        // that a delivery (review P1-A).
+        if strict == Some(true) {
+            eprintln!("⚠  could not hold a delivery for {session}:{window} ({e}); its CLI would lose a typed line, so nothing is typed");
+            telemetry::record_undelivered(session, window, &crate::address::shown(line, ask_at), "the agent is busy and the line could not be held");
+            return false;
+        }
         if unknown {
             eprintln!("⚠️  could not hold a delivery for {session}:{window} ({e}); its turn is unknown, so nothing is typed");
             telemetry::record_undelivered(session, window, &crate::address::shown(line, ask_at), "its turn is unknown and the line could not be held");
@@ -471,8 +531,10 @@ fn deliver_gated(
         // Into a steer turn it is steered, owing no echo (validator, #276).
         return if steered { type_steered(session, window, target, line, ask_at, msg_id) } else { type_now(session, window, target, line, ask_at, msg_id) };
     }
-    if may_release(known, busy, &held) {
+    if may_release(known, busy, strict.is_some(), &held) {
         flush_locked(session, window, target, steered);
+    } else if strict.is_some() {
+        warn_if_overdue(session, window);
     }
     true
 }
@@ -555,13 +617,17 @@ fn flush_at(session: &str, window: &str, target: &str) {
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
     let known = telemetry::turn_known(session, window);
-    let busy = known && telemetry::turn_busy(session, window);
-    if !may_release(known, busy, &telemetry::held_rows(session, window)) {
+    let strict = strict_occupied(session, window);
+    let busy = strict.unwrap_or_else(|| known && telemetry::turn_busy(session, window));
+    if !may_release(known, busy, strict.is_some(), &telemetry::held_rows(session, window)) {
+        if strict.is_some() {
+            warn_if_overdue(session, window);
+        }
         return;
     }
     // An overdue flush into a turn still open: steered if the session now
     // runs steer (#276), so its rows are owed no echo.
-    let steered = busy && input_mode(session, window) == Some("steer");
+    let steered = busy && strict.is_none() && input_mode(session, window) == Some("steer");
     flush_locked(session, window, target, steered);
 }
 
@@ -575,7 +641,15 @@ fn flush_at(session: &str, window: &str, target: &str) {
 /// An UNKNOWN turn (`telemetry::turn_known`: its log could not be read and
 /// the window has no live fact) releases nothing, however old: the overdue
 /// rule is for a turn that READS busy, and an unread log reads nothing.
-fn may_release(known: bool, busy: bool, held: &[super::store::DeliveryRow]) -> bool {
+/// `strict` (a CLI that loses typed text, board #404) releases exactly when
+/// its CLI side is ready (`busy` is `strict_occupied` then): never by the
+/// overdue rule — typed into its running turn the lines are gone — and
+/// without asking the turn log. Past `HOLD_MAX_SECS` its lines are reported
+/// once instead (`warn_if_overdue`).
+fn may_release(known: bool, busy: bool, strict: bool, held: &[super::store::DeliveryRow]) -> bool {
+    if strict {
+        return !busy;
+    }
     known && (!busy || overdue(held))
 }
 
@@ -1588,6 +1662,121 @@ mod tests {
 
     fn sql(stmt: &str) {
         crate::projects::with_store(|st| st.exec_test_sql(stmt)).unwrap();
+    }
+
+    /// Board #404: dsh LOSES a line typed into a running turn (its run owns
+    /// the TTY raw), so delivery holds for it through the production path —
+    /// a fixed `queue` the gate honours though it has no queue|steer choice —
+    /// and the overdue release never types into its running turn; the line
+    /// waits for the Stop. (The end-to-end form, with a real pane and the
+    /// real inbox, is agent_notifications' `a_busy_dsh_turn_holds_lines_and_ends_in_order`.)
+    #[test]
+    fn a_busy_dsh_turn_holds_through_the_overdue_rule() {
+        let mut scratch = crate::tmux::Scratch::new("dsh-hold");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "dev", "dsh", "queue");
+        assert_eq!(input_mode_seen(&s, "dev", "%9", ""), Some("queue"), "a fixed queue, no choice");
+        assert!(!crate::backends::Backend::Dsh.switches_input_mode());
+        let ready = std::path::Path::new(&scratch.path()).join(".tmm/agents/dev/dsh/tmm/ready");
+        std::fs::create_dir_all(ready.parent().unwrap()).unwrap();
+        // A real window, so the pane's process — the only owner a ready file
+        // may name — can be read.
+        if crate::tmux::run_tmux(&["new-session", "-d", "-s", &s, "-n", "dev", "sleep 120"]).is_err() {
+            eprintln!("skipped: no tmux server");
+            return;
+        }
+        let owner = crate::tmux::find_window_by_name(&s, "dev").and_then(|p| crate::tmux::pane_format(&p, "#{pane_pid}")).unwrap();
+        let not_ready = |s: &str| warns(s).into_iter().filter(|w| w.contains(NOT_READY)).count();
+        fake();
+        busy(&s, "dev");
+        assert!(deliver(&s, "dev", "t", "[tmm chat 03:00] lead: @dev a", 0, ""));
+        assert_eq!((typed().len(), held(&s, "dev")), (0, 1), "the shell is not at its prompt: held, not typed into the raw TTY");
+        sql(&format!("UPDATE deliveries SET ts = ts - {} WHERE session = '{s}'", HOLD_MAX_SECS));
+        flush_at(&s, "dev", "t");
+        assert!(deliver(&s, "dev", "t", "[tmm chat 03:10] lead: @dev b", 0, ""));
+        for _ in 0..3 {
+            flush_at(&s, "dev", "t");
+        }
+        assert!(typed().is_empty(), "overdue, and still held: typed into the running turn it would be lost");
+        assert_eq!(not_ready(&s), 1, "ONE warning past the limit, however often it is asked: {:?}", warns(&s));
+        assert!(warns(&s).iter().any(|w| w == &format!("held ({NOT_READY}): 1 line will be typed when it clears")), "{:?}", warns(&s));
+        // The app ends the turn (an interrupt, or the Stop): that alone is not
+        // readiness — the shell's own ready file is.
+        end(&s, "dev");
+        flush_at(&s, "dev", "t");
+        assert!(typed().is_empty(), "an end edge without the shell back types nothing");
+        // A file naming another process (this test's) is not readiness…
+        std::fs::write(&ready, format!("{} %1", std::process::id())).unwrap();
+        flush_at(&s, "dev", "t");
+        assert!(typed().is_empty(), "alive, but not the pane's process");
+        // …one naming the pane's own live process is.
+        std::fs::write(&ready, format!("{owner} %1")).unwrap();
+        flush_at(&s, "dev", "t");
+        assert_eq!(typed(), vec!["[tmm chat 03:00] lead: @dev a\n\n[tmm chat 03:10] lead: @dev b".to_string()], "one prompt once the shell is back");
+        // A line typed at rest that has not echoed yet keeps the next held,
+        // even with the ready file still there (before the shell read Enter).
+        assert!(deliver(&s, "dev", "t", "[tmm chat 03:20] lead: @dev c", 0, ""));
+        assert_eq!(typed().len(), 1, "held behind the line in flight");
+        assert_eq!(not_ready(&s), 1, "no new warning for a fresh hold");
+    }
+
+    /// Board #404 review: a hold that cannot be written for a strict window
+    /// whose CLI is occupied is said undelivered and NOTHING is typed (typed
+    /// into its raw TTY the line would be lost, and calling that a delivery
+    /// is false). A non-strict queue backend keeps today's fallback.
+    #[test]
+    fn a_failed_hold_for_a_busy_dsh_window_types_nothing() {
+        let mut scratch = crate::tmux::Scratch::new("dsh-holdfail");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "dev", "dsh", "queue");
+        fake();
+        busy(&s, "dev");
+        sql("CREATE TEMP TRIGGER no_hold BEFORE INSERT ON deliveries WHEN NEW.held = 1 BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+        let ok = deliver(&s, "dev", "t", "[tmm chat 03:30] lead: @dev lost?", 0, "");
+        sql("DROP TRIGGER no_hold");
+        assert!(!ok);
+        assert!(typed().is_empty(), "nothing typed into the occupied pane");
+        assert!(warns(&s).iter().any(|w| w.starts_with("undelivered (the agent is busy and the line could not be held)")), "{:?}", warns(&s));
+    }
+
+    /// Board #404 review, every backend: lines HELD for a window that is gone
+    /// are said undelivered, once each, instead of vanishing — including a
+    /// window this process holds no turn record for (only its rows).
+    #[test]
+    fn held_lines_of_a_window_that_is_gone_are_reported_undelivered() {
+        let s = setup("gone");
+        busy(&s, "dev");
+        deliver_as(&s, "dev", "t", "[tmm chat 03:40] lead: @dev one", "", true);
+        deliver_as(&s, "dev", "t", "[tmm chat 03:41] lead: @dev two", "", true);
+        crate::projects::with_store(|st| st.insert_activity(&s, "ghost", crate::projects::now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        telemetry::record_held(&s, "ghost", "[tmm chat 03:42] lead: @ghost three", 0, "").unwrap();
+        assert_eq!((held(&s, "dev"), held(&s, "ghost")), (2, 1));
+        // As after a server restart: this process holds no record for either
+        // window — only their rows say they exist.
+        telemetry::forget_process_state(&s);
+        telemetry::retain_windows(&s, &["other".to_string()]);
+        assert_eq!((held(&s, "dev"), held(&s, "ghost")), (0, 0));
+        let gone: Vec<String> = warns(&s).into_iter().filter(|w| w.starts_with("undelivered (its window closed)")).collect();
+        assert_eq!(gone.len(), 3, "{gone:?}");
+        telemetry::retain_windows(&s, &["other".to_string()]);
+        assert_eq!(warns(&s).iter().filter(|w| w.starts_with("undelivered (its window closed)")).count(), 3, "once");
+    }
+
+    /// A non-dsh queue backend through the same production path is unchanged:
+    /// held while busy, typed past the overdue limit (its CLI queues it).
+    #[test]
+    fn a_kiro_queue_window_keeps_the_overdue_release() {
+        let mut scratch = crate::tmux::Scratch::new("kiro-hold");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "dev", "kiro", "queue");
+        fake();
+        busy(&s, "dev");
+        assert!(deliver(&s, "dev", "t", "[tmm chat 03:50] lead: @dev a", 0, ""));
+        assert_eq!((typed().len(), held(&s, "dev")), (0, 1));
+        sql(&format!("UPDATE deliveries SET ts = ts - {} WHERE session = '{s}'", HOLD_MAX_SECS));
+        flush_at(&s, "dev", "t");
+        assert_eq!(typed().len(), 1, "kiro queues it itself: the overdue release still types");
+        assert!(warns(&s).iter().all(|w| !w.contains(NOT_READY)));
     }
 
     /// Review blocker 1 (real SQLite fault, a TEMP trigger as in #249): a

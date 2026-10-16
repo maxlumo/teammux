@@ -38,6 +38,7 @@ export const AGENTS: Agent[] = [
   { tag: 'Grok',     icon: '/assets/grok.svg',     iconSize: 14 },
   { tag: 'OpenClaw', icon: '/assets/openclaw.svg', iconSize: 14 },
   { tag: 'OMP',      icon: '/assets/omp.svg',      iconSize: 14 },
+  { tag: 'DSH',      icon: '/assets/dsh.svg',      iconSize: 14 },
 ];
 
 // ── The server's backend list (board #130) ──────────────────────────────

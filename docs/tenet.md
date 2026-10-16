@@ -17,7 +17,7 @@
 ## Purpose
 
 We build a **shell** connecting things that already exist: tmux owns processes
-and sessions, coding agent CLIs (kiro / claude / codex / grok / omp / kimi) own
+and sessions, coding agent CLIs (kiro / claude / codex / grok / omp / kimi / dsh) own
 intelligence, MCP and skills own tools, and a phone or desktop provides the
 window into them. We do not maintain a tmux-like runtime, implement agents,
 build tools, or hide agents behind an invisible protocol wrapper. We define
@@ -140,7 +140,7 @@ ongoing maintenance.
 1. Look for a native integration point first. Build your own only if there
    is none, and record why in the design document.
 2. A new backend may add only one backend file; downstream hub, delivery,
-   status and UI code must not gain another `if`. The six backends really
+   status and UI code must not gain another `if`. The seven backends really
    do have different configuration, hook dialects and status lines, so
    separate implementations are necessary. Their scattered placement is
    the problem (see todo).

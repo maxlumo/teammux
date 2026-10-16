@@ -10,7 +10,7 @@ they are one document.)
 ## Tenets
 
 We are a **shell, not an engine**. tmux owns processes and sessions, the agent
-CLIs (kiro, claude, codex, grok, omp, kimi) own intelligence and their own harness,
+CLIs (kiro, claude, codex, grok, omp, kimi, dsh) own intelligence and their own harness,
 MCP and skills own tools. We own four things — the **connection**, the
 **room**, the **identity**, the **window** — and a person can always walk back
 to the terminal and take over. Full text with reasons and evidence:
@@ -45,7 +45,7 @@ The non-negotiables below are the tenets' enforced, mechanizable form.
 
 Tauri 2 cross-platform app (Rust + Svelte 5) for monitoring and controlling
 tmux sessions from a phone, and — through the **Hub** — for running and
-talking to AI coding agents (kiro, codex, claude, grok, omp, kimi) inside those sessions.
+talking to AI coding agents (kiro, codex, claude, grok, omp, kimi, dsh) inside those sessions.
 WebSocket JSON-RPC with token auth + optional E2E encryption. Targets: Android
 (primary), macOS desktop, browser/PWA.
 
@@ -89,7 +89,7 @@ Each links to the doc that holds the reason and the details.
 9. **Projects declare, tmux projects**: every session is a project, `up` matches windows by name, only agent slots are relaunched, migrations run with `PRAGMA foreign_keys=OFF`. A project is named by its NAME, never its folder. → [projects.md](docs/design-docs/features/projects.md)
 10. **A managed agent is defined by its isolated home** (`<ws>/.tmm/agents/<name>/`, `projects::managed_home`); its model and effort live in its CONFIG, never on the launch line; the launch recipe (env + PATH + identity) is replayed on restart; the app-wide `<config>/AGENTS.md` is the first block of every prompt (`tmm prompt`). → [agents-overview.md](docs/design-docs/features/agents-overview.md), [agents-overview.md § app-wide instructions](docs/design-docs/features/agents-overview.md#the-app-wide-instructions-lead-every-prompt-2026-09-04)
 11. **Final replies follow one reply edge**: hooks record every managed agent's final response and return it once to every agent whose request the turn carried (the edge accumulates until the turn ends, #256); `[reply]` never creates a reverse edge. Status is DERIVED from turn edges — pane activity is not work, Claude's `idle_prompt` is not an ask. → [agent-status.md](docs/design-docs/features/agent-status.md)
-12. **Delivery is typing into a pane**: every delivery takes ONE path (`projects::delivery`), and a busy queue-mode kiro/codex gets its lines typed as one combined prompt at its turn's end (#257); `@name` types into one agent, `@all` into every managed agent, no recipient records only; a Team agent also gets the routed room delta since its previous delivery as background; a `/command` goes verbatim to the CLI; `Escape` is the only interrupt. → [hub-composer.md](docs/design-docs/features/hub-composer.md)
+12. **Delivery is typing into a pane**: every delivery takes ONE path (`projects::delivery`), and a busy queue-mode kiro/codex — and dsh, whose run loses typed text — gets its lines typed as one combined prompt at its turn's end (#257, #404); `@name` types into one agent, `@all` into every managed agent, no recipient records only; a Team agent also gets the routed room delta since its previous delivery as background; a `/command` goes verbatim to the CLI; `Escape` is the only interrupt. → [hub-composer.md](docs/design-docs/features/hub-composer.md)
 13. **Chat markdown escapes `&` and `<`, never `>`**; images are references, never bytes; messages are not deletable in the UI. → [conventions/frontend.md](docs/conventions/frontend.md), [hub-feed.md](docs/design-docs/features/hub-feed.md)
 14. **CLI/UI parity**: every project/agent/board verb exists as a `tmm` command, because an agent that can only be managed by a human cannot manage a teammate. → [tmm-cli.md](docs/design-docs/features/tmm-cli.md)
 

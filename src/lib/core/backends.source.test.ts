@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 
 const ROOT = new URL('../', import.meta.url);
-const NAMES = ['kiro', 'claude', 'codex', 'grok', 'omp', 'kimi'];
+const NAMES = ['kiro', 'claude', 'codex', 'grok', 'omp', 'kimi', 'dsh'];
 
 async function walk(dir: URL): Promise<URL[]> {
   const out: URL[] = [];

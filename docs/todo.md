@@ -287,6 +287,16 @@ closed; kept as the record of what the scattering looked like.
   lines held for it (board #257) wait up to `HOLD_MAX_SECS` (300 s) before
   they are typed anyway. See hub-composer.md § A busy queue-mode agent.
 
+- Hook consumption is at least once (board #404, orchestrator rulings
+  2026-10-16): what is promised is that a final reply reaches the ROOM at
+  least once, not the requester's pane. A gateway that dies after a Stop's
+  end row and before its reply reads the envelope again, and the reread
+  recovers the reply edge from a log that already holds that end, so the
+  re-posted reply has no recipients. Shared by every backend (pre-existing in
+  the shared hook consumer). A possible follow-up: recover who was waiting
+  durably (e.g. record the reply edge before the end row). Not filed; a crash
+  in that window is rare. See agent-notifications.md § Event Path.
+
 - Emoji width: tmux measures 2 cells, xterm's UnicodeV6 table 1 — a joined
   (`capture -J`) line with emoji can re-wrap differently and shear pane rows.
   Fix = `@xterm/addon-unicode11` AND the same table in

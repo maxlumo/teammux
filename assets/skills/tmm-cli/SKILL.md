@@ -205,7 +205,7 @@ tmm spawn <registry-name> --join <team>   # …into a team of this project (live
 
 ```bash
 tmm project list
-tmm project create <path> [--name n] [--session s] [--with-agent kiro|claude|codex|grok|omp|kimi]
+tmm project create <path> [--name n] [--session s] [--with-agent kiro|claude|codex|grok|omp|kimi|dsh]
 tmm project up <session>            # bring the tmux session up (recreates
                                     #   missing windows, relaunches agents)
 tmm project down <session>          # kill the session, KEEP the declaration
@@ -220,7 +220,7 @@ tmm project delete <session>        # forget it AND delete its agents' homes
 
 ```bash
 tmm registry list
-tmm registry save --name <n> --backend <kiro|claude|codex|grok|omp|kimi>
+tmm registry save --name <n> --backend <kiro|claude|codex|grok|omp|kimi|dsh>
       [--system <text>] [--model m] [--effort low|...|high]
       [--skills a,b] [--mcp <json>] [--input-mode queue|steer]
                                     # steer (kiro, codex): a line typed while

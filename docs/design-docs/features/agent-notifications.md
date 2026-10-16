@@ -51,6 +51,76 @@ commands invoke the helper through `/bin/sh` instead of executing it directly:
 macOS may attach `com.apple.provenance` to app-generated scripts and kill direct
 execution with status 137.
 
+Inbox files are named `<unix secs>-<pid>.json`, or `<unix secs>-<seq, 20
+digits>-<pid>.json` when the producer sets `TMM_HOOK_SEQ` (digits only). They
+are consumed by ONE order (`inbox_order`) for a directory that mixes both
+shapes: the second, then the sequence (none = 0), then the name — so an
+unsequenced pair keeps exactly today's order (sorting by modification time
+instead would have reordered every other backend's same-second pairs, and an
+existing test pins the name order).
+Only dsh's plugin and shell set a sequence (board #404: a prompt and the Stop
+of a run interrupted at once land in one second); every other backend keeps
+its old file name. A producer that numbers its envelopes also puts the number
+in the payload (`tmm_seq`), and the hub keeps a per-window high-water mark: an
+envelope not above it is dropped, so one published late (a notifier that
+outlived its run) can never reopen a turn that already ended. The mark is
+durable (`meta` key `hook_seq:<session>:<window>`, one per window, so one
+window's number never fences another), and the in-memory copy never runs
+ahead of it. A numbered envelope is ACCEPTED, and leaves the inbox, only once
+its turn fact, its effects and its durable mark have all succeeded
+(orchestrator ruling, #404 round 5):
+- a mark that cannot be read, or holds something that is not a number, is
+  unknown: the envelope is kept, never consumed past a guessed fence;
+- a turn fact of the producer's own window whose INSERT failed
+  (`telemetry::with_numbered`) stops the consumption BEFORE the room post,
+  the flush and the mark, and changes no live turn state. A numbered
+  prompt's row and the retirement of the delivery receipts it settles are
+  ONE store transaction (`Store::settle_prompt`, round 6): both durable or
+  neither, so a retry finds exactly the receipts it matched and never
+  records them as local input. Retrying a known failure repeats no visible
+  effect;
+- the room row is an effect: `RoomPoster::post_final` returns whether the
+  room recorded the reply (`rooms::post_routed`; nothing is typed when it
+  did not). A refused post keeps the envelope and writes no mark; the next
+  pass retries the end's tail alone (`finish_end`: the post, then the flush),
+  never its end fact (round 6). A post that succeeded but reported an
+  error is posted again: the at-least-once window below;
+- a mark that cannot be written keeps the envelope; its effects are done, so
+  later passes retry the mark alone;
+- while a producer has an envelope not yet accepted, its later envelopes wait
+  behind it (`Consume::Defer`), so the fence never passes it and it is never
+  dropped as old. Other windows and unnumbered producers go on.
+
+For such a numbered producer the helper's exit status is a receipt — 0 only once the
+envelope is in the inbox, 1 when it is not — so it can keep and resend what
+did not land; every other caller keeps the fail-soft exit 0.
+
+**Consumption is at least once, for every backend** (board #404, orchestrator
+rulings 2026-10-16 16:00 and 17:30). A file leaves the inbox only after its
+consumption returned, so a gateway that dies in between reads it again on the
+next start: the end row may be written twice and the reply posted to the room
+twice. Only a crash (or a restart), or a room write that succeeded but
+reported failure, repeats an effect. Unnumbered producers log a refused room
+post and go on, as before. An unnumbered
+producer's failed INSERT stays fail-soft telemetry (the file is consumed).
+What is promised is that the reply reaches the ROOM at least once, NOT that it
+reaches the requester's pane at least once: the reread recovers the reply
+edge from the log (`recovered_targets`), which already holds the end written
+before the crash, so the re-posted reply has no recipients (docs/todo.md).
+Recovering who was waiting durably is a separate, possible follow-up.
+Pinned by `dsh_consumption_is_at_least_once_and_never_guesses_a_fence` (a
+crash after the end row, a crash after the reply, a failed end INSERT, an
+unreadable mark), `a_numbered_window_waits_behind_its_unaccepted_envelope` (a
+failed end INSERT under repeated polling with a held line, N+1 queued behind
+N, a restart, a failed prompt INSERT keeping its receipt),
+`a_failed_mark_write_keeps_its_envelope_across_a_restart` (a failed mark
+write, a restart, then an old prompt), `a_room_post_that_failed_is_retried_alone`
+(three refused posts, then one post, one end row, the flush after it),
+`a_numbered_prompt_settles_its_receipts_with_its_row_or_not_at_all` (the
+transaction as a restarted process would read it, mid-way and after a
+failed INSERT), `a_reply_the_room_did_not_record_is_an_error_and_types_nothing` and
+`a_numbered_envelope_is_accepted_by_its_own_windows_turn_facts_only`.
+
 The server side of the inbox (`AgentNotificationHub::run`) polls every 250 ms
 and runs `consume_inbox` on tokio's blocking pool: the scan is synchronous end
 to end (directory listing, file reads, tmux subprocesses, bus posts), and on a

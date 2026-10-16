@@ -70,6 +70,17 @@ pub struct DeliveryRow {
     pub ask_at: usize,
 }
 
+/// The activity row of a settled prompt (`Store::settle_prompt`).
+pub struct PromptRow {
+    pub session: String,
+    pub window: String,
+    pub ts: u64,
+    pub text: String,
+    pub via: String,
+    pub deliveries: String,
+    pub requesters: Option<String>,
+}
+
 impl DeliveryRow {
     /// The line as shown: its ask first (`address::shown`).
     pub fn shown(&self) -> String {
@@ -716,6 +727,36 @@ impl Store {
             .map_err(|e| format!("delete delivery: {e}"))
     }
 
+    /// A NUMBERED producer's prompt (board #404 round 6): the delivery rows
+    /// it settles are retired and its activity row is written in ONE
+    /// transaction, so either both are durable or neither is — a retried
+    /// prompt finds exactly the receipts the failed attempt matched. Each
+    /// candidate counts only if this transaction deleted it (two echoes
+    /// racing for one row cannot both call it theirs); `row` builds the
+    /// activity row from the ids that were won. Returns them and the row id.
+    pub fn settle_prompt(&mut self, candidates: &[i64], row: impl FnOnce(&[i64]) -> PromptRow) -> Result<(Vec<i64>, i64), String> {
+        let tx = self.conn.transaction().map_err(|e| format!("prompt settlement transaction: {e}"))?;
+        let mut won = Vec::new();
+        for id in candidates {
+            let n = tx
+                .execute("DELETE FROM deliveries WHERE id = ?1", rusqlite::params![id])
+                .map_err(|e| format!("settle delivery: {e}"))?;
+            if n > 0 {
+                won.push(*id);
+            }
+        }
+        let r = row(&won);
+        tx.execute(
+            "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
+             VALUES (?1, 0, ?2, ?3, 'prompt', ?4, '', ?5, '', ?6, ?7)",
+            rusqlite::params![r.session, r.window, r.ts as i64, r.text, r.via, r.deliveries, r.requesters],
+        )
+        .map_err(|e| format!("insert activity: {e}"))?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(|e| format!("prompt settlement commit: {e}"))?;
+        Ok((won, id))
+    }
+
     /// Forget every outstanding line of a window (it no longer exists, so it can
     /// never ack) or of a whole session.
     pub fn clear_deliveries(&self, session: &str, window: Option<&str>) -> Result<usize, String> {
@@ -746,6 +787,64 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    /// Board #404 round 6: a numbered prompt's settlement and its row are
+    /// ONE transaction. While it runs, the durable state a restarted
+    /// process would read (a second connection) still holds the receipt;
+    /// when the row INSERT fails, the receipt is still pending and no row
+    /// exists; once it succeeds, the receipt is retired and the row names
+    /// its id and message — never one without the other.
+    #[test]
+    fn a_numbered_prompt_settles_its_receipts_with_its_row_or_not_at_all() {
+        let path = std::env::temp_dir().join(format!("tmm-settle-{}.db", uuid::Uuid::new_v4()));
+        let mut store = Store::open(&path).unwrap();
+        store.insert_delivery("s", "w", "[tmm chat 2026-10-16 21:30] lead: @w go", 0, 100, "m-1").unwrap();
+        let d = store.pending_deliveries("s", Some("w")).unwrap()[0].id;
+        let other = || rusqlite::Connection::open(&path).unwrap();
+        let durable = |c: &rusqlite::Connection| {
+            let pending: i64 = c.query_row("SELECT COUNT(*) FROM deliveries WHERE id = ?1", [d], |r| r.get(0)).unwrap();
+            let rows: Vec<(String, String)> = c
+                .prepare("SELECT via, deliveries FROM activity WHERE session = 's' AND kind = 'prompt'")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (pending, rows)
+        };
+        let row = |won: &[i64]| PromptRow {
+            session: "s".into(),
+            window: "w".into(),
+            ts: 1,
+            text: "go".into(),
+            via: if won.is_empty() { "local" } else { "app" }.into(),
+            deliveries: serde_json::to_string(&won.iter().map(|id| serde_json::json!({"id": id, "msg": "m-1"})).collect::<Vec<_>>()).unwrap(),
+            requesters: None,
+        };
+        store.exec_test_sql("CREATE TEMP TRIGGER no_prompt BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT, 'disk full'); END;").unwrap();
+        for _ in 0..3 {
+            let err = store.settle_prompt(&[d], |won| {
+                assert_eq!(won, [d], "this transaction deleted it");
+                assert_eq!(durable(&other()), (1, vec![]), "mid-transaction, a restart still reads the receipt pending");
+                row(won)
+            });
+            assert!(err.is_err());
+            assert_eq!(durable(&other()), (1, vec![]), "the failed INSERT rolled the retirement back");
+        }
+        store.exec_test_sql("DROP TRIGGER no_prompt;").unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let (won, _) = store.settle_prompt(&[d], row).unwrap();
+        assert_eq!(won, [d]);
+        let (pending, rows) = durable(&other());
+        assert_eq!(pending, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "app", "never converted to local input");
+        assert!(rows[0].1.contains(&format!("\"id\":{d}")) && rows[0].1.contains("m-1"), "{}", rows[0].1);
+        let (won, _) = store.settle_prompt(&[d], row).unwrap();
+        assert!(won.is_empty(), "a second echo cannot take the same receipt");
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// Board #257 review: the 24 h prune drops stale TYPED lines and never a
     /// HELD one, however old.
