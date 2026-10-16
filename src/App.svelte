@@ -56,7 +56,7 @@
   import { navFor, readNav, reownSavedNav, saveNav } from './lib/app/nav-saved.ts';
   import { paneRef, reownRef, retargetRef, sessionRef } from './lib/app/refs.ts';
   import { absorbedInto, activateConnected, adoptHostname, focusServer, restoreCurrent, currentConnection, currentServerId, currentServerName, hostLabel, loadServers, mergedInto, migrateServers, recordServer, removeServer, renameServer, saveMachineAddresses, saveServers,
-    serverAddresses, addServerAddress, removeServerAddress, setServerToken, editSnapshot, MAX_ADDRESSES } from './lib/app/servers.ts';
+    serverAddresses, addServerAddress, removeServerAddress, setServerToken, editSnapshot, tryLoadServers, MAX_ADDRESSES } from './lib/app/servers.ts';
   import { confirmLeave } from './lib/app/leave-guards.ts';
   import { terminalFocusTarget } from './lib/sessions/split-focus.ts';
   import { createServerSwitch } from './lib/app/server-switch.ts';
@@ -2393,35 +2393,51 @@
   // Frozen with the rest of the registry while the migration is blocked.
   function serverRename(id, name) { if (!migrationBlocked) serverList = renameServer(localStorage, id, name); }
   // A saved server's addresses and token (board #402): the dialog is open
-  // for ONE entry id, read fresh from storage on each change (the version
-  // bump the current server's address list already uses).
+  // for ONE entry id and shows what was last READ of it (review round 3
+  // P2): a registry that cannot be read keeps that entry and the draft, and
+  // only a read that finds the entry gone closes the dialog.
   let detailsId = $state('');
-  const detailsEntry = $derived(detailsId ? serverList.find((s) => s.id === detailsId) ?? null : null);
-  const detailsAddresses = $derived.by(() => { void addrSetVersion; return detailsId ? serverAddresses(localStorage, detailsId) : []; });
-  // Closed when its server goes, NOT when the storage gate blocks (review
-  // P2-D round 3): the typed address or token stays in the open dialog.
-  $effect(() => { if (detailsId && !detailsEntry) detailsId = ''; });
+  let detailsShown = $state(null);   // { entry, addresses } as last read
+  function refreshDetails() {
+    if (!detailsId) { detailsShown = null; return; }
+    const servers = tryLoadServers(localStorage);
+    let addresses = null;
+    try { localStorage.getItem('tmux_machines'); addresses = servers && serverAddresses(localStorage, detailsId); } catch { /* unreadable */ }
+    if (!servers || !addresses) return;           // unreadable: keep what is shown
+    const entry = servers.find((s) => s.id === detailsId);
+    if (!entry) { detailsId = ''; detailsShown = null; return; }
+    detailsShown = { entry, addresses };
+  }
+  // A change elsewhere (a removal, a rename, a reload of the list) re-reads.
+  $effect(() => { void serverList; void addrSetVersion; void detailsId; untrack(refreshDetails); });
   // A write that fails (a full or refused storage) is put back as far as the
   // storage lets it (servers.ts `compensated`, best effort, not atomic), is
   // reported to the one storage gate, and the dialog is told what a RE-READ
   // shows (review P2-D round 3): `storage` (nothing changed) only when the
-  // re-read is what it was before, else `uncertain` (could not confirm).
-  // While the gate is blocked nothing is attempted, and nothing changed.
+  // re-read is what it was before, or when the snapshot itself could not be
+  // read and so no write was attempted; else `uncertain` (could not
+  // confirm). The snapshot and the re-read are inside the one boundary. While
+  // the gate is blocked nothing is attempted, and nothing changed.
   function detailsEdit(edit) {
     if (!detailsId) return 'missing';
     if (migrationBlocked) return 'storage';
-    const before = editSnapshot(localStorage);
+    let before = null;
     try {
+      before = editSnapshot(localStorage);
       const result = edit(detailsId);
       if (result && 'refused' in result) return result.refused;
       return null;
     } catch {
-      const unchanged = (() => { try { return editSnapshot(localStorage) === before; } catch { return false; } })();
+      let outcome = 'uncertain';
+      if (before === null) outcome = 'storage';
+      else { try { if (editSnapshot(localStorage) === before) outcome = 'storage'; } catch { /* still uncertain */ } }
       storageFailed();
-      return unchanged ? 'storage' : 'uncertain';
+      return outcome;
     } finally {
       addrSetVersion++;
-      serverList = loadServers(localStorage);
+      const next = tryLoadServers(localStorage);
+      if (next) serverList = next;
+      refreshDetails();
     }
   }
   const serverAddressAdd = (address) => detailsEdit((id) => addServerAddress(localStorage, id, address));
@@ -3873,14 +3889,14 @@
   {#snippet savedServers()}
     <!-- Settings › Connection: the same ServerList as the popover (board 315). -->
     <ServerList variant="page" servers={serverList} currentId={serverCurId} link={serverLink}
-      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} ondetails={(id) => { detailsId = id; }}
+      onpick={doServerSwitch} onrename={serverRename} onremove={serverRemove} onadd={serverAddRow} ondetails={(id) => { detailsId = id; refreshDetails(); }}
       frozen={migrationBlocked ? t('migrationBlockedNote') : ''}
       members={memberRows} notice={membershipError} builds={buildOf} />
   {/snippet}
 
-  {#if detailsEntry}
-    <ServerDetailsDialog name={detailsEntry.name} addresses={detailsAddresses} active={detailsEntry.address}
-      machineKnown={!!detailsEntry.machineId} max={MAX_ADDRESSES} compact={narrowVp}
+  {#if detailsId && detailsShown}
+    <ServerDetailsDialog name={detailsShown.entry.name} addresses={detailsShown.addresses} active={detailsShown.entry.address}
+      machineKnown={!!detailsShown.entry.machineId} max={MAX_ADDRESSES} compact={narrowVp}
       onadd={serverAddressAdd} onremove={serverAddressRemove} ontoken={serverTokenSet} onclose={() => { detailsId = ''; }} />
   {/if}
 

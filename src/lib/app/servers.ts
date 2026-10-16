@@ -151,6 +151,17 @@ export function adoptHostname(servers: ServerEntry[], id: string, hostname: stri
   return next;
 }
 
+/** The saved servers, or null when the registry cannot be READ (a storage
+ * that throws, a value that does not parse). `loadServers` reads that as an
+ * empty list; a caller that must not mistake "unreadable" for "removed"
+ * (the Addresses and token dialog, board #402 review round 3 P2) asks this. */
+export function tryLoadServers(storage: Reader): ServerEntry[] | null {
+  try {
+    const raw = storage.getItem(SERVERS_KEY);
+    return raw == null ? [] : sanitize(JSON.parse(raw));
+  } catch { return null; }
+}
+
 export function loadServers(storage: Reader): ServerEntry[] {
   try { return sanitize(JSON.parse(storage.getItem(SERVERS_KEY) || '[]')); }
   catch { return []; }
@@ -535,8 +546,13 @@ export function recordServer(
     // active one unless it was removed from it while the dial was in flight;
     // its token is the dial's unless it was changed meanwhile.
     const was = seen?.entries[entry.id];
+    // An entry that exists now but was ABSENT from the observation was saved
+    // after the dial began (review round 3 P1-A residual): it is newer than
+    // the dial, so its credential is not overwritten either. Without an
+    // observation (an explicit write) the token is the one given.
+    const newer = !!seen && !was;
     if (!(seen && removedSince(storage, seen, entry.id, conn.address))) entry.address = conn.address;
-    if (!(was && entry.token !== was.token)) entry.token = conn.token;
+    if (!newer && !(was && entry.token !== was.token)) entry.token = conn.token;
     if (conn.socket) entry.socket = conn.socket; else delete entry.socket;
     if (mid) entry.machineId = mid;
   } else {

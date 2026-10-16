@@ -33,6 +33,9 @@ function world() {
     'ws://a-ts:9': { machine: 'm-a', sessions: ['app'] },
     'ws://b:2': { machine: 'm-b', sessions: ['app'] },
     'ws://b-wan:3': { machine: 'm-b', sessions: ['app'] },
+    // A third machine, saved by no fixture (board #402 review round 3).
+    'ws://c:4': { machine: 'm-c', sessions: ['app'] },
+    'ws://c-alt:5': { machine: 'm-c', sessions: ['app'] },
   };
   let at: string | null = null;
   const fails = new Map<string, number>();
@@ -695,4 +698,29 @@ test('an address added while the leave prompt is up and removed while the dial i
   off();
   assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b:2', 'the removed address is not made active');
   assert.deepEqual(serverAddresses(t.storage, t.b.id), ['ws://b:2'], 'nor put back');
+});
+
+test('a held switch to a machine-less entry, then the machine it reaches is saved and its token edited: the commit keeps that token, in the registry and the mirror, and the next dial sends it (#402 review round 3)', async () => {
+  const { setServerToken } = await import('./servers.ts');
+  const t = app();
+  const x = recordServer(t.storage, { address: 'ws://c-alt:5', token: 'tx' }).entry;
+  assert.equal(x.machineId, undefined, 'the target knows no machine yet');
+  let release!: () => void;
+  t.onDial((addr) => (addr === 'ws://c-alt:5' ? new Promise<void>((r) => { release = r; }) : null));
+  const switching = t.sw.switchTo(loadServers(t.storage).find((s) => s.id === x.id)!);
+  for (let i = 0; i < 5 && !release; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(release, 'the dial is held');
+  const c = recordServer(t.storage, { address: 'ws://c:4', token: 'tc-saved', machineId: 'm-c' }).entry;
+  setServerToken(t.storage, c.id, 'tc-edited');
+  t.onDial(() => null);
+  release();
+  await switching;
+  const saved = loadServers(t.storage).find((s) => s.id === c.id)!;
+  assert.equal(currentServerId(t.storage), c.id, 'the answer resolves to the machine s entry');
+  assert.equal(saved.token, 'tc-edited', 'whose newest token is not overwritten by the target s');
+  assert.equal(t.storage.getItem('tmux_token'), 'tc-edited', 'nor is the mirror');
+  assert.ok(!loadServers(t.storage).some((s) => s.id === x.id), 'the machine-less target is absorbed, as before');
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.a.id)!);
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === c.id)!);
+  assert.equal(t.tokens.at(-1), 'tc-edited', 'the next dial sends the newest token');
 });

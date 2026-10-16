@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { RPC_KIND } from '../core/ws-api.ts';
 import type { ConnectionSlot } from '../core/connection-registry.ts';
 import { createServerRuntime } from './server-runtime.ts';
-import { loadServers, removeServerAddress, serverAddresses, setServerToken } from './servers.ts';
+import { loadServers, recordServer, removeServerAddress, serverAddresses, setServerToken } from './servers.ts';
+import { targetOf } from './server-target.ts';
 
 function mem(init: Record<string, string>) {
   const m = new Map(Object.entries(init));
@@ -42,7 +43,7 @@ function rig({ servers = TWO, answers = 'm-b' }: { servers?: object[]; answers?:
   for (const name of Object.keys(RPC_KIND)) api[name] = async () => ({});
   const runtime = createServerRuntime(loadServers(storage).find((s) => s.id === 'b')!, { storage, slot: { connection, api } as unknown as ConnectionSlot });
   return {
-    storage, runtime, dials,
+    storage, runtime, dials, connection, api,
     hold() { holding = true; },
     async release() { holding = false; const go = held; held = null; go?.(); for (let i = 0; i < 5; i++) await Promise.resolve(); },
     beta: () => loadServers(storage).find((s) => s.id === 'b')!,
@@ -125,4 +126,30 @@ test('a held dial of a machine-less alias that answers as alpha absorbs it into 
   const ids = loadServers(r.storage).map((s) => s.id);
   assert.deepEqual(ids, ['a'], 'the alias is absorbed into alpha, as before');
   assert.equal(r.alpha().token, 'tokA-new', 'and alpha keeps the token saved while the dial was held');
+});
+
+// Review round 3 P1-A residual: an entry SAVED after the dial's snapshot is
+// newer than the dial, though the snapshot never saw it.
+test('a held dial to beta, then alpha is saved and its token edited, then beta answers as alpha: alpha keeps its newest token, and the next dial of alpha sends it (#402 review round 3)', async () => {
+  const r = rig({ servers: [TWO[1]!], answers: 'm-a' });
+  r.hold();
+  const dialling = r.runtime.dial();
+  await Promise.resolve();
+  const { entry: alpha } = recordServer(r.storage, { address: 'ws://a:9899', token: 'tokA-saved', machineId: 'm-a' });
+  setServerToken(r.storage, alpha.id, 'tokA-edited');
+  await r.release();
+  const result = await dialling;
+  assert.equal(result.ok === false && result.reason, 'elsewhere');
+  const saved = loadServers(r.storage).find((s) => s.id === alpha.id)!;
+  assert.equal(saved.token, 'tokA-edited', 'the older dial does not write beta s token onto the alpha saved after it began');
+  assert.equal(targetOf(r.storage, alpha.id)?.token, 'tokA-edited', 'and the one reader every dial asks gives the newest token');
+  const runtimeA = createServerRuntime(saved, { storage: r.storage, slot: { connection: r.connection, api: r.api } as unknown as ConnectionSlot });
+  await runtimeA.dial();
+  assert.match(r.dials.at(-1)!, / tokA-edited$/u, 'the next dial of alpha sends it');
+  // Without an edit and without an observation of alpha, the creation path
+  // when NO entry exists at the commit is unchanged: the answer creates alpha.
+  const u = rig({ servers: [TWO[1]!], answers: 'm-a' });
+  await u.runtime.dial();
+  const created = loadServers(u.storage).find((s) => s.machineId === 'm-a');
+  assert.equal(created?.token, 'tokB', 'a machine reached for the first time is recorded with the credential that worked');
 });

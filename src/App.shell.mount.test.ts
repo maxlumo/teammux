@@ -9572,7 +9572,7 @@ test('#402 review P2-D: a storage failure on add or token is said on the dialog,
   store.state.failing = true;
   await type(field('Add address'), 'ws://b-ts:9899');
   press(/^add address$/iu); await h.settle();
-  assert.match(dialog.querySelector('[role=alert]')?.textContent ?? '', /could not write its storage/iu, 'the failure is said');
+  assert.match(dialog.querySelector('[role=alert]')?.textContent ?? '', /not saved: this device could not use its storage/iu, 'the failure is said');
   assert.ok(!/tok/iu.test(dialog.querySelector('[role=alert]')?.textContent ?? ''), 'credential-free');
   assert.equal(field('Add address').value, 'ws://b-ts:9899', 'the draft is kept');
   assert.deepEqual(rows(), ['ws://b:9899 In use'], 'nothing shown as added');
@@ -9754,4 +9754,42 @@ test('#402 review P2-D round 3: a failure that blocks the storage gate keeps the
   await h.settle();
   assert.deepEqual(JSON.parse(h.app.window.localStorage.getItem('tmux_machines') ?? '{}')['m-b'] ?? [], [], 'frozen: nothing added');
   assert.equal(field.value, 'ws://b-ts:9899');
+});
+
+// Review round 3 P2: an unreadable registry is not a removal.
+for (const when of ['before the write (the snapshot cannot be read)', 'after a failed write (the re-read cannot be read)'] as const) test(`#402 review round 3 P2: the registry unreadable ${when}: the dialog keeps the server and the draft, and says no more than it knows`, async (context) => {
+  const plan = { readFails: false, writeFails: false };
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      const get = window.Storage.prototype.getItem, set = window.Storage.prototype.setItem;
+      window.Storage.prototype.getItem = function (this: Storage, k: string) {
+        if (plan.readFails && k === 'tmux_servers') throw new Error('SecurityError');
+        return get.call(this, k);
+      };
+      window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
+        if (plan.writeFails && k === 'tmux_machines') { plan.readFails = true; throw new Error('QuotaExceededError'); }
+        return set.call(this, k, v);
+      };
+    } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = () => doc.querySelector<HTMLElement>('[role=dialog]');
+  const field = () => dialog()!.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  field().value = 'ws://b-ts:9899'; field().dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  if (when.startsWith('before')) plan.readFails = true; else plan.writeFails = true;
+  [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^add address$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(dialog(), 'the dialog stays open: an unreadable registry is not a removal');
+  assert.match(dialog()!.querySelector('h2')?.textContent ?? '', /^beta/u, 'still beta s');
+  assert.equal(field().value, 'ws://b-ts:9899', 'the draft is kept');
+  assert.deepEqual([...dialog()!.querySelectorAll('.details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim()),
+    ['ws://b:9899 In use'], 'the last addresses read are still shown');
+  const said = dialog()!.querySelector('[role=alert]')?.textContent ?? '';
+  if (when.startsWith('before')) assert.match(said, /not saved: this device could not use its storage/iu, 'no write was attempted: nothing changed is true');
+  else assert.match(said, /could not confirm the save/iu, 'the re-read could not be made: uncertain, never "nothing changed"');
 });
