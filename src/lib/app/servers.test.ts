@@ -1066,3 +1066,38 @@ test('a new token for the CURRENT server reaches the connect form through the re
   assert.equal(t.getItem('tmux_token'), 'tokA');
   assert.equal(t.getItem('tmux_address'), 'ws://a:9899');
 });
+
+// Board #402 review P2-D: a storage write that fails changes nothing, even
+// when it is the second step (the token saved, then its mirror reconcile).
+for (const [what, failing] of [
+  ['add (the failover-set write)', 'set:tmux_machines'],
+  ['remove (the failover-set write)', 'set:tmux_machines'],
+  ['token (the registry write)', 'set:tmux_servers'],
+  ['token (its mirror reconcile, after the registry was written)', 'remove:tmux_token'],
+] as const) test(`a failing ${what} throws and leaves every key as it was; a retry succeeds (#402 review P2-D)`, async () => {
+  const { addServerAddress, removeServerAddress, setServerToken } = await import('./servers.ts');
+  const s = mem({
+    tmux_servers: JSON.stringify([
+      { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+      { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    ]),
+    tmux_server_current: 'a', tmux_address: 'ws://a:9899', tmux_token: 'tokA',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899', 'ws://a-ts:9899'], 'm-b': ['ws://b:9899', 'ws://b-ts:9899'] }),
+  });
+  const before = new Map(s.m);
+  const set = s.setItem, remove = s.removeItem;
+  let armed = true;
+  s.setItem = (k: string, v: string) => { if (armed && `set:${k}` === failing) { armed = false; throw new Error('QuotaExceededError'); } set(k, v); };
+  s.removeItem = (k: string) => { if (armed && `remove:${k}` === failing) { armed = false; throw new Error('SecurityError'); } remove(k); };
+  const run = () => (what.startsWith('add') ? addServerAddress(s, 'b', 'ws://b-wan:9899')
+    : what.startsWith('remove') ? removeServerAddress(s, 'b', 'ws://b-ts:9899')
+    : setServerToken(s, 'a', 'tokA-new'));
+  assert.throws(run, /QuotaExceededError|SecurityError/u);
+  assert.deepEqual(new Map(s.m), before, 'nothing of the edit landed');
+  run();
+  assert.notDeepEqual(new Map(s.m), before, 'the retry writes');
+  if (what.startsWith('token')) {
+    assert.equal(loadServers(s).find((e) => e.id === 'a')?.token, 'tokA-new');
+    assert.equal(s.getItem('tmux_token'), null, 'and reconciles the mirror');
+  }
+});

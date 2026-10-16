@@ -22,7 +22,7 @@
 // it, `from` (its identity) stays frozen for Retry and Back, and its state,
 // in its own slots, was never touched.
 
-import { activateSwitched, restoreCurrent, type ServerEntry } from './servers.ts';
+import { activateSwitched, observe, restoreCurrent, type ServerEntry } from './servers.ts';
 import { isReachabilityFailure } from './dial-order.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -148,6 +148,10 @@ export function createServerSwitch(d: SwitchDeps) {
     if (fromConnected && target.id && target.id === d.currentId()) return;
     if (fromConnected && !(await guard(() => d.confirmLeave()))) return;
     const intent = ++seq;
+    // What the target's entry holds as the switch begins (board #402 review
+    // P1-A): an edit made while it dials wins at the commit. A candidate
+    // (no id) has nothing saved to observe; what it carries is the person's.
+    const seen = target.id ? observe(d.storage, target.id) : undefined;
     d.stopReconnect();
     const from = fromConnected ? { id: d.currentId(), name: d.currentName() } : state?.from ?? null;
     const left = d.currentId();
@@ -192,7 +196,7 @@ export function createServerSwitch(d: SwitchDeps) {
         address: used, token: target.token,
         ...(target.socket ? { socket: target.socket } : {}),
         ...(mid ? { machineId: mid } : {}),
-      });
+      }, seen);
       moved = true;
       const failure = await d.comeUp(target, entry);
       if (intent !== seq) return;

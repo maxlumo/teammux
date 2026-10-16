@@ -102,6 +102,7 @@ function app(storage = mem({
   const published: string[] = [];
   const idles: string[] = [];
   const dials: string[] = [];
+  const tokens: string[] = [];
   const unreachable: string[] = [];
   const handovers = createActivations();
   let frozen = false;
@@ -109,6 +110,8 @@ function app(storage = mem({
    * null once it is up, or why not. */
   let bringUp: () => Promise<string | null> = async () => null;
   let gate: (target: SwitchTarget) => void = () => {};
+  /** A dial a case holds until it says so (board #402 review P1-A). */
+  let holdDial: (addr: string) => Promise<void> | null = () => null;
   const sw = createServerSwitch({
     storage,
     connected: () => connected,
@@ -126,7 +129,13 @@ function app(storage = mem({
     // The candidate: in this world one socket stands for "what the switch
     // dialled", the server's own runtimes are App's (App.shell covers them).
     disconnect: () => { resets.push('candidate-closed'); },
-    connect: (addr, _token, timeoutMs) => { dials.push(`${addr}@${timeoutMs}`); return w.connect(addr); },
+    connect: async (addr, token, timeoutMs) => {
+      dials.push(`${addr}@${timeoutMs}`);
+      tokens.push(token);
+      const held = holdDial(addr);
+      if (held) await held;
+      return w.connect(addr);
+    },
     // The server's other addresses (board #353), as App wires them.
     addresses: (target) => dialOrder(addressesOf(storage, target.id, target.address), () => true),
     dialTimeout: () => dialTimeoutMs(2), // every fixture address is an internet one (ws.ts needs a window)
@@ -145,7 +154,7 @@ function app(storage = mem({
   const slot = (id: string) => createServerStore(storage, id);
   /** Every key of every slot, and the legacy keys: what nothing may touch. */
   const everything = () => JSON.stringify([...RESIDENT_KEYS].flatMap((k) => [storage.getItem(k), ...[a.id, b.id].map((id) => storage.getItem(residentKey(k, id)))]));
-  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, resets, reconnects, published, idles, dials, unreachable,
+  return { storage, slot, everything, w, a, b, sw, handovers, states, freeze: (on: boolean) => { frozen = on; }, onGate: (fn: (target: SwitchTarget) => void) => { gate = fn; }, onBringUp: (fn: () => Promise<string | null>) => { bringUp = fn; }, onDial: (fn: (addr: string) => Promise<void> | null) => { holdDial = fn; }, resets, reconnects, published, idles, dials, tokens, unreachable,
     get connected() { return connected; }, get mounted() { return mounted; } };
 }
 
@@ -555,4 +564,57 @@ test('the reviewer\u2019s sequence: the walk fails on A and B, a pick of A fails
   assert.deepEqual(t.dials, ['ws://b:2@5000', 'ws://b-wan:3@5000'], 'the plain Retry walks the set again, it is not the pick\u2019s only');
   assert.equal(t.w.at, 'ws://b-wan:3');
   assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.address, 'ws://b-wan:3', 'and records the address that answered');
+});
+
+// Board #402 review P1-A: an edit made in Settings › Connection while a switch
+// to that server is dialling is the newest explicit configuration. The switch
+// that read the old token or address before it awaited must not put them back
+// when it commits.
+test('a switch in flight while beta s token is changed commits without the old token, and the next dial uses the new one (#402 review P1-A)', async () => {
+  const { setServerToken } = await import('./servers.ts');
+  const t = app();
+  let release!: () => void;
+  t.onDial((addr) => (addr === 'ws://b:2' ? new Promise<void>((r) => { release = r; }) : null));
+  const switching = t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(t.tokens, ['tb'], 'the switch dialled with the token it read');
+  // The person saves a new token for beta while that dial is held.
+  setServerToken(t.storage, t.b.id, 'tb-new');
+  t.onDial(() => null);
+  release();
+  await switching;
+  assert.equal(currentServerId(t.storage), t.b.id, 'the switch still arrives: the live connection is kept');
+  assert.equal(loadServers(t.storage).find((s) => s.id === t.b.id)!.token, 'tb-new', 'the saved token is not overwritten by the one the switch dialled');
+  assert.equal(t.storage.getItem('tmux_token'), 'tb-new', 'nor is the mirror');
+  // The next dial of beta reads the saved configuration.
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.a.id)!);
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  assert.equal(t.tokens.at(-1), 'tb-new');
+});
+
+test('a switch in flight to an alternate that is removed meanwhile does not make it active or put it back (#402 review P1-A)', async () => {
+  const { removeServerAddress, serverAddresses, saveMachineAddresses } = await import('./servers.ts');
+  const t = app();
+  saveMachineAddresses(t.storage, 'm-b', ['ws://b:2', 'ws://b-wan:3']);
+  // beta's own address is down: the switch walks to the alternate, held.
+  t.w.fail('ws://b:2', 1);
+  let release!: () => void;
+  t.onDial((addr) => (addr === 'ws://b-wan:3' ? new Promise<void>((r) => { release = r; }) : null));
+  const switching = t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  for (let i = 0; i < 5 && !release; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(release, 'the dial to the alternate is held');
+  assert.deepEqual(removeServerAddress(t.storage, t.b.id, 'ws://b-wan:3'), { addresses: ['ws://b:2'] });
+  t.onDial(() => null);
+  release();
+  await switching;
+  assert.equal(currentServerId(t.storage), t.b.id, 'the live connection on it is kept');
+  const b = loadServers(t.storage).find((s) => s.id === t.b.id)!;
+  assert.equal(b.address, 'ws://b:2', 'the removed address does not become the active one');
+  assert.deepEqual(serverAddresses(t.storage, t.b.id), ['ws://b:2'], 'nor is it put back into the set');
+  assert.equal(t.storage.getItem('tmux_address'), 'ws://b:2', 'the mirror is the saved tuple');
+  // The next dial of beta does not try it.
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.a.id)!);
+  const mark = t.dials.length;
+  await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.b.id)!);
+  assert.ok(!t.dials.slice(mark).some((d) => d.startsWith('ws://b-wan:3')), `the removed address is not dialled: ${t.dials.slice(mark)}`);
 });

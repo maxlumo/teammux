@@ -2399,24 +2399,27 @@
   const detailsEntry = $derived(detailsId ? serverList.find((s) => s.id === detailsId) ?? null : null);
   const detailsAddresses = $derived.by(() => { void addrSetVersion; return detailsId ? serverAddresses(localStorage, detailsId) : []; });
   $effect(() => { if (detailsId && (!detailsEntry || migrationBlocked)) detailsId = ''; });
-  function serverAddressAdd(address) {
+  // A write that fails (a full or refused storage) changes nothing
+  // (servers.ts allOrNothing), is said on the dialog, and is reported to the
+  // one storage gate, which blocks only when the migration cannot record
+  // (board #402 review P2-D).
+  function detailsEdit(edit) {
     if (migrationBlocked || !detailsId) return 'missing';
-    const result = addServerAddress(localStorage, detailsId, address);
-    if ('refused' in result) return result.refused;
-    addrSetVersion++;
-    return null;
+    try {
+      const result = edit(detailsId);
+      if (result && 'refused' in result) return result.refused;
+      return null;
+    } catch {
+      storageFailed();
+      return 'storage';
+    } finally {
+      addrSetVersion++;
+      serverList = loadServers(localStorage);
+    }
   }
-  function serverAddressRemove(address) {
-    if (migrationBlocked || !detailsId) return 'missing';
-    const result = removeServerAddress(localStorage, detailsId, address);
-    if ('refused' in result) return result.refused;
-    addrSetVersion++;
-    return null;
-  }
-  function serverTokenSet(token) {
-    if (migrationBlocked || !detailsId) return;
-    serverList = setServerToken(localStorage, detailsId, token);
-  }
+  const serverAddressAdd = (address) => detailsEdit((id) => addServerAddress(localStorage, id, address));
+  const serverAddressRemove = (address) => detailsEdit((id) => removeServerAddress(localStorage, id, address));
+  const serverTokenSet = (token) => detailsEdit((id) => { setServerToken(localStorage, id, token); return null; });
   async function serverRemove(id) {
     if (migrationBlocked) return;
     // Removing a member destroys its tree (#335 ③b-2): that tree's guards
@@ -3279,6 +3282,9 @@
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
       if (addServer) { addServer = null; navPush(); return; }
+      // So is a saved server's Addresses and token dialog (board #402 review
+      // P2-C): Back closes it, writes nothing, and Connection stays behind it.
+      if (detailsId) { detailsId = ''; navPush(); return; }
       // A held tree takes no input, programmatic or not (reviewer P1-2): its
       // pages' Back chains are not asked while the app is blocked. The Retry
       // panel is the content area then; Back just stays (re-push).

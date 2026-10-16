@@ -37,7 +37,7 @@ import type { ConnectionSlot } from '../core/connection-registry.ts';
 import { RPC_KIND, type WsApi } from '../core/ws-api.ts';
 import type { BackendInfo } from '../core/agents.ts';
 import type { ServerId } from './refs.ts';
-import { adoptHostname, loadServers, recordServer, saveServers, type ServerEntry } from './servers.ts';
+import { adoptHostname, loadServers, observe, recordServer, saveServers, type ServerEntry } from './servers.ts';
 import { targetOf } from './server-target.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -303,6 +303,9 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     const route = targetOf(storage, id);
     const address = how.via || route?.address || target.address;
     const token = route ? route.token : target.token;
+    // What this dial read, for the commit below: an edit of the token or the
+    // addresses made while it awaits wins over it (board #402 review P1-A).
+    const seen = observe(storage, id);
     let reported: string | null;
     try {
       reported = await connection.connect(address, token, how.timeoutMs ?? connectTimeoutMs);
@@ -362,7 +365,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
         token,
         ...(target.socket ? { socket: target.socket } : {}),
         ...(machine ? { machineId: machine } : {}),
-      }));
+      }, seen));
     } catch (error) {
       connection.disconnect();
       // The record may have COMMITTED the registry before it threw (a merge

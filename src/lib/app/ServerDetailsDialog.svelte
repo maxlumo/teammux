@@ -17,6 +17,8 @@
   import { normalizeAddress } from '../core/connection-address.ts';
   import type { AddressRefusal } from './servers.ts';
 
+  type Failure = AddressRefusal | 'storage';
+
   let {
     name, addresses, active, machineKnown, max, compact = false,
     onadd, onremove, ontoken, onclose,
@@ -30,25 +32,29 @@
     machineKnown: boolean;
     max: number;
     compact?: boolean;
-    onadd: (address: string) => AddressRefusal | null;
-    onremove: (address: string) => AddressRefusal | null;
-    ontoken: (token: string) => void;
+    /** null: done. A refusal, or `storage`: nothing was written (board
+     * #402 review P2-D: a write that throws changes nothing and is said). */
+    onadd: (address: string) => Failure | null;
+    onremove: (address: string) => Failure | null;
+    ontoken: (token: string) => Failure | null;
     onclose: () => void;
   } = $props();
 
   let draft = $state('');
   let token = $state('');
-  let refusal = $state<AddressRefusal | null>(null);
+  let refusal = $state<Failure | null>(null);
   let tokenDone = $state(false);
+  let tokenFailed = $state(false);
 
   const title = $derived(t('serverDetailsTitle').replace('{name}', name));
   // Why adding is not possible right now, said beside the field (a touch
   // screen has no tooltip, #384 validator F1).
   const blocked = $derived(!machineKnown ? t('serverAddressNoMachine')
     : addresses.length >= max ? t('serverAddressFull').replace('{n}', String(max)) : '');
-  const REASON: Record<AddressRefusal, string> = {
+  const REASON: Record<Failure, string> = {
     missing: 'serverAddressInvalid', 'no-machine': 'serverAddressNoMachine', full: 'serverAddressFull',
     invalid: 'serverAddressInvalid', duplicate: 'serverAddressDuplicate', active: 'serverAddressesNote',
+    storage: 'serverEditFailed',
   };
   const said = $derived(refusal ? t(REASON[refusal]).replace('{n}', String(max)) : '');
 
@@ -68,7 +74,11 @@
   }
   function applyToken() {
     if (!token) return;
-    ontoken(token);
+    // Success is said only when the save completed; a failure keeps the
+    // typed token in its field (a password field: never shown) for a retry.
+    const failed = ontoken(token);
+    tokenFailed = !!failed;
+    if (failed) return;
     token = '';
     tokenDone = true;
   }
@@ -109,6 +119,7 @@
       aria-label={t('serverTokenNew')} bind:value={token} onkeydown={tokenKey} />
     <CommandButton icon="key" label={t('serverTokenChange')} disabled={!token} onclick={applyToken} />
   </div>
+  {#if tokenFailed}<p class="dlg-error config-error appear" role="alert">{t('serverEditFailed')}</p>{/if}
   <p class="dlg-note" role="status">{tokenDone ? t('serverTokenChanged') : t('serverTokenNote')}</p>
   <div class="dlg-actions">
     <CommandButton label={t('close')} onclick={onclose} />

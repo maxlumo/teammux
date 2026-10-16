@@ -9528,3 +9528,65 @@ test('#402 + #400: what the Addresses and token dialog saves is what the login p
   assert.equal(tokenField().value, 'tokB-new', 'and picking it fills beta s new token');
   assert.equal(ls.getItem('tmux_server_current'), 'a');
 });
+
+test('#402 review P2-C: on the phone Back closes the Addresses and token dialog first; Connection stays, nothing is written', async (context) => {
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'mobile' },
+    undefined, sandbox);
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await settingsTab(h, /^connection/iu);
+  const doc = h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const add = dialog.querySelector<HTMLInputElement>('input[aria-label="Add address"]')!;
+  add.value = 'ws://b-typed:9899'; add.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  const before = JSON.stringify(dumpStorage(h.app));
+  h.app.window.history.pushState({ app: true }, '');
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 3; i++) await h.settle();
+  assert.equal(doc.querySelector('[role=dialog]'), null, 'Back closed the dialog');
+  const list = doc.querySelector('.preferences .server-list');
+  assert.ok(list && !list.closest('.page-layer.hidden'), 'and Connection is still the page behind it');
+  assert.equal(JSON.stringify(dumpStorage(h.app)), before, 'nothing written: the typed address was dropped');
+});
+
+test('#402 review P2-D: a storage failure on add or token is said on the dialog, keeps the draft, never says done; a retry succeeds', async (context) => {
+  const store = refusing(['tmux_machines', 'tmux_servers']);
+  store.state.failing = false;
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'desktop' },
+    undefined, { setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  await toConnection(h);
+  const doc = h.app.document;
+  const ls = h.app.window.localStorage;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const field = (label: string) => dialog.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+  const type = async (input: HTMLInputElement, value: string) => { input.value = value; input.dispatchEvent(new h.app.window.Event('input', { bubbles: true })); await h.settle(); };
+  const press = (name: RegExp) => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => name.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+  const rows = () => [...dialog.querySelectorAll('.details-address')].map((r) => (r.textContent ?? '').replace(/\s+/gu, ' ').trim());
+  const machines = ls.getItem('tmux_machines');
+  const servers = ls.getItem('tmux_servers');
+  store.state.failing = true;
+  await type(field('Add address'), 'ws://b-ts:9899');
+  press(/^add address$/iu); await h.settle();
+  assert.match(dialog.querySelector('[role=alert]')?.textContent ?? '', /could not write its storage/iu, 'the failure is said');
+  assert.ok(!/tok/iu.test(dialog.querySelector('[role=alert]')?.textContent ?? ''), 'credential-free');
+  assert.equal(field('Add address').value, 'ws://b-ts:9899', 'the draft is kept');
+  assert.deepEqual(rows(), ['ws://b:9899 In use'], 'nothing shown as added');
+  assert.equal(ls.getItem('tmux_machines'), machines);
+  await type(field('New token'), 'tokB-new');
+  press(/^change token$/iu); await h.settle();
+  assert.equal(ls.getItem('tmux_servers'), servers, 'the token was not saved');
+  assert.doesNotMatch(dialog.textContent ?? '', /token changed/iu, 'and success is not reported');
+  assert.equal(field('New token').value, 'tokB-new', 'the typed token is kept for a retry (a password field)');
+  // Retry, the storage writable again.
+  store.state.failing = false;
+  press(/^add address$/iu); await h.settle();
+  assert.deepEqual(rows(), ['ws://b:9899 In use', 'ws://b-ts:9899']);
+  press(/^change token$/iu); await h.settle();
+  assert.equal(JSON.parse(ls.getItem('tmux_servers')!).find((s: { id: string }) => s.id === 'b').token, 'tokB-new');
+  assert.match(dialog.textContent ?? '', /token changed/iu);
+});
