@@ -23,10 +23,13 @@ use super::recipe::recipe_section;
 use super::spawn::{agent_home, effective_def_kind, provenance_of, recipe_provenance, team_defining, MemberKind};
 use crate::backends::{AppCommand, Backend, LiveWrite};
 
-/// What a window's model and effort derive from: the registry definitions it
-/// reads them from (with which of the two it inherits rather than overrides),
-/// and the team path when a team defines it. This is provenance, not a display
-/// label: it decides whether a failed home belongs to a given change.
+/// What a window's LIVE-published fields derive from — the fields the live
+/// writer projects into a running home: the model, the effort and (board #412)
+/// the MCP servers. The registry definitions it reads them from (with which it
+/// inherits rather than overrides), and the team path when a team defines it.
+/// This is provenance, not a display label: it decides whether a failed home
+/// belongs to a given change. Skills are not live-published (their links are
+/// the render's, applied at restart), so no change of them is attributed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lineage {
     pub bases: Vec<Base>,
@@ -44,13 +47,17 @@ pub struct Base {
     pub name: String,
     pub model: bool,
     pub effort: bool,
+    /// The MCP list: a member derived from a base always takes the base's
+    /// (`teams::member_def` has no MCP override), a solo agent its own.
+    pub mcp: bool,
 }
 
 /// What was saved, for deciding which failed homes it concerns.
 pub enum Change<'a> {
-    /// A registry definition (every field may have changed, or `model`/`effort`
-    /// say which of the two a field update touched).
-    Definition { name: &'a str, model: bool, effort: bool },
+    /// A registry definition, and which of its live-published fields the save
+    /// may have changed: a whole-definition save all of them, a field update
+    /// (`/model`, `/effort`) only its own.
+    Definition { name: &'a str, model: bool, effort: bool, mcp: bool },
     /// A team (its members, their overrides and bases).
     Team(&'a str),
 }
@@ -68,7 +75,7 @@ impl Lineage {
 
     fn affected_by(&self, change: &Change) -> bool {
         match change {
-            Change::Definition { name, model, effort } => !self.resolved || self.bases.iter().any(|b| b.name == *name && ((*model && b.model) || (*effort && b.effort))),
+            Change::Definition { name, model, effort, mcp } => !self.resolved || self.bases.iter().any(|b| b.name == *name && ((*model && b.model) || (*effort && b.effort) || (*mcp && b.mcp))),
             Change::Team(team) => self.team.split('/').any(|segment| segment == *team),
         }
     }
@@ -137,10 +144,10 @@ fn lineage_of(p: &super::spawn::Provenance, kind: MemberKind, window_name: &str)
     match kind {
         MemberKind::NotTeam => {
             let name = if p.agent_def.is_empty() { window_name.to_string() } else { p.agent_def.clone() };
-            Lineage { team, resolved: true, bases: vec![Base { name, model: true, effort: true }] }
+            Lineage { team, resolved: true, bases: vec![Base { name, model: true, effort: true, mcp: true }] }
         }
         MemberKind::Inline => Lineage { team, resolved: true, bases: Vec::new() },
-        MemberKind::Based { base, model_inherited, effort_inherited } => Lineage { team, resolved: true, bases: vec![Base { name: base, model: model_inherited, effort: effort_inherited }] },
+        MemberKind::Based { base, model_inherited, effort_inherited } => Lineage { team, resolved: true, bases: vec![Base { name: base, model: model_inherited, effort: effort_inherited, mcp: true }] },
         MemberKind::Unresolved => Lineage { team, resolved: false, bases: Vec::new() },
     }
 }
@@ -179,7 +186,7 @@ pub(crate) fn project_window(project_path: &str, window_name: &str) -> (Outcome,
     if let Err(e) = super::models::validate(&def.backend, &def.model).and_then(|_| super::models::validate_effort(&def.backend, &def.effort)) {
         return (Outcome::Failed(format!("its definition is not valid: {e}")), lineage);
     }
-    let outcome = match backend.write_live_config(&home, &def.model, &def.effort) {
+    let outcome = match backend.write_live_config(&home, &def) {
         Some(Ok(LiveWrite::Written)) => Outcome::Applied,
         Some(Ok(LiveWrite::AlreadyCurrent)) => Outcome::AlreadyCurrent,
         Some(Ok(LiveWrite::NoConfig)) => Outcome::Unknown("it has no profile yet (never rendered), so nothing is known about what it runs".into()),
@@ -818,18 +825,80 @@ mod tests {
         for n in [base, other] { super::super::registry_delete(n).ok(); }
     }
 
+    /// Boards #411 x #412: the live writer publishes the WHOLE patch, the
+    /// definition's MCP rows included, so a save that changes ONLY the MCP list
+    /// concerns every home that inherits it — a team member that overrides both
+    /// model and effort still takes its base's MCP list. Four homes: the base's
+    /// own window (applied), a read-only member of the base overriding model and
+    /// effort (reported, with project and window), a read-only member of an
+    /// unrelated base whose projection also fails (not this change's), and a
+    /// writable member of the base (applied). Once the read-only member can be
+    /// written, the next projection brings the rows to it.
+    #[test]
+    fn an_mcp_only_save_reports_a_failed_member_that_overrides_model_and_effort() {
+        if running_as_root() {
+            eprintln!("skipped: root writes through a read-only directory");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let ws = Ws::new("mcp412");
+        let (base, other, crew, others) = ("dl-mcp-base", "dl-mcp-other", "dl-mcp-crew", "dl-mcp-others");
+        ws.def(base, "deepseek-flash", "");
+        ws.def(other, "deepseek-flash", "");
+        let team = |name: &str, members: serde_json::Value| super::super::teams_save(&json!({ "name": name, "description": "", "members": members.to_string() })).unwrap();
+        team(crew, json!([{ "name": "overrides", "base": base, "model": "deepseek-v4-pro", "effort": "max" }, { "name": "plain", "base": base }]));
+        team(others, json!([{ "name": "strange", "base": other }]));
+        ws.window("solo", "dsh", base, "");
+        for (m, def, t) in [("overrides", base, crew), ("plain", base, crew), ("strange", other, others)] {
+            ws.window(m, "dsh", def, "");
+            std::fs::write(agent_home(&ws.path, m).join("launch.json"), json!({ "backend": "dsh", "agent_def": "", "team": t, "member": m }).to_string()).unwrap();
+            assert!(matches!(project_window(&ws.path, m).0, Outcome::Applied | Outcome::AlreadyCurrent), "{m}");
+        }
+        let lineage = project_window(&ws.path, "overrides").1.unwrap();
+        assert!(!lineage.bases[0].model && !lineage.bases[0].effort && lineage.bases[0].mcp, "model and effort are its own, the MCP list is its base's");
+        // The unrelated definition moved on, so its member has a write to attempt (and fail).
+        let mut moved = super::super::registry_get(other).unwrap().unwrap();
+        moved.model = "deepseek-v4-pro".into();
+        super::super::with_store(|st| st.reg_save(&moved, 3)).unwrap();
+        let profile = |w: &str| agent_home(&ws.path, w).join("dsh/profiles/tmm");
+        let set = |mode: u32| for w in ["overrides", "strange"] { std::fs::set_permissions(profile(w), std::fs::Permissions::from_mode(mode)).unwrap(); };
+        set(0o555);
+        let mcp = json!([{ "name": "echo", "command": "node", "args": ["srv.mjs"] }]).to_string();
+        let saved = super::super::registry_save(&json!({ "name": base, "backend": "dsh", "model": "deepseek-flash", "effort": "", "system": "Persona.", "skills": "[]", "mcp": mcp })).unwrap();
+        let mine: Vec<(&str, &str, &str)> = saved["unapplied"].as_array().map(|a| a.iter().filter(|u| u["project"] == ws.path.as_str()).filter_map(|u| Some((u["window"].as_str()?, u["definition"].as_str()?, u["kind"].as_str()?))).collect()).unwrap_or_default();
+        assert_eq!(mine, vec![("overrides", format!("team {crew}").as_str(), "failed")], "the MCP-inheriting member is reported, the unrelated failure is not: {saved}");
+        for w in ["solo", "plain"] {
+            assert!(ws.patch(w).contains("- id: tmm-mcp-echo\n"), "{w}: {}", ws.patch(w));
+        }
+        assert!(!ws.patch("overrides").contains("tmm-mcp-echo"), "it could not be written");
+        // A model-only command on the base still does not attribute the overriding member.
+        let done = command(&ws, "solo", "/model", "deepseek-v4-pro").expect("the standalone window itself was applied");
+        assert!(done.others_unapplied.iter().all(|u| !u.starts_with("overrides")), "{:?}", done.others_unapplied);
+        set(0o755);
+        assert_eq!(project_window(&ws.path, "overrides").0, Outcome::Applied);
+        let patch = ws.patch("overrides");
+        assert!(patch.contains("- id: tmm-mcp-echo\n") && patch.contains("model: \"deepseek-v4-pro\"") && patch.contains("reasoningEffort: \"max\""), "the rows reached it, its own model and effort kept: {patch}");
+        super::super::teams_delete(crew).ok();
+        super::super::teams_delete(others).ok();
+        for n in [base, other] { super::super::registry_delete(n).ok(); }
+    }
+
     /// The rule on constructed lineages: a field the member overrides is not
     /// inherited from the base, a sub-team's save concerns the members under it.
     #[test]
     fn the_scope_rule_follows_overrides_and_team_nesting() {
-        let base = |model, effort| Base { name: "a".into(), model, effort };
+        let base = |model, effort| Base { name: "a".into(), model, effort, mcp: true };
         let member = |model, effort, team: &str| Unapplied { project: "/p".into(), window: "m".into(), kind: "failed", error: "e".into(), lineage: Some(Lineage { team: team.into(), resolved: true, bases: vec![base(model, effort)] }) };
-        let (model, effort) = (Change::Definition { name: "a", model: true, effort: false }, Change::Definition { name: "a", model: false, effort: true });
+        let (model, effort) = (Change::Definition { name: "a", model: true, effort: false, mcp: false }, Change::Definition { name: "a", model: false, effort: true, mcp: false });
         assert!(affected(&member(true, true, "crew"), &model) && affected(&member(true, true, "crew"), &effort));
         assert!(!affected(&member(false, true, "crew"), &model), "the model is the member's own");
         assert!(affected(&member(false, true, "crew"), &effort));
-        assert!(!affected(&member(false, false, "crew"), &Change::Definition { name: "a", model: true, effort: true }));
-        assert!(!affected(&member(true, true, "crew"), &Change::Definition { name: "b", model: true, effort: true }), "another definition");
+        assert!(!affected(&member(false, false, "crew"), &Change::Definition { name: "a", model: true, effort: true, mcp: false }));
+        assert!(!affected(&member(true, true, "crew"), &Change::Definition { name: "b", model: true, effort: true, mcp: true }), "another definition");
+        // Board #412: the MCP list is inherited even when both model and effort are overridden.
+        let mcp = Change::Definition { name: "a", model: false, effort: false, mcp: true };
+        assert!(affected(&member(false, false, "crew"), &mcp), "an MCP change reaches a member that overrides model and effort");
+        assert!(!affected(&member(false, false, "crew"), &model), "a model-only change still does not");
         assert!(affected(&member(true, true, "crew/review"), &Change::Team("review")) && affected(&member(true, true, "crew/review"), &Change::Team("crew")));
         assert!(!affected(&member(true, true, "crew/review"), &Change::Team("others")));
         // A member with no base is KNOWN to derive from none; one that could not be resolved is not known at all.

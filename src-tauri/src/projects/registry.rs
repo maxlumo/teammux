@@ -73,7 +73,10 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
         store.reg_save(&agent, now())?;
         Ok(json!({ "ok": true, "name": agent.name }))
     })
-    .map(|saved| with_unapplied(saved, project_live_config(&agent.backend, live_config::Change::Definition { name: &agent.name, model: true, effort: true })))
+    // A whole-definition save concerns every home that inherits ANY field the
+    // live writer publishes from it — the MCP list too (board #412): a member
+    // that overrides model and effort still takes its base's MCP rows.
+    .map(|saved| with_unapplied(saved, project_live_config(&agent.backend, live_config::Change::Definition { name: &agent.name, model: true, effort: true, mcp: true })))
 }
 
 /// A saved definition reaches a RUNNING agent of a backend that reads its
@@ -126,7 +129,7 @@ pub fn registry_set_model_effort(name: &str, model: Option<&str>, effort: Option
         store.reg_save(&agent, now())?;
         Ok(agent)
     })?;
-    let change = live_config::Change::Definition { name: &agent.name, model: model.is_some(), effort: effort.is_some() };
+    let change = live_config::Change::Definition { name: &agent.name, model: model.is_some(), effort: effort.is_some(), mcp: false };
     Ok(with_unapplied(json!({ "ok": true, "name": agent.name }), project_live_config(&agent.backend, change)))
 }
 

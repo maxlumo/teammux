@@ -403,11 +403,14 @@ pub(crate) fn profile_cordis_yml() -> &'static str {
 }
 
 /// The profile's own patch layer: the plugin, the model (its config is the
-/// ONE place the model lives — never the launch line), and the LLM session
-/// title switched off (it is an extra model request on every first prompt).
-/// Values are JSON strings, which YAML reads as plain strings.
+/// ONE place the model lives — never the launch line), the LLM session
+/// title switched off (it is an extra model request on every first prompt),
+/// the definition's MCP servers as native `dsh-mcp-client` rows
+/// (`mcp_rows`), and the skill provider pointed at the agent's own skill
+/// root only (board #412). Values are JSON strings, which YAML reads as
+/// plain strings.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn profile_patch_yml(plugin_entry: &std::path::Path, model: &str, effort: &str) -> String {
+pub(crate) fn profile_patch_yml(plugin_entry: &std::path::Path, model: &str, effort: &str, mcp: &str, skill_root: &std::path::Path) -> String {
     let q = |s: &str| serde_json::to_string(s).unwrap();
     let model = model.trim();
     let model = if model.is_empty() { DEFAULT_MODEL } else { model };
@@ -415,16 +418,165 @@ pub(crate) fn profile_patch_yml(plugin_entry: &std::path::Path, model: &str, eff
     let effort_line = if effort.is_empty() { String::new() } else { format!("    reasoningEffort: {}\n", q(effort)) };
     format!(
         "# Written by tmux-mobile — regenerated at every spawn and restart (board #404).\n\
-         - insert:\n    - id: {PLUGIN_NAME}\n      name: {}\n      config:\n        requireEnv: {}\n\
+         - insert:\n    - id: {PLUGIN_NAME}\n      name: {}\n      config:\n        requireEnv: {}\n{mcp}\
          - id: agent-default-model\n  config:\n    provider: {}\n    model: {}\n{effort_line}\
          - id: session-title-llm\n  disabled: true\n\
          - id: session-log-deepseek\n  config:\n    enabled: false\n\
-         - id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n",
+         - id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n\
+         - id: skill-filesystem\n  config:\n    customSkillDirs: [{}]\n    includeDefaultRoots: false\n",
         q(&plugin_entry.to_string_lossy()),
         q(KEY_ENV),
         q(PROVIDER),
         q(model),
+        q(&skill_root.to_string_lossy()),
     )
+}
+
+/// The definition's MCP servers as `dsh-mcp-client` rows inside the patch's
+/// `insert` list (board #412), the same servers kiro and claude get
+/// natively (`spawn::mcp_defs`). stdio = `command`/`args`/`env`; remote =
+/// `streamable-http` `url`/`headers`. A value naming an environment
+/// variable (`${VAR}`, `$VAR`, `Bearer ${VAR}`) reads it at launch
+/// (`!!js process.env.VAR`, the name already validated as an identifier);
+/// every other value is a literal JSON string. What dsh cannot express is
+/// REFUSED, never guessed: a server name outside dsh's rule, or a server
+/// with neither a command nor a url.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn mcp_rows(defs: &[shared::McpDef]) -> Result<String, String> {
+    let q = |s: &str| serde_json::to_string(s).unwrap();
+    let env_value = |v: &str| match shared::env_reference(v) {
+        Some(name) => format!("!!js \"process.env.{name} ?? ''\""),
+        None => q(v),
+    };
+    let mut out = String::new();
+    for m in defs {
+        let ok_name = (1..=32).contains(&m.name.len()) && m.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !ok_name {
+            return Err(format!("MCP server {:?}: dsh needs a name of 1-32 letters, digits, '_' or '-'", m.name));
+        }
+        out += &format!("    - id: tmm-mcp-{}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: {}\n", m.name, q(&m.name));
+        if let Some(url) = &m.url {
+            out += &format!("        transport: \"streamable-http\"\n        url: {}\n", q(url));
+            if !m.headers.is_empty() {
+                out += "        headers:\n";
+                for (k, v) in &m.headers {
+                    let value = match shared::header_env_reference(v) {
+                        Some((name, true)) => format!("!!js \"'Bearer ' + (process.env.{name} ?? '')\""),
+                        Some((name, false)) => format!("!!js \"process.env.{name} ?? ''\""),
+                        None => q(v),
+                    };
+                    out += &format!("          {}: {value}\n", q(k));
+                }
+            }
+        } else if let Some(cmd) = &m.command {
+            let args: Vec<String> = m.args.iter().map(|a| q(a)).collect();
+            out += &format!("        transport: \"stdio\"\n        command: {}\n        args: [{}]\n", q(cmd), args.join(", "));
+            if !m.env.is_empty() {
+                out += "        env:\n";
+                for (k, v) in &m.env {
+                    out += &format!("          {}: {}\n", q(k), env_value(v));
+                }
+            }
+        } else {
+            return Err(format!("MCP server {:?}: neither a command nor a url", m.name));
+        }
+    }
+    Ok(out)
+}
+
+/// Where the agent's own skill root lives (`write_skill_root`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn skill_root(dsh_home: &Path) -> std::path::PathBuf {
+    dsh_home.join("tmm").join("skills")
+}
+
+/// The agent's own skill root (board #412): one link per skill of its
+/// definition, rebuilt at every render, and the ONLY root the skill provider
+/// scans (`includeDefaultRoots: false` keeps the owner's `~/.agents`, the
+/// project's `.agents/skills` and dsh's bundled skills out — the AGENTS.md
+/// rule). dsh announces these skills to the model in its own catalog and
+/// loads them with its `skill` tool, so no index is written into the
+/// prompt. Each skill's SKILL.md is checked the way dsh's `parseSkillFile`
+/// reads it (`dsh_skill_name`); one dsh would skip is refused with the
+/// reason, never rewritten.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_skill_root(root: &Path, skills: &[crate::projects::skills::ResolvedSkill]) -> Result<(), String> {
+    let names = skills
+        .iter()
+        .map(|sk| dsh_skill_name(&sk.dir).map_err(|why| format!("skill {:?} ({}): {why}", sk.name, sk.dir.display())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if root.exists() {
+        std::fs::remove_dir_all(root).map_err(|e| format!("clear {}: {e}", root.display()))?;
+    }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    for (sk, name) in skills.iter().zip(&names) {
+        std::os::unix::fs::symlink(&sk.dir, root.join(name)).map_err(|e| format!("link skill {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The name dsh 0.2.0-rc.2 catalogs a skill bundle under, or why it would
+/// skip it. A validated SUBSET mirroring its `parseSkillFile`, not a second
+/// copy of its parser (YAML edge cases can still differ): `SKILL.md` opens
+/// with a `---` line and a closing `---` line (each with at most ONE `\r`
+/// before its newline, as dsh strips) around a YAML mapping; `name` and
+/// `description` are non-empty strings (no fallback to the directory name);
+/// the name matches `^[a-z0-9]+(-[a-z0-9]+)*$`; the legacy invocation keys
+/// are rejected; `disable-model-invocation` / `user-invocable`, when
+/// present, read as a boolean (true/false, 1/0 — `1.0` is the number 1 to
+/// dsh's YAML too —, yes/no, on/off).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn dsh_skill_name(dir: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| format!("no readable SKILL.md ({e})"))?;
+    // One `\n`, then at most one `\r`: dsh's `replace(/\r$/, "")`.
+    let delim = |l: &str| {
+        let l = l.strip_suffix('\n').unwrap_or(l);
+        l.strip_suffix('\r').unwrap_or(l) == "---"
+    };
+    let mut lines = raw.split_inclusive('\n');
+    if !lines.next().is_some_and(delim) {
+        return Err("SKILL.md does not open with YAML frontmatter".into());
+    }
+    let mut yaml = String::new();
+    let mut closed = false;
+    for line in lines {
+        if delim(line) {
+            closed = true;
+            break;
+        }
+        yaml.push_str(line);
+    }
+    if !closed {
+        return Err("SKILL.md frontmatter is not closed by a --- line".into());
+    }
+    let data: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&yaml).map_err(|e| format!("invalid YAML frontmatter ({e})"))?;
+    let field = |k: &str| data.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let name = field("name").ok_or("the frontmatter needs a `name` (dsh never uses the directory name)")?;
+    if field("description").is_none() {
+        return Err("the frontmatter needs a `description`".into());
+    }
+    let ok_name = name.split('-').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    if !ok_name {
+        return Err(format!("the name {name:?} is not lowercase letters and digits joined by '-'"));
+    }
+    for (legacy, canonical) in [("disableModelInvocation", "disable-model-invocation"), ("modelInvocable", "disable-model-invocation"), ("userInvocable", "user-invocable")] {
+        if data.contains_key(legacy) {
+            return Err(format!("the field {legacy:?} is unsupported; dsh reads {canonical:?}"));
+        }
+    }
+    for key in ["disable-model-invocation", "user-invocable"] {
+        let Some(v) = data.get(key) else { continue };
+        let ok = match v {
+            serde_yaml_ng::Value::Bool(_) => true,
+            serde_yaml_ng::Value::Number(n) => n.as_f64().is_some_and(|n| n == 0.0 || n == 1.0),
+            serde_yaml_ng::Value::String(s) => matches!(s.to_ascii_lowercase().as_str(), "1" | "0" | "true" | "false" | "yes" | "no" | "on" | "off"),
+            _ => false,
+        };
+        if !ok {
+            return Err(format!("the field {key:?} must be a boolean"));
+        }
+    }
+    Ok(name.to_string())
 }
 
 /// The managed shell's `.zshenv`: no system rc files (`/etc/zshrc` and
@@ -684,17 +836,16 @@ pub(crate) fn render_dsh(
     shared::write_owned(&profile.join("package.json"), Some(profile_package_json()))?;
     shared::write_owned(&profile.join("pnpm-workspace.yaml"), Some(profile_workspace_yaml()))?;
     shared::write_owned(&profile.join("cordis.yml"), Some(profile_cordis_yml()))?;
-    shared::write_atomic(&profile.join("cordis.patch.yml"), &profile_patch_yml(&entry, &def.model, &def.effort))?;
+    let mcp = mcp_rows(&crate::projects::spawn::mcp_defs(def))?;
+    let skill_root = skill_root(&dsh_home);
+    write_skill_root(&skill_root, skills)?;
+    shared::write_atomic(&profile.join("cordis.patch.yml"), &profile_patch_yml(&entry, &def.model, &def.effort, &mcp, &skill_root))?;
 
     // The prompt is the harness home's user-global AGENTS.md (dsh-agent-
     // instructions reads `$DSH_HOME/AGENTS.md` first); DSH_AGENTS_HOME points
     // at the same home, so the user's own `~/.agents/AGENTS.md` stays out.
-    let full_prompt = if skills.is_empty() {
-        system_prompt.to_string()
-    } else {
-        format!("{}\n\n{}", system_prompt, crate::projects::skills::skills_index_text(skills))
-    };
-    shared::write_owned(&dsh_home.join("AGENTS.md"), Some(&full_prompt))?;
+    // The skills are announced by dsh's own catalog (board #412).
+    shared::write_owned(&dsh_home.join("AGENTS.md"), Some(system_prompt))?;
 
     let dsh = dsh_home.to_string_lossy().to_string();
     Ok(Rendered {
@@ -723,15 +874,18 @@ pub(crate) fn render_dsh(
     })
 }
 
-/// Re-render ONLY the profile's patch layer — the model and the effort — in a
-/// home that already has its profile (board #411). Every dsh turn is a fresh
-/// process that reads the profile, so this is all a model or effort change
-/// needs for the NEXT turn: no restart, no other file rewritten under a running
-/// agent. The patch is replaced whole (`write_atomic`). `NoConfig` when the
+/// Re-render ONLY the profile's patch layer in a home that already has its
+/// profile (board #411), from the definition: the model and the effort, and
+/// with them the rest of that one document — the definition's MCP rows and
+/// the skill provider's root (board #412), which a live write must carry, not
+/// drop. Every dsh turn is a fresh process that reads the profile, so this is
+/// all a model or effort change needs for the NEXT turn: no restart, no other
+/// file rewritten under a running agent (the skill root's links are the
+/// render's). The patch is replaced whole (`write_atomic`). `NoConfig` when the
 /// home has no profile (never rendered): nothing was written, and nothing is
 /// known about what the agent runs; `AlreadyCurrent` when the text is right.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn write_profile_patch(home: &Path, model: &str, effort: &str) -> Result<super::LiveWrite, String> {
+pub(crate) fn write_profile_patch(home: &Path, def: &RegAgent) -> Result<super::LiveWrite, String> {
     use super::LiveWrite;
     let dsh_home = home.join("dsh");
     let profile = dsh_home.join("profiles").join(PROFILE);
@@ -739,7 +893,8 @@ pub(crate) fn write_profile_patch(home: &Path, model: &str, effort: &str) -> Res
         return Ok(LiveWrite::NoConfig);
     }
     let entry = dsh_home.join("plugins").join(PLUGIN_NAME).join("index.mjs");
-    let text = profile_patch_yml(&entry, model, effort);
+    let mcp = mcp_rows(&crate::projects::spawn::mcp_defs(def))?;
+    let text = profile_patch_yml(&entry, &def.model, &def.effort, &mcp, &skill_root(&dsh_home));
     let path = profile.join("cordis.patch.yml");
     if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
         return Ok(LiveWrite::AlreadyCurrent);
@@ -1044,7 +1199,8 @@ pub(crate) mod tests {
     #[test]
     fn the_patch_holds_the_model_the_plugin_and_no_title_request() {
         let entry = Path::new("/ws/.tmm/agents/d1/dsh/plugins/tmm-telemetry/index.mjs");
-        let patch = profile_patch_yml(entry, "", "");
+        let root = Path::new("/ws/.tmm/agents/d1/dsh/tmm/skills");
+        let patch = profile_patch_yml(entry, "", "", "", root);
         assert!(patch.contains("    model: \"deepseek-flash\"\n"), "empty = the route's shipped default\n{patch}");
         assert!(patch.contains("    provider: \"deepseek-official\"\n"));
         assert!(!patch.contains("reasoningEffort"), "empty effort = dsh's default");
@@ -1054,16 +1210,25 @@ pub(crate) mod tests {
         // Board #408: nothing but the model request leaves the machine.
         assert!(patch.contains("- id: session-log-deepseek\n  config:\n    enabled: false\n"), "{patch}");
         assert!(patch.contains("- id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n"), "{patch}");
-        let pinned = profile_patch_yml(entry, " deepseek-v4-pro ", "max");
+        let pinned = profile_patch_yml(entry, " deepseek-v4-pro ", "max", "", root);
         assert!(pinned.contains("    model: \"deepseek-v4-pro\"\n    reasoningEffort: \"max\"\n"), "{pinned}");
-        let odd = profile_patch_yml(entry, "a\"b: c", "");
+        let odd = profile_patch_yml(entry, "a\"b: c", "", "", root);
         assert!(odd.contains("    model: \"a\\\"b: c\"\n"), "a value is one JSON string, never YAML syntax");
+        // Board #412: the skill provider scans the agent's own root only.
+        assert!(patch.contains("- id: skill-filesystem\n  config:\n    customSkillDirs: [\"/ws/.tmm/agents/d1/dsh/tmm/skills\"]\n    includeDefaultRoots: false\n"), "{patch}");
     }
 
-    /// A loopback stand-in for the Messages API (a fake key; zero model calls):
-    /// answers every request with one text reply and records `(request line,
-    /// JSON body)`. Returns its port and the record.
-    fn loopback_messages_api() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    /// A dsh definition with only a model and an effort (board #411's tests).
+    fn model_def(model: &str, effort: &str) -> RegAgent {
+        serde_json::from_value(json!({"name": "d1", "backend": "dsh", "model": model, "effort": effort})).unwrap()
+    }
+
+    /// A loopback stand-in for the DeepSeek Messages API (boards #408,
+    /// #412): records each request (its first line and JSON body) and
+    /// answers the n-th with `script[n]` — `Some((tool, input))` = one
+    /// tool call — or, past the script, with the text "OK". A fake key and
+    /// `DEEPSEEK_BASE_URL` point a real dsh at it: zero model calls.
+    pub(crate) fn messages_stand_in(script: Vec<(String, Value)>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1087,22 +1252,249 @@ pub(crate) mod tests {
                 }
                 let mut body = vec![0; len];
                 reader.read_exact(&mut body).unwrap();
-                log.lock().unwrap().push((first.trim().to_string(), serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                let n = {
+                    let mut log = log.lock().unwrap();
+                    log.push((first.trim().to_string(), serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                    log.len() - 1
+                };
                 let ev = |t: &str, d: Value| format!("event: {t}\ndata: {d}\n\n");
-                let sse = [
-                    ev("message_start", json!({"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})),
-                    ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
-                    ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}})),
-                    ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
-                    ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}})),
-                    ev("message_stop", json!({"type":"message_stop"})),
-                ]
-                .concat();
+                let start = ev("message_start", json!({"type":"message_start","message":{"id":format!("m{n}"),"type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}));
+                let sse = match script.get(n) {
+                    Some((tool, input)) => [
+                        start,
+                        ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":format!("call_{n}"),"name":tool,"input":{}}})),
+                        ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}})),
+                        ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
+                        ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}})),
+                        ev("message_stop", json!({"type":"message_stop"})),
+                    ]
+                    .concat(),
+                    None => [
+                        start,
+                        ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
+                        ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}})),
+                        ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
+                        ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}})),
+                        ev("message_stop", json!({"type":"message_stop"})),
+                    ]
+                    .concat(),
+                };
                 let _ = write!(conn, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}", sse.len());
             }
         });
         (port, seen)
     }
+
+    /// Board #412, through the REAL dsh against the stand-in (zero model
+    /// calls): an agent whose definition names one stdio MCP server and one
+    /// skill gets them NATIVELY. The server's tool is in the request's tool
+    /// list as `mcp__echo__echo` and a call reaches the server; the skill is
+    /// in dsh's own catalog and the `skill` tool returns its body; the
+    /// prompt (AGENTS.md) carries no second skills index; the owner's
+    /// `~/.agents/skills` stays out (`includeDefaultRoots: false`).
+    #[test]
+    fn the_managed_profile_gives_dsh_native_mcp_tools_and_skills() {
+        let (Some(dsh), Some(node)) = (which("dsh"), which("node")) else {
+            eprintln!("skipped: no dsh or node on PATH");
+            return;
+        };
+        let ws = std::env::temp_dir().join(format!("tmm-dsh-412-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/d1");
+        std::fs::create_dir_all(&home).unwrap();
+        let server = ws.join("echo.mjs");
+        std::fs::write(&server, MCP_ECHO).unwrap();
+        let mcp_log = ws.join("mcp.jsonl");
+        let http_log = ws.join("http.jsonl");
+        // The Streamable HTTP server, started first: its url names its port.
+        let port_file = ws.join("http.port");
+        // Killed when the test ends, however it ends, and holding none of the
+        // test's own pipes (a leftover child would keep cargo's output open).
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _http_server = KillOnDrop(
+            std::process::Command::new(&node)
+                .arg(&server)
+                .args(["--http", &port_file.to_string_lossy()])
+                .env("MCP_LOG", &http_log)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for("the HTTP MCP server", 10, || std::fs::read_to_string(&port_file).is_ok_and(|p| !p.is_empty()));
+        let http_port = std::fs::read_to_string(&port_file).unwrap();
+        // A literal that LOOKS like code, with quotes and a newline: it must
+        // arrive as text, never be evaluated.
+        let lit = "!!js process.exit(7) \" ' ${NOT_A_REF}\nsecond line";
+        let header_lit = "!!js process.exit(7) \" '";
+        let skill = ws.join("lib/hello-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: hello-skill\ndescription: Greet in the special way.\n---\n\nSay HELLO-412.\n").unwrap();
+        // A skill in a default root (the project's `.agents/skills`; the
+        // cwd has no .git, so it is the project root) that must NOT be seen.
+        std::fs::create_dir_all(ws.join(".agents/skills/owner-skill")).unwrap();
+        std::fs::write(ws.join(".agents/skills/owner-skill/SKILL.md"), "---\nname: owner-skill\ndescription: The owner's own.\n---\n").unwrap();
+        let def: RegAgent = serde_json::from_value(json!({
+            "name": "d1", "backend": "dsh",
+            "mcp": json!([
+                {"name": "echo", "command": node.to_string_lossy(), "args": [server.to_string_lossy()], "env": {"MCP_LOG": mcp_log.to_string_lossy(), "REF": "${TMM_412_REF}", "LIT": lit}},
+                {"name": "web", "url": format!("http://127.0.0.1:{http_port}/mcp"), "headers": {"Authorization": "Bearer ${TMM_412_TOKEN}", "X-Lit": header_lit}},
+            ]).to_string(),
+        }))
+        .unwrap();
+        let skills = vec![crate::projects::skills::ResolvedSkill { name: "hello-skill".into(), dir: skill.clone(), description: "Greet in the special way.".into() }];
+        let r = render_dsh(&def, "d1", &home, "You are d1.", &skills).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("dsh/AGENTS.md")).unwrap(), "You are d1.", "no second skills index");
+        let script = vec![
+            ("mcp__echo__echo".to_string(), json!({"text": "hi"})),
+            ("mcp__web__echo".to_string(), json!({"text": "over http"})),
+            ("skill".to_string(), json!({"name": "hello-skill"})),
+        ];
+        let (port, seen) = messages_stand_in(script);
+        let mut cmd = std::process::Command::new(&dsh);
+        cmd.args(["--profile", PROFILE, "--", "use the echo tool, then the skill"])
+            .current_dir(&ws)
+            .env_clear()
+            .env("HOME", &ws)
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("DEEPSEEK_API_KEY", "not-a-key")
+            .env("DEEPSEEK_BASE_URL", format!("http://127.0.0.1:{port}"))
+            .env("TMM_412_REF", "ref-412")
+            .env("TMM_412_TOKEN", "tok-412")
+            .stdin(std::process::Stdio::null());
+        for (k, v) in &r.env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 4, "two tool calls, the skill call, the answer");
+        // The references were read from the launch env; the literals arrived
+        // byte for byte (the stdio child's env, the HTTP request's headers).
+        let logged = |f: &Path| std::fs::read_to_string(f).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
+        let stdio_env = logged(&mcp_log).into_iter().find_map(|e| e.get("env").cloned()).unwrap();
+        assert_eq!(stdio_env, json!({"REF": "ref-412", "LIT": lit}));
+        let headers: Vec<Value> = logged(&http_log).into_iter().filter_map(|e| e.get("headers").cloned()).collect();
+        assert!(!headers.is_empty() && headers.iter().all(|h| *h == json!({"authorization": "Bearer tok-412", "x-lit": header_lit})), "{headers:?}");
+        assert!(logged(&http_log).iter().any(|e| e["method"] == "tools/call"), "the HTTP call reached its server");
+        assert!(seen[2].1["messages"].to_string().contains("echo: over http"));
+        let tools: Vec<String> = seen[0].1["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(tools.iter().any(|t| t == "mcp__echo__echo") && tools.iter().any(|t| t == "mcp__web__echo"), "{tools:?}");
+        assert!(tools.iter().any(|t| t == "skill"), "{tools:?}");
+        let first = seen[0].1["messages"].to_string();
+        assert!(first.contains("hello-skill") && first.contains("Greet in the special way."), "dsh's catalog announces the skill");
+        assert!(!first.contains("owner-skill"), "the owner's skills stay out");
+        assert!(std::fs::read_to_string(&mcp_log).unwrap().contains("\"tools/call\""), "the call reached the server");
+        assert!(seen[1].1["messages"].to_string().contains("echo: hi"), "the tool result came back");
+        assert!(seen[3].1["messages"].to_string().contains("Say HELLO-412."), "the skill body was loaded");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #412: the agent's skill root is exactly its definition's skills,
+    /// rebuilt at every render — a skill dropped from the definition has no
+    /// link left, not even a dangling one — and each SKILL.md is checked the
+    /// way dsh reads it: a bundle dsh would skip is refused with the reason,
+    /// and its file is left exactly as it was.
+    #[test]
+    fn the_skill_root_is_the_definitions_skills_and_odd_ones_are_refused() {
+        let ws = std::env::temp_dir().join(format!("tmm-dsh-skills-{}", uuid::Uuid::new_v4()));
+        let root = ws.join("root");
+        let sk = |dir: &str, front: &str| {
+            let d = ws.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\n{front}---\n\nBody.\n")).unwrap();
+            crate::projects::skills::ResolvedSkill { name: dir.into(), dir: d, description: "from the index".into() }
+        };
+        let re = |x: &crate::projects::skills::ResolvedSkill| crate::projects::skills::ResolvedSkill { name: x.name.clone(), dir: x.dir.clone(), description: x.description.clone() };
+        let a = sk("a-dir", "name: a-1\ndescription: one\nuser-invocable: \"off\"\ndisable-model-invocation: 1.0\n");
+        let b = sk("b", "name: b\ndescription: two\n");
+        write_skill_root(&root, &[re(&a), re(&b)]).unwrap();
+        assert_eq!(std::fs::read_link(root.join("a-1")).unwrap(), ws.join("a-dir"), "linked under dsh's catalog name, not the folder's");
+        write_skill_root(&root, &[re(&b)]).unwrap();
+        assert!(root.join("a-1").symlink_metadata().is_err(), "revoked: no link left, dangling or not");
+        assert!(root.join("b").symlink_metadata().unwrap().file_type().is_symlink());
+        let cases = [
+            ("no-name", "description: no name here\n", "needs a `name`"),
+            ("no-desc", "name: no-desc\n", "needs a `description`"),
+            ("upper", "name: Upper\ndescription: x\n", "is not lowercase"),
+            ("double", "name: a--b\ndescription: x\n", "is not lowercase"),
+            ("legacy", "name: legacy\ndescription: x\nuserInvocable: true\n", "unsupported"),
+            ("policy", "name: policy\ndescription: x\nuser-invocable: maybe\n", "must be a boolean"),
+            ("policy2", "name: policy2\ndescription: x\ndisable-model-invocation: 2\n", "must be a boolean"),
+        ];
+        for (dir, front, why) in cases {
+            let bad = sk(dir, front);
+            let before = std::fs::read_to_string(bad.dir.join("SKILL.md")).unwrap();
+            let err = write_skill_root(&root, &[re(&b), re(&bad)]).unwrap_err();
+            assert!(err.contains(why) && err.contains(dir), "{dir}: {err}");
+            assert_eq!(std::fs::read_to_string(bad.dir.join("SKILL.md")).unwrap(), before, "{dir}: never rewritten");
+        }
+        std::fs::create_dir_all(ws.join("bare")).unwrap();
+        std::fs::write(ws.join("bare/SKILL.md"), "no frontmatter\n").unwrap();
+        assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("does not open"));
+        std::fs::write(ws.join("bare/SKILL.md"), "---\nname: x\n").unwrap();
+        assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("not closed"));
+        // One CR before a delimiter's newline is stripped, as dsh does; two
+        // are not, so that file is no frontmatter to dsh either.
+        std::fs::write(ws.join("bare/SKILL.md"), "---\r\nname: crlf\r\ndescription: x\r\n---\r\n").unwrap();
+        assert_eq!(dsh_skill_name(&ws.join("bare")).unwrap(), "crlf");
+        std::fs::write(ws.join("bare/SKILL.md"), "---\r\r\nname: cr2\ndescription: x\n---\n").unwrap();
+        assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("does not open"));
+        std::fs::write(ws.join("bare/SKILL.md"), "---\nname: cr2\ndescription: x\n---\r\r\n").unwrap();
+        assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("not closed"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// An MCP server in one file, one tool `echo`: stdio (newline-delimited
+    /// JSON-RPC), or Streamable HTTP with `--http <port file>` (JSON
+    /// responses). It logs its `REF`/`LIT` environment at start, each
+    /// request's `authorization`/`x-lit` headers, and every method, to
+    /// `$MCP_LOG`.
+    const MCP_ECHO: &str = r#"import fs from 'node:fs'
+import http from 'node:http'
+import readline from 'node:readline'
+const log = (m) => process.env.MCP_LOG && fs.appendFileSync(process.env.MCP_LOG, JSON.stringify(m) + '\n')
+const answer = (m) => {
+  log({ method: m.method })
+  if (m.id === undefined) return undefined
+  if (m.method === 'initialize') return { jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'echo', version: '1.0.0' } } }
+  if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'echo', description: 'Echo the text back.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] } }
+  if (m.method === 'tools/call') return { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'echo: ' + (m.params?.arguments?.text ?? '') }] } }
+  if (m.method === 'ping') return { jsonrpc: '2.0', id: m.id, result: {} }
+  return { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'method not found' } }
+}
+log({ env: { REF: process.env.REF ?? null, LIT: process.env.LIT ?? null } })
+const at = process.argv.indexOf('--http')
+if (at < 0) {
+  readline.createInterface({ input: process.stdin }).on('line', (line) => {
+    let m
+    try { m = JSON.parse(line) } catch { return }
+    const r = answer(m)
+    if (r) process.stdout.write(JSON.stringify(r) + '\n')
+  })
+} else {
+  const server = http.createServer((req, res) => {
+    log({ headers: { authorization: req.headers['authorization'] ?? null, 'x-lit': req.headers['x-lit'] ?? null } })
+    if (req.method !== 'POST') { res.writeHead(405).end(); return }
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      let m
+      try { m = JSON.parse(body) } catch { res.writeHead(400).end(); return }
+      const out = (Array.isArray(m) ? m : [m]).map(answer).filter(Boolean)
+      if (!out.length) { res.writeHead(202).end(); return }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(Array.isArray(m) ? out : out[0]))
+    })
+  })
+  server.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[at + 1], String(server.address().port)))
+}
+"#;
 
     /// Board #408, through the REAL dsh when one is installed, against a
     /// loopback stand-in for the Messages API (a fake key; zero model
@@ -1122,7 +1514,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh"})).unwrap();
         let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
-        let (port, seen) = loopback_messages_api();
+        let (port, seen) = messages_stand_in(Vec::new());
         let mut cmd = std::process::Command::new(&dsh);
         cmd.args(["--profile", PROFILE, "--", "Reply with exactly: OK"])
             .current_dir(&ws)
@@ -1164,7 +1556,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh","model":"deepseek-flash"})).unwrap();
         let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
-        let (port, seen) = loopback_messages_api();
+        let (port, seen) = messages_stand_in(Vec::new());
         let run = || {
             let mut cmd = std::process::Command::new(&dsh);
             cmd.args(["--profile", PROFILE, "--", "Reply with exactly: OK"])
@@ -1187,12 +1579,40 @@ pub(crate) mod tests {
         assert_eq!(first.pointer("/output_config/effort").and_then(Value::as_str), Some("high"), "no effort named: dsh's own default");
 
         // Between runs, as `/model` and `/effort` do it.
-        assert_eq!(write_profile_patch(&home, "deepseek-v4-pro", "max").unwrap(), crate::backends::LiveWrite::Written);
+        assert_eq!(write_profile_patch(&home, &model_def("deepseek-v4-pro", "max")).unwrap(), crate::backends::LiveWrite::Written);
         let second = run();
         assert_eq!(second["model"], "deepseek-v4-pro", "the next run answered from the new model: {second}");
         assert_eq!(second.pointer("/output_config/effort").and_then(Value::as_str), Some("max"), "{second}");
         assert_eq!(seen.lock().unwrap().len(), 2, "one request per run");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #412: the definition's MCP servers become dsh-mcp-client rows
+    /// inside the patch's insert list. A variable reference is read from the
+    /// environment at launch, every other value is a literal JSON string, and
+    /// what dsh cannot express is refused.
+    #[test]
+    fn mcp_servers_render_as_native_dsh_rows_and_odd_ones_are_refused() {
+        let def = |v: Value| -> shared::McpDef { serde_json::from_value(v).unwrap() };
+        let rows = mcp_rows(&[
+            def(json!({"name": "files", "command": "npx", "args": ["-y", "srv", "a\"b"], "env": {"TOKEN": "${GH_TOKEN}", "MODE": "ro $x"}})),
+            def(json!({"name": "web_2", "url": "https://h/mcp", "headers": {"Authorization": "Bearer ${MCP_TOKEN}", "X-Id": "$ID", "X-Lit": "plain"}})),
+        ])
+        .unwrap();
+        assert_eq!(
+            rows,
+            "    - id: tmm-mcp-files\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: \"files\"\n\
+             \x20       transport: \"stdio\"\n        command: \"npx\"\n        args: [\"-y\", \"srv\", \"a\\\"b\"]\n        env:\n\
+             \x20         \"MODE\": \"ro $x\"\n          \"TOKEN\": !!js \"process.env.GH_TOKEN ?? ''\"\n\
+             \x20   - id: tmm-mcp-web_2\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: \"web_2\"\n\
+             \x20       transport: \"streamable-http\"\n        url: \"https://h/mcp\"\n        headers:\n\
+             \x20         \"Authorization\": !!js \"'Bearer ' + (process.env.MCP_TOKEN ?? '')\"\n\
+             \x20         \"X-Id\": !!js \"process.env.ID ?? ''\"\n          \"X-Lit\": \"plain\"\n"
+        );
+        assert!(mcp_rows(&[def(json!({"name": "has space", "command": "x"}))]).unwrap_err().contains("1-32"));
+        assert!(mcp_rows(&[def(json!({"name": "a".repeat(33), "command": "x"}))]).is_err());
+        assert!(mcp_rows(&[def(json!({"name": "empty"}))]).unwrap_err().contains("neither a command nor a url"));
+        assert_eq!(mcp_rows(&[]).unwrap(), "");
     }
 
     #[test]
@@ -1497,10 +1917,10 @@ pub(crate) mod tests {
             return;
         };
         let profile = pane.dir.join("dsh").join("profiles").join(PROFILE);
-        assert_eq!(write_profile_patch(&pane.dir, "x", "").unwrap(), LiveWrite::NoConfig, "a home with no profile is rendered by spawn: nothing is written, and nothing is known about what runs");
+        assert_eq!(write_profile_patch(&pane.dir, &model_def("x", "")).unwrap(), LiveWrite::NoConfig, "a home with no profile is rendered by spawn: nothing is written, and nothing is known about what runs");
         assert!(!profile.exists(), "and nothing was created");
         std::fs::create_dir_all(&profile).unwrap();
-        assert_eq!(write_profile_patch(&pane.dir, "deepseek-flash", "").unwrap(), LiveWrite::Written);
+        assert_eq!(write_profile_patch(&pane.dir, &model_def("deepseek-flash", "")).unwrap(), LiveWrite::Written);
         let patch = |n: usize| std::fs::read_to_string(pane.dir.join(format!("patch-{n}"))).unwrap();
 
         let n = pane.deliver("one");
@@ -1508,8 +1928,8 @@ pub(crate) mod tests {
         assert!(!pane.argv(n).iter().any(|a| a == "--session-id"), "the first turn starts a conversation");
 
         // The change lands between turns, in the running pane.
-        assert_eq!(write_profile_patch(&pane.dir, "deepseek-v4-pro", "max").unwrap(), LiveWrite::Written, "the patch changed");
-        assert_eq!(write_profile_patch(&pane.dir, "deepseek-v4-pro", "max").unwrap(), LiveWrite::AlreadyCurrent, "and the same text is not rewritten");
+        assert_eq!(write_profile_patch(&pane.dir, &model_def("deepseek-v4-pro", "max")).unwrap(), LiveWrite::Written, "the patch changed");
+        assert_eq!(write_profile_patch(&pane.dir, &model_def("deepseek-v4-pro", "max")).unwrap(), LiveWrite::AlreadyCurrent, "and the same text is not rewritten");
         let n = pane.deliver("two");
         assert!(patch(n).contains("model: \"deepseek-v4-pro\"") && patch(n).contains("reasoningEffort: \"max\""), "the next turn read the new profile: {}", patch(n));
         assert_eq!(pane.argv(n)[..4], ["--profile", "tmm", "--session-id", "session-0000-test"], "and it is still the same conversation");
@@ -1612,6 +2032,37 @@ pub(crate) mod tests {
         assert!(!pane.argv(n).iter().any(|a| a == "--session-id"));
     }
 
+    /// Boards #411 x #412: a live model change re-renders the WHOLE patch
+    /// from the definition, so the definition's MCP rows and the skill
+    /// provider's root survive it — the live write and the render are one
+    /// document, never a model-only patch that drops the agent's tools.
+    #[test]
+    fn a_live_model_change_keeps_the_mcp_rows_and_the_skill_root() {
+        let home = std::env::temp_dir().join(format!("tmm-dsh-live412-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mcp = json!([{"name": "echo", "command": "node", "args": ["srv.mjs"]}]).to_string();
+        let def = |model: &str| -> RegAgent { serde_json::from_value(json!({"name": "d1", "backend": "dsh", "model": model, "mcp": mcp})).unwrap() };
+        // One real skill, so the live write is seen to leave its link alone.
+        let skill = home.join("lib/hello-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: hello-skill\ndescription: Greet.\n---\n\nSay hello.\n").unwrap();
+        let skills = [crate::projects::skills::ResolvedSkill { name: "hello-skill".into(), dir: skill.clone(), description: "Greet.".into() }];
+        render_dsh(&def("deepseek-flash"), "d1", &home, "You are d1.", &skills).unwrap();
+        let link = home.join("dsh/tmm/skills/hello-skill");
+        let path = home.join("dsh/profiles/tmm/cordis.patch.yml");
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(write_profile_patch(&home, &def("deepseek-flash")).unwrap(), crate::backends::LiveWrite::AlreadyCurrent, "the live write renders exactly what spawn did");
+        assert_eq!(write_profile_patch(&home, &def("deepseek-v4-pro")).unwrap(), crate::backends::LiveWrite::Written);
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert!(live.contains("model: \"deepseek-v4-pro\""));
+        assert!(live.contains("- id: tmm-mcp-echo\n") && live.contains("customSkillDirs: ["), "{live}");
+        assert_eq!(live.replace("deepseek-v4-pro", "deepseek-flash"), rendered, "only the model changed");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink(), "the skill link survives the live write");
+        assert_eq!(std::fs::read_link(&link).unwrap(), skill, "with its target");
+        assert_eq!(std::fs::read_to_string(link.join("SKILL.md")).unwrap(), "---\nname: hello-skill\ndescription: Greet.\n---\n\nSay hello.\n", "and its content");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Review P1-B: the live patch is replaced WHOLE. A reader that opens it
     /// while it is being rewritten — a dsh turn starting — sees all of one
     /// document or all of the other, never an empty or half-written file.
@@ -1621,8 +2072,9 @@ pub(crate) mod tests {
         let profile = dir.join("dsh").join("profiles").join(PROFILE);
         std::fs::create_dir_all(&profile).unwrap();
         let entry = dir.join("dsh").join("plugins").join(PLUGIN_NAME).join("index.mjs");
-        let (a, b) = (profile_patch_yml(&entry, "deepseek-flash", ""), profile_patch_yml(&entry, "deepseek-v4-pro", "max"));
-        assert_eq!(write_profile_patch(&dir, "deepseek-flash", "").unwrap(), crate::backends::LiveWrite::Written);
+        let root = skill_root(&dir.join("dsh"));
+        let (a, b) = (profile_patch_yml(&entry, "deepseek-flash", "", "", &root), profile_patch_yml(&entry, "deepseek-v4-pro", "max", "", &root));
+        assert_eq!(write_profile_patch(&dir, &model_def("deepseek-flash", "")).unwrap(), crate::backends::LiveWrite::Written);
         let path = profile.join("cordis.patch.yml");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (reader_stop, reader_path, docs) = (stop.clone(), path.clone(), [a.clone(), b.clone()]);
@@ -1637,7 +2089,7 @@ pub(crate) mod tests {
         });
         for i in 0..400 {
             let (m, e) = if i % 2 == 0 { ("deepseek-v4-pro", "max") } else { ("deepseek-flash", "") };
-            write_profile_patch(&dir, m, e).unwrap();
+            write_profile_patch(&dir, &model_def(m, e)).unwrap();
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(reader.join().unwrap() > 0, "the reader ran");

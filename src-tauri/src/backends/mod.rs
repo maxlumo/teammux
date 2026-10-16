@@ -220,9 +220,9 @@ impl Backend {
     /// the home's config (`LiveWrite`), `Some(Err)` that it could not be
     /// written, `None` that the backend does not read its config every turn.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub(crate) fn write_live_config(self, home: &std::path::Path, model: &str, effort: &str) -> Option<Result<LiveWrite, String>> {
+    pub(crate) fn write_live_config(self, home: &std::path::Path, def: &crate::projects::store::RegAgent) -> Option<Result<LiveWrite, String>> {
         match self {
-            Backend::Dsh => Some(dsh::write_profile_patch(home, model, effort)),
+            Backend::Dsh => Some(dsh::write_profile_patch(home, def)),
             _ => None,
         }
     }

@@ -35,7 +35,7 @@ pub(crate) struct McpDef {
     pub(crate) env: std::collections::BTreeMap<String, String>,
 }
 
-fn env_reference(value: &str) -> Option<&str> {
+pub(crate) fn env_reference(value: &str) -> Option<&str> {
     let name = value
         .strip_prefix("${")
         .and_then(|s| s.strip_suffix('}'))
@@ -51,7 +51,7 @@ fn env_reference(value: &str) -> Option<&str> {
     }
 }
 
-fn header_env_reference(value: &str) -> Option<(&str, bool)> {
+pub(crate) fn header_env_reference(value: &str) -> Option<(&str, bool)> {
     if let Some(name) = value.strip_prefix("Bearer ").and_then(env_reference) {
         Some((name, true))
     } else {
