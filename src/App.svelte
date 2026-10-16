@@ -3343,22 +3343,29 @@
   $effect(() => {
     if (!layout.isTouchDevice) return; // desktop: the browser's Back is the browser's
     const handler = (e) => {
-      if (!e.state?.app) {
-        // Reached bottom of our stack, re-push to prevent exit
-        navPush();
-        return;
-      }
-      // The shell's OWN dialog is the first layer (#317): a dialog is modal,
+      // The shell's OWN dialogs are the first layers (#317): a dialog is modal,
       // so a Back that peeled a page layer behind it would act on something
       // the reader cannot even see. Every other dialog in the app is peeled
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
+      //
+      // They are asked BEFORE the bottom-of-stack branch below, whatever state
+      // this pop carries (board #403, validator): on a fresh login page the stack
+      // is only [initial, seed], so the first Back arrives with state null, and a
+      // dialog opened there (the scan, with its camera live) was swallowed by the
+      // re-push without ever being closed. Closing it and re-pushing is exactly
+      // what a pop that carries state does, so no entry of its own is needed.
       if (scanOp) { scans.end(); navPush(); return; }
       if (addServer) { addServer = null; navPush(); return; }
       // So is a saved server's Addresses and token dialog (board #402 review
       // P2-C): Back closes it, writes nothing, and Connection stays behind it.
       if (detailsId) { detailsId = ''; navPush(); return; }
       if (qr) { qr = null; navPush(); return; }
+      if (!e.state?.app) {
+        // Reached bottom of our stack, re-push to prevent exit
+        navPush();
+        return;
+      }
       // A held tree takes no input, programmatic or not (reviewer P1-2): its
       // pages' Back chains are not asked while the app is blocked. The Retry
       // panel is the content area then; Back just stays (re-push).

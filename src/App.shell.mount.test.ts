@@ -10088,3 +10088,93 @@ test('#403: the app being torn down while the camera permission is held releases
   for (let i = 0; i < 6; i++) await Promise.resolve();
   assert.equal(camera.track.stopped, 1, 'released');
 });
+
+// ─── #403 validator finding: Back on the REAL history stack ──────────────
+//
+// A synthetic popstate with state {app:true} is what a Back from a deep stack
+// delivers. The first Back from a fresh login page does not: the stack is only
+// [initial, seed], and the pop arrives with state null. These tests drive
+// window.history itself.
+
+async function realBack(h: Awaited<ReturnType<typeof bootApp>>, context: TestContext) {
+  h.app.window.history.back();
+  context.mock.timers.tick(50);                                // jsdom traverses history on a timer, which the harness mocks
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.settle();
+}
+
+test('#403: from a fresh login page (stack [initial, seed]) the phone\u2019s Back ends the scan with the camera stopped, the page stays on login, and a Cancel leaves no extra entry', async (context) => {
+  let camera!: ReturnType<typeof heldCamera>;
+  const h = await bootApp(context, { tmux_layout_mode: 'mobile' }, undefined, { setup(window: any) { sandbox.setup(window); camera = heldCamera(window); } });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const win = h.app.window as any;
+  const doc = h.app.document;
+  const scanDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^scan qr code/iu.test((d.getAttribute('aria-label') ?? '').trim()));
+  const open = async () => {
+    [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()))!.click();
+    await h.settle(); await h.settle();
+  };
+  const startLength = win.history.length;
+  assert.equal(win.history.state?.app, true, 'the seed is the top entry of a fresh stack');
+
+  await open();
+  assert.ok(scanDialog());
+  await realBack(h, context);
+  assert.equal(scanDialog(), undefined, 'the first Back ended the scan');
+  camera.give(); for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(camera.track.stopped, 1, 'and the camera is stopped');
+  assert.ok(doc.querySelector('.card .fields'), 'the page is still the login page');
+  assert.equal(win.history.state?.app, true, 'the stack was topped up like any other consumed Back');
+  assert.ok(win.history.length <= startLength + 1, 'by one entry at most');
+
+  const afterBack = win.history.length;
+  await open();
+  [...scanDialog()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^cancel$/iu.test((b.textContent ?? '').trim()))!.click();
+  await h.settle();
+  assert.equal(scanDialog(), undefined);
+  assert.equal(win.history.length, afterBack, 'a Cancel pushed and left nothing behind');
+  await realBack(h, context);
+  assert.ok(doc.querySelector('.card .fields'), 'a Back after a Cancel is an ordinary Back at the bottom: it stays on the login page');
+  assert.equal(win.history.state?.app, true);
+});
+
+test('#403: from Settings, on the real history stack, one Back closes only the scan and the next closes Add server, each with the page where it was; the QR and the details dialogs close on one real Back too', async (context) => {
+  let camera!: ReturnType<typeof heldCamera>;
+  const h = await bootApp(context, { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'mobile' },
+    undefined, { setup(window: any) { sandbox.setup(window); camera = heldCamera(window); } });
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  const doc = h.app.document;
+  const press = (root: ParentNode, label: RegExp) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => label.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+  const scanDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^scan qr code/iu.test((d.getAttribute('aria-label') ?? '').trim()));
+  const addDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => d !== scanDialog() && d.querySelector('input[type="text"]'));
+  await settingsTab(h, /^connection/iu);
+
+  press(doc.querySelector('.preferences')!, /^add a server/iu);
+  await h.settle();
+  assert.ok(addDialog(), 'Add server is open');
+  press(addDialog()!, /^scan qr code$/iu);
+  await h.settle(); await h.settle();
+  assert.ok(scanDialog());
+  await realBack(h, context);
+  assert.equal(scanDialog(), undefined, 'the first Back closed only the scan');
+  assert.ok(addDialog(), 'Add server is still open');
+  camera.give(); for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(camera.track.stopped, 1, 'and the camera is stopped');
+  await realBack(h, context);
+  assert.equal(addDialog(), undefined, 'the second Back closed Add server');
+  assert.ok(doc.querySelector('.preferences .server-list'), 'Connection is still where it was');
+
+  press(doc.querySelector('.preferences')!, /^show qr code$/iu);
+  await h.settle();
+  assert.ok(doc.querySelector('.dlg svg.qr'), 'the QR code is up');
+  await realBack(h, context);
+  assert.equal(doc.querySelector('.dlg svg.qr'), null, 'one real Back closed it');
+  assert.ok(doc.querySelector('.preferences .server-list'));
+
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await h.settle();
+  assert.ok(doc.querySelector('[role=dialog] .details-address'), 'the details dialog is up');
+  await realBack(h, context);
+  assert.equal(doc.querySelector('[role=dialog] .details-address'), null, 'one real Back closed it');
+  assert.ok(doc.querySelector('.preferences .server-list'));
+});

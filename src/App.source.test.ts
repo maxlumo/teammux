@@ -52,6 +52,15 @@ test('the connection QR code is the shell\u2019s own dialog: Back peels it, and 
   assert.match(source, /<QrDialog matrix=\{qr\} compact=\{narrowVp\} oncancel=\{\(\) => \(qr = null\)\} \/>/u, 'and Hide drops them');
 });
 
+test('the shell\u2019s own dialogs are peeled BEFORE the bottom-of-stack floor, so a Back that arrives with state null (a fresh login page: [initial, seed]) still closes the scan and releases its camera (#403)', () => {
+  const handler = source.match(/const handler = \(e\) => \{[\s\S]*?if \(storageHeld/u)?.[0] ?? '';
+  const scan = handler.indexOf('if (scanOp)');
+  const floor = handler.indexOf('if (!e.state?.app)');
+  assert.ok(scan > 0 && floor > scan, 'the scan is asked before the floor');
+  for (const layer of ['if (addServer)', 'if (detailsId)', 'if (qr)']) assert.ok(handler.indexOf(layer) > 0 && handler.indexOf(layer) < floor, `${layer} is asked before the floor`);
+  assert.match(handler, /if \(!e\.state\?\.app\) \{\s*\/\/ Reached bottom of our stack, re-push to prevent exit\s*navPush\(\);\s*return;\s*\}/u, 'and the floor is still there for a pop with no layer open');
+});
+
 test('a scan is one operation, registered synchronously at the tap and ended by Back, the background, Cancel, a second tap, its consumer form or the shell; a picker it opened is not an ending; the dialog is keyed by it (#403)', () => {
   assert.match(source, /const scans = new ScanHost\(\(op\) => \{ scanOp = op; \}\);\s*const scanQr = \(signal\) => scans\.begin\(signal\)\.result;\s*onDestroy\(\(\) => scans\.end\(\)\);/u, 'begun in the tap itself (no async, no await before it is registered), with the asking form\u2019s lifetime, and ended with the shell');
   assert.match(source, /if \(scanOp\) \{ scans\.end\(\); navPush\(\); return; \}\s*if \(addServer\)/u, 'Back is first in the popstate chain, above the Add server dialog it can be opened from');
