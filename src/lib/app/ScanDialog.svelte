@@ -11,6 +11,7 @@
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { decodePhoto, openCamera, type Camera, type Frame } from '../core/qr-scan.ts';
+  import { isAndroid } from '../core/platform.ts';
 
   let {
     compact = false, onscanned, oncancel,
@@ -20,7 +21,7 @@
     toFrame = undefined,
   }: {
     compact?: boolean; onscanned: (text: string) => void; oncancel: () => void;
-    camera?: (video: HTMLVideoElement) => Promise<Camera>;
+    camera?: (video: HTMLVideoElement, signal: AbortSignal) => Promise<Camera>;
     toFrame?: ((file: Blob) => Promise<Frame>) | undefined;
   } = $props();
 
@@ -32,11 +33,15 @@
   let active: Camera | null = null;
   let frame = 0;
   let stopped = false;
+  /** The dialog's lifetime, handed to the camera so that closing it stops the
+   * stream even while the camera is still opening. */
+  const lifetime = new AbortController();
 
-  const REASONS = { insecure: 'scanInsecure', none: 'scanNoCamera', denied: 'scanDenied', failed: 'scanFailed' } as const;
+  const REASONS = { insecure: 'scanInsecure', none: 'scanNoCamera', denied: isAndroid ? 'scanDeniedAndroid' : 'scanDenied', failed: 'scanFailed' } as const;
 
   function release() {
     stopped = true;
+    lifetime.abort();
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
     active?.stop();
@@ -52,7 +57,7 @@
   $effect(() => {
     const el = video;
     if (!el || active || stopped) return;
-    camera(el).then((opened) => {
+    camera(el, lifetime.signal).then((opened) => {
       if (stopped) { opened.stop(); return; }
       active = opened;
       status = 'live';
@@ -69,6 +74,7 @@
       };
       frame = requestAnimationFrame(tick);
     }).catch((error) => {
+      if (stopped) return;                      // closed while opening: nothing to report
       status = 'unavailable';
       // Read by its `reason` rather than by class: the camera is a parameter, and
       // anything that says why is understood.

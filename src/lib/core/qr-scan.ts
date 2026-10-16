@@ -10,8 +10,9 @@ export interface Frame { width: number; height: number; data: Uint8ClampedArray 
 
 /** Why the camera could not be used: the page is not a secure context (the
  * camera needs https or localhost), there is no camera, access was refused, or
- * something else went wrong. */
-export type CameraFailure = 'insecure' | 'none' | 'denied' | 'failed';
+ * something else went wrong; `cancelled` is the scan ending while the camera was
+ * still being opened, which is no failure to report. */
+export type CameraFailure = 'insecure' | 'none' | 'denied' | 'failed' | 'cancelled';
 export class CameraError extends Error {
   readonly reason: CameraFailure;
   constructor(reason: CameraFailure) { super(reason); this.reason = reason; }
@@ -45,36 +46,60 @@ function failureOf(error: unknown): CameraFailure {
 }
 
 /** Open the rear camera into `video` and return a frame reader. Rejects with a
- * `CameraError` saying why it could not. */
-export async function openCamera(video: HTMLVideoElement): Promise<Camera> {
+ * `CameraError` saying why it could not.
+ *
+ * `signal` is the lifetime of the scan that asked. The stream is owned the moment
+ * `getUserMedia` resolves, not when the camera is ready: an abort while the
+ * request is pending stops the tracks of the stream that then arrives and never
+ * attaches it; an abort while `play()` is pending stops them at once, without
+ * waiting for playback; and a failure anywhere after acquisition stops them too.
+ * Whatever happens, no track outlives the operation. */
+export async function openCamera(video: HTMLVideoElement, signal?: AbortSignal): Promise<Camera> {
   if (typeof window === 'undefined' || !window.isSecureContext) throw new CameraError('insecure');
   const media = navigator.mediaDevices;
   if (!media?.getUserMedia) throw new CameraError('none');
+  if (signal?.aborted) throw new CameraError('cancelled');
   let stream: MediaStream;
   try {
     stream = await media.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-  } catch (error) { throw new CameraError(failureOf(error)); }
-  video.muted = true;
-  video.setAttribute('playsinline', '');
-  video.srcObject = stream;
-  await video.play().catch(() => {});
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  return {
-    readFrame() {
-      if (!context || !video.videoWidth || !video.videoHeight) return null;
-      const scale = Math.min(1, LIVE_SIDE / Math.max(video.videoWidth, video.videoHeight));
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const { width, height, data } = context.getImageData(0, 0, canvas.width, canvas.height);
-      return decodeFrame({ width, height, data });
-    },
-    stop() {
-      for (const track of stream.getTracks()) track.stop();
-      video.srcObject = null;
-    },
+  } catch (error) { throw new CameraError(signal?.aborted ? 'cancelled' : failureOf(error)); }
+  let released = false;
+  const stop = () => {
+    if (released) return;
+    released = true;
+    for (const track of stream.getTracks()) track.stop();
+    if (video.srcObject === stream) video.srcObject = null;
   };
+  if (signal?.aborted) { stop(); throw new CameraError('cancelled'); }     // late: acquired, never attached
+  signal?.addEventListener('abort', stop, { once: true });                 // owned from here on
+  try {
+    video.muted = true;
+    video.setAttribute('playsinline', '');
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    if (signal?.aborted) throw new CameraError('cancelled');
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    return {
+      readFrame() {
+        if (signal?.aborted || !context || !video.videoWidth || !video.videoHeight) return null;
+        const scale = Math.min(1, LIVE_SIDE / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const { width, height, data } = context.getImageData(0, 0, canvas.width, canvas.height);
+        return decodeFrame({ width, height, data });
+      },
+      stop() {
+        signal?.removeEventListener('abort', stop);
+        stop();
+      },
+    };
+  } catch (error) {
+    signal?.removeEventListener('abort', stop);
+    stop();
+    throw error instanceof CameraError ? error : new CameraError('failed');
+  }
 }
 
 /** The pixels of an image file, at most `PHOTO_SIDE` on its longest side. */

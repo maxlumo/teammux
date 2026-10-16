@@ -1370,11 +1370,3 @@ textarea.config-input {
     .config-input { font-size: var(--fs-input-touch); }
   }
 }
-
-/* The Android scan (board #403): the camera preview is the native plugin's, drawn
-   behind the webview, so while it is up the page paints nothing but the scan
-   sheet. `visibility` rather than `display`: nothing is unmounted or re-laid out,
-   and the app is exactly where it was when the scan ends. */
-html.scan-native, html.scan-native body, html.scan-native #app { background: transparent; }
-html.scan-native #app { visibility: hidden; }
-html.scan-native .dlg, html.scan-native .dlg-backdrop { visibility: visible; }

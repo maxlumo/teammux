@@ -111,8 +111,7 @@ test('the shell owns the modal contract its consumers stopped repeating', () => 
   assert.match(text, /if \(!escapeGuard\(\)\) cancel\(\);/u);
   assert.match(text, /e\.stopPropagation\(\); e\.preventDefault\(\);\s*\n\s*if \(!escapeGuard\(\)\)/u,
     'handled either way, so nothing further acts on the key');
-  assert.match(text, /onclick=\{scrim \? cancel : undefined\}/u, 'the scrim closes without asking, unless it is the undimmed one over the native camera preview (#403)');
-  assert.match(text, /scrim = true,/u, 'and every dialog has the dimming scrim unless it asks for none');
+  assert.match(text, /onclick=\{cancel\}/u, 'the scrim closes without asking');
   // Back is the host's layer chain, not the shell's: a shell that consumed
   // popstate would peel two layers for one gesture.
   assert.doesNotMatch(code(text), /popstate|history\./u);

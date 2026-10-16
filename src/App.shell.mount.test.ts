@@ -9975,3 +9975,68 @@ test('#403: the login page\u2019s Scan command opens the one scan dialog; Cancel
   assert.equal(address(), before, 'the form was never touched');
   assert.equal(h.app.window.localStorage.getItem('tmux_servers'), '[]', 'and nothing was recorded');
 });
+
+// ─── #403 review round 2: one scan lifetime, from the tap, through the real shell ──
+//
+// The camera request is HELD (getUserMedia pending, as on Android while the
+// permission prompt is up). Each way a scan ends must leave nothing to start
+// later: a stream that arrives afterwards is stopped and never attached.
+
+function heldCamera(window: any) {
+  const track = { stopped: 0, stop() { this.stopped++; } };
+  const stream = { getTracks: () => [track] };
+  let requests = 0;
+  let give!: (s: unknown) => void;
+  const pending = new Promise((resolve) => { give = resolve; });
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  Object.defineProperty(window.navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => { requests++; return pending; } } });
+  window.HTMLMediaElement.prototype.play = () => new Promise(() => {});
+  return { track, stream, give: () => give(stream), requests: () => requests };
+}
+
+for (const [owner, ending] of [
+  ['the login page', 'Back'], ['the login page', 'the background'], ['the login page', 'Cancel'],
+  ['the Add server dialog', 'Back'], ['the Add server dialog', 'the background'], ['the Add server dialog', 'Cancel'], ['the Add server dialog', 'its form closing'],
+] as const) {
+  test(`#403: a scan from ${owner} whose camera is still being asked for ends by ${ending}, and the stream that arrives afterwards is stopped and never attached`, async (context) => {
+    let camera!: ReturnType<typeof heldCamera>;
+    const seed = owner === 'the login page'
+      ? { tmux_layout_mode: 'mobile' }
+      : { ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), tmux_layout_mode: 'mobile' };
+    const h = await bootApp(context, seed, undefined, { setup(window: any) { sandbox.setup(window); camera = heldCamera(window); } });
+    for (let i = 0; i < 4; i++) await h.settle();
+    const doc = h.app.document;
+    const win = h.app.window as any;
+    const scanDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^scan qr code/iu.test((d.getAttribute('aria-label') ?? '').trim()));
+    const addDialog = () => [...doc.querySelectorAll('.dlg')].find((d) => /^add/iu.test((d.getAttribute('aria-label') ?? '')) || d.querySelector('.fields, input[type="text"]') && d !== scanDialog());
+    const press = (root: ParentNode, label: RegExp) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => label.test((b.textContent ?? '').trim()))!.click();
+    if (owner === 'the Add server dialog') {
+      await toConnection(h);
+      press(doc.querySelector('.preferences')!, /^add a server/iu);
+      await h.settle();
+      assert.ok(addDialog(), 'the Add server dialog is open');
+      press(addDialog()!, /^scan qr code$/iu);
+    } else {
+      press(doc.querySelector('.card')!, /^scan qr code$/iu);
+    }
+    await h.settle(); await h.settle();
+    assert.ok(scanDialog(), 'the tap opened the scan dialog at once');
+    assert.equal(camera.requests(), 1, 'and asked for the camera once');
+
+    if (ending === 'Back') win.dispatchEvent(new win.PopStateEvent('popstate', { state: { app: true } }));
+    else if (ending === 'the background') { Object.defineProperty(doc, 'hidden', { configurable: true, get: () => true }); doc.dispatchEvent(new win.Event('visibilitychange')); }
+    else if (ending === 'Cancel') press(scanDialog()!, /^cancel$/iu);
+    else press(addDialog()!, /^cancel$/iu);                    // the owner form is closed from underneath
+    await h.settle();
+    assert.equal(scanDialog(), undefined, 'the scan is gone');
+    if (ending === 'Back' && owner === 'the Add server dialog') assert.ok(addDialog(), 'one Back peels one layer: the Add server dialog is still there');
+
+    camera.give();                                               // the permission answer arrives late
+    for (let i = 0; i < 4; i++) await h.settle();
+    assert.equal(camera.track.stopped, 1, 'the late stream was stopped');
+    assert.equal(doc.querySelector('video'), null, 'and has no video to be attached to');
+    assert.equal(camera.requests(), 1, 'nothing asked for the camera again');
+    Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
+    assert.equal(win.localStorage.getItem('tmux_servers') === '[]' || owner !== 'the login page', true, 'nothing was recorded');
+  });
+}

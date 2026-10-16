@@ -44,3 +44,86 @@ test('the module keeps nothing and says nothing about what it reads', async () =
   const source = await readFile(new URL('./qr-scan.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /console\.|localStorage|sessionStorage|fetch\(|XMLHttpRequest|WebSocket|sendBeacon/u);
 });
+
+// ─── the camera is owned from the moment it is acquired (review P1-C) ─────
+
+function stage(over: { createElement?: () => unknown } = {}) {
+  const track = { stopped: 0, stop() { this.stopped++; } };
+  const stream = { getTracks: () => [track] } as unknown as MediaStream;
+  let giveStream!: (s: MediaStream) => void;
+  const acquiring = new Promise<MediaStream>((resolve) => { giveStream = resolve; });
+  let letPlay!: () => void;
+  const playing = new Promise<void>((resolve) => { letPlay = resolve; });
+  const video = { srcObject: null as unknown, muted: false, videoWidth: 0, videoHeight: 0, setAttribute() {}, play: () => playing } as unknown as HTMLVideoElement;
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator') };
+  g.window = { isSecureContext: true };
+  g.document = { createElement: over.createElement ?? (() => ({ getContext: () => ({}) })) };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: () => acquiring } } });
+  const restore = () => {
+    g.window = saved.window; g.document = saved.document;
+    if (saved.navigator) Object.defineProperty(globalThis, 'navigator', saved.navigator); else delete g.navigator;
+  };
+  const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
+  return { track, stream, video, giveStream, letPlay, restore, settle };
+}
+const reasonOf = (error: unknown) => (error as { reason?: string }).reason;
+
+test('a stream that arrives after the scan ended is stopped and never attached', async () => {
+  const s = stage();
+  try {
+    const lifetime = new AbortController();
+    const opening = openCamera(s.video, lifetime.signal);
+    lifetime.abort();
+    s.giveStream(s.stream);
+    await assert.rejects(opening, (e) => reasonOf(e) === 'cancelled');
+    assert.equal(s.track.stopped, 1, 'the late stream was stopped');
+    assert.equal(s.video.srcObject, null, 'and never attached to the video');
+  } finally { s.restore(); }
+});
+
+test('ending the scan while playback is still pending stops the tracks at once, without waiting for playback', async () => {
+  const s = stage();
+  try {
+    const lifetime = new AbortController();
+    const opening = openCamera(s.video, lifetime.signal);
+    s.giveStream(s.stream);
+    await s.settle();
+    assert.equal(s.track.stopped, 0, 'playing: the stream is in use');
+    assert.equal(s.video.srcObject, s.stream);
+    lifetime.abort();
+    assert.equal(s.track.stopped, 1, 'stopped before play() settled');
+    assert.equal(s.video.srcObject, null);
+    s.letPlay();
+    await assert.rejects(opening, (e) => reasonOf(e) === 'cancelled');
+    assert.equal(s.track.stopped, 1, 'and only once');
+  } finally { s.restore(); }
+});
+
+test('a failure after acquisition releases the stream', async () => {
+  const s = stage({ createElement: () => { throw new Error('no canvas'); } });
+  try {
+    const opening = openCamera(s.video, new AbortController().signal);
+    s.giveStream(s.stream);
+    s.letPlay();
+    await assert.rejects(opening, (e) => reasonOf(e) === 'failed');
+    assert.equal(s.track.stopped, 1);
+    assert.equal(s.video.srcObject, null);
+  } finally { s.restore(); }
+});
+
+test('an open camera stops once on stop(), and a later abort has nothing left to stop; no frame is read after the abort', async () => {
+  const s = stage();
+  try {
+    const lifetime = new AbortController();
+    const opening = openCamera(s.video, lifetime.signal);
+    s.giveStream(s.stream);
+    s.letPlay();
+    const camera = await opening;
+    Object.assign(s.video, { videoWidth: 10, videoHeight: 10 });
+    camera.stop();
+    lifetime.abort();
+    assert.equal(s.track.stopped, 1);
+    assert.equal(camera.readFrame(), null, 'a stopped camera reads nothing');
+  } finally { s.restore(); }
+});

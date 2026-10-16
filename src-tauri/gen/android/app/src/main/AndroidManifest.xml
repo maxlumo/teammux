@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -12,11 +11,12 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
-    <!-- The barcode-scanner plugin's own manifest declares the camera as REQUIRED,
-         which would hide the app from a device without one in the store. The QR
-         scan is an extra here (a photo of the code works without a camera), so it
-         is optional. board #403 -->
-    <uses-feature android:name="android.hardware.camera.any" android:required="false" tools:node="replace" />
+    <!-- The QR scan reads the camera through the webview (board #403): wry's
+         WebChromeClient asks Android for CAMERA when the page asks for the
+         camera, and only then. The camera is an extra here (a photo of the code
+         works without one), so a device with none still installs the app. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:icon="@mipmap/ic_launcher"

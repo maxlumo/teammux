@@ -64,8 +64,7 @@
   import { qrMatrix } from './lib/core/qr.ts';
   import QrDialog from './lib/app/QrDialog.svelte';
   import ScanDialog from './lib/app/ScanDialog.svelte';
-  import NativeScanSheet from './lib/app/NativeScanSheet.svelte';
-  import { startNativeScan } from './lib/core/qr-native.ts';
+  import { ScanHost } from './lib/app/scan-operation.ts';
   import { readScratchEdge, writeScratchEdge } from './lib/app/scratch-edge.ts';
   import { hoverCard } from './lib/ui/hover.svelte.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from './lib/ui/placement.ts';
@@ -75,7 +74,7 @@
   import { cycleItem, dispatchShortcut, shortcutLabel } from './lib/app/shortcuts.ts';
   import { isShortcutInputTarget, shortcuts } from './lib/app/shortcuts.svelte.ts';
   import { installExternalLinkHandler } from './lib/core/external-links.ts';
-  import { isAndroid, isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
+  import { isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
   import { localServerLine, localServer } from './lib/app/server-mode.svelte.ts';
   import { flip } from 'svelte/animate';
   import { moveMs } from './lib/ui/motion.ts';
@@ -3059,45 +3058,25 @@
   $effect(() => { void linkContext; linkFeedback.clear(); });
   onDestroy(() => linkFeedback.dispose());
   /** Scan a connection QR code (board #403): the host of the one scan, so the
-   * login page and the Add server dialog share it. Resolves with the decoded
-   * text, or null when it was cancelled, closed by Back, or the app went to the
-   * background (which also releases the camera). On the Android app the camera
-   * is the native plugin's (a preview behind the transparent page, `nativeScan`);
-   * a refused permission or a plugin that fails falls through to the browser
-   * dialog, whose photo path needs no camera at all. A second request settles
-   * the first. */
-  let scan = $state(null);        // { settle } | null
-  let nativeScan = $state.raw(null);  // { cancel } | null: the native preview is up
-  async function scanQr() {
-    if (nativeScan) return null;
-    if (isAndroid) {
-      await tauriReady;
-      const run = startNativeScan(() => { nativeScan = run; });
-      const outcome = await run.done;
-      nativeScan = null;
-      if (outcome.kind === 'text') return outcome.text;
-      if (outcome.kind === 'cancelled') return null;
-    }
-    return new Promise((resolve) => { scan?.settle(null); scan = { settle: resolve }; });
-  }
-  // The native preview is drawn behind the webview: while it is up the page is
-  // transparent and only the scan sheet is painted (app.css `.scan-native`).
+   * login page and the Add server dialog share it, on every platform: the Android
+   * app's webview asks for the camera like a browser does (wry bridges the
+   * permission), so there is one scan, `ScanDialog`. A scan is an OPERATION with
+   * an owner (scan-operation.ts), registered synchronously at the tap and ended
+   * by Back, the background, Cancel, a second tap or the owner form going away;
+   * it resolves with the decoded text, or null. */
+  let scanOp = $state.raw(null);
+  const scans = new ScanHost((op) => { scanOp = op; });
+  const scanQr = (owner) => scans.begin(owner).result;
   $effect(() => {
-    if (!nativeScan) return;
-    document.documentElement.classList.add('scan-native');
-    return () => document.documentElement.classList.remove('scan-native');
-  });
-  function finishScan(text) {
-    const open = scan;
-    scan = null;
-    open?.settle(text);
-  }
-  $effect(() => {
-    if (!scan && !nativeScan) return;
-    const hide = () => { if (document.hidden) { finishScan(null); nativeScan?.cancel(); } };
+    if (!scanOp) return;
+    const hide = () => { if (document.hidden) scans.end(); };
     document.addEventListener('visibilitychange', hide);
     return () => document.removeEventListener('visibilitychange', hide);
   });
+  // The owner form's teardown ends its scan: the Add server dialog closing, the
+  // login page being replaced by a connected one.
+  $effect(() => { if (!addServer) scans.endOwner('addServer'); });
+  $effect(() => { if (page !== 'settings') scans.endOwner('settings'); });
 
   /** The connection QR code (board #403): open only by an explicit command, since
    * the code carries the token. What is held is the code's MODULES, never the
@@ -3371,8 +3350,7 @@
       // the reader cannot even see. Every other dialog in the app is peeled
       // by the page that owns it (Hub's backLayers, Projects/Sessions/Files'
       // goBack) — the one mechanism, one registration per host.
-      if (nativeScan) { nativeScan.cancel(); navPush(); return; }
-      if (scan) { finishScan(null); navPush(); return; }
+      if (scanOp) { scans.end(); navPush(); return; }
       if (addServer) { addServer = null; navPush(); return; }
       // So is a saved server's Addresses and token dialog (board #402 review
       // P2-C): Back closes it, writes nothing, and Connection stays behind it.
@@ -3974,17 +3952,15 @@
   {/if}
 
   {#if addServer}
-    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={scanQr}
+    <AddServerDialog initial={addServer.initial} compact={narrowVp} onscan={() => scanQr('addServer')}
       onsubmit={submitAddServer} oncancel={() => (addServer = null)} />
   {/if}
 
-  {#if scan}
-    <ScanDialog compact={narrowVp} onscanned={finishScan} oncancel={() => finishScan(null)} />
-  {/if}
-
-  {#if nativeScan}
-    <NativeScanSheet oncancel={() => nativeScan?.cancel()} />
-  {/if}
+  <!-- Keyed by the operation: a second tap mounts a fresh dialog, and a callback
+       can only end the operation it was made for, never its successor. -->
+  {#each scanOp ? [scanOp] : [] as op (op)}
+    <ScanDialog compact={narrowVp} onscanned={(text) => op.end(text)} oncancel={() => op.end(null)} />
+  {/each}
 
   {#if reconnecting && page !== 'settings'}
     <div class="reconnect-bar appear">
@@ -4048,7 +4024,7 @@
          come back to the attempt that asked (reviewer P1-b on 48b40082). -->
     {#if (page === 'settings' || holdPages) && !switching}
     <div class="page-layer connect-layer" class:hidden={page !== 'settings'}>
-      <Settings {onConnected} {openCandidate} onScan={scanQr} confirmLeave={confirmFormLeave} notice={reconnectError}
+      <Settings {onConnected} {openCandidate} onScan={() => scanQr('settings')} confirmLeave={confirmFormLeave} notice={reconnectError}
         frozen={migrationBlocked ? t('migrationBlockedNote') : ''} onRetry={retryMigration} onIdentityFailed={storageFailed} />
     </div>
     {/if}
