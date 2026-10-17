@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_INBOX_BYTES: u64 = 256 * 1024;
 /// Chat-path budget for hook-sourced auto-replies: a final reply carries full
@@ -453,7 +452,6 @@ impl AgentNotificationHub {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let home: Option<PathBuf> = None;
         let normalized = normalize_in(&envelope, home.as_deref())?;
-        let timestamp = unix_seconds();
         // Resolve the reply edge BEFORE recording this stop. On a server
         // restart the in-memory edge is gone, so the durable activity log
         // recovers the prompt newer than the previous turn end.
@@ -470,7 +468,7 @@ impl AgentNotificationHub {
             // placeholder, real text, or nothing usable) is written WITH the
             // end, in one step: a separate "and it was empty" write could land
             // on a different end.
-            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, timestamp, normalized.quality);
+            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality);
             // A turn edge (stop, ask) means the CLI just repainted its footer —
             // the context-usage number is at its freshest right here.
             crate::projects::vitals::sniff_window_soon(&session, &window);
@@ -1009,12 +1007,6 @@ fn truncate(input: &str, max: usize) -> String {
 fn window_key(session: &str, window: &str) -> String {
     format!("{session}:{window}")
 }
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 #[cfg(test)]
 mod tests {
@@ -1051,7 +1043,7 @@ mod tests {
         crate::projects::telemetry::record_prompt(&session, "critic", ask);
         let (hub, root) = AgentNotificationHub::scratch_with_turn(&session, "critic", ask);
         use crate::projects::telemetry as tm;
-        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", tm::Identity::Paint("auth_expired|x"), tm::turn_version(&session, "critic"), tm_now()), tm::Missed::Ended);
+        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", tm::Identity::Paint("auth_expired|x"), tm::turn_version(&session, "critic")), tm::Missed::Ended);
         assert!(hub.take_reply_targets(&session, "critic").is_empty(), "the edge closed at the missed end");
         let posted: Vec<_> = tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "msg" || e.text.contains("[reply]")).collect();
         assert!(posted.is_empty(), "nothing was returned as the agent's answer: {posted:?}");
@@ -1064,15 +1056,11 @@ mod tests {
         let next = "[tmm chat 2026-10-15 23:10] human: @critic mwinit done, carry on";
         tm::record_prompt(&session, "critic", next);
         let (hub, root) = AgentNotificationHub::scratch_with_turn(&session, "critic", next);
-        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", tm::Identity::Paint("auth_expired|x"), seen, tm_now()), tm::Missed::Stale);
+        assert_eq!(tm::record_missed_end(&session, "critic", "auth_expired", tm::Identity::Paint("auth_expired|x"), seen), tm::Missed::Stale);
         assert_eq!(tm::derive(&session, "critic", 0).state, "running", "the newer turn is still open");
         assert_eq!(hub.take_reply_targets(&session, "critic"), vec!["maker".to_string(), "human".to_string()],
             "the open turn's edge is intact: both requests it carries, none closed by the stale paint");
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    fn tm_now() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
     }
 
     /// A legacy build's unread.json is REMOVED at load (the retired unread
@@ -1862,7 +1850,7 @@ mod tests {
             record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
             let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload };
             let n = normalize_in(&envelope, Some(&home)).unwrap();
-            record_notification_with(&s, w, &n.kind, crate::projects::now(), n.quality);
+            record_notification_with(&s, w, &n.kind, n.quality);
             n.quality
         };
         let body_less = |id: &str| json!({"hook_event_name": "stop", "session_id": id});
@@ -3611,19 +3599,19 @@ mod tests {
             vec!["orchestrator", "lead", "human"],
             "every requester once, in order; [reply] adds nobody; the human is recorded (#289)"
         );
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // The next turn opens fresh: nobody from the closed turn rides along.
         input(&hub, "[tmm chat 2026-09-27 20:52] builder: [reply] thanks");
         assert!(hub.take_reply_targets(&session, "v").is_empty());
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // An interrupt closes the turn too (it takes no edge: no reply).
         input(&hub, "[tmm chat 2026-09-27 21:00] orchestrator: @validator start X");
         record_interrupt(&session, "v");
         input(&hub, "[tmm chat 2026-09-27 21:01] builder: [reply] fyi");
         assert!(hub.take_reply_targets(&session, "v").is_empty(), "the interrupted turn's requester does not leak");
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // A restart mid-turn: the new process's first input joins the inputs
         // the turn already recorded instead of starting over.
@@ -3631,7 +3619,7 @@ mod tests {
         let restarted = AgentNotificationHub::load_at(root.clone());
         input(&restarted, "[tmm chat 2026-09-27 22:01] builder: [reply] pushed a fix");
         assert_eq!(restarted.take_reply_targets(&session, "v"), vec!["orchestrator"]);
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // Validator's review repro: the requester is the FIRST of more than
         // 64 inputs in one open turn, and the server restarts right before
@@ -3649,7 +3637,7 @@ mod tests {
         let restarted = AgentNotificationHub::load_at(root.clone());
         input(&restarted, "[tmm chat 2026-09-27 23:02] lead: @validator one more");
         assert_eq!(restarted.take_reply_targets(&session, "v"), vec!["orchestrator", "human", "lead"], "recovered at the next input");
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // Tool-only turns (validator, orchestrator 03:07): the turn is OPEN
         // by derive_from, but it carries no requester yet, so the next input
@@ -3660,11 +3648,11 @@ mod tests {
         record_tool(&session, "v", "memory", "capture");
         input(&hub, "[tmm chat 2026-09-28 00:01] builder: [reply] fyi");
         assert!(hub.take_reply_targets(&session, "v").is_empty(), "no leak through a tool-only stretch");
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
         record_tool(&session, "v", "memory", "capture");
         input(&hub, "[tmm chat 2026-09-28 00:02] lead: @validator go");
         assert_eq!(hub.take_reply_targets(&session, "v"), vec!["lead"]);
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // Orchestrator's regression: completed → tool (same second; a
         // tool-only turn, derive = running) → orchestrator input → [reply] →
@@ -3675,12 +3663,12 @@ mod tests {
         input(&hub, "[tmm chat 2026-09-28 00:02] orchestrator: @validator review");
         input(&hub, "[tmm chat 2026-09-28 00:02] builder: [reply] fixed");
         assert_eq!(hub.take_reply_targets(&session, "v"), vec!["orchestrator"]);
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
         // ... and completed → a new input with no later tool: idle, fresh.
         assert!(!turn_busy(&session, "v"));
         input(&hub, "[tmm chat 2026-09-28 00:03] lead: @validator next");
         assert_eq!(hub.take_reply_targets(&session, "v"), vec!["lead"]);
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
         // A restart in a tool-only turn: whatever the recovered record says,
         // turn_busy is derive's verdict, and the first input starts the edge
         // (the durable replay itself is pinned in telemetry's #249 tests).
@@ -3690,7 +3678,7 @@ mod tests {
         let restarted = AgentNotificationHub::load_at(root.clone());
         input(&restarted, "[tmm chat 2026-09-28 00:04] orchestrator: @validator after restart");
         assert_eq!(restarted.take_reply_targets(&session, "v"), vec!["orchestrator"]);
-        record_notification(&session, "v", "completed", unix_seconds());
+        record_notification(&session, "v", "completed");
 
         // The cap counts distinct requesters and keeps the earliest — live
         // and after a restart alike.

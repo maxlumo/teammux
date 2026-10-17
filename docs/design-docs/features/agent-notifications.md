@@ -121,6 +121,101 @@ transaction as a restarted process would read it, mid-way and after a
 failed INSERT), `a_reply_the_room_did_not_record_is_an_error_and_types_nothing` and
 `a_numbered_envelope_is_accepted_by_its_own_windows_turn_facts_only`.
 
+**The store stamps every activity row at its INSERT, on one clock with the
+live record** (board #414). ONE rule, `Store::stamp_activity`: an observed
+row's `ts` is `max(clock_ms, high-water + 1)`, taken inside the store's write
+section — the one store lock is held across the stamp and its INSERT, the
+settled-prompt and missed-end transactions included — so `ts` rises strictly
+in INSERT order across EVERY writer: turn facts (prompt, ask, tool, end,
+interrupt), the numbered prompt (`settle_prompt`), the missed end
+(`insert_missed_end`), and the warn, steered and recovery rows. The
+high-water is seeded from `MAX(ts)` when the store opens, so a restart, or a
+wall clock that stepped back, never stamps a row behind one a client already
+holds. No caller computes a ts: the store returns it (`publish_activity` →
+`(ts, Result<id>)`, `settle_prompt` and `insert_missed_end` with their row), and the live record, the ring and the log all carry exactly that
+value, so a restart that replays the row derives the state the window had.
+A fact dated ON PURPOSE (a test's chosen time) is a separate, named path —
+`record_notification_at`, `record_notification_with_at`,
+`record_missed_end_at`, `Store::insert_dated_activity`,
+`Store::insert_dated_missed_end` — never inferred from how old a time is, and
+all of it `#[cfg(test)]`: no build that ships can date a row. A dated row is
+outside the cursor contract and does not move this process's high-water (a
+test's simulated timeline minutes ahead must not stamp every later observed
+row there).
+
+**A failed write keeps its stamp; no store at all degrades, never backwards**
+(review P1, round 3). `publish_activity` returns the stamp with the INSERT's
+outcome, so a row that could not be written leaves no id behind, and its
+fail-soft live and ring update carries the time the store gave it. Before,
+the failure fell back to the wall clock: with the high-water ahead of it
+(after a restart or a clock step) a stop that failed to write was dated
+before its turn's prompt, and the ended agent still read running. With no
+store write at all — none could be opened, a mobile build, a unit test — the
+event takes `max(wall clock, the session's newest KNOWN fact + 1)`, so a later
+fact never sorts before one the process already holds. Known means the live
+records as well as the in-memory feed (round 4): a restart replays the log
+into the records and paints no feed, and the feed is a display cache, not the
+authority. A record keeps whole seconds, so its second `S` counts as
+`S * 1000` (`known_floor_ms`): a fact just above it takes the same second and
+sorts after it by arrival, which is how the live state orders. Rounding up to
+`(S + 1) * 1000` was tried and measured wrong: it put the degraded fact a
+second past the store's high-water, so an end the store stamped right after it
+sorted first (two recovery tests that mix a degraded prompt with a stamped
+missed end read running). A NUMBERED producer is unchanged: a failed write changes no live state
+and its envelope is retried (`numbered_write_failed`, board #404).
+
+**The cursor contract.** The feed is ordered by `(ts, id)`
+(`Store::activity_page`) and a client's tail is `since_ts` (exclusive). Because
+an observed row's `ts` is strictly greater than every row inserted before it,
+a tail from ANY cursor the feed handed out sees every observed row
+successfully published after that row, exactly once. A write that failed has
+no row, so it is in no tail; a stamp it used is a gap, never a duplicate.
+
+Why: a row's ts used to be `ts * 1000 + now_ms() % 1000`, the seconds of a
+time the caller captured glued to the milliseconds of now. When a second
+boundary passed between the two reads the row was ~1 s in the past: a turn's
+end could sort before the prompt that opened it (seen once in a full test run
+as `[notif, prompt]`, in `dsh_consumption_is_at_least_once_and_never_guesses_a_fence`,
+load-dependent), and a tail that had read the prompt skipped the end. The
+inbox's own order was never at fault; the rows were stamped out of it. Two
+caller-side fixes came first and are gone: a write-time stamp with the record
+left on the caller's second (50 full runs caught the replay disagreeing once),
+then one clock allocated by the caller from an in-process counter, with a
+"this second or the one before" test for a dated fact. The review (P1-A, P1-B
+on 3f0bb156) named what that still left: a real event delayed two seconds
+(behind the turn-fact lock, a slow disk, a clock step) was taken as dated and
+backdated again; warn and steered rows used the bare wall clock; the counter
+was allocated before the INSERT, so a writer could take T, wait, and commit
+after another's T+1 had moved a client's cursor; and it restarted at zero.
+Stamping at the INSERT, in the store, closes all of them in one place. Pinned
+by `every_activity_writer_is_stamped_in_insert_order_under_a_fixed_or_backwards_clock`
+(prompt, ask, tool, warn, steered, end, missed end; a clock that stands still,
+then steps back a minute; ts strictly by id; a tail from every cursor sees
+every later row; the record's second is its row's),
+`an_observed_end_held_behind_the_lock_lands_after_a_row_published_meanwhile`
+(the end observed WAITING on the turn lock, `TURN_WAITING`, while a warn is
+published; the clock then two seconds behind),
+`a_writer_held_inside_the_write_section_keeps_the_next_one_behind_it` (a
+writer held between its stamp and its INSERT, `Store::hold_next_publish`, while
+a second is observed waiting for the store, `STORE_WAITING`),
+`two_racing_writers_are_stamped_in_insert_order` (a stress check: 400 rows,
+two threads, a frozen clock), `a_restart_never_stamps_below_the_durable_high_water`
+(a real file closed and reopened, in this process, an hour behind its own
+high-water), `a_failed_insert_keeps_its_stamp_so_a_later_end_is_never_undone`
+(the high-water two seconds ahead, a trigger refusing the end's and the
+interrupt's INSERT: both windows read idle, the ring is prompt then end, no
+row, then a new prompt opens the next turn),
+`with_no_store_write_a_later_fact_never_sorts_before_a_known_one` (a feed
+that holds the newer fact), `with_no_store_write_a_later_fact_never_sorts_before_a_replayed_one`
+(a prompt five seconds ahead recovered through the real replay with an EMPTY
+feed; an end and an interrupt with no store write read idle, dated in the
+recovered second or later), and the
+restart (a real child process) and concurrency tests above. A numbered
+producer's failed write keeps its envelope and changes no live state:
+`a_numbered_window_waits_behind_its_unaccepted_envelope` (an end row and a
+prompt row that cannot be written: retained, no live change, landed in order
+once repaired).
+
 The server side of the inbox (`AgentNotificationHub::run`) polls every 250 ms
 and runs `consume_inbox` on tokio's blocking pool: the scan is synchronous end
 to end (directory listing, file reads, tmux subprocesses, bus posts), and on a

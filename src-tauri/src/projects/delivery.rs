@@ -912,7 +912,7 @@ mod tests {
         assert!(telemetry::turn_busy(session, window));
     }
     fn end(session: &str, window: &str) {
-        record_notification(session, window, "completed", crate::projects::now());
+        record_notification(session, window, "completed");
     }
     fn setup(tag: &str) -> String {
         crate::projects::tests::use_test_store();
@@ -1456,7 +1456,7 @@ mod tests {
         assert_eq!(typed().len(), 1);
 
         let s = setup("restart-busy");
-        crate::projects::with_store(|st| st.insert_activity(&s, "dev", crate::projects::now() * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|st| st.insert_dated_activity(&s, "dev", crate::projects::now() * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
         crate::projects::with_store(|st| st.insert_held_delivery(&s, "dev", "[tmm chat 03:00] lead: @dev a", 0, crate::projects::now(), "")).unwrap();
         telemetry::forget_process_state(&s);
         flush_at(&s, "dev", "t");
@@ -1475,7 +1475,7 @@ mod tests {
         let r = setup("start-running");
         crate::projects::with_store(|st| {
             st.insert_held_delivery(&s, "dev", "[tmm chat 03:00] lead: @dev idle one", 0, crate::projects::now(), "")?;
-            st.insert_activity(&r, "dev", crate::projects::now() * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_dated_activity(&r, "dev", crate::projects::now() * 1000, "prompt", "long turn", "", "app", "", "")?;
             st.insert_held_delivery(&r, "dev", "[tmm chat 03:00] lead: @dev running one", 0, crate::projects::now(), "")
         })
         .unwrap();
@@ -1514,18 +1514,18 @@ mod tests {
         let line_b = "[tmm chat 03:00] lead: @done for b";
         crate::projects::with_store(|st| {
             // B: an open turn with a tool call; an ended one holding a line.
-            st.insert_activity(&b, "w", t * 1000, "prompt", "long turn", "", "app", "", "")?;
-            st.insert_activity(&b, "w", t * 1000, "tool", "/w/x.rs", "Read", "", "", "")?;
-            st.insert_activity(&b, "done", t * 1000, "prompt", "short", "", "app", "", "")?;
-            st.insert_activity(&b, "done", t * 1000, "notif", "completed", "", "", "", "")?;
+            st.insert_dated_activity(&b, "w", t * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_dated_activity(&b, "w", t * 1000, "tool", "/w/x.rs", "Read", "", "", "")?;
+            st.insert_dated_activity(&b, "done", t * 1000, "prompt", "short", "", "app", "", "")?;
+            st.insert_dated_activity(&b, "done", t * 1000, "notif", "completed", "", "", "", "")?;
             st.insert_held_delivery(&b, "done", line_b, 0, t, "")?;
             // A: "idle" ended, holding a line past HOLD_MAX_SECS; "dev" and
             // "aux" open.
-            st.insert_activity(&a, "idle", old * 1000, "prompt", "short", "", "app", "", "")?;
-            st.insert_activity(&a, "idle", old * 1000, "notif", "completed", "", "", "", "")?;
+            st.insert_dated_activity(&a, "idle", old * 1000, "prompt", "short", "", "app", "", "")?;
+            st.insert_dated_activity(&a, "idle", old * 1000, "notif", "completed", "", "", "", "")?;
             st.insert_held_delivery(&a, "idle", line_a, 0, old, "")?;
-            st.insert_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
-            st.insert_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "").map(|_| ())
+            st.insert_dated_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_dated_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "").map(|_| ())
         })
         .unwrap();
         telemetry::forget_process_state(&a);
@@ -1553,7 +1553,7 @@ mod tests {
         telemetry::sweep_deliveries(&a);
         assert!(warns(&a).is_empty(), "the sweep reports nothing for an unknown window: {:?}", warns(&a));
         // A live end on aux is aux's own fact: aux is known, and at rest.
-        record_notification(&a, "aux", "completed", crate::projects::now());
+        record_notification(&a, "aux", "completed");
         assert!(telemetry::turn_known(&a, "aux") && !telemetry::turn_busy(&a, "aux"));
         assert!(!telemetry::turn_known(&a, "dev"), "still asked again, still failing: nothing cached as a success");
 
@@ -1587,7 +1587,7 @@ mod tests {
         let old = crate::projects::now() - HOLD_MAX_SECS - 60;
         let first = "[tmm chat 03:00] lead: @dev old one";
         crate::projects::with_store(|st| {
-            st.insert_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
+            st.insert_dated_activity(&a, "dev", old * 1000, "prompt", "long turn", "", "app", "", "")?;
             st.insert_held_delivery(&a, "dev", first, 0, old, "")
         })
         .unwrap();
@@ -1606,7 +1606,7 @@ mod tests {
         // A steer window of A with nothing held: the line is held, not
         // steered into a turn nobody has read (its row, like A's others,
         // stored undecodable).
-        crate::projects::with_store(|st| st.insert_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|st| st.insert_dated_activity(&a, "aux", old * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
         telemetry::test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{a}'"));
         assert!(!telemetry::turn_known(&a, "aux"));
         assert!(deliver_with(&a, "aux", "t", "[tmm chat 03:11] lead: @aux steer, nothing held", 0, "", || Some("steer")));
@@ -1747,7 +1747,7 @@ mod tests {
         busy(&s, "dev");
         deliver_as(&s, "dev", "t", "[tmm chat 03:40] lead: @dev one", "", true);
         deliver_as(&s, "dev", "t", "[tmm chat 03:41] lead: @dev two", "", true);
-        crate::projects::with_store(|st| st.insert_activity(&s, "ghost", crate::projects::now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|st| st.insert_dated_activity(&s, "ghost", crate::projects::now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
         telemetry::record_held(&s, "ghost", "[tmm chat 03:42] lead: @ghost three", 0, "").unwrap();
         assert_eq!((held(&s, "dev"), held(&s, "ghost")), (2, 1));
         // As after a server restart: this process holds no record for either
@@ -1906,7 +1906,7 @@ mod tests {
     #[test]
     fn a_gated_delivery_is_checked_and_typed_in_one_step_against_the_prompt_edge() {
         let s = setup("gate");
-        crate::projects::telemetry::record_notification_with(&s, "dev", "completed", crate::projects::now(), crate::backends::EndQuality::Empty);
+        crate::projects::telemetry::record_notification_with(&s, "dev", "completed", crate::backends::EndQuality::Empty);
         let end_seq = telemetry::turn_epoch(&s, "dev");
         let nudge = "[tmm chat 10:00] tmm: [reply] your previous turn ended without a response";
 

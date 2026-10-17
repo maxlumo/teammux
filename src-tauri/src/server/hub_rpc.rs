@@ -5003,7 +5003,7 @@ mod tests {
         telemetry::record_prompt(&session, "aux", "[tmm chat 2026-10-16 03:40] lead: @aux review");
         let seen = telemetry::turn_version(&session, "aux");
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let missed = telemetry::record_missed_end(&session, "aux", "auth_expired", telemetry::Identity::Paint("auth_expired|394"), seen, ts);
+        let missed = telemetry::record_missed_end_at(&session, "aux", "auth_expired", telemetry::Identity::Paint("auth_expired|394"), seen, ts);
         PERSIST_IN_TEST.with(|p| p.set(false));
         assert_eq!(missed, telemetry::Missed::Ended);
 

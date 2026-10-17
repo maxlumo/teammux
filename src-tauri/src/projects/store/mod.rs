@@ -35,6 +35,15 @@ pub use wakes::Wake;
 
 pub struct Store {
     conn: Connection,
+    /// The activity log's high-water `ts` in ms (board #414): every OBSERVED
+    /// row is stamped strictly above it, inside the store's write section
+    /// (`Store::stamp_activity`), so `ts` rises in INSERT order. Seeded from
+    /// the log at open, so a restart or a wall clock that stepped back never
+    /// stamps a row behind one a client has already seen.
+    activity_hw: std::cell::Cell<u64>,
+    /// The wall clock in ms that stamp reads; a test injects its own
+    /// (`set_activity_clock`).
+    activity_clock: Box<dyn Fn() -> u64 + Send>,
 }
 
 impl Store {
@@ -54,7 +63,7 @@ impl Store {
     fn init(conn: Connection) -> Result<Self, String> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| format!("pragma: {e}"))?;
-        let mut store = Self { conn };
+        let mut store = Self { conn, activity_hw: std::cell::Cell::new(0), activity_clock: Box::new(activity::wall_ms) };
         // Migrations MUST run with foreign keys off: a schema change rebuilds
         // `projects`, and with enforcement on SQLite performs an implicit
         // DELETE FROM before the DROP, which cascades every slot and snapshot
@@ -67,6 +76,7 @@ impl Store {
             .map_err(|e| format!("pragma: {e}"))?;
         store.migrate()?;
         store.heal()?;
+        store.seed_activity_hw()?;
         store
             .conn
             .execute_batch("PRAGMA foreign_keys=ON;")

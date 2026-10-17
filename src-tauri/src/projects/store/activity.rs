@@ -70,11 +70,11 @@ pub struct DeliveryRow {
     pub ask_at: usize,
 }
 
-/// The activity row of a settled prompt (`Store::settle_prompt`).
+/// The activity row of a settled prompt (`Store::settle_prompt`); its `ts`
+/// is the store's stamp, handed to the builder.
 pub struct PromptRow {
     pub session: String,
     pub window: String,
-    pub ts: u64,
     pub text: String,
     pub via: String,
     pub deliveries: String,
@@ -135,11 +135,103 @@ pub fn person_paint_prefix(session: &str, window: Option<&str>) -> String {
     }
 }
 
+/// Test-only: runs once inside the next `publish_activity`, after its stamp
+/// and before its INSERT — inside the store's write section (board #414).
+#[cfg(test)]
+static IN_PUBLISH_HOOK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+/// The wall clock in ms: what an observed activity row is stamped from.
+pub(super) fn wall_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 impl Store {
-    /// Append one observed event. Called on every hook, so it stays a single
-    /// INSERT and its failure is the caller's to ignore. Returns the row id:
-    /// a turn fact takes it as its order (board #249).
-    pub fn insert_activity(
+    /// The activity log's ordering rule (board #414), ONE place: an observed
+    /// row's `ts` is `max(clock, high-water + 1)`, taken inside the store's
+    /// write section (the caller holds the one store lock across the stamp
+    /// and its INSERT), so `ts` rises strictly in INSERT order across EVERY
+    /// writer — turn facts, the numbered prompt and missed-end transactions,
+    /// warns, steered rows — and a tail from any cursor it handed out
+    /// (`since_ts`, exclusive) sees every row published after it. A stamp
+    /// whose INSERT then fails leaves a gap, never a duplicate.
+    fn stamp_activity(&self) -> u64 {
+        let ts = (self.activity_clock)().max(self.activity_hw.get() + 1);
+        self.activity_hw.set(ts);
+        ts
+    }
+
+    /// Where the high-water starts: the newest `ts` the log holds, read once
+    /// at open, so a restart — or a wall clock that stepped back — never
+    /// stamps a row behind one a client already holds.
+    pub(super) fn seed_activity_hw(&self) -> Result<(), String> {
+        let max: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(ts), 0) FROM activity", [], |r| r.get(0))
+            .map_err(|e| format!("activity high-water: {e}"))?;
+        self.activity_hw.set(max.max(0) as u64);
+        Ok(())
+    }
+
+    /// Test-only: the clock `stamp_activity` reads, and back to the wall.
+    #[cfg(test)]
+    pub fn set_activity_clock(&mut self, clock: impl Fn() -> u64 + Send + 'static) {
+        self.activity_clock = Box::new(clock);
+    }
+    #[cfg(test)]
+    pub fn reset_activity_clock(&mut self) {
+        self.activity_clock = Box::new(wall_ms);
+    }
+    /// Test-only: `f` runs once inside the next `publish_activity`, after
+    /// its stamp and before its INSERT (`IN_PUBLISH_HOOK`).
+    #[cfg(test)]
+    pub fn hold_next_publish(f: Box<dyn FnOnce() + Send>) {
+        *IN_PUBLISH_HOOK.lock().unwrap() = Some(f);
+    }
+    #[cfg(test)]
+    pub fn activity_high_water(&self) -> u64 {
+        self.activity_hw.get()
+    }
+
+    /// Publish one OBSERVED event: the store stamps it (`stamp_activity`)
+    /// and returns that `ts` — the one time the live record, the ring and
+    /// the log all carry — with the row id, or the INSERT's error. The stamp
+    /// is returned EITHER WAY (board #414 review P1, round 3): a fact whose
+    /// write failed keeps the time the store gave it, so a fail-soft live
+    /// update never falls back to an earlier clock and undoes a later fact.
+    /// Called on every hook, so it stays a single INSERT and its failure is
+    /// the caller's to ignore. A prompt row's `requesters` ride in the SAME
+    /// statement (board #257, v27): the display text and the sender map
+    /// commit together or not at all.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_activity(
+        &self,
+        session: &str,
+        window: &str,
+        kind: &str,
+        text: &str,
+        tool: &str,
+        via: &str,
+        state: &str,
+        deliveries: &str,
+        requesters: Option<&str>,
+    ) -> (u64, Result<i64, String>) {
+        let ts = self.stamp_activity();
+        #[cfg(test)]
+        if let Some(hook) = IN_PUBLISH_HOOK.lock().unwrap().take() {
+            hook();
+        }
+        (ts, self.insert_row(session, window, ts, kind, text, tool, via, state, deliveries, requesters))
+    }
+
+    /// A HISTORICAL row at a time its caller names (a test's chosen time):
+    /// never stamped, and outside the cursor contract — it may sit behind or
+    /// ahead of a cursor already handed out, and it does not move this
+    /// process's high-water (a test's simulated timeline five minutes ahead
+    /// must not stamp every later observed row there). TEST-ONLY, by the
+    /// compiler (board #414 review P2-A): no build that ships can date a row.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_dated_activity(
         &self,
         session: &str,
         window: &str,
@@ -151,15 +243,30 @@ impl Store {
         state: &str,
         deliveries: &str,
     ) -> Result<i64, String> {
-        self.insert_activity_with(session, window, ts, kind, text, tool, via, state, deliveries, None)
+        self.insert_dated_activity_with(session, window, ts, kind, text, tool, via, state, deliveries, None)
     }
 
-    /// `insert_activity` plus a prompt row's `requesters` (board #257, v27),
-    /// in the SAME statement: the display text and the sender map commit
-    /// together or not at all (validator 05:04 — a second UPDATE left a
-    /// window where a durable prompt had no senders).
+    /// `insert_dated_activity` with a prompt row's `requesters`.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_activity_with(
+    pub fn insert_dated_activity_with(
+        &self,
+        session: &str,
+        window: &str,
+        ts: u64,
+        kind: &str,
+        text: &str,
+        tool: &str,
+        via: &str,
+        state: &str,
+        deliveries: &str,
+        requesters: Option<&str>,
+    ) -> Result<i64, String> {
+        self.insert_row(session, window, ts, kind, text, tool, via, state, deliveries, requesters)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_row(
         &self,
         session: &str,
         window: &str,
@@ -260,7 +367,21 @@ impl Store {
     /// fact with no end would make a restart skip a turn that never ended,
     /// and an end with no fact would let the same paint end a later turn.
     /// The end's row id. Real hook telemetry stays fail-soft and outside this.
-    pub fn insert_missed_end(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept_key: Option<&str>) -> Result<i64, String> {
+    /// Its `ts` is the store's stamp (`stamp_activity`), returned with the
+    /// row id.
+    pub fn insert_missed_end(&mut self, session: &str, window: &str, detail: &str, accept_key: Option<&str>) -> Result<(i64, u64), String> {
+        let ts_ms = self.stamp_activity();
+        self.missed_end_at(session, window, ts_ms, detail, accept_key)
+    }
+
+    /// `insert_missed_end` at a time its caller names (`insert_dated_activity`'s
+    /// terms). Test-only.
+    #[cfg(test)]
+    pub fn insert_dated_missed_end(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept_key: Option<&str>) -> Result<(i64, u64), String> {
+        self.missed_end_at(session, window, ts_ms, detail, accept_key)
+    }
+
+    fn missed_end_at(&mut self, session: &str, window: &str, ts_ms: u64, detail: &str, accept_key: Option<&str>) -> Result<(i64, u64), String> {
         let tx = self.conn.transaction().map_err(|e| format!("missed end transaction: {e}"))?;
         tx.execute(
             "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
@@ -277,7 +398,7 @@ impl Store {
             .map_err(|e| format!("accept missed end: {e}"))?;
         }
         tx.commit().map_err(|e| format!("commit missed end: {e}"))?;
-        Ok(row)
+        Ok((row, ts_ms))
     }
 
     /// Forget the accepted person-needed paints of ONE agent's identity
@@ -733,8 +854,10 @@ impl Store {
     /// prompt finds exactly the receipts the failed attempt matched. Each
     /// candidate counts only if this transaction deleted it (two echoes
     /// racing for one row cannot both call it theirs); `row` builds the
-    /// activity row from the ids that were won. Returns them and the row id.
-    pub fn settle_prompt(&mut self, candidates: &[i64], row: impl FnOnce(&[i64]) -> PromptRow) -> Result<(Vec<i64>, i64), String> {
+    /// activity row from the ids that were won and the row's stamp (its `ts`,
+    /// `stamp_activity`). Returns them, the row id and that ts.
+    pub fn settle_prompt(&mut self, candidates: &[i64], row: impl FnOnce(&[i64], u64) -> PromptRow) -> Result<(Vec<i64>, i64, u64), String> {
+        let ts = self.stamp_activity();
         let tx = self.conn.transaction().map_err(|e| format!("prompt settlement transaction: {e}"))?;
         let mut won = Vec::new();
         for id in candidates {
@@ -745,16 +868,16 @@ impl Store {
                 won.push(*id);
             }
         }
-        let r = row(&won);
+        let r = row(&won, ts);
         tx.execute(
             "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
              VALUES (?1, 0, ?2, ?3, 'prompt', ?4, '', ?5, '', ?6, ?7)",
-            rusqlite::params![r.session, r.window, r.ts as i64, r.text, r.via, r.deliveries, r.requesters],
+            rusqlite::params![r.session, r.window, ts as i64, r.text, r.via, r.deliveries, r.requesters],
         )
         .map_err(|e| format!("insert activity: {e}"))?;
         let id = tx.last_insert_rowid();
         tx.commit().map_err(|e| format!("prompt settlement commit: {e}"))?;
-        Ok((won, id))
+        Ok((won, id, ts))
     }
 
     /// Forget every outstanding line of a window (it no longer exists, so it can
@@ -812,10 +935,9 @@ mod tests {
                 .collect();
             (pending, rows)
         };
-        let row = |won: &[i64]| PromptRow {
+        let row = |won: &[i64], _ts: u64| PromptRow {
             session: "s".into(),
             window: "w".into(),
-            ts: 1,
             text: "go".into(),
             via: if won.is_empty() { "local" } else { "app" }.into(),
             deliveries: serde_json::to_string(&won.iter().map(|id| serde_json::json!({"id": id, "msg": "m-1"})).collect::<Vec<_>>()).unwrap(),
@@ -823,10 +945,10 @@ mod tests {
         };
         store.exec_test_sql("CREATE TEMP TRIGGER no_prompt BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT, 'disk full'); END;").unwrap();
         for _ in 0..3 {
-            let err = store.settle_prompt(&[d], |won| {
+            let err = store.settle_prompt(&[d], |won, ts| {
                 assert_eq!(won, [d], "this transaction deleted it");
                 assert_eq!(durable(&other()), (1, vec![]), "mid-transaction, a restart still reads the receipt pending");
-                row(won)
+                row(won, ts)
             });
             assert!(err.is_err());
             assert_eq!(durable(&other()), (1, vec![]), "the failed INSERT rolled the retirement back");
@@ -834,15 +956,53 @@ mod tests {
         store.exec_test_sql("DROP TRIGGER no_prompt;").unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
-        let (won, _) = store.settle_prompt(&[d], row).unwrap();
+        let (won, _, _) = store.settle_prompt(&[d], row).unwrap();
         assert_eq!(won, [d]);
         let (pending, rows) = durable(&other());
         assert_eq!(pending, 0);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "app", "never converted to local input");
         assert!(rows[0].1.contains(&format!("\"id\":{d}")) && rows[0].1.contains("m-1"), "{}", rows[0].1);
-        let (won, _) = store.settle_prompt(&[d], row).unwrap();
+        let (won, _, _) = store.settle_prompt(&[d], row).unwrap();
         assert!(won.is_empty(), "a second echo cannot take the same receipt");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Board #414: the stamp is the store's, across EVERY writer and across a
+    /// REAL restart. A process whose clock ran an hour ahead publishes a
+    /// prompt (the settlement transaction), an end, a missed end; the next
+    /// process opens the same file on the wall clock — an hour BEHIND that
+    /// durable high-water — and its first rows are still stamped above it, so
+    /// a client holding the old process's last cursor sees them. A dated row
+    /// is written as dated and moves nothing.
+    #[test]
+    fn a_restart_never_stamps_below_the_durable_high_water() {
+        let path = std::env::temp_dir().join(format!("tmm-hw-{}.db", uuid::Uuid::new_v4()));
+        let ahead = wall_ms() + 3_600_000;
+        let mut store = Store::open(&path).unwrap();
+        store.set_activity_clock(move || ahead);
+        let (_, _, p_ts) = store.settle_prompt(&[], |_, _| PromptRow {
+            session: "s".into(),
+            window: "w".into(),
+            text: "go".into(),
+            via: "local".into(),
+            deliveries: String::new(),
+            requesters: None,
+        }).unwrap();
+        let (n_ts, written) = store.publish_activity("s", "w", "notif", "completed", "", "", "", "", None);
+        written.unwrap();
+        let (_, m_ts) = store.insert_missed_end("s", "w", "auth_expired", None).unwrap();
+        assert_eq!((p_ts, n_ts, m_ts), (ahead, ahead + 1, ahead + 2), "stamped in order on the clock that stands still");
+        store.insert_dated_activity("s", "w", 5, "tool", "old.rs", "Edit", "", "", "").unwrap();
+        assert_eq!(store.activity_high_water(), ahead + 2, "a dated row moves nothing");
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.activity_high_water(), ahead + 2, "seeded from the log");
+        let (next, written) = store.publish_activity("s", "w", "warn", "after the restart", "", "", "", "", None);
+        written.unwrap();
+        assert_eq!(next, ahead + 3, "above the durable high-water, not on the wall clock behind it");
+        let tail: Vec<String> = store.activity_since("s", m_ts, 10).unwrap().into_iter().map(|r| r.text).collect();
+        assert_eq!(tail, ["after the restart"], "the old process's last cursor sees it");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -921,8 +1081,8 @@ mod tests {
         assert_eq!(left.iter().map(|r| r.msg_id.as_str()).collect::<Vec<_>>(), vec!["m1", ""]);
 
         let refs = format!(r#"[{{"id":{},"msg":"m1"}}]"#, left[0].id);
-        store.insert_activity("s", "w1", 1000, "prompt", "same", "", "app", "", &refs).unwrap();
-        store.insert_activity("s", "w1", 1001, "prompt", "typed", "", "local", "", "").unwrap();
+        store.insert_dated_activity("s", "w1", 1000, "prompt", "same", "", "app", "", &refs).unwrap();
+        store.insert_dated_activity("s", "w1", 1001, "prompt", "typed", "", "local", "", "").unwrap();
         let evs = store.activity_since("s", 0, 10).unwrap();
         assert_eq!(evs.iter().map(|e| e.deliveries.as_str()).collect::<Vec<_>>(), vec![refs.as_str(), ""]);
         // Reported once: only the first call flips the mark, and the row stays.
@@ -935,16 +1095,16 @@ mod tests {
     #[test]
     fn the_activity_log_survives_and_stays_bounded() {
         let store = Store::open_memory().unwrap();
-        let first = store.insert_activity("s0", "w1", 1, "prompt", "p", "", "", "", "").unwrap();
-        let second = store.insert_activity("s0", "w1", 1, "notif", "completed", "", "", "", "").unwrap();
+        let first = store.insert_dated_activity("s0", "w1", 1, "prompt", "p", "", "", "", "").unwrap();
+        let second = store.insert_dated_activity("s0", "w1", 1, "notif", "completed", "", "", "", "").unwrap();
         assert!(second > first, "the returned row id is the insertion order (board #249)");
         for n in 0..5u64 {
             store
-                .insert_activity("s1", "w3", 1000 + n, "tool", &format!("file{n}.rs"), "Edit", "", "", "")
+                .insert_dated_activity("s1", "w3", 1000 + n, "tool", &format!("file{n}.rs"), "Edit", "", "", "")
                 .unwrap();
         }
         // Another session's rows never leak into this one's feed.
-        store.insert_activity("s2", "w1", 1002, "tool", "other.rs", "Read", "", "", "").unwrap();
+        store.insert_dated_activity("s2", "w1", 1002, "tool", "other.rs", "Read", "", "", "").unwrap();
 
         let all = store.activity_since("s1", 0, 100).unwrap();
         assert_eq!(all.len(), 5);
@@ -985,11 +1145,11 @@ mod tests {
             assert_eq!(n, out.len());
             out
         };
-        store.insert_activity("s", "w2", 900, "prompt", "[tmm chat] old: closed turn", "", "app", "", "").unwrap();
-        store.insert_activity("s", "w2", 1000, "notif", "completed", "", "", "", "").unwrap();
-        store.insert_activity("s", "w2", 1100, "prompt", "[tmm chat] lead: work", "", "app", "", "").unwrap();
-        store.insert_activity("s", "w2", 1200, "tool", "file.rs", "Edit", "", "", "").unwrap();
-        store.insert_activity("s", "w2", 1250, "prompt", "[tmm chat] peer: [reply] fyi", "", "app", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 900, "prompt", "[tmm chat] old: closed turn", "", "app", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 1000, "notif", "completed", "", "", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 1100, "prompt", "[tmm chat] lead: work", "", "app", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 1200, "tool", "file.rs", "Edit", "", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 1250, "prompt", "[tmm chat] peer: [reply] fyi", "", "app", "", "").unwrap();
         // Every input of the OPEN turn, oldest first; the closed turn's is not.
         assert_eq!(
             all(None),
@@ -997,14 +1157,14 @@ mod tests {
         );
         // The bound stops early (oldest first).
         assert_eq!(all(Some(1)), vec!["[tmm chat] lead: work".to_string()]);
-        store.insert_activity("s", "w2", 1300, "notif", "completed", "", "", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 1300, "notif", "completed", "", "", "", "").unwrap();
         assert!(all(None).is_empty());
 
         // #256 review: an open turn of 200 inputs comes back WHOLE, so the
         // first requester survives recovery; Some(1) reads just one row.
-        store.insert_activity("s", "w2", 2000, "prompt", "[tmm chat] orchestrator: request", "", "app", "", "").unwrap();
+        store.insert_dated_activity("s", "w2", 2000, "prompt", "[tmm chat] orchestrator: request", "", "app", "", "").unwrap();
         for i in 0..199 {
-            store.insert_activity("s", "w2", 2001 + i, "prompt", &format!("[tmm chat] builder: [reply] {i}"), "", "app", "", "").unwrap();
+            store.insert_dated_activity("s", "w2", 2001 + i, "prompt", &format!("[tmm chat] builder: [reply] {i}"), "", "app", "", "").unwrap();
         }
         let whole = all(None);
         assert_eq!(whole.len(), 200);
@@ -1021,7 +1181,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         // Six events, and three of them share ts 1002 — the shape a real turn has.
         for (n, ts) in [1000u64, 1001, 1002, 1002, 1002, 1003].into_iter().enumerate() {
-            store.insert_activity("s", "w1", ts, "tool", &format!("e{n}"), "Edit", "", "", "").unwrap();
+            store.insert_dated_activity("s", "w1", ts, "tool", &format!("e{n}"), "Edit", "", "", "").unwrap();
         }
         assert_eq!(store.activity_stats("s").unwrap(), (6, 1000, 1003));
 

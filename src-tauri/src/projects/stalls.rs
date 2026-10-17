@@ -213,18 +213,18 @@ mod tests {
     /// An empty end, recorded the way the consumer does: ONE write, the end
     /// and how it ended. Returns the arrival number of that end.
     fn empty_end(session: &str, window: &str) -> u64 {
-        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Empty);
+        record_notification_with(session, window, "completed", EndQuality::Empty);
         super::super::telemetry::turn_epoch(session, window)
     }
 
     /// An end with something to say.
     fn real_end(session: &str, window: &str) {
-        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Said);
+        record_notification_with(session, window, "completed", EndQuality::Said);
     }
 
     /// An end whose reply was unavailable (no body, blank, unreadable).
     fn unknown_end(session: &str, window: &str) {
-        record_notification_with(session, window, "completed", super::super::now(), EndQuality::Unknown);
+        record_notification_with(session, window, "completed", EndQuality::Unknown);
     }
 
     /// The nudge the window is owed now, read the way a timer reads it.

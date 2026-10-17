@@ -200,6 +200,7 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+
 /// The activity FEED: recent observed events per session, newest last. This
 /// is telemetry made visible in the chat timeline (owner ask: show tool
 /// calls / status changes between the final replies) — an in-memory ring,
@@ -304,21 +305,24 @@ fn push_event(session: &str, window: &str, kind: &str, text: String) {
 }
 
 fn push_full(session: &str, window: &str, kind: &str, text: String, tool: String, via: String, deliveries: Vec<DeliveryRef>) {
-    let _ = push_full_at(session, window, now_ms(), kind, text, tool, via, deliveries);
+    let _ = push_full_with(session, window, None, kind, text, tool, via, deliveries, None);
 }
 
+/// One event. `at`: `None` for an OBSERVED one — the store stamps it at its
+/// INSERT (`Store::publish_activity`, board #414) — or `Some(secs)` for a
+/// fact its caller DATES on purpose (a test's chosen time), written as such
+/// (`Store::insert_dated_activity`); never inferred from how old a time is.
+/// Returns the row id when it was written, and the event's `ts` in ms: the
+/// store's stamp, the dated time, or — with no durable log (a mobile build,
+/// a unit test) — the wall clock.
 #[allow(clippy::too_many_arguments)]
-fn push_full_at(session: &str, window: &str, ts_ms: u64, kind: &str, text: String, tool: String, via: String, deliveries: Vec<DeliveryRef>) -> Option<i64> {
-    push_full_with(session, window, ts_ms, kind, text, tool, via, deliveries, None)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_full_with(session: &str, window: &str, ts_ms: u64, kind: &str, text: String, tool: String, via: String, deliveries: Vec<DeliveryRef>, requesters: Option<Vec<String>>) -> Option<i64> {
+fn push_full_with(session: &str, window: &str, at: Option<u64>, kind: &str, text: String, tool: String, via: String, deliveries: Vec<DeliveryRef>, requesters: Option<Vec<String>>) -> (Option<i64>, u64) {
     push(
         session,
+        at,
         ActivityEvent {
             id: 0,
-            ts: ts_ms,
+            ts: at.map_or(0, |secs| secs * 1000),
             window: window.to_string(),
             kind: kind.into(),
             text,
@@ -334,35 +338,85 @@ fn push_full_with(session: &str, window: &str, ts_ms: u64, kind: &str, text: Str
 /// The one place the ring is appended to and trimmed. The event also goes to
 /// state.db, because a restart used to erase the whole feed while the messages
 /// around it survived: a conversation with holes in it.
-/// Returns the row id the event was written as, when it was written.
-fn push(session: &str, ev: ActivityEvent) -> Option<i64> {
-    let id = persist(session, &ev);
-    ring_push(session, ev);
-    id
+/// Returns the row id the event was written as, when it was written, and
+/// its `ts` (`push_full_with`): the store's stamp — kept when the INSERT then
+/// failed (board #414 review P1, round 3) — or the dated time; with no store
+/// write at all (none could be opened, a mobile build, a unit test), the
+/// DEGRADED time `max(wall clock, this session's newest KNOWN fact + 1)`, so
+/// a later fact never sorts before one this process already holds. Known =
+/// the live records (`known_floor_ms`: what a restart replayed from the log
+/// lives there, not in the feed) and the in-memory feed, the display cache.
+fn push(session: &str, at: Option<u64>, mut ev: ActivityEvent) -> (Option<i64>, u64) {
+    let (id, stamp) = match persist(session, &ev, at.is_some()) {
+        Persisted::Row(id, ts) => (Some(id), Some(ts)),
+        Persisted::Stamped(ts) => (None, Some(ts)),
+        Persisted::Not => (None, at.map(|_| ev.ts)),
+    };
+    // Read before the feed's lock: the two locks are never nested here.
+    let floor = if stamp.is_none() { known_floor_ms(session) } else { 0 };
+    let mut map = events().lock().unwrap();
+    let q = map.entry(session.to_string()).or_default();
+    ev.ts = stamp.unwrap_or_else(|| now_ms().max(floor + 1).max(q.iter().map(|e| e.ts + 1).max().unwrap_or(0)));
+    let ts = ev.ts;
+    ring_append(q, ev);
+    (id, ts)
+}
+
+/// The newest turn fact the session's live records hold, in ms. A record
+/// keeps whole seconds, so its second `S` is known as `S * 1000`: a fact
+/// stamped just above it takes the same second and sorts after it by arrival
+/// (`derive_from` compares second, then arrival), which is all the live state
+/// needs. Rounding up to `(S + 1) * 1000` would put it a second past the
+/// store's own high-water, so a fact the store stamps right after it, in
+/// that second, would sort BEFORE it (measured: two recovery tests that mix
+/// a degraded prompt with a stamped missed end read running).
+fn known_floor_ms(session: &str) -> u64 {
+    let map = store().lock().unwrap();
+    map.iter()
+        .filter(|((s, _), _)| s == session)
+        .flat_map(|(_, r)| [r.prompt, r.end.as_ref().map(|e| e.1), r.ask.as_ref().map(|a| a.1), r.tool.as_ref().map(|t| t.1)])
+        .flatten()
+        .map(|secs| secs * 1000)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The in-memory half of `push`, for a row already persisted by its caller.
 fn ring_push(session: &str, ev: ActivityEvent) {
     let mut map = events().lock().unwrap();
-    let q = map.entry(session.to_string()).or_default();
+    ring_append(map.entry(session.to_string()).or_default(), ev);
+}
+
+fn ring_append(q: &mut std::collections::VecDeque<ActivityEvent>, ev: ActivityEvent) {
     q.push_back(ev);
     while q.len() > EVENTS_CAP {
         q.pop_front();
     }
 }
 
+/// What became of one event's durable write (board #414).
+enum Persisted {
+    /// Written: its row id and the store's stamp (or its dated time).
+    Row(i64, u64),
+    /// The store stamped it, then the INSERT failed: no row, but the stamp
+    /// stays the event's time.
+    Stamped(u64),
+    /// No store write at all.
+    Not,
+}
+
 /// Unit tests exercise the ring and the derive rules; the durable log is tested
 /// directly in `store.rs`. Keeping the two apart is what stops `cargo test` from
 /// writing rows for invented sessions into the developer's real state.db.
 #[cfg(test)]
-fn persist(session: &str, ev: &ActivityEvent) -> Option<i64> {
+fn persist(session: &str, ev: &ActivityEvent, dated: bool) -> Persisted {
     // Off by default in tests; one test may opt in on its own thread after
     // pointing the process at a throwaway database (board #249: the fail-soft
     // order is tested against a REAL failed INSERT).
     if PERSIST_IN_TEST.with(|p| p.get()) {
-        persist_now(session, ev)
+        persist_now(session, ev, dated)
     } else {
-        None
+        Persisted::Not
     }
 }
 
@@ -380,17 +434,30 @@ thread_local! {
 /// process's lifetime if the database is unavailable (a mobile build, a
 /// read-only disk).
 #[cfg(not(test))]
-fn persist(session: &str, ev: &ActivityEvent) -> Option<i64> {
-    persist_now(session, ev)
+fn persist(session: &str, ev: &ActivityEvent, dated: bool) -> Persisted {
+    persist_now(session, ev, dated)
 }
 
-fn persist_now(session: &str, ev: &ActivityEvent) -> Option<i64> {
-    let written = super::with_store(|s| {
+/// `dated`: the event carries its caller's time (`push_full_with`; only a
+/// test can date one); else the store stamps it.
+fn persist_now(session: &str, ev: &ActivityEvent, dated: bool) -> Persisted {
+    #[cfg(not(test))]
+    let _ = dated;
+    // (the stamp, if the store gave one; the row id or the error)
+    let written: (Option<u64>, Result<i64, String>) = match super::with_store(|s| {
         let refs = if ev.deliveries.is_empty() { String::new() } else { serde_json::to_string(&ev.deliveries).unwrap_or_default() };
         let requesters = ev.requesters.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default());
-        s.insert_activity_with(session, &ev.window, ev.ts, &ev.kind, &ev.text, &ev.tool, &ev.via, &ev.state, &refs, requesters.as_deref())
-    });
-    if let Err(e) = &written {
+        #[cfg(test)]
+        if dated {
+            return Ok((Some(ev.ts), s.insert_dated_activity_with(session, &ev.window, ev.ts, &ev.kind, &ev.text, &ev.tool, &ev.via, &ev.state, &refs, requesters.as_deref())));
+        }
+        let (ts, row) = s.publish_activity(session, &ev.window, &ev.kind, &ev.text, &ev.tool, &ev.via, &ev.state, &refs, requesters.as_deref());
+        Ok((Some(ts), row))
+    }) {
+        Ok(w) => w,
+        Err(e) => (None, Err(e)),
+    };
+    if let (_, Err(e)) = &written {
         note_failed_write(session, &ev.window, &ev.kind);
         // Fail-soft, but not SILENT: a lost write is a hole in the trace, and the
         // whole point of the log is that it is complete. Reported on the first
@@ -404,7 +471,11 @@ fn persist_now(session: &str, ev: &ActivityEvent) -> Option<i64> {
     }
     // And that is all: no prune. The trace is kept whole (see the note on
     // EVENTS_CAP / LOAD_EVENTS) and the READ is what is bounded.
-    written.ok()
+    match written {
+        (Some(ts), Ok(id)) => Persisted::Row(id, ts),
+        (Some(ts), Err(_)) => Persisted::Stamped(ts),
+        (None, _) => Persisted::Not,
+    }
 }
 
 /// One page of the activity feed, oldest first, plus whether older events exist.
@@ -806,8 +877,18 @@ fn forget_window_deliveries(session: &str, window: &str) {
 static TURN_ORDER: Mutex<()> = Mutex::new(());
 
 fn turn_order() -> std::sync::MutexGuard<'static, ()> {
-    TURN_ORDER.lock().unwrap_or_else(|e| e.into_inner())
+    #[cfg(test)]
+    TURN_WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let guard = TURN_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(test)]
+    TURN_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    guard
 }
+
+/// Test-only: how many callers are waiting for `turn_order()` right now —
+/// a barrier a test can observe instead of sleeping (board #414).
+#[cfg(test)]
+static TURN_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The turn-fact lock for a delivery decision (board #281, validator 11:50):
 /// `delivery::deliver_with` reads `turn_busy` and `line_in_flight` and then
@@ -842,25 +923,25 @@ static IN_END_HOOK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 fn turn_fact_unless(
     session: &str,
     window: &str,
-    ts: u64,
+    at: Option<u64>,
     same: impl FnOnce(&Rec) -> bool,
     event: Option<(&str, String, String, String, Vec<DeliveryRef>)>,
     apply: impl FnOnce(&mut Rec, u64, u64),
 ) -> bool {
-    turn_fact_unless_row(session, window, ts, same, event, apply, None)
+    turn_fact_unless_row(session, window, at, same, event, apply, None)
 }
 
 fn turn_fact_unless_row(
     session: &str,
     window: &str,
-    ts: u64,
+    at: Option<u64>,
     same: impl FnOnce(&Rec) -> bool,
     event: Option<(&str, String, String, String, Vec<DeliveryRef>)>,
     apply: impl FnOnce(&mut Rec, u64, u64),
     requesters: Option<Vec<String>>,
 ) -> bool {
     let order = turn_order();
-    turn_fact_held(&order, session, window, ts, same, event, apply, requesters)
+    turn_fact_held(&order, session, window, at, same, event, apply, requesters)
 }
 
 /// `turn_fact_unless_row` for a caller already holding `turn_order()`.
@@ -869,7 +950,7 @@ fn turn_fact_held(
     _order: &std::sync::MutexGuard<'static, ()>,
     session: &str,
     window: &str,
-    ts: u64,
+    at: Option<u64>,
     same: impl FnOnce(&Rec) -> bool,
     event: Option<(&str, String, String, String, Vec<DeliveryRef>)>,
     apply: impl FnOnce(&mut Rec, u64, u64),
@@ -879,9 +960,17 @@ fn turn_fact_held(
     if same(&held) {
         return false;
     }
-    let row = event.and_then(|(kind, text, tool, via, deliveries)| {
-        push_full_with(session, window, ts * 1000 + now_ms() % 1000, kind, text, tool, via, deliveries, requesters)
-    });
+    // One clock for the row and the record (board #414): the record takes
+    // the row's own `ts` — the store's stamp at its INSERT for an observed
+    // fact (`at: None`), the caller's time for a dated one — so a restart
+    // that replays the row derives exactly this state. A fact with no row of
+    // its own here (a numbered prompt's, written by its transaction) is
+    // dated by its caller from that row.
+    let (row, ts) = match event {
+        Some((kind, text, tool, via, deliveries)) => push_full_with(session, window, at, kind, text, tool, via, deliveries, requesters),
+        None => (None, at.map_or_else(now_ms, |secs| secs * 1000)),
+    };
+    let ts = ts / 1000;
     // A numbered producer's fact that did not reach the log changes no live
     // state either (board #404 round 5): its envelope is retried, and until
     // then the window reads as it did, so nothing is released on it.
@@ -908,8 +997,17 @@ fn turn_fact_held(
 /// facts arrive here and they are stored apart: a stop ENDS the turn, a
 /// permission/input prompt means the agent is blocked on the human while the
 /// turn stays open.
-pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
-    record_notification_with(session, window, kind, ts, EndQuality::Unknown);
+/// The store stamps it at its INSERT (board #414); a test that needs a
+/// chosen time dates it with `record_notification_at`.
+pub fn record_notification(session: &str, window: &str, kind: &str) {
+    notification(session, window, kind, None, EndQuality::Unknown);
+}
+
+/// `record_notification` at a time the test names (seconds): a dated fact,
+/// test-only by the compiler (board #414 review P2-A).
+#[cfg(test)]
+pub fn record_notification_at(session: &str, window: &str, kind: &str, at: u64) {
+    notification(session, window, kind, Some(at), EndQuality::Unknown);
 }
 
 /// `record_notification` for a stop whose reply the caller has already read
@@ -923,7 +1021,19 @@ pub fn record_notification(session: &str, window: &str, kind: &str, ts: u64) {
 /// one (no body, blank, unreadable session file) is no evidence that anyone
 /// spoke, so it neither marks the end empty nor reopens the allowance (review
 /// P1-2).
-pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64, quality: EndQuality) {
+pub fn record_notification_with(session: &str, window: &str, kind: &str, quality: EndQuality) {
+    notification(session, window, kind, None, quality);
+}
+
+/// `record_notification_with` at a time the test names. Test-only.
+#[cfg(test)]
+pub fn record_notification_with_at(session: &str, window: &str, kind: &str, at: u64, quality: EndQuality) {
+    notification(session, window, kind, Some(at), quality);
+}
+
+/// `at`: `None` for the observed fact; `Some` only from a test's dated
+/// wrapper.
+fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, quality: EndQuality) {
     let completed = kind == "completed";
     let kind_is_ask = matches!(kind, "permission_required" | "input_required");
     // ONE critical section (board #264, orchestrator 11:57): whether the
@@ -938,7 +1048,7 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, ts: u64
         .is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
     let event = ("notif", kind.to_string(), String::new(), String::new(), Vec::new());
     let kind = kind.to_string();
-    turn_fact_held(&order, session, window, ts, |_| false, Some(event), |r, ts, seq| match kind.as_str() {
+    turn_fact_held(&order, session, window, at, |_| false, Some(event), |r, ts, seq| match kind.as_str() {
         "permission_required" | "input_required" => {
             r.ask = Some((kind, ts));
             r.ask_seq = seq;
@@ -1111,7 +1221,7 @@ pub fn record_interrupt(session: &str, window: &str) {
         .get(&(session.to_string(), window.to_string()))
         .is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
     let event = ("notif", "interrupted".to_string(), String::new(), String::new(), Vec::new());
-    turn_fact_held(&order, session, window, now(), |_| false, Some(event), |r, ts, seq| {
+    turn_fact_held(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
         r.end = Some(("completed".to_string(), ts));
         r.end_seq = seq;
         r.ask = None;
@@ -1164,7 +1274,7 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) {
             && tool_k >= r.ask.as_ref().map(|(_, t)| (*t, r.ask_seq))
     };
     let line_for_rec = line.clone();
-    turn_fact_unless(session, window, ts, same_call, Some(event), |r, ts, seq| {
+    turn_fact_unless(session, window, None, same_call, Some(event), |r, ts, seq| {
         r.tool = Some((line_for_rec, ts));
         r.tool_seq = seq;
     });
@@ -1478,7 +1588,6 @@ pub fn record_undelivered(session: &str, window: &str, line: &str, reason: &str)
 /// decoration, and an agent that is mid-task receives our line appended to
 /// whatever it was already typing.
 pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
-    let ts = now();
     recovery_mark(session);
     // The settlement and the prompt fact are ONE critical section under the
     // turn-fact lock (board #264): an end edge stepping the command rows
@@ -1511,7 +1620,7 @@ pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
     // and writes its row in ONE store transaction: retried after a failure,
     // it finds exactly the receipts it matched, never a deleted one.
     if numbered_persists(session, window) {
-        return record_numbered_prompt(&order, session, window, ts, prompt, settled, next_command, command_hit);
+        return record_numbered_prompt(&order, session, window, prompt, settled, next_command, command_hit);
     }
     // A row counts only if THIS echo deleted it: two echoes racing for one
     // row cannot both call it theirs.
@@ -1537,7 +1646,7 @@ pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
     let requesters = crate::address::requesters(prompt);
     // Its requesters ride in the SAME activity INSERT as the row (#257).
     let event = ("prompt", text, String::new(), via.to_string(), refs);
-    turn_fact_held(&order, session, window, ts, |_| false, Some(event), |r, ts, seq| {
+    turn_fact_held(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
         r.prompt = Some(ts);
         r.prompt_seq = seq;
     }, Some(requesters));
@@ -1571,7 +1680,6 @@ fn record_numbered_prompt(
     order: &std::sync::MutexGuard<'static, ()>,
     session: &str,
     window: &str,
-    ts: u64,
     prompt: &str,
     settled: Vec<Settled>,
     next_command: Option<&super::store::DeliveryRow>,
@@ -1579,10 +1687,10 @@ fn record_numbered_prompt(
 ) -> bool {
     let ids: Vec<i64> = settled.iter().map(|h| h.row.id).collect();
     let requesters = crate::address::requesters(prompt);
-    let ts_ms = ts * 1000 + now_ms() % 1000;
     let mut event = None;
     let written = queue(|s| {
-        s.settle_prompt(&ids, |won_ids| {
+        // The store stamps the row inside this transaction (board #414).
+        s.settle_prompt(&ids, |won_ids, ts_ms| {
             let won: Vec<Settled> = settled.iter().filter(|h| won_ids.contains(&h.row.id)).cloned().collect();
             let refs: Vec<DeliveryRef> = won.iter().map(|hit| DeliveryRef::of(hit.row)).collect();
             let ev = ActivityEvent {
@@ -1600,7 +1708,6 @@ fn record_numbered_prompt(
             let row = super::store::PromptRow {
                 session: session.to_string(),
                 window: window.to_string(),
-                ts: ts_ms,
                 text: ev.text.clone(),
                 via: ev.via.clone(),
                 deliveries: if ev.deliveries.is_empty() { String::new() } else { serde_json::to_string(&ev.deliveries).unwrap_or_default() },
@@ -1614,7 +1721,7 @@ fn record_numbered_prompt(
     if let Some(hook) = IN_PROMPT_SETTLED_HOOK.lock().unwrap().take() {
         hook();
     }
-    let (won_ids, row_id) = match written {
+    let (won_ids, row_id, ts_ms) = match written {
         Ok(w) => w,
         Err(e) => {
             eprintln!("⚠  a numbered prompt for {session}:{window} did not reach the log ({e}); its receipts stay pending, it is retried");
@@ -1626,7 +1733,7 @@ fn record_numbered_prompt(
     ev.id = row_id;
     ring_push(session, ev);
     settle_next_command(prompt, next_command, command_hit, won_ids.is_empty());
-    turn_fact_held(order, session, window, ts, |_| false, None, |r, ts, seq| {
+    turn_fact_held(order, session, window, Some(ts_ms / 1000), |_| false, None, |r, ts, seq| {
         r.prompt = Some(ts);
         r.prompt_seq = seq;
     }, None);
@@ -1973,7 +2080,17 @@ pub fn accepted_paint(session: &str, window: &str, sig: &str) -> Result<Option<i
 /// contract): the end's own row is the hook's and stays as it was, so after
 /// a gateway restart the replay restores the end without it, and the next
 /// capture tick that still sees the paint as the newest attaches it again.
-pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Identity, seen: u64, ts: u64) -> Missed {
+pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Identity, seen: u64) -> Missed {
+    missed_end(session, window, detail, identity, seen, None)
+}
+
+/// `record_missed_end` at a time the test names (seconds). Test-only.
+#[cfg(test)]
+pub fn record_missed_end_at(session: &str, window: &str, detail: &str, identity: Identity, seen: u64, at: u64) -> Missed {
+    missed_end(session, window, detail, identity, seen, Some(at))
+}
+
+fn missed_end(session: &str, window: &str, detail: &str, identity: Identity, seen: u64, at: Option<u64>) -> Missed {
     recovery_mark(session);
     let order = turn_order();
     let held = store().lock().unwrap().get(&(session.to_string(), window.to_string())).cloned();
@@ -2023,15 +2140,20 @@ pub fn record_missed_end(session: &str, window: &str, detail: &str, identity: Id
     }
     // Ended: the end row and the acceptance mark in ONE store transaction
     // (review P1-E); memory, the command rows and the flush only after it.
-    let ts_ms = ts * 1000 + now_ms() % 1000;
     let key = match identity {
         Identity::Paint(sig) => Some(super::store::person_paint_key(session, window, sig)),
         Identity::Incident => None,
     };
-    let row = match super::with_store(|s| s.insert_missed_end(session, window, ts_ms, detail, key.as_deref())) {
-        Ok(row) => row,
+    // Stamped by the store at its INSERT (board #414), or dated by `at`.
+    let (row, ts_ms) = match super::with_store(|s| match at {
+        #[cfg(test)]
+        Some(secs) => s.insert_dated_missed_end(session, window, secs * 1000, detail, key.as_deref()),
+        _ => s.insert_missed_end(session, window, detail, key.as_deref()),
+    }) {
+        Ok(written) => written,
         Err(e) => return unknown("written", e),
     };
+    let ts = ts_ms / 1000;
     ring_push(session, ActivityEvent {
         id: 0,
         ts: ts_ms,
@@ -2316,7 +2438,7 @@ mod tests {
             record_undelivered(&session, "B", "[tmm chat 2026-10-16 16:00] A: [reply] done", "pane in copy mode");
             record_prompt(&session, "B", "a prompt fact of another window");
             push_event(&session, "A", "warn", "a warn row of A itself".into());
-            record_notification(&session, "A", "completed", now());
+            record_notification(&session, "A", "completed");
             numbered_write_failed()
         });
         sql("DROP TRIGGER attr404;".into());
@@ -2327,14 +2449,14 @@ mod tests {
         ));
         let failed = with_numbered(Some((&session, "A")), || {
             record_prompt(&session, "A", "[tmm chat 2026-10-16 16:01] lead: @A again");
-            record_notification(&session, "A", "completed", now());
+            record_notification(&session, "A", "completed");
             numbered_write_failed()
         });
         sql("DROP TRIGGER attr404b;".into());
         assert!(failed, "A's own end fact did not reach the log: not accepted");
         assert!(!with_numbered(None, || {
             sql(format!("CREATE TEMP TRIGGER attr404c BEFORE INSERT ON activity WHEN NEW.session = '{session}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
-            record_notification(&session, "A", "completed", now());
+            record_notification(&session, "A", "completed");
             sql("DROP TRIGGER attr404c;".into());
             numbered_write_failed()
         }), "an unnumbered consumption stays fail-soft");
@@ -2468,7 +2590,7 @@ mod tests {
     #[test]
     fn all_states_reports_every_hooked_window_with_its_derived_state() {
         record_prompt("allst-a", "w2", "do the thing");
-        record_notification("allst-b", "w3", "completed", 12345);
+        record_notification_at("allst-b", "w3", "completed", 12345);
         let states = all_states();
         let get = |s: &str, w: &str| {
             states.iter().find(|(ss, ww, _)| ss == s && ww == w).map(|(_, _, st)| st.clone())
@@ -2762,7 +2884,7 @@ mod tests {
         assert!(record_housekeeping_tool(&session, "w1", "memory", ""), "mid-turn the agent may use the tool");
         assert_eq!(derive(&session, "w1", 0).state, "running");
         record_tool(&session, "w1", "execute_bash", "python3 compile.py");
-        record_notification(&session, "w1", "completed", now());
+        record_notification(&session, "w1", "completed");
         assert_eq!(derive(&session, "w1", 0).state, "idle");
         let rows = recent_events(&session, 0).len();
         for _ in 0..3 {
@@ -2845,6 +2967,29 @@ mod tests {
 
     /// What the process loses when the binary restarts: every derived record and
     /// every hydration mark. state.db is untouched, which is the point.
+    /// Board #414: the store's activity clock held at the start of the second
+    /// after everything it has stamped (so a test's rows share one second)
+    /// until the guard drops.
+    struct FixedActivityClock;
+    impl Drop for FixedActivityClock {
+        fn drop(&mut self) {
+            let _ = crate::projects::with_store(|s| {
+                s.reset_activity_clock();
+                Ok(())
+            });
+        }
+    }
+    fn fix_activity_clock_at_next_second() -> FixedActivityClock {
+        crate::projects::tests::use_test_store();
+        crate::projects::with_store(|s| {
+            let at = (s.activity_high_water().max(now_ms()) / 1000 + 1) * 1000;
+            s.set_activity_clock(move || at);
+            Ok(())
+        })
+        .unwrap();
+        FixedActivityClock
+    }
+
     fn simulate_restart(session: &str) {
         forget_process_state(session);
     }
@@ -3164,8 +3309,8 @@ mod tests {
         let opened = (now() - 600) * 1000;
         // The durable edges an earlier process wrote (persist() is off in tests).
         crate::projects::with_store(|s| {
-            s.insert_activity(&session, "w1", opened - 5000, "notif", "completed", "", "", "", "")?;
-            s.insert_activity(&session, "w1", opened, "prompt", "the 20-minute turn", "", "app", "", "")
+            s.insert_dated_activity(&session, "w1", opened - 5000, "notif", "completed", "", "", "", "")?;
+            s.insert_dated_activity(&session, "w1", opened, "prompt", "the 20-minute turn", "", "app", "", "")
         })
         .unwrap();
         let lines: Vec<String> = (0..30).map(|n| format!("[tmm chat 12:{n:02}] validator: @builder q{n}")).collect();
@@ -3187,8 +3332,8 @@ mod tests {
         // A window whose last edge was a stop is NOT reopened.
         let closed = format!("closed-{}", uuid::Uuid::new_v4());
         crate::projects::with_store(|s| {
-            s.insert_activity(&closed, "w1", opened, "prompt", "done turn", "", "app", "", "")?;
-            s.insert_activity(&closed, "w1", opened + 1000, "notif", "completed", "", "", "", "")
+            s.insert_dated_activity(&closed, "w1", opened, "prompt", "done turn", "", "app", "", "")?;
+            s.insert_dated_activity(&closed, "w1", opened + 1000, "notif", "completed", "", "", "", "")
         })
         .unwrap();
         recovery_mark(&closed);
@@ -3227,9 +3372,8 @@ mod tests {
     #[test]
     fn a_prompt_after_a_stop_in_the_same_second_opens_the_turn() {
         let session = format!("tie-{}", uuid::Uuid::new_v4());
-        let t = now();
         record_prompt(&session, "w1", "turn one");
-        record_notification(&session, "w1", "completed", t);
+        record_notification(&session, "w1", "completed");
         record_prompt(&session, "w1", "turn two, queued"); // same second
         assert_eq!(derive(&session, "w1", 0).state, "running", "the later arrival wins the tie");
         record_delivery(&session, "w1", "@builder still queued", "");
@@ -3237,7 +3381,7 @@ mod tests {
         sweep_deliveries(&session);
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 0, "a running turn is not swept");
         // And the reverse order in one second is a finished turn.
-        record_notification(&session, "w1", "completed", now());
+        record_notification(&session, "w1", "completed");
         assert_eq!(derive(&session, "w1", 0).state, "idle");
     }
 
@@ -3326,7 +3470,7 @@ mod tests {
     fn a_late_failed_replay_never_undoes_a_published_success() {
         crate::projects::tests::use_test_store();
         let session = format!("settle-{}", uuid::Uuid::new_v4());
-        crate::projects::with_store(|s| s.insert_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|s| s.insert_dated_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
         // Entry 1 replays and publishes Ok; entry 2's read had failed and
         // publishes after it.
         assert!(replay_turns(&session));
@@ -3355,7 +3499,7 @@ mod tests {
     fn a_failed_replay_is_retried_without_moving_the_delivery_mark() {
         crate::projects::tests::use_test_store();
         let session = format!("mark-{}", uuid::Uuid::new_v4());
-        crate::projects::with_store(|s| s.insert_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|s| s.insert_dated_activity(&session, "w", now() * 1000, "prompt", "x", "", "app", "", "")).unwrap();
         test_exec_sql(&format!("UPDATE activity SET win = CAST(win AS BLOB) WHERE session = '{session}'"));
         let first = recovery_mark(&session);
         assert!(replay_error(&session).is_some());
@@ -3412,7 +3556,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let session = format!("intr-{}", uuid::Uuid::new_v4());
         let opened = (now() - 600) * 1000;
-        crate::projects::with_store(|s| s.insert_activity(&session, "w1", opened, "prompt", "long turn", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|s| s.insert_dated_activity(&session, "w1", opened, "prompt", "long turn", "", "app", "", "")).unwrap();
         // The live path: record_interrupt writes its end row (persist() is
         // off in unit tests, so the row it pushes is written here as persist
         // would write it).
@@ -3421,7 +3565,7 @@ mod tests {
         assert_eq!((end.kind.as_str(), end.text.as_str()), ("notif", "interrupted"));
         // Written as persist would write it, dated as an interrupt made long
         // enough ago that a held line's clock has had its window since.
-        crate::projects::with_store(|s| s.insert_activity(&session, "w1", opened + 1000, &end.kind, &end.text, "", "", "", "")).unwrap();
+        crate::projects::with_store(|s| s.insert_dated_activity(&session, "w1", opened + 1000, &end.kind, &end.text, "", "", "", "")).unwrap();
         record_delivery(&session, "w1", "[tmm chat 12:00] human: @dev queued", "");
         simulate_restart(&session);
         recovery_mark(&session);
@@ -3463,7 +3607,7 @@ mod tests {
 
         let a = format!("dd-stop-{}", uuid::Uuid::new_v4());
         record_tool(&a, "w1", "Edit", "a.rs");
-        record_notification(&a, "w1", "completed", now());
+        record_notification(&a, "w1", "completed");
         assert_eq!(derive(&a, "w1", 0).state, "idle");
         record_tool(&a, "w1", "Edit", "a.rs"); // same call, < 3 s, after the stop
         assert_eq!(derive(&a, "w1", 0).state, "running", "a new tool-only turn");
@@ -3473,7 +3617,7 @@ mod tests {
         let b = format!("dd-ask-{}", uuid::Uuid::new_v4());
         record_prompt(&b, "w1", "run the tests");
         record_tool(&b, "w1", "Bash", "npm test"); // Pre
-        record_notification(&b, "w1", "permission_required", now());
+        record_notification(&b, "w1", "permission_required");
         assert_eq!(derive(&b, "w1", 0).state, "waiting");
         record_tool(&b, "w1", "Bash", "npm test"); // Post, right after approval
         assert_eq!(derive(&b, "w1", 0).state, "running", "the Post is the resume edge");
@@ -3509,6 +3653,285 @@ mod tests {
         assert!(orders.windows(2).all(|w| w[0] < w[1]), "{orders:?}");
     }
 
+    /// Board #414: the store's activity clock driven by the test (a shared
+    /// cell), starting at the next second after everything already stamped —
+    /// so the process's high-water moves at most a second or so past the
+    /// wall for the tests after it — and back to the wall clock when the
+    /// guard drops. Returns the cell, that start and the guard.
+    fn drive_activity_clock() -> (std::sync::Arc<std::sync::atomic::AtomicU64>, u64, FixedActivityClock) {
+        crate::projects::tests::use_test_store();
+        let cell = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let read = cell.clone();
+        let start = crate::projects::with_store(|s| {
+            let start = (s.activity_high_water().max(now_ms()) / 1000 + 1) * 1000;
+            read.store(start, std::sync::atomic::Ordering::SeqCst);
+            s.set_activity_clock(move || read.load(std::sync::atomic::Ordering::SeqCst));
+            Ok(start)
+        })
+        .unwrap();
+        (cell, start, FixedActivityClock)
+    }
+
+    /// The session's rows as (kind, ts), in INSERT (id) order.
+    fn rows_by_id(session: &str) -> Vec<(String, u64, i64)> {
+        let mut rows = crate::projects::with_store(|s| s.activity_page(session, 0, None, 1000)).unwrap().0;
+        rows.sort_by_key(|r| r.id);
+        rows.into_iter().map(|r| (r.kind, r.ts, r.id)).collect()
+    }
+
+    /// A tail from EVERY cursor the feed handed out (`since_ts`, exclusive)
+    /// sees exactly the rows published after that row.
+    fn assert_every_cursor_sees_every_later_row(session: &str, rows: &[(String, u64, i64)]) {
+        for (n, (_, ts, _)) in rows.iter().enumerate() {
+            let tail: Vec<i64> = crate::projects::with_store(|s| s.activity_page(session, *ts, None, 1000)).unwrap().0.iter().map(|r| r.id).collect();
+            let later: Vec<i64> = rows[n + 1..].iter().map(|r| r.2).collect();
+            assert_eq!(tail, later, "the tail from row {n}'s cursor {ts}: {rows:?}");
+        }
+    }
+
+    /// Board #414 review P1-B: EVERY activity writer — a turn's prompt, an
+    /// ask, a tool, an end, a missed end, a warn, a steered row — is stamped
+    /// by the store at its INSERT, so `ts` rises strictly in INSERT order
+    /// under a clock that stands still and one that steps BACK a minute, and a
+    /// tail from every cursor sees every later row. The live record takes its
+    /// row's own ts (one clock).
+    #[test]
+    fn every_activity_writer_is_stamped_in_insert_order_under_a_fixed_or_backwards_clock() {
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("ts414-{}", uuid::Uuid::new_v4());
+        let (clock, base, _guard) = drive_activity_clock();
+        let writers = |turn: &str| {
+            record_prompt(&session, "w1", &format!("[tmm chat 2026-10-17 13:00] lead: @w1 {turn}"));
+            record_notification(&session, "w1", "permission_required");
+            record_tool(&session, "w1", "Edit", &format!("{turn}.rs"));
+            record_undelivered(&session, "w2", "a line", "the pane is gone");
+            record_steered(&session, "w2", "a steered line", &[]);
+            record_notification(&session, "w1", "completed");
+        };
+        writers("one");
+        clock.store(base - 60_000, std::sync::atomic::Ordering::SeqCst); // the wall clock steps back
+        writers("two");
+        record_prompt(&session, "w1", "[tmm chat 2026-10-17 13:01] lead: @w1 three");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Incident, turn_version(&session, "w1")), Missed::Ended);
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let rows = rows_by_id(&session);
+        assert_eq!(rows.len(), 14, "{rows:?}");
+        assert!(rows.windows(2).all(|w| w[0].1 < w[1].1), "ts rises strictly in INSERT order: {rows:?}");
+        assert_eq!(rows[0].1, base, "the clock, while it is ahead of the high-water");
+        assert_every_cursor_sees_every_later_row(&session, &rows);
+        let live = store().lock().unwrap().get(&(session.clone(), "w1".to_string())).cloned().unwrap();
+        assert_eq!(live.end.as_ref().map(|e| e.1), Some(rows[13].1 / 1000), "the record's second is its row's");
+        assert_eq!(live.prompt, Some(rows[12].1 / 1000));
+    }
+
+    /// Board #414 review P1-A: how long a fact waited is no evidence it was
+    /// dated on purpose. An observed end that waits on the turn-fact lock
+    /// while another writer publishes, with the wall clock then two seconds
+    /// BEHIND that row (a slow consumer, a clock step), still lands after it
+    /// — on its INSERT's stamp, never on a time its caller captured — and
+    /// its live record agrees with its row. No sleep: the lock is the barrier.
+    #[test]
+    fn an_observed_end_held_behind_the_lock_lands_after_a_row_published_meanwhile() {
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("ts414b-{}", uuid::Uuid::new_v4());
+        let (clock, base, _guard) = drive_activity_clock();
+        record_prompt(&session, "w1", "[tmm chat 2026-10-17 13:10] lead: @w1 go");
+        let order = turn_order();
+        let end = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                PERSIST_IN_TEST.with(|p| p.set(true));
+                record_notification(&session, "w1", "completed"); // waits on the lock
+            })
+        };
+        // The end is observed WAITING on the turn-fact lock before anything
+        // else is published (the barrier, no sleep).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while TURN_WAITING.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "the end never waited on the turn-fact lock");
+            std::thread::yield_now();
+        }
+        record_undelivered(&session, "w2", "published while the end waits", "test");
+        clock.store(base - 2_000, std::sync::atomic::Ordering::SeqCst);
+        drop(order);
+        end.join().unwrap();
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let rows = rows_by_id(&session);
+        let kinds: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(kinds, ["prompt", "warn", "notif"], "{rows:?}");
+        assert!(rows.windows(2).all(|w| w[0].1 < w[1].1), "{rows:?}");
+        assert_every_cursor_sees_every_later_row(&session, &rows);
+        let live = store().lock().unwrap().get(&(session.clone(), "w1".to_string())).cloned().unwrap();
+        assert_eq!(live.end.as_ref().map(|e| e.1), Some(rows[2].1 / 1000), "the record's second is its row's");
+    }
+
+    /// Board #414 review P1 (round 3): a fact whose INSERT FAILED keeps the
+    /// time the store stamped it. The high-water is ahead of the wall clock
+    /// (the restart / clock-step case); a trigger refuses the next notif
+    /// INSERT; an unnumbered end and an interrupt are recorded on two
+    /// windows. Each reads idle at once — its stamp is above the prompt, not
+    /// the earlier wall clock — and the ring holds prompt then end, in
+    /// order. The failed rows are not in the log (no id is invented); a new
+    /// prompt after the database recovers opens the next turn.
+    #[test]
+    fn a_failed_insert_keeps_its_stamp_so_a_later_end_is_never_undone() {
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("ts414f-{}", uuid::Uuid::new_v4());
+        let (clock, base, _guard) = drive_activity_clock();
+        clock.store(base + 2_000, std::sync::atomic::Ordering::SeqCst);
+        for w in ["w1", "w2"] {
+            record_prompt(&session, w, &format!("[tmm chat 2026-10-17 13:40] lead: @{w} go"));
+        }
+        // The wall clock is now two seconds behind the high-water.
+        clock.store(base, std::sync::atomic::Ordering::SeqCst);
+        crate::projects::with_store(|s| s.exec_test_sql(&format!(
+            "CREATE TEMP TRIGGER lost414 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'notif'
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+        ))).unwrap();
+        record_notification(&session, "w1", "completed");
+        record_interrupt(&session, "w2");
+        crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER lost414;")).unwrap();
+        for w in ["w1", "w2"] {
+            assert_eq!(derive(&session, w, 0).state, "idle", "{w}: the failed end is not undone by an earlier clock");
+        }
+        let ring: Vec<(String, String, u64)> = recent_events(&session, 0).into_iter().map(|e| (e.window, e.kind, e.ts)).collect();
+        assert_eq!(ring.iter().map(|e| (e.0.as_str(), e.1.as_str())).collect::<Vec<_>>(), [("w1", "prompt"), ("w2", "prompt"), ("w1", "notif"), ("w2", "notif")], "{ring:?}");
+        assert!(ring.windows(2).all(|w| w[0].2 < w[1].2), "the ring's order is its stamps': {ring:?}");
+        let rows = rows_by_id(&session);
+        assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["prompt", "prompt"], "no row for a failed write");
+        record_prompt(&session, "w1", "[tmm chat 2026-10-17 13:41] lead: @w1 again");
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        assert_eq!(derive(&session, "w1", 0).state, "running", "the next turn opens");
+        let rows = rows_by_id(&session);
+        assert!(rows.windows(2).all(|w| w[0].1 < w[1].1) && rows[2].1 > ring[3].2, "the next row is stamped above the failed one: {rows:?} {ring:?}");
+    }
+
+    /// Board #414 review P1 (round 3), the degradation: with no store write
+    /// at all, an observed event takes `max(wall clock, the session's newest
+    /// event + 1)`, so a later fact never sorts before one this process
+    /// already holds — here a test's end dated five seconds ahead, then an
+    /// observed prompt, which must open the next turn.
+    #[test]
+    fn with_no_store_write_a_later_fact_never_sorts_before_a_known_one() {
+        let session = format!("ts414n-{}", uuid::Uuid::new_v4());
+        record_prompt(&session, "w1", "[tmm chat 2026-10-17 13:50] lead: @w1 one");
+        record_notification_at(&session, "w1", "completed", now() + 5);
+        assert_eq!(derive(&session, "w1", 0).state, "idle");
+        record_prompt(&session, "w1", "[tmm chat 2026-10-17 13:50] lead: @w1 two");
+        assert_eq!(derive(&session, "w1", 0).state, "running", "the later prompt opens the turn");
+        let ring: Vec<u64> = recent_events(&session, 0).into_iter().map(|e| e.ts).collect();
+        assert!(ring.windows(2).all(|w| w[0] < w[1]), "{ring:?}");
+    }
+
+    /// Board #414 review P1 (round 4): the degraded time counts the facts a
+    /// restart REPLAYED, which live in the records, not in the feed. A prompt
+    /// stamped five seconds ahead of the wall is in the log; a fresh process
+    /// recovers it through the real replay path with an EMPTY feed; with no
+    /// store write (persistence off: the `Not` outcome) an unnumbered end and
+    /// an interrupt are recorded on its two windows. Both read idle, and
+    /// their degraded times are in the recovered second or later (the live
+    /// order is second, then arrival).
+    #[test]
+    fn with_no_store_write_a_later_fact_never_sorts_before_a_replayed_one() {
+        crate::projects::tests::use_test_store();
+        let session = format!("ts414r-{}", uuid::Uuid::new_v4());
+        let ahead = now() + 5;
+        for w in ["w1", "w2"] {
+            crate::projects::with_store(|s| s.insert_dated_activity(&session, w, ahead * 1000 + 500, "prompt", "long turn", "", "app", "", "")).unwrap();
+        }
+        simulate_restart(&session);
+        recovery_mark(&session);
+        assert!(recent_events(&session, 0).is_empty(), "the replay paints no feed");
+        for w in ["w1", "w2"] {
+            assert_eq!(derive(&session, w, 0).state, "running", "{w}: recovered from the log");
+        }
+        record_notification(&session, "w1", "completed");
+        record_interrupt(&session, "w2");
+        for w in ["w1", "w2"] {
+            assert_eq!(derive(&session, w, 0).state, "idle", "{w}: the later end is not dated before the replayed prompt");
+        }
+        let ring: Vec<u64> = recent_events(&session, 0).into_iter().map(|e| e.ts).collect();
+        assert_eq!(ring.len(), 2);
+        assert!(ring[0] > ahead * 1000 && ring[0] < ring[1], "not before the recovered second: {ring:?}");
+    }
+
+    /// Board #414 review P2-B: a writer held INSIDE the store's write section
+    /// — after its stamp, before its INSERT (`IN_PUBLISH_HOOK`) — while a
+    /// second writer is observed waiting for the store; the second is
+    /// stamped only after the first INSERT, above it. The barrier is the
+    /// store's own waiting counter, no sleep.
+    #[test]
+    fn a_writer_held_inside_the_write_section_keeps_the_next_one_behind_it() {
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("ts414h-{}", uuid::Uuid::new_v4());
+        let (_clock, _base, _guard) = drive_activity_clock();
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        crate::projects::store::Store::hold_next_publish(Box::new(move || {
+            inside_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        }));
+        let first = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                PERSIST_IN_TEST.with(|p| p.set(true));
+                record_undelivered(&session, "w1", "first, held inside", "test");
+            })
+        };
+        // The first writer has its stamp, not its row (bounded: a writer that
+        // never reaches the write section fails the test, never hangs it).
+        inside_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the first writer reached publish_activity's write section");
+        let second = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                PERSIST_IN_TEST.with(|p| p.set(true));
+                record_undelivered(&session, "w2", "second", "test");
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::projects::tests::STORE_WAITING.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "the second writer never waited for the store");
+            std::thread::yield_now();
+        }
+        go_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let rows = rows_by_id(&session);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].1 < rows[1].1, "the held writer's stamp is below the one that waited: {rows:?}");
+        assert_every_cursor_sees_every_later_row(&session, &rows);
+    }
+
+    /// Board #414 review P1-B (b): allocation and INSERT are one step. Two
+    /// writers race — turn facts on one window, warns on another — under a
+    /// clock that never moves; the stamp order is the INSERT order, row for
+    /// row, so no cursor can pass a row that commits later with a smaller ts.
+    #[test]
+    fn two_racing_writers_are_stamped_in_insert_order() {
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("ts414c-{}", uuid::Uuid::new_v4());
+        let (_clock, _base, _guard) = drive_activity_clock();
+        let facts = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                PERSIST_IN_TEST.with(|p| p.set(true));
+                for n in 0..100 {
+                    record_prompt(&session, "w1", &format!("[tmm chat 2026-10-17 13:20] lead: @w1 {n}"));
+                    record_notification(&session, "w1", "completed");
+                }
+            })
+        };
+        for n in 0..200 {
+            record_undelivered(&session, "w2", &format!("warn {n}"), "test");
+        }
+        facts.join().unwrap();
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let rows = rows_by_id(&session);
+        assert_eq!(rows.len(), 400);
+        assert!(rows.windows(2).all(|w| w[0].1 < w[1].1), "ts rises strictly in INSERT order");
+    }
+
     /// Validator 15:47/15:57, orchestrator 15:48/15:58: a REAL failed
     /// INSERT. SQLite consumes no id for it, so after a lost stop the next
     /// successful row gets exactly the id the stop would have had (max+1) —
@@ -3519,7 +3942,6 @@ mod tests {
         crate::projects::tests::use_test_store();
         PERSIST_IN_TEST.with(|p| p.set(true));
         let session = format!("lost-{}", uuid::Uuid::new_v4());
-        let t = now();
         record_prompt(&session, "w1", "turn one");
         let top = crate::projects::with_store(|s| s.max_activity_id()).unwrap();
         // The next notif INSERT really fails inside SQLite (a temp trigger on
@@ -3528,7 +3950,7 @@ mod tests {
             "CREATE TEMP TRIGGER lost249 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'notif'
              BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
         ))).unwrap();
-        record_notification(&session, "w1", "completed", t);
+        record_notification(&session, "w1", "completed");
         crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER lost249;")).unwrap();
         record_prompt(&session, "w1", "turn two"); // same second
         PERSIST_IN_TEST.with(|p| p.set(false));
@@ -3556,7 +3978,7 @@ mod tests {
                         for n in 0..25 {
                             match (t + n) % 3 {
                                 0 => { record_prompt(&session, "w1", &format!("p{t}-{n}")); }
-                                1 => record_notification(&session, "w1", "completed", now()),
+                                1 => record_notification(&session, "w1", "completed"),
                                 _ => record_interrupt(&session, "w1"),
                             }
                         }
@@ -3610,7 +4032,7 @@ mod tests {
         let ends = || rows().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @critic G3 review");
         assert_eq!(derive(&session, "w1", 0).state, "running", "the hooks gave no end: running for hours, as measured");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1"), now()), Missed::Ended);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1")), Missed::Ended);
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         assert!(!turn_busy(&session, "w1"), "an end: nothing is held behind it");
@@ -3622,18 +4044,18 @@ mod tests {
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "auth_expired"));
         // The turn has ended: the detail goes on that end, no second row.
-        assert_eq!(record_missed_end(&session, "w1", "recovery_exhausted", Identity::Paint("recovery_exhausted|sig"), turn_version(&session, "w1"), now()), Missed::Attached);
+        assert_eq!(record_missed_end(&session, "w1", "recovery_exhausted", Identity::Paint("recovery_exhausted|sig"), turn_version(&session, "w1")), Missed::Attached);
         assert_eq!(derive(&session, "w1", 0).detail, "recovery_exhausted");
         assert_eq!(ends().len(), 1, "no double end");
         // A later prompt supersedes it; so does that turn's own hook end.
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 23:10] human: @critic mwinit done");
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("running", ""));
-        record_notification_with(&session, "w1", "completed", now() + 1, EndQuality::Said);
+        record_notification_with(&session, "w1", "completed", EndQuality::Said);
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""));
         // A window with no turn at all gets nothing.
-        assert_eq!(record_missed_end(&session, "w2", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w2"), now()), Missed::NoTurn);
+        assert_eq!(record_missed_end(&session, "w2", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w2")), Missed::NoTurn);
         assert_eq!(derive(&session, "w2", 0).detail, "");
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -3650,7 +4072,7 @@ mod tests {
         PERSIST_IN_TEST.with(|p| p.set(true));
         for (what, end) in [
             ("an interrupt", &(|s: &str| record_interrupt(s, "w1")) as &dyn Fn(&str)),
-            ("a hook end", &|s: &str| record_notification_with(s, "w1", "completed", now(), EndQuality::Said)),
+            ("a hook end", &|s: &str| record_notification_with(s, "w1", "completed", EndQuality::Said)),
         ] {
             let session = format!("attached-{}", uuid::Uuid::new_v4());
             let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
@@ -3658,14 +4080,14 @@ mod tests {
             end(&session);
             let hook_end = ends();
             assert_eq!(hook_end.len(), 1, "{what}");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1"), now()), Missed::Attached, "{what}");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1")), Missed::Attached, "{what}");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
             assert_eq!(ends(), hook_end, "{what}: the end's row is the hook's, unchanged; no second end");
             simulate_restart(&session);
             recovery_mark(&session);
             let st = derive(&session, "w1", 0);
             assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""), "{what}: memory only, by contract");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1"), now()), Missed::Attached, "{what}: the next tick");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|sig"), turn_version(&session, "w1")), Missed::Attached, "{what}: the next tick");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
             assert_eq!(ends(), hook_end, "{what}: still one end");
         }
@@ -3685,15 +4107,15 @@ mod tests {
         let session = format!("once-{}", uuid::Uuid::new_v4());
         let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").count();
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 12:32] maker: @cx go");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1"), now()), Missed::Ended);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1")), Missed::Ended);
         record_prompt(&session, "w1", "[tmm chat 2026-10-16 00:30] human: @cx mwinit done, carry on");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1"), now()), Missed::Recorded, "before a restart");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1")), Missed::Recorded, "before a restart");
         simulate_restart(&session);
         recovery_mark(&session);
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1"), now()), Missed::Recorded, "after a restart");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|a"), turn_version(&session, "w1")), Missed::Recorded, "after a restart");
         assert_eq!(derive(&session, "w1", 0).state, "running", "the newer turn is still open");
         assert_eq!(ends(), 1, "one end for one paint");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|b"), turn_version(&session, "w1"), now()), Missed::Ended, "a new paint ends the new turn");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", Identity::Paint("auth_expired|b"), turn_version(&session, "w1")), Missed::Ended, "a new paint ends the new turn");
         assert_eq!(ends(), 2);
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -3714,22 +4136,22 @@ mod tests {
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 09:36] architect: @reviewer go");
         record_interrupt(&session, "w1");
         let x = Identity::Paint("auth_expired|23a04597-c6d8-4439-954f-2216f9c7d687");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Attached);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Attached);
         record_prompt(&session, "w1", "[tmm chat 2026-10-15 23:10] human: @reviewer mwinit done");
         record_held(&session, "w1", "[tmm chat 2026-10-15 23:11] lead: @reviewer and this", 0, "m1").unwrap();
         let before = ends();
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Recorded, "before a restart");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Recorded, "before a restart");
         simulate_restart(&session);
         recovery_mark(&session);
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Recorded, "after a restart");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Recorded, "after a restart");
         let st = derive(&session, "w1", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str()), ("running", ""), "turn B is untouched");
         assert_eq!(ends(), before, "no end written");
         assert_eq!(held_rows(&session, "w1").len(), 1, "B's held line is still held");
         // B then ends by its own hook, the screen still showing the old paint:
         // the paint is A's, and it is not put on B's end (the S2 race, across ticks).
-        record_notification_with(&session, "w1", "completed", now() + 1, EndQuality::Said);
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Recorded);
+        record_notification_with(&session, "w1", "completed", EndQuality::Said);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Recorded);
         assert_eq!(derive(&session, "w1", 0).detail, "", "B's end keeps its own (empty) detail");
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -3744,30 +4166,31 @@ mod tests {
         crate::projects::tests::use_test_store();
         PERSIST_IN_TEST.with(|p| p.set(true));
         let x = Identity::Paint("auth_expired|23a04597-c6d8-4439-954f-2216f9c7d687");
-        let t = now();
+        // Every row of this test in ONE second, on the store's own clock.
+        let _clock = fix_activity_clock_at_next_second();
         for (what, a_ends) in [("attached to A's hook end", true), ("ended A itself", false)] {
             let session = format!("p1cr-{}", uuid::Uuid::new_v4());
             record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:20] lead: @w1 A");
             if a_ends {
-                record_notification_with(&session, "w1", "completed", t, EndQuality::Said);
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Attached, "{what}");
+                record_notification_with(&session, "w1", "completed", EndQuality::Said);
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Attached, "{what}");
             } else {
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Ended, "{what}");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Ended, "{what}");
             }
             // A's own end, current, re-attaches after a restart.
             simulate_restart(&session);
             recovery_mark(&session);
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Attached, "{what}: A's own end");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Attached, "{what}: A's own end");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired", "{what}");
             // Turn B opens and ends by its hook in the SAME second as A's end.
             record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:20] lead: @w1 B");
-            record_notification_with(&session, "w1", "completed", t, EndQuality::Said);
+            record_notification_with(&session, "w1", "completed", EndQuality::Said);
             for when in ["before a restart", "after a restart"] {
                 if when == "after a restart" {
                     simulate_restart(&session);
                     recovery_mark(&session);
                 }
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), t), Missed::Recorded, "{what}, {when}");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Recorded, "{what}, {when}");
                 let st = derive(&session, "w1", 0);
                 assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", ""), "{what}, {when}: B's end keeps its own detail");
             }
@@ -3798,16 +4221,16 @@ mod tests {
             record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:50] lead: @w1 A");
             if x_how == "Attached" {
                 record_interrupt(&session, "w1");
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Attached, "{what}");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version()), Missed::Attached, "{what}");
             } else {
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Ended, "{what}");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version()), Missed::Ended, "{what}");
             }
             record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:51] lead: @w1 B");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", y, version(), now()), Missed::Ended, "{what}: Y");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", y, version()), Missed::Ended, "{what}: Y");
             record_prompt(&session, "w1", "[tmm chat 2026-10-16 01:52] lead: @w1 C");
             record_held(&session, "w1", "[tmm chat 2026-10-16 01:52] human: @w1 held for C", 0, "m1").unwrap();
             if c_ended {
-                record_notification_with(&session, "w1", "completed", now(), EndQuality::Said);
+                record_notification_with(&session, "w1", "completed", EndQuality::Said);
             }
             let before = (derive(&session, "w1", 0), ends(), held_rows(&session, "w1").len());
             for when in ["before a restart", "after a restart"] {
@@ -3815,7 +4238,7 @@ mod tests {
                     simulate_restart(&session);
                     recovery_mark(&session);
                 }
-                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version(), now()), Missed::Recorded, "{what}, {when}");
+                assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, version()), Missed::Recorded, "{what}, {when}");
                 let st = derive(&session, "w1", 0);
                 assert_eq!((st.state.as_str(), st.detail.as_str()), (before.0.state.as_str(), before.0.detail.as_str()), "{what}, {when}: C untouched");
                 assert_ne!(st.detail, "auth_expired", "{what}, {when}: no old detail on C");
@@ -3825,7 +4248,7 @@ mod tests {
                 }
             }
             // A paint never accepted is still handled.
-            assert!(matches!(record_missed_end(&session, "w1", "auth_expired", z, version(), now()), Missed::Ended | Missed::Attached), "{what}: Z");
+            assert!(matches!(record_missed_end(&session, "w1", "auth_expired", z, version()), Missed::Ended | Missed::Attached), "{what}: Z");
         }
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -3853,7 +4276,7 @@ mod tests {
                 format!("BEFORE INSERT ON meta WHEN NEW.key = 'person_paint:{session}:w1:auth_expired|389cc17d-bf5d-409b-ba80-102270246c79'")
             };
             crate::projects::with_store(|s| s.exec_test_sql(&format!("CREATE TEMP TRIGGER p1e {guard} BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"))).unwrap();
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{refused} refused");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Unknown, "{refused} refused");
             crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER p1e;")).unwrap();
             assert_eq!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").unwrap(), None, "{refused} refused: no mark");
             assert_eq!(ends(), 0, "{refused} refused: no end row");
@@ -3861,8 +4284,8 @@ mod tests {
             assert_eq!(held_rows(&session, "w1").len(), 1, "{refused} refused: not flushed as a success");
             simulate_restart(&session);
             recovery_mark(&session);
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Ended, "{refused}: recovered");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Attached, "{refused}: then its own end");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Ended, "{refused}: recovered");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Attached, "{refused}: then its own end");
             assert_eq!(ends(), 1, "{refused}: exactly one end");
             assert_eq!(derive(&session, "w1", 0).detail, "auth_expired");
         }
@@ -3880,7 +4303,7 @@ mod tests {
         for bad in ["garbage", "0", "-3", "12 x", ""] {
             crate::projects::with_store(|s| s.meta_set(&crate::projects::store::person_paint_key(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79"), bad)).unwrap();
             assert!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").is_err(), "{bad:?}");
-            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown, "{bad:?}");
+            assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Unknown, "{bad:?}");
             assert_eq!(derive(&session, "w1", 0).state, "running", "{bad:?}");
         }
     }
@@ -3902,12 +4325,12 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
         ))).unwrap();
         let x = Identity::Paint("auth_expired|389cc17d-bf5d-409b-ba80-102270246c79");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Unknown);
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Unknown);
         crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER p2u;")).unwrap();
         assert_eq!(derive(&session, "w1", 0).state, "running", "nothing ended");
         assert_eq!(held_rows(&session, "w1").len(), 1, "nothing flushed");
         assert_eq!(accepted_paint(&session, "w1", "auth_expired|389cc17d-bf5d-409b-ba80-102270246c79").unwrap(), None, "nothing marked");
-        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1"), now()), Missed::Ended, "asked again, accepted");
+        assert_eq!(record_missed_end(&session, "w1", "auth_expired", x, turn_version(&session, "w1")), Missed::Ended, "asked again, accepted");
         PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
@@ -3926,7 +4349,7 @@ mod tests {
             let session = format!("rec-{label}-{}", uuid::Uuid::new_v4());
             crate::projects::with_store(|s| {
                 for (n, (kind, text, tool)) in facts.iter().enumerate() {
-                    s.insert_activity(&session, "w1", opened + n as u64, kind, text, tool, "", "", "")?;
+                    s.insert_dated_activity(&session, "w1", opened + n as u64, kind, text, tool, "", "", "")?;
                 }
                 Ok(())
             })
@@ -3943,8 +4366,8 @@ mod tests {
         // post-stop housekeeping is never written as a tool row, #227).
         let closed = format!("rec-closed-{}", uuid::Uuid::new_v4());
         crate::projects::with_store(|s| {
-            s.insert_activity(&closed, "w1", opened, "tool", "a.rs", "Edit", "", "", "")?;
-            s.insert_activity(&closed, "w1", opened + 1, "notif", "completed", "", "", "", "")
+            s.insert_dated_activity(&closed, "w1", opened, "tool", "a.rs", "Edit", "", "", "")?;
+            s.insert_dated_activity(&closed, "w1", opened + 1, "notif", "completed", "", "", "", "")
         })
         .unwrap();
         recovery_mark(&closed);
@@ -3960,7 +4383,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let session = format!("rtie-{}", uuid::Uuid::new_v4());
         let t = now();
-        crate::projects::with_store(|s| s.insert_activity(&session, "w1", t * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
+        crate::projects::with_store(|s| s.insert_dated_activity(&session, "w1", t * 1000, "prompt", "long turn", "", "app", "", "")).unwrap();
         let row_id = crate::projects::with_store(|s| s.turn_facts(&session)).unwrap().remove(0).prompt.unwrap().id;
         // Simulate a log far ahead of this process's counter: the recovered
         // order must still move the counter past it.
@@ -3971,7 +4394,7 @@ mod tests {
             r.prompt_seq = recovered_arrival(far);
         });
         assert_eq!(derive(&session, "w1", 0).state, "running", "the recovered turn is open");
-        record_notification(&session, "w1", "completed", t); // same second, after the restart
+        record_notification(&session, "w1", "completed"); // same second, after the restart
         assert_eq!(derive(&session, "w1", 0).state, "idle", "the later stop wins the tie");
         record_prompt(&session, "w1", "next queued line"); // and the next prompt, same second
         assert_eq!(derive(&session, "w1", 0).state, "running");
@@ -3979,8 +4402,8 @@ mod tests {
         // is not recovered as open, and the new prompt opens the turn.
         let closed = format!("rtie2-{}", uuid::Uuid::new_v4());
         crate::projects::with_store(|s| {
-            s.insert_activity(&closed, "w1", t * 1000, "prompt", "turn", "", "app", "", "")?;
-            s.insert_activity(&closed, "w1", t * 1000, "notif", "completed", "", "", "", "")
+            s.insert_dated_activity(&closed, "w1", t * 1000, "prompt", "turn", "", "app", "", "")?;
+            s.insert_dated_activity(&closed, "w1", t * 1000, "notif", "completed", "", "", "", "")
         })
         .unwrap();
         recovery_mark(&closed);
@@ -4020,22 +4443,26 @@ mod tests {
     /// (1) stop, restart, new prompt -> running;
     /// (2) open prompt, restart (recovered from the log), stop -> idle, then
     ///     prompt -> running.
+    /// Run twice (board #414): with the earlier process's rows dated this
+    /// second, and dated the second before — the child then starts across a
+    /// second boundary, which one run in 50 hit by chance.
     #[test]
     fn same_second_order_survives_a_real_process_restart() {
+        for back in [0, 1] {
         let dir = std::env::temp_dir().join(format!("tmm-fresh-proc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.db");
-        let t = now();
+        let t = now() - back;
         {
             let store = crate::projects::store::Store::open(&db).unwrap();
             // Enough earlier rows that recovered ids are well above a fresh
             // process's first counter values.
             for n in 0..50 {
-                store.insert_activity("filler", "w9", n, "tool", "x", "Edit", "", "", "").unwrap();
+                store.insert_dated_activity("filler", "w9", n, "tool", "x", "Edit", "", "", "").unwrap();
             }
-            store.insert_activity("fp-stop", "w1", t * 1000, "prompt", "turn", "", "app", "", "").unwrap();
-            store.insert_activity("fp-stop", "w1", t * 1000, "notif", "completed", "", "", "", "").unwrap();
-            store.insert_activity("fp-open", "w1", t * 1000, "prompt", "long turn", "", "app", "", "").unwrap();
+            store.insert_dated_activity("fp-stop", "w1", t * 1000, "prompt", "turn", "", "app", "", "").unwrap();
+            store.insert_dated_activity("fp-stop", "w1", t * 1000, "notif", "completed", "", "", "", "").unwrap();
+            store.insert_dated_activity("fp-open", "w1", t * 1000, "prompt", "long turn", "", "app", "", "").unwrap();
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "projects::telemetry::tests::fresh_process_child", "--ignored", "--test-threads=1", "--nocapture"])
@@ -4045,8 +4472,9 @@ mod tests {
             .unwrap();
         let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(out.status.success(), "child failed:\n{log}");
+        assert!(out.status.success(), "child (rows dated {back} s back) failed:\n{log}");
         assert!(log.contains("1 passed"), "the child really ran:\n{log}");
+        }
     }
 
     /// The child half of `same_second_order_survives_a_real_process_restart`.
@@ -4067,12 +4495,11 @@ mod tests {
         // this new process in the same second must sort after it.
         recovery_mark("fp-open");
         assert_eq!(derive("fp-open", "w1", 0).state, "running", "recovered from the log");
-        record_notification("fp-open", "w1", "completed", t);
+        record_notification_at("fp-open", "w1", "completed", t);
         assert_eq!(derive("fp-open", "w1", 0).state, "idle", "the later stop wins the same-second tie");
-        with_rec("fp-open", "w1", |r| {
-            r.prompt = Some(t);
-            r.prompt_seq = arrival();
-        });
+        // The next prompt through the live path, on the one clock its stop
+        // was written on (board #414): never dated before that stop.
+        record_prompt("fp-open", "w1", "the next turn");
         assert_eq!(derive("fp-open", "w1", 0).state, "running");
     }
 
@@ -4139,14 +4566,14 @@ mod tests {
         crate::projects::tests::use_test_store();
         let session = format!("cmd-end-{}", uuid::Uuid::new_v4());
         record_command_delivery(&session, "kiro", "goal a", "m-a").unwrap();
-        record_notification(&session, "kiro", "failed", now());
+        record_notification(&session, "kiro", "failed");
         assert!(held(&session, "kiro").is_empty(), "no prompt in that turn: the command echoed nothing");
         assert!(!record_prompt(&session, "kiro", "goal a"), "a later look-alike is local input, not its receipt");
         // Only ONE row per end, and not one queued behind the ending turn.
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         record_command_delivery(&session, "kiro", "goal b", "m-b").unwrap();
         record_command_delivery(&session, "kiro", "goal c", "m-c").unwrap();
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         assert_eq!(held(&session, "kiro"), vec!["goal c"], "the oldest Idle retired, the next stays");
     }
 
@@ -4161,7 +4588,7 @@ mod tests {
         assert!(!record_prompt(&session, "kiro", "a long task"));
         record_command_delivery(&session, "kiro", "goal a", "m-a").unwrap();
         record_command_delivery(&session, "kiro", "goal b", "m-b").unwrap();
-        record_notification(&session, "kiro", "completed", now()); // both Idle now
+        record_notification(&session, "kiro", "completed"); // both Idle now
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_inside = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (s2, d2, d3, seen) = (session.clone(), done.clone(), done.clone(), done_inside.clone());
@@ -4169,7 +4596,7 @@ mod tests {
         let slot = racer.clone();
         *IN_PROMPT_HOOK.lock().unwrap() = Some(Box::new(move || {
             *slot.lock().unwrap() = Some(std::thread::spawn(move || {
-                record_notification(&s2, "kiro", "completed", now());
+                record_notification(&s2, "kiro", "completed");
                 d2.store(true, std::sync::atomic::Ordering::SeqCst);
             }));
             std::thread::sleep(std::time::Duration::from_millis(150));
@@ -4214,7 +4641,7 @@ mod tests {
             seen.store(d3.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
         }));
         // A prompt-less end: it WILL retire the oldest Idle command it sees.
-        record_notification(&session, "kiro", "failed", now());
+        record_notification(&session, "kiro", "failed");
         assert!(!done_inside.load(std::sync::atomic::Ordering::SeqCst), "the insert waited for the end's section");
         racer.lock().unwrap().take().unwrap().join().unwrap();
         assert_eq!(held(&session, "kiro"), vec!["goal new"], "the new command was not retired by the end it raced");
@@ -4231,7 +4658,7 @@ mod tests {
         record_command_delivery(&session, "kiro", "goal next", "m-q").unwrap();
         assert!(!record_prompt(&session, "kiro", "steer: also check the logs"), "a mid-turn prompt is not its echo");
         assert_eq!(held(&session, "kiro"), vec!["goal next"], "and cannot drop it");
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         assert_eq!(held(&session, "kiro"), vec!["goal next"], "the end it waited for does not retire it");
         assert!(record_prompt(&session, "kiro", "goal next"), "then its echo settles it");
         assert!(held(&session, "kiro").is_empty());
@@ -4247,10 +4674,10 @@ mod tests {
         assert!(!record_prompt(&session, "kiro", "a long task"));
         record_command_delivery(&session, "kiro", "goal a", "m-a").unwrap();
         record_command_delivery(&session, "kiro", "goal a then b", "m-b").unwrap();
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         assert!(record_prompt(&session, "kiro", "goal a"), "the first echo");
         assert_eq!(held(&session, "kiro"), vec!["goal a then b"], "the second is still owed");
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         assert_eq!(held(&session, "kiro"), vec!["goal a then b"], "an end retires nothing");
         // The second echo CONTAINS the first command's text: only its own row
         // can be taken, one command row per prompt.
@@ -4284,14 +4711,14 @@ mod tests {
         assert!(last.deliveries.is_empty(), "no bubble is checked");
         assert_eq!(held(&session, "kiro"), vec!["goal a"], "still owed");
         // …and its real echo, after that turn, settles it: no INPUT row.
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         assert!(record_prompt(&session, "kiro", "goal a"));
         let last = recent_events(&session, 0).into_iter().last().unwrap();
         assert_eq!((last.via.as_str(), last.deliveries.iter().map(|d| d.msg.as_str()).collect::<Vec<_>>()), ("app", vec!["m-a"]));
         assert!(held(&session, "kiro").is_empty());
         // Whitespace is forgiven the same way as for chat lines. (That prompt
         // opened a turn; end it, so the next command is typed at an idle pane.)
-        record_notification(&session, "kiro", "completed", now());
+        record_notification(&session, "kiro", "completed");
         record_command_delivery(&session, "kiro", "goal do x", "m-x").unwrap();
         assert!(record_prompt(&session, "kiro", "goal  do\nx"));
     }
@@ -4329,7 +4756,7 @@ mod tests {
         record_delivery(&session, "kiro", "[tmm chat] human: @kiro hello", "m-chat");
         // An end older than the ack window, so the chat line is overdue; the
         // command is typed after it, so that end does not concern it.
-        record_notification(&session, "kiro", "completed", now() - DELIVERY_ACK_SECS - 5);
+        record_notification_at(&session, "kiro", "completed", now() - DELIVERY_ACK_SECS - 5);
         record_command_delivery(&session, "kiro", "goal x", "m-cmd").unwrap();
         assert_eq!(held(&session, "kiro"), vec!["[tmm chat] human: @kiro hello", "goal x"]);
         backdate(&session);

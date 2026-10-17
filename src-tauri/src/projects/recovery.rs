@@ -485,9 +485,9 @@ pub fn note_answered(session: &str, window: &str) {
 /// the screen was captured. Telemetry keeps the once durably
 /// (`Identity::Paint`): an accepted paint never ends a later turn. True
 /// when accepted.
-fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64, ts: u64) -> bool {
+fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64) -> bool {
     use super::telemetry::{record_missed_end, Identity, Missed};
-    matches!(record_missed_end(session, window, detail, Identity::Paint(sig), seen, ts), Missed::Ended | Missed::Attached)
+    matches!(record_missed_end(session, window, detail, Identity::Paint(sig), seen), Missed::Ended | Missed::Attached)
 }
 
 /// Record the turn end the hooks missed for an EXHAUSTED recovery decision
@@ -501,7 +501,7 @@ fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64
 /// its error is the newest block by the backend's own grammar, and nothing
 /// may have landed since it was first seen so (`exhausted_attributable`);
 /// otherwise nothing is recorded. True when accepted.
-fn commit_exhausted(session: &str, window: &str, capped: bool, newest: bool, seen: u64, ts: u64) -> bool {
+fn commit_exhausted(session: &str, window: &str, capped: bool, newest: bool, seen: u64) -> bool {
     use super::telemetry::{record_missed_end, Identity, Missed};
     // Once per incident: defence in depth under the attribution rule, which
     // already refuses a second commit after our own end (a fact).
@@ -511,7 +511,7 @@ fn commit_exhausted(session: &str, window: &str, capped: bool, newest: bool, see
     if capped && !tracker().lock().unwrap().exhausted_attributable(session, window, newest, seen) {
         return false;
     }
-    let accepted = matches!(record_missed_end(session, window, EXHAUSTED, Identity::Incident, seen, ts), Missed::Ended | Missed::Attached);
+    let accepted = matches!(record_missed_end(session, window, EXHAUSTED, Identity::Incident, seen), Missed::Ended | Missed::Attached);
     if accepted {
         tracker().lock().unwrap().exhausted_accept(session, window);
     }
@@ -578,7 +578,7 @@ pub fn check_once() {
                 // Its Request ID is its identity (every measured shape ends
                 // with one); without it nothing is recorded.
                 if let Some(id) = extract_request_id(&block) {
-                    commit_person(&project.session, &p.window_name, &format!("{shape}|{id}"), shape, seen, now_secs());
+                    commit_person(&project.session, &p.window_name, &format!("{shape}|{id}"), shape, seen);
                 }
                 continue;
             }
@@ -616,7 +616,7 @@ pub fn check_once() {
             if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. }) {
                 let capped = matches!(decision, Decision::Capped { .. });
                 let newest = capped && error_is_newest(backend, &tail);
-                commit_exhausted(&project.session, &p.window_name, capped, newest, seen, now_secs());
+                commit_exhausted(&project.session, &p.window_name, capped, newest, seen);
             }
             match decision {
                 Decision::Send { attempt } => {
@@ -1206,7 +1206,7 @@ mod tests {
             }
         }
         for w in ["kr", "kq"] {
-            tm::record_notification_with(&session, w, "completed", now_secs(), crate::backends::EndQuality::Said);
+            tm::record_notification_with(&session, w, "completed", crate::backends::EndQuality::Said);
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         let st = |w: &str| { let s = tm::derive(&session, w, 0); (s.state, s.detail) };
@@ -1271,10 +1271,10 @@ mod tests {
         assert!(matches!(decide("1|x"), Decision::Capped { .. }));
         let seen = tm::turn_version(&session, "w");
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 02:41] human: @w B");
-        assert!(!commit_exhausted(&session, "w", true, true, seen, now_secs()), "stale");
+        assert!(!commit_exhausted(&session, "w", true, true, seen), "stale");
         assert!(tracker().lock().unwrap().exhausted_new(&session, "w"), "nothing spent");
         assert!(matches!(decide("1|x"), Decision::Capped { first: false }));
-        assert!(!commit_exhausted(&session, "w", true, true, tm::turn_version(&session, "w"), now_secs()), "a fact since the first sighting");
+        assert!(!commit_exhausted(&session, "w", true, true, tm::turn_version(&session, "w")), "a fact since the first sighting");
         assert_eq!(tm::derive(&session, "w", 0).state, "running");
         tracker().lock().unwrap().retain_windows(&session, &[]);
     }
@@ -2091,11 +2091,11 @@ mod tests {
                 sends += 1;
             }
             assert_eq!(decide(base + 300), Decision::GiveUp { first: true }, "incident {n}");
-            assert!(commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w"), now_secs()), "incident {n}: its turn gets its end");
+            assert!(commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w")), "incident {n}: its turn gets its end");
             let st = tm::derive(&session, "w", 0);
             assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", EXHAUSTED), "incident {n}");
             assert_eq!(decide(base + 320), Decision::GiveUp { first: false });
-            assert!(!commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w"), now_secs()), "incident {n}: one continuous incident is written once (the once flag: a give-up has no attribution rule over it)");
+            assert!(!commit_exhausted(&session, "w", false, false, tm::turn_version(&session, "w")), "incident {n}: one continuous incident is written once (the once flag: a give-up has no attribution rule over it)");
             assert_eq!(ends(), n, "incident {n}");
             // The error leaves the screen: the incident is over.
             tracker().lock().unwrap().clear(&session, "w");
@@ -2122,8 +2122,8 @@ mod tests {
         let barriers: [(&str, &dyn Fn(&str)); 5] = [
             ("a new prompt", &|s| { tm::record_prompt(s, "w", "[tmm chat 2026-10-16 00:10] human: @w next"); }),
             ("a tool call", &|s| tm::record_tool(s, "w", "Bash", "npm test")),
-            ("an ask", &|s| tm::record_notification(s, "w", "permission_required", now_secs())),
-            ("a real hook end", &|s| tm::record_notification_with(s, "w", "completed", now_secs(), crate::backends::EndQuality::Said)),
+            ("an ask", &|s| tm::record_notification(s, "w", "permission_required")),
+            ("a real hook end", &|s| tm::record_notification_with(s, "w", "completed", crate::backends::EndQuality::Said)),
             ("an interrupt", &|s| tm::record_interrupt(s, "w")),
         ];
         for (what, barrier) in barriers {
@@ -2135,8 +2135,8 @@ mod tests {
             let before = tm::derive(&session, "w", 0);
             let rows = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif").count();
             let ends = rows();
-            assert_eq!(tm::record_missed_end(&session, "w", "auth_expired", tm::Identity::Paint("auth_expired|x"), seen, now_secs()), tm::Missed::Stale, "{what}");
-            assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()), "{what}: not accepted");
+            assert_eq!(tm::record_missed_end(&session, "w", "auth_expired", tm::Identity::Paint("auth_expired|x"), seen), tm::Missed::Stale, "{what}");
+            assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", seen), "{what}: not accepted");
             let after = tm::derive(&session, "w", 0);
             assert_eq!((after.state.as_str(), after.detail.as_str()), (before.state.as_str(), before.detail.as_str()), "{what}: the newer turn is untouched");
             assert_ne!(after.detail, "auth_expired", "{what}");
@@ -2148,11 +2148,11 @@ mod tests {
         let session = format!("p1a-ok-{}", uuid::Uuid::new_v4());
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:09] maker: @w go");
         let seen = tm::turn_version(&session, "w");
-        assert!(commit_person(&session, "w", "auth_expired|x", "auth_expired", seen, now_secs()));
+        assert!(commit_person(&session, "w", "auth_expired|x", "auth_expired", seen));
         assert_eq!(tm::derive(&session, "w", 0).detail, "auth_expired");
         assert!(tm::accepted_paint(&session, "w", "auth_expired|x").unwrap().is_some(), "accepted: marked");
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:10] human: @w next");
-        assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w"), now_secs()), "once: the newer turn is not ended");
+        assert!(!commit_person(&session, "w", "auth_expired|x", "auth_expired", tm::turn_version(&session, "w")), "once: the newer turn is not ended");
         assert_eq!(tm::derive(&session, "w", 0).state, "running");
         tm::PERSIST_IN_TEST.with(|p| p.set(false));
     }
@@ -2175,9 +2175,9 @@ mod tests {
             assert_eq!(t.decide(&session, "w", at, "1|a", verified), Decision::Send { attempt: n });
         }
         assert_eq!(t.decide(&session, "w", t0 + 300, "1|a", verified), Decision::GiveUp { first: true });
-        assert_eq!(tm::record_missed_end(&session, "w", EXHAUSTED, tm::Identity::Incident, tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
+        assert_eq!(tm::record_missed_end_at(&session, "w", EXHAUSTED, tm::Identity::Incident, tm::turn_version(&session, "w"), t0 + 301), tm::Missed::Ended);
         assert_eq!(t.decide(&session, "w", t0 + 320, "1|a", verified), Decision::GiveUp { first: false }, "our own end proves nothing");
-        tm::record_notification_with(&session, "w", "completed", t0 + 330, crate::backends::EndQuality::Said);
+        tm::record_notification_with_at(&session, "w", "completed", t0 + 330, crate::backends::EndQuality::Said);
         assert_eq!(t.decide(&session, "w", t0 + 340, "1|a", verified), Decision::Confirmed { first: true }, "the CLI's own end is evidence");
         tracker().lock().unwrap().retain_windows(&session, &[]);
     }
@@ -2197,10 +2197,10 @@ mod tests {
         }
         assert_eq!(decide("1|d", t0 + 3), Decision::Capped { first: true });
         for quality in [EndQuality::Unknown, EndQuality::Empty] {
-            super::super::telemetry::record_notification_with(&session, "w", "completed", t0 + 4, quality);
+            super::super::telemetry::record_notification_with_at(&session, "w", "completed", t0 + 4, quality);
             assert!(matches!(decide(&format!("1|{quality:?}"), t0 + 5), Decision::Capped { first: false }), "{quality:?} is no answer");
         }
-        super::super::telemetry::record_notification_with(&session, "w", "completed", t0 + 6, EndQuality::Said);
+        super::super::telemetry::record_notification_with_at(&session, "w", "completed", t0 + 6, EndQuality::Said);
         assert_eq!(decide("1|e", t0 + 7), Decision::Capped { first: true }, "a real reply: the next cap is a new stretch");
         tracker().lock().unwrap().retain_windows(&session, &[]);
     }
