@@ -96,7 +96,7 @@ fn format_permissions(mode: u32) -> String {
     s
 }
 
-fn mime_hint(name: &str) -> String {
+pub(crate) fn mime_hint(name: &str) -> String {
     let ext = Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -129,19 +129,36 @@ fn mime_hint(name: &str) -> String {
         "gif" => "image/gif",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
-        // Video streams through /dl into a <video> (board #182); the same
-        // rows as server::download::media_content_type, so what Files calls a
-        // video, /dl serves as one.
+        "pdf" => "application/pdf",
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" => "application/archive",
+        other => streamed_media_type(other).unwrap_or("application/octet-stream"),
+    }
+    .to_string()
+}
+
+/// The ONE lookup for what a browser's own `<video>` / `<audio>` plays from a
+/// streamed `/dl` URL (board #182 video, #416 audio): `mime_hint` (what Files
+/// calls it) and `server::download::media_content_type` (what `/dl` serves it
+/// as, and what may carry a stream signature) both read these rows, so they
+/// cannot drift apart. `ext` is lower-case, without the dot. Everything else is
+/// `None`: documents and executables never get a media type off `/dl`.
+pub(crate) fn streamed_media_type(ext: &str) -> Option<&'static str> {
+    Some(match ext {
         "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "mkv" => "video/x-matroska",
         "ogv" => "video/ogg",
-        "pdf" => "application/pdf",
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" => "application/archive",
-        _ => "application/octet-stream",
-    }
-    .to_string()
+        "mp3" => "audio/mpeg",
+        // m4a is AAC in an MP4 container; a bare .aac is ADTS, its own type (review #416).
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "weba" => "audio/webm",
+        _ => return None,
+    })
 }
 
 fn is_text_file(path: &Path, name: &str) -> bool {
@@ -432,6 +449,14 @@ mod tests {
         assert_eq!(mime_hint("screen.webm"), "video/webm");
         assert_eq!(mime_hint("take.mov"), "video/quicktime");
         assert_eq!(mime_hint("rip.mkv"), "video/x-matroska");
+        // Board #416: audio, one row per extension, the same as media_content_type.
+        for (name, mime) in [
+            ("song.mp3", "audio/mpeg"), ("MEMO.M4A", "audio/mp4"), ("voice.aac", "audio/aac"),
+            ("take.ogg", "audio/ogg"), ("/a/take.oga", "audio/ogg"), ("clip.opus", "audio/ogg"),
+            ("beep.wav", "audio/wav"), ("lossless.flac", "audio/flac"), ("clip.weba", "audio/webm"),
+        ] {
+            assert_eq!(mime_hint(name), mime, "{name}");
+        }
         assert_eq!(mime_hint("notes.md"), "text/markdown");
         assert_eq!(mime_hint("blob.bin"), "application/octet-stream");
     }

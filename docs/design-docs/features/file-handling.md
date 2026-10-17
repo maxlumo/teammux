@@ -308,7 +308,7 @@ mount, lifted with `--menu-shadow` (measured: without a shadow the quiet
 secondary paint vanished into a white page). **Where it is offered**: the
 touch layout only (the desktop keeps rail + wide screen; a follow-up if
 wanted), never for an image (its fullscreen is the one Lightbox, #188) or
-a video (the player). **Where it ends**: any view change, and the page
+a video or a sound (their players). **Where it ends**: any view change, and the page
 going hidden — `$effect: if (!readingEligible || !visible) reading = false`
 — so the tab bar is back before a list or another page shows. Pins:
 `Files.mount` (enter → class + control + `onimmersive(true)`; Back and the
@@ -321,7 +321,7 @@ rule beside the keyboard one).
 | Path | Used for | Size limit | Transport |
 |------|----------|-----------|-----------|
 | `fs_download` (WS RPC) | Inline PDF/image preview, Markdown-embedded images | 50 MB (`MAX_READ_SIZE`) | JSON-RPC over WebSocket, base64 |
-| `/dl?path=…&exp=…&sig=…[&stream=1]` | User-initiated file download; video preview (`<video src>`, board #182) | None — streams chunks; Range | Plain HTTP on same port |
+| `/dl?path=…&exp=…&sig=…[&stream=1]` | User-initiated file download; video and audio preview (`<video src>`, board #182; `<audio src>`, board #416) | None — streams chunks; Range | Plain HTTP on same port |
 
 Frontend `fsDownloadHttp` always uses the streaming HTTP path now (both `ws://` and `wss://`). The server peeks the first bytes of every accepted connection (plain TCP via `TcpStream::peek`; TLS via `BufStream::fill_buf` after the TLS handshake) and branches HTTP vs WebSocket-upgrade. This is what keeps a 56 MB .pptx download working over `wss://` — before, `wss://` fell back to the WS RPC path and tripped `MAX_READ_SIZE`.
 
@@ -418,6 +418,38 @@ Guards: `Files.mount.test.ts` opens a 2 GB `demo.mp4` — one
 category and the gate bypass. Not verified here: actual playback on the
 owner's devices (the WebView's probe-and-decide, and codec support, are the
 browser's).
+
+### Audio rides the same stream (board #416, 2026-10-17)
+
+Owner: "文件预览除了视频播放外，还应该加上音频播放". Nothing new is built: audio
+is the second kind the browser's own player streams from `/dl`, under the
+rules above. `FilePreview.svelte` has an `'audio'` branch,
+`<audio controls preload="metadata" src={mediaUrl}>` in the video branch's
+wrapper (`.image-preview`, `width: 100%`; no new visual species);
+`mimeCategory` maps `audio/*` to `'audio'`; `streamsInline` includes it (no
+size gate, no bytes over the RPC); `Files.svelte` signs it once with
+`fsDownloadHttp(path, { stream: true })` and does not re-sign on tab return,
+and reading mode is not offered for it. The server has ONE lookup for
+the streamed kinds, `fs::streamed_media_type`, read by both `fs::mime_hint` and
+`download::media_content_type` (video's rows moved into it, so the two cannot
+drift; images and the rest of `mime_hint` stay where they were, and `/dl` still
+answers octet-stream for everything else): mp3 → `audio/mpeg`, m4a →
+`audio/mp4` (AAC in an MP4 container), aac → `audio/aac` (a bare .aac is ADTS,
+its own type), ogg/oga/opus → `audio/ogg`, wav → `audio/wav`, flac →
+`audio/flac`, weba → `audio/webm`; `streams()` is
+true for `video/*` and `audio/*` and nothing else, so a stream signature is
+still refused at mint and at `/dl` for every other extension, and the 403
+matrix of point 1 is unchanged. Guards: the `download.rs` and `fs.rs` unit
+rows (one per extension, and a test that both callers agree with the lookup), `file-preview.test.ts` (category, gate bypass),
+`FilePreview.render.ts` (`controls`, `preload="metadata"`), and
+`Files.mount.test.ts` (a 300 MB `demo.mp3`: one stream-signed call, no
+`fs_download`/`fs_read`; hiding the page pauses it, showing it never plays). **Hiding the page pauses the media** (video and audio share it): Files stays
+mounted and hidden on a tab or server switch, so without it a track would go
+on with no controls in sight. `FilePreview` takes the page's `visible`; when it
+turns false the element is paused, nothing else changes (same element, same
+signed URL, same position), and showing the page again never plays. Leaving
+the preview removes the element, which pauses it. Not in scope: waveform, playlist, background
+playback, metadata or cover art. Device playback stays with the owner.
 
 ### Upload feedback is the third slot of the same stack, and it never invents a percentage (board #214, 2026-09-20)
 

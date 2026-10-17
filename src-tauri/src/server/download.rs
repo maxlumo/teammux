@@ -33,11 +33,12 @@ pub(super) fn download_expiry(stream: bool) -> u64 {
     unix_now() + if stream { DL_STREAM_TTL_SECS } else { DL_TOKEN_TTL_SECS }
 }
 
-/// Only what a `<video>` plays may carry a stream signature — the long life
-/// is for media elements, never for arbitrary files (`stream: true` on a
-/// .env is refused at mint AND at /dl).
+/// Only what a `<video>` or an `<audio>` plays may carry a stream signature —
+/// the long life is for media elements, never for arbitrary files (`stream:
+/// true` on a .env is refused at mint AND at /dl).
 pub(super) fn streams(name: &str) -> bool {
-    media_content_type(name).starts_with("video/")
+    let ctype = media_content_type(name);
+    ctype.starts_with("video/") || ctype.starts_with("audio/")
 }
 
 /// The signed tuple. The MODE is a literal in the MAC input, so a stream
@@ -336,8 +337,9 @@ where
 /// wants a `video/*` type before it asks AVFoundation). Media never execute
 /// anything. Everything else stays octet-stream — /dl serves DOWNLOADS, not
 /// documents (html/js/css must never render off this endpoint: same-origin +
-/// a token-signed URL would be an XSS gift). Same table as fs::mime_hint's
-/// video rows: what Files calls a video, /dl serves as one.
+/// a token-signed URL would be an XSS gift). Video and audio come from
+/// `fs::streamed_media_type`, the one lookup `fs::mime_hint` shares: what Files
+/// calls a video or a sound, /dl serves as one.
 fn media_content_type(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -347,12 +349,8 @@ fn media_content_type(name: &str) -> &'static str {
         "gif" => "image/gif",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "mkv" => "video/x-matroska",
-        "ogv" => "video/ogg",
-        _ => "application/octet-stream",
+        // Video and audio: the one lookup `fs::mime_hint` shares (board #182, #416).
+        other => crate::fs::streamed_media_type(other).unwrap_or("application/octet-stream"),
     }
 }
 
@@ -373,6 +371,20 @@ mod tests {
         assert_eq!(media_content_type("screen.webm"), "video/webm");
         assert_eq!(media_content_type("take.mov"), "video/quicktime");
         assert_eq!(media_content_type("rip.mkv"), "video/x-matroska");
+        // Audio (board #416): the same rows as fs::mime_hint, one per extension.
+        for (name, ctype) in [
+            ("song.mp3", "audio/mpeg"), ("MEMO.M4A", "audio/mp4"), ("voice.aac", "audio/aac"),
+            ("take.ogg", "audio/ogg"), ("take.oga", "audio/ogg"), ("clip.opus", "audio/ogg"),
+            ("beep.wav", "audio/wav"), ("lossless.flac", "audio/flac"), ("clip.weba", "audio/webm"),
+        ] {
+            assert_eq!(media_content_type(name), ctype, "{name}");
+        }
+        // The two callers read ONE lookup: whatever Files calls a streamed kind, /dl serves as that type.
+        for ext in ["mp4", "m4v", "webm", "mov", "mkv", "ogv", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac", "weba"] {
+            let name = format!("x.{ext}");
+            assert_eq!(media_content_type(&name), crate::fs::mime_hint(&name), "{ext}");
+            assert_eq!(Some(media_content_type(&name)), crate::fs::streamed_media_type(ext), "{ext}");
+        }
         // Documents and executables must never render off /dl.
         assert_eq!(media_content_type("index.html"), "application/octet-stream");
         assert_eq!(media_content_type("report.pdf"), "application/octet-stream");
@@ -497,8 +509,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_signatures_are_a_separate_mode_for_video_only() {
-        // Board #182: a <video> re-requests its URL for the whole playback,
+    fn stream_signatures_are_a_separate_mode_for_video_and_audio_only() {
+        // Board #182: a <video> (or an <audio>, #416) re-requests its URL for the whole playback,
         // so a stream signature lives hours — and therefore ONLY for media.
         let now = unix_now();
         let dl = download_expiry(false);
@@ -512,7 +524,14 @@ mod tests {
         assert_ne!(sig, sign_download("tok", false, "/v.mp4", st));
         assert!(!verify_download("tok", false, "/v.mp4", st, &sig), "a stream signature does not verify as a download");
         assert!(!verify_download("tok", true, "/v.mp4", dl, &sign_download("tok", false, "/v.mp4", dl)), "a download signature does not verify as a stream");
-        // A stream signature over a non-video path is refused even when the MAC is right.
+        // Board #416: audio streams under the same rule, every extension of the table and nothing else.
+        for name in ["/a/song.mp3", "/a/memo.m4a", "/a/voice.aac", "/a/take.ogg", "/a/take.oga", "/a/clip.opus", "/a/beep.wav", "/a/lossless.flac", "/a/clip.weba"] {
+            assert!(streams(name), "{name}");
+            assert!(verify_download("tok", true, name, st, &sign_download("tok", true, name, st)), "{name}");
+            assert!(!verify_download("tok", false, name, st, &sign_download("tok", true, name, st)), "{name}: the mode stays in the MAC");
+        }
+        assert!(!streams("/a/playlist.m3u") && !streams("/a/song.mp3.txt") && !streams("/a/cover.jpg"), "a lookalike or a picture does not get the long life");
+        // A stream signature over a non-media path is refused even when the MAC is right.
         let env = sign_download("tok", true, "/srv/.env", st);
         assert!(!streams("/srv/.env"));
         assert!(!verify_download("tok", true, "/srv/.env", st, &env), "the long life is for media elements only");

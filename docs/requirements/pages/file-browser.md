@@ -47,7 +47,7 @@ directory, or the server's home directory when no session is open yet.
   names, on the same row; ordinary file and folder rows share a height.
 - Bookmark panel (star current dir, scrollable saved paths)
 - Recent files panel (last 20 opened files, scrollable, capped to 40vh)
-- File preview: Markdown (rendered through the shared safe renderer, `core/markdown.ts`, + mermaid + KaTeX), CSV (table), code (syntax highlighted; the lined view shows the first 3000 lines with a "Show all N lines" button), HTML (sandboxed iframe), PDF (pdf.js), images (tap → the fullscreen Lightbox with pinch/wheel zoom; a trackpad pinch on the inline image opens it instead of zooming the page), video (the browser's own `<video>` player streaming ranges from the signed `/dl` URL — mp4/m4v/webm/mov/mkv/ogv, any size). pdf.js, mermaid and highlight.js load on first use, not at startup.
+- File preview: Markdown (rendered through the shared safe renderer, `core/markdown.ts`, + mermaid + KaTeX), CSV (table), code (syntax highlighted; the lined view shows the first 3000 lines with a "Show all N lines" button), HTML (sandboxed iframe), PDF (pdf.js), images (tap → the fullscreen Lightbox with pinch/wheel zoom; a trackpad pinch on the inline image opens it instead of zooming the page), video (the browser's own `<video>` player streaming ranges from the signed `/dl` URL — mp4/m4v/webm/mov/mkv/ogv, any size), audio (the browser's own `<audio controls>` player on the same stream — mp3 (`audio/mpeg`), m4a (`audio/mp4`), aac (`audio/aac`), ogg/oga/opus (`audio/ogg`), wav, flac, weba (`audio/webm`), any size; no waveform, playlist, background playback or cover art; hiding the page — a tab or server switch — pauses video and audio, and showing it again never plays). pdf.js, mermaid and highlight.js load on first use, not at startup.
 - Text editor with syntax highlighting, undo stack, save button
 - File operations: create file/folder, rename, delete, upload (with per-file progress feedback: reading %, a sending beat, then `Uploaded …` or a line naming every failed file; single file ≤ 60 MB), download
 - File info panel: path (tap to copy), type, size, modified, permissions
@@ -56,13 +56,13 @@ directory, or the server's home directory when no session is open yet.
 ## Interactions
 - Tap the server door → App's server popover (rail / Settings dialect); pick a server → focus moves there, Files shows that server's tree
 - Tap directory → navigate into it
-- Tap file → preview (or info page if not previewable, or if file size > 5 MB and the kind is not streamed — video streams at any size)
+- Tap file → preview (or info page if not previewable, or if file size > 5 MB and the kind is not streamed — video and audio stream at any size)
 - On the phone, a text preview (markdown, code, csv, html, pdf, converted
   documents) offers **Reading mode** (maximize in the header): the preview
   header and the app's tab bar hide, the content takes the whole screen, and
   one floating control (minimize, bottom-right, above the safe area) or the
   Back gesture returns to the normal preview. Not offered for images (the
-  Lightbox) or video (the player), nor on the desktop layout. Leaving the
+  Lightbox), video or audio (their players), nor on the desktop layout. Leaving the
   preview or the page ends it.
 - Tap a path reference in chat, Markdown, converted content, or an HTML
   preview → open it in Files, with the target's parent listing and a Back

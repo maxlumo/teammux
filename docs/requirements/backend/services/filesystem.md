@@ -17,7 +17,7 @@ Server-side filesystem operations. File: `src-tauri/src/fs.rs`
 - `upload_file(path, data_b64)` — upload from base64, creates parent dirs
 
 ## Helpers
-- `mime_hint(name)` — infer MIME type from file extension (supports ~45 extensions, incl. `video/*` for mp4/m4v/webm/mov/mkv/ogv)
+- `mime_hint(name)` — infer MIME type from file extension (supports ~45 extensions, incl. `video/*` for mp4/m4v/webm/mov/mkv/ogv and `audio/*` for mp3/m4a/aac/ogg/oga/opus/wav/flac/weba, via the shared `streamed_media_type`)
 - `is_text_file(path, name)` — heuristic: check extension + sample first 8KB for binary bytes
 - `format_permissions(mode)` — Unix permission string (rwxrwxrwx)
 

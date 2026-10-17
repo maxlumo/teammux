@@ -292,10 +292,10 @@ test('reading mode: the header hides as a cut, the return floats above the safe 
   assert.match(exit, /min-width: 44px; min-height: 44px;/u, 'a touch target');
   assert.match(source, /<CommandButton variant="secondary" iconOnly icon="minimize" label=\{t\('filesReadingExit'\)\}/u);
   assert.match(source, /<CommandButton variant="icon" icon="maximize" label=\{t\('filesReading'\)\} onclick=\{\(\) => \{ reading = true; navPush\(\); \}\}/u, 'entering is a layer: Back can leave it');
-  // Reading mode is offered on the touch layout only, never for an image or a
-  // video (the Lightbox / the player are their fullscreen), and it does not
+  // Reading mode is offered on the touch layout only, never for an image, a
+  // video or a sound (the Lightbox / the players are their own surface), and it does not
   // outlive the preview or the page.
-  assert.match(source, /let readingEligible = \$derived\(layout\.isTouchDevice && view === 'preview' && !!currentFile\n\s+&& !\['image', 'video'\]\.includes\(mimeCategory\(currentFile\.stat\?\.mime_hint\)\)\);/u);
+  assert.match(source, /let readingEligible = \$derived\(layout\.isTouchDevice && view === 'preview' && !!currentFile\n\s+&& !\['image', 'video', 'audio'\]\.includes\(mimeCategory\(currentFile\.stat\?\.mime_hint\)\)\);/u);
   assert.match(source, /\$effect\(\(\) => \{ if \(!readingEligible \|\| !visible\) reading = false; \}\);/u);
   assert.match(source, /\$effect\(\(\) => \{ onimmersive\?\.\(reading\); \}\);/u, 'the host hides its chrome from this one signal');
   // Back order: the viewer, then reading mode, then the file menu.

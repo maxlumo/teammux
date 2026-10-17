@@ -31,10 +31,12 @@ export function defaultWrapForMime(mime: string | null | undefined): boolean {
   return mime === 'text/markdown' || mime === 'text/plain';
 }
 
-/** Kinds the browser streams straight from /dl (a `<video>` fetching its own
- * ranges) — no bytes cross the RPC, so no size gate applies (board #182). */
+/** Kinds the browser streams straight from /dl (a `<video>` or an `<audio>`
+ * fetching its own ranges) — no bytes cross the RPC, so no size gate applies
+ * (board #182, audio #416). */
 export function streamsInline(stat: { mime_hint?: string | null; size?: number } | null | undefined): boolean {
-  return mimeCategory(stat?.mime_hint) === 'video';
+  const category = mimeCategory(stat?.mime_hint);
+  return category === 'video' || category === 'audio';
 }
 
 export function isPreviewable(stat: { mime_hint?: string; is_text?: boolean; size: number } | null, name?: string): boolean {
@@ -52,6 +54,7 @@ export function mimeCategory(mime: string | null | undefined) {
   if (!mime) return 'other';
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
   if (mime === 'text/markdown') return 'markdown';
   if (mime === 'text/csv') return 'csv';
   if (mime === 'text/html') return 'html';

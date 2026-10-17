@@ -50,6 +50,11 @@ test('the extracted preview renders every existing branch and preserves the code
   assert.match(video, /<video[^>]*\bplaysinline\b/u, 'the phone plays in place, not in a forced fullscreen player');
   assert.match(video, /<video[^>]*preload="metadata"/u, 'opening a preview costs the header, not the film');
   assert.ok(!video.includes('<img'));
+  // Board #416: a sound is an <audio> on the same signed stream URL, header only until played.
+  const audio = renderFile({ name: 'song.mp3', stat: { mime_hint: 'audio/mpeg' }, mediaUrl: 'https://h/dl?path=%2Fsong.mp3&exp=9&sig=s&stream=1' });
+  assert.match(audio, /<audio[^>]*\bcontrols\b[^>]*src="https:\/\/h\/dl\?path=%2Fsong\.mp3&amp;exp=9&amp;sig=s&amp;stream=1"/u);
+  assert.match(audio, /<audio[^>]*preload="metadata"/u, 'opening a preview costs the header, not the track');
+  assert.ok(!audio.includes('<video') && !audio.includes('<img'));
 
   const content = Array.from({ length: 3002 }, (_, i) => `line ${i}`).join('\n');
   const capped = renderFile({ stat: { mime_hint: 'text/plain' }, content });

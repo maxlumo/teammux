@@ -32,6 +32,13 @@ test('preview classification and limits match the existing Files decisions', () 
   assert.equal(streamsInline({ mime_hint: 'video/webm', size: 2 * 1024 ** 3 }), true, 'streamed kinds bypass the inline-bytes size gate');
   assert.equal(streamsInline({ mime_hint: 'image/png', size: 9e6 }), false, 'images still arrive as bytes');
   assert.equal(streamsInline(null), false);
+  // Board #416: audio rides the same rule — a track's size never decides previewability either.
+  for (const mime of ['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/flac', 'audio/webm']) {
+    assert.equal(mimeCategory(mime), 'audio', mime);
+    assert.equal(streamsInline({ mime_hint: mime, size: 2 * 1024 ** 3 }), true, `${mime} bypasses the inline-bytes size gate`);
+    assert.equal(isPreviewable({ mime_hint: mime, size: 2 * 1024 ** 3 }), true, mime);
+  }
+  assert.equal(mimeCategory('application/octet-stream'), 'other', 'a lookalike stays a download');
 });
 
 test('highlighters keep escaped fallback, known languages and existing error boundaries', () => {

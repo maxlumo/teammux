@@ -972,7 +972,7 @@
    * view change or a page switch (the tab bar must be back before either). */
   let reading = $state(false);
   let readingEligible = $derived(layout.isTouchDevice && view === 'preview' && !!currentFile
-    && !['image', 'video'].includes(mimeCategory(currentFile.stat?.mime_hint)));
+    && !['image', 'video', 'audio'].includes(mimeCategory(currentFile.stat?.mime_hint)));
   $effect(() => { if (!readingEligible || !visible) reading = false; });
   $effect(() => { onimmersive?.(reading); });
 
@@ -992,8 +992,9 @@
         currentFile = { ...file, dataUrl: `data:${stat.mime_hint};base64,${r.data}` };
         enterView('preview');
       } else if (streamsInline(stat)) {
-        // A video STREAMS (board #182): the <video> fetches its own ranges
-        // from /dl under a media-lived signature; no bytes cross the RPC.
+        // A video or a sound STREAMS (board #182, #416): the <video> / <audio>
+        // fetches its own ranges from /dl under a media-lived signature; no
+        // bytes cross the RPC.
         const { url } = await fsDownloadHttp(path, { stream: true });
         if (!fileNav.isCurrentFile(my)) return false;
         currentFile = { ...file, mediaUrl: url };
@@ -1116,7 +1117,7 @@
         currentFile.dataUrl = `data:${file.stat.mime_hint};base64,${r.data}`;
         currentFile = currentFile;
       }
-      // A stream is NOT re-fetched here: swapping a <video>'s src restarts it
+      // A stream is NOT re-fetched here: swapping a media element's src restarts it
       // at 0, and its signature lives the whole viewing (board #182).
     } catch {}
   }
@@ -1948,7 +1949,7 @@
     </div>
     <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
       bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
-      {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} />
+      {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible} />
     {#if reading}
       <!-- The one way back that is not a gesture: a floating control above the
            safe area, where the thumb is. -->

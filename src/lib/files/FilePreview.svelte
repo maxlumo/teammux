@@ -18,9 +18,13 @@
     pdfContainer: HTMLDivElement | null;
     /** Open the picture in the host's fullscreen viewer (board #188). */
     onview?: (src: string) => void;
+    /** Whether the page showing this preview is on screen. Files stays mounted
+     * and hidden on a tab or server switch, so a playing track or film would
+     * go on with no controls in sight (board #416 review). */
+    visible?: boolean;
   }
   let {
-    currentFile, fontSize, wrapLines, hljs, onview = () => {},
+    currentFile, fontSize, wrapLines, hljs, onview = () => {}, visible = true,
     showAllLines = $bindable(false),
     previewLinkClick, attachHtmlPreviewLinks,
     previewBodyEl = $bindable(null), previewEl = $bindable(null),
@@ -34,6 +38,12 @@
     node.addEventListener('wheel', onWheel, { passive: false });
     return { destroy() { node.removeEventListener('wheel', onWheel); } };
   }
+
+  /** The video or audio element, if the preview is one. */
+  let mediaEl = $state<HTMLMediaElement | null>(null);
+  // Hiding the page pauses the media and nothing else: the element, its signed
+  // URL and its position stay, and showing the page again never plays.
+  $effect(() => { if (!visible) mediaEl?.pause(); });
 
   // Keep the cap state in Files so an editor round-trip does not reset it.
   const CODE_PREVIEW_MAX_LINES = 3000;
@@ -78,7 +88,12 @@
          the film; playsinline keeps the phone in the preview, not a forced
          fullscreen player. -->
     <!-- svelte-ignore a11y_media_has_caption -->
-    <div class="image-preview"><video controls playsinline preload="metadata" src={currentFile.mediaUrl}></video></div>
+    <div class="image-preview"><video bind:this={mediaEl} controls playsinline preload="metadata" src={currentFile.mediaUrl}></video></div>
+  {:else if mimeCategory(currentFile.stat?.mime_hint) === 'audio'}
+    <!-- Board #416: the same stream as the video above, into the browser's own
+         audio player; preload=metadata costs the header, not the track. -->
+    <!-- svelte-ignore a11y_media_has_caption -->
+    <div class="image-preview"><audio bind:this={mediaEl} controls preload="metadata" src={currentFile.mediaUrl}></audio></div>
   {:else if currentFile.convertedHtml}
     <div class="md-render">{@html currentFile.convertedHtml}</div>
   {:else}
@@ -141,6 +156,7 @@
     flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 12px;
   }
   .image-preview img, .image-preview video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+  .image-preview audio { width: 100%; }
   .image-open { display: block; max-width: 100%; max-height: 100%; padding: 0; margin: 0; border: 0; background: none; cursor: zoom-in; touch-action: none; }
   .md-render { font-size: var(--file-font-size, 14px); line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
   .md-render :global(h1) { font-size: 1.55em; margin: 16px 0 8px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }

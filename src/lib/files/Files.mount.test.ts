@@ -559,6 +559,52 @@ test('a video previews as a stream: one stream-signed /dl URL, no bytes through 
     assert.equal(video.getAttribute('src'), 'https://h/dl?path=%2Ffixture%2Fdemo.mp4&exp=9&sig=s&stream=1');
     assert.equal(JSON.stringify(signed), JSON.stringify([['/fixture/demo.mp4', { stream: true }]]), 'signed once, for a stream lifetime');
     assert.deepEqual(bytes, [], 'no fs_download / fs_read for a stream');
+    // The same pause-on-hide policy as the sound's (board #416 review): hidden pauses, shown never plays.
+    const calls: string[] = [];
+    video.pause = () => { calls.push('pause'); };
+    video.play = () => { calls.push('play'); return Promise.resolve(); };
+    await app.setProps({ visible: false });
+    await app.setProps({ visible: true });
+    assert.deepEqual(calls, ['pause']);
+  } finally { await app.close(); }
+});
+
+test('a sound previews as a stream too: one stream-signed /dl URL into an <audio>, no bytes through the RPC, no size gate (board #416)', async context => {
+  // Owner 2026-10-17: "文件预览除了视频播放外，还应该加上音频播放". A 300 MB track is far
+  // over PREVIEW_SIZE_LIMIT and MAX_READ_SIZE; it is never read — the <audio>
+  // element fetches its own ranges from /dl, exactly as the <video> does.
+  const signed: unknown[][] = [];
+  const bytes: string[] = [];
+  const size = 300 * 1024 ** 2;
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [rpc({
+    fsList: async () => ({ path: '/fixture', entries: [{ name: 'demo.mp3', path: '/fixture/demo.mp3', type: 'file', size }] }),
+    fsStat: async (path: string) => ({ path, is_text: false, writable: true, readable: true, size, mime_hint: 'audio/mpeg' }),
+    fsDownloadHttp: async (...args: unknown[]) => { signed.push(args); return { url: 'https://h/dl?path=%2Ffixture%2Fdemo.mp3&exp=9&sig=s&stream=1', name: 'demo.mp3' }; },
+    fsDownload: async (path: string) => { bytes.push(path); return { data: '' }; },
+    fsRead: async (path: string) => { bytes.push(path); return { content: '' }; },
+  })] });
+  try {
+    await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.file-row .file-main')!.click();
+    await settle(app);
+    const audio = app.document.querySelector<HTMLAudioElement>('.preview-body audio, .media-preview audio');
+    assert.ok(audio, 'the preview is an <audio>, not the info page');
+    assert.equal(audio.getAttribute('src'), 'https://h/dl?path=%2Ffixture%2Fdemo.mp3&exp=9&sig=s&stream=1');
+    assert.equal(audio.getAttribute('preload'), 'metadata');
+    assert.equal(JSON.stringify(signed), JSON.stringify([['/fixture/demo.mp3', { stream: true }]]), 'signed once, for a stream lifetime');
+    assert.deepEqual(bytes, [], 'no fs_download / fs_read for a stream');
+
+    // Review: Files stays mounted and hidden on a tab or server switch, so hiding it pauses the
+    // track; showing it again changes nothing (same element, same signed URL, no play).
+    const calls: string[] = [];
+    audio.pause = () => { calls.push('pause'); };
+    audio.play = () => { calls.push('play'); return Promise.resolve(); };
+    await app.setProps({ visible: false });
+    assert.deepEqual(calls, ['pause'], 'hiding the page pauses the media');
+    await app.setProps({ visible: true });
+    assert.deepEqual(calls, ['pause'], 'showing it never plays');
+    assert.equal(app.document.querySelector('.preview-body audio, .media-preview audio'), audio, 'the same element: the position is kept');
+    assert.equal(audio.getAttribute('src'), 'https://h/dl?path=%2Ffixture%2Fdemo.mp3&exp=9&sig=s&stream=1', 'and the signed URL');
   } finally { await app.close(); }
 });
 
