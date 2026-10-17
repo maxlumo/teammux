@@ -417,6 +417,12 @@ button:disabled {
   --backend-kimi: #4ade80; --backend-grok: #e2e8f0; --backend-omp: #ed4abf;
   --backend-dsh: #4d6bfe;
   --backend-other: #818cf8;
+  /* The connection QR code (board #403) is the ONE place the app paints a
+     literal black and white, in every theme: a scanner reads dark modules on a
+     light ground, and an inverted code fails on many of them, so the code must
+     not follow the theme. Used by ui/QrDialog.svelte only (a test pins it);
+     the exception and its reason are in design-language.md. */
+  --qr-ink: #000; --qr-paper: #fff;
   /* Type scale + motion + metadata ink — APP-WIDE (born Hub-scoped, promoted
      2026-08-18: the settings/connect surfaces had re-grown ad-hoc values).
      The contract lives in tmm-cli.md "Design tokens"; a raw font-size or

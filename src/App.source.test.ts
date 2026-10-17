@@ -44,6 +44,36 @@ test('the boot reads a deep link through the one parser, and strips it from the 
   assert.doesNotMatch(take, /URLSearchParams|q\.get\(/u, 'no second parser of the link');
 });
 
+test('the connection QR code is the shell\u2019s own dialog: Back peels it, and it closes with the page, the connection and the background (#403)', () => {
+  assert.match(source, /if \(addServer\) \{ addServer = null; navPush\(\); return; \}(?:\s*\/\/[^\n]*)*\s*if \(detailsId\) \{ detailsId = ''; navPush\(\); return; \}\s*if \(qr\) \{ qr = null; navPush\(\); return; \}/u, 'registered in the popstate chain, after the Add server and the saved server\u2019s details dialogs (#402), a modal like them');
+  assert.match(source, /\$effect\(\(\) => \{ void linkContext; qr = null; \}\);/u, 'closed when the copy feedback context changes');
+  assert.match(source, /document\.addEventListener\('visibilitychange', hide\);[\s\S]*?document\.removeEventListener\('visibilitychange', hide\);/u, 'and when the app goes to the background');
+  assert.match(source, /qr = qrMatrix\(link\);/u, 'what is held is the code\u2019s modules');
+  assert.match(source, /<QrDialog matrix=\{qr\} compact=\{narrowVp\} oncancel=\{\(\) => \(qr = null\)\} \/>/u, 'and Hide drops them');
+});
+
+test('the shell\u2019s own dialogs are peeled BEFORE the bottom-of-stack floor, so a Back that arrives with state null (a fresh login page: [initial, seed]) still closes the scan and releases its camera (#403)', () => {
+  const handler = source.match(/const handler = \(e\) => \{[\s\S]*?if \(storageHeld/u)?.[0] ?? '';
+  const scan = handler.indexOf('if (scanOp)');
+  const floor = handler.indexOf('if (!e.state?.app)');
+  assert.ok(scan > 0 && floor > scan, 'the scan is asked before the floor');
+  for (const layer of ['if (addServer)', 'if (detailsId)', 'if (qr)']) assert.ok(handler.indexOf(layer) > 0 && handler.indexOf(layer) < floor, `${layer} is asked before the floor`);
+  assert.match(handler, /if \(!e\.state\?\.app\) \{\s*\/\/ Reached bottom of our stack, re-push to prevent exit\s*navPush\(\);\s*return;\s*\}/u, 'and the floor is still there for a pop with no layer open');
+});
+
+test('a scan is one operation, registered synchronously at the tap and ended by Back, the background, Cancel, a second tap, its consumer form or the shell; a picker it opened is not an ending; the dialog is keyed by it (#403)', () => {
+  assert.match(source, /const scans = new ScanHost\(\(op\) => \{ scanOp = op; \}\);\s*const scanQr = \(signal\) => scans\.begin\(signal\)\.result;\s*onDestroy\(\(\) => scans\.end\(\)\);/u, 'begun in the tap itself (no async, no await before it is registered), with the asking form\u2019s lifetime, and ended with the shell');
+  assert.match(source, /if \(scanOp\) \{ scans\.end\(\); navPush\(\); return; \}\s*if \(addServer\)/u, 'Back is first in the popstate chain, above the Add server dialog it can be opened from');
+  assert.match(source, /if \(document\.hidden\) \{ if \(!op\.picking\) scans\.end\(\); \}\s*else op\.picking = false;[\s\S]*?document\.addEventListener\('visibilitychange', changed\);[\s\S]*?document\.removeEventListener\('visibilitychange', changed\);/u, 'the background ends it, except while the picker it opened is up; coming back clears that');
+  assert.doesNotMatch(source, /endOwner|scans\.begin\('/u, 'the owner is the form\u2019s lifetime, not a page name');
+  assert.match(source, /\{#each scanOp \? \[scanOp\] : \[\] as op \(op\)\}\s*<ScanDialog compact=\{narrowVp\} onscanned=\{\(text\) => op\.end\(text\)\} oncancel=\{\(\) => op\.end\(null\)\} onpicking=\{\(on\) => \{ op\.picking = on; \}\} \/>/u, 'a callback can only end the operation it was made for');
+  assert.match(source, /onscan=\{scanQr\}/u);
+  assert.match(source, /onScan=\{scanQr\}/u);
+  assert.doesNotMatch(source, /isAndroid|barcode|startNativeScan/u, 'one scan on every platform: the Android webview asks for the camera like a browser (wry bridges the permission)');
+  const ending = source.match(/const scanQr = [^\n]*/u)?.[0] ?? '';
+  assert.doesNotMatch(ending, /onConnected|connect|submit|recordServer/u, 'a scan hands back text and nothing else');
+});
+
 test('App link feedback belongs to its page and connection, and disposes with App (#167)', () => {
   // Polling can replace serverInfo without changing the machine. A primitive
   // descriptor keeps that refresh from invalidating the copy or its timer.
@@ -622,7 +652,7 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // The runtime is the FLEET's (board #335 ②b-4): one connection each.
   assert.match(source, /activations\.claim\(held\);\s*(?:\/\/[^\n]*\n\s*)*fleet\.reconcile\(\);[\s\S]{0,1200}?const next = entry \? fleet\.include\(entry\) \?\? null : null;\s*(?:\/\/[^\n]*\n\s*)*if \(next\) wireDrop\(next\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(storageHeld\) next\?\.setFrozen\(true\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !serverStates\.has\(next\)\) serverStates\.set\(next, stateFor\(entry\.id\)\);\s*(?:\s*\/\/[^\n]*\n)*\s*if \(next && !views\.has\(next\) && held && held\.id !== entry\.id && mergedInto\(localStorage, held\.id\) === entry\.id\) views\.set\(next, viewOf\(held\)\);\s*return \{ keep: false, runtime: next \};/u,
     'a mint for another server makes every attempt in flight stale — the tree is changing servers');
-  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
+  assert.match(source, /<Settings \{onConnected\} \{openCandidate\} onScan=\{scanQr\} confirmLeave=\{confirmFormLeave\} notice=\{reconnectError\}\s*frozen=/u,
     'and the form dials a candidate of its own');
   // The person-level surfaces are OUTSIDE the server-bound subtree, which is
   // what lets that subtree render nothing while it has no runtime — and what

@@ -17,8 +17,8 @@
 
   type Candidate = { address: string; token: string; socket?: string };
   let {
-    initial = null, compact = false, onsubmit, oncancel,
-  }: { initial?: Candidate | null; compact?: boolean; onsubmit: (c: Candidate) => void; oncancel: () => void } = $props();
+    initial = null, compact = false, onsubmit, oncancel, onscan = null,
+  }: { initial?: Candidate | null; compact?: boolean; onsubmit: (c: Candidate) => void; oncancel: () => void; onscan?: ((signal: AbortSignal) => Promise<string | null>) | null } = $props();
 
   // The dialog is mounted per opening, so the prefill is read once on purpose.
   const seed = untrack(() => initial);
@@ -38,7 +38,7 @@
 
 <Dialog {compact} label={t('serverAdd')} {oncancel}>
   <h2>{t('serverAdd')}</h2>
-  <ConnectFields bind:this={fields} bind:address bind:token bind:socket autofocus onenter={submit} />
+  <ConnectFields bind:this={fields} bind:address bind:token bind:socket autofocus onscan={onscan} onenter={submit} />
   <div class="dlg-actions">
     <CommandButton label={t('cancel')} onclick={oncancel} />
     <CommandButton label={t('connect')} variant="primary" icon="link" disabled={!address.trim()} onclick={submit} />

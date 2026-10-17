@@ -227,6 +227,18 @@ danger semantics.
   = ended well, `--status-warn` = needs a person / a turn cut short,
   `--status-danger` = failed/destructive, grey = at rest. A literal colour is
   wrong; compute expressions with `color-mix` over tokens (`ctxColor`).
+- **The connection QR code paints a literal black on white, in every theme —
+  the one exception to "a literal colour is wrong"** (board #403, 2026-10-16).
+  A scanner reads dark modules on a light ground, and an inverted code (light
+  modules on a dark ground, which is what a theme token would give in the dark
+  theme) fails on many scanners; the code must be dark on light in every theme,
+  so it cannot follow `--text`/`--bg`. Two named tokens carry it,
+  `--qr-ink: #000` and `--qr-paper: #fff`, defined ONCE in `app.css`'s
+  theme-independent `:root` block beside the backend identity colours, and used
+  by `ui/QrDialog.svelte` alone (`qr.source.test.ts` pins the definition, the
+  single user, and that the dialog builds no HTML and never sees the link). The
+  exception is the code's two colours and nothing around them: the dialog, its
+  text and its buttons are ordinary tokens.
 - **Agent name inks are identity, the one exception to "one hue"** (board #292,
   owner 2026-10-01: "名字多个颜色更好看，可以的"). Six theme-aware tokens
   `--agent-1..6` in each theme block, chosen by ONE pure function,

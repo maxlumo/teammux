@@ -24,12 +24,12 @@ const saved = (...servers: { address: string; token: string; socket?: string }[]
   tmux_servers: JSON.stringify(servers.map((s, i) => ({ id: `s${i}`, name: `s${i}`, address: s.address, token: s.token, ...(s.socket ? { socket: s.socket } : {}) }))),
 });
 
-async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string) {
+async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string, extraProps: Record<string, unknown> = {}) {
   const calls: string[] = [];
   let release!: (cfg: typeof LOCAL) => void;
   const answer = new Promise<typeof LOCAL>(yes => { release = yes; });
   const app = await (await compiled).mount(context, {
-    props: { onConnected() {} },
+    props: { onConnected() {}, ...extraProps },
     modules: [
       { copyText: () => true },
     ],
@@ -371,6 +371,10 @@ test('a typed link that cannot be used is taken out of the field when it is left
 for (const [what, text, message] of [
   ['a credential inside the decoded addr', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN', "This link's address contains a credential"],
   ['a repeated token', 'wss://other.example/ws?token=SECRET-ONE&token=SECRET-TWO', 'This link cannot be read: a token or socket appears twice'],
+  ['user info', 'wss://user:SECRET-ONE@h.example/ws', "This link's address contains a credential"],
+  ['user info behind extra slashes', 'wss:////user:SECRET-ONE@h.example/ws', "This link's address contains a credential"],
+  ['user info behind a zero-width space', '\u200bwss://user:SECRET-ONE@h.example/ws', 'This text contains hidden characters'],
+  ['a clean address behind a delete character', '\u007fwss://h.example/ws', 'This text contains hidden characters'],
   ['an endpoint with user info and a password', 'wss://user:SECRET-ONE@h.example/ws', "This link's address contains a credential"],
   ['an http address in an old link', 'https://front.example/?addr=http%3A%2F%2Fh%3A1&token=SECRET-ONE', 'This link has no server address'],
   ['a token-only old link', 'https://front.example/?token=SECRET-ONE', 'This link has no server address'],
@@ -382,3 +386,127 @@ for (const [what, text, message] of [
     assert.equal(app.document.querySelector('.fields .config-error[role=alert]')?.textContent, message);
   });
 }
+
+// ─── #403: scanning a connection QR code fills the form, never connects ──
+
+const MOBILE = { tmux_layout_mode: 'mobile' };
+const SCAN = 'button[aria-label="Scan QR code"], .command-button';
+const scanButton = (app: Mounted) => [...app.document.querySelectorAll<HTMLButtonElement>('button')].find(b => /^scan qr code$/iu.test((b.textContent ?? '').trim()));
+const scanning = (text: string | null) => ({ onScan: async () => text });
+
+test('the Scan command is a phone command: absent on a desktop layout, absent when the host offers no scanner, present on touch', async context => {
+  const desktop = await mount(context, { tmux_layout_mode: 'desktop' }, undefined, scanning(null));
+  assert.equal(scanButton(desktop), undefined, 'a desktop layout offers no scan');
+});
+
+test('a touch layout with no scanner offered shows no Scan command', async context => {
+  const app = await mount(context, { ...MOBILE });
+  assert.equal(scanButton(app), undefined);
+});
+
+test('on a touch layout the Scan command is there, and a scan of a connection link fills address, token and socket without connecting', async context => {
+  const connected: unknown[] = [];
+  const app = await mount(context, { ...MOBILE }, undefined, { ...scanning('wss://scan.example/ws?token=SCANNED-TOKEN&socket=%2Ftmp%2Fscanned'), onConnected: (...a: unknown[]) => connected.push(a) });
+  await app.answer();
+  assert.ok(scanButton(app), 'the command is there');
+  scanButton(app)!.click();
+  await app.flush(); await app.flush();
+  assert.equal(app.value(ADDR), 'wss://scan.example/ws');
+  assert.equal(app.value(TOKEN), 'SCANNED-TOKEN');
+  assert.equal(app.value(SOCKET), '/tmp/scanned');
+  assert.equal(app.document.querySelector(TOKEN)!.getAttribute('type'), 'password', 'the token stays masked');
+  assert.ok(!app.document.documentElement.outerHTML.includes('SCANNED-TOKEN'), 'and is nowhere in the page');
+  assert.equal(app.document.querySelector('.fields .config-error'), null);
+  assert.deepEqual(connected, [], 'nothing was connected: the person taps Connect');
+});
+
+for (const [what, text, address, token] of [
+  ['a bare gateway address fills the address alone and clears the previous credentials', 'wss://bare.example/ws', 'wss://bare.example/ws', ''],
+  ['an old front-end link is read like a pasted one', 'https://front.example/?addr=wss%3A%2F%2Fold.example%2Fws&token=OLD-TOKEN', 'wss://old.example/ws', 'OLD-TOKEN'],
+] as const) {
+  test(`a scan: ${what}`, async context => {
+    const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, scanning(text));
+    await app.answer();
+    scanButton(app)!.click();
+    await app.flush(); await app.flush();
+    assert.equal(app.value(ADDR), address);
+    assert.equal(app.value(TOKEN), token);
+    assert.equal(app.value(SOCKET), '', 'the previous server\u2019s socket did not follow');
+  });
+}
+
+for (const [what, text] of [
+  ['text that is not a connection', 'hello, this is a poster for a concert'],
+  ['a url that is not a gateway', 'https://example.com/tickets?id=7'],
+  ['an old token-only link', 'https://front.example/?token=SECRET-ONE'],
+  ['a link whose addr hides a credential', 'https://front.example/?addr=wss%3A%2F%2Fh%2Fws%23token%3DSECRET-ONE&token=OUTER-TOKEN'],
+] as const) {
+  test(`a scan of ${what} is refused: the form is as it was, one message, no part of the code is shown`, async context => {
+    const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, scanning(text));
+    await app.answer();
+    scanButton(app)!.click();
+    await app.flush(); await app.flush();
+    assert.equal(app.value(ADDR), 'ws://keep.example:9899');
+    assert.equal(app.value(TOKEN), 'KEEP-TOKEN');
+    assert.equal(app.value(SOCKET), '/keep/sock');
+    const message = app.document.querySelector('.fields .config-error[role=alert]')?.textContent ?? '';
+    assert.match(message, /^This (?:is not a connection code|link(?: has no server address|.s address contains (?:a credential|a token or socket)| cannot be read.*))$/u);
+    const html = app.document.documentElement.outerHTML;
+    for (const secret of ['SECRET-ONE', 'OUTER-TOKEN', 'concert', 'tickets']) assert.ok(!html.includes(secret), `${secret} is nowhere in the page`);
+  });
+}
+
+for (const [what, text, message] of [
+  ['an old token-only link', 'https://front.example/?token=SECRET-ONE', 'This link has no server address'],
+  ['a repeated token', 'wss://other.example/ws?token=SECRET-ONE&token=SECRET-TWO', 'This link cannot be read: a token or socket appears twice'],
+] as const) {
+  test(`a scan of ${what} is refused with the link's own reason, not the generic one`, async context => {
+    const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, scanning(text));
+    await app.answer();
+    scanButton(app)!.click();
+    await app.flush(); await app.flush();
+    assert.equal(app.document.querySelector('.fields .config-error[role=alert]')?.textContent, message);
+  });
+}
+
+test('a refusal is cleared by the next scan, and the next scan fills the form', async context => {
+  const texts = ['hello, this is a poster', 'wss://good.example/ws?token=GOOD-TOKEN&socket='];
+  const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, { onScan: async () => texts.shift() ?? null });
+  await app.answer();
+  scanButton(app)!.click();
+  await app.flush(); await app.flush();
+  assert.equal(app.document.querySelector('.fields .config-error[role=alert]')?.textContent, 'This is not a connection code');
+  scanButton(app)!.click();
+  await app.flush(); await app.flush();
+  assert.equal(app.document.querySelector('.fields .config-error'), null, 'the old message is gone');
+  assert.equal(app.value(ADDR), 'wss://good.example/ws');
+  assert.equal(app.value(TOKEN), 'GOOD-TOKEN');
+});
+
+test('the form hands its own lifetime to the scan: unmounting Settings aborts it whatever the page is, and a result that arrives afterwards fills nothing', async context => {
+  const signals: AbortSignal[] = [];
+  let later!: (text: string) => void;
+  const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, {
+    onScan: (signal: AbortSignal) => { signals.push(signal); return new Promise<string | null>((resolve) => { later = resolve; }); },
+  });
+  await app.answer();
+  scanButton(app)!.click();
+  await app.flush();
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.aborted, false, 'alive while the form is');
+  const address = app.document.querySelector<HTMLInputElement>(ADDR)!;
+  await app.close();
+  assert.equal(signals[0]!.aborted, true, 'the form going away ended the scan it started');
+  later('wss://late.example/ws?token=LATE-TOKEN&socket=');
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(address.value, 'ws://keep.example:9899', 'a stale consumer never receives a result');
+});
+
+test('a cancelled scan changes nothing', async context => {
+  const app = await mount(context, { ...HELD, ...MOBILE, tmux_server_current: 's0' }, undefined, scanning(null));
+  await app.answer();
+  scanButton(app)!.click();
+  await app.flush(); await app.flush();
+  assert.equal(app.value(ADDR), 'ws://keep.example:9899');
+  assert.equal(app.document.querySelector('.fields .config-error'), null);
+});

@@ -11,6 +11,13 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- The QR scan reads the camera through the webview (board #403): wry's
+         WebChromeClient asks Android for CAMERA when the page asks for the
+         camera, and only then. The camera is an extra here (a photo of the code
+         works without one), so a device with none still installs the app. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
