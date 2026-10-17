@@ -204,11 +204,12 @@ server start (`source = "builtin"`; save/delete refuse their names).
 | `registry_delete` | `name` | OK |
 | `global_prompt_get` | — | `{text, path, max_bytes}` — the app-wide agent instructions (`<config>/AGENTS.md`), prepended to every managed agent's system prompt at spawn |
 | `global_prompt_set` | `text` | `{ok, bytes}`; empty text deletes the file; > 24 KB rejected |
-| `skills_list` | — | `{skills: [{name, source, description, synced_at}]}` |
+| `skills_list` | — | `{skills: [{name, source, description, synced_at, root}]}` — `root` is the managed directory holding the skill's SKILL.md (#418) |
 | `skills_save` | `name`, `source`, `description?` | Imports/re-syncs the files from `source` (abs dir, github url, or `builtin`) |
 | `skills_import` | `url` (or abs dir) | `{imported: [names]}` — walks the fetched tree for EVERY dir holding a SKILL.md (claude plugins/marketplaces work as-is); each row's source points at its own subdir; frontmatter names, built-in names skipped |
 | `skills_read` | `name` | `{markdown}` — the managed SKILL.md |
 | `skills_files` | `name` | `{files: [{path, size}]}` — every managed file of the skill |
+| `skills_load` | `name` | `{name, description, root, skill_md, files: [{rel, path, size}], truncated?}` — the SKILL.md text and every other file as an absolute path on the gateway's filesystem (`tmm skills load`, #418); `description` is the frontmatter's; at most 200 files besides SKILL.md, `truncated` when more exist; an unreadable part, or an unknown name (with near matches), is an error |
 | `skills_file` | `name`, `path` | `{content}` — 256 KB cap, text only, path escapes rejected |
 | `skills_refresh` | `name` | Re-syncs from the recorded source (builtin = the running build) |
 | `skills_delete` | `name` | OK (refused for built-ins) |

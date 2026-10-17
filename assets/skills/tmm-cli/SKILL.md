@@ -230,7 +230,8 @@ tmm registry save --name <n> --backend <kiro|claude|codex|grok|omp|kimi|dsh>
                                     #   busy enters the running turn; applied
                                     #   on restart
 tmm registry delete <name>
-tmm skills list                     # the app-managed skill store
+tmm skills list                     # the app-managed skill store (with each root)
+tmm skills load <name>              # print its SKILL.md + the paths of its other files
 tmm skills save --name <n> --source <abs dir|github url>   # import files
 tmm skills refresh <name>           # re-sync from the recorded source
 tmm skills delete <name>            # (built-in skills refuse: they reseed)

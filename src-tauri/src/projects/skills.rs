@@ -241,8 +241,33 @@ pub fn seed_builtin_skills() {
     }
 }
 
+/// Every skill in the store, each with its managed `root` — the directory
+/// holding its SKILL.md — so a reader can go from the list to the files
+/// (board #418).
 pub fn skills_list() -> Result<Value, String> {
-    with_store(|store| Ok(json!({ "skills": store.skills_list()? })))
+    let rows = with_store(|store| store.skills_list())?;
+    let skills = rows
+        .into_iter()
+        .map(|row| {
+            let root = skill_root(&row.name)?.to_string_lossy().into_owned();
+            let mut v = json!(row);
+            v["root"] = json!(root);
+            Ok(v)
+        })
+        .collect::<Result<Vec<Value>, String>>()?;
+    Ok(json!({ "skills": skills }))
+}
+
+/// A skill's managed directory as an ABSOLUTE path on the gateway's own
+/// filesystem (board #418 review P2-B): `TMM_STATE_DB` may be relative, and
+/// a reader in another cwd must not resolve it against its own. Canonical
+/// when it exists, else made absolute against the gateway's cwd. The one
+/// boundary `skills_list` and `skill_load` both answer through.
+fn skill_root(name: &str) -> Result<std::path::PathBuf, String> {
+    let root = managed_skills_dir().join(name);
+    std::fs::canonicalize(&root)
+        .or_else(|_| std::path::absolute(&root))
+        .map_err(|e| format!("the skill directory {} cannot be made absolute: {e}", root.display()))
 }
 
 /// The app-OWNED skills storage: `<state dir>/skills/<name>/`. Lives beside
@@ -404,33 +429,140 @@ pub fn skill_import(source: &str) -> Result<Value, String> {
     Ok(json!({ "ok": !imported.is_empty(), "imported": imported, "skipped": skipped }))
 }
 
+/// The most files a listing names, SKILL.md NOT counted (it is the body,
+/// not a resource).
+const MAX_LISTED_FILES: usize = 200;
+
+/// A skill's managed files as `(relative path, size)`, SKILL.md first then by
+/// path — the ONE walk the UI preview (`skill_files`) and `tmm skills load`
+/// (`skill_load`) both read. At most `MAX_LISTED_FILES` besides SKILL.md;
+/// `truncated` is true only when a further file was actually found (board
+/// #418 review P2-A). A directory or file that cannot be read is an error,
+/// never a shorter list: a reader is told what it cannot see.
+struct Listing {
+    files: Vec<(String, u64)>,
+    truncated: bool,
+}
+
+fn managed_files(root: &std::path::Path) -> Result<Listing, String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Listing, counted: &mut usize) -> Result<(), String> {
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut entries = Vec::new();
+        for e in rd {
+            entries.push(e.map_err(|e| format!("{}: {e}", dir.display()))?);
+        }
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let ty = e.file_type().map_err(|err| format!("{}: {err}", p.display()))?;
+            if ty.is_dir() {
+                walk(&p, root, out, counted)?;
+                if out.truncated {
+                    return Ok(());
+                }
+                continue;
+            }
+            let meta = e.metadata().map_err(|err| format!("{}: {err}", p.display()))?;
+            let rel = p.strip_prefix(root).map_err(|err| format!("{}: {err}", p.display()))?.to_string_lossy().into_owned();
+            if rel == "SKILL.md" {
+                continue; // taken before the walk
+            }
+            if *counted == MAX_LISTED_FILES {
+                out.truncated = true;
+                return Ok(());
+            }
+            *counted += 1;
+            out.files.push((rel, meta.len()));
+        }
+        Ok(())
+    }
+    let mut out = Listing { files: Vec::new(), truncated: false };
+    // The root SKILL.md first, outside the budget (review round 2): a walk
+    // that stops at the 201st resource must not have skipped it.
+    match std::fs::metadata(root.join("SKILL.md")) {
+        Ok(meta) => out.files.push(("SKILL.md".into(), meta.len())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", root.join("SKILL.md").display())),
+    }
+    walk(root, root, &mut out, &mut 0)?;
+    out.files.sort_by_key(|(rel, _)| (rel != "SKILL.md", rel.clone()));
+    Ok(out)
+}
+
 /// The managed files of a skill, relative paths + sizes (for the UI preview).
 pub fn skill_files(name: &str) -> Result<Value, String> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err("invalid skill name".into());
     }
-    let root = managed_skills_dir().join(name);
-    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<Value>) {
-        if out.len() >= 200 {
-            return;
-        }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<_> = rd.flatten().collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let p = e.path();
-            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                walk(&p, root, out);
-            } else if let (Ok(rel), Ok(meta)) = (p.strip_prefix(root), e.metadata()) {
-                out.push(json!({ "path": rel.to_string_lossy(), "size": meta.len() }));
-            }
-        }
+    let listing = managed_files(&managed_skills_dir().join(name))?;
+    let files: Vec<Value> = listing.files.into_iter().map(|(rel, size)| json!({ "path": rel, "size": size })).collect();
+    let mut answer = json!({ "name": name, "files": files });
+    if listing.truncated {
+        answer["truncated"] = json!(true);
     }
-    let mut files = Vec::new();
-    walk(&root, &root, &mut files);
-    // SKILL.md leads: it is the file the preview opens with.
-    files.sort_by_key(|f| (f["path"] != "SKILL.md", f["path"].as_str().unwrap_or("").to_string()));
-    Ok(json!({ "name": name, "files": files }))
+    Ok(answer)
+}
+
+/// Everything an agent needs to load ONE skill from the command line (board
+/// #418, `tmm skills load`): its managed root, the SKILL.md text, and every
+/// other file as an absolute path with its size — paths, never contents, so a
+/// large resource is not dumped. Read-only, from the same store the Skills
+/// page reads. An unknown name names the near matches.
+pub fn skill_load(name: &str) -> Result<Value, String> {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("invalid skill name".into());
+    }
+    let rows = with_store(|store| store.skills_list())?;
+    if !rows.iter().any(|r| r.name == name) {
+        let near = near_names(name, rows.iter().map(|r| r.name.as_str()));
+        return Err(if near.is_empty() {
+            format!("no skill '{name}' — try `tmm skills list`")
+        } else {
+            format!("no skill '{name}' — did you mean: {}?", near.join(", "))
+        });
+    }
+    let root = skill_root(name)?;
+    let skill_md = std::fs::read_to_string(root.join("SKILL.md"))
+        .map_err(|e| format!("'{name}' is in the store but {} cannot be read: {e} — try `tmm skills refresh {name}`", root.join("SKILL.md").display()))?;
+    let listing = managed_files(&root).map_err(|e| format!("'{name}': its files cannot all be read: {e}"))?;
+    let files: Vec<Value> = listing
+        .files
+        .into_iter()
+        .filter(|(rel, _)| rel != "SKILL.md")
+        .map(|(rel, size)| json!({ "rel": rel, "path": root.join(&rel).to_string_lossy(), "size": size }))
+        .collect();
+    // The description is the FRONTMATTER's, read now with the store's own
+    // parser (review P2-C): the truth of the files. The registry row's
+    // description is the declaration the Skills page shows, and may differ.
+    let (_, description) = read_skill_meta(&root);
+    let mut answer = json!({
+        "name": name,
+        "description": description,
+        "root": root.to_string_lossy(),
+        "skill_md": skill_md,
+        "files": files,
+    });
+    if listing.truncated {
+        answer["truncated"] = json!(true);
+    }
+    Ok(answer)
+}
+
+/// Up to five store names that look like `wanted`: one contains the other,
+/// or they share a three-letter start (case-insensitive).
+fn near_names<'a>(wanted: &str, names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let w = wanted.to_ascii_lowercase();
+    let mut near: Vec<String> = names
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            let start = |s: &str| s.chars().take(3).collect::<String>();
+            n.contains(&w) || w.contains(&n) || (w.chars().count() >= 3 && start(&n) == start(&w))
+        })
+        .map(str::to_string)
+        .collect();
+    near.sort();
+    near.truncate(5);
+    near
 }
 
 /// One managed file's text (for the UI preview). Rejects path escapes and
@@ -571,6 +703,214 @@ mod tests {
         let (o, r, gr, sub) = parse_github("https://github.com/owner/repo").unwrap();
         assert_eq!((o.as_str(), r.as_str(), gr.as_str(), sub.as_str()), ("owner", "repo", "main", ""));
         assert!(parse_github("https://gitlab.com/x/y").is_err(), "only github.com supported");
+    }
+
+    #[test]
+    fn skill_load_gives_the_root_the_skill_md_and_every_other_file_as_a_path() {
+        use_test_store();
+        let tag = &uuid::Uuid::new_v4().to_string()[..8];
+        // A bundle skill (SKILL.md + scripts + references) and a flat one.
+        let bundle = std::env::temp_dir().join(format!("tmm-skill-bundle-{tag}"));
+        std::fs::create_dir_all(bundle.join("scripts")).unwrap();
+        std::fs::create_dir_all(bundle.join("references")).unwrap();
+        std::fs::write(bundle.join("SKILL.md"), "---\nname: bundle\ndescription: does bundled things\n---\nRun scripts/x.sh.\n").unwrap();
+        std::fs::write(bundle.join("scripts/x.sh"), "#!/bin/sh\necho x\n").unwrap();
+        std::fs::write(bundle.join("references/a.md"), "# A\n").unwrap();
+        let flat = std::env::temp_dir().join(format!("tmm-skill-flat-{tag}"));
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::write(flat.join("SKILL.md"), "---\nname: flat\n---\nJust text.").unwrap();
+        let (b, f) = (format!("load-bundle-{tag}"), format!("load-flat-{tag}"));
+        // The registry row's description differs from the frontmatter's on
+        // purpose: load answers the FILE's (review P2-C).
+        skill_save(&serde_json::json!({ "name": b, "source": bundle.to_string_lossy(), "description": "the registry's own words" })).unwrap();
+        skill_save(&serde_json::json!({ "name": f, "source": flat.to_string_lossy(), "description": "" })).unwrap();
+
+        let r = skill_load(&b).unwrap();
+        let root = managed_skills_dir().join(&b).canonicalize().unwrap();
+        assert_eq!(r["root"], root.to_string_lossy().as_ref(), "the MANAGED copy, not the source");
+        assert_eq!(r["description"], "does bundled things");
+        assert!(r["skill_md"].as_str().unwrap().contains("Run scripts/x.sh."), "{r}");
+        let files: Vec<(String, String)> = r["files"].as_array().unwrap().iter()
+            .map(|f| (f["rel"].as_str().unwrap().to_string(), f["path"].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(files, vec![
+            ("references/a.md".to_string(), root.join("references/a.md").to_string_lossy().into_owned()),
+            ("scripts/x.sh".to_string(), root.join("scripts/x.sh").to_string_lossy().into_owned()),
+        ], "every other file, as an absolute path; SKILL.md is the body, not a file row");
+        for (_, path) in &files {
+            assert!(std::path::Path::new(path).is_file(), "{path} exists");
+        }
+        assert_eq!(r["files"][1]["size"], 17);
+        assert!(r.get("truncated").is_none());
+
+        let r = skill_load(&f).unwrap();
+        assert_eq!(r["files"], serde_json::json!([]), "a flat skill has nothing besides SKILL.md");
+        assert_eq!(r["skill_md"].as_str().unwrap(), "---\nname: flat\n---\nJust text.");
+        assert_eq!(r["description"], "", "no frontmatter description is an empty one, not the registry's");
+
+        let unknown = skill_load(&format!("load-bundl-{tag}"));
+        assert!(unknown.as_ref().is_err_and(|e| e.contains("did you mean") && e.contains(&b)), "{unknown:?}");
+        let none = skill_load("zzz-nothing-like-it");
+        assert!(none.as_ref().is_err_and(|e| e.contains("try `tmm skills list`")), "{none:?}");
+        for path_like in ["../etc", "a/b", ".", "x y"] {
+            let refused = skill_load(path_like);
+            assert!(refused.as_ref().is_err_and(|e| e == "invalid skill name"), "{path_like}: refused before the store, not merely unknown: {refused:?}");
+            let refused = skill_files(path_like);
+            assert!(refused.as_ref().is_err_and(|e| e == "invalid skill name"), "{path_like}: the preview refuses it too: {refused:?}");
+        }
+
+        // 201 resources in a directory that sorts BEFORE SKILL.md: the body
+        // is still there, SKILL.md still leads the preview's listing, and
+        // the listing says it is truncated.
+        let early = root.join("A");
+        std::fs::create_dir_all(&early).unwrap();
+        for i in 0..=MAX_LISTED_FILES {
+            std::fs::write(early.join(format!("r{i:03}")), "x").unwrap();
+        }
+        let r = skill_load(&b).unwrap();
+        assert!(r["skill_md"].as_str().unwrap().contains("Run scripts/x.sh."));
+        assert_eq!(r["truncated"], true);
+        let preview = skill_files(&b).unwrap();
+        assert_eq!(preview["files"][0]["path"], "SKILL.md", "the preview can always go back to SKILL.md");
+        assert_eq!(preview["truncated"], true);
+        std::fs::remove_dir_all(&early).unwrap();
+
+        let listed = skills_list().unwrap();
+        let row = listed["skills"].as_array().unwrap().iter().find(|s| s["name"] == b.as_str()).unwrap().clone();
+        assert_eq!(row["root"], root.to_string_lossy().as_ref(), "the list leads to the files");
+        assert_eq!(row["description"], "the registry's own words", "the list shows the declaration, as the Skills page does");
+
+        // A multi-line frontmatter description stays as written in JSON.
+        std::fs::write(managed_skills_dir().join(&f).join("SKILL.md"), "---\nname: flat\ndescription: |\n  first line\n  second line\n---\nbody").unwrap();
+        assert_eq!(skill_load(&f).unwrap()["description"], "first line\nsecond line");
+
+        // A RELATIVE TMM_STATE_DB (review P2-B): the roots are still absolute,
+        // resolved on the gateway's side, and name the same directory.
+        let db = std::path::PathBuf::from(std::env::var_os("TMM_STATE_DB").unwrap());
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count().saturating_sub(1));
+        let relative = format!("{up}{}", db.to_string_lossy().trim_start_matches('/'));
+        assert!(!relative.starts_with('/'));
+        struct Restore(std::ffi::OsString);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::env::set_var("TMM_STATE_DB", &self.0);
+            }
+        }
+        let _restore = Restore(db.clone().into_os_string());
+        std::env::set_var("TMM_STATE_DB", &relative);
+        let r = skill_load(&b).unwrap();
+        assert!(r["root"].as_str().unwrap().starts_with('/'), "{r}");
+        assert_eq!(r["root"], root.to_string_lossy().as_ref());
+        assert!(r["files"].as_array().unwrap().iter().all(|f| f["path"].as_str().unwrap().starts_with('/')));
+        let listed = skills_list().unwrap();
+        assert!(listed["skills"].as_array().unwrap().iter().all(|s| s["root"].as_str().unwrap().starts_with('/')), "{listed}");
+        drop(_restore);
+
+        for n in [&b, &f] {
+            let _ = skill_delete(n);
+        }
+        let _ = std::fs::remove_dir_all(&bundle);
+        let _ = std::fs::remove_dir_all(&flat);
+    }
+
+    /// Review P2-A: the listing is bounded per FILE, SKILL.md does not count,
+    /// "truncated" means a further file was really found, and a part that
+    /// cannot be read is an error, never a shorter list.
+    #[test]
+    fn the_file_listing_is_bounded_per_file_and_an_unreadable_part_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("tmm-skill-walk-{}", uuid::Uuid::new_v4()));
+        let make = |sub: &str, n: usize| {
+            let d = dir.join(sub);
+            std::fs::create_dir_all(&d).unwrap();
+            for i in 0..n {
+                std::fs::write(d.join(format!("f{i:03}")), "x").unwrap();
+            }
+        };
+        let fresh = |name: &str| {
+            let root = dir.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+            root
+        };
+        let others = |l: &Listing| l.files.iter().filter(|(rel, _)| rel != "SKILL.md").count();
+
+        let exact = fresh("exact");
+        make("exact", MAX_LISTED_FILES);
+        let l = managed_files(&exact).unwrap();
+        assert_eq!((others(&l), l.truncated), (MAX_LISTED_FILES, false), "exactly the cap is complete");
+        assert_eq!(l.files[0].0, "SKILL.md", "SKILL.md leads and is not counted");
+
+        let over = fresh("over");
+        make("over", MAX_LISTED_FILES + 1);
+        let l = managed_files(&over).unwrap();
+        assert_eq!((others(&l), l.truncated), (MAX_LISTED_FILES, true), "one more is truncated");
+
+        let nested = fresh("nested");
+        make("nested/a", 150);
+        make("nested/b/deep", 51);
+        let l = managed_files(&nested).unwrap();
+        assert_eq!((others(&l), l.truncated), (MAX_LISTED_FILES, true), "the cap runs across directories");
+        let nested_ok = fresh("nested-ok");
+        make("nested-ok/a", 150);
+        make("nested-ok/b/deep", 50);
+        let l = managed_files(&nested_ok).unwrap();
+        assert_eq!((others(&l), l.truncated), (MAX_LISTED_FILES, false));
+        assert!(l.files.iter().any(|(rel, _)| rel == "b/deep/f049"));
+
+        // A directory that sorts before SKILL.md and alone exceeds the cap:
+        // the walk stops inside it, and SKILL.md still leads the listing.
+        let early = fresh("early");
+        make("early/A", MAX_LISTED_FILES + 1);
+        let l = managed_files(&early).unwrap();
+        assert_eq!(l.files[0].0, "SKILL.md", "SKILL.md is taken before the budget runs out");
+        assert_eq!((others(&l), l.truncated), (MAX_LISTED_FILES, true));
+
+        let locked = fresh("locked");
+        make("locked/secret", 1);
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped the unreadable-dir case: root reads a 0000 directory (this is not coverage)");
+        } else {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(locked.join("secret"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            let r = managed_files(&locked);
+            std::fs::set_permissions(locked.join("secret"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(r.as_ref().is_err_and(|e| e.contains("secret")), "an unreadable dir is an error naming it: {:?}", r.as_ref().map(|l| l.files.len()));
+        }
+        assert!(managed_files(&dir.join("absent")).is_err(), "a missing root is not an empty skill");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review round 2, P2-B: a root that cannot be made absolute is an
+    /// error, never the relative path passed off as resolved. A relative
+    /// state path whose cwd is gone cannot be made absolute.
+    #[test]
+    fn a_root_that_cannot_be_made_absolute_is_an_error() {
+        // `std::path::absolute` of a relative path needs the cwd; run the
+        // case in a child whose cwd was removed, so this process's is never
+        // touched.
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "projects::skills::tests::root_resolution_child", "--nocapture", "--test-threads=1", "--ignored"])
+            .env("TMM_SKILL_ROOT_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    }
+
+    #[test]
+    #[ignore = "run only as a child of a_root_that_cannot_be_made_absolute_is_an_error"]
+    fn root_resolution_child() {
+        if std::env::var_os("TMM_SKILL_ROOT_CHILD").is_none() {
+            return;
+        }
+        let gone = std::env::temp_dir().join(format!("tmm-gone-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&gone).unwrap();
+        std::env::set_current_dir(&gone).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        std::env::set_var("TMM_STATE_DB", "rel/state.db");
+        let r = skill_root("absent-skill");
+        assert!(r.as_ref().is_err_and(|e| e.contains("cannot be made absolute")), "{r:?}");
     }
 
     #[test]

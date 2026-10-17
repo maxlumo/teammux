@@ -145,7 +145,9 @@ USAGE (human or agent — self-management):
   tmm prompt show|path                the app-wide agent instructions (<config>/AGENTS.md),
   tmm prompt set <text> | --file <p>  prepended to EVERY managed agent's system prompt at spawn;
   tmm prompt clear                    a running agent picks a change up on restart
-  tmm skills list|delete|refresh <name>   app-managed skill store
+  tmm skills list|delete|refresh <name>   app-managed skill store (list shows each skill's root)
+  tmm skills load <name>              print a skill's SKILL.md and the paths of its other files
+                                      (absolute paths on the gateway's machine)
   tmm skills save --name <n> --source <abs dir|github url>  (imports the files)
   tmm skills import <url|abs dir>     install EVERYTHING a source contains
                                       (a claude plugin/marketplace url works as-is)
@@ -1056,9 +1058,18 @@ async fn main() {
                 let empty = Vec::new();
                 for sk in r.get("skills").and_then(|v| v.as_array()).unwrap_or(&empty) {
                     let s = |k: &str| sk.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                    println!("{} ← {} {}", s("name"), s("source"), s("description"));
+                    // The root last (board #418): the list leads to the files.
+                    // One line per skill, whatever the description holds.
+                    println!("{} ← {} {} · {}", s("name"), s("source"), one_line(s("description")), s("root"));
                 }
             }
+        }
+        ("skills", rest) if rest.first().map(String::as_str) == Some("load") => {
+            // Board #418: the CLI door to a skill, beside each CLI's own
+            // loader — the SKILL.md text and the paths of everything else.
+            let Some(name) = rest.get(1).cloned() else { fail(EXIT_USAGE, "skills load <name>: tmm skills load tmm-cli"); };
+            let r = rpc(&ctx, "skills_load", json!({ "name": name })).await;
+            if ctx.json { println!("{r}"); } else { print!("{}", skill_load_text(&r)); }
         }
         ("skills", rest) if rest.first().map(String::as_str) == Some("import") => {
             // One url installs EVERYTHING it contains — a claude plugin or
@@ -1588,6 +1599,40 @@ fn task_value(t: &tasks::Task) -> Value {
         "started": t.started,
         "cmd": t.cmd,
     })
+}
+
+/// Any run of whitespace, newlines included, as one space: a text listing is
+/// one line per item (board #418 review P2-C). JSON keeps the original.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `tmm skills load` as text (board #418): one header line (name ·
+/// description · root), the SKILL.md body, then every other file as
+/// `<relative>  <absolute path>` — paths, not contents.
+fn skill_load_text(r: &Value) -> String {
+    let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let description = one_line(s("description"));
+    let header: Vec<&str> = [s("name"), description.as_str(), s("root")].into_iter().filter(|p| !p.is_empty()).collect();
+    let mut out = format!("{}\n\n{}", header.join(" · "), s("skill_md"));
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let empty = Vec::new();
+    let files = r.get("files").and_then(|v| v.as_array()).unwrap_or(&empty);
+    if files.is_empty() {
+        out.push_str("\nfiles: none besides SKILL.md\n");
+    } else {
+        out.push_str("\nfiles:\n");
+        for f in files {
+            let g = |k: &str| f.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!("  {}  {}\n", g("rel"), g("path")));
+        }
+    }
+    if r.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
+        out.push_str("  … more files than listed; the root holds them all\n");
+    }
+    out
 }
 
 /// A delete that kept the agent homes says why (board #415): the directory
@@ -2591,7 +2636,7 @@ mod tests {
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team"] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }

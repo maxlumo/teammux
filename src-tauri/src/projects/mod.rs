@@ -47,7 +47,7 @@ pub use rooms::{archive_msg, archived_ids, archived_msgs, unarchive_msgs};
 pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, registry_set_model_effort, team_get, teams_delete, teams_list, teams_save};
 pub(crate) use registry::{with_registry_mcp, with_registry_skills};
 pub use managed::{agent_remove, deliver_chat_line, is_managed_in, joined_team, managed_home, member_of, spawned_by, team_of};
-pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_read, skill_refresh, skill_save, skills_list};
+pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_load, skill_read, skill_refresh, skill_save, skills_list};
 pub use capture::{SESSION_SETTLE_SECS, capture_loop, capture_once};
 pub use projects::{Refused, adopt, auto_adopt_once, create, delete, down, list, project_for_session, rename, set_archived, set_autostart, up, up_agent};
 

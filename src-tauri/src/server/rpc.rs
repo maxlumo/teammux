@@ -525,7 +525,7 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
         | "global_prompt_get" | "global_prompt_set"
         | "teams_list" | "teams_save" | "teams_delete"
         | "skills_list" | "skills_save" | "skills_delete" | "skills_refresh" | "skills_read"
-        | "skills_import" | "skills_files" | "skills_file"
+        | "skills_import" | "skills_files" | "skills_file" | "skills_load"
         | "mcp_list" | "mcp_save" | "mcp_delete" => {
             handle_project_request(req.method.as_str(), p)
         }
@@ -641,6 +641,7 @@ fn handle_project_request(method: &str, p: &serde_json::Value) -> Result<serde_j
         "skills_read" => need_id("name").and_then(|n| projects::skill_read(&n)),
         "skills_import" => require_str(p, "source").and_then(|s| projects::skill_import(s)),
         "skills_files" => need_id("name").and_then(|n| projects::skill_files(&n)),
+        "skills_load" => need_id("name").and_then(|n| projects::skill_load(&n)),
         "skills_file" => need_id("name").and_then(|n| {
             require_str(p, "path").and_then(|f| projects::skill_file(&n, f))
         }),

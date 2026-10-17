@@ -86,6 +86,7 @@ tmm registry list|save|delete        agent definitions (--backend --system --mod
 tmm teams list|save|delete           named agent teams (members + roles)
 tmm prompt show|path|set|clear       the app-wide instructions (<config>/AGENTS.md)
 tmm skills list|save|delete|refresh|import   app-owned skill store
+tmm skills load <name>               SKILL.md + the absolute paths of its other files
 tmm mcp list|save|delete             central MCP server defs (RPC half)
 
 # background tasks — LOCAL tmux only, no server, never exits 2
@@ -475,6 +476,7 @@ a teammate:
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |
 | Project | `tmm project up\|down\|archive\|unarchive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action); recycle bin: Restore (#415) |
 | Board hand-off | `tmm board assign <id> <name\|->` | Board detail: the assignee picker (its first row clears it) |
+| Skill | `tmm skills list\|load <name>` (root, SKILL.md, the other files' paths) | Agents > Skills: the list and the skill editor's file preview (#418) |
 
 **`tmm board assign` (board #367, 2026-10-15).** Found reassigning #363–#366
 away from an agent that had been removed: `take` claims an issue for the
