@@ -34,6 +34,24 @@ const WS_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// port that listens on 0.0.0.0 by default.
 const PRE_AUTH_MAX_MESSAGE_BYTES: usize = 8 * 1024;
 const AUTH_DEADLINE_SECS: u64 = 10;
+/// The keepalive: a ping every 15 s; no pong for 45 s tears the connection down.
+const PING_INTERVAL_SECS: u64 = 15;
+const PING_DEADLINE_SECS: u64 = 45;
+
+/// (ping interval, ping deadline, auth deadline) in seconds: the constants
+/// above. A test shortens them (`TestTimings`), so the disconnect reasons
+/// those deadlines give are pinned without a minute of waiting (board #417);
+/// a build that ships has no override.
+#[cfg(not(test))]
+fn timings() -> (u64, u64, u64) {
+    (PING_INTERVAL_SECS, PING_DEADLINE_SECS, AUTH_DEADLINE_SECS)
+}
+#[cfg(test)]
+static TEST_TIMINGS: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((PING_INTERVAL_SECS, PING_DEADLINE_SECS, AUTH_DEADLINE_SECS));
+#[cfg(test)]
+fn timings() -> (u64, u64, u64) {
+    *TEST_TIMINGS.lock().unwrap()
+}
 
 /// Configure aggressive TCP keepalive on a freshly accepted connection.
 ///
@@ -308,6 +326,9 @@ where
     // is gone).
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_tx = shutdown.clone();
+    // Who raised `shutdown` first (board #417): the disconnect line names it.
+    let torn_down_by: Arc<std::sync::Mutex<Option<&'static str>>> = Arc::new(std::sync::Mutex::new(None));
+    let torn_down_by_send = torn_down_by.clone();
     // Snapshot in-flight counter shared between the subscription loop
     // (producer, increments + skips ticks while > 0) and the send task
     // (consumer, decrements after ws.send resolves).
@@ -360,6 +381,7 @@ where
         // Channel closed OR ws.send failed. Either way, whoever's still
         // writing to out_tx should stop as soon as possible — tell the
         // receiver to bail.
+        torn_down_by_send.lock().unwrap().get_or_insert("our send failed");
         shutdown_tx.notify_waiters();
     });
 
@@ -384,20 +406,21 @@ where
     // haven't seen a PONG in PING_DEADLINE_SECS, assume the link is dead
     // and tell the connection to tear down.
     let last_pong_at = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    const PING_INTERVAL_SECS: u64 = 15;
-    const PING_DEADLINE_SECS: u64 = 45;
+    let (ping_interval_secs, ping_deadline_secs, auth_deadline_secs) = timings();
     let ping_handle = {
         let out_tx = out_tx.clone();
         let last_pong_at = last_pong_at.clone();
         let shutdown_for_ping = shutdown.clone();
+        let torn_down_by = torn_down_by.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(PING_INTERVAL_SECS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(ping_interval_secs));
             tick.tick().await; // discard immediate first tick
             loop {
                 tick.tick().await;
                 let elapsed = last_pong_at.lock().unwrap().elapsed().as_secs();
-                if elapsed > PING_DEADLINE_SECS {
-                    eprintln!("💀 ping deadline exceeded ({}s > {}s) conn_id={}; tearing down", elapsed, PING_DEADLINE_SECS, conn_id);
+                if elapsed > ping_deadline_secs {
+                    eprintln!("💀 ping deadline exceeded ({}s > {}s) conn_id={}; tearing down", elapsed, ping_deadline_secs, conn_id);
+                    torn_down_by.lock().unwrap().get_or_insert("our ping deadline (no pong)");
                     shutdown_for_ping.notify_waiters();
                     return;
                 }
@@ -408,19 +431,28 @@ where
         })
     };
 
-    let auth_deadline = tokio::time::sleep(std::time::Duration::from_secs(AUTH_DEADLINE_SECS));
+    let auth_deadline = tokio::time::sleep(std::time::Duration::from_secs(auth_deadline_secs));
     tokio::pin!(auth_deadline);
+    // Why this connection ended, for the disconnect line (board #417). Set
+    // where the loop is left; none set = the peer ended the stream.
+    let mut why: Option<String> = None;
     while let Some(msg) = tokio::select! {
         m = receiver.next() => m,
-        _ = shutdown.notified() => None,  // send task died — tear down
+        _ = shutdown.notified() => {
+            // The send task died, or our ping deadline fired.
+            why = Some(torn_down_by.lock().unwrap().unwrap_or("our send failed").to_string());
+            None
+        }
         _ = &mut auth_deadline, if !authenticated => {
-            eprintln!("⏱️  no auth within {}s from {} conn_id={}; closing", AUTH_DEADLINE_SECS, addr, conn_id);
+            eprintln!("⏱️  no auth within {}s from {} conn_id={}; closing", auth_deadline_secs, addr, conn_id);
+            why = Some("our auth deadline".into());
             None
         }
     } {
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
+                why = Some(read_error_reason(&e));
                 // Annotate with conn_id + how long the connection had been
                 // up. This is the path that fires on TCP RST / network
                 // teardown; the "uptime" number is the most useful clue
@@ -441,6 +473,7 @@ where
             Message::Text(text) => {
                 if !authenticated && text.len() > PRE_AUTH_MAX_MESSAGE_BYTES {
                     eprintln!("❌ {} byte frame before auth from {} conn_id={}; closing", text.len(), addr, conn_id);
+                    why = Some("oversized frame before auth".into());
                     break;
                 }
                 if let Some(ref mut rc) = recv_cipher {
@@ -451,7 +484,7 @@ where
                     let ct = base64::engine::general_purpose::STANDARD.decode(text.as_bytes()).unwrap_or_default();
                     match rc.decrypt(&ct) {
                         Ok(pt) => Some(String::from_utf8_lossy(&pt).to_string()),
-                        Err(_) => { eprintln!("❌ Decrypt failed (text path) from {} conn_id={}", addr, conn_id); break; }
+                        Err(_) => { eprintln!("❌ Decrypt failed (text path) from {} conn_id={}", addr, conn_id); why = Some("decrypt failed".into()); break; }
                     }
                 } else {
                     Some(text.to_string())
@@ -462,14 +495,15 @@ where
                 // (optionally deflated) JSON. Auth must already be set up.
                 let Some(rc) = recv_cipher.as_mut() else {
                     eprintln!("❌ Binary frame before auth from {} conn_id={}", addr, conn_id);
+                    why = Some("binary frame before auth".into());
                     break;
                 };
                 match rc.decrypt(bytes) {
                     Ok(pt) => match decode_wire_payload(&pt) {
                         Ok(s) => Some(s),
-                        Err(e) => { eprintln!("❌ Wire decode failed from {} conn_id={}: {}", addr, conn_id, e); break; }
+                        Err(e) => { eprintln!("❌ Wire decode failed from {} conn_id={}: {}", addr, conn_id, e); why = Some("wire decode failed".into()); break; }
                     },
-                    Err(_) => { eprintln!("❌ Decrypt failed (binary path) from {} conn_id={} bytes_len={}", addr, conn_id, bytes.len()); break; }
+                    Err(_) => { eprintln!("❌ Decrypt failed (binary path) from {} conn_id={} bytes_len={}", addr, conn_id, bytes.len()); why = Some("decrypt failed".into()); break; }
                 }
             }
             _ => None,
@@ -494,6 +528,7 @@ where
                     if req.method != "auth" {
                         let r = Response::err(req.id, ERR_AUTH, "auth required — send {\"method\":\"auth\",\"params\":{\"token\":\"...\"}} first".into());
                         let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
+                        why = Some("a request before auth".into());
                         break;
                     }
                     let client_nonce_hex = req.params.get("client_nonce").and_then(|v| v.as_str()).unwrap_or("");
@@ -507,6 +542,7 @@ where
                         if client_nonce_bytes.len() != 16 {
                             let r = Response::err(req.id, ERR_AUTH, "invalid client_nonce".into());
                             let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
+                            why = Some("auth refused (invalid client_nonce)".into());
                             break;
                         }
                         let mut cn = [0u8; 16];
@@ -562,6 +598,7 @@ where
                             drop(tracker);
                             let r = Response::err(req.id, ERR_AUTH, "invalid proof".into());
                             let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
+                            why = Some("auth refused (invalid proof)".into());
                             break;
                         }
                     } else if provided_token_matches(plain_token, &token) {
@@ -585,6 +622,7 @@ where
                         eprintln!("🚫 Auth failed from {} (attempt {})", addr, fails);
                         let r = Response::err(req.id, ERR_AUTH, "invalid token".into());
                         let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
+                        why = Some("auth refused (invalid token)".into());
                         break;
                     }
                 }
@@ -667,7 +705,13 @@ where
         }
         // Control frames fall through to here.
         match msg {
-            Message::Close(_) => break,
+            Message::Close(frame) => {
+                why = Some(match frame {
+                    Some(f) => format!("peer close frame ({})", u16::from(f.code)),
+                    None => "peer close frame".into(),
+                });
+                break;
+            }
             Message::Ping(_) => {
                 // Browsers don't usually send WS PINGs (they only reply to
                 // ours). If some non-browser client does, we just ignore it
@@ -768,8 +812,171 @@ where
         }
     }
     let up = conn_started_at.elapsed().as_secs();
+    let why = why.unwrap_or_else(|| "peer ended the stream (no close frame)".into());
+    #[cfg(test)]
+    DISCONNECTS.lock().unwrap().push((addr.port(), why.clone()));
     println!(
-        "👋 Client disconnected: {} (conn_id={}, authed={}, up={}s)",
-        addr, conn_id, authenticated, up
+        "👋 Client disconnected: {} (conn_id={}, authed={}, up={}s, reason={})",
+        addr, conn_id, authenticated, up, why
     );
+}
+
+/// The disconnect reason for a read error (board #417): a TCP reset or
+/// timeout from the peer's side of the network, or a protocol error.
+fn read_error_reason(e: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::error::{Error, ProtocolError};
+    match e {
+        Error::Io(io) => match io.kind() {
+            std::io::ErrorKind::ConnectionReset => "TCP reset by peer".into(),
+            std::io::ErrorKind::TimedOut => "TCP timed out".into(),
+            std::io::ErrorKind::ConnectionAborted => "TCP aborted".into(),
+            std::io::ErrorKind::BrokenPipe => "TCP broken pipe".into(),
+            k => format!("IO error ({k:?})"),
+        },
+        Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => "peer reset without a close handshake".into(),
+        Error::ConnectionClosed | Error::AlreadyClosed => "connection already closed".into(),
+        other => format!("protocol error ({other})"),
+    }
+}
+
+/// Test-only: every disconnect line's (peer port, reason), in order.
+#[cfg(test)]
+static DISCONNECTS: std::sync::Mutex<Vec<(u16, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+mod disconnect_reason_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::{self, error::ProtocolError, protocol::frame::coding::CloseCode, protocol::CloseFrame};
+
+    #[test]
+    fn a_read_error_names_what_happened_on_the_wire() {
+        let io = |k| tungstenite::Error::Io(std::io::Error::from(k));
+        assert_eq!(read_error_reason(&io(std::io::ErrorKind::ConnectionReset)), "TCP reset by peer");
+        assert_eq!(read_error_reason(&io(std::io::ErrorKind::TimedOut)), "TCP timed out");
+        assert_eq!(read_error_reason(&tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake)), "peer reset without a close handshake");
+        assert!(read_error_reason(&tungstenite::Error::Protocol(ProtocolError::HandshakeIncomplete)).starts_with("protocol error ("));
+    }
+
+    /// Board #417: the disconnect line names WHY, through a real server: a
+    /// close frame, a refused token, a TCP reset (SO_LINGER 0) and a FIN
+    /// with no close frame are four different reasons.
+    #[tokio::test]
+    async fn the_disconnect_line_names_the_reason() {
+        use futures_util::{SinkExt, StreamExt};
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        tokio::spawn(async move {
+            let _ = crate::server::start_with_socket("127.0.0.1", port, "tok-417", "m-417", None, None, None, 5).await;
+        });
+        let connect = || async move {
+            for _ in 0..100 {
+                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    return s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("the server never listened");
+        };
+        let login = |token: &'static str| async move {
+            let tcp = connect().await;
+            let local = tcp.local_addr().unwrap().port();
+            let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp).await.unwrap();
+            let _nonce = ws.next().await.unwrap().unwrap();
+            ws.send(tungstenite::Message::Text(format!(r#"{{"id":1,"method":"auth","params":{{"token":"{token}"}}}}"#).into())).await.unwrap();
+            let reply = ws.next().await.unwrap().unwrap();
+            (ws, local, reply.to_text().unwrap_or("").to_string())
+        };
+        let reason_of = |local: u16| async move {
+            for _ in 0..100 {
+                if let Some((_, why)) = DISCONNECTS.lock().unwrap().iter().find(|(p, _)| *p == local) {
+                    return why.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("no disconnect line for peer port {local}");
+        };
+
+        let (mut ws, a, reply) = login("tok-417").await;
+        assert!(reply.contains("\"authenticated\":true"), "{reply}");
+        ws.send(tungstenite::Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() }))).await.unwrap();
+        assert_eq!(reason_of(a).await, "peer close frame (1000)");
+
+        let (_ws, b, reply) = login("tok-wrong").await;
+        assert!(reply.contains("invalid token"), "{reply}");
+        assert_eq!(reason_of(b).await, "auth refused (invalid token)");
+
+        let (ws, c, _) = login("tok-417").await;
+        ws.get_ref().set_linger(Some(std::time::Duration::ZERO)).unwrap();
+        drop(ws);
+        assert_eq!(reason_of(c).await, "TCP reset by peer");
+
+        let (ws, d, _) = login("tok-417").await;
+        drop(ws);
+        let why = reason_of(d).await;
+        assert!(why == "peer reset without a close handshake" || why == "peer ended the stream (no close frame)", "{why}");
+    }
+
+    /// Board #417, validator: the two reasons OUR deadlines give — the ping
+    /// deadline is what 142 of clawdbjs's 392 tunnel teardowns were. With the
+    /// timings shortened (ping every 1 s, no pong for 2 s, 1 s to log in), a
+    /// client that logs in and then never reads (so it never answers a ping)
+    /// ends on "our ping deadline (no pong)", and one that never logs in on
+    /// "our auth deadline". Restored on drop, whatever the outcome.
+    #[tokio::test]
+    async fn our_two_deadlines_name_themselves() {
+        use futures_util::{SinkExt, StreamExt};
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                *TEST_TIMINGS.lock().unwrap() = (PING_INTERVAL_SECS, PING_DEADLINE_SECS, AUTH_DEADLINE_SECS);
+            }
+        }
+        let _restore = Restore;
+        *TEST_TIMINGS.lock().unwrap() = (1, 2, 1);
+        let _tmux = crate::tmux::test_support::GlobalSocket::hold();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        tokio::spawn(async move {
+            let _ = crate::server::start_with_socket("127.0.0.1", port, "tok-417", "m-417", None, None, None, 5).await;
+        });
+        let connect = || async move {
+            for _ in 0..100 {
+                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    return s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("the server never listened");
+        };
+        let reason_of = |local: u16| async move {
+            for _ in 0..200 {
+                if let Some((_, why)) = DISCONNECTS.lock().unwrap().iter().find(|(p, _)| *p == local) {
+                    return why.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("no disconnect line for peer port {local}");
+        };
+        // Logged in, then deaf: nothing reads, so no ping is answered.
+        let tcp = connect().await;
+        let deaf = tcp.local_addr().unwrap().port();
+        let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp).await.unwrap();
+        let _nonce = ws.next().await.unwrap().unwrap();
+        ws.send(tungstenite::Message::Text(r#"{"id":1,"method":"auth","params":{"token":"tok-417"}}"#.into())).await.unwrap();
+        let reply = ws.next().await.unwrap().unwrap();
+        assert!(reply.to_text().unwrap_or("").contains("\"authenticated\":true"), "{reply:?}");
+        // Never logs in.
+        let tcp = connect().await;
+        let silent = tcp.local_addr().unwrap().port();
+        let (mut quiet, _) = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp).await.unwrap();
+        let _nonce = quiet.next().await.unwrap().unwrap();
+        assert_eq!(reason_of(silent).await, "our auth deadline");
+        assert_eq!(reason_of(deaf).await, "our ping deadline (no pong)");
+        drop((ws, quiet));
+    }
 }

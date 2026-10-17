@@ -56,6 +56,47 @@ reference to a session, pane, room, issue or project carries its `ServerId`
   it gets us: a 50 MB `fs_download` frame can be in flight for tens of
   seconds and the keepalive is completely unaffected — PING/PONG goes
   through the WS framing layer, not through our JSON-RPC mutex.
+- **The gateway log says when, and why a connection ended** (board #417,
+  2026-10-17). Every line a gateway process writes (`gateway::start`: the
+  `server` binary and `tmm gateway start`, foreground or `--service`)
+  starts with its local time, `YYYY-MM-DD HH:MM:SS.mmm`: fds 1 and 2 are
+  pointed at a pipe and one thread per stream stamps each line, so our
+  own lines, a panic message and a child's output are all stamped by one
+  mechanism (`stamp_output_lines`). launchd keeps a line as it is given,
+  and clawdbjs's `server.log` had 7152 lines with no time, so no drop
+  could be matched to the moment the owner saw it. A stream that IS
+  systemd's journal is left alone, because the journal stamps each line
+  itself. `JOURNAL_STREAM` names that stream's `device:inode`, and only an fd
+  whose fstat matches is skipped: the variable alone proves nothing, since a
+  redirected child can inherit it (review P2-B). A line longer than 16 KiB is
+  written in pieces, each after the first marked `+ `, so an unterminated
+  child stream is never held without bound (P2-A). The stamper fails OPEN
+  (P1): its reader thread runs before the live fd is replaced, and any
+  failure leaves the stream as it was with nothing of ours left open. At a
+  normal exit or `process::exit` the streams are drained for at most a
+  second; a SIGKILL or a fatal signal runs no atexit handler, so what was
+  still in the pipe then is lost. Every
+  `👋 Client disconnected` line also names `reason=`:
+  - `peer close frame (code)`
+  - `peer reset without a close handshake`
+  - `TCP reset by peer`, `TCP timed out`
+  - `our ping deadline (no pong)`, `our auth deadline`, `our send failed`
+  - `auth refused (…)`, `decrypt failed`, or the other frame errors
+  Before this, the cause had to be inferred from a separate `❌ Read error`
+  line or a `💀 ping deadline` line, matched to the connection by conn_id.
+  Pinned by `every_line_of_a_gateway_process_starts_with_its_time` (a real
+  child process: both streams, the last line before `exit`, a last line
+  with no newline), `only_the_stream_that_is_the_journal_is_left_unstamped`
+  (JOURNAL_STREAM naming the child's real stdout pipe; a value naming
+  neither), `a_stamper_that_cannot_start_leaves_the_streams_as_they_were`
+  (an injected thread-spawn failure: lines unstamped in their sink, no fd
+  left open, the same exit), `a_long_or_unterminated_line_is_written_in_bounded_pieces`
+  `the_disconnect_line_names_the_reason` (a real server: a close frame,
+  a refused token, a TCP reset, a FIN with no close frame) and
+  `our_two_deadlines_name_themselves` (the timings shortened in the test only
+  — a ping every 1 s, no pong for 2 s, 1 s to log in — a client that logs in
+  and never reads ends on `our ping deadline (no pong)`, one that never logs
+  in on `our auth deadline`; a build that ships keeps 15 s, 45 s and 10 s).
 - RPC timeout is 6 s by default; long-running methods (`fs_download`,
   `fs_upload`) pass `60_000` at the call site.
 - **3-consecutive-RPC-timeout disconnect is gated on `pending.size === 0`
