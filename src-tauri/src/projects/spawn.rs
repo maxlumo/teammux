@@ -2514,6 +2514,16 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // config.toml (symlinked into the home) cannot make it queue.
         assert!(steer.contains(r#"-c 'tui.keymap.composer.submit="enter"'"#), "{steer}");
         assert!(steer.contains(r#"-c 'tui.keymap.composer.queue="tab"'"#), "{steer}");
+
+        // dsh (board #410): the mode is a file its plugin reads at the start
+        // of each run; a restart re-renders it from the definition.
+        let mut d = def("dsh");
+        let mode = || std::fs::read_to_string(dir.join("dsh/tmm/input_mode")).unwrap();
+        crate::backends::dsh::render_dsh(&d, "tester", &dir, &prompt, &[]).unwrap();
+        assert_eq!(mode(), "queue\n", "the default");
+        d.input_mode = "steer".into();
+        crate::backends::dsh::render_dsh(&d, "tester", &dir, &prompt, &[]).unwrap();
+        assert_eq!(mode(), "steer\n");
     }
 
     /// Board #245: `steer` is accepted only where the switch was measured;
@@ -2522,7 +2532,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     fn steer_is_offered_only_where_it_was_measured() {
         use crate::backends::Backend;
         let switching: Vec<&str> = Backend::ALL.iter().filter(|b| b.switches_input_mode()).map(|b| b.name()).collect();
-        assert_eq!(switching, ["kiro", "codex"]);
+        assert_eq!(switching, ["kiro", "codex", "dsh"], "dsh: measured through the real dsh, board #410");
         for b in Backend::ALL {
             assert!(super::super::models::validate_input_mode(b.name(), "queue").is_ok());
             assert_eq!(super::super::models::validate_input_mode(b.name(), "steer").is_ok(), b.switches_input_mode(), "{}", b.name());

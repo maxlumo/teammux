@@ -415,6 +415,15 @@ impl AgentNotificationHub {
                     if crate::projects::telemetry::numbered_write_failed() {
                         return Err(Consume::Retain("its prompt did not reach the log".into()));
                     }
+                    // A prompt settled: for a CLI that loses typed text (dsh,
+                    // board #410), its run is up, and a steer-mode reader may
+                    // now claim the pane — lines held through the cold start
+                    // (or behind the previous steer's echo) are typed now,
+                    // by the one readiness predicate, outside the turn-fact
+                    // lock. In queue mode the shell is not ready: nothing.
+                    if crate::backends::Backend::parse(&envelope.backend).is_some_and(|b| b.loses_busy_input()) {
+                        crate::projects::delivery::flush(&session, &window);
+                    }
                 }
             }
             // A turn just opened: sniff while the pane is fresh.
@@ -2075,7 +2084,10 @@ mod tests {
     /// `fail` (exit 1, nothing published),
     /// `hold` (1.5 s, inside the plugin's 3 s bound), `hang` (10 s, past every
     /// bound), `late` (fail now, publish 4 s later from a child that outlives
-    /// the invoker); this inbox and its hub; `deliver_chat_line`.
+    /// the invoker); this inbox and its hub; `deliver_chat_line`. Like dsh,
+    /// the stand-in AWAITS the plugin's `apply` before the turn opens
+    /// (`applied-<n>` once it returned); `factory-hold` keeps the fake
+    /// message factory loading until `factory-go` (board #410).
     struct DshRig {
         ws: PathBuf,
         root: PathBuf,
@@ -2101,6 +2113,11 @@ mod tests {
 
     impl DshRig {
         fn start() -> Option<DshRig> {
+            Self::start_in("queue")
+        }
+        /// The rig with the given input mode (board #410) rendered into the
+        /// agent's recipe and home, as spawn does.
+        fn start_in(mode: &str) -> Option<DshRig> {
             use crate::backends::dsh::tests::{pane_id, wait_for, which};
             crate::projects::tests::use_test_store();
             let (zsh, node) = (which("zsh")?, which("node")?);
@@ -2112,7 +2129,27 @@ mod tests {
             for d in [&dsh_home, &zdot, &bin] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            std::fs::write(home.join("launch.json"), json!({"backend": "dsh", "input_mode": "queue", "cmd": "x"}).to_string()).unwrap();
+            std::fs::write(home.join("launch.json"), json!({"backend": "dsh", "input_mode": mode, "cmd": "x"}).to_string()).unwrap();
+            std::fs::create_dir_all(dsh_home.join("tmm")).unwrap();
+            std::fs::write(dsh_home.join("tmm/input_mode"), format!("{mode}\n")).unwrap();
+            // dsh's message factory where the plugin looks for it: next to
+            // the program it runs as (`realpath(argv[1])`, here driver.mjs).
+            // Same contract as @deepseek-ai/dsh-llm's createUserMessage: a
+            // fresh id, role user, frozen. With `factory-hold` its module
+            // finishes loading only once `factory-go` exists (review P1-C).
+            let llm = ws.join("node_modules/@deepseek-ai/dsh-llm");
+            std::fs::create_dir_all(llm.join("lib")).unwrap();
+            std::fs::write(llm.join("package.json"), r#"{"name":"@deepseek-ai/dsh-llm","version":"0.0.0-fake","type":"module","exports":{".":{"default":"./lib/index.js"}}}"#).unwrap();
+            std::fs::write(
+                llm.join("lib/index.js"),
+                format!(
+                    "import {{ randomUUID }} from 'node:crypto'\nimport fs from 'node:fs'\nconst dir = {dir}\n\
+                     if (fs.existsSync(`${{dir}}/factory-hold`)) while (!fs.existsSync(`${{dir}}/factory-go`)) await new Promise((r) => setTimeout(r, 30))\n\
+                     export function createUserMessage(input) {{ return Object.freeze({{ ...input, id: randomUUID(), role: 'user' }}) }}\n",
+                    dir = serde_json::to_string(&ws.to_string_lossy()).unwrap(),
+                ),
+            )
+            .unwrap();
             let root = std::env::temp_dir().join(format!("tmm-dsh-hub-{}", uuid::Uuid::new_v4()));
             let hub = AgentNotificationHub::load_at(root.clone());
             hub.ensure_helper().unwrap();
@@ -2147,13 +2184,21 @@ mod tests {
                      const task = process.argv[process.argv.indexOf('--') + 1]\n\
                      const n = fs.readdirSync(dir).filter((f) => f.startsWith('task-')).length + 1\n\
                      fs.writeFileSync(`${{dir}}/task-${{n}}`, task)\n\
-                     let h\np.apply({{ on: (e, f) => {{ if (e === 'session/event') h = f }} }}, {{}})\n\
-                     const root = {{ header: {{ id: 'session-e2e-1' }} }}\n\
+                     let h\nconst root = {{ header: {{ id: 'session-e2e-1' }} }}\n\
+                     process.on('SIGINT', () => process.exit(130))\n\
+                     const queued = [], seen = new Set(), steered = []\n\
+                     const agent = {{ session: root, steer(m) {{ if (m?.role !== 'user' || typeof m.id !== 'string' || m.source?.kind !== 'user' || seen.has(m.id) || !Object.isFrozen(m)) throw new Error('not a UserMessage'); seen.add(m.id); queued.push(m) }} }}\n\
+                     await p.apply({{ on: (e, f) => {{ if (e === 'session/event') h = f }}, get: (k) => (k === 'agents' ? {{ roots: () => [agent] }} : undefined) }}, {{}})\n\
+                     fs.writeFileSync(`${{dir}}/applied-${{n}}`, '')\n\
+                     while (fs.existsSync(`${{dir}}/coldstart`) && !fs.existsSync(`${{dir}}/started-${{n}}`)) await new Promise((r) => setTimeout(r, 30))\n\
                      h(root, {{ type: 'turn/start', data: {{ turn: n }} }})\n\
                      h(root, {{ type: 'user/message', data: {{ role: 'user', source: {{ kind: 'user' }}, content: [{{ type: 'text', text: task }}] }} }})\n\
-                     const t = setInterval(() => {{ if (fs.existsSync(`${{dir}}/release-${{n}}`)) {{ clearInterval(t)\n\
-                     h(root, {{ type: 'assistant/message', data: {{ message: {{ role: 'assistant', content: [{{ type: 'text', text: `done ${{n}}` }}] }} }} }})\n\
-                     h(root, {{ type: 'turn/end', data: {{ turn: n, reason: {{ kind: 'completed' }} }} }})\nprocess.exit(0) }} }}, 30)\n",
+                     const t = setInterval(() => {{ while (queued.length) {{ const m = queued.shift(); steered.push(m.content[0].text); fs.writeFileSync(`${{dir}}/steer-${{n}}-${{steered.length}}`, m.content[0].text); h(root, {{ type: 'user/message', data: m }}) }}\n\
+                     if (fs.existsSync(`${{dir}}/release-${{n}}`)) {{ clearInterval(t)\n\
+                     h(root, {{ type: 'assistant/message', data: {{ message: {{ role: 'assistant', content: [{{ type: 'text', text: steered.length ? `done ${{n}} +${{steered.join(' | ')}}` : `done ${{n}}` }}] }} }} }})\n\
+                     h(root, {{ type: 'turn/end', data: {{ turn: n, reason: {{ kind: 'completed' }} }} }})\n\
+                     fs.writeFileSync(`${{dir}}/ended-${{n}}`, String(process.pid))\n\
+                     const bye = setInterval(() => {{ if (!fs.existsSync(`${{dir}}/linger`) || fs.existsSync(`${{dir}}/exit-${{n}}`)) {{ clearInterval(bye); process.exit(0) }} }}, 30) }} }}, 30)\n",
                     plugin = serde_json::to_string(&plugin.to_string_lossy()).unwrap(),
                     dir = serde_json::to_string(&ws.to_string_lossy()).unwrap(),
                 ),
@@ -2225,6 +2270,26 @@ mod tests {
                 assert_eq!(parts.len(), 3, "{name}: an unsequenced name for tmm_seq {seq}");
                 assert_eq!(parts[1], format!("{seq:020}"), "{name}: named by another number than its tmm_seq {seq}");
             }
+        }
+        /// Type into the pane as a person does (no delivery, no receipt).
+        fn type_keys(&self, text: &str, enter: bool) {
+            crate::tmux::run_tmux(&["send-keys", "-t", &self.target, "-l", text]).unwrap();
+            if enter {
+                crate::tmux::send_keys(&self.target, "Enter", false).unwrap();
+            }
+        }
+        fn screen(&self) -> String {
+            crate::tmux::capture_pane_plain(&self.target, Some(200)).unwrap_or_default()
+        }
+        fn steer_ready(&self) -> bool {
+            self.ws.join(".tmm/agents/d1/dsh/tmm/steer-ready").is_file()
+        }
+        fn steers(&self, n: usize) -> Vec<String> {
+            (1..)
+                .map(|k| self.ws.join(format!("steer-{n}-{k}")))
+                .take_while(|f| f.is_file())
+                .map(|f| std::fs::read_to_string(f).unwrap())
+                .collect()
         }
         fn inbox_has(&self, event: &str) -> bool {
             self.inbox().iter().any(|p| p["hook_event_name"] == event)
@@ -2793,6 +2858,533 @@ mod tests {
         assert_eq!(rows().last().map(|r| r.0.clone()), Some("notif".to_string()), "nothing reopened the turn");
         rig.mode("prompt", None);
         crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #410, steer mode end to end — the generated plugin under the
+    /// real pane, production delivery, the real helper and inbox, a fake
+    /// dsh loop that claims steered input at its next step:
+    /// * a line delivered while run 1's root turn is open is TYPED (the
+    ///   reader's claim is the one readiness predicate), taken by
+    ///   `Agent.steer` as a real UserMessage, echoed as a prompt; its sender
+    ///   joins the turn's reply edge, its receipt is settled;
+    /// * the next one is held while the previous steer has not echoed
+    ///   (one in flight), then typed by the prompt-settled flush;
+    /// * the Stop answers ALL three senders once, in one run (one dsh
+    ///   process), and the reply reflects the steered lines;
+    /// * in a second run, a line delivered during the cold start (before the
+    ///   reader claims the pane) is HELD, then steered once the run's own
+    ///   prompt settled; a multi-line message arrives as ONE line (bracketed
+    ///   paste).
+    #[test]
+    fn steered_lines_join_the_running_turn_and_every_sender_gets_the_reply() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:00] lead: @d1 one"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        wait_for("the steer reader's claim", 10, || rig.steer_ready());
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:01] reviewer: @d1 steer two"));
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:01] validator: @d1 steer three"));
+        consume_until("both steers", &|| rig.steers(1).len() == 2 && crate::projects::telemetry::pending_receipts(&session, "d1").is_empty() && rig.held() == 0);
+        assert_eq!(rig.steers(1), ["[tmm chat 2026-10-17 05:01] reviewer: @d1 steer two", "[tmm chat 2026-10-17 05:01] validator: @d1 steer three"]);
+        assert_eq!(rig.tasks(), 1, "one run: nothing became a new dsh process");
+        rig.release(1);
+        consume_until("run 1's reply", &|| !rig.posts().is_empty());
+        let (agent, body, to) = rig.posts()[0].clone();
+        assert_eq!(agent, "d1");
+        assert!(body.starts_with("done 1 +") && body.contains("steer two") && body.contains("steer three"), "{body}");
+        assert_eq!(to, ["lead", "reviewer", "validator"], "every sender of the turn, once");
+        let prompts = crate::projects::telemetry::durable_prompts(&session);
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts.iter().all(|(via, _)| via == "app"), "each echo settled its own receipt: {prompts:?}");
+        consume_until("the shell back", &|| rig.ready() && !rig.busy());
+
+        // Run 2: a line during the cold start (the fake waits for
+        // `started-2` before its turn opens) is held, then steered.
+        std::fs::write(rig.ws.join("coldstart"), "").unwrap();
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:02] lead: @d1 two"));
+        wait_for("run 2", 10, || rig.tasks() == 2);
+        assert!(!rig.steer_ready(), "no claim before the root turn opens");
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:02] reviewer: @d1 a long one\nwith a second line"));
+        assert_eq!(rig.held(), 1, "nothing is typed into a TTY nobody reads");
+        rig.hub.consume_inbox();
+        assert_eq!(rig.held(), 1);
+        std::fs::write(rig.ws.join("started-2"), "").unwrap();
+        consume_until("the held line steered", &|| rig.steers(2).len() == 1);
+        assert_eq!(rig.steers(2), ["[tmm chat 2026-10-17 05:02] reviewer: @d1 a long one\nwith a second line"], "one line, newline kept");
+        rig.release(2);
+        consume_until("run 2's reply", &|| rig.posts().len() == 2);
+        assert_eq!(rig.posts()[1].2, ["lead", "reviewer"]);
+        assert_eq!(rig.tasks(), 2);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #410 P1-C, the hand-off between the run and the shell, in the
+    /// gap between the root turn's end and the process's exit (the fake
+    /// lingers there until `exit-N`), with the real plugin and shell:
+    /// * two complete lines and a draft typed in the gap: the shell sends run
+    ///   1's Stop FIRST, then runs each line, one per prompt, through its own
+    ///   accept-line (a canary `$(touch …)` reaches dsh's argv, nothing
+    ///   runs), then gives the draft back to the buffer;
+    /// * a delivery that passed the gate and typed as the turn ended (its
+    ///   receipt recorded, its text landing after the end): it becomes the
+    ///   next run, and its receipt settles on that run's prompt;
+    /// * half a paste typed in the gap, then the exit: unclean, shown as not
+    ///   sent, nothing runs;
+    /// * a reader killed with SIGKILL after a line in the gap: its record is
+    ///   not final, shown as not sent, nothing runs.
+    #[test]
+    fn a_line_typed_after_the_turn_ended_runs_next_only_from_a_clean_hand_off() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let canary = rig.ws.join("canary-410");
+        std::fs::write(rig.ws.join("linger"), "").unwrap();
+        // Two complete lines and a draft in the gap.
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:10] lead: @d1 one"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        rig.release(1);
+        wait_for("run 1's turn end", 10, || rig.ws.join("ended-1").is_file());
+        assert!(!rig.steer_ready(), "no claim after the root turn ended");
+        rig.type_keys(&format!("late $(touch {})", canary.display()), true);
+        rig.type_keys("late two", true);
+        rig.type_keys("a draft", false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-1"), "").unwrap();
+        wait_for("run 2 from the hand-off", 10, || rig.tasks() == 2);
+        assert_eq!(rig.task(2), format!("late $(touch {})", canary.display()), "byte for byte, through the accept-line quoting");
+        assert!(!canary.exists(), "nothing ran as shell code");
+        wait_for("run 2's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        let kinds: Vec<String> = rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(kinds, ["Stop", "UserPromptSubmit"], "run 1's Stop before the handed-off run's prompt");
+        consume_until("run 1's reply", &|| rig.posts().len() == 1);
+        rig.release(2);
+        std::fs::write(rig.ws.join("exit-2"), "").unwrap();
+        wait_for("run 3 from the hand-off", 10, || rig.tasks() == 3);
+        assert_eq!(rig.task(3), "late two");
+        rig.release(3);
+        std::fs::write(rig.ws.join("exit-3"), "").unwrap();
+        consume_until("the shell back with the draft", &|| rig.ready() && rig.screen().lines().any(|l| l.contains("dsh › a draft")));
+        assert_eq!(rig.tasks(), 3, "the draft is not run");
+        consume_until("runs 2 and 3 answered", &|| rig.posts().len() == 3);
+        crate::tmux::send_keys(&rig.target, "C-u", false).unwrap();
+
+        // A delivery that passed the gate as the turn ended.
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:11] lead: @d1 four"));
+        consume_until("run 4's prompt", &|| rig.busy() && rig.tasks() == 4);
+        rig.release(4);
+        wait_for("run 4's turn end", 10, || rig.ws.join("ended-4").is_file());
+        let raced = "[tmm chat 2026-10-17 05:11] reviewer: @d1 raced the end";
+        crate::projects::telemetry::record_delivery(&session, "d1", raced, "");
+        crate::tmux::send_command(&rig.target, raced).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-4"), "").unwrap();
+        wait_for("run 5 from the hand-off", 10, || rig.tasks() == 5);
+        assert_eq!(rig.task(5), raced);
+        consume_until("its receipt settled by run 5's prompt", &|| crate::projects::telemetry::pending_receipts(&session, "d1").is_empty() && rig.busy());
+        assert_eq!(crate::projects::telemetry::durable_prompts(&session).last().unwrap().0, "app");
+        rig.release(5);
+        std::fs::write(rig.ws.join("exit-5"), "").unwrap();
+        consume_until("run 5 answered", &|| rig.posts().len() == 5 && rig.ready());
+
+        // Half a paste in the gap: unclean.
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:12] lead: @d1 six"));
+        consume_until("run 6's prompt", &|| rig.busy() && rig.tasks() == 6);
+        rig.release(6);
+        wait_for("run 6's turn end", 10, || rig.ws.join("ended-6").is_file());
+        rig.type_keys("\x1b[200~half a paste", false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-6"), "").unwrap();
+        consume_until("the shell back", &|| rig.ready() && rig.posts().len() == 6);
+        assert!(rig.screen().contains("not sent: half a paste"), "{}", rig.screen());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(rig.tasks(), 6, "nothing of an unclean hand-off runs");
+
+        // SIGKILL after a line in the gap: not final.
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:13] lead: @d1 seven"));
+        consume_until("run 7's prompt", &|| rig.busy() && rig.tasks() == 7);
+        rig.release(7);
+        wait_for("run 7's turn end", 10, || rig.ws.join("ended-7").is_file());
+        rig.type_keys("killed with its reader", true);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pid: i32 = std::fs::read_to_string(rig.ws.join("ended-7")).unwrap().trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        consume_until("the shell back", &|| rig.ready() && !rig.busy());
+        assert!(rig.screen().contains("not sent: killed with its reader"), "{}", rig.screen());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(rig.tasks(), 7);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #410, the interrupt in steer mode through the ACTUAL hub path
+    /// (the turn ended app-side first, then Escape): the reader decodes the
+    /// lone ESC (after Node's escape-code timeout, ~500 ms) and ends the run
+    /// through dsh's SIGINT exit; its claim is gone at once; a draft typed
+    /// before it comes back into the shell's buffer from a clean, final
+    /// hand-off, and nothing runs. And a lone `-` is refused by the shell: it
+    /// would make dsh read its task from the pane the reader owns.
+    #[test]
+    fn a_steer_run_is_interrupted_by_escape_and_a_lone_hyphen_is_refused() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        assert!(rig.deliver("[tmm chat 2026-10-17 05:20] lead: @d1 long task"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        wait_for("the claim", 10, || rig.steer_ready());
+        // Bytes the decoder holds without a key (half a character here; a
+        // lone ESC that may be the hub's interrupt is the same case) withdraw
+        // the claim at once, until they are decoded — and the decoded
+        // character is a draft, which admits nothing until the line is empty.
+        crate::tmux::run_tmux(&["send-keys", "-t", &rig.target, "-H", "e4"]).unwrap();
+        wait_for("the claim withdrawn while a byte is undecoded", 5, || !rig.steer_ready());
+        assert!(rig.busy(), "the run goes on");
+        crate::tmux::run_tmux(&["send-keys", "-t", &rig.target, "-H", "b8", "ad"]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!rig.steer_ready(), "the decoded character is a draft in the line: it admits nothing");
+        crate::tmux::send_keys(&rig.target, "BSpace", false).unwrap();
+        wait_for("the claim back with the line empty", 5, || rig.steer_ready());
+        rig.type_keys("a draft", false);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let at = std::time::Instant::now();
+        rig.hub_interrupt();
+        assert!(!rig.busy(), "the hub ended the turn app-side first");
+        wait_for("the claim gone", 5, || !rig.steer_ready());
+        consume_until("the shell back", &|| rig.ready());
+        assert!(at.elapsed() < std::time::Duration::from_secs(3), "{:?}", at.elapsed());
+        consume_until("the run's Stop consumed", &|| rig.inbox().is_empty());
+        consume_until("the draft back in the buffer", &|| rig.screen().lines().any(|l| l.contains("dsh › a draft")));
+        assert_eq!(rig.tasks(), 1, "nothing ran");
+        assert!(rig.posts().is_empty(), "an interrupted turn posts nothing");
+        crate::tmux::send_keys(&rig.target, "C-u", false).unwrap();
+        // A lone `-`.
+        rig.type_keys("-", true);
+        wait_for("the refusal", 5, || rig.screen().contains("not sent: a lone '-' is not a message"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(rig.tasks(), 1, "no run for a lone '-'");
+        assert!(rig.ready());
+    }
+
+    /// Board #410 review P1-A, through the real plugin → hand-off → zsh
+    /// path: a NUL in a line refuses it whole — in the turn (never steered)
+    /// and in the gap (never split into two lines); a handed-off line and a
+    /// given-back draft are MESSAGES, so a leading `!` is never the shell
+    /// escape and shell metacharacters reach dsh's argv as text; a draft
+    /// with a NUL is shown as not sent and nothing runs. No canary, no extra
+    /// run.
+    #[test]
+    fn a_nul_or_a_bang_in_a_typed_line_never_runs_as_shell_code() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let canary = |k: usize| rig.ws.join(format!("canary-{k}"));
+        let nul = || crate::tmux::run_tmux(&["send-keys", "-t", &rig.target, "-H", "00"]).unwrap();
+        std::fs::write(rig.ws.join("linger"), "").unwrap();
+        assert!(rig.deliver("[tmm chat 2026-10-17 08:00] lead: @d1 one"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        wait_for("the claim", 10, || rig.steer_ready());
+        // In the turn: `safe<NUL>!touch …` pasted.
+        rig.type_keys("\x1b[200~safe", false);
+        nul();
+        rig.type_keys(&format!("!touch {}\x1b[201~", canary(1).display()), true);
+        wait_for("the refusal", 5, || rig.screen().contains("not sent: unsupported control byte"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(rig.steers(1).is_empty(), "no half of it is steered");
+        rig.release(1);
+        wait_for("run 1's turn end", 10, || rig.ws.join("ended-1").is_file());
+        // In the gap: the same paste, a `!` line, metacharacters, a `!` draft.
+        rig.type_keys("\x1b[200~safe", false);
+        nul();
+        rig.type_keys(&format!("!touch {}\x1b[201~", canary(2).display()), true);
+        rig.type_keys(&format!("!touch {}", canary(3).display()), true);
+        let meta = format!("x; touch {c4} && `touch {c5}` | touch {c5} > {c5}", c4 = canary(4).display(), c5 = canary(5).display());
+        rig.type_keys(&meta, true);
+        rig.type_keys(&format!("!touch {}", canary(6).display()), false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-1"), "").unwrap();
+        wait_for("run 2 from the hand-off", 10, || rig.tasks() == 2);
+        assert_eq!(rig.task(2), format!("!touch {}", canary(3).display()), "a handed-off `!` line is a message");
+        rig.release(2);
+        std::fs::write(rig.ws.join("exit-2"), "").unwrap();
+        wait_for("run 3 from the hand-off", 10, || rig.tasks() == 3);
+        assert_eq!(rig.task(3), meta, "metacharacters are text");
+        rig.release(3);
+        std::fs::write(rig.ws.join("exit-3"), "").unwrap();
+        wait_for("the draft back", 10, || rig.screen().lines().any(|l| l.contains("dsh › !touch")));
+        crate::tmux::send_keys(&rig.target, "Enter", false).unwrap();
+        wait_for("the draft as run 4", 10, || rig.tasks() == 4);
+        assert_eq!(rig.task(4), format!("!touch {}", canary(6).display()), "a given-back `!` draft is a message");
+        wait_for("run 4's claim", 10, || rig.steer_ready());
+        rig.release(4);
+        wait_for("run 4's turn end", 10, || rig.ws.join("ended-4").is_file());
+        // A draft with a NUL in the gap: shown, nothing runs.
+        rig.type_keys("\x1b[200~d", false);
+        nul();
+        rig.type_keys(&format!("!touch {}\x1b[201~", canary(7).display()), false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-4"), "").unwrap();
+        wait_for("the shell back", 10, || rig.screen().contains("not sent: d␀!touch"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(rig.tasks(), 4, "no extra run");
+        for k in 1..=7 {
+            assert!(!canary(k).exists(), "canary {k} ran as shell code");
+        }
+    }
+
+    /// Board #410 review P1-B: the pane is admitted only from a complete
+    /// admission state.
+    /// * A person's half paste in the turn (no byte pending, the paste
+    ///   open) withdraws the claim: a hub send is HELD, never typed inside
+    ///   it; once the person's line is entered and steered, its prompt's
+    ///   flush types the held line, which is steered on its own.
+    /// * A draft given back after the turn: the shell is not ready while it
+    ///   is in the buffer — not while the Stop's publication is held, not at
+    ///   the Stop's flush, not at a later flush. Submitted, it is its own run
+    ///   and the held line steers into that run, never joined to the draft.
+    #[test]
+    fn a_half_paste_or_a_given_back_draft_keeps_a_delivery_out() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let shell_ready = || rig.ws.join(".tmm/agents/d1/dsh/tmm/ready").is_file();
+        std::fs::write(rig.ws.join("linger"), "").unwrap();
+        assert!(rig.deliver("[tmm chat 2026-10-17 08:10] lead: @d1 one"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        wait_for("the claim", 10, || rig.steer_ready());
+        rig.type_keys("\x1b[200~half", false);
+        wait_for("the claim withdrawn while the paste is open", 5, || !rig.steer_ready());
+        let hub = "[tmm chat 2026-10-17 08:11] reviewer: @d1 from the hub";
+        assert!(rig.deliver(hub));
+        assert_eq!(rig.held(), 1, "held, never typed into the open paste");
+        rig.hub.consume_inbox();
+        crate::projects::delivery::flush(&session, "d1");
+        assert_eq!(rig.held(), 1);
+        rig.type_keys(" paste\x1b[201~", true);
+        consume_until("both steered", &|| rig.steers(1).len() == 2 && rig.held() == 0);
+        assert_eq!(rig.steers(1), ["half paste", hub], "each line on its own");
+        rig.release(1);
+        wait_for("run 1's turn end", 10, || rig.ws.join("ended-1").is_file());
+        // A draft in the gap, a delivery held behind it, the Stop held.
+        rig.type_keys("my draft", false);
+        let two = "[tmm chat 2026-10-17 08:12] validator: @d1 held two";
+        assert!(rig.deliver(two));
+        assert_eq!(rig.held(), 1);
+        rig.mode("stop", Some("hold"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(rig.ws.join("exit-1"), "").unwrap();
+        // The shell is inside the Stop's publication once it has closed the
+        // run (`open` gone); ZLE paints the buffer only after that handler.
+        wait_for("the Stop being published", 10, || !rig.ws.join(".tmm/agents/d1/dsh/tmm/open").exists());
+        assert!(!rig.inbox_has("Stop"), "the Stop's publication is still held");
+        crate::projects::delivery::flush(&session, "d1");
+        assert_eq!(rig.held(), 1, "no release while the Stop is held");
+        consume_until("run 1's reply (the Stop's flush)", &|| rig.posts().len() == 1);
+        wait_for("the draft back", 10, || rig.screen().lines().any(|l| l.contains("dsh › my draft")));
+        crate::projects::delivery::flush(&session, "d1");
+        assert_eq!(rig.held(), 1, "no release while the draft is in the buffer");
+        assert!(!shell_ready(), "a buffer with a draft is not ready");
+        assert_eq!(rig.tasks(), 1);
+        crate::tmux::send_keys(&rig.target, "Enter", false).unwrap();
+        consume_until("the held line steered into the draft's run", &|| rig.steers(2).len() == 1 && rig.held() == 0);
+        assert_eq!(rig.task(2), "my draft", "the draft alone");
+        assert_eq!(rig.steers(2), [two]);
+        rig.release(2);
+        std::fs::write(rig.ws.join("exit-2"), "").unwrap();
+        consume_until("the shell back and ready", &|| rig.posts().len() == 2 && shell_ready());
+        assert_eq!(rig.tasks(), 2);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #410 review P1-C: the run's first prompt is published only once
+    /// its reader is whole (dsh awaits the plugin's `apply`, which awaits the
+    /// message factory). With the factory held: no prompt, no claim, a hub
+    /// line held; once it loads, the claim is on file when the prompt is in
+    /// the inbox, and consuming that prompt alone — no feed read, no new
+    /// delivery, no turn end — steers the held line into this run, whose
+    /// reply then answers both senders.
+    #[test]
+    fn a_line_held_through_a_slow_factory_steers_the_run_once_its_reader_is_whole() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        std::fs::write(rig.ws.join("factory-hold"), "").unwrap();
+        assert!(rig.deliver("[tmm chat 2026-10-17 08:20] lead: @d1 one"));
+        wait_for("run 1", 10, || rig.tasks() == 1);
+        let two = "[tmm chat 2026-10-17 08:20] reviewer: @d1 two";
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(rig.deliver(two));
+        assert_eq!(rig.held(), 1);
+        rig.hub.consume_inbox();
+        assert!(!rig.inbox_has("UserPromptSubmit") && !rig.busy(), "no prompt before the reader is whole");
+        assert!(!rig.steer_ready() && !rig.ws.join("applied-1").exists());
+        assert_eq!(rig.held(), 1);
+        std::fs::write(rig.ws.join("factory-go"), "").unwrap();
+        wait_for("the first prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        assert!(rig.steer_ready(), "the claim is on file before the prompt is consumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while rig.steers(1).is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the held line was not steered by the prompt's own flush");
+            rig.hub.consume_inbox();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(rig.steers(1), [two]);
+        rig.release(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while rig.posts().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no reply");
+            rig.hub.consume_inbox();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(rig.posts()[0].2, ["lead", "reviewer"]);
+        assert_eq!(rig.tasks(), 1);
+    }
+
+    /// Board #410 review round 2, P1-B residual: a person's draft in the
+    /// running turn — typed, or a paste closed before its Enter — admits no
+    /// delivery. The hub line is held (through a consume and a flush), the
+    /// person's Enter steers their exact line, and that prompt's own flush
+    /// steers the hub line on its own, with its receipt and its requester.
+    #[test]
+    fn a_persons_draft_in_the_turn_keeps_a_delivery_out_until_it_is_entered() {
+        use crate::backends::dsh::tests::wait_for;
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let session = rig.session.clone();
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        assert!(rig.deliver("[tmm chat 2026-10-17 10:00] lead: @d1 one"));
+        consume_until("run 1's prompt", &|| rig.busy());
+        wait_for("the claim", 10, || rig.steer_ready());
+        let hubs = ["[tmm chat 2026-10-17 10:01] reviewer: @d1 after a typed draft", "[tmm chat 2026-10-17 10:02] validator: @d1 after a closed paste"];
+        for (draft, hub) in [("human draft", hubs[0]), ("\x1b[200~pasted\x1b[201~", hubs[1])] {
+            rig.type_keys(draft, false);
+            wait_for("the claim withdrawn by the draft", 5, || !rig.steer_ready());
+            assert!(rig.deliver(hub));
+            assert_eq!(rig.held(), 1, "held, never joined to the draft");
+            rig.hub.consume_inbox();
+            crate::projects::delivery::flush(&session, "d1");
+            assert_eq!(rig.held(), 1);
+            let n = rig.steers(1).len();
+            crate::tmux::send_keys(&rig.target, "Enter", false).unwrap();
+            consume_until("the draft, then the hub line, steered", &|| rig.steers(1).len() == n + 2 && rig.held() == 0);
+        }
+        assert_eq!(rig.steers(1), ["human draft", hubs[0], "pasted", hubs[1]], "each line exactly, on its own");
+        consume_until("every receipt settled", &|| crate::projects::telemetry::pending_receipts(&session, "d1").is_empty());
+        rig.release(1);
+        consume_until("run 1's reply", &|| !rig.posts().is_empty());
+        assert_eq!(rig.posts()[0].2, ["lead", "human", "reviewer", "validator"], "the person's own lines join as the human");
+        assert_eq!(rig.tasks(), 1);
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #410 review round 2, P1-C: the interrupt keys keep their
+    /// meaning inside an unfinished paste. The ACTUAL hub interrupt
+    /// (Escape, decoded as a lone ESC) and ^C, each with a paste open: the
+    /// claim is withdrawn, the dsh process ends, no reply is posted, and the
+    /// unclean draft is shown as not sent, never run.
+    #[test]
+    fn an_interrupt_ends_a_steer_run_from_inside_an_open_paste() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let consume_until = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                rig.hub.consume_inbox();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let claim = rig.ws.join(".tmm/agents/d1/dsh/tmm/steer-ready");
+        for (n, text, hub) in [(1usize, "half by escape", true), (2, "half by ctrl-c", false)] {
+            assert!(rig.deliver(&format!("[tmm chat 2026-10-17 10:1{n}] lead: @d1 run {n}")));
+            consume_until("the run's prompt", &|| rig.busy() && rig.tasks() == n);
+            wait_for("the claim", 10, || rig.steer_ready());
+            let pid: i32 = std::fs::read_to_string(&claim).unwrap().split(' ').next().unwrap().parse().unwrap();
+            rig.type_keys(&format!("\x1b[200~{text}"), false);
+            wait_for("the claim withdrawn by the open paste", 5, || !rig.steer_ready());
+            if hub {
+                rig.hub_interrupt();
+                assert!(!rig.busy(), "the hub ended the turn app-side");
+            } else {
+                crate::tmux::send_keys(&rig.target, "C-c", false).unwrap();
+            }
+            wait_for("the dsh process gone", 5, || unsafe { libc::kill(pid, 0) } != 0);
+            consume_until("the shell back with the draft not sent", &|| rig.screen().contains(&format!("not sent: {text}")) && rig.inbox().is_empty() && !rig.busy());
+            assert!(!rig.steer_ready());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(rig.tasks(), 2, "no draft ran");
+        assert!(rig.posts().is_empty(), "an aborted run posts nothing");
+        assert!(rig.steers(1).is_empty() && rig.steers(2).is_empty());
     }
 
     /// Board #404 P1-C2, the helper contract itself: with `TMM_HOOK_SEQ` its

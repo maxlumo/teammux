@@ -1666,17 +1666,16 @@ mod tests {
 
     /// Board #404: dsh LOSES a line typed into a running turn (its run owns
     /// the TTY raw), so delivery holds for it through the production path —
-    /// a fixed `queue` the gate honours though it has no queue|steer choice —
-    /// and the overdue release never types into its running turn; the line
-    /// waits for the Stop. (The end-to-end form, with a real pane and the
+    /// queue mode, the default — and the overdue release never types into
+    /// its running turn; the line waits for the Stop. (The end-to-end form, with a real pane and the
     /// real inbox, is agent_notifications' `a_busy_dsh_turn_holds_lines_and_ends_in_order`.)
     #[test]
     fn a_busy_dsh_turn_holds_through_the_overdue_rule() {
         let mut scratch = crate::tmux::Scratch::new("dsh-hold");
         let s = scratch.session("s");
         agent_with_recipe(&scratch, &s, "dev", "dsh", "queue");
-        assert_eq!(input_mode_seen(&s, "dev", "%9", ""), Some("queue"), "a fixed queue, no choice");
-        assert!(!crate::backends::Backend::Dsh.switches_input_mode());
+        assert_eq!(input_mode_seen(&s, "dev", "%9", ""), Some("queue"), "the recipe's queue (board #410: dsh has the choice)");
+        assert!(crate::backends::Backend::Dsh.switches_input_mode());
         let ready = std::path::Path::new(&scratch.path()).join(".tmm/agents/dev/dsh/tmm/ready");
         std::fs::create_dir_all(ready.parent().unwrap()).unwrap();
         // A real window, so the pane's process — the only owner a ready file

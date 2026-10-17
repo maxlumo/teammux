@@ -45,11 +45,14 @@
 //!   `~/.dsh/.credentials.yaml` and is NOT visible in an isolated home.
 //! * cold start ≈ 1.7 s before the request.
 
-/// No queue|steer choice: a run owns the TTY in raw mode (Escape), so a line
-/// typed while it runs is swallowed (`LOSES_BUSY_INPUT`). Lines for a busy
-/// agent are held by delivery and typed after its Stop, which the shell
-/// sends once its prompt is back.
-pub(crate) const SWITCHES_INPUT_MODE: bool = false;
+/// queue|steer (board #410). A run owns the TTY in raw mode, so a line typed
+/// while it runs reaches nobody unless the run's own reader takes it
+/// (`LOSES_BUSY_INPUT`): in `queue` (the default) lines for a busy agent are
+/// held by delivery and typed after its Stop, which the shell sends once its
+/// prompt is back; in `steer` the plugin reads the pane while the root turn
+/// is open and hands each line to dsh's `Agent.steer`, and delivery types
+/// into it only while that reader claims the pane (`input_ready`).
+pub(crate) const SWITCHES_INPUT_MODE: bool = true;
 pub(crate) const LOSES_BUSY_INPUT: bool = true;
 
 /// The deepseek-official route's reasoning levels (dsh providers guide:
@@ -166,8 +169,12 @@ pub(crate) fn plugin_js(notify: &str) -> String {
         r#"// tmux-mobile telemetry plugin for DeepSeek Harness — generated, rewritten
 // on every start (board #404). Do not edit.
 import {{ spawnSync }} from 'node:child_process'
-import {{ appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync }} from 'node:fs'
+import {{ appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync }} from 'node:fs'
+import {{ createRequire }} from 'node:module'
 import {{ join }} from 'node:path'
+import readline from 'node:readline'
+import {{ PassThrough }} from 'node:stream'
+import {{ pathToFileURL }} from 'node:url'
 
 export const name = '{PLUGIN_NAME}'
 
@@ -254,6 +261,267 @@ function interruptOnEscape() {{
   }} catch {{}}
 }}
 
+// ---- steer mode (board #410) -------------------------------------------
+// The run's input mode, as the shell's home was rendered when this run
+// started (`tmm/input_mode`); a registry edit changes the NEXT run.
+const MODE = (() => {{ try {{ return readFileSync(join(STATE, 'input_mode'), 'utf8').trim() === 'steer' ? 'steer' : 'queue' }} catch {{ return 'queue' }} }})()
+// The run's identity the shell minted at its accept-line (`tmm/run`); the
+// readiness claim names it, so a claim another run left is never believed.
+const RUN = (() => {{ try {{ return readFileSync(join(STATE, 'run'), 'utf8').trim() }} catch {{ return '' }} }})()
+const LINE_MAX = 256 * 1024
+
+// Control characters made inert for an echo: a pasted escape sequence is
+// shown, never replayed into the terminal.
+export function inert(text) {{
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => {{
+    const n = c.charCodeAt(0)
+    if (c === '\n') return '⏎'
+    if (c === '\x1b') return '␛'
+    if (n < 0x20) return String.fromCharCode(0x2400 + n)
+    if (n === 0x7f) return '␡'
+    return '\ufffd'
+  }})
+}}
+
+// The pane's line reader for steer mode: bytes in, lines out. Node's own
+// key decoder (readline.emitKeypressEvents) frames the bytes — escape
+// sequences, bracketed paste, split UTF-8 — and a LEDGER around it says
+// whether it is clean: every key's `sequence` must retire exactly the raw
+// bytes at the head of the ledger. A key that does not (a replacement
+// character for an invalid byte) taints the reader for good; bytes the
+// decoder holds without a key yet (half a sequence, half a character, a
+// lone ESC before its timeout) are still in the ledger. Only a clean reader
+// may hand a line to the shell to RUN (`handoff`). A line with a NUL in it
+// (typed or pasted) is refused whole: NUL frames the hand-off record, and
+// half a line must never run as a line of its own (review P1-A).
+export function makeReader({{ submit, interrupt, notSent, changed = () => {{}} }}) {{
+  const decoder = new PassThrough()
+  decoder.isTTY = true
+  readline.emitKeypressEvents(decoder)
+  const st = {{ pending: Buffer.alloc(0), taint: false, line: '', paste: false, overflow: false, nul: false, lastCR: false }}
+  const add = (s) => {{
+    if (st.overflow) return
+    if (Buffer.byteLength(st.line) + Buffer.byteLength(s) > LINE_MAX) st.overflow = true
+    else st.line += s
+  }}
+  const enter = () => {{
+    const text = st.line
+    const over = st.overflow
+    const nul = st.nul
+    st.line = ''
+    st.overflow = false
+    st.nul = false
+    if (nul) return notSent('unsupported control byte')
+    if (over) return notSent(`line too long (more than ${{LINE_MAX}} bytes)`)
+    if (text.trim()) submit(text)
+  }}
+  decoder.on('keypress', (str, key) => {{
+    const seq = Buffer.from(key?.sequence ?? str ?? '', 'utf8')
+    // A tainted ledger is never clean again: it stops holding bytes, so
+    // what it retains is bounded (review P2-B).
+    if (st.taint) {{}}
+    else if (seq.length <= st.pending.length && st.pending.subarray(0, seq.length).equals(seq)) st.pending = st.pending.subarray(seq.length)
+    else {{ st.taint = true; st.pending = Buffer.alloc(0) }}
+    if (seq.includes(0)) st.nul = true
+    const name = key?.name
+    const wasCR = st.lastCR
+    st.lastCR = name === 'return'
+    if (name === 'paste-start') {{ st.paste = true; return }}
+    if (name === 'paste-end') {{ st.paste = false; return }}
+    // The interrupt keys keep their meaning in every state — inside an
+    // unfinished paste and in a refused line too (review round 2, P1-C):
+    // ^C always, and the decoder's lone `escape` (a paste or arrow prefix is
+    // never one). Any other control byte in a paste is kept as text; a decoded
+    // sequence in it (ESC[31m) is ignored, neither text nor an interrupt.
+    if (key?.ctrl && name === 'c') return interrupt()
+    if (name === 'escape' && key?.sequence === '\x1b') return interrupt()
+    if (st.paste) {{
+      if (name === 'return') return add('\n')
+      if (name === 'enter') return wasCR ? undefined : add('\n')
+      if (typeof str === 'string') add(str)
+      return
+    }}
+    if (name === 'return') return enter()
+    if (name === 'enter') return wasCR ? undefined : enter()
+    if (name === 'backspace') {{ st.line = Array.from(st.line).slice(0, -1).join(''); return }}
+    if (key?.ctrl || key?.meta || typeof str !== 'string') return
+    if (str === '\t' || str >= ' ') add(str)
+  }})
+  decoder.on('keypress', () => changed())
+  // The complete decoder state: nothing undecoded, no paste open, no
+  // refused line in progress, never tainted (review P1-B). A clean reader
+  // may still hold a person's draft, which is valid to hand back.
+  const clean = () => !st.taint && st.pending.length === 0 && !st.paste && !st.overflow && !st.nul
+  return {{
+    feed(chunk) {{
+      if (!st.taint) st.pending = Buffer.concat([st.pending, chunk])
+      decoder.write(chunk)
+      changed()
+    }},
+    state: st,
+    clean,
+    // May a NEW line be typed in now? Clean AND an empty line: a person's
+    // draft — typed, or a paste closed before its Enter — is never joined
+    // to a delivery (review round 2, P1-B residual).
+    admits() {{ return clean() && st.line === '' }},
+    // What the reader holds that no key represents yet, made inert.
+    unaccounted() {{ return inert(st.pending.toString('utf8')) }},
+  }}
+}}
+
+// dsh's own message factory, from dsh's own install (a plugin mounted by
+// path cannot import the package by name): every steer is a real
+// UserMessage with its own id, role and source.
+let createUser = null
+async function loadFactory() {{
+  const require = createRequire(realpathSync(process.argv[1]))
+  const m = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm')).href)
+  createUser = m.createUserMessage
+}}
+
+// One steer: the line is the agent's once `steer()` returns; the echo is
+// best effort and never decides that (review P2-A), so an accepted line is
+// never handed to the shell as well.
+export function steerOnce(agent, make, text, echo) {{
+  try {{
+    agent.steer(make({{ content: [{{ type: 'text', text }}], source: {{ kind: 'user' }} }}))
+  }} catch {{
+    return false
+  }}
+  try {{ echo(`› steer: ${{inert(text).slice(0, 80)}}\n`) }} catch {{}}
+  return true
+}}
+
+// What a run holds for later (lines read before its turn opened or after
+// it ended), under the one bound: past it a line is reported not sent and
+// the hand-off is no longer clean, so nothing after a dropped line runs out
+// of order (review P2-B).
+export function makeHold(notSent) {{
+  let bytes = 0
+  const h = {{
+    over: false,
+    take(text) {{
+      const n = Buffer.byteLength(text)
+      if (!h.over && bytes + n <= LINE_MAX) {{ bytes += n; return true }}
+      h.over = true
+      notSent(`more than ${{LINE_MAX}} bytes held for after the turn`)
+      return false
+    }},
+    give(text) {{ bytes -= Buffer.byteLength(text) }},
+  }}
+  return h
+}}
+
+// The hand-off to the shell (`tmm/handoff`, NUL-separated, written by
+// rename): `clean` + draft + complete lines, which the shell runs one per
+// prompt through its own accept-line; anything else (`pending` while the
+// process lives, `unclean` at exit) is only shown, as not sent, never run.
+export function handoffFields(final, reader, late, over = false) {{
+  const draft = reader.state.line
+  if (!late.length && !draft && !over && reader.clean()) return null
+  if (final && !over && reader.clean()) return ['clean', draft, ...late, 'end']
+  const shown = [...late, draft, reader.unaccounted()].filter((s) => s).map(inert).join(' ⏎ ')
+  return [final ? 'unclean' : 'pending', shown, 'end']
+}}
+
+function steerReader(ctx) {{
+  if (!process.stdin.isTTY) return null
+  const late = []
+  // Lines read before the root turn opened (typed during the cold start,
+  // kept by the TTY's queue): steered once it opens.
+  const early = []
+  let agent = null
+  let open = false
+  let ended = false
+  let raw = false
+  const out = process.stderr.isTTY ? process.stderr : null
+  // The pane is claimed only while a line typed now would be steered: the
+  // root turn open, the factory and the root agent at hand — and the reader
+  // admitting a new line (`admits`: clean — nothing undecoded, a lone ESC
+  // may be the hub's interrupt; no paste open; no refused line — and no
+  // person's draft in the line).
+  const claim = () => {{
+    const ok = open && raw && createUser !== null && agent !== null && reader.admits()
+    try {{
+      if (ok) put('steer-ready', `${{process.pid}} ${{RUN}} steer`)
+      else unlinkSync(join(STATE, 'steer-ready'))
+    }} catch {{}}
+  }}
+  const handoff = (final) => {{
+    const f = handoffFields(final, reader, late, hold.over)
+    try {{
+      if (f) put('handoff', f.join('\0'))
+      else unlinkSync(join(STATE, 'handoff'))
+    }} catch {{}}
+  }}
+  const steerNow = (text) => open && createUser !== null && agent !== null && steerOnce(agent, createUser, text, (s) => process.stderr.write(s))
+  const notSent = (why) => {{ try {{ process.stderr.write(`not sent: ${{why}}\n`) }} catch {{}} }}
+  const hold = makeHold(notSent)
+  const steerEarly = () => {{
+    while (early.length && steerNow(early[0])) hold.give(early.shift())
+  }}
+  const reader = makeReader({{
+    submit(text) {{
+      if (steerNow(text)) return
+      if (!hold.take(text)) return
+      if (!open && !ended) {{ early.push(text); return }}
+      late.push(text)
+      if (ended) handoff(false)
+    }},
+    changed() {{ claim() }},
+    interrupt() {{
+      open = false
+      claim()
+      try {{ out?.write('\x1b[?2004l'); process.stdin.setRawMode(false) }} catch {{}}
+      process.kill(process.pid, 'SIGINT')
+    }},
+    notSent,
+  }})
+  try {{
+    process.stdin.setRawMode(true)
+    raw = true
+    out?.write('\x1b[?2004h')
+    process.on('exit', () => {{
+      open = false
+      claim()
+      late.unshift(...early.splice(0))
+      handoff(true)
+      try {{ out?.write('\x1b[?2004l'); process.stdin.setRawMode(false) }} catch {{}}
+    }})
+    process.stdin.on('data', (d) => {{
+      reader.feed(d)
+      if (ended) handoff(false)
+    }})
+    process.stdin.resume()
+    process.stdin.unref()
+  }} catch {{}}
+  return {{
+    // Settled once the factory is loaded or has failed: `apply` returns it
+    // and dsh awaits a plugin's apply before the run's turn opens (measured
+    // on 0.2.0-rc.2), so the reader is whole before the first prompt is
+    // published and the prompt-settled flush sees its claim (review P1-C).
+    // A factory that fails leaves the run in queue behaviour: no claim.
+    ready: loadFactory().then(() => {{
+      if (open) steerEarly()
+      claim()
+    }}, () => {{}}),
+    turnStart(session) {{
+      try {{ agent = ctx.get('agents')?.roots?.().find((a) => a.session === session) ?? null }} catch {{ agent = null }}
+      open = true
+      ended = false
+      steerEarly()
+      claim()
+    }},
+    turnEnd() {{
+      open = false
+      ended = true
+      late.unshift(...early.splice(0))
+      claim()
+      handoff(false)
+    }},
+  }}
+}}
+
 // The agent's OWN session: the first root session (no parentSession, not a
 // subagent's origin) this run sees. A subagent's session — spawned or forked
 // in process — never becomes the window's turn, prompt or reply; every event
@@ -305,7 +573,10 @@ function vitalsRow(model, window, used) {{
 export function apply(ctx, config) {{
   const required = typeof config?.requireEnv === 'string' ? config.requireEnv : ''
   resendUnsent()
-  interruptOnEscape()
+  // Steer mode reads the pane itself (its Escape and ^C included); queue
+  // mode keeps the raw-byte interrupt handler.
+  const steer = MODE === 'steer' ? steerReader(ctx) : null
+  if (!steer) interruptOnEscape()
   let root = null
   let sid = ''
   let awaitingPrompt = false
@@ -330,13 +601,20 @@ export function apply(ctx, config) {{
         case 'turn/start':
           awaitingPrompt = true
           reply = ''
+          steer?.turnStart(session)
           break
         case 'user/message':
-          if (awaitingPrompt && d?.source?.kind === 'user') {{
+          // EVERY user-sourced root message is a prompt — the run's first
+          // and each steered line (board #410), whose sender joins the
+          // turn's reply edge. A user-ROLE message with any other source
+          // (the instructions reminder, runtime context, the skills
+          // catalog) never is.
+          if (d?.source?.kind === 'user') {{
+            const first = awaitingPrompt
             awaitingPrompt = false
             // Marked only once it is published: otherwise the shell reports it.
-            if (send({{ hook_event_name: 'UserPromptSubmit', prompt: textOf(d.content), session_id: sid }})) put('prompted', '')
-            if (required && !process.env[required]) {{
+            if (send({{ hook_event_name: 'UserPromptSubmit', prompt: textOf(d.content), session_id: sid }}) && first) put('prompted', '')
+            if (first && required && !process.env[required]) {{
               put('stop.json', JSON.stringify({{ hook_event_name: 'Stop', session_id: sid, last_assistant_message: '', dsh_reason: 'error' }}))
               process.stderr.write(`${{required}} is not set\n`)
               process.exit(1)
@@ -366,10 +644,13 @@ export function apply(ctx, config) {{
         }}
         case 'turn/end':
           put('stop.json', JSON.stringify({{ hook_event_name: 'Stop', session_id: sid, last_assistant_message: reply, dsh_reason: d?.reason?.kind ?? '' }}))
+          steer?.turnEnd()
           break
       }}
     }} catch {{}}
   }})
+  // Steer mode: dsh awaits this before the run's turn opens (P1-C).
+  return steer?.ready
 }}
 "#
     )
@@ -636,12 +917,13 @@ case ${{TMM_DSH_SESSION-}} in
   *) [[ $TMM_DSH_SESSION =~ '^session-[A-Za-z0-9-]+$' ]] && print -r -- $TMM_DSH_SESSION >| $_tmm_state/session ;;
 esac
 unset TMM_DSH_SESSION
-rm -f -- $_tmm_state/ready
+rm -f -- $_tmm_state/ready $_tmm_state/steer-ready
 # A run the previous shell never finished — its window was killed or the
 # agent restarted mid-turn — still owes its turn an end, or the lines held
 # for that turn would wait for a Stop nobody sends: it is ended at this
 # shell's first prompt, as an interrupt (the plugin's own Stop if it wrote one).
-typeset -g _tmm_stale=0
+typeset -g _tmm_stale=0 _tmm_draft= _tmm_replay=0 _tmm_unready=0
+typeset -ga _tmm_pending
 [[ -e $_tmm_state/open ]] && _tmm_stale=1
 
 # The recorded session, if dsh still has it.
@@ -719,16 +1001,29 @@ _tmm_send() {{
 _tmm_accept() {{
   # Whatever runs now owns the TTY until the next prompt.
   [[ -n ${{BUFFER//[[:space:]]/}} ]] && rm -f -- $_tmm_state/ready
-  if [[ $BUFFER == '!'* ]]; then
+  # A line this shell put in the buffer itself (a handed-off line, a
+  # restored draft) is a MESSAGE: never the `!` shell escape, which is a
+  # person's own command typed at this prompt (review P1-A).
+  local replay=$_tmm_replay
+  _tmm_replay=0 _tmm_unready=0
+  if (( ! replay )) && [[ $BUFFER == '!'* ]]; then
     BUFFER=${{BUFFER#!}}
+  elif [[ $BUFFER == - ]]; then
+    # A lone `-` makes dsh read its task from stdin, the pane the plugin
+    # owns (board #410): it is not a message.
+    zle -I
+    print -r -- "not sent: a lone '-' is not a message"
+    BUFFER=
   elif [[ -n ${{BUFFER//[[:space:]]/}} ]]; then
     local sid=
     # The new conversation the app asked for (tmm/new) is consumed HERE, by the
     # turn it applies to: it outranks the session the previous shell recorded
     # and a resume id a restart handed back (TMM_DSH_SESSION wrote it above).
     if [[ -e $_tmm_state/new ]]; then rm -f -- $_tmm_state/session $_tmm_state/new; else sid=$(_tmm_session); fi
-    rm -f -- $_tmm_state/prompted $_tmm_state/stop.json $_tmm_state/vitals
+    rm -f -- $_tmm_state/prompted $_tmm_state/stop.json $_tmm_state/vitals $_tmm_state/steer-ready $_tmm_state/handoff
     print -rn -- $BUFFER >| $_tmm_state/line
+    # The run's identity: a steer reader's readiness claim must name it.
+    print -r -- "$EPOCHREALTIME.$$" >| $_tmm_state/run
     BUFFER="dsh --profile {PROFILE}${{sid:+ --session-id $sid}} -- ${{(q+)BUFFER}}"
     : >| $_tmm_state/open
   fi
@@ -758,9 +1053,48 @@ precmd_functions=(_tmm_status_of_run $precmd_functions)
 # the ready work runs from a one-shot fd handler, which ZLE calls once it is
 # waiting for input — paste on, the TTY its own.
 _tmm_init() {{
+  # 1) The previous run's Stop comes first when a handed-off line runs now;
+  # 2) the hand-off is consumed: a clean record's lines run one per prompt,
+  # each through this shell's own accept-line (an fd handler cannot end a
+  # line, measured on zsh 5.9), as messages, with no ready file meanwhile;
+  # 3) only then the draft comes back into the buffer.
+  _tmm_take_handoff
+  if (( $#_tmm_pending )); then
+    PS1='{PROMPT}'
+    [[ -e $_tmm_state/open ]] && _tmm_end_run
+    BUFFER=$_tmm_pending[1]
+    shift _tmm_pending
+    _tmm_replay=1
+    zle accept-line
+    return
+  fi
+  if [[ -n $_tmm_draft ]]; then
+    BUFFER=$_tmm_draft
+    CURSOR=$#BUFFER
+    _tmm_draft=
+    _tmm_replay=1
+  fi
   local fd
   exec {{fd}}</dev/null
   zle -F -w $fd _tmm_ready
+}}
+
+# The previous run's hand-off (board #410): what a person typed after its
+# turn ended. Only a CLEAN record runs: its complete lines, one per prompt,
+# each through this shell's own accept-line; its draft comes back into the
+# buffer. Anything else is shown as not sent, and nothing of it runs.
+_tmm_take_handoff() {{
+  [[ -r $_tmm_state/handoff ]] || return 0
+  local -a ho
+  ho=("${{(@0)$(<$_tmm_state/handoff)}}")
+  rm -f -- $_tmm_state/handoff
+  if [[ $ho[-1] == end && $ho[1] == clean ]]; then
+    _tmm_draft=$ho[2]
+    _tmm_pending+=("${{(@)ho[3,-2]}}")
+  elif [[ $ho[-1] == end && -n $ho[2] ]]; then
+    zle -I
+    print -r -- "not sent: $ho[2]"
+  fi
 }}
 zle -N zle-line-init _tmm_init
 
@@ -768,12 +1102,41 @@ _tmm_ready() {{
   local fd=$1
   zle -F $fd
   exec {{fd}}<&-
-  # The shell is ready for a typed line, and says so first — naming itself,
-  # so a file this shell outlives is never believed.
-  print -r -- "$$ ${{TMUX_PANE-}}" >| $_tmm_state/ready
+  # The shell is ready for a typed line only with an EMPTY buffer: a draft
+  # given back is the person's until they submit or clear it (the next
+  # accept-line, or `_tmm_redraw` on an emptied buffer), so no delivery is
+  # ever typed into it (review P1-B). Readiness is written BEFORE the Stop:
+  # publishing the Stop is what releases a held line (the stop flush), so
+  # that flush must find it — while ZLE cannot read a typed line until this
+  # handler has published the Stop, so run N's Stop still precedes the
+  # prompt of a line typed now. It names this shell, so a file this shell
+  # outlives is never believed.
+  if [[ -z $BUFFER ]]; then
+    print -r -- "$$ ${{TMUX_PANE-}}" >| $_tmm_state/ready
+  else
+    _tmm_unready=1
+  fi
   PS1='{PROMPT}'
   zle reset-prompt
-  [[ -e $_tmm_state/open ]] || return 0
+  [[ -e $_tmm_state/open ]] && _tmm_end_run
+}}
+zle -N _tmm_ready
+
+# A draft the person cleared: the buffer is theirs again and the shell is
+# ready (a line held meanwhile goes at the next feed read or delivery).
+_tmm_redraw() {{
+  (( _tmm_unready || _tmm_replay )) && [[ -z $BUFFER ]] || return 0
+  _tmm_replay=0
+  if (( _tmm_unready )); then
+    _tmm_unready=0
+    print -r -- "$$ ${{TMUX_PANE-}}" >| $_tmm_state/ready
+  fi
+}}
+zle -N zle-line-pre-redraw _tmm_redraw
+
+# The run's Stop, exactly once (above): sent before anything the next run
+# says, a handed-off line included.
+_tmm_end_run() {{
   local st=$_tmm_status sid=$(_tmm_session) line= payload
   (( _tmm_stale )) && st=130 _tmm_stale=0
   if [[ ! -e $_tmm_state/prompted ]]; then
@@ -791,7 +1154,6 @@ _tmm_ready() {{
   rm -f -- $_tmm_state/open $_tmm_state/prompted $_tmm_state/line $_tmm_state/stop.json
   _tmm_send $payload
 }}
-zle -N _tmm_ready
 "#
     )
 }
@@ -840,6 +1202,8 @@ pub(crate) fn render_dsh(
     let skill_root = skill_root(&dsh_home);
     write_skill_root(&skill_root, skills)?;
     shared::write_atomic(&profile.join("cordis.patch.yml"), &profile_patch_yml(&entry, &def.model, &def.effort, &mcp, &skill_root))?;
+    // The mode the plugin reads at the start of each run (board #410).
+    shared::write_owned(&dsh_home.join("tmm").join("input_mode"), Some(if def.input_mode == "steer" { "steer\n" } else { "queue\n" }))?;
 
     // The prompt is the harness home's user-global AGENTS.md (dsh-agent-
     // instructions reads `$DSH_HOME/AGENTS.md` first); DSH_AGENTS_HOME points
@@ -963,12 +1327,55 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 /// can read nothing — see `owns_input`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn input_ready(home: &Path, pane_pid: Option<u32>) -> bool {
+    shell_ready(home, pane_pid) || steer_ready(home, pane_pid)
+}
+
+/// The managed shell is at its prompt (`tmm/ready`, `<pid> <pane>`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn shell_ready(home: &Path, pane_pid: Option<u32>) -> bool {
     let Ok(text) = std::fs::read_to_string(home.join("dsh").join("tmm").join("ready")) else { return false };
     let Some(pid) = text.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()).filter(|p| *p > 1) else { return false };
     if pane_pid != Some(pid as u32) {
         return false;
     }
     owns_input(pid)
+}
+
+/// A steer-mode run's reader claims the pane (board #410): `tmm/steer-ready`
+/// = `<dsh pid> <run> steer`, written by the plugin only while it owns the
+/// TTY raw, holds dsh's message factory and the root agent, and the root
+/// turn is open; removed at that turn's end, at an interrupt and at exit.
+/// Believed only for THIS run of THIS pane: the pid is a live input owner
+/// (`owns_input`), its parent is the pane's process (the managed zsh the
+/// run was started by), the run is the one the shell minted last
+/// (`tmm/run`), and the mode is the one that reader loaded — a claim another
+/// run, another shell or a dead reader left is never readiness.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn steer_ready(home: &Path, pane_pid: Option<u32>) -> bool {
+    let state = home.join("dsh").join("tmm");
+    let Ok(text) = std::fs::read_to_string(state.join("steer-ready")) else { return false };
+    let Ok(run) = std::fs::read_to_string(state.join("run")) else { return false };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let [pid, claimed, "steer"] = words[..] else { return false };
+    let Some(pid) = pid.parse::<i32>().ok().filter(|p| *p > 1) else { return false };
+    if claimed.is_empty() || claimed != run.trim() || pane_pid.is_none() || parent_of(pid) != pane_pid {
+        return false;
+    }
+    owns_input(pid)
+}
+
+/// A process's parent: `/proc/<pid>/stat` (the field after the state, past
+/// the `)` that ends the command name), else `ps -o ppid=` (macOS).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn parent_of(pid: i32) -> Option<u32> {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok();
+    }
+    if Path::new("/proc/self/stat").exists() {
+        return None;
+    }
+    let out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 /// Can process `pid` still read its TTY: it exists and is not a zombie (board
@@ -1229,6 +1636,12 @@ pub(crate) mod tests {
     /// tool call — or, past the script, with the text "OK". A fake key and
     /// `DEEPSEEK_BASE_URL` point a real dsh at it: zero model calls.
     pub(crate) fn messages_stand_in(script: Vec<(String, Value)>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        messages_stand_in_held(script, None)
+    }
+
+    /// `messages_stand_in` whose FIRST answer waits until `hold` exists (the
+    /// turn stays open in its first step for as long as a test needs).
+    pub(crate) fn messages_stand_in_held(script: Vec<(String, Value)>, hold: Option<std::path::PathBuf>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1257,6 +1670,12 @@ pub(crate) mod tests {
                     log.push((first.trim().to_string(), serde_json::from_slice(&body).unwrap_or(Value::Null)));
                     log.len() - 1
                 };
+                if let (0, Some(h)) = (n, &hold) {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while !h.exists() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
                 let ev = |t: &str, d: Value| format!("event: {t}\ndata: {d}\n\n");
                 let start = ev("message_start", json!({"type":"message_start","message":{"id":format!("m{n}"),"type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}));
                 let sse = match script.get(n) {
@@ -1448,6 +1867,73 @@ pub(crate) mod tests {
         assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("does not open"));
         std::fs::write(ws.join("bare/SKILL.md"), "---\nname: cr2\ndescription: x\n---\r\r\n").unwrap();
         assert!(dsh_skill_name(&ws.join("bare")).unwrap_err().contains("not closed"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #410 through the REAL dsh 0.2.0-rc.2 in a real pane, against
+    /// the loopback stand-in (a fake key; zero model calls), with the
+    /// managed shell and plugin rendered in steer mode:
+    /// * M3, the TTY transition: a line typed right after the task's Enter —
+    ///   during dsh's cold start, before the plugin owns the TTY — is still
+    ///   read by the plugin once it switches to raw mode (the switch keeps
+    ///   the kernel's input queue), and is steered into the run;
+    /// * a line typed while the root turn is open (the stand-in holds the
+    ///   first answer) is steered through dsh's own `Agent.steer` with a
+    ///   message from dsh's own factory, resolved from dsh's install;
+    /// * dsh takes it at the next step boundary: the turn goes on, the
+    ///   steered text reaches the model's next request, and each steered line
+    ///   is reported as a prompt.
+    #[test]
+    fn the_real_dsh_takes_steered_lines_into_the_running_turn() {
+        let (Some(_), Some(zsh)) = (which("dsh"), which("zsh")) else {
+            eprintln!("skipped: no dsh or zsh on PATH");
+            return;
+        };
+        let ws = std::env::temp_dir().join(format!("tmm-dsh-410-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/d1");
+        std::fs::create_dir_all(&home).unwrap();
+        let def: RegAgent = serde_json::from_value(json!({"name": "d1", "backend": "dsh", "input_mode": "steer"})).unwrap();
+        let r = render_dsh(&def, "d1", &home, "You are d1.", &[]).unwrap();
+        // Hooks go to a sink in this test's directory, never to a live inbox.
+        write_runtime(&home, &seq_sink(&ws.join("hooks"))).unwrap();
+        let hold = ws.join("hold");
+        let (port, seen) = messages_stand_in_held(Vec::new(), Some(hold.clone()));
+        let q = |p: &std::path::Path| crate::shell::quote_always(&p.to_string_lossy());
+        let env: String = r.env.iter().map(|(k, v)| format!(" {k}={}", crate::shell::quote_always(v))).collect();
+        let cmd = format!(
+            "env -i HOME={} TERM=xterm-256color LANG=C.UTF-8 PATH={} DEEPSEEK_API_KEY=not-a-key DEEPSEEK_BASE_URL=http://127.0.0.1:{port}{env} {} -i",
+            q(&ws), crate::shell::quote_always(&std::env::var("PATH").unwrap()), q(&zsh)
+        );
+        let session = format!("tmm-dsh-410-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        if crate::tmux::run_tmux(&["new-session", "-d", "-s", &session, "-x", "200", "-y", "50", "-c", &ws.to_string_lossy(), &cmd]).is_err() {
+            eprintln!("skipped: no tmux server");
+            return;
+        }
+        let target = pane_id(&session);
+        let screen = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        wait_for("the dsh prompt", 15, || screen().contains(READY_MARKER));
+        crate::tmux::send_command(&target, "the task").unwrap();
+        // At once, into dsh's cold start: nobody reads the TTY yet.
+        crate::tmux::run_tmux(&["send-keys", "-t", &target, "-l", "steered early"]).unwrap();
+        crate::tmux::send_keys(&target, "Enter", false).unwrap();
+        let state = home.join("dsh/tmm");
+        wait_for("the reader's claim", 20, || state.join("steer-ready").is_file());
+        crate::tmux::run_tmux(&["send-keys", "-t", &target, "-l", "steered while open"]).unwrap();
+        crate::tmux::send_keys(&target, "Enter", false).unwrap();
+        wait_for("the echo", 10, || screen().contains("› steer: steered while open"));
+        std::fs::write(&hold, "").unwrap();
+        wait_for("the shell back", 30, || std::fs::read_to_string(state.join("ready")).is_ok());
+        let shown = screen();
+        let _ = crate::tmux::run_tmux(&["kill-session", "-t", &session]);
+        let seen = seen.lock().unwrap().clone();
+        let all: String = seen.iter().map(|r| r.1["messages"].to_string()).collect();
+        assert!(all.contains("steered early"), "M3: a line typed during the cold start was read after raw mode and steered: {} requests\n{shown}", seen.len());
+        assert!(all.contains("steered while open"), "the open turn took the steered line");
+        let last = seen.last().unwrap().1["messages"].to_string();
+        assert!(last.contains("steered while open"), "it reached the model's next request");
+        let prompts: Vec<String> = sunk(&ws.join("hooks")).iter().filter(|h| h["hook_event_name"] == "UserPromptSubmit").map(|h| h["prompt"].as_str().unwrap().to_string()).collect();
+        assert!(prompts.contains(&"the task".to_string()) && prompts.contains(&"steered early".to_string()) && prompts.contains(&"steered while open".to_string()), "{prompts:?}");
+        eprintln!("M3: {} requests; prompts {prompts:?}", seen.len());
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -2266,6 +2752,47 @@ if (at < 0) {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// Board #410 P1-D: a steer reader's claim (`tmm/steer-ready`) is the
+    /// second half of the ONE readiness predicate, and it is believed only
+    /// for THIS run of THIS pane: a live owner whose parent is the pane's
+    /// process, naming the run the shell minted last, in the mode it loaded.
+    #[test]
+    fn a_steer_claim_is_believed_only_for_this_run_of_this_pane() {
+        let home = std::env::temp_dir().join(format!("tmm-dsh-claim-{}", uuid::Uuid::new_v4()));
+        let state = home.join("dsh/tmm");
+        std::fs::create_dir_all(&state).unwrap();
+        let me = std::process::id();
+        // A child of this test is a reader whose parent (this test) plays
+        // the pane's process.
+        let mut reader = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = reader.id();
+        std::fs::write(state.join("run"), "1797.1\n").unwrap();
+        let claim = |text: &str| std::fs::write(state.join("steer-ready"), text).unwrap();
+        assert!(!input_ready(&home, Some(me)), "no claim, no shell");
+        claim(&format!("{pid} 1797.1 steer"));
+        assert!(input_ready(&home, Some(me)), "this run, this pane, a live reader");
+        assert!(!input_ready(&home, Some(me + 1)), "another pane's process");
+        assert!(!input_ready(&home, None), "a pane whose process cannot be read");
+        claim(&format!("{pid} 1797.0 steer"));
+        assert!(!input_ready(&home, Some(me)), "a claim an earlier run left");
+        claim(&format!("{pid} 1797.1 queue"));
+        assert!(!input_ready(&home, Some(me)), "not the steer mode");
+        claim(&format!("{me} 1797.1 steer"));
+        assert!(!input_ready(&home, Some(me)), "the pane's process itself is no reader (its parent is not the pane)");
+        for junk in ["", "abc", &format!("{pid} steer"), &format!("{pid}  steer"), &format!("{pid} 1797.1 steer x")] {
+            claim(junk);
+            assert!(!input_ready(&home, Some(me)), "{junk:?}");
+        }
+        claim(&format!("{pid} 1797.1 steer"));
+        std::fs::remove_file(state.join("run")).unwrap();
+        assert!(!input_ready(&home, Some(me)), "no run minted");
+        std::fs::write(state.join("run"), "1797.1\n").unwrap();
+        reader.kill().unwrap();
+        reader.wait().unwrap();
+        assert!(!input_ready(&home, Some(me)), "a dead reader");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Review P1-A2, through the PRODUCTION launcher: the launch script is
     /// sourced into the pane's own ordinary shell, exactly as spawn types it,
     /// and `exec`s the managed zsh — which therefore IS the pane's process
@@ -2495,6 +3022,222 @@ if (at < 0) {
         assert!(dir.join("tmm/prompted").exists(), "the shell must not report the prompt again");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Board #410: EVERY user-sourced root message is a prompt — the run's
+    /// first and each steered line — and a user-ROLE message with any other
+    /// source never is (dsh's skills catalog, a skill invocation, runtime
+    /// context, a plugin's message). Only the first marks `prompted` and
+    /// meets the missing-key check.
+    #[test]
+    fn only_user_sourced_root_messages_become_prompts() {
+        let msg = |source: &str, text: &str| json!(["root", {"type":"user/message","data":{"role":"user","source":{"kind":source},"content":[{"type":"text","text":text}]}}]);
+        let events_in = json!([
+            ["root", {"type":"turn/start","data":{"turn":1}}],
+            msg("user", "the task"),
+            msg("skill-catalog", "<available_skills>x</available_skills>"),
+            msg("skill-invocation", "skill body"),
+            msg("runtime", "Current runtime context."),
+            msg("plugin", "a plugin's note"),
+            msg("user", "a steered line"),
+            ["root", {"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}}],
+            ["root", {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}]
+        ]);
+        let Some((code, _, hooks, dir)) = run_plugin(json!({"requireEnv": ""}), root_and_child(), events_in) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_eq!(code, Some(0));
+        let prompts: Vec<&str> = hooks.iter().filter(|h| h["hook_event_name"] == "UserPromptSubmit").map(|h| h["prompt"].as_str().unwrap()).collect();
+        assert_eq!(prompts, ["the task", "a steered line"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #410, the steer reader (P1-B) and its hand-off record (P1-C),
+    /// against the generated plugin under node, zero model calls. Node's own
+    /// key decoder frames the bytes; the ledger around it says whether it is
+    /// clean, and only a clean reader's record may RUN anything:
+    /// * every split of a bracketed paste with a 3-byte character, fed in
+    ///   full, is one line; an exit at EVERY split BEFORE the rest arrives is
+    ///   unclean (shown, never run) except at a key boundary outside a paste;
+    ///   likewise for an arrow, a split character, a lone ESC before its
+    ///   timeout, and an ordinary draft followed by each of these prefixes;
+    /// * an invalid byte (a replacement character) taints the reader for
+    ///   good — also when the same chunk ends in an incomplete character or
+    ///   ESC, where cumulative byte counts would come out equal;
+    /// * a lone ESC and ^C interrupt; arrows are ignored; CRLF is one Enter;
+    ///   several Enters in one chunk are several lines; backspace; a line
+    ///   past the cap is not sent, and says so; the echo is inert.
+    #[test]
+    fn the_steer_reader_frames_bytes_and_hands_off_only_a_clean_state() {
+        let Some(node) = which("node") else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("tmm-dsh-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.mjs"), plugin_js("true")).unwrap();
+        std::fs::write(dir.join("t.mjs"), STEER_READER_CASES).unwrap();
+        let out = std::process::Command::new(node).arg("t.mjs").current_dir(&dir).env("DSH_HOME", &dir).stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let paste_len = r["paste_len"].as_u64().unwrap();
+        for e in r["eventual"].as_array().unwrap() {
+            assert_eq!(e["subs"], json!(["a\nb中"]), "split {}", e["i"]);
+            assert_eq!(e["clean"], true, "split {}", e["i"]);
+            assert_eq!(e["ints"], 0, "split {}: a paste's escape sequence is no interrupt", e["i"]);
+        }
+        for (case, list) in r["exit"].as_object().unwrap() {
+            for e in list.as_array().unwrap() {
+                let i = e["i"].as_u64().unwrap();
+                let f = &e["f"];
+                assert_eq!(e["subs"], json!([]), "{case} @{i}: nothing submitted");
+                let boundary = case.starts_with("paste") && i == paste_len - 1;
+                if boundary {
+                    assert_eq!(f[0], "clean", "{case} @{i}: a key boundary outside the paste");
+                    assert_eq!(f.as_array().unwrap().len(), 3, "{case} @{i}: a draft only, no line to run");
+                } else {
+                    assert_eq!(f[0], "unclean", "{case} @{i}: {f}");
+                    let shown = f[1].as_str().unwrap();
+                    if case.ends_with("+draft") {
+                        assert!(shown.starts_with("hi"), "{case} @{i}: the draft is shown with the prefix: {shown}");
+                    }
+                    assert!(!shown.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}'), "{case} @{i}: inert: {shown:?}");
+                }
+            }
+        }
+        assert_eq!(r["invalid"], json!(["unclean", "unclean", "unclean"]), "a replacement character taints, even with equal byte counts");
+        assert_eq!(r["lone_esc"], 1);
+        assert_eq!(r["ctrl_c"], 1);
+        assert_eq!(r["arrow"], json!({"subs": ["x"], "ints": 0}), "arrows and F1 are not Escape");
+        assert_eq!(r["crlf"], json!(["x", "y"]));
+        assert_eq!(r["many"], json!(["a", "b", "c"]));
+        assert_eq!(r["backspace"], json!(["a中"]));
+        assert_eq!(r["paste_crlf"], json!(["x\ny"]));
+        assert_eq!(r["overflow"], json!({"subs": ["ok"], "not_sent": 1}));
+        assert_eq!(r["inert"], "a␛[31mb⏎c␇");
+        assert_eq!(r["late_clean"], json!(["clean", "", "l1", "l2", "end"]));
+        assert_eq!(r["late_live"], json!(["pending", "l1 ⏎ dr", "end"]), "while the process lives a record is never final");
+        assert_eq!(r["nothing"], Value::Null);
+        assert_eq!(r["nul"], json!({"subs": ["ok"], "not_sent": 2}), "a NUL refuses its line whole, pasted or typed");
+        assert_eq!(r["nul_draft"], json!({"clean": false, "f": ["unclean", "d␀x", "end"]}), "a draft with a NUL is shown, never run");
+        assert_eq!(r["open_paste"], json!({"pending": 0, "clean": false}), "an open paste is no admission state");
+        assert_eq!(r["bounded"], json!({"tainted": 0, "endless": 0, "clean": [false, false]}));
+        assert_eq!(r["hold"], json!({"takes": [true, false, false], "over": true, "not_sent": 2, "f": "unclean"}), "past the bound nothing runs out of order");
+        assert_eq!(r["hold_give"], json!([true, true]), "a steered early line frees its room");
+        assert_eq!(r["steer_once"], json!([true, 1, false]), "an echo failure never un-accepts a steer");
+        assert_eq!(r["admits"], json!([[true, false], [true, false], true]), "a draft is clean to hand back, never admits a new line");
+        assert_eq!(r["paste_ctrl_c"], 1, "^C interrupts inside an open paste");
+        assert_eq!(r["paste_esc"], 1, "a decoded lone ESC interrupts inside an open paste");
+        assert_eq!(r["paste_bel"], json!({"subs": ["a\u{7}b"], "ints": 0}), "other control bytes in a paste are text (BEL kept); a decoded sequence (ESC[31m) is ignored, never an interrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const STEER_READER_CASES: &str = r#"import * as p from './index.mjs'
+const B = (x) => Buffer.from(x)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const mk = () => {
+  const r = { subs: [], ints: 0, ns: 0 }
+  r.reader = p.makeReader({ submit: (t) => r.subs.push(t), interrupt: () => r.ints++, notSent: () => r.ns++ })
+  return r
+}
+const run = async (chunks, wait = 5) => { const r = mk(); for (const c of chunks) { r.reader.feed(c); await sleep(wait) } return r }
+const out = {}
+const paste = B('\x1b[200~a\nb中\x1b[201~\r')
+out.paste_len = paste.length
+out.eventual = []
+for (let i = 1; i < paste.length; i++) {
+  const r = await run([paste.subarray(0, i), paste.subarray(i)])
+  out.eventual.push({ i, subs: r.subs, clean: r.reader.clean(), ints: r.ints })
+}
+const exitAt = async (bytes, draft) => {
+  const res = []
+  for (let i = 1; i < bytes.length; i++) {
+    const r = await run(draft ? [B(draft), bytes.subarray(0, i)] : [bytes.subarray(0, i)])
+    res.push({ i, f: p.handoffFields(true, r.reader, []), subs: r.subs })
+  }
+  return res
+}
+out.exit = {}
+for (const [name, bytes] of [['paste', paste], ['arrow', B('\x1b[A')], ['char', B('中')], ['esc', B('\x1bx')]]) {
+  out.exit[name] = await exitAt(bytes, '')
+  out.exit[name + '+draft'] = await exitAt(bytes, 'hi')
+}
+out.invalid = []
+for (const c of [Buffer.from([0xff, 0xe4, 0xb8]), Buffer.from([0xff, 0x1b]), Buffer.from([0xff, 0x61])]) {
+  const r = await run([c], 700)
+  out.invalid.push(p.handoffFields(true, r.reader, [])[0])
+}
+out.lone_esc = (await run([B('\x1b')], 700)).ints
+out.ctrl_c = (await run([B('\x03')])).ints
+{
+  const r = await run([B('\x1b[Ax\x1b[B\x1bOP\r')], 700)
+  out.arrow = { subs: r.subs, ints: r.ints }
+}
+out.crlf = (await run([B('x\r\ny\r')])).subs
+out.many = (await run([B('a\rb\rc\r')])).subs
+out.backspace = (await run([B('ab\x7f中\r')])).subs
+out.paste_crlf = (await run([B('\x1b[200~x\r\ny\x1b[201~\r')])).subs
+{
+  const r = await run([B('a'.repeat(300000) + '\r'), B('ok\r')])
+  out.overflow = { subs: r.subs, not_sent: r.ns }
+}
+out.inert = p.inert('a\x1b[31mb\nc\x07')
+const clean = await run([])
+out.late_clean = p.handoffFields(true, clean.reader, ['l1', 'l2'])
+const live = await run([B('dr')])
+out.late_live = p.handoffFields(false, live.reader, ['l1'])
+out.nothing = p.handoffFields(true, clean.reader, [])
+// Review P1-A: a NUL anywhere in a line refuses it whole, pasted or typed.
+{
+  const r = await run([B('\x1b[200~safe'), Buffer.from([0]), B('!touch x\x1b[201~\r'), B('a'), Buffer.from([0]), B('b\r'), B('ok\r')])
+  out.nul = { subs: r.subs, not_sent: r.ns }
+  const d = await run([B('\x1b[200~d'), Buffer.from([0]), B('x\x1b[201~')])
+  out.nul_draft = { clean: d.reader.clean(), f: p.handoffFields(true, d.reader, []) }
+}
+// Review P1-B: an open paste is no admission state, though no byte is pending.
+{
+  const r = await run([B('\x1b[200~half')])
+  out.open_paste = { pending: r.reader.state.pending.length, clean: r.reader.clean() }
+}
+// Review P2-B: what the reader retains is bounded — a tainted ledger holds
+// nothing, and Node's decoder itself never holds a long sequence (measured,
+// Node 22: `ESC [` and 300 000 digits is a key per few bytes).
+{
+  const t = await run([Buffer.from([0xff]), B('x'.repeat(100000))])
+  const e = await run([B('\x1b[' + '1'.repeat(300000))])
+  out.bounded = { tainted: t.reader.state.pending.length, endless: e.reader.state.pending.length, clean: [t.reader.clean(), e.reader.clean()] }
+  let ns = 0
+  const h = p.makeHold(() => ns++)
+  out.hold = { takes: [h.take('a'.repeat(200000)), h.take('b'.repeat(100000)), h.take('c')], over: h.over, not_sent: ns, f: p.handoffFields(true, clean.reader, ['a'], h.over)[0] }
+  const g = p.makeHold(() => ns++)
+  out.hold_give = [g.take('a'.repeat(200000)), (g.give('a'.repeat(200000)), g.take('b'.repeat(200000)))]
+}
+// Review P2-A: a steer that returned is accepted, whatever its echo does.
+{
+  let calls = 0
+  const agent = { steer() { calls++ } }
+  const thrower = { steer() { throw new Error('no') } }
+  out.steer_once = [p.steerOnce(agent, (m) => m, 'x', () => { throw new Error('EPIPE') }), calls, p.steerOnce(thrower, (m) => m, 'x', () => {})]
+}
+// Round 2 P1-B residual: a person's draft (typed, or a paste closed before
+// its Enter) is clean to hand back but admits no new line.
+{
+  const typed = await run([B('hi')])
+  const pasted = await run([B('\x1b[200~p\x1b[201~')])
+  const empty = await run([B('done\r')])
+  out.admits = [[typed.reader.clean(), typed.reader.admits()], [pasted.reader.clean(), pasted.reader.admits()], empty.reader.admits()]
+}
+// Round 2 P1-C: ^C and a decoded lone ESC interrupt inside an open paste;
+// any other control byte in a paste is text, a decoded sequence is ignored.
+{
+  out.paste_ctrl_c = (await run([B('\x1b[200~ab\x03')])).ints
+  out.paste_esc = (await run([B('\x1b[200~ab'), B('\x1b')], 700)).ints
+  const bel = await run([B('\x1b[200~a\x07b\x1b[31m\x1b[201~\r')], 700)
+  out.paste_bel = { subs: bel.subs, ints: bel.ints }
+}
+process.stdout.write(JSON.stringify(out))
+process.exit(0)
+"#;
 
     /// P1-B: only the agent's OWN (root) session is the window's turn. A
     /// subagent session — even one seen FIRST — never opens a turn, becomes
