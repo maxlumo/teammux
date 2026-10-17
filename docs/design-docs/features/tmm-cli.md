@@ -78,7 +78,7 @@ tmm spawn <agent> --join <team>      …into a team of this project, at runtime 
 tmm spawn --team <team> [--brief <text>]     start a configured team (all members)
 tmm project list                     ● live / ○ down, session + path
 tmm project create <path> [--name n] [--session s] [--with-agent <backend>]
-tmm project up|down|archive|delete|rename <session>
+tmm project up|down|archive|unarchive|delete|rename <session>
 
 # identity assets (central registry)
 tmm registry list|save|delete        agent definitions (--backend --system --model
@@ -473,7 +473,7 @@ a teammate:
 | Input mode | `tmm agent mode <name> queue\|steer` | kiro card context menu: Switch to Steer / Switch to Queue (#271) |
 | Runtime team | `tmm agent team <name> <team\|->` | drag the card onto a team (mouse/pen); card menu: Move to team t / Leave team t (#384) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |
-| Project | `tmm project up\|down\|archive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action) |
+| Project | `tmm project up\|down\|archive\|unarchive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action); recycle bin: Restore (#415) |
 | Board hand-off | `tmm board assign <id> <name\|->` | Board detail: the assignee picker (its first row clears it) |
 
 **`tmm board assign` (board #367, 2026-10-15).** Found reassigning #363–#366
@@ -548,7 +548,16 @@ DROPS THE SLOT (so `up` never recreates it) and deletes the isolated home (so
 `is_managed_in` stops recognising it). `delete` is archive's irreversible
 sibling: it closes the session, removes every `<path>/.tmm/agents/<name>/` the
 app created, and forgets the row (slots cascade; the Board's issues go with a
-permanent delete, board #41). Two things both verbs leave alone on purpose:
+permanent delete, board #41). The homes are the DIRECTORY's, so while another
+project (archived ones count) declares the same directory, or its path cannot
+be resolved, delete keeps them and answers `agent_homes_kept_for:
+[{project, reason}]` (`declared` | `unresolved`), which the CLI prints, and
+`agent_homes_error` / `agent_homes_left_in` when not everything could be
+removed (board
+#415: a stale probe project on this repository's own path would have deleted
+every live agent's home; the decision and the claim are one store section,
+see projects.md). `unarchive` is the recycle bin's restore: `project_archive`
+with `archived: false`, no `down`, nothing deleted (`project_archive_cli.rs`). Two things both verbs leave alone on purpose:
 **your files** — we only ever delete inside `.tmm/agents/` — and **the chat
 history**, because the room is the record. In the chat UI, delete is a recycle
 bin, not destruction (hub-feed.md); the raw CLI keeps the sharper verbs as-is.

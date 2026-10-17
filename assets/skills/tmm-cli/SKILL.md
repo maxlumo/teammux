@@ -213,7 +213,10 @@ tmm project rename <session> --name "New name"   # the tmux session follows
                                     #   the name (slugged; printed); the room,
                                     #   board and wakes move with it
 tmm project archive <session>       # forget the project (session survives)
+tmm project unarchive <session>     # bring an archived project back
 tmm project delete <session>        # forget it AND delete its agents' homes
+                                    #   (kept while another project declares
+                                    #   the same directory)
 ```
 
 ## Registry — central agent/skill/MCP definitions

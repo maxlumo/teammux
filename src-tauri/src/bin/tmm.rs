@@ -125,8 +125,10 @@ USAGE (human or agent — self-management):
   tmm project rename <session> --name "New name"   rename it: the tmux session follows the
                                       name (slugged); the room, board and wakes move with it
   tmm project delete <session>        forget the project and delete its agents' homes
+                                      (kept while another project declares the same directory)
   tmm project down <session>          kill the session, keep the declaration
   tmm project archive <session>       remove from projects (session survives)
+  tmm project unarchive <session>     bring an archived project back to the list
   tmm registry list                   centrally-defined agents
   tmm teams list                      configured agent teams (members + roles)
   tmm teams save --name <n> --def '<members json>' [--description <text>]
@@ -1014,7 +1016,7 @@ async fn main() {
                 println!("✓ renamed {name} → {new_name} (session {session})");
             }
         }
-        ("project", rest) if matches!(rest.first().map(String::as_str), Some("up" | "down" | "archive" | "delete")) => {
+        ("project", rest) if matches!(rest.first().map(String::as_str), Some("up" | "down" | "archive" | "unarchive" | "delete")) => {
             let action = rest[0].clone();
             let Some(name) = rest.get(1).cloned() else {
                 fail(EXIT_USAGE, &format!("project {action} needs a session name: tmm project {action} <session>"));
@@ -1026,8 +1028,16 @@ async fn main() {
                 "delete" => "project_delete",
                 _ => "project_archive",
             };
-            let r = rpc(&ctx, method, json!({ "id": id })).await;
-            if ctx.json { println!("{r}"); } else { println!("✓ {action} {name}"); }
+            // `unarchive` is the recycle bin's restore (board #415).
+            let params = if action == "unarchive" { json!({ "id": id, "archived": false }) } else { json!({ "id": id }) };
+            let r = rpc(&ctx, method, params).await;
+            if ctx.json { println!("{r}"); } else {
+                println!("✓ {action} {name}");
+                print_kept_homes(&r);
+                if let Some(e) = r.get("agent_homes_error").and_then(|v| v.as_str()) {
+                    eprintln!("  agent homes not removed: {e}");
+                }
+            }
         }
         ("registry", rest) if rest.first().map(String::as_str) == Some("save") => {
             // Self-evolution: an agent can define NEW agents (or refine
@@ -1578,6 +1588,27 @@ fn task_value(t: &tasks::Task) -> Value {
         "started": t.started,
         "cmd": t.cmd,
     })
+}
+
+/// A delete that kept the agent homes says why (board #415): the directory
+/// is also declared by another project, or another project's path could not
+/// be resolved, so it may be.
+fn print_kept_homes(r: &Value) {
+    let empty = Vec::new();
+    let kept = r.get("agent_homes_kept_for").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let names = |reason: &str| -> Vec<&str> {
+        kept.iter()
+            .filter(|k| k.get("reason").and_then(|v| v.as_str()) == Some(reason))
+            .filter_map(|k| k.get("project").and_then(|v| v.as_str()))
+            .collect()
+    };
+    let (declared, unresolved) = (names("declared"), names("unresolved"));
+    if !declared.is_empty() {
+        println!("  agent homes kept: the directory is also declared by {}", declared.join(", "));
+    }
+    if !unresolved.is_empty() {
+        println!("  agent homes kept: the path of {} could not be resolved, so it may be the same directory", unresolved.join(", "));
+    }
 }
 
 /// Accepts a session name or a raw project id; resolves via project_list so

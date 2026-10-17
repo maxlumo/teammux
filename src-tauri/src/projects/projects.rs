@@ -469,10 +469,13 @@ pub fn set_archived(id: &str, archived: bool) -> Result<Value, String> {
     })
 }
 
-/// Delete a project for good: kill its session, remove every managed agent's
-/// isolated home, then forget the row (slots cascade). Archive is the
-/// reversible verb — "hide this from the list, I might come back"; this one is
-/// for a project that should stop existing (owner: "除了关闭之外，还要可以删除").
+/// Delete a project for good: close its session, then — in one store section
+/// — check it is still the project that was closed, forget the row (slots
+/// cascade) and stage its agents' homes, and finally remove the staged homes
+/// outside the lock. The homes are kept when another project declares the
+/// same directory: they are its too. Archive is the reversible verb — "hide
+/// this from the list, I might come back"; this one is for a project that
+/// should stop existing (owner: "除了关闭之外，还要可以删除").
 ///
 /// What it does NOT touch: the workspace directory and anything in it that is
 /// not ours. We delete `<path>/.tmm/agents/<name>/` — configs and launch
@@ -483,28 +486,153 @@ pub fn set_archived(id: &str, archived: bool) -> Result<Value, String> {
 /// issues and note threads are deleted before the session name is released,
 /// so another project can never inherit them (board #41).
 pub fn delete(id: &str) -> Result<Value, String> {
+    delete_with(id, reconcile::down, |_| {}, |store, id| store.delete_project(id))
+}
+
+/// Where `delete_with`'s `in_section` seam is called: both inside the one
+/// store section, after the owner decision and after the claim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DeletePhase {
+    Decided,
+    Claimed,
+}
+
+/// `delete`, with its seams named for the tests: `close` brings the session
+/// down (`reconcile::down`); `in_section` runs inside the one store section,
+/// once after the owner decision and once after the claim (a test barrier;
+/// `|_| {}` in production); `forget` deletes the row (`Store::delete_project`).
+fn delete_with(
+    id: &str,
+    close: impl FnOnce(&store::Project) -> Result<(), String>,
+    mut in_section: impl FnMut(DeletePhase),
+    forget: impl FnOnce(&mut Store, &str) -> Result<bool, String>,
+) -> Result<Value, String> {
     let project = with_store(|store| store.project(id))?
         .ok_or_else(|| format!("no project with id '{id}'"))?;
-    // Down first: killing the session while its declaration still exists is
+    // Down FIRST: killing the session while its declaration still exists is
     // what `down` is for, and it keeps the reconciler from re-creating windows
     // for a project that is about to vanish. And down MUST succeed before
     // anything is forgotten: a session that survives with its homes deleted
     // and its row gone is an untracked session full of windows nobody owns,
     // which `auto_adopt_once` re-adopts as a NEW project within 120 s —
     // delete would resurrect what it was asked to forget. (`down` is Ok when
-    // the session is already gone.)
-    down(id).map_err(|e| format!("'{}' was not deleted — its session did not go down: {e}", project.name))?;
-    let mut homes_removed = 0usize;
+    // the session is already gone.) Outside the store lock: it is tmux.
+    close(&project).map_err(|e| format!("'{}' was not deleted — its session did not go down: {e}", project.name))?;
+    // The homes live in the DIRECTORY (`<path>/.tmm/agents/`), and several
+    // projects may declare one directory (`create` keeps them separate). While
+    // another project — archived ones included, they are still declared —
+    // names the same directory, or its path cannot be resolved, the homes are
+    // (or may be) its too: they are kept and the answer says for whom (board
+    // #415: a stale probe project on this repo's own path would have deleted
+    // every live agent's home here).
+    //
+    // ONE store section checks, decides and claims (board #415 review P1-B):
+    // it rereads the target, reads the other declarations, forgets the row,
+    // and — with no other owner — RENAMES the agents dir to a staging name.
+    // Every declaration writer (create, adopt, rename) takes the same lock,
+    // so one that committed before the section is seen, and one that commits
+    // after it finds no agents dir: nothing it declares can be removed below.
+    // The recursive delete of the staging dir runs after the lock.
     let agents_root = std::path::Path::new(&project.path).join(".tmm").join("agents");
-    if let Ok(entries) = std::fs::read_dir(&agents_root) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() && std::fs::remove_dir_all(entry.path()).is_ok() {
-                homes_removed += 1;
+    let (deleted, kept, staged, mut error) = with_store(|store| {
+        // What was closed must still be what is deleted (review round 2,
+        // P1): a rename between the read and here moved the session, so the
+        // close above closed a name the project no longer has — its renamed
+        // session may be running. Changed or gone: nothing is removed.
+        match store.project(id)? {
+            None => return Err(format!("'{}' was deleted by someone else while this delete ran; nothing removed", project.name)),
+            Some(now) if now.session != project.session || now.path != project.path => {
+                return Err(format!(
+                    "'{}' changed while it was being deleted (session {} → {}, path {} → {}); nothing removed — run delete again",
+                    project.name, project.session, now.session, project.path, now.path
+                ))
+            }
+            Some(_) => {}
+        }
+        let kept: Vec<Value> = store
+            .list_projects(true)?
+            .into_iter()
+            .filter(|p| p.id != project.id)
+            .filter_map(|p| match same_dir(&p.path, &project.path) {
+                Some(true) => Some(json!({ "project": p.name, "reason": "declared" })),
+                Some(false) => None,
+                None => Some(json!({ "project": p.name, "reason": "unresolved" })),
+            })
+            .collect();
+        in_section(DeletePhase::Decided);
+        // The row first: a failed forget stages nothing.
+        let deleted = forget(store, id)?;
+        let (mut staged, mut error) = (None, None);
+        if kept.is_empty() {
+            let staging = agents_root.with_file_name(format!("agents.deleting-{id}-{}", now()));
+            match std::fs::rename(&agents_root, &staging) {
+                Ok(()) => staged = Some(staging),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // The row is gone and the homes stay where they were: an
+                // orphan home is harmless, a lost one is not.
+                Err(e) => error = Some(format!("homes kept in {}: {e}", agents_root.display())),
             }
         }
+        in_section(DeletePhase::Claimed);
+        Ok((deleted, kept, staged, error))
+    })?;
+    // Outside the lock: remove each staged home, counting only what is gone.
+    let mut homes_removed = 0usize;
+    let mut left_in = None;
+    if let Some(staging) = staged {
+        let mut failures = Vec::new();
+        match std::fs::read_dir(&staging) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let home = entry.file_type().is_ok_and(|t| t.is_dir());
+                    let gone = if home { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+                    match gone {
+                        Ok(()) => homes_removed += usize::from(home),
+                        Err(e) => failures.push(format!("{}: {e}", path.display())),
+                    }
+                }
+            }
+            Err(e) => failures.push(format!("{}: {e}", staging.display())),
+        }
+        if failures.is_empty() {
+            if let Err(e) = std::fs::remove_dir(&staging) {
+                failures.push(format!("{}: {e}", staging.display()));
+            }
+        }
+        if !failures.is_empty() {
+            error = Some(format!("not everything was removed; what is left is in {}: {}", staging.display(), failures.join("; ")));
+            left_in = Some(staging.to_string_lossy().into_owned());
+        }
     }
-    let deleted = with_store(|store| store.delete_project(id))?;
-    Ok(json!({ "id": id, "deleted": deleted, "agent_homes_removed": homes_removed }))
+    let mut answer = json!({ "id": id, "deleted": deleted, "agent_homes_removed": homes_removed, "agent_homes_kept_for": kept });
+    if let Some(e) = error {
+        answer["agent_homes_error"] = json!(e);
+    }
+    if let Some(dir) = left_in {
+        answer["agent_homes_left_in"] = json!(dir);
+    }
+    Ok(answer)
+}
+
+/// Do two declared paths name one directory? `Some` when both resolve:
+/// canonical paths (symlinks, `.`/`..`, a relative spelling all resolved),
+/// and a path that does not exist (`NotFound`, or a component that is a file)
+/// compares as written, minus a
+/// trailing `/` — it has no reachable homes to lose. `None` when either
+/// path's resolution FAILED otherwise (permission, a symlink loop, I/O):
+/// unknown, which the caller treats as "may be the same" and keeps the homes
+/// (board #415 review P2-C).
+fn same_dir(a: &str, b: &str) -> Option<bool> {
+    fn norm(p: &str) -> Option<String> {
+        match std::fs::canonicalize(p) {
+            Ok(c) => Some(c.to_string_lossy().into_owned()),
+            // A component that is not there, or is a file: the path cannot exist.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(p.trim_end_matches('/').to_string()),
+            Err(_) => None,
+        }
+    }
+    Some(norm(a)? == norm(b)?)
 }
 
 pub fn set_autostart(id: &str, autostart: bool) -> Result<Value, String> {
@@ -862,6 +990,298 @@ mod tests {
         // about a project that no longer exists.
         assert!(delete(&id).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory holding one agent home, `builder`, for the #415 tests.
+    fn dir_with_a_home(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("tmm-del-{tag}-{}", uuid::Uuid::new_v4()));
+        let home = dir.join(".tmm").join("agents").join("builder");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), "{}").unwrap();
+        let path = dir.canonicalize().unwrap().to_string_lossy().to_string();
+        (dir, home, path)
+    }
+
+    fn id_of(v: &Value) -> String {
+        v.get("id").and_then(|v| v.as_str()).unwrap().to_string()
+    }
+
+    /// Board #415: agent homes belong to the DIRECTORY, so deleting one of two
+    /// projects declared on it (the other archived, which is still declared)
+    /// forgets only its row and keeps every home, naming who keeps them; the
+    /// last project on the directory takes them with it.
+    #[test]
+    fn delete_keeps_the_homes_while_another_project_declares_the_directory() {
+        use_test_store();
+        let (dir, home, path) = dir_with_a_home("shared");
+        let live = id_of(&create(&path, Some("realproj"), Some("realproj"), None).unwrap());
+        let stale = id_of(&create(&path, Some("stale probe"), Some("staleprobe"), None).unwrap());
+        assert_ne!(live, stale, "two projects on one path are two projects");
+        set_archived(&live, true).unwrap();
+
+        let r = delete(&stale).unwrap();
+        assert_eq!(r.get("deleted").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(r.get("agent_homes_removed").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(r["agent_homes_kept_for"], json!([{ "project": "realproj", "reason": "declared" }]), "the answer names who keeps them");
+        assert!(home.join("launch.json").is_file(), "the other project's agent home is intact");
+
+        let r = delete(&live).unwrap();
+        assert_eq!(r.get("agent_homes_removed").and_then(|v| v.as_u64()), Some(1), "the last one takes them");
+        assert_eq!(r["agent_homes_kept_for"], json!([]));
+        assert!(!home.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join(".tmm")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(leftovers.is_empty(), "the staging dir is removed too: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review P1-A: the session goes down FIRST, for real, and a close that is
+    /// refused deletes nothing — not the homes, not the row.
+    #[test]
+    fn delete_closes_the_real_session_first_and_a_refused_close_deletes_nothing() {
+        // The session is the one `create` answers (it slugs to 24
+        // characters), killed on drop, also on a panic.
+        struct Kill(String);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = tmux::kill_session(&self.0);
+            }
+        }
+        use_test_store();
+        let (dir, home, path) = dir_with_a_home("close");
+        let made = create(&path, Some("delclose"), Some(&format!("dc{}", std::process::id())), None).unwrap();
+        let id = id_of(&made);
+        let session = made["session"].as_str().unwrap().to_string();
+        let _kill = Kill(session.clone());
+        tmux::ensure_session(&session, &path).unwrap();
+        assert!(tmux::session_exists(&session));
+
+        let refused = delete_with(&id, |_| Err("tmux said no".into()), |_| {}, |st: &mut Store, id: &str| st.delete_project(id));
+        assert!(refused.as_ref().is_err_and(|e| e.contains("its session did not go down: tmux said no")), "{refused:?}");
+        assert!(home.join("launch.json").is_file(), "a refused close removes no home");
+        assert!(with_store(|st| st.project(&id)).unwrap().is_some(), "and forgets no row");
+        assert!(tmux::session_exists(&session));
+
+        let r = delete(&id).unwrap();
+        assert_eq!(r.get("deleted").and_then(|v| v.as_bool()), Some(true));
+        assert!(!tmux::session_exists(&session), "delete brought the real session down");
+        assert!(!home.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review P1-B: the owner decision and the claim are one store section.
+    /// A project declared on the same directory BEFORE it (here, while the
+    /// session goes down) is an owner and keeps the homes. A create started
+    /// between the decision and the claim must WAIT for the claim: it returns
+    /// only once the homes are moved away, so it starts with no agents dir
+    /// and declares nothing that was removed. A delete whose decision were a
+    /// snapshot would let that create finish in between — it would see the
+    /// homes, and then lose them.
+    #[test]
+    fn a_declaration_racing_a_delete_is_counted_or_finds_no_homes_to_lose() {
+        use_test_store();
+        // Before the section: counted.
+        let (dir, home, path) = dir_with_a_home("race-before");
+        let id = id_of(&create(&path, Some("first"), Some("racefirst"), None).unwrap());
+        let r = delete_with(&id, |_| create(&path, Some("early"), Some("raceearly"), None).map(|_| ()), |_| {}, |st: &mut Store, id: &str| st.delete_project(id)).unwrap();
+        assert_eq!(r["agent_homes_kept_for"], json!([{ "project": "early", "reason": "declared" }]), "{r}");
+        assert!(home.join("launch.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Waiting on the store while the section runs: after it.
+        let (dir, home, path) = dir_with_a_home("race-during");
+        let id = id_of(&create(&path, Some("second"), Some("racesecond"), None).unwrap());
+        let late = std::sync::Mutex::new(None);
+        let returned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let section = std::cell::Cell::new(None);
+        let r = delete_with(&id, |_| Ok(()), |phase| match phase {
+            // Round 4 (validator on a662aca0: the old barrier let a split
+            // section through 2 times in 5). Observable, not timed: the
+            // decision runs INSIDE a store section; the create announces
+            // itself before it asks for the store; and after the claim, still
+            // in the SAME section, the create has not returned. A claim in a
+            // second section fails the first assertion every time.
+            DeletePhase::Decided => {
+                let s = super::super::tests::current_section();
+                assert!(s.is_some(), "the owner decision runs inside a store section");
+                section.set(s);
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (p, h, done) = (path.clone(), home.clone(), returned.clone());
+                let t = std::thread::spawn(move || {
+                    tx.send(()).unwrap();
+                    let made = create(&p, Some("late"), Some("racelate"), None);
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    (made, h.exists())
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the late create announced itself within 10 s");
+                *late.lock().unwrap() = Some(t);
+            }
+            DeletePhase::Claimed => {
+                assert_eq!(super::super::tests::current_section(), section.get(), "the claim is in the same section as the decision");
+                assert!(!returned.load(std::sync::atomic::Ordering::SeqCst), "the create has not returned before the claim is done");
+            }
+        }, |st: &mut Store, id: &str| st.delete_project(id))
+        .unwrap();
+        let (late, saw_homes) = late.lock().unwrap().take().unwrap().join().unwrap();
+        let late = late.unwrap();
+        assert!(!saw_homes, "the create waited for the claim: it never saw the homes it would lose");
+        assert_eq!(r["agent_homes_kept_for"], json!([]), "it was not declared when the section decided: {r}");
+        assert_eq!(r.get("agent_homes_removed").and_then(|v| v.as_u64()), Some(1));
+        assert!(!home.exists());
+        assert!(!dir.join(".tmm/agents").exists(), "the late project starts with no agents dir");
+        assert!(with_store(|st| st.project(&id_of(&late))).unwrap().is_some(), "and its declaration stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session name from `create`'s answer, killed on drop (also on a panic).
+    struct KillSession(String);
+    impl Drop for KillSession {
+        fn drop(&mut self) {
+            let _ = tmux::kill_session(&self.0);
+        }
+    }
+
+    /// Review round 2, P1: what was closed must be what is deleted. A rename
+    /// between the read and the section moves the session, so the close
+    /// closed a name the project no longer has: the delete refuses, and the
+    /// renamed live session keeps its row and its homes. A target that
+    /// vanished meanwhile stages nothing.
+    #[test]
+    fn a_project_renamed_or_gone_while_it_is_deleted_loses_nothing() {
+        use_test_store();
+        let (dir, home, path) = dir_with_a_home("renamed");
+        let made = create(&path, Some("before"), Some(&format!("rb{}", std::process::id())), None).unwrap();
+        let id = id_of(&made);
+        let old = made["session"].as_str().unwrap().to_string();
+        let _k_old = KillSession(old.clone());
+        tmux::ensure_session(&old, &path).unwrap();
+        let renamed = std::sync::Mutex::new(String::new());
+        let refused = delete_with(
+            &id,
+            |p| {
+                rename(&id, &format!("after{}", std::process::id())).unwrap();
+                *renamed.lock().unwrap() = with_store(|st| st.project(&id)).unwrap().unwrap().session;
+                reconcile::down(p)
+            },
+            |_| {},
+            |st: &mut Store, id: &str| st.delete_project(id),
+        );
+        let new = renamed.lock().unwrap().clone();
+        let _k_new = KillSession(new.clone());
+        assert_ne!(new, old, "the rename moved the session");
+        assert!(refused.as_ref().is_err_and(|e| e.contains("changed while it was being deleted") && e.contains("nothing removed")), "{refused:?}");
+        assert!(tmux::session_exists(&new), "the renamed session is still running");
+        assert_eq!(with_store(|st| st.project(&id)).unwrap().map(|p| p.session), Some(new.clone()), "with its row");
+        assert!(home.join("launch.json").is_file(), "and its homes");
+        let _ = delete(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir, home, path) = dir_with_a_home("gone");
+        let id = id_of(&create(&path, Some("gone"), Some("gonebefore"), None).unwrap());
+        let refused = delete_with(&id, |_| with_store(|st| st.delete_project(&id)).map(|_| ()), |_| {}, |st: &mut Store, id: &str| st.delete_project(id));
+        assert!(refused.as_ref().is_err_and(|e| e.contains("deleted by someone else")), "{refused:?}");
+        assert!(home.join("launch.json").is_file(), "nothing staged");
+        assert!(!std::fs::read_dir(dir.join(".tmm")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("agents.deleting")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review round 2, P2-A: each failure says what it left. A forget that
+    /// fails stages nothing; a rename that fails keeps the homes where they
+    /// were; a staged home that cannot be removed is named, with only what
+    /// is really gone counted as removed.
+    #[test]
+    fn a_delete_that_cannot_finish_says_what_it_left_and_never_overstates() {
+        use std::os::unix::fs::PermissionsExt;
+        use_test_store();
+        let mode = |p: &std::path::Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+
+        let (dir, home, path) = dir_with_a_home("forget");
+        let id = id_of(&create(&path, Some("forget"), Some("forgetfails"), None).unwrap());
+        let failed = delete_with(&id, |_| Ok(()), |_| {}, |_: &mut Store, _: &str| Err("disk full".to_string()));
+        assert!(failed.as_ref().is_err_and(|e| e.contains("disk full")), "{failed:?}");
+        assert!(home.join("launch.json").is_file(), "no rename after a failed forget");
+        assert!(with_store(|st| st.project(&id)).unwrap().is_some());
+        let _ = delete(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir, home, path) = dir_with_a_home("rename");
+        let id = id_of(&create(&path, Some("rename"), Some("renamefails"), None).unwrap());
+        mode(&dir.join(".tmm"), 0o555);
+        let r = delete(&id).unwrap();
+        mode(&dir.join(".tmm"), 0o755);
+        assert_eq!(r.get("deleted").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(r.get("agent_homes_removed").and_then(|v| v.as_u64()), Some(0));
+        assert!(r["agent_homes_error"].as_str().is_some_and(|e| e.contains("homes kept in")), "{r}");
+        assert!(home.join("launch.json").is_file(), "the homes stay where they were");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir, _home, path) = dir_with_a_home("cleanup");
+        let stuck = dir.join(".tmm/agents/stuck");
+        std::fs::create_dir_all(&stuck).unwrap();
+        std::fs::write(stuck.join("f"), "x").unwrap();
+        mode(&stuck, 0o555);
+        let id = id_of(&create(&path, Some("cleanup"), Some("cleanupfails"), None).unwrap());
+        let r = delete(&id).unwrap();
+        assert_eq!(r.get("agent_homes_removed").and_then(|v| v.as_u64()), Some(1), "only builder is gone: {r}");
+        let left = r["agent_homes_left_in"].as_str().unwrap().to_string();
+        assert!(r["agent_homes_error"].as_str().is_some_and(|e| e.contains(&left)), "{r}");
+        let staged_stuck = std::path::Path::new(&left).join("stuck");
+        assert!(staged_stuck.join("f").is_file(), "what is left is where the answer says");
+        mode(&staged_stuck, 0o755);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review P2-C: canonical comparison — a symlink alias, a relative
+    /// spelling and `..` are the same directory; a missing path compares as
+    /// written; a resolution that FAILS (here a symlink loop) is unknown, and
+    /// a delete next to such a project keeps the homes, saying why.
+    #[test]
+    fn same_dir_compares_canonical_paths_and_a_failed_resolution_is_unknown() {
+        let dir = std::env::temp_dir().join(format!("tmm-same-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let p = dir.join("a").canonicalize().unwrap().to_string_lossy().to_string();
+        std::os::unix::fs::symlink(&p, dir.join("alias")).unwrap();
+        assert_eq!(same_dir(&p, &dir.join("alias").to_string_lossy()), Some(true), "a symlink alias");
+        assert_eq!(same_dir(&p, &format!("{p}/")), Some(true));
+        assert_eq!(same_dir(&p, &dir.join("a/../a").to_string_lossy()), Some(true));
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count().saturating_sub(1));
+        let relative = format!("{up}{}", p.trim_start_matches('/'));
+        assert!(!relative.starts_with('/'));
+        assert_eq!(same_dir(&p, &relative), Some(true), "a relative spelling: {relative}");
+        assert_eq!(same_dir(&p, &dir.to_string_lossy()), Some(false));
+        assert_eq!(same_dir("/gone/x/", "/gone/x"), Some(true), "a missing path compares as written");
+        assert_eq!(same_dir("/gone/x", "/gone/y"), Some(false));
+        std::fs::write(dir.join("file"), "").unwrap();
+        let under_a_file = dir.join("file/x").to_string_lossy().to_string();
+        assert_eq!(same_dir(&under_a_file, &p), Some(false), "under a file is missing, not unknown");
+        std::os::unix::fs::symlink(dir.join("loop"), dir.join("loop")).unwrap();
+        let looped = dir.join("loop").to_string_lossy().to_string();
+        assert!(std::fs::canonicalize(&looped).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound), "a real failure, not a missing path");
+        assert_eq!(same_dir(&p, &looped), None, "a failed resolution is unknown");
+        assert_eq!(same_dir(&looped, &p), None);
+
+        use_test_store();
+        let (home_dir, home, path) = dir_with_a_home("unresolved");
+        let id = id_of(&create(&path, Some("victim"), Some("unresolvedvictim"), None).unwrap());
+        // A declared project whose path no longer resolves (create would
+        // refuse it now, so the row is written directly).
+        let odd = uuid::Uuid::new_v4().to_string();
+        with_store(|st| {
+            let mut row = st.project(&id)?.unwrap();
+            row.id = odd.clone();
+            row.name = "odd".into();
+            row.session = format!("unresolvedodd-{}", &odd[..8]);
+            row.room = String::new();
+            row.path = looped.clone();
+            st.insert_project(&row)
+        })
+        .unwrap();
+        let r = delete(&id).unwrap();
+        assert_eq!(r["agent_homes_kept_for"], json!([{ "project": "odd", "reason": "unresolved" }]));
+        assert!(home.join("launch.json").is_file(), "unknown ownership keeps the homes");
+        let _ = delete(&odd);
+        let _ = std::fs::remove_dir_all(&home_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

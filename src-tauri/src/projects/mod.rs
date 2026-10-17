@@ -106,6 +106,8 @@ fn with_store<T>(f: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, S
     #[cfg(test)]
     tests::STORE_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     let mut guard = locked.map_err(|_| "state.db lock poisoned".to_string())?;
+    #[cfg(test)]
+    let _section = tests::Section::enter();
     f(&mut guard)
 }
 
@@ -195,6 +197,35 @@ pub(crate) mod tests {
     /// Threads between asking for the store and holding it (tests observe this
     /// instead of sleeping, to know a caller is really waiting on a holder).
     pub(crate) static STORE_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// The store section this thread is inside, if any (board #415 round 4):
+    /// every `with_store` that holds the store gets a fresh number, so a test
+    /// can tell "inside a section" and "the SAME section" without timing.
+    pub(crate) fn current_section() -> Option<u64> {
+        SECTION.with(|s| s.get())
+    }
+
+    thread_local! {
+        static SECTION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Marks this thread inside a store section until dropped (also on a
+    /// panic), restoring whatever it was before.
+    pub(crate) struct Section(Option<u64>);
+
+    impl Section {
+        pub(crate) fn enter() -> Section {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Section(SECTION.with(|s| s.replace(Some(id))))
+        }
+    }
+
+    impl Drop for Section {
+        fn drop(&mut self) {
+            SECTION.with(|s| s.set(self.0));
+        }
+    }
 
     /// Point the process-wide store at a throwaway database, wiped once per
     /// test process. `STORE` is a `OnceLock`, so every test that touches it must
