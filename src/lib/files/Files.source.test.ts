@@ -20,7 +20,7 @@ test('upload feedback rides the same slot: one batch runner for both transports,
   // to be a silent listing refresh.
   assert.match(source, /import \{ uploadProgress, uploadSummary, uploadSizeError \} from '\.\/file-upload\.ts'/u);
   assert.match(source, /const uploadLifetime = createFeedbackLifetime\(value => \{ uploadFeedback = value; \}\);/u);
-  assert.match(source, /\{#if copyFeedback \|\| downloadFeedback \|\| uploadFeedback \|\| earlierFeedback\}/u, 'the slot renders for an upload (and an earlier download, #301) too');
+  assert.match(source, /\{#if copyFeedback \|\| stackedRows\.length \|\| downloadFeedback \|\| uploadFeedback \|\| earlierFeedback\}/u, 'the slot renders for an upload, a running download (#420) and an earlier one (#301) too');
   assert.match(source, /<OperationFeedback value=\{uploadFeedback\}\s*ondismiss=\{uploadFeedback\?\.kind === 'error' \? uploadLifetime\.clear : undefined\} \/>/u,
     'errors are dismissable; progress has no cancel, success expires by itself');
   assert.equal(source.match(/await runUploadBatch\(/gu)?.length, 2, 'picker/drop Files and native paths share ONE runner');
@@ -305,21 +305,46 @@ test('reading mode: the header hides as a cut, the return floats above the safe 
   assert.ok(back > 0 && back < reading && reading < menu, 'reading mode is the layer under the viewer');
 });
 
-test('a download that lost its slot reports once, outside the live slot (board #301)', () => {
+test('a download that ends while Files is hidden reports once, outside the outcome slot (board #301, #420)', () => {
   assert.match(source, /const earlierLifetime = createFeedbackLifetime\(value => \{ earlierFeedback = value; \}\);/u);
-  assert.match(source, /if \(!operation\.current\(\)\) \{ earlier\(\{ kind: 'success', message: t\('saved'\), detail: savedPath \}\); return; \}/u);
-  assert.match(source, /if \(operation\.current\(\)\) downloadLifetime\.update\(token, failed\); else earlier\(failed\);/u);
+  // ONE door for every outcome: seen -> the outcome slot (a saved file with
+  // Open); hidden -> the earlier notice, told once, with no Open.
+  assert.match(source, /function tell\(value, savedPath = null\) \{\s*if \(!alive\) return;\s*if \(!visible\) \{\s*heldOutcome = /u);
+  assert.match(source, /tell\(\{ kind: 'result', message: t\('saved'\), detail: savedPath \}, savedPath\);/u);
+  assert.match(source, /tell\(\{ kind: 'error', message: String\(e\.message \|\| e\), detail: path \}\);/u);
+  assert.doesNotMatch(source, /else earlier\(/u, 'no second routing rule');
   assert.doesNotMatch(source.slice(source.indexOf('return () => { copyLifetime.clear();'), source.indexOf('return () => { copyLifetime.clear();') + 120), /earlierLifetime/u,
     'leaving the context is the case it reports, so the context exit does not clear it');
 });
 
-test('the download feedback slot shows the store row; it keeps no copy of its own (board #308)', () => {
+test('the download stack is a bounded scroll region; Cancel only while honored; a hidden outcome is held (board #420 review)', () => {
+  // P1-A: the bookmarks panel's fraction and scroll rule, no new size.
+  assert.match(source, /\.files-feedback \{[^}]*max-height: calc\(40vh \/ var\(--ui-zoom, 1\)\); overflow-y: auto;\s*-webkit-overflow-scrolling: touch; overscroll-behavior: contain;/u);
+  // Review round 2: the STACK scrolls; a card keeps its natural height and is
+  // never squeezed into scrolling inside itself (this boundary only).
+  assert.match(source, /\.files-feedback > :global\(\.operation-feedback\) \{ flex: none; \}/u);
+  // P2-C: no Cancel in 'saving'; the boundaries outside download() check it.
+  assert.match(source, /actions=\{row\.state === 'downloading' \? cancelAction : undefined\}/u);
+  assert.match(source, /throwIfCancelled\(control\.signal\);\s*\/\/ There is no measured write fraction\. Only transfer bytes report a percentage\.\s*store\.saving\(rowId\);/u, 'the one check sits right before saving');
+  // P1-B: hidden -> held, latest wins; its life starts when Files is seen.
+  assert.match(source, /if \(!visible\) \{\s*heldOutcome = value\.kind === 'result' \? \{ \.\.\.value, kind: 'success' \} : value;\s*return;/u);
+  assert.match(source, /if \(!visible \|\| !heldOutcome\) return;\s*const value = heldOutcome;\s*heldOutcome = null;\s*earlierLifetime\.update\(earlierLifetime\.begin\(\), value\);/u);
+});
+
+test('the feedback stack shows every running download from the store; it keeps no progress of its own (board #308, #420)', () => {
   // The rows are this server's record, from the scope (board #335 ②b-2-1);
   // what to show is the module's pure `feedbackOf` over the row.
   assert.match(source, /const store = files\.downloads;/u);
-  assert.match(source, /const show = \(\) => \{ if \(operation\.current\(\)\) downloadLifetime\.update\(token, feedbackOf\(row, strings\(\)\)\); \};/u);
-  assert.match(source, /const progress = \(fraction, received = 0, total = 0\) => \{ store\.progress\(rowId, received, total\); show\(\); \};/u);
+  assert.match(source, /const sessionRows = \$derived\(store\.rows\);/u);
+  assert.match(source, /const stackedRows = \$derived\(view === 'local' \? \[\] : activeRows\);/u, 'the stack reads the store rows; the Downloads view lists them itself');
+  // Progress writes the store and nothing else.
+  assert.match(source, /const progress = \(fraction, received = 0, total = 0\) => \{ store\.progress\(rowId, received, total\); \};/u);
+  assert.doesNotMatch(source, /downloadLifetime\.update\(token, feedbackOf\(/u, 'no slot holds a copy of the progress');
   assert.doesNotMatch(source, /shown = \{ kind: 'progress'/u, 'the old private progress copy is gone');
+  // ONE card, drawn by the Downloads view and by the stack alike.
+  assert.match(source, /\{#snippet activeDownload\(row\)\}[\s\S]*?<OperationFeedback value=\{rowFeedback\(row\)\} actions=\{row\.state === 'downloading' \? cancelAction : undefined\} \/>\s*\{\/snippet\}/u);
+  assert.equal(source.match(/\{@render activeDownload\(row\)\}/gu)?.length, 2, 'the view and the stack render the same card');
+  assert.match(source, /\{#each stackedRows as row \(row\.id\)\}\{@render activeDownload\(row\)\}\{\/each\}/u);
   assert.match(source, /store\.done\(rowId, savedPath\);/u);
 });
 

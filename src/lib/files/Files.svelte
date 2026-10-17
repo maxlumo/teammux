@@ -22,7 +22,7 @@
   import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
   import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
-  import { download, bytesToB64, memorySink, nativeSink, partId, PIECE_BYTES, SUSPEND } from './download.ts';
+  import { download, bytesToB64, memorySink, nativeSink, partId, PIECE_BYTES, SUSPEND, throwIfCancelled } from './download.ts';
   import { speed as bytesPerSecond, feedbackOf } from './downloads.svelte.ts';
   import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
@@ -251,6 +251,10 @@
   const sessionRows = $derived(store.rows);
   const activeRows = $derived(sessionRows.filter((r) => r.state === 'downloading' || r.state === 'saving'));
   const failedRows = $derived(sessionRows.filter((r) => r.state === 'failed'));
+  // The feedback stack's cards (board #420): every running download, newest
+  // first, straight from the store; none in the Downloads view, which lists
+  // the same rows itself.
+  const stackedRows = $derived(view === 'local' ? [] : activeRows);
   // Resumable: a part on disk with no attempt. The store knows this
   // session's paused rows; the disk knows every part. One row per id.
   const resumableRows = $derived.by(() => {
@@ -1257,9 +1261,10 @@
   let uploadFeedback = $state(null);
   let downloadOperation = $state.raw(null);
   let downloadOutput = $state(null);
-  // A download whose slot was taken (a newer download, or leaving the
-  // preview) still finishes; its outcome is told ONCE here (#301). One slot,
-  // latest wins: this is a notice, not a download list.
+  // Every download in progress has its own card in the stack, read from the
+  // store (board #420); `downloadFeedback` holds only an OUTCOME. A download
+  // that ends while this Files is hidden tells its outcome ONCE here when
+  // Files is seen again (#301). One slot, latest wins: a notice, not a list.
   let earlierFeedback = $state(null);
   const earlierLifetime = createFeedbackLifetime(value => { earlierFeedback = value; });
   const copyLifetime = createFeedbackLifetime(value => { copyFeedback = value; });
@@ -1315,11 +1320,38 @@
   /** One writer per part id (board #305). The id is stable per server +
    * file so a later session can resume; two concurrent attempts on one id
    * would append to the same part and corrupt it. A second Download of a
-   * file already downloading starts nothing: in THIS Files it takes that
-   * attempt back into the slot; in the other Files (page vs drawer) it says
-   * the file is already downloading, because the progress lives where the
-   * download was started. `inFlight` is the module-level table. */
+   * file already downloading starts nothing: in THIS Files it does nothing
+   * (its card is already in the stack, board #420); in the other Files (page
+   * vs drawer) it says the file is already downloading, because the outcome
+   * is told where the download was started. `inFlight` is the module-level
+   * table. */
   const instance = {};
+
+  /** A download's OUTCOME (board #420; progress is the store's card). While
+   * this Files is seen, it takes the outcome slot — a saved file with its
+   * Open action, latest wins; while hidden, it is HELD (latest wins) and the
+   * earlier notice tells it once when Files is seen again (#301), with no
+   * Open — its 1500 ms life starts only then (review P1-B). */
+  let heldOutcome = null;
+  $effect(() => {
+    if (!visible || !heldOutcome) return;
+    const value = heldOutcome;
+    heldOutcome = null;
+    earlierLifetime.update(earlierLifetime.begin(), value);
+  });
+  function tell(value, savedPath = null) {
+    if (!alive) return;
+    if (!visible) {
+      heldOutcome = value.kind === 'result' ? { ...value, kind: 'success' } : value;
+      return;
+    }
+    const token = downloadLifetime.begin();
+    const contextCurrent = feedbackContext();
+    const operation = { token, current: () => downloadLifetime.current(token) && contextCurrent() };
+    downloadOperation = operation;
+    downloadOutput = savedPath ? { path: savedPath, operation, opening: false } : null;
+    downloadLifetime.update(token, value);
+  }
 
   async function handleDownload(path) {
     const name = path.split('/').pop();
@@ -1329,48 +1361,23 @@
     const server = isTauri ? getMachineId() || `once-${Date.now()}-${Math.random()}` : '';
     const id = isTauri ? partId(server, path) : null;
     const running = id ? memory.writerOf(id) : null;
-    if (running?.owner === instance) { running.adopt(); return; }
-    if (running) {
-      const notice = downloadLifetime.begin();
-      downloadOperation = null; downloadOutput = null;
-      downloadLifetime.update(notice, { kind: 'success', message: t('downloadInProgress'), detail: path });
-      return;
-    }
-    let token = downloadLifetime.begin();
-    let contextCurrent = feedbackContext();
-    const operation = { get token() { return token; }, current: () => downloadLifetime.current(token) && contextCurrent() };
-    downloadOperation = operation;
-    downloadOutput = null;
+    // Its card is already in the stack (board #420): nothing to take back.
+    if (running?.owner === instance) return;
+    if (running) { tell({ kind: 'success', message: t('downloadInProgress'), detail: path }); return; }
     // The store's row is this attempt's ONE record (board #308): progress
-    // writes it, and the feedback slot shows what it says.
+    // writes it, and its card in the feedback stack shows what it says.
     const rowId = id ?? memory.nextWebRowId();
     const control = new AbortController();
     let settle;
     // The gate (board #335 ②b-2-3, reviewer P1-a): a record being released
     // refuses the attempt, which ends here — no row, no claim, no RPC.
     if (!memory.track(rowId, control, new Promise((resolve) => { settle = resolve; }))) return;
-    const row = store.begin(rowId, name, path);
-    const strings = () => ({ downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
-    const show = () => { if (operation.current()) downloadLifetime.update(token, feedbackOf(row, strings())); };
-    const progress = (fraction, received = 0, total = 0) => { store.progress(rowId, received, total); show(); };
-    if (id) memory.claim(id, { owner: instance, adopt() {
-      token = downloadLifetime.begin();
-      contextCurrent = feedbackContext();
-      downloadOperation = operation;
-      downloadOutput = null;
-      show();
-    } });
-    // Outcome of an attempt that lost its slot: an expiring success or a
-    // closable error in the earlier-download notice, never the live slot.
-    const earlier = (value) => {
-      if (!alive) return;
-      earlierLifetime.update(earlierLifetime.begin(), value);
-    };
+    store.begin(rowId, name, path);
+    const progress = (fraction, received = 0, total = 0) => { store.progress(rowId, received, total); };
+    if (id) memory.claim(id, { owner: instance });
     const completed = (savedPath) => {
       store.done(rowId, savedPath);
-      if (!operation.current()) { earlier({ kind: 'success', message: t('saved'), detail: savedPath }); return; }
-      downloadOutput = { path: savedPath, operation, opening: false };
-      downloadLifetime.update(token, { kind: 'result', message: t('saved'), detail: savedPath });
+      tell({ kind: 'result', message: t('saved'), detail: savedPath }, savedPath);
     };
     try {
     progress();
@@ -1391,7 +1398,7 @@
             onProgress: progress,
             // The part on disk is of an older version of the file: the row
             // says so for the rest of the attempt (told once).
-            onRestart: () => { store.restarted(rowId); show(); } });
+            onRestart: () => { store.restarted(rowId); } });
         } catch (e) {
           if (e.code !== 'DL_HTTP_UNREACHABLE') throw e;
           // The WS connection demonstrably works (we just got the signed
@@ -1406,9 +1413,13 @@
         await writeWhole(sink, dlInfo.base64);
       }
 
+      // Cancel is honored up to here (review P2-C): download() checks it on
+      // the streamed path, and this one check covers the whole-file fallback
+      // and a URL ask a Cancel overtook. Past it the row is 'saving' and its
+      // card offers no Cancel (a dialog or a finish is not cancelled here).
+      throwIfCancelled(control.signal);
       // There is no measured write fraction. Only transfer bytes report a percentage.
       store.saving(rowId);
-      show();
       if (native) {
         let dest = null;
         if (!isAndroid) {
@@ -1420,8 +1431,7 @@
             // next Download of this file asks again without refetching.
             await native.release();
             store.paused(rowId, null);
-            const kept = { kind: 'success', message: t('downloadPartKept'), detail: name };
-            if (operation.current()) downloadLifetime.update(token, kept); else earlier(kept);
+            tell({ kind: 'success', message: t('downloadPartKept'), detail: name });
             return;
           }
         }
@@ -1438,8 +1448,7 @@
       a.click();
       setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(blobUrl); }, 100);
       store.done(rowId, null, Date.now(), true);
-      const requested = { kind: 'success', message: t('downloadRequested'), detail: name };
-      if (operation.current()) downloadLifetime.update(token, requested); else earlier(requested);
+      tell({ kind: 'success', message: t('downloadRequested'), detail: name });
     } catch (e) {
       // A NETWORK failure keeps the part for a later resume (download.ts
       // flushed what arrived); anything else (a write or save failure, a
@@ -1449,8 +1458,7 @@
       // guard does.
       if (e?.partBusy) {
         store.forget(rowId);
-        const busy = { kind: 'success', message: t('downloadInProgress'), detail: path };
-        if (operation.current()) downloadLifetime.update(token, busy); else earlier(busy);
+        tell({ kind: 'success', message: t('downloadInProgress'), detail: path });
         return;
       }
       // Suspended by a server switch (board 315): the part stays for a
@@ -1460,18 +1468,16 @@
         store.forget(rowId);
         return;
       }
-      // Cancelled from the Downloads view: the part goes, the row goes, and
-      // the slot says nothing more.
+      // Cancelled (its card or the Downloads view): the part goes, the row
+      // goes and with it the card; nothing more is said.
       if (e?.cancelled) {
         await native?.abort();
         store.forget(rowId);
-        dismissDownload(operation);
         return;
       }
       if (e?.keepPart) { await native?.release(); store.paused(rowId, String(e.message || e)); }
       else { await native?.abort(); store.failed(rowId, String(e.message || e)); }
-      const failed = { kind: 'error', message: String(e.message || e), detail: path };
-      if (operation.current()) downloadLifetime.update(token, failed); else earlier(failed);
+      tell({ kind: 'error', message: String(e.message || e), detail: path });
     }
     } finally { if (id) memory.release(id); memory.untrack(rowId); settle(); }
   }
@@ -2004,6 +2010,18 @@
     </div>
 {/snippet}
 
+{#snippet activeDownload(row)}
+    <!-- ONE card per running download (board #420), read from the store:
+         the Downloads view lists it, the feedback stack shows it. -->
+    {#snippet cancelAction()}
+      <CommandButton variant="icon" icon="x" label={`${t('cancel')}: ${row.name}`} onclick={() => cancelDownload(row.id)} />
+    {/snippet}
+    <!-- Cancel only while it is honored (review P2-C): while downloading.
+         Saving (a dialog, a finish) offers no action rather than a cancel
+         that would not happen. -->
+    <OperationFeedback value={rowFeedback(row)} actions={row.state === 'downloading' ? cancelAction : undefined} />
+{/snippet}
+
 {#snippet localPanel()}
     <!-- Downloads (board #308): four groups from ONE store plus what the
          shell keeps on disk. Same list atoms as the file list; a running
@@ -2020,10 +2038,7 @@
       {#if activeRows.length}
         <div class="side-h">{t('downloadsActive')}</div>
         {#each activeRows as row (row.id)}
-          {#snippet cancelAction()}
-            <CommandButton variant="icon" icon="x" label={`${t('cancel')}: ${row.name}`} onclick={() => cancelDownload(row.id)} />
-          {/snippet}
-          <div class="dl-active"><OperationFeedback value={rowFeedback(row)} actions={cancelAction} /></div>
+          <div class="dl-active">{@render activeDownload(row)}</div>
         {/each}
       {/if}
       {#if resumableRows.length}
@@ -2147,7 +2162,7 @@
     {:else if view === 'git'}<GitPanel bind:this={gitPanelRef} {cwd} {fontSize} lead={listShown ? null : serverDoor} onOpenFile={(entry) => { fromGit = true; openEntry(entry); }} onClose={() => { view = 'list'; }} />
     {/if}
   {/if}
-  {#if copyFeedback || downloadFeedback || uploadFeedback || earlierFeedback}
+  {#if copyFeedback || stackedRows.length || downloadFeedback || uploadFeedback || earlierFeedback}
     {@const operation = downloadOperation}
     {@const output = downloadOutput}
     {#snippet downloadActions()}
@@ -2158,6 +2173,9 @@
     <div class="files-feedback">
       <OperationFeedback value={copyFeedback}
         ondismiss={copyFeedback?.kind === 'error' ? copyLifetime.clear : undefined} />
+      <!-- Every download in progress, newest first (board #420); the
+           Downloads view lists the same rows, so it shows none here. -->
+      {#each stackedRows as row (row.id)}{@render activeDownload(row)}{/each}
       <OperationFeedback value={downloadFeedback} actions={output ? downloadActions : undefined}
         ondismiss={downloadFeedback?.kind === 'error' || downloadFeedback?.kind === 'result'
           ? () => dismissDownload(operation) : undefined} />
@@ -2466,10 +2484,21 @@
   }
   .info-path:active { color: var(--accent); }
 
+  /* One card per running download (board #420): the stack is a bounded
+     region of its own, so every card and its Cancel stays reachable while
+     the list or preview keeps its space (review P1-A). The bookmarks panel's
+     fraction and scroll rule, not a new size. */
   .files-feedback {
     display: flex; flex: none; flex-direction: column; gap: var(--ui-gap);
     min-width: 0; padding: var(--ui-gap);
+    max-height: calc(40vh / var(--ui-zoom, 1)); overflow-y: auto;
+    -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
   }
+  /* The stack scrolls, its cards do not shrink (review round 2): a card in a
+     bounded column flex could otherwise be squeezed below its content and
+     scroll inside itself instead of the stack. This boundary only; the
+     shared card keeps its own rules everywhere else. */
+  .files-feedback > :global(.operation-feedback) { flex: none; }
   @media (prefers-reduced-motion: reduce) {
     .file-list { transition: none; }
   }

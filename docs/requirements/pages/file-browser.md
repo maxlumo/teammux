@@ -155,6 +155,7 @@ Both rules are implemented once in `src/lib/files/persisted-list.ts`
 - Android downloads go to `/storage/emulated/0/Download/TmuxMobile/`, opened via FileProvider + Intent
 - Android's downloaded-files list is sorted by filesystem modification time descending (newest first)
 - The Files toolbar's Downloads (every platform, board #308) lists downloads in four groups: In progress (the running card with percent, speed and Cancel, which deletes its part), Resumable (parts on disk with their size; Download again resumes, Delete removes the part; a part from another server can only be deleted), Failed (Retry), and Finished (Android: the Download/TmuxMobile folder, tap opens, Delete asks first; desktop and browser: what this session saved). A browser shows only this session, and says so.
+- Several downloads at once each keep their own card in the Files feedback stack, newest first, with percent, speed and Cancel (board #420): the same card the Downloads view's In progress group shows, read from the same store, so a newer download never hides an older one and the page and the Hub drawer show the same running downloads. The Downloads view itself lists them instead of the stack. No count badge, no cap.
 - Download feedback uses the shared presentation; a measured transfer reports
   an integer byte percentage, while unknown totals and writing are indeterminate
   (#167, 2026-09-12). No synthetic percentage or delayed completion flash.

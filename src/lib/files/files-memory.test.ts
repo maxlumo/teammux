@@ -36,11 +36,11 @@ test('the one-writer rule holds across instances of one server, not across two',
   const b = createFilesMemory();
   const page = {};
   const drawer = {};
-  a.claim('part-1', { owner: page, adopt() {} });
+  a.claim('part-1', { owner: page });
 
   assert.equal(a.writerOf('part-1')?.owner, page, 'the drawer sees the page s claim');
   assert.equal(b.writerOf('part-1'), undefined, 'the other server has no claim on it');
-  b.claim('part-1', { owner: drawer, adopt() {} });
+  b.claim('part-1', { owner: drawer });
   assert.equal(a.writerOf('part-1')?.owner, page, 'and claiming there did not take A s');
 
   a.release('part-1');
@@ -148,7 +148,7 @@ test('resetting the browse positions does not forget a running transfer', () => 
   const control = new AbortController();
   control.signal.addEventListener('abort', () => aborted.push('r1'));
   a.track('r1', control, Promise.resolve());
-  a.claim('part-1', { owner: {}, adopt() {} });
+  a.claim('part-1', { owner: {} });
 
   a.reset();
   assert.ok(a.writerOf('part-1'), 'the part still has its writer');

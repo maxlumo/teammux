@@ -70,6 +70,13 @@ export class DownloadCancelled extends Error {
 export const SUSPEND = Object.freeze({ suspend: true });
 const cancelledBy = (signal: AbortSignal | undefined) => new DownloadCancelled(signal?.reason === SUSPEND);
 
+/** Throws the cancel error when `signal` was aborted: the check a caller
+ * puts at its own await boundaries outside `download()` (board #420, the
+ * whole-file fallback), so a Cancel shown there is a Cancel honored. */
+export function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw cancelledBy(signal);
+}
+
 export class DownloadUnreachable extends Error {
   code = 'DL_HTTP_UNREACHABLE';
 }

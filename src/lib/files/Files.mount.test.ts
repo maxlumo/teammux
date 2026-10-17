@@ -292,7 +292,7 @@ for (const copied of [true, false]) {
   });
 }
 
-test('Files download progress has no dismissal/action slot; failure has Close (#167 review)', async context => {
+test('Files download progress offers only its Cancel, never a dismissal; failure has Close (#167 review, #420)', async context => {
   const pending = deferred<object>();
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
@@ -300,8 +300,8 @@ test('Files download progress has no dismissal/action slot; failure has Close (#
   });
   try {
     await settle(app); button(app, 'Download: AGENTS.md').click(); await settle(app);
-    assert.equal(app.document.querySelector('.operation-feedback .feedback-actions'), null,
-      'hiding progress is not cancellation and must not be offered');
+    const actions = [...app.document.querySelectorAll('.operation-feedback button')].map((b) => b.getAttribute('aria-label'));
+    assert.deepEqual(actions, ['Cancel: AGENTS.md'], 'hiding progress is not offered; the card\u2019s one action is the real Cancel (#420)');
     pending.reject(Error('download failed')); await settle(app);
     const feedback = app.document.querySelector('.operation-feedback');
     assert.match(feedback?.textContent ?? '', /download failed/);
@@ -874,10 +874,116 @@ test('reading mode is not offered for an image (the Lightbox is its fullscreen) 
   } finally { await desktop.close(); }
 });
 
-// Board #301: a second download takes the feedback slot; the first still
-// finishes, and its outcome must be told once instead of being dropped.
-test('a download that lost its slot still reports its outcome once (#301)', async context => {
-  const first = deferred<object>(), second = deferred<object>();
+// Board #420 (owner 2026-10-18: "如果点了多个下载，应该有一个下载文件列表，而不是
+// 之前的显示看不到了"): every download in progress keeps its own card, newest
+// first, read from the store; a newer one never hides an older one.
+test('several downloads show one card each, newest first; cancel and finish touch only their own (#420)', async context => {
+  const feeds = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+  const handed: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    setup(window) {
+      (window.URL as any).createObjectURL = () => 'blob:fixture';
+      (window.URL as any).revokeObjectURL = () => {};
+      window.HTMLAnchorElement.prototype.click = function () { handed.push((this as HTMLAnchorElement).download); };
+      (window as any).fetch = async (url: string, init: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({ start(c) {
+          feeds.set(url, c);
+          init.signal?.addEventListener('abort', () => c.error(init.signal!.reason));
+        } });
+        return new Response(body, { status: 200, headers: { 'content-length': '1000' } });
+      };
+    },
+    modules: [rpc({ fsDownloadHttp: async (path: string) => ({ url: `http://h/dl?p=${path}`, name: path.split('/').pop() }) })],
+  });
+  const cards = () => [...app.document.querySelectorAll('.files-feedback .operation-feedback')].map((e) => e.textContent?.replace(/\s+/gu, ' ').trim() ?? '');
+  const feed = (path: string, n: number) => feeds.get(`http://h/dl?p=${path}`)!.enqueue(new Uint8Array(n));
+  try {
+    await settle(app);
+    button(app, 'Download: AGENTS.md').click();
+    for (let i = 0; i < 20 && feeds.size < 1; i++) await settle(app);
+    feed('/fixture/AGENTS.md', 250); await settle(app);
+    await app.advance(1000);
+    button(app, 'Download: next.md').click();
+    for (let i = 0; i < 20 && feeds.size < 2; i++) await settle(app);
+    feed('/fixture/next.md', 500); await settle(app);
+    let now = cards();
+    assert.equal(now.length, 2, `two downloads, two cards: ${now.join(' | ')}`);
+    assert.match(now[0]!, /next\.md/u, 'newest first');
+    assert.match(now[0]!, /50%/u);
+    assert.match(now[1]!, /AGENTS\.md/u, 'the first is still on screen');
+    assert.match(now[1]!, /25%/u, 'with its own percent');
+
+    // Cancelled from its own card: the other stays, with its progress.
+    button(app, 'Cancel: next.md').click();
+    for (let i = 0; i < 20 && cards().length > 1; i++) await settle(app);
+    now = cards();
+    assert.equal(now.length, 1, `cancelling one leaves the other: ${now.join(' | ')}`);
+    assert.match(now[0]!, /AGENTS\.md.*25%/u);
+
+    button(app, 'Download: next.md').click();
+    for (let i = 0; i < 20 && cards().length < 2; i++) await settle(app);
+    // The first finishes: its card leaves, its outcome is told, the other runs on.
+    feed('/fixture/AGENTS.md', 750); feeds.get('http://h/dl?p=/fixture/AGENTS.md')!.close();
+    for (let i = 0; i < 20 && !handed.includes('AGENTS.md'); i++) await settle(app);
+    await settle(app);
+    now = cards();
+    assert.deepEqual(handed, ['AGENTS.md']);
+    assert.ok(now.some((t) => /Download requested.*AGENTS\.md/u.test(t)), `the outcome is told: ${now.join(' | ')}`);
+    assert.ok(now.some((t) => /next\.md/u.test(t) && /Cancel|%|Downloading/u.test(t) && !/requested/u.test(t)), `next.md still runs: ${now.join(' | ')}`);
+    assert.ok(!now.some((t) => /AGENTS\.md.*%/u.test(t)), 'the finished download has no progress card');
+  } finally { for (const f of feeds.values()) { try { f.close(); } catch {} } await app.close(); }
+});
+
+// Board #301, kept: a download that ends while Files is HIDDEN tells its
+// outcome once when Files is seen again. Review P1-B (#420): the outcome is
+// HELD while hidden, so its 1500 ms life starts on return, not at the end.
+test('a download that ends while Files is hidden is told once on return, however late (#301, #420)', async context => {
+  const first = deferred<object>();
+  const feeds = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+  const calls: string[] = [];
+  let set!: (next: Record<string, unknown>) => void;
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture', register: (fn: typeof set) => { set = fn; } },
+    setup(window) {
+      (window.URL as any).createObjectURL = () => 'blob:fixture';
+      (window.URL as any).revokeObjectURL = () => {};
+      window.HTMLAnchorElement.prototype.click = function () { calls.push((this as HTMLAnchorElement).download); };
+      (window as any).fetch = async (url: string) => {
+        const body = new ReadableStream<Uint8Array>({ start(c) { feeds.set(url, c); } });
+        return new Response(body, { status: 200, headers: { 'content-length': '1000' } });
+      };
+    },
+    modules: [rpc({ fsDownloadHttp: (path: string) => (path.endsWith('AGENTS.md') ? first.promise : Promise.resolve({ url: `http://h/dl?p=${path}`, name: 'next.md' })) })],
+  });
+  const notices = () => [...app.document.querySelectorAll('.operation-feedback')].map((e) => e.textContent?.replace(/\s+/gu, ' ').trim() ?? '');
+  const told = () => notices().filter((n) => /Download requested.*AGENTS\.md/u.test(n));
+  try {
+    await settle(app);
+    button(app, 'Download: AGENTS.md').click(); await settle(app);
+    button(app, 'Download: next.md').click();
+    for (let i = 0; i < 20 && feeds.size < 1; i++) await settle(app);
+    set({ visible: false }); await settle(app);
+    first.resolve({ base64: 'eA==' }); await settle(app);
+    assert.deepEqual(calls, ['AGENTS.md'], 'the file was handed to the browser');
+    await app.advance(5000); await settle(app);         // far past COMPLETION_FEEDBACK_MS
+    set({ visible: true }); await settle(app);
+    assert.equal(told().length, 1, `held while hidden, told on return: ${notices().join(' | ')}`);
+    assert.ok(notices().some((n) => /next\.md/u.test(n) && !/requested/u.test(n)), 'the other download keeps its card');
+    await app.advance(1600); await settle(app);
+    assert.equal(told().length, 0, 'then it expires like any success');
+    assert.ok(notices().some((n) => /next\.md/u.test(n)), 'and the running card stays');
+    set({ visible: false }); await settle(app);
+    set({ visible: true }); await settle(app);
+    assert.equal(told().length, 0, 'told once: no replay on the next return');
+  } finally { first.reject(Error('fixture closed')); for (const f of feeds.values()) { try { f.close(); } catch {} } await app.close(); }
+});
+
+// Review P2-C (#420): the card offers Cancel only while a Cancel is honored.
+// Through the whole-file fallback, a Cancel before the bytes arrive means
+// nothing is handed to the browser and nothing more is said.
+test('a Cancel through the whole-file fallback is honored: nothing is saved (#420)', async context => {
+  const pending = deferred<object>();
   const calls: string[] = [];
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
@@ -886,24 +992,20 @@ test('a download that lost its slot still reports its outcome once (#301)', asyn
       (window.URL as any).revokeObjectURL = () => {};
       window.HTMLAnchorElement.prototype.click = function () { calls.push((this as HTMLAnchorElement).download); };
     },
-    modules: [rpc({ fsDownloadHttp: (path: string) => (path.endsWith('AGENTS.md') ? first.promise : second.promise) })],
+    modules: [rpc({ fsDownloadHttp: () => pending.promise })],
   });
-  const notices = () => [...app.document.querySelectorAll('.operation-feedback')].map((e) => e.textContent?.replace(/\s+/gu, ' ').trim());
   try {
     await settle(app);
     button(app, 'Download: AGENTS.md').click(); await settle(app);
-    button(app, 'Download: next.md').click(); await settle(app);
-    assert.equal(notices().length, 1, 'the slot belongs to the newest download');
-    assert.match(notices()[0] ?? '', /next\.md/u);
-    second.resolve({ base64: 'eA==' }); await settle(app);
-    assert.match(notices().join(' | '), /next\.md/u);
-    first.resolve({ base64: 'eA==' }); await settle(app);
-    assert.deepEqual(calls, ['next.md', 'AGENTS.md'], 'both files were handed to the browser');
-    assert.ok(notices().some((n) => /AGENTS\.md/u.test(n ?? '')), `the earlier download is reported: ${notices().join(' | ')}`);
-  } finally { first.reject(Error('fixture closed')); second.reject(Error('fixture closed')); await app.close(); }
+    button(app, 'Cancel: AGENTS.md').click(); await settle(app);
+    pending.resolve({ base64: 'eA==' });               // the bytes arrive after the Cancel
+    for (let i = 0; i < 5; i++) await settle(app);
+    assert.deepEqual(calls, [], 'nothing was handed to the browser');
+    assert.equal(app.document.querySelector('.files-feedback .operation-feedback'), null, 'no card, no outcome');
+  } finally { pending.reject(Error('fixture closed')); await app.close(); }
 });
 
-test('an earlier download\u2019s failure is reported, closable, without touching the live slot (#301)', async context => {
+test('a download\u2019s failure is reported, closable, while another keeps its card (#301, #420)', async context => {
   const first = deferred<object>(), second = deferred<object>();
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
@@ -915,7 +1017,7 @@ test('an earlier download\u2019s failure is reported, closable, without touching
     button(app, 'Download: next.md').click(); await settle(app);
     first.reject(Error('first failed')); await settle(app);
     const all = [...app.document.querySelectorAll('.operation-feedback')];
-    assert.equal(all.length, 2, 'the live progress stays, the earlier failure joins it');
+    assert.equal(all.length, 2, 'the running card stays, the failure joins it');
     const failed = all.find((e) => /first failed/u.test(e.textContent ?? ''))!;
     assert.ok(failed, 'the earlier failure is shown');
     assert.ok(all.some((e) => /next\.md/u.test(e.textContent ?? '') && !/first failed/u.test(e.textContent ?? '')), 'next.md is still downloading');
@@ -972,6 +1074,40 @@ test('Android saves a download through download_chunk pieces, never one buffer (
     assert.equal(JSON.stringify(calls.at(-1)!.args), JSON.stringify({ id, name: 'AGENTS.md', dest: null }), 'Android needs no destination');
     assert.match(app.document.querySelector('.operation-feedback')?.textContent ?? '', /TmuxMobile\/AGENTS\.md/u);
   } finally { await app.close(); }
+});
+
+// Review P2-C (#420): while a download is SAVING (here Android's finish),
+// a Cancel would not be honored, so its card offers none.
+test('a saving download offers no Cancel; it ends Saved (#420)', async context => {
+  const finish = deferred<string>();
+  const app = await (await shell).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    pendingImports: ['@tauri-apps/'],
+    setup(window) {
+      Object.assign(window, { __TAURI_INTERNALS__: {} });
+      Object.defineProperty(window.navigator, 'userAgent', { value: 'Mozilla/5.0 (Linux; Android 15) fixture' });
+      (window as any).fetch = async () => new Response(new Uint8Array(10), { status: 200, headers: { etag: '"v1"', 'content-length': '10' } });
+    },
+    modules: [
+      rpc({ getMachineId: () => 'machine-1', fsDownloadHttp: async () => ({ url: 'http://h/dl?path=x', name: 'AGENTS.md' }) }),
+      { invokeNative: async (cmd: string) => {
+        if (cmd === 'download_open') return { received: 0, etag: null };
+        if (cmd === 'download_finish') return finish.promise;
+        return null;
+      } },
+    ],
+  });
+  const card = () => app.document.querySelector('.files-feedback .operation-feedback');
+  try {
+    await settle(app);
+    button(app, 'Download: AGENTS.md').click();
+    for (let i = 0; i < 40 && !/Saving/u.test(card()?.textContent ?? ''); i++) await settle(app);
+    assert.match(card()?.textContent ?? '', /Saving.*AGENTS\.md/u, 'the row is saving');
+    assert.equal(app.document.querySelector('button[aria-label="Cancel: AGENTS.md"]'), null, 'no Cancel that would not happen');
+    finish.resolve('/storage/emulated/0/Download/TmuxMobile/AGENTS.md');
+    for (let i = 0; i < 20 && !/Saved/u.test(card()?.textContent ?? ''); i++) await settle(app);
+    assert.match(card()?.textContent ?? '', /Saved/u);
+  } finally { finish.resolve(''); await app.close(); }
 });
 
 // Validator #305 P1: a second Download of a file still downloading reused its

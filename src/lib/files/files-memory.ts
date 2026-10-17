@@ -34,11 +34,10 @@
  * #305): the page and the drawer write the same folder, so the one-writer
  * rule has to hold between them and not only inside one. */
 export interface PartWriter {
-  /** The instance that started it, so a second ask from the SAME instance
-   * re-adopts the attempt instead of refusing it. */
+  /** The instance that started it: a second ask from the SAME instance does
+   * nothing (its card is already on screen, board #420), from the other one
+   * it is told the file is already downloading. */
   owner: unknown;
-  /** Take the attempt's feedback back over in this instance. */
-  adopt(): void;
 }
 
 /** A browse position: where this session was last read, and the directory a
