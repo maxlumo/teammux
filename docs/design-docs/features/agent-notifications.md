@@ -141,7 +141,15 @@ A fact dated ON PURPOSE (a test's chosen time) is a separate, named path —
 all of it `#[cfg(test)]`: no build that ships can date a row. A dated row is
 outside the cursor contract and does not move this process's high-water (a
 test's simulated timeline minutes ahead must not stamp every later observed
-row there).
+row there). A test must therefore not date one fact of a turn and let the
+store stamp the next: with the high-water ahead of the wall clock (after a
+restart over a log a faster clock wrote, or after a test that drove the
+clock), the stamped prompt lands a second after the dated end, and the
+replay reopens the turn (board #419:
+`the_first_agent_read_after_a_restart_derives_from_the_log` dated its missed
+end with the wall-clock second since #414's call-site rewrite, and failed
+whenever an earlier test had left the high-water ahead; it now records every
+fact observed, on a clock held ahead).
 
 **A failed write keeps its stamp; no store at all degrades, never backwards**
 (review P1, round 3). `publish_activity` returns the stamp with the INSERT's

@@ -2414,6 +2414,33 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
     AgentStatus { state: "running".into(), detail, since }
 }
 
+/// Test-only (board #414, #419): the store's activity clock held at the
+/// start of the second after everything it has stamped — so a test's rows
+/// share one second, and the high-water may sit AHEAD of the wall clock, as
+/// after a restart over a log a faster clock wrote — until the guard drops.
+#[cfg(test)]
+pub(crate) struct FixedActivityClock;
+#[cfg(test)]
+impl Drop for FixedActivityClock {
+    fn drop(&mut self) {
+        let _ = super::with_store(|s| {
+            s.reset_activity_clock();
+            Ok(())
+        });
+    }
+}
+#[cfg(test)]
+pub(crate) fn fix_activity_clock_at_next_second() -> FixedActivityClock {
+    crate::projects::tests::use_test_store();
+    super::with_store(|s| {
+        let at = (s.activity_high_water().max(now_ms()) / 1000 + 1) * 1000;
+        s.set_activity_clock(move || at);
+        Ok(())
+    })
+    .unwrap();
+    FixedActivityClock
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2967,28 +2994,7 @@ mod tests {
 
     /// What the process loses when the binary restarts: every derived record and
     /// every hydration mark. state.db is untouched, which is the point.
-    /// Board #414: the store's activity clock held at the start of the second
-    /// after everything it has stamped (so a test's rows share one second)
-    /// until the guard drops.
-    struct FixedActivityClock;
-    impl Drop for FixedActivityClock {
-        fn drop(&mut self) {
-            let _ = crate::projects::with_store(|s| {
-                s.reset_activity_clock();
-                Ok(())
-            });
-        }
-    }
-    fn fix_activity_clock_at_next_second() -> FixedActivityClock {
-        crate::projects::tests::use_test_store();
-        crate::projects::with_store(|s| {
-            let at = (s.activity_high_water().max(now_ms()) / 1000 + 1) * 1000;
-            s.set_activity_clock(move || at);
-            Ok(())
-        })
-        .unwrap();
-        FixedActivityClock
-    }
+    use super::{fix_activity_clock_at_next_second, FixedActivityClock};
 
     fn simulate_restart(session: &str) {
         forget_process_state(session);

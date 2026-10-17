@@ -4997,13 +4997,21 @@ mod tests {
         assert!(tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "aux", "-c", &dir, "sleep 120"]));
         crate::projects::adopt(&session, Some(&format!("r394-{}", &session[8..16]))).expect("adopt");
 
+        // Board #419: the store's high-water AHEAD of the wall clock, as after
+        // a restart over a log a faster clock wrote (or any test that left it
+        // there): every fact here is OBSERVED, stamped by the store on one
+        // clock, so the replay orders them as they happened. The missed end
+        // was once dated with the wall-clock second (`record_missed_end_at`)
+        // while its prompt was stamped above it: in the log it sorted BEFORE
+        // the prompt, and the replay reopened the turn — under load, when an
+        // earlier test had moved the high-water.
+        let _ahead = telemetry::fix_activity_clock_at_next_second();
         PERSIST_IN_TEST.with(|p| p.set(true));
         telemetry::record_prompt(&session, "dev", "[tmm chat 2026-10-16 03:40] lead: @dev the long thing");
         telemetry::record_tool(&session, "dev", "Read", "/w/src/lib.rs");
         telemetry::record_prompt(&session, "aux", "[tmm chat 2026-10-16 03:40] lead: @aux review");
         let seen = telemetry::turn_version(&session, "aux");
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let missed = telemetry::record_missed_end_at(&session, "aux", "auth_expired", telemetry::Identity::Paint("auth_expired|394"), seen, ts);
+        let missed = telemetry::record_missed_end(&session, "aux", "auth_expired", telemetry::Identity::Paint("auth_expired|394"), seen);
         PERSIST_IN_TEST.with(|p| p.set(false));
         assert_eq!(missed, telemetry::Missed::Ended);
 
