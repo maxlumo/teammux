@@ -704,7 +704,7 @@ pub(crate) fn profile_patch_yml(plugin_entry: &std::path::Path, model: &str, eff
          - id: session-title-llm\n  disabled: true\n\
          - id: session-log-deepseek\n  config:\n    enabled: false\n\
          - id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n\
-         - id: skill-filesystem\n  config:\n    customSkillDirs: [{}]\n    includeDefaultRoots: false\n",
+         - id: skill-filesystem\n  config:\n    customSkillDirs: [{}]\n    includeDefaultRoots: false\n    watch: false\n",
         q(&plugin_entry.to_string_lossy()),
         q(KEY_ENV),
         q(PROVIDER),
@@ -1639,7 +1639,7 @@ pub(crate) mod tests {
         let odd = profile_patch_yml(entry, "a\"b: c", "", "", root);
         assert!(odd.contains("    model: \"a\\\"b: c\"\n"), "a value is one JSON string, never YAML syntax");
         // Board #412: the skill provider scans the agent's own root only.
-        assert!(patch.contains("- id: skill-filesystem\n  config:\n    customSkillDirs: [\"/ws/.tmm/agents/d1/dsh/tmm/skills\"]\n    includeDefaultRoots: false\n"), "{patch}");
+        assert!(patch.contains("- id: skill-filesystem\n  config:\n    customSkillDirs: [\"/ws/.tmm/agents/d1/dsh/tmm/skills\"]\n    includeDefaultRoots: false\n    watch: false\n"), "{patch}");
     }
 
     /// A dsh definition with only a model and an effort (board #411's tests).
@@ -1823,6 +1823,11 @@ pub(crate) mod tests {
         let tools: Vec<String> = seen[0].1["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert!(tools.iter().any(|t| t == "mcp__echo__echo") && tools.iter().any(|t| t == "mcp__web__echo"), "{tools:?}");
         assert!(tools.iter().any(|t| t == "skill"), "{tools:?}");
+        // Measured on dsh 0.2.0-rc.2 (board #426): the catalog is emitted only when the
+        // skill snapshot is COMPLETE, and the filesystem provider's file watcher failing
+        // (EMFILE on a host out of inotify instances) makes it incomplete — hence
+        // `watch: false` in the patch. If this fails alone, look at the host's inotify
+        // use (`fs.inotify.max_user_instances`) before looking at dsh.
         let first = seen[0].1["messages"].to_string();
         assert!(first.contains("hello-skill") && first.contains("Greet in the special way."), "dsh's catalog announces the skill");
         assert!(!first.contains("owner-skill"), "the owner's skills stay out");
