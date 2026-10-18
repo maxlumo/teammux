@@ -22,6 +22,7 @@
   import ServerDetailsDialog from './lib/app/ServerDetailsDialog.svelte';
   import ScratchPanel from './lib/app/ScratchPanel.svelte';
   import NotifyCentre from './lib/hub/NotifyCentre.svelte';
+  import { notifySwitch } from './lib/hub/notify-switch.svelte.ts';
   import { createAlertLog, createCentre, centreSurface } from './lib/hub/notify-centre.svelte.ts';
   import { activeOwners, createCentreUnion } from './lib/app/centre-union.svelte.ts';
   import { createWindowDrain } from './lib/app/window-drain.ts';
@@ -459,6 +460,14 @@
     });
   });
   const centre = createCentreUnion(() => centreSources, centreSurface);
+  // Both bells say what the ONE mute switch says (board #423): `bell-off`
+  // while muted, and the label says so.
+  const bellIcon = $derived(notifySwitch.on ? 'bell' : 'bell-off');
+  const bellLabel = $derived([
+    t('notifyCentre'),
+    ...(notifySwitch.on ? [] : [t('notifyMuted')]),
+    ...(centre.unviewed ? [t('hubUnreadCount').replace('{n}', String(centre.unviewed))] : []),
+  ].join(' · '));
   const scopeSwap = createScopeSwap({
     show: (runtime) => { scopeRuntime = runtime; },
     // Where the unbound tree's teardown runs.
@@ -3808,12 +3817,12 @@
             <button
               class="rail-btn rail-bell"
               class:open={!!centre.anchor}
-              aria-label={centre.unviewed ? `${t('notifyCentre')} · ${t('hubUnreadCount').replace('{n}', String(centre.unviewed))}` : t('notifyCentre')}
+              aria-label={bellLabel}
               use:hoverInfo={() => ({ title: t('notifyCentre') })}
               aria-haspopup="dialog"
               aria-expanded={!!centre.anchor}
               onclick={(e) => centre.toggle(e.currentTarget)}
-            ><Icon name="bell" size={17} />{#if centre.unviewed}<span class="bell-badge">{centre.unviewed > 99 ? '99+' : centre.unviewed}</span>{/if}</button>
+            ><Icon name={bellIcon} size={17} />{#if centre.unviewed}<span class="bell-badge">{centre.unviewed > 99 ? '99+' : centre.unviewed}</span>{/if}</button>
           {/if}
           <!-- Server switcher (board #55): "右下角agent上边" — glued to the top
                of the rail's bottom (configure) group, above the agents icon in
@@ -4262,9 +4271,9 @@
              the same window-level centre instead — another member's alerts
              stay reachable, and picking one focuses that server (D2). No Hub
              is pretended for this server: the tab is the bell, not Chat. -->
-        <button class="tab-bell" aria-label={centre.unviewed ? `${t('notifyCentre')} · ${t('hubUnreadCount').replace('{n}', String(centre.unviewed))}` : t('notifyCentre')}
+        <button class="tab-bell" aria-label={bellLabel}
           aria-haspopup="dialog" aria-expanded={!!centre.anchor} onclick={(e) => centre.toggle(e.currentTarget)}>
-          <span class="tab-glyph" class:on={!!centre.anchor}><Icon name="bell" size={19} />{#if centre.unviewed}<span class="unread-dot tab-badge" aria-hidden="true"></span>{/if}</span><span>{t('notifyCentre')}</span>
+          <span class="tab-glyph" class:on={!!centre.anchor}><Icon name={bellIcon} size={19} />{#if centre.unviewed}<span class="unread-dot tab-badge" aria-hidden="true"></span>{/if}</span><span>{t('notifyCentre')}</span>
         </button>
       {/if}
       <button class:active={page === 'files'} aria-current={page === 'files' ? 'page' : undefined} onclick={() => switchTab('files')}>

@@ -56,6 +56,10 @@ const GLOBAL: Record<string, Record<string, string>> = {
   // per-server jump counter would let two requests both think they are
   // current. A switch resets it (`centreSurface.reset()`).
   'hub/notify-centre.svelte.ts': { centreSurface: 'this WINDOW\'s bell and popover' },
+  // The notification mute switch's reactive face (board #423): the
+  // person's choice, one key for every server, mirrored here so Settings,
+  // the centre's Mute and both bells read the same fact.
+  'hub/notify-switch.svelte.ts': { on: 'a preference', permission: 'this device\'s platform permission' },
   'app/terminal-prefs.svelte.ts': { state: 'a preference' },
   'app/layout.svelte.ts': { mode: 'a preference' },
   'app/server-mode.svelte.ts': { current: 'THIS computer\'s own server, not the connected one', started: 'one subscription per page' },

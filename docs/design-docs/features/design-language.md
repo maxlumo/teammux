@@ -445,7 +445,12 @@ likewise. Measured on a 390px phone (coarse tokens): the three toggles
 193px before it ellipsizes (was ~178). The `.title-group`'s 60% cap is for
 the PATH beside it, which the phone does not render, so
 `.hub-root.compact .title-group { max-width: none }` lets the name run up to
-the tool group.
+the tool group. **The notification centre's head is a dense group too**
+(board #423, owner 2026-10-19: "all to me 的按钮样式…稍微有点大"): its All | To
+me `Segmented` and the Mute toggle sit in one `.nc-tools.compact-tools`, so
+on touch the head holds a 30px pitch instead of a 44px control inside a menu
+heading (the paint is 26px), and on a pointer the 20px paint inside 28. The
+same exception, a new member of it, no new size.
 Single-line controls are border-box sized with an 18px line box. Layout,
 hover, pending icons and disabled states cannot resize them. Command
 labels use display/ui-step 500; values/options use the content face;

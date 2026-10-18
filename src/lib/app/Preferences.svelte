@@ -20,7 +20,8 @@
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
   import { terminalPrefs, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX } from './terminal-prefs.svelte.ts';
   import { appPrefs } from '../hub/hub-prefs.svelte.ts';
-  import { notifyEnabled, setNotifyEnabled, ensurePermission, previewCue, notifyPermission, systemNotify, notifyLevel, setNotifyLevel, NOTIFY_LEVELS, type NotifyLevel } from '../hub/notifications.ts';
+  import { ensurePermission, previewCue, systemNotify, notifyLevel, setNotifyLevel, NOTIFY_LEVELS, type NotifyLevel } from '../hub/notifications.ts';
+  import { notifySwitch } from '../hub/notify-switch.svelte.ts';
   import { SHORTCUTS, SHORTCUT_GROUPS, isCharacterInput, shortcutFromEvent, shortcutLabel, type ShortcutAction, type ShortcutDef, type ShortcutHost } from './shortcuts.ts';
   import { shortcuts } from './shortcuts.svelte.ts';
   import { moveMs } from '../ui/motion.ts';
@@ -217,8 +218,11 @@
   // or no Notification API at all (sound only). The TEST row exists because
   // the real alert only fires while you are NOT looking — there is no other
   // way to check on a phone that the tray actually shows one.
-  let notifyOn = $state(notifyEnabled());
-  let notifyPerm = $state(notifyPermission());
+  // The ONE switch the notification centre's Mute writes too (board #423).
+  const notifyOn = $derived(notifySwitch.on);
+  // The permission snapshot is the switch's (review P2-B): an unmute from the
+  // centre updates this caption too.
+  const notifyPerm = $derived(notifySwitch.permission);
   let notifyTested = $state(false);
   let notifyBusy = $state(false);
   let notifyError = $state('');
@@ -230,19 +234,13 @@
   function setLevel(l: NotifyLevel) { notifyLvl = l; setNotifyLevel(l); }
   async function setNotify(on: boolean) {
     if (notifyBusy) return;
-    const before = notifyOn;
     notifyError = '';
-    notifyOn = on;
-    setNotifyEnabled(on);
-    if (!on) return;
     notifyBusy = true;
     try {
-      previewCue();
-      await ensurePermission();
-      if (alive) notifyPerm = notifyPermission();
+      // `false`: the key could not be written, so nothing moved — say so.
+      if (!(await notifySwitch.set(on)) && alive) notifyError = t('notifySwitchFailed');
     } catch (error) {
-      setNotifyEnabled(before);
-      if (alive) { notifyOn = before; notifyError = errorText(error); }
+      if (alive) notifyError = errorText(error);
     } finally { if (alive) notifyBusy = false; }
   }
   async function testNotify() {
@@ -254,8 +252,8 @@
     try {
       previewCue();
       await ensurePermission();
+      notifySwitch.refreshPermission();
       if (!alive) return;
-      notifyPerm = notifyPermission();
       notifyTested = systemNotify({ title: t('hubNotifyTestTitle'), body: t('hubNotifyTestBody'), tag: 'tmm:test' });
       notifyTimer = setTimeout(() => { notifyTested = false; }, 1500);
     } catch (error) {

@@ -491,3 +491,44 @@ test('external category requests and Agent edits wait for approval; old exits ca
     assert.equal(edit()?.name, 'alice');
   } finally { await app.close(); }
 });
+
+// Board #423 review P2-B: the permission caption is the switch's snapshot, so
+// an unmute from the centre — with Settings open beside it — updates both the
+// switch and the caption; a deferred grant shows the change only once it lands.
+const withCentre = compileMount(new URL('./Preferences.centre.test.svelte', import.meta.url), [
+  new URL('../hub/AgentsPage.svelte', import.meta.url),
+]);
+
+test('an unmute from the centre updates Settings  switch and its permission caption (#423)', async context => {
+  const grant = deferred<string>();
+  const app = await (await withCentre).mount(context, {
+    props: { initial: {} },
+    modules: [{ default: () => {} }],
+    setup(window) {
+      window.localStorage.setItem('tmux_settings_tab', 'notifications');
+      window.localStorage.setItem('tmux_locale', 'en');
+      window.localStorage.setItem('tmux_notify', 'off');
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      window.Audio = class { play() { return Promise.resolve(); } };
+      window.Notification = class {
+        static permission = 'denied';
+        static requestPermission() { return grant.promise.then((p: string) => { (window.Notification as any).permission = p; return p; }); }
+      };
+    },
+  });
+  const settle = async () => { for (let i = 0; i < 6; i++) await app.flush(); };
+  const toggle = () => app.document.querySelector<HTMLButtonElement>('[role="switch"]')!;
+  const caption = () => app.document.querySelector('.preference-row .pref-label')?.textContent ?? '';
+  try {
+    await settle();
+    assert.equal(toggle().getAttribute('aria-checked'), 'false');
+    assert.match(caption(), /blocked; sound only/u, 'denied before');
+    app.document.querySelector<HTMLButtonElement>('.centre-host button[aria-label="Mute notifications"]')!.click();
+    await settle();
+    assert.equal(toggle().getAttribute('aria-checked'), 'true', 'Settings shows the switch the centre turned on');
+    assert.match(caption(), /blocked; sound only/u, 'the grant has not landed yet');
+    grant.resolve('granted');
+    await settle();
+    assert.doesNotMatch(caption(), /sound only/u, 'the caption follows the grant');
+  } finally { grant.resolve('granted'); await app.close(); }
+});

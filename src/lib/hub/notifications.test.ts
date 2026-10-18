@@ -306,19 +306,28 @@ test('Hub notifies from the PUSH first and the poll second, both through isAway 
 
 const prefs = readFileSync(join(here, '..', 'app', 'Preferences.svelte'), 'utf8');
 
-test('the permission request and the audio unlock ride the SETTINGS toggle, never the header or the send path (board #72)', () => {
+test('the permission request and the audio unlock ride the ONE mute switch, never the header or the send path (board #72, #423)', () => {
   const sendBody = hub.slice(hub.indexOf('async function send()'), hub.indexOf('async function send()') + 4000);
   assert.ok(!sendBody.includes('ensurePermission'), 'send() asks for nothing');
-  assert.ok(!hub.includes('ensurePermission') && !hub.includes('setNotifyEnabled'),
+  assert.ok(!hub.includes('ensurePermission') && !hub.includes('setNotifyEnabled') && !hub.includes('notifySwitch.set'),
     'the Hub header carries no notification switch — a header keeps no spare switches, and on a phone it cost the row a button');
-  // Board #322: the phone's bell there OPENS the centre (a record), it is not a switch.
-  assert.match(hub, /icon="bell" label=\{t\('notifyCentre'\)\} hasPopup="dialog" expanded=\{!!centre\.anchor\}\s*onclick=\{\(e\) => centre\.toggle\(e\.currentTarget\)\}/u);
+  // Board #322: the phone's bell there OPENS the centre (a record), it is not
+  // a switch; since #423 it only SHOWS the switch (bell-off while muted).
+  assert.match(hub, /icon=\{notifySwitch\.on \? 'bell' : 'bell-off'\} label=[^\n]*hasPopup="dialog" expanded=\{!!centre\.anchor\}\s*onclick=\{\(e\) => centre\.toggle\(e\.currentTarget\)\}/u);
+  // ONE door writes the switch (board #423): Settings' toggle and the
+  // centre's Mute both call it, and only turning it ON asks and unlocks.
   // #156 keeps this ordering inside a serialized pending/error operation.
-  // Real Settings mount tests also execute the permission and duplicate guards.
+  const door = readFileSync(join(here, 'notify-switch.svelte.ts'), 'utf8');
+  // The gate and the face agree: `on` moves only after the key really did
+  // (review P1), and only turning ON asks and unlocks.
+  assert.match(door, /if \(!setNotifyEnabled\(next\)\) return false;\s*on = notifyEnabled\(\);\s*if \(!next\) return true;\s*previewCue\(\);\s*await ensurePermission\(\);\s*permission = notifyPermission\(\);/u);
   const toggle = prefs.slice(prefs.indexOf('async function setNotify('), prefs.indexOf('async function testNotify('));
-  assert.match(toggle, /setNotifyEnabled\(on\);[\s\S]*?if \(!on\) return;[\s\S]*?previewCue\(\);[\s\S]*?await ensurePermission\(\);/u);
+  assert.match(toggle, /await notifySwitch\.set\(on\)/u, 'Settings goes through the door');
+  assert.ok(!/setNotifyEnabled/u.test(prefs), 'and never writes the key itself');
+  const centreSrc = readFileSync(join(here, 'NotifyCentre.svelte'), 'utf8');
+  assert.match(centreSrc, /await notifySwitch\.set\(!notifySwitch\.on\)/u, 'the centre s Mute goes through the same door');
   const asks = prefs.match(/await ensurePermission\(\)/gu) ?? [];
-  assert.equal(asks.length, 2, 'the toggle and the test row, nothing else');
+  assert.equal(asks.length, 1, 'Settings asks on its own only in the test row; the toggle asks through the door');
   assert.match(prefs, /\{t\('hubNotify'\)\}/u, 'a labelled setting-row');
   // Its OWN category (owner, 2026-09-02: "应该在一个单独的 notification 二级页面"),
   // right after Appearance, never a row under it.

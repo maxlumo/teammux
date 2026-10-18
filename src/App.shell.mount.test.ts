@@ -10178,3 +10178,45 @@ test('#403: from Settings, on the real history stack, one Back closes only the s
   assert.equal(doc.querySelector('[role=dialog] .details-address'), null, 'one real Back closed it');
   assert.ok(doc.querySelector('.preferences .server-list'));
 });
+
+// Board #423 (owner 2026-10-19: "同时小铃铛也加一条竖线"): every bell SHOWS the
+// one mute switch — `bell-off` and "muted" in the label while it is off — and
+// the centre's Mute flips it for all of them at once. One fact, every door.
+const bellOff = (button: Element | null | undefined) => !!button?.querySelector('svg line[x1="1"][y1="1"][x2="23"][y2="23"]');
+
+test('#423 (desktop): muted, the rail bell is bell-off and says muted; the centre s Mute turns it back to the bell', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop', tmux_notify: 'off',
+  }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) {
+    window.Element.prototype.getAnimations = () => [];
+    window.Audio = class { play() { return Promise.resolve(); } };
+    window.Notification = class { static permission = 'granted'; static requestPermission() { return Promise.resolve('granted'); } };
+  } });
+  for (let i = 0; i < 30 && !h.app.document.querySelector('.rail-bell'); i++) { await h.app.advance(500); await h.settle(); }
+  const bell = () => h.app.document.querySelector<HTMLButtonElement>('.rail-bell')!;
+  assert.ok(bellOff(bell()), 'muted: the bell carries the line');
+  assert.match(bell().getAttribute('aria-label') ?? '', /Notifications · muted/u);
+  await openBell(h);
+  const mute = h.app.document.querySelector<HTMLButtonElement>('.centre-menu button[aria-label="Mute notifications"]')!;
+  assert.equal(mute.getAttribute('aria-pressed'), 'true', 'the centre shows the same switch');
+  mute.click();
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.equal(h.app.window.localStorage.getItem('tmux_notify'), 'on');
+  assert.ok(!bellOff(bell()), 'unmuted: the plain bell');
+  assert.ok(!/muted/u.test(bell().getAttribute('aria-label') ?? ''));
+});
+
+test('#423 (phone): the Hub header bell is bell-off while muted, and follows the switch', async (context) => {
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile', tmux_notify: 'off',
+  }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) { window.Element.prototype.getAnimations = () => []; } });
+  const hubBell = () => h.app.document.querySelector<HTMLButtonElement>('.scope-tree:not(.held) .hub-root .bell-wrap button');
+  for (let i = 0; i < 30 && !hubBell(); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(hubBell(), 'the phone s bell is in the Hub header');
+  assert.ok(bellOff(hubBell()), 'muted: bell-off');
+  assert.match(hubBell()!.getAttribute('aria-label') ?? '', /Notifications · muted/u);
+  h.app.window.localStorage.setItem('tmux_notify', 'on');
+  h.app.window.dispatchEvent(new h.app.window.StorageEvent('storage', { key: 'tmux_notify' }));
+  for (let i = 0; i < 4; i++) await h.settle();
+  assert.ok(!bellOff(hubBell()), 'the switch on: the plain bell');
+});

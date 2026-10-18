@@ -25,7 +25,9 @@
 //    or the Hub page is not the one on screen.
 //
 // Enabling is EXPLICIT: the permission prompt and the autoplay unlock ride the
-// Settings toggle's own click (a real user gesture that also previews the cue)
+// one switch's turn-on click — Settings' toggle or the notification centre's
+// Mute (board #423), through `notifySwitch.set` — a real user gesture that
+// also previews the cue
 // — never an unrelated send. The choice persists. The toggle lived in the Hub
 // header until board #72: a header is not a place to keep spare switches, and
 // on a phone the switch cost the row a button (owner, 2026-09-02).
@@ -64,7 +66,9 @@ export const CUE_COOLDOWN_MS = 3000;
 /** Seen-key memory bound — enough for hours of chat, small enough to forget. */
 export const SEEN_CAP = 800;
 
-const ENABLED_KEY = 'tmux_notify';
+/** The persisted mute switch's key (`notify-switch.svelte.ts` mirrors it). */
+export const NOTIFY_ENABLED_KEY = 'tmux_notify';
+const ENABLED_KEY = NOTIFY_ENABLED_KEY;
 const LEVEL_KEY = 'tmux_notify_level';
 
 /** How much of the BELL rings (owner, 2026-09-02, board #72: "能设置通知的
@@ -208,8 +212,10 @@ export function notifyEnabled(): boolean {
   try { return localStorage.getItem(ENABLED_KEY) !== 'off'; } catch { return true; }
 }
 
-export function setNotifyEnabled(on: boolean): void {
-  try { localStorage.setItem(ENABLED_KEY, on ? 'on' : 'off'); } catch { /* private mode */ }
+/** `false` when the key could not be written (storage refused it): the
+ * switch is then unchanged, and the caller must not claim it moved (#423). */
+export function setNotifyEnabled(on: boolean): boolean {
+  try { localStorage.setItem(ENABLED_KEY, on ? 'on' : 'off'); return true; } catch { return false; }
 }
 
 /** The persisted level. Every legal stored value is recognised by name, so a
@@ -330,9 +336,11 @@ export function systemNotify(text: { title: string; body: string; tag?: string }
   }
 }
 
-/** Ask for notification permission — call from the Settings toggle's click
- * (a real user gesture), because browsers ignore or penalize unprompted
- * requests. Resolves once the prompt settles (or at once when there is
+/** Ask for notification permission — call from a user's click on the
+ * switch (turning it on, from Settings or the centre, through
+ * `notifySwitch.set`) or Settings' Test row, because browsers ignore or
+ * penalize unprompted requests. Fail-soft: a denied or absent API leaves the
+ * sound on its own. Resolves once the prompt settles (or at once when there is
  * nothing to ask), so the caller can re-read `notifyPermission()`. */
 export async function ensurePermission(): Promise<void> {
   try {

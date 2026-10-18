@@ -43,6 +43,7 @@
   import { walkFeedGap } from './hub-history.ts';
   import { createHubBackRegistry } from './hub-back.ts';
   import { notifyNews, isAway, roomProjectName, playCue, systemNotify, notifyEnabled, notifyLevel, excerpt } from './notifications.ts';
+  import { notifySwitch } from './notify-switch.svelte.ts';
   import { anchorOf } from '../ui/placement.ts';
   import ContextMenu from '../ui/ContextMenu.svelte';
   import { groupActions, groupScope, runGroup } from './group-actions.ts';
@@ -2392,7 +2393,7 @@
         <!-- The phone's door to the notification centre (board #322): the
              desktop's is the rail bell; the Hub tab carries the badge. -->
         {#if mobile || compact}
-          <span class="bell-wrap"><CommandButton variant="icon" icon="bell" label={t('notifyCentre')} hasPopup="dialog" expanded={!!centre.anchor}
+          <span class="bell-wrap"><CommandButton variant="icon" icon={notifySwitch.on ? 'bell' : 'bell-off'} label={notifySwitch.on ? t('notifyCentre') : `${t('notifyCentre')} · ${t('notifyMuted')}`} hasPopup="dialog" expanded={!!centre.anchor}
             onclick={(e) => centre.toggle(e.currentTarget)} />{#if centre.unviewed}<span class="unread-dot bell-dot" aria-hidden="true"></span>{/if}</span>
         {/if}
         <CommandButton variant="icon" icon="layout" label={t('board')}

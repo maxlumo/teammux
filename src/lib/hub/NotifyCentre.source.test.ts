@@ -44,3 +44,8 @@ test('no raw sizes or colours: tokens only (design-language contract)', () => {
   assert.ok(!/#[0-9a-f]{3,8}\b/iu.test(css), 'no raw colour');
   assert.ok(!/@media/u.test(css), 'one structure on both screens: no breakpoint changes the grid');
 });
+
+test('the save-failure line sits on the menu row s inset tokens, not raw px (#423 review)', () => {
+  assert.match(source, /\.nc-error \{ padding: 0 var\(--menu-item-padding-x\) var\(--menu-item-padding-y\); \}/u);
+  assert.match(source, /<div class="config-error nc-error" role="alert">\{t\('notifySwitchFailed'\)\}<\/div>/u, 'the shared error text role');
+});

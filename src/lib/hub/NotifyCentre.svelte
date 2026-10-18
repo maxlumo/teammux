@@ -16,6 +16,7 @@
   import ServerTag from '../ui/ServerTag.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { agentHue, listWhen } from './hub.ts';
+  import { notifySwitch } from './notify-switch.svelte.ts';
   import type { Alert } from './notify-centre.svelte.ts';
   import type { CentreUnion } from '../app/centre-union.svelte.ts';
 
@@ -26,13 +27,34 @@
   const shown = $derived(view === 'me' ? centre.items.filter((a) => a.toHuman) : centre.items);
   const unavailable = $derived(centre.sources.filter((s) => !s.available && (s.log?.items.length ?? 0) > 0));
   const when = (ms: number) => listWhen(Math.floor(ms / 1000));
+  // Mute (board #423): the SAME switch as Settings > Notifications, through
+  // its one door. A toggle with one label, pressed while muted.
+  // A write the storage refused moved nothing, and says so (review P1).
+  let muteBusy = $state(false);
+  let muteFailed = $state(false);
+  async function toggleMute() {
+    if (muteBusy) return;
+    muteBusy = true;
+    muteFailed = false;
+    try { muteFailed = !(await notifySwitch.set(!notifySwitch.on)); }
+    finally { muteBusy = false; }
+  }
 </script>
 
+<!-- The head's tools are a dense group (.compact-tools, the design
+     language's one exception for tool groups: a 30px pitch on touch, not a
+     44px control inside a menu heading — board #423, owner: "all to me 的
+     按钮样式…稍微有点大"). -->
 <div class="menu-heading nc-head">
   <span>{t('notifyCentre')}</span>
-  <Segmented options={[{ value: 'all', label: t('notifyCentreAll') }, { value: 'me', label: t('notifyCentreToMe') }]}
-    value={view} onchange={(v) => (view = v)} ariaLabel={t('notifyCentre')} />
+  <span class="nc-tools compact-tools">
+    <Segmented options={[{ value: 'all', label: t('notifyCentreAll') }, { value: 'me', label: t('notifyCentreToMe') }]}
+      value={view} onchange={(v) => (view = v)} ariaLabel={t('notifyCentre')} />
+    <CommandButton variant="icon" icon="bell-off" label={t('notifyMute')} pressed={!notifySwitch.on}
+      pending={muteBusy} onclick={toggleMute} />
+  </span>
 </div>
+{#if muteFailed}<div class="config-error nc-error" role="alert">{t('notifySwitchFailed')}</div>{/if}
 {#if shown.length}
   <ul class="nc-list">
     {#each shown as a (`${a.server}|${a.key}`)}
@@ -75,6 +97,9 @@
 
 <style>
   .nc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .nc-tools { display: flex; align-items: center; gap: var(--ui-gap); flex: none; }
+  /* Under the heading, on the menu row's own inset (no raw px; board 423 review). */
+  .nc-error { padding: 0 var(--menu-item-padding-x) var(--menu-item-padding-y); }
   .nc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
   .nc-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; text-align: left; }
   .nc-row.unavailable { opacity: var(--muted-opacity, 0.6); }
