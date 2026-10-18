@@ -467,6 +467,13 @@ flaky wall-clock assertions in the test.
   state of the live system (the isolation rules above), and clean up the
   burners. A negative control that fails in such a run shows the test bites in
   that run, not under every load.
+- A wait observes the SAME fact the next assertion reads. A fake that writes
+  a file whose content is asserted writes it under another name and renames
+  it into place, so a wait for its existence or count is a wait for its
+  content. Reason: board #421, `a_nul_or_a_bang_in_a_typed_line_never_runs_as_shell_code`
+  failed twice under load (at load ~246, and at ~210-240 in the #422 gate):
+  `tasks() == 2` was observed, then `task(2)` read an empty file the dsh
+  stand-in had created and not yet written.
 - Rust tests never see the operator's `~/.config/tmux-mobile`. Under
   `cfg(test)` the lib's `config::dirs_next()` is ONE empty temp directory
   per test process (`/tmp/tmm-config-test-<pid>`), so every

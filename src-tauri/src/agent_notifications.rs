@@ -2171,7 +2171,7 @@ mod tests {
                     "import * as p from {plugin}\nimport fs from 'node:fs'\nconst dir = {dir}\n\
                      const task = process.argv[process.argv.indexOf('--') + 1]\n\
                      const n = fs.readdirSync(dir).filter((f) => f.startsWith('task-')).length + 1\n\
-                     fs.writeFileSync(`${{dir}}/task-${{n}}`, task)\n\
+                     fs.writeFileSync(`${{dir}}/.task-${{n}}`, task); fs.renameSync(`${{dir}}/.task-${{n}}`, `${{dir}}/task-${{n}}`)\n\
                      let h\nconst root = {{ header: {{ id: 'session-e2e-1' }} }}\n\
                      process.on('SIGINT', () => process.exit(130))\n\
                      const queued = [], seen = new Set(), steered = []\n\
@@ -2181,7 +2181,7 @@ mod tests {
                      while (fs.existsSync(`${{dir}}/coldstart`) && !fs.existsSync(`${{dir}}/started-${{n}}`)) await new Promise((r) => setTimeout(r, 30))\n\
                      h(root, {{ type: 'turn/start', data: {{ turn: n }} }})\n\
                      h(root, {{ type: 'user/message', data: {{ role: 'user', source: {{ kind: 'user' }}, content: [{{ type: 'text', text: task }}] }} }})\n\
-                     const t = setInterval(() => {{ while (queued.length) {{ const m = queued.shift(); steered.push(m.content[0].text); fs.writeFileSync(`${{dir}}/steer-${{n}}-${{steered.length}}`, m.content[0].text); h(root, {{ type: 'user/message', data: m }}) }}\n\
+                     const t = setInterval(() => {{ while (queued.length) {{ const m = queued.shift(); steered.push(m.content[0].text); fs.writeFileSync(`${{dir}}/.steer-${{n}}`, m.content[0].text); fs.renameSync(`${{dir}}/.steer-${{n}}`, `${{dir}}/steer-${{n}}-${{steered.length}}`); h(root, {{ type: 'user/message', data: m }}) }}\n\
                      if (fs.existsSync(`${{dir}}/release-${{n}}`)) {{ clearInterval(t)\n\
                      h(root, {{ type: 'assistant/message', data: {{ message: {{ role: 'assistant', content: [{{ type: 'text', text: steered.length ? `done ${{n}} +${{steered.join(' | ')}}` : `done ${{n}}` }}] }} }} }})\n\
                      h(root, {{ type: 'turn/end', data: {{ turn: n, reason: {{ kind: 'completed' }} }} }})\n\
@@ -2231,6 +2231,10 @@ mod tests {
         fn release(&self, n: usize) {
             std::fs::write(self.ws.join(format!("release-{n}")), "").unwrap();
         }
+        /// The runs started so far. The stand-in writes each `task-<n>` (and
+        /// each `steer-<n>-<k>`) under a dot name and renames it into place
+        /// (board #421: a count was observed and the file read empty), so a
+        /// wait on this count observes the same fact `task(n)` reads.
         fn tasks(&self) -> usize {
             std::fs::read_dir(&self.ws).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("task-")).count()
         }
@@ -2326,8 +2330,28 @@ mod tests {
             };
             let ws = self.ws.clone();
             let inbox_dir = self.root.join("inbox");
+            // `agent_target`'s three inputs, each read on its own (board
+            // #421: it answered None on a live, active d1 pane with its ready
+            // file present): the project's workspace, the pane detection and
+            // the managed-home check.
+            let project = crate::projects::project_for_session(&self.session);
+            let workspace = project.as_ref().ok().cloned().flatten().map(|p| p.path);
+            let inputs = format!(
+                "project={} detect={} managed={}",
+                field(|| project.clone().map(|p| p.map(|p| p.path))),
+                field(|| {
+                    let panes = crate::tmux::list_panes(&self.session)?;
+                    Ok::<_, String>(
+                        panes
+                            .iter()
+                            .find(|p| p.active && p.window_name == "d1")
+                            .map(|p| crate::projects::agents::detect_pane(workspace.as_deref(), p).map(|a| a.backend)),
+                    )
+                }),
+                field(|| Ok::<_, String>(crate::projects::is_managed_in(workspace.as_deref(), "d1"))),
+            );
             format!(
-                "target={} panes={} warns={} ready={} steer-ready={} run={} open={} handoff={} held={} busy={} tasks={} inbox={} screen tail={}",
+                "target={} {inputs} panes={} warns={} ready={} steer-ready={} run={} open={} handoff={} held={} busy={} tasks={} inbox={} screen tail={}",
                 field(|| Ok::<_, String>(crate::projects::delivery::agent_target(&self.session, "d1"))),
                 field(|| crate::tmux::list_panes(&self.session).map(|ps| ps.iter().map(|p| format!("{}:{} active={} cmd={}", p.window, p.window_name, p.active, p.current_command)).collect::<Vec<_>>())),
                 field(|| Ok::<_, String>(crate::projects::telemetry::recent_events(&self.session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect::<Vec<_>>())),
