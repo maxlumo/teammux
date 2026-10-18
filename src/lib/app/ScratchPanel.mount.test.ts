@@ -85,22 +85,22 @@ test('closed: inert, hidden, nothing ensured; open ensures once and mounts the T
   } finally { await app.close(); }
 });
 
-test('Escape closes from the head, Kill asks first then ends the session, and opening an ended panel brings a live one back', { timeout: 60000 }, async (context) => {
+test('Escape closes from the cluster, Kill asks first then ends the session, and opening an ended panel brings a live one back', { timeout: 60000 }, async (context) => {
   const r = rpc();
   const app = await mount(context, r.mod);
   try {
     app.window.__scratch.open = true;
     await until(app, () => !!app.document.querySelector('.scratch .xterm-wrap'));
-    const head = app.document.querySelector<HTMLElement>('.scratch-head')!;
+    const head = app.document.querySelector<HTMLElement>('.scratch-tools')!;
     head.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await app.flush();
-    assert.equal(app.window.__scratch.open, false, 'Escape on the head closes');
+    assert.equal(app.window.__scratch.open, false, 'Escape on the cluster closes');
     app.window.__scratch.open = true;
     for (let i = 0; i < 4; i++) await app.flush();
-    app.document.querySelector<HTMLButtonElement>('.scratch-head [aria-label="Kill scratch session"]')!.click();
+    app.document.querySelector<HTMLButtonElement>('.scratch-tools [aria-label="Kill scratch session"]')!.click();
     await until(app, () => !!app.document.querySelector('.confirm-dialog, [role="alertdialog"], dialog[open]'));
     assert.deepEqual(r.calls, ['ensure'], 'nothing is killed before the confirmation');
-    const confirm = [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-head'))!;
+    const confirm = [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-tools'))!;
     confirm.click();
     await until(app, () => r.calls.includes('kill') && app.window.__scratch.open === false);
     assert.deepEqual(r.calls, ['ensure', 'kill']);
@@ -138,16 +138,70 @@ test('a server switch drops a pending ensure and never ensures by itself; the ed
     app.window.__scratch.live = true;
     for (let i = 0; i < 4; i++) await app.flush();
     assert.deepEqual(r.calls, ['ensure'], 'no ensure on the new server until the reader opens it');
-    // Edge: the head's two icons move it to the right (#326).
-    const edges = app.document.querySelectorAll<HTMLButtonElement>('.scratch-head .segmented button');
+    // Edge: the cluster's two icons move it to the right (#326).
+    const edges = app.document.querySelectorAll<HTMLButtonElement>('.scratch-tools .segmented button');
     assert.deepEqual([...edges].map((b) => b.getAttribute('aria-label')), ['Bottom', 'Right'],
       'icons, with their words as the accessible names');
-    assert.ok([...edges].every((b) => !b.textContent?.trim()), 'no Bottom/Right text in the head');
+    assert.ok([...edges].every((b) => !b.textContent?.trim()), 'no Bottom/Right text in the cluster');
     edges[1]!.click();
     await app.flush();
     assert.equal(app.window.__scratch.edge, 'right');
     assert.ok(app.document.querySelector('.scratch.right'));
     assert.equal(app.document.querySelector('.scratch .side-handle')!.getAttribute('aria-orientation'), 'vertical', 'the side-docked panel resizes on X');
+  } finally { await app.close(); }
+});
+
+test('no header bar: the controls are ONE small cluster over the terminal, which keeps the whole panel; both docks, the handle stays (board #424)', { timeout: 60000 }, async (context) => {
+  const r = rpc();
+  const app = await mount(context, r.mod);
+  try {
+    app.window.__scratch.open = true;
+    await until(app, () => !!app.document.querySelector('.scratch .xterm-wrap'));
+    const panel = app.document.querySelector<HTMLElement>('.scratch')!;
+    assert.equal(panel.querySelector('header, .scratch-head, .scratch-name'), null, 'no full-width bar, no title text on screen');
+    assert.equal(panel.getAttribute('aria-label'), 'Scratch terminal', 'the panel keeps its name for a screen reader');
+    const cluster = () => app.document.querySelectorAll<HTMLElement>('.scratch .scratch-tools');
+    assert.equal(cluster().length, 1, 'exactly one cluster');
+    const tools = cluster()[0]!;
+    assert.equal(tools.getAttribute('role'), 'toolbar');
+    assert.equal(tools.getAttribute('aria-label'), 'Scratch terminal');
+    assert.ok(tools.classList.contains('menu-surface'), 'the existing menu surface atom, not a private frame');
+    // The controls that need a tap, and nothing else: the edge pair, kill, close.
+    assert.deepEqual([...tools.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')), ['Bottom', 'Right', 'Kill scratch session', 'Close'], 'the edge pair, kill, close');
+    assert.equal(tools.querySelector('.server-tag'), null, 'one server: nothing to name');
+    // The cluster floats over the terminal; it is not a row the terminal sits under, so the
+    // terminal's box is the whole panel and opening or docking never changes cols x rows.
+    const body = app.document.querySelector<HTMLElement>('.scratch-body')!;
+    assert.ok(!body.contains(tools) && !tools.contains(body), 'a sibling of the terminal body, not its parent or child');
+    assert.equal(tools.nextElementSibling, body, 'painted over it');
+    assert.ok(panel.querySelector('.side-handle'), 'the resize handle stays (bottom dock)');
+    assert.equal(panel.querySelector('.side-handle')!.getAttribute('aria-orientation'), 'horizontal');
+
+    // The right dock: the same one cluster, the handle on the other edge.
+    panel.querySelectorAll<HTMLButtonElement>('.scratch-tools .segmented button')[1]!.click();
+    await app.flush();
+    const right = app.document.querySelector<HTMLElement>('.scratch.right')!;
+    assert.ok(right, 'docked right');
+    assert.equal(right.querySelectorAll('.scratch-tools').length, 1);
+    assert.equal(right.querySelector('header, .scratch-head'), null);
+    assert.equal(right.querySelector('.side-handle')!.getAttribute('aria-orientation'), 'vertical');
+  } finally { await app.close(); }
+});
+
+test('with several servers the cluster says which machine this shell is on; one server says nothing (board #424)', { timeout: 60000 }, async (context) => {
+  const r = rpc();
+  const app = await mount(context, r.mod);
+  try {
+    app.window.__scratch.open = true;
+    await until(app, () => !!app.document.querySelector('.scratch .xterm-wrap'));
+    assert.equal(app.document.querySelector('.scratch-tools .server-tag'), null);
+    await app.setScope({ tag: 'work' });
+    const tag = app.document.querySelector('.scratch-tools .server-tag');
+    assert.equal(tag?.textContent, 'work', 'what you type goes to that machine: its name stays on screen, inside the cluster');
+    assert.equal(tag, app.document.querySelector('.scratch-tools')!.firstElementChild, 'first in the cluster, before the controls');
+    assert.equal(app.document.querySelector('.scratch header'), null);
+    await app.setScope({ tag: null });
+    assert.equal(app.document.querySelector('.scratch-tools .server-tag'), null, 'and goes when only one server is left');
   } finally { await app.close(); }
 });
 
@@ -173,9 +227,9 @@ test('the server-keyed tree unmounting first still drops a pending completion (#
   try {
     app.window.__scratch.open = true;
     await until(app, () => !!app.document.querySelector('.scratch .xterm-wrap'));
-    app.document.querySelector<HTMLButtonElement>('.scratch-head [aria-label="Kill scratch session"]')!.click();
-    await until(app, () => !![...app.document.querySelectorAll('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-head')));
-    [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-head'))!.click();
+    app.document.querySelector<HTMLButtonElement>('.scratch-tools [aria-label="Kill scratch session"]')!.click();
+    await until(app, () => !![...app.document.querySelectorAll('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-tools')));
+    [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-tools'))!.click();
     await until(app, () => !!killed);
     // The switch tears the keyed tree down BEFORE `live` ever goes false, and
     // the reader opens the new server's panel.

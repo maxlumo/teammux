@@ -8000,7 +8000,7 @@ test('③c-5 (Single): the status card names no server', async (context) => {
   assert.equal(h.app.document.querySelector('.sysvitals .server-tag'), null, 'no name beside the reading');
   await hoverOn(h, h.app.document.querySelector('.sysvitals')!);
   assert.doesNotMatch(cardText(h), /alpha|beta/u, `no server in the card: ${cardText(h)}`);
-  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-head .server-tag'), null, 'nor on the scratch head');
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-tools .server-tag'), null, 'nor on the scratch cluster');
 });
 
 test('③c-5: the switcher row s hover carries only what the row hides — the machine, a connecting/reconnecting word, Excluded — never the name or address again, and no other server s readings', async (context) => {
@@ -8035,14 +8035,14 @@ test('③c-5: the switcher row s hover carries only what the row hides — the m
   assert.match(card, /Reconnecting|Connecting/u, `the status word: ${card}`);
 });
 
-test('③c-5: the owner-bound surfaces say whose they are when several servers are included — the scratch head, the Agents page head, the Connection title — and the copy-link acts on the FOCUSED server, frozen at the click', async (context) => {
+test('③c-5: the owner-bound surfaces say whose they are when several servers are included — the scratch cluster, the Agents page head, the Connection title — and the copy-link acts on the FOCUSED server, frozen at the click', async (context) => {
   const h = await bootApp(context, aggregateOn({
     ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'desktop',
   }), undefined, { ...sandbox, rpc: twoHubs(), setup(window: any) { window.Element.prototype.getAnimations = () => []; window.navigator.clipboard = { writeText: async (t: string) => { (window as any).__copied = t; } }; } });
   for (let i = 0; i < 30 && sideRows(h).length < 4; i++) { await h.app.advance(500); await h.settle(); }
-  // The scratch head, in the focused tree.
+  // The scratch cluster, in the focused tree.
   // (The held tree mounts no scratch panel — it is shown only in the connected, focused tree.)
-  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-head .server-tag')?.textContent, 'alpha', 'the scratch head names its owner');
+  assert.equal(h.app.document.querySelector('.scope-tree:not(.held) .scratch-tools .server-tag')?.textContent, 'alpha', 'the scratch cluster names its owner');
   // The Agents page head.
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.rail-btn')].find((b) => /^agents$/iu.test((b.getAttribute('aria-label') ?? '').trim()))?.click();
   for (let i = 0; i < 4; i++) await h.settle();

@@ -8,6 +8,28 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('./ScratchPanel.svelte', import.meta.url), 'utf8');
 const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
 
+test('no header bar: one small rounded cluster over the terminal, on existing tokens only (board #424)', () => {
+  // Owner 2026-10-19: "不要这个横条了，只有一些需要点击的元素变成右上角的一个小矩形…注意有圆角".
+  assert.doesNotMatch(source, /<header|scratch-head|scratch-name|min-height: 36px|\.spacer/u, 'no full-width bar, no title row');
+  const css = (/<style>[\s\S]*<\/style>/u.exec(source)?.[0] ?? '').replace(/\/\*[\s\S]*?\*\//gu, '');
+  const tools = css.match(/\.scratch-tools \{([^}]*)\}/u)?.[1] ?? '';
+  assert.match(tools, /position: absolute; z-index: 6; top: var\(--ui-gap\); right: var\(--ui-gap\);/u, 'floats at the top-right and clears the 3px handle straddle');
+  assert.match(tools, /gap: var\(--tool-gap\);/u);
+  assert.match(tools, /padding: var\(--tool-inset-block\); border-radius: var\(--ui-radius-row\);/u, 'the small-bar corner, from the radius scale');
+  assert.doesNotMatch(tools, /\d+px|#[0-9a-f]{3,6}|rgba?\(/iu, 'no raw size, no literal colour in the cluster');
+  // The width budget: never wider than the panel (a coarse pointer's four controls are 176px in a 280px
+  // right dock); the long server name is what shrinks, with its ellipsis, so the handle stays reachable.
+  assert.match(tools, /max-width: calc\(100% - 2 \* var\(--ui-gap\)\);/u);
+  assert.match(css, /\.scratch-tools :global\(\.server-tag\) \{ flex: 0 1 auto; min-width: 0; \}/u);
+  // It overlays: the terminal body is the whole panel, so the cluster reserves no rows.
+  const body = css.match(/\.scratch-body \{([^}]*)\}/u)?.[1] ?? '';
+  assert.match(body, /position: relative; flex: 1; min-height: 0; display: flex;/u);
+  assert.doesNotMatch(body, /padding|margin|top:/u, 'the terminal body gives nothing up to the cluster');
+  assert.doesNotMatch(css.match(/\.scratch \{([^}]*)\}/u)?.[1] ?? '', /padding/u, 'nor does the panel');
+  assert.match(source, /<div class="scratch-tools menu-surface"[\s\S]*?<\/div>\s*<div class="scratch-body">/u, 'the cluster precedes the terminal body and is painted over it');
+  assert.match(source, /<ServerTag name=\{scope\.tag\} \/>\s*<Segmented/u, 'the owner tag leads the cluster');
+});
+
 test('the shared Terminal and SideHandle, one slide tempo, no backdrop', () => {
   assert.match(source, /import Terminal from '\.\.\/terminal\/Terminal\.svelte';/u);
   assert.match(source, /<Terminal \{target\} \{session\} \{fontSize\} embedded chromeless active=\{open\} visible=\{open\} onPaneExit=\{ended\} \/>/u);
@@ -19,8 +41,8 @@ test('the shared Terminal and SideHandle, one slide tempo, no backdrop', () => {
   assert.doesNotMatch(css, /\d+ms|scrim|backdrop/u, 'no private tempo, no backdrop');
 });
 
-test('Escape closes from the head only; the terminal keeps it', () => {
-  assert.match(source, /<header class="scratch-head" onkeydown=\{onHeadKey\}/u);
+test('Escape closes from the corner cluster only; the terminal keeps it', () => {
+  assert.match(source, /<div class="scratch-tools menu-surface" onkeydown=\{onHeadKey\} role="toolbar"/u);
   assert.doesNotMatch(source, /window\.addEventListener\('keydown'|<section[^>]*onkeydown/u, 'no Escape catcher over the terminal');
 });
 

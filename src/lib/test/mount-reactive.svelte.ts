@@ -26,5 +26,6 @@ export function reactiveProps(initial: Record<string, unknown>) {
 
 /** What the host tells a server-bound page about its binding (`ServerScope.eligible`):
  * flipping it is how a test makes the tree "no longer the focus" or "no
- * longer served" while the component stays mounted and displayed. */
-export const scopeFlags = $state({ eligible: true });
+ * longer served" while the component stays mounted and displayed. `tag` is the
+ * server's name beside what it owns (null: one server, nothing to name). */
+export const scopeFlags = $state<{ eligible: boolean; tag: string | null }>({ eligible: true, tag: null });

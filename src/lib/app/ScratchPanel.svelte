@@ -15,7 +15,7 @@
   // Closing HIDES the panel (the session keeps running, the Terminal stays
   // mounted and records frames without rendering, rule 7); Kill ends the
   // session. Escape belongs to the shell inside: it closes the panel only from
-  // the head's own controls.
+  // the corner cluster's own controls.
   //
   // The panel docks at the BOTTOM or the RIGHT (board #326, owner 2026-10-09:
   // "这个 terminal 应该可以显示在下方或右侧 上面的按钮不用写'bottom'之类的文字
@@ -192,19 +192,24 @@
   {:else}
     <SideHandle varName="--scratch-h" storeKey="tmux_scratch_h" min={160} max={1200} def={320} edge="top" label={t('scratchTitle')} always />
   {/if}
+  <!-- No header bar (board #424, owner 2026-10-19: "不要这个横条了，只有一些需要点击的
+       元素变成右上角的一个小矩形…注意有圆角"): the controls that need a tap are one
+       small rounded cluster floating at the top-right over the terminal, which
+       keeps every row. The panel's name is its accessible name (the section's and
+       the toolbar's), not text on screen: a person who opened a shell panel does
+       not need it said. Whose scratch this is stays on screen (③c-5): the panel
+       lives in its server's tree, so with several servers included the tag in
+       the cluster says which machine this shell is on — what you type goes
+       THERE, which is what a person needs to identify before acting (tenet 11);
+       with one server there is no tag and the cluster is just the controls. -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <header class="scratch-head" onkeydown={onHeadKey} role="toolbar" aria-label={t('scratchTitle')} tabindex="-1">
-    <span class="scratch-name">{t('scratchTitle')}</span>
-    <!-- Whose scratch this is (③c-5): the panel lives in its server's tree,
-         so its owner is frozen by construction; with several servers
-         included the head says which. -->
+  <div class="scratch-tools menu-surface" onkeydown={onHeadKey} role="toolbar" aria-label={t('scratchTitle')} tabindex="-1">
     <ServerTag name={scope.tag} />
-    <span class="spacer"></span>
     <Segmented options={[{ value: 'bottom', label: t('scratchBottom'), icon: 'panel-bottom' }, { value: 'right', label: t('scratchRight'), icon: 'panel-right' }]}
       value={edge} onchange={(v) => onedge(v)} ariaLabel={t('scratchEdge')} />
     <CommandButton variant="icon" icon="stop" label={t('scratchKill')} disabled={phase !== 'ready'} onclick={() => { killError = ''; killAsk = true; }} />
     <CommandButton variant="icon" icon="x" label={t('close')} onclick={onclose} />
-  </header>
+  </div>
   <div class="scratch-body">
     {#if target}
       <Terminal {target} {session} {fontSize} embedded chromeless active={open} visible={open} onPaneExit={ended} />
@@ -240,7 +245,7 @@
     position: fixed; z-index: 20; display: flex; flex-direction: column;
     left: var(--shell-left, 0px); right: 0; bottom: 0;
     /* A stored size never outgrows the window it is restored into or shrinks
-       with: the head and its handle stay on screen (#324 review). */
+       with: the controls and the handle stay on screen (#324 review). */
     height: min(var(--scratch-h, 320px), calc(100vh / var(--ui-zoom, 1) - 80px));
     background: var(--bg); border-top: 1px solid var(--border);
     box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
@@ -259,9 +264,23 @@
     transform: translateX(100%);
   }
   .scratch.open { transform: none; visibility: visible; transition: transform var(--t-move) ease; }
-  .scratch-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; min-height: 36px; box-sizing: border-box; border-bottom: 1px solid var(--border); outline: none; }
-  .scratch-name { font-size: var(--fs-meta); color: var(--text2); font-family: var(--font-mono); }
-  .spacer { flex: 1; }
+  /* The cluster OVERLAYS the terminal's top-right corner and reserves nothing:
+     the Terminal's box is the whole panel, so opening, closing or docking never
+     changes cols x rows because of it (terminal-sizing.md), and the last line is
+     never covered. What it does cover is the first rows' last ~14 columns; that
+     is the accepted price of giving every row back. The surface is the menu
+     surface atom (page background, border, shadow) at the small-bar corner; the
+     offsets clear the resize handle, which straddles the panel's edge by 3px. */
+  .scratch-tools {
+    position: absolute; z-index: 6; top: var(--ui-gap); right: var(--ui-gap);
+    display: flex; align-items: center; gap: var(--tool-gap);
+    padding: var(--tool-inset-block); border-radius: var(--ui-radius-row); outline: none;
+    /* Never wider than the panel it floats in (the narrowest right dock is 280px,
+       and a coarse pointer makes the four controls 176px): the server's name gives
+       way, with an ellipsis, never the controls' hit boxes and never the name. */
+    max-width: calc(100% - 2 * var(--ui-gap));
+  }
+  .scratch-tools :global(.server-tag) { flex: 0 1 auto; min-width: 0; }
   .scratch-body { position: relative; flex: 1; min-height: 0; display: flex; }
   .scratch-body > :global(*) { flex: 1; min-width: 0; }
   .scratch-state { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text3); font-size: var(--fs-ui); }

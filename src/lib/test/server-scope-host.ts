@@ -25,7 +25,7 @@ export const testScope = (transport?: unknown) => {
   (globalThis as { __serverState?: unknown }).__serverState = state;
   const runtime = { id: 'test', api: transport, connection: transport } as unknown as ServerRuntime;
   // The host's word on the binding: live, so a test can take the focus away.
-  return { runtime, state, get eligible() { return () => scopeFlags.eligible; } };
+  return { runtime, state, get eligible() { return () => scopeFlags.eligible; }, get tag() { return scopeFlags.tag; } };
 };
 
 export const testScopeContext = (transport?: unknown) => scopeContext(testScope(transport));

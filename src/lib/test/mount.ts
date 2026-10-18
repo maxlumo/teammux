@@ -24,7 +24,7 @@ interface MountOptions {
 interface ClientApi {
   start(props: Record<string, unknown>): void;
   setProps(patch: Record<string, unknown>): void;
-  setScope(flags: { eligible?: boolean }): void;
+  setScope(flags: { eligible?: boolean; tag?: string | null }): void;
   tick(): Promise<void>;
   flushSync(): void;
   stop(): Promise<void>;
@@ -249,7 +249,7 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
         /** Change props the fixture was started with (a parent re-rendering). */
         async setProps(patch: Record<string, unknown>) { api!.setProps(patch); await flush(); },
         /** What the host says about the binding (\`ServerScope.eligible\`). */
-        async setScope(flags: { eligible?: boolean }) { api!.setScope(flags); await flush(); },
+        async setScope(flags: { eligible?: boolean; tag?: string | null }) { api!.setScope(flags); await flush(); },
         /** Destroy the component but keep the realm, so a test can observe
          * what its teardown did — and what work it had in flight still does.
          * `close` remains idempotent after it. */

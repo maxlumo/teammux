@@ -88,7 +88,7 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   (`aria-pressed`, hover card with its shortcut), and the registry shortcut
   `toggleScratch` (⌘⌥` / Ctrl+Alt+`, free of the reserved chords). Both toggle;
   so does the panel's × . **Escape belongs to the shell** (vim, readline, agent
-  TUIs): it closes the panel only from the head's own controls.
+  TUIs): it closes the panel only from the corner cluster's own controls.
   It was a rail control until #326, at the top of the bottom group. Owner,
   2026-10-09: "左下角的快捷 Terminal 按钮和上方的 Terminal 按钮感觉有一点重叠，
   看起来一样了…我想到 可以把它放到我们的系统状态栏里 我们不是有一个系统状态栏嘛
@@ -130,7 +130,7 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   it; the shortcut is the door that is always open.
 - **Panel.** `app/ScratchPanel.svelte`, fixed over the content area right of the
   rail, no backdrop (a tool panel, not a modal), one `--t-move` slide (reduced
-  motion: none). Edge `bottom` (default) or `right`, chosen in its own head by
+  motion: none). Edge `bottom` (default) or `right`, chosen in its corner cluster by
   TWO ICONS (one place, no Settings row; `tmux_scratch_edge`) — the one
   `ui/Segmented` in its icon mode (`panel-bottom` / `panel-right`, each
   option's word kept as its accessible name), because the owner asked for the
@@ -142,11 +142,51 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   existing user back to the bottom edge — hence a tested function rather than
   a ternary in App). Its size per edge through the one
   `SideHandle` (`edge="top"` on `--scratch-h`, `edge="left"` on `--scratch-w`,
-  `always`, clamped to the viewport), restored by App like `--sidebar-w`, and clamped by the layout itself (`min(var, viewport − 80px)`, zoom-corrected) so a size stored on a larger window, or a window shrunk with the panel open, keeps the head and handle on screen (measured: h=1200/w=1400 into 900×600 then 700×420, both edges). Closed
+  `always`, clamped to the viewport), restored by App like `--sidebar-w`, and clamped by the layout itself (`min(var, viewport − 80px)`, zoom-corrected) so a size stored on a larger window, or a window shrunk with the panel open, keeps the controls and handle on screen (measured: h=1200/w=1400 into 900×600 then 700×420, both edges). Closed
   it is off-screen, `visibility: hidden` after the slide and `inert`, so nothing
   in it takes focus. Opening focuses the terminal once it is mounted and shown;
   closing returns focus to what had it, only if focus is still in the panel and
   that control is still there and visible.
+- **No header bar: one small rounded cluster over the terminal (board #424,
+  2026-10-19).** Owner: "快捷终端上方的横线有点太大了，可以不要这个横条了，只有一些需要
+  点击的元素变成右上角的一个小矩形在那里，注意有圆角". The panel had a full-width
+  36px toolbar (title, server tag, spacer, edge pair, kill, close). It is gone:
+  what a person taps is ONE `.scratch-tools` cluster, `position: absolute` at
+  the panel's top-right (`top`/`right: var(--ui-gap)`, which clears the resize
+  handle's 3px straddle of the edge), `role="toolbar"` with the panel's name,
+  on the existing **menu surface** atom (page background, border, menu shadow)
+  at the small-bar corner `--ui-radius-row`, padded and spaced by the tool
+  tokens, its controls at the default `--control-height`. No raw size, no new
+  colour, no new species. **It overlays; it does not reserve.** The Terminal's
+  box is the whole panel (measured on the real stylesheet, mouse pointer: panel
+  320px, terminal 319px, the 1px being the panel's border, where the bar took
+  36px), so the cluster takes no layout row and adds no sizing trigger
+  ([terminal-sizing](../pages/terminal-sizing.md): sizing follows the
+  container, the terminal's own ResizeObserver; changing dock changes the
+  container and refits, as it always did), and the last line is never covered.
+  The price is accepted and written down, and it is not lossless: the cluster
+  covers a few cells of the first rows at the right (measured with a mouse
+  pointer, the default 14px terminal font and a short tag: 34px tall, about
+  120px wide, 158px with the tag "work"; a coarse pointer makes the controls
+  `--control-height` 44px and the cluster larger, and it is not squeezed back
+  to 28px). **What stays on screen is what
+  a person needs to identify or act:** the title text is dropped (the section and
+  the toolbar keep it as their accessible name; a person who opened a shell
+  panel does not need it said), but **the server tag stays**, first in the
+  cluster, whenever several servers are included (`scope.tag`, the same rule
+  as every other place, nothing in single mode): what is typed goes to THAT
+  machine, which is what has to be identifiable before acting (tenet 11). The
+  `SideHandle` stays on its edge (top for the bottom dock, left for the right
+  dock), and Escape from the cluster still closes (`onHeadKey` moved onto it).
+  The panel exists on the desktop layout only, so the cluster has no phone
+  form; a touch device forced into the desktop layout keeps the coarse
+  pointer's 44px controls (the `any-pointer: coarse` block of app.css), so
+  there the cluster is 50px tall and the four controls take 176px. **Width
+  budget:** the cluster is never wider than the panel (`max-width` of the panel
+  less the two offsets), and it is the server's name that gives way, with its
+  ellipsis (`flex: 0 1 auto; min-width: 0` on the tag in the cluster), never the
+  controls' hit boxes and never the identity itself, so the narrowest right dock
+  (280px) keeps its resize edge reachable.
 - **Only the reader ensures, and opening converges on a LIVE session.** Opening the panel (and an explicit "Open again") is the only thing that calls `scratch_session`; the effect tracks `open`/`live` only, so a refusal is a stable error with its reason, not a retry loop. The Terminal takes the session name the server returned.
   #326 added `ended` to the states an open ensures from, which is the client half of 「点开 Terminal 之后，我现在经常看到里面什么都没有」. A hidden Terminal stays SUBSCRIBED (rule 7), so a session that ended behind the panel's back — before #326 the shell's own `exit` ended it, see projects.md — delivered `pane_closed` while the panel was CLOSED and left `phase = 'ended'` with no target; the open effect re-ensured only from `idle | error`, so the next open rendered the bare "Session ended" line. Both halves are mount-tested; the retry-loop guard is unchanged.
   **Known limit, accepted (orchestrator, 2026-10-09, #326 review):** a `ready`
@@ -163,7 +203,7 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   `session:window.pane`; the panel embeds the ONE Terminal on it (`embedded
   chromeless`, app `fontSize`, same keys/resize contract). Close HIDES (the
   session runs on; the Terminal stays mounted and records frames without
-  rendering, rule 7); the head's stop icon is Kill, behind a ConfirmDialog
+  rendering, rule 7); the cluster's stop icon is Kill, behind a ConfirmDialog
   (close ≠ kill). A session that ends (Ctrl-D, external kill) shows "Session
   ended · Open again"; nothing recreates it in the background. A name held by a
   plain session or a project shows the server's refusal with the same re-try —
@@ -193,13 +233,15 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   [projects.md § the scratch terminal's session](projects.md).
 
 `ScratchPanel.mount.test.ts` pins lazy ensure, focus in and back, inert when
-closed, hide-not-kill, Kill behind its confirmation, "Open again", the edge
+closed, no header bar and exactly one cluster (edge pair, kill, close) on the menu surface, a
+sibling of the terminal body and painted over it, in both docks with the handle on its edge, the
+server tag leading the cluster with several servers and absent with one (#424), hide-not-kill, Kill behind its confirmation, "Open again", the edge
 switch, a switch dropping a pending ensure without re-ensuring, a refusal that
 stays an error until Open again, and a kill completion after the keyed tree was
 destroyed (negative controls: no intent guard, ensure on every open, no `inert`,
 the effect tracking the phase, no destroy bump);
 `ScratchPanel.source.test.ts` pins the shared Terminal/SideHandle, the tempo, the
-head-only Escape and App's mount inside the key; since #326 also the right
+cluster-only Escape, the cluster's tokens (no raw size or colour, no `<header>`) and App's mount inside the key; since #326 also the right
 dock's `--sat` and `translateX(100%)`, the two edge icons, and the open effect's
 `ready ? focus : ensure`. `App.source.test.ts` pins the rail WITHOUT a scratch
 control and the status bar WITH one, including that NO pointer type overrides

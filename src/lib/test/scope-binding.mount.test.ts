@@ -154,10 +154,10 @@ test('ScratchPanel ensures and kills its session on its scope s server', { timeo
   await until(() => !!app.document.querySelector('.scratch .xterm-wrap'));
   assert.deepEqual(onScope, ['scratchSession()']);
   assert.equal(app.document.querySelector<HTMLElement>('.scratch .xterm-wrap')!.dataset.target, 'tmm-scratch:1.1');
-  app.document.querySelector<HTMLButtonElement>('.scratch-head [aria-label="Kill scratch session"]')!.click();
+  app.document.querySelector<HTMLButtonElement>('.scratch-tools [aria-label="Kill scratch session"]')!.click();
   await until(() => !!app.document.querySelector('[role="alertdialog"]'));
   [...app.document.querySelectorAll<HTMLButtonElement>('button')]
-    .find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-head'))!.click();
+    .find((b) => b.textContent?.includes('Kill scratch session') && !b.closest('.scratch-tools'))!.click();
   await until(() => onScope.includes('scratchKill()'));
   assert.deepEqual(onScope, ['scratchSession()', 'scratchKill()']);
   assert.deepEqual(onFacade, [], 'the facade was never asked');
