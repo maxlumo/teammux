@@ -474,6 +474,13 @@ flaky wall-clock assertions in the test.
   failed twice under load (at load ~246, and at ~210-240 in the #422 gate):
   `tasks() == 2` was observed, then `task(2)` read an empty file the dsh
   stand-in had created and not yet written.
+- A test that feeds a child's stdin writes only what that child reads. Where
+  the child rightly exits before reading (the hook helper with no pane, or an
+  inbox `mktemp` cannot write into), the test lets it exit, tolerates the
+  broken pipe of a late write, and asserts the exit code alone. Reason: board
+  #428 — `the_helpers_exit_is_a_receipt_only_for_a_numbered_producer` wrote
+  unconditionally and got EPIPE in 1 of 20 runs writing at once and 20 of 20
+  after a 0.2 s delay (validator, #425 gate).
 - Rust tests never see the operator's `~/.config/tmux-mobile`. Under
   `cfg(test)` the lib's `config::dirs_next()` is ONE empty temp directory
   per test process (`/tmp/tmm-config-test-<pid>`), so every

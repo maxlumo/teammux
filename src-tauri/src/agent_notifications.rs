@@ -3512,7 +3512,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tmm-receipt-{}", uuid::Uuid::new_v4()));
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
-        let run = |seq: Option<&str>, pane: Option<&str>| {
+        // `reads`: whether the helper reads its payload on this path. With no
+        // pane, or an inbox mktemp cannot write into, it exits BEFORE reading,
+        // and rightly (board #428): a producer that writes then gets a broken
+        // pipe (1 of 20 at once, 20 of 20 after a 0.2 s delay, validator,
+        // 2026-10-19). So on those
+        // paths the helper is let exit first, the late write is made anyway,
+        // and only the exit code — the receipt — is asserted.
+        let run = |seq: Option<&str>, pane: Option<&str>, reads: bool| {
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(hub.helper_command("dsh")).env_remove("TMM_HOOK_SEQ").env_remove("TMUX_PANE");
             if let Some(seq) = seq {
@@ -3523,15 +3530,37 @@ mod tests {
             }
             let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().unwrap();
             use std::io::Write;
-            child.stdin.take().unwrap().write_all(b"{\"hook_event_name\":\"Stop\"}\n").unwrap();
-            child.wait().unwrap().code()
+            let mut stdin = child.stdin.take().unwrap();
+            let payload = b"{\"hook_event_name\":\"Stop\"}\n";
+            if reads {
+                stdin.write_all(payload).unwrap();
+                drop(stdin);
+                return child.wait().unwrap().code();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("seq={seq:?} pane={pane:?}: the helper waited for its payload on a path that exits before reading");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            match stdin.write_all(payload) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("seq={seq:?} pane={pane:?}: {e}"),
+            }
+            status.code()
         };
-        assert_eq!(run(Some("5"), Some("%7")), Some(0), "published");
-        assert_eq!(run(Some("6"), None), Some(1), "no pane: nothing published, and it says so");
-        assert_eq!(run(None, None), Some(0), "an unnumbered caller is never failed");
+        assert_eq!(run(Some("5"), Some("%7"), true), Some(0), "published");
+        assert_eq!(run(Some("6"), None, false), Some(1), "no pane: nothing published, and it says so");
+        assert_eq!(run(None, None, false), Some(0), "an unnumbered caller is never failed");
         std::fs::set_permissions(root.join("inbox"), std::fs::Permissions::from_mode(0o500)).unwrap();
-        assert_eq!(run(Some("7"), Some("%7")), Some(1), "the write failed: no receipt");
-        assert_eq!(run(None, Some("%7")), Some(0), "fail-soft for every other backend");
+        assert_eq!(run(Some("7"), Some("%7"), false), Some(1), "the write failed: no receipt");
+        assert_eq!(run(None, Some("%7"), false), Some(0), "fail-soft for every other backend");
         std::fs::set_permissions(root.join("inbox"), std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
