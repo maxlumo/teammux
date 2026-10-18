@@ -70,8 +70,14 @@ const SEP: &str = "<TMM_SEP>";
 
 /// ONE `list-sessions` names the server and every session at once.
 pub fn tmux_now() -> TmuxNow {
+    tmux_now_on(tmux::get_socket().as_deref())
+}
+
+/// `tmux_now` on a server named by the caller (the restore executor binds
+/// every tmux call to its batch's socket).
+pub fn tmux_now_on(socket: Option<&str>) -> TmuxNow {
     let format = format!("#{{pid}}{SEP}#{{start_time}}{SEP}#{{socket_path}}{SEP}#{{session_name}}");
-    match tmux::run_tmux(&["list-sessions", "-F", &format]) {
+    match tmux::run_tmux_on(socket, &["list-sessions", "-F", &format]) {
         Ok(out) => parse_listing(&out),
         Err(e) if tmux::session_confirmed_absent(&e) => TmuxNow::Absent,
         Err(e) => TmuxNow::Unknown(e),

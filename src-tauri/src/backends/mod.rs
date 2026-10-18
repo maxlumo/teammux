@@ -572,6 +572,30 @@ impl Backend {
     /// is the agent's isolated home and `agent` its window name, which only
     /// kiro reads: its v3 store is that home, and an id the home does not hold
     /// for THIS agent must not be resumed (board #379).
+    /// The strict exact-resume line for a restore after a reboot (board
+    /// #422), built by each backend's own `resume_command` construction:
+    /// `Some` only when that construction carries the exact `id`.
+    pub fn resume_exact(self, cmd: &str, id: &str, home: Option<&std::path::Path>, agent: &str) -> Option<String> {
+        match self {
+            Backend::Kiro => kiro::resume_exact(cmd, id, home, agent),
+            Backend::Claude => claude::resume_exact(cmd, id),
+            Backend::Codex => codex::resume_exact(cmd, id),
+            Backend::Grok => grok::resume_exact(cmd, id),
+            Backend::Omp => omp::resume_exact(cmd, id),
+            Backend::Kimi => kimi::resume_exact(cmd, id),
+            Backend::Dsh => dsh::resume_exact(cmd, id),
+        }
+    }
+
+    /// Whether `id` is an exact conversation id for this backend's strict
+    /// resume — the shared rule, plus the backend's own reserved selectors.
+    pub fn exact_id_ok(self, id: &str) -> bool {
+        match self {
+            Backend::Dsh => dsh::exact_id_ok(id),
+            _ => shared::exact_id_ok(id),
+        }
+    }
+
     pub fn resume_command(self, cmd: &str, id: Option<&str>, home: Option<&std::path::Path>, agent: &str) -> String {
         match self {
             Backend::Kiro => kiro::resume_command(cmd, id, home, agent),
@@ -705,6 +729,75 @@ pub fn newer_than_measured(running: &[u64], m: &Measured) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Board #422 review P1-C: the strict exact resume is built by each
+    /// backend's own construction and fails closed; the manual
+    /// `resume_command` keeps every one of its old branches.
+    #[test]
+    fn resume_exact_carries_the_exact_id_or_refuses() {
+        use super::Backend;
+        let canonical = [
+            (Backend::Claude, "claude --x", "claude --x --resume conv"),
+            (Backend::Grok, "grok", "grok --resume conv"),
+            (Backend::Omp, "omp", "omp --resume conv"),
+            (Backend::Kimi, "kimi", "kimi -S conv"),
+            (Backend::Dsh, "dsh-headless", "TMM_DSH_SESSION=conv dsh-headless"),
+            (Backend::Codex, "command codex --cfg x", "command codex resume conv --cfg x"),
+        ];
+        for (b, cmd, want) in canonical {
+            assert_eq!(b.resume_exact(cmd, "conv", None, "a").as_deref(), Some(want), "{b:?}");
+            assert_eq!(b.resume_exact(cmd, "  ", None, "a"), None, "{b:?}: an empty id");
+            assert_eq!(b.resume_command(cmd, Some("conv"), None, "a"), want, "{b:?}: the manual form is the same line");
+        }
+        // Codex: a non-canonical recipe is refused, never returned verbatim
+        // (which would start a NEW conversation); the manual form keeps its
+        // old verbatim fallback.
+        for cmd in ["codex --cfg x", "/opt/wrap-codex.sh", "env A=1 command codex x"] {
+            assert_eq!(Backend::Codex.resume_exact(cmd, "conv", None, "a"), None, "{cmd}");
+            assert_eq!(Backend::Codex.resume_command(cmd, Some("conv"), None, "a"), cmd);
+        }
+        assert!(Backend::parse("nope").is_none(), "an unknown backend has no resume at all");
+        // Review P1-E: a CLI's recent selector is not an exact id.
+        assert_eq!(Backend::Codex.resume_exact("command codex x", "--last", None, "a"), None);
+        assert_eq!(Backend::Dsh.resume_exact("dsh-headless", "recent", None, "a"), None);
+        assert_eq!(Backend::Claude.resume_exact("claude", "--continue", None, "a"), None);
+        assert_eq!(Backend::Claude.resume_exact("claude", "a\nb", None, "a"), None, "a control character");
+        // An id with spaces or shell metacharacters is ONE quoted argument.
+        assert_eq!(Backend::Claude.resume_exact("claude", "a b;rm x", None, "a").as_deref(), Some("claude --resume 'a b;rm x'"));
+        // The manual forms keep their old selectors.
+        assert_eq!(Backend::Codex.resume_command("command codex x", None, None, "a"), "command codex resume --last x");
+        assert_eq!(Backend::Dsh.resume_command("dsh-headless", None, None, "a"), "TMM_DSH_SESSION=recent dsh-headless");
+
+        // Kiro: only what its OWN store holds for this agent.
+        let home = std::env::temp_dir().join(format!("tmm-kiro-exact-{}", uuid::Uuid::new_v4().simple()));
+        let v2 = home.join("sessions/cli");
+        std::fs::create_dir_all(&v2).unwrap();
+        let id = "9147464d-a6fc-4391-8597-9263de1ce85f";
+        std::fs::write(v2.join(format!("{id}.json")), serde_json::json!({ "session_id": id, "session_state": { "agent_name": "dev" } }).to_string()).unwrap();
+        std::fs::write(v2.join("other.json"), serde_json::json!({ "session_id": "mismatch", "session_state": { "agent_name": "dev" } }).to_string()).unwrap();
+        let v2cmd = "command kiro-cli chat --agent dev";
+        let k = |cmd: &str, id: &str, agent: &str| Backend::Kiro.resume_exact(cmd, id, Some(&home), agent);
+        assert_eq!(k(v2cmd, id, "dev").as_deref(), Some(format!("{v2cmd} --resume-id {id}").as_str()));
+        assert_eq!(k(v2cmd, id, "ops"), None, "another agent's conversation");
+        assert_eq!(k(v2cmd, "missing-id", "dev"), None, "not in the store");
+        assert_eq!(k(v2cmd, "other", "dev"), None, "a record naming another id");
+        assert_eq!(k(v2cmd, "../x", "dev"), None, "never a path");
+        assert_eq!(Backend::Kiro.resume_exact(v2cmd, id, None, "dev"), None, "no home, no proof");
+        // The manual v2 form is unchanged: it does not look.
+        assert_eq!(Backend::Kiro.resume_command(v2cmd, Some("missing-id"), Some(&home), "dev"), format!("{v2cmd} --resume-id missing-id"));
+        // v3: the #379 check, unchanged.
+        let v3cmd = "command kiro-cli chat --agent dev --agent-engine v3";
+        let sid = "sess_abc";
+        let bucket = home.join("sessions").join("bucket1").join(sid);
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("session.json"), serde_json::json!({ "agentMode": "dev" }).to_string()).unwrap();
+        assert_eq!(k(v3cmd, sid, "dev").as_deref(), Some(format!("{v3cmd} --resume-id {sid}").as_str()));
+        assert_eq!(k(v3cmd, sid, "vibe"), None, "another agentMode");
+        assert_eq!(k(v3cmd, "sess_missing", "dev"), None);
+        assert_eq!(k(v3cmd, id, "dev"), None, "a v2 id under the v3 engine");
+        assert_eq!(k(v2cmd, sid, "dev"), None, "a v3 id under the v2 engine");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Board #362: the `--version` answers as each CLI prints them on this
     /// host (2026-10-15), and the comparison the drift guard makes.
     #[test]

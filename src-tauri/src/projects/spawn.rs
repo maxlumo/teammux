@@ -1408,11 +1408,31 @@ fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Opti
 /// Replay the persisted identity (env + backend command), preferring an exact
 /// conversation id and otherwise the isolated home's newest cwd conversation.
 pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&str>) -> Option<String> {
+    let (cmd, backend, env, home) = recipe_parts(project_path, window_name)?;
+    let cmd = resume_command(&cmd, &backend, session_id, Some(&home), window_name);
+    Some(with_env(&env, &cmd))
+}
+
+/// The strict relaunch for a restore after a reboot (board #422): the
+/// persisted identity with the EXACT conversation, or `Err` — a recipe that
+/// cannot be read, an unknown backend, or a resume the backend cannot prove
+/// is exact is refused, never relaunched recent or blank.
+pub fn relaunch_line_exact(project_path: &str, window_name: &str, session_id: &str) -> Result<String, String> {
+    let (cmd, backend, env, home) = recipe_parts(project_path, window_name).ok_or_else(|| format!("{window_name}: no readable launch recipe"))?;
+    let b = crate::backends::Backend::parse(&backend).ok_or_else(|| format!("{window_name}: unknown backend '{backend}'"))?;
+    let cmd = b
+        .resume_exact(&cmd, session_id, Some(&home), window_name)
+        .ok_or_else(|| format!("{window_name}: {backend} cannot resume exactly {session_id}"))?;
+    Ok(with_env(&env, &cmd))
+}
+
+/// A recipe's command, backend, `K=V` env prefix and home — the ONE reader
+/// both relaunch forms use.
+fn recipe_parts(project_path: &str, window_name: &str) -> Option<(String, String, String, PathBuf)> {
     let home = agent_home(project_path, window_name);
     let recipe: Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).ok()?).ok()?;
-    let cmd = recipe.get("cmd")?.as_str()?;
-    let backend = recipe.get("backend").and_then(|b| b.as_str()).unwrap_or("");
-    let cmd = resume_command(cmd, backend, session_id, Some(&home), window_name);
+    let cmd = recipe.get("cmd")?.as_str()?.to_string();
+    let backend = recipe.get("backend").and_then(|b| b.as_str()).unwrap_or("").to_string();
     let env = recipe.get("env").and_then(|e| e.as_array()).map(|arr| {
         arr.iter()
             .filter_map(|kv| Some((kv.get(0)?.as_str()?, kv.get(1)?.as_str()?)))
@@ -1420,13 +1440,17 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
             .collect::<Vec<_>>()
             .join(" ")
     }).unwrap_or_default();
+    Some((cmd, backend, env, home))
+}
+
+fn with_env(env: &str, cmd: &str) -> String {
     let mut line = String::new();
     if !env.is_empty() {
-        line.push_str(&env);
+        line.push_str(env);
         line.push(' ');
     }
-    line.push_str(&cmd);
-    Some(line)
+    line.push_str(cmd);
+    line
 }
 
 /// The first prompt, if there is one AT ALL. A spawned agent used to receive a

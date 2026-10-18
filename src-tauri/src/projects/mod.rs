@@ -31,6 +31,7 @@ pub mod reconcile;
 pub mod recovery;
 pub mod registry;
 pub mod restore;
+pub mod restore_run;
 pub mod rooms;
 pub mod scratch;
 pub(crate) mod skills;

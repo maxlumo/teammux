@@ -1080,9 +1080,44 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
         };
     }
     match id {
-        Some(id) if !v3_id => format!("{cmd} --resume-id {}", crate::shell::quote(id)),
+        Some(id) if !v3_id => exact_line(cmd, id),
         _ => format!("{cmd} --resume"),
     }
+}
+
+/// The exact-resume line, shared by `resume_command` and `resume_exact`.
+fn exact_line(cmd: &str, id: &str) -> String {
+    format!("{cmd} --resume-id {}", crate::shell::quote(id))
+}
+
+/// The strict form for a restore after a reboot (board #422): `Some` only
+/// when kiro's OWN store in this agent's isolated home holds that
+/// conversation for this agent — v3: `v3_session_resumable`; v2: its
+/// `sessions/cli/<id>.json` naming the id and the agent. Anything else is
+/// `None`, never `--resume` (recent) or a blank start. `resume_command` keeps
+/// its looser manual behaviour unchanged.
+pub(crate) fn resume_exact(cmd: &str, id: &str, home: Option<&std::path::Path>, agent: &str) -> Option<String> {
+    let home = home?;
+    if cmd.trim().is_empty() || !super::shared::exact_id_ok(id) {
+        return None;
+    }
+    let v3_id = id.starts_with(V3_SESSION_PREFIX);
+    let held = if launch_engine_is_v3(cmd) { v3_id && v3_session_resumable(home, agent, id) } else { !v3_id && v2_session_held(home, agent, id) };
+    held.then(|| exact_line(cmd, id))
+}
+
+/// Whether the v2 engine's store in `home` holds conversation `id` for
+/// `agent`: `<home>/sessions/cli/<id>.json` with `session_id == id` and
+/// `session_state.agent_name == agent` (layout read off a live v2 managed
+/// home, kiro-cli 2.31.0, 2026-10-18). Anything short of that is `false`.
+pub(crate) fn v2_session_held(home: &std::path::Path, agent: &str, id: &str) -> bool {
+    if agent.is_empty() || !valid_session_id(id) {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(home.join("sessions").join("cli").join(format!("{id}.json"))) else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else { return false };
+    v.get("session_id").and_then(Value::as_str) == Some(id)
+        && v.get("session_state").and_then(|s| s.get("agent_name")).and_then(Value::as_str) == Some(agent)
 }
 
 /// Whether `<home>/sessions/<cwd-hash>/<id>/session.json` exists and says the

@@ -367,9 +367,20 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 
 /// kimi resume dialect: `-S <id>` exact, `-c` the cwd's previous session
 /// (scoped to the isolated home, so it cannot cross into another agent's).
+/// The exact-resume line, shared by `resume_command` and `resume_exact` (board #422).
+fn exact_line(cmd: &str, id: &str) -> String {
+    format!("{cmd} -S {}", crate::shell::quote(id))
+}
+
+/// The strict form for a restore after a reboot (board #422): `Some` only
+/// when the exact id is on the line.
+pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
+    (!cmd.trim().is_empty() && super::shared::exact_id_ok(id)).then(|| exact_line(cmd, id))
+}
+
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     match id {
-        Some(id) => format!("{cmd} -S {}", crate::shell::quote(id)),
+        Some(id) => exact_line(cmd, id),
         None => format!("{cmd} -c"),
     }
 }

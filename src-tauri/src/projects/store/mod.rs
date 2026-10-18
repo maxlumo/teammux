@@ -13,7 +13,7 @@
 //! declarations and the row-type re-exports. Each table family is an
 //! `impl Store` block in its own file — `schema` (the ladder and the on-open
 //! repairs), `projects`, `registry`, `board`, `activity`, `rooms`, `restore`
-//! (the reboot evidence, board #422) — with its
+//! (the reboot evidence, board #422), `restore_batch` (its work in progress) — with its
 //! tests beside it; a method that lands here instead of in its family is what
 //! the guard test at the bottom rejects.
 
@@ -26,12 +26,14 @@ mod board;
 mod projects;
 mod registry;
 mod restore;
+mod restore_batch;
 mod rooms;
 mod schema;
 mod wakes;
 pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts};
 pub use projects::{Project, Slot, SlotKind};
 pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntents, TmuxInstance};
+pub use restore_batch::{Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, ProjectState, WindowState};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
 pub use rooms::HubMsg;
 pub use wakes::Wake;
@@ -176,6 +178,11 @@ impl Store {
     // ---- the project task board (issues) ----------------------------------
 
 }
+
+/// The capture tick's batch-read seam (board #422), for the tests outside
+/// this module that place another connection's write at that read.
+#[cfg(test)]
+pub(crate) use restore_batch::SCAN_HOOK;
 
 #[cfg(test)]
 pub(super) mod test_support {

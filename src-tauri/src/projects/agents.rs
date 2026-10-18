@@ -245,6 +245,19 @@ pub fn launch_for(backend: &str) -> Option<&'static str> {
     known().iter().find(|a| a.backend == backend).map(|a| a.launch)
 }
 
+/// The generic exact-resume line (`resume_id` with `{id}` substituted), or
+/// `None` — never the recent or blank fallbacks of `launch_line`. The strict
+/// door for an ADOPTED agent window in a restore after a reboot (board #422).
+pub fn launch_line_exact(backend: &str, session_id: &str) -> Option<String> {
+    // The backend's own id rule (no option-shaped recent selector), and the
+    // id goes in as ONE shell-quoted data argument (review P1-E).
+    if !crate::backends::Backend::parse(backend)?.exact_id_ok(session_id) {
+        return None;
+    }
+    let template = known().iter().find(|a| a.backend == backend)?.resume_id?;
+    Some(template.replace("{id}", &crate::shell::quote(session_id)))
+}
+
 /// Can `backend` go back to ONE exact conversation from the generic line
 /// (`resume_id`)? A restore after a reboot relaunches an adopted agent only
 /// then — never into "the newest one here" or a blank prompt (board #422).

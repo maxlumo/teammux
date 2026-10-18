@@ -1446,9 +1446,26 @@ fn state_is_live(word: &str) -> Option<bool> {
 
 /// dsh resume dialect, read by the managed shell at start: an exact id, or
 /// `recent` for the session the home last recorded.
+/// The exact-resume line, shared by `resume_command` and `resume_exact` (board #422).
+fn exact_line(cmd: &str, id: &str) -> String {
+    format!("TMM_DSH_SESSION={} {cmd}", crate::shell::quote(id))
+}
+
+/// The strict form for a restore after a reboot (board #422): `Some` only
+/// when the exact session is on the line — never `recent`.
+pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
+    (!cmd.trim().is_empty() && exact_id_ok(id)).then(|| exact_line(cmd, id))
+}
+
+/// dsh's strict id rule: the shared one, and never `recent` — dsh's own
+/// selector for the newest session (`resume_command`'s fallback).
+pub(crate) fn exact_id_ok(id: &str) -> bool {
+    super::shared::exact_id_ok(id) && id.trim() != "recent"
+}
+
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     match id {
-        Some(id) => format!("TMM_DSH_SESSION={} {cmd}", crate::shell::quote(id)),
+        Some(id) => exact_line(cmd, id),
         None => format!("TMM_DSH_SESSION=recent {cmd}"),
     }
 }

@@ -501,10 +501,10 @@ restore needs was already durable (the declaration, each agent's recipe and
 conversation id). What was missing is the decision: which projects were up
 when the host went down, and whether the host really went down.
 
-This round records the evidence and makes the decision as pure functions
-(`projects/restore.rs`, `store/restore.rs`). **Nothing brings a session back
-yet**: the executor, its single owner across gateways, and the input barrier
-for restored windows are later rounds, and `autostart` is still not acted on.
+Round 1 records the evidence and makes the decision as pure functions
+(`projects/restore.rs`, `store/restore.rs`). Round 2 adds the executor
+(below). **Nothing calls it at gateway start yet**: that waits for round 3's
+input barrier for restored windows, and `autostart` is still not acted on.
 
 - **The checkpoint is a complete observation, committed with its folds.**
   Each capture tick lists its tmux socket's sessions ONCE (`list-sessions -F
@@ -617,6 +617,146 @@ for restored windows are later rounds, and `autostart` is still not acted on.
   only. Every skip carries its reason (`SkipReason`), so "why did X not come
   back" has an answer. Restore never reads `last_seen_at`; it stays the MRU
   sort key.
+
+## After a host reboot: the executor (board #422, round 2)
+
+`projects/restore_run.rs` brings a plan back, and `store/restore_batch.rs`
+holds its progress. Tests are its only caller in this round; round 3 wires
+`restore_run::run` into gateway start, together with the input barrier.
+
+- **The gate holds for both paths.** Restore off, or a boot that cannot be
+  read, does nothing before any write. An open batch is then neither
+  continued nor closed; it is closed FAILED only when both boots are known
+  and differ (review P1-D).
+- **One owner.** `flock(LOCK_EX|LOCK_NB)` on `<state dir>/restore.lock`; the
+  OS releases it when the owner dies. A run that cannot take it answers
+  `Busy` and does nothing.
+- **The batch.** `meta restore_batch:<socket>` holds the plan frozen whole:
+  the full batch uuid, the boot, the socket, the source checkpoint, the
+  server the first creation printed, and every project and window with its
+  state. Every step writes the next state BEFORE the tmux call (`op` is the
+  step issued). A successor continues from the batch alone: it never reads a
+  newer checkpoint and never re-judges the reboot trigger. The closed batch
+  moves to `restore_last:<socket>`. A boot that already has one is not
+  restored again. A batch from another boot (a second reboot mid-restore) is
+  closed FAILED and nothing is re-planned automatically.
+- **Ownership is a fact on the tmux object.**
+  - A session is made by ONE `new-session -e TMM_RESTORE_BATCH=<uuid> -n
+    tmm-r-<uuid>-holder`, so it carries the batch from birth. A taken name
+    fails, so creation is the claim. Only "duplicate session" means
+    "exists".
+  - A window is born as `tmm-r-<uuid>-<ord>` and then tagged
+    `@tmm_rw=<uuid>:<ord>`; the session is tagged `@tmm_rs=<uuid>`. These
+    are separate options, so a window format can never mistake the
+    session's tag for its own.
+  - A same-name session made by a person has no env, or another batch's:
+    it is skipped untouched.
+  - Placeholder and holder names are no agent's names, so no delivery can
+    reach such a window.
+  - Capture leaves an OPEN batch's projects unfolded, and publishes no
+    checkpoint while one is open. It reads the open and last batches in ONE
+    SQL statement (one WAL snapshot), decodes both from those bytes, and
+    keeps the same bytes as the revision it compares AGAIN inside its
+    commit's IMMEDIATE transaction; a separate read for the revision could
+    pair an old scan with a new revision (review round 2, P1-A residual). If a
+    restore opened, moved on or closed meanwhile (here or in another
+    gateway on the same state.db), the tick commits nothing; the batch
+    writer takes the same write lock. After the close, it excludes only the
+    windows a batch OWNS and never restored: env and `@tmm_rs` carry the
+    batch's full uuid, `@tmm_rw` names that batch and ord, the native id is
+    the recorded one, and it is on the batch's server. That covers a
+    `launch_unknown` start, a kill left in place, and the holder. Each is
+    excluded by the `(window index, name)` of the listing that proved it
+    ours, so a person's window of the same name next to it is still folded.
+    That pair is not an identity across a renumber or a same-name
+    replacement between the two listings; carrying the native id through
+    the observation is open (review P2).
+    A person's window named `tmm-r-…`, even in the exact placeholder
+    format, is folded like any other: a name never proves ownership
+    (review P1-A).
+    An unreadable batch holds only the projects whose session carries a
+    restore env; every other project folds as usual (validator P2).
+- **Every write is checked in-server.** Each write to an owned object is ONE
+  `if-shell -F -t <native id>`. Its condition holds the server's own
+  `#{pid}`/`#{start_time}` and the full tags; `#{TMM_RESTORE_BATCH}` reads
+  the session env, measured on tmux 3.6a. The true branch ends `; display -p
+  OK` and the false branch is `display -p REFUSED`. Results are Applied,
+  Refused or Unknown, and only REFUSED proves nothing ran. A server replaced
+  between our read and the write refuses: its pid and start time differ, and
+  its reused `@0`/`$0` lacks our tags. Every call names the batch socket
+  with `-S`.
+  - Every window write also binds the window's FROZEN identity: its native
+    `@id` inside its project's native `$N`. The ord alone repeats across
+    projects.
+  - The launch is typed into the pane `%id` recorded at creation, and only
+    while that window has exactly one pane (`#{window_panes}==1`). A window
+    moved to another session, or split, refuses, and nothing is typed
+    (review P1-B).
+  - Every parsed tmux answer uses the `<TMM_SEP>` delimiter, never spaces:
+    socket paths may contain them.
+  - A window is created only while the server sees no window of the slot's
+    name in the session (`#{W:…}` in the same condition). A person's window
+    that appears between our read and the create makes the create refuse,
+    and the slot is skipped as "window exists". A slot name the format
+    grammar cannot hold literally (`#{},`) is not created.
+  - **The launch is typed only into a shell whose prompt was seen** (the
+    observable edge of `wait_for_shell_on`). A shell still starting on a
+    busy host drops typed-ahead input, so a timeout never types (validator
+    load finding, 2026-10-19). Instead the window stays Created with
+    nothing typed ("shell not ready; not started"), and the next pass looks
+    again. Manual `up` keeps its type-anyway behaviour.
+- **Unknown is re-observed, never redone blind.**
+  - A create (`new-session`, `new-window`) is never issued twice: an unseen
+    result is looked up by its full uuid name or env, and adopted or failed.
+  - A kill is never issued twice: present means left in place, reported.
+  - A tag or a rename is redone only after re-observation shows the object
+    is still ours.
+  - `launch_issued` is written BEFORE the launch is typed. From then on the
+    automatic path never retypes, kills or renames that window, and an
+    unseen outcome is `launch_unknown`. Tenet 4: our death never ends a
+    running agent.
+- **The strict launch door.** `reconcile::slot_command_exact` launches an
+  agent only with its exact conversation:
+  - a managed agent needs `managed_state` Managed and its recipe, through
+    `spawn::relaunch_line_exact` → `Backend::resume_exact`, which each
+    backend builds with the same code as its `resume_command`. Codex returns
+    a line only for the canonical `command codex …` shape; kiro only when
+    its own store holds that conversation for that agent (v3:
+    `v3_session_resumable`; v2: `<home>/sessions/cli/<id>.json` naming the
+    id and the agent);
+  - an adopted agent needs its CLI's `resume_id`.
+
+Otherwise it is `Err`: the window we made is killed (nothing was typed)
+and failed. Manual `up` keeps `resume_command`'s looser behaviour.
+
+- **What counts as an exact id.** An id is one data argument: shell-quoted
+  through the managed builder's own quoter, also for the adopted
+  `resume_id` templates. It is non-empty, not an option, and has no control
+  characters (`backends::shared::exact_id_ok`). Each backend also refuses
+  its own recent selector: codex `--last`, dsh `recent` (review P1-E).
+- **The holder is never killed to zero windows.** The kill's own in-server
+  condition requires `#{session_windows} > 1`. When it refuses because the
+  holder is the session's last window, the holder is renamed to the shell's
+  name (one plain shell window) and the project is reported NOT restored.
+  - Both steps are written ahead (`HolderKill` / `HolderRename`).
+  - The holder is judged by every native fact: its id, its birth name, and
+    the session's env and tag. One a person took over is left as it is,
+    and the project closes.
+  - A successor consumes an issued kill by re-observation: gone is done;
+    present is left in place, and the report says so. The kill is never
+    issued twice, and an unconfirmed step is never reported as cleaned up
+    (review P1-C).
+  - After an unseen session-tag install, a session that is present, ours by
+    env and untagged is NOT foreign: the install is redone under the same
+    bootstrap guard.
+- **The reread.** Before each project and at each launch, the row,
+  `archived`, `project_down`, the window's `slot_stopped` and the path are
+  read again. A later act skips that project or window; the old plan is not
+  permission to override it. The reread compares the FROZEN session and
+  path: a project renamed or moved since the plan is refused, never
+  launched half from its old place under its new identity. The ONE row it
+  validated is what the recipe, the tmm identity and the staged script are
+  built from; no later read of the row is used.
 
 ## Storage
 
@@ -773,6 +913,58 @@ the mark), `sessions_page_kills_record_the_persons_intent`,
 `t6_only_a_reboot_that_took_the_server_restores` and
 `adopt_then_down_then_up_restores_the_workspace` (the real tick publishes;
 down marks, up clears).
+
+### The restore executor acts only on objects it can prove it made (2026-10-18, #422 round 2)
+
+Ownership is on the tmux object, not in our memory. It is checked by the
+server that performs each write, on that write's own native target. An
+unseen result is re-observed and never redone blind: no second create, no
+second kill, no retype after `launch_issued`. The reasons are the round-2
+design reviews:
+- a `session_created` bool written after the fact lost our own half-built
+  session to a crash, and adopted the person's same-name session;
+- a check in Rust followed by a write let a replaced server's reused `@0`
+  receive our kill;
+- killing an "uncertain" window could end a CLI that had already started.
+
+Pinned on a real private tmux server by the `restore_run` tests:
+`a_restore_brings_back_the_live_windows_once_with_their_exact_conversation`,
+`t7_a_session_the_person_made_is_skipped_untouched`,
+`t7_a_session_of_another_batch_is_not_ours`,
+`t10_a_second_owner_is_busy_and_does_nothing`,
+`t9_t17_an_owner_that_dies_is_continued_from_the_batch_alone` (a child
+process aborts mid-batch), `b1_…` through `b5a_…`,
+`b3b_a_server_replaced_before_a_write_refuses_it_in_server` (create, tag,
+launch, rename, kill), `r1_…`, `r2_text_without_enter_is_launch_unknown_and_the_cli_never_started`,
+`r3_bootstrap_guards_refuse_a_second_install_and_a_foreign_object`,
+`the_guards_carry_the_batch_instance`,
+`a_claim_issued_but_unseen_with_no_session_is_failed_not_retried`,
+`t19_b6_the_door_and_the_reread_refuse_what_changed_after_the_plan`,
+`the_strict_door_never_falls_back`,
+`t11_capture_leaves_a_restoring_project_and_every_placeholder_alone` and
+`a_second_reboot_mid_batch_closes_it_failed_and_plans_nothing`; plus
+`resume_exact_carries_the_exact_id_or_refuses` (backends). Review round 2
+added `capture_excludes_only_windows_a_batch_owns_never_by_name`,
+`an_unreadable_batch_holds_only_restore_sessions`,
+`a_project_renamed_or_moved_after_the_plan_is_refused`,
+`a_window_moved_or_split_before_the_launch_gets_nothing_typed`,
+`the_holder_kill_is_written_ahead_never_repeated_and_never_empties_a_session`,
+`a_holder_that_became_the_last_window_is_renamed_not_killed`,
+`an_open_batch_is_left_untouched_when_restore_is_off_or_the_boot_is_unknown`
+and `a_lost_session_tag_install_is_completed_not_called_foreign`; then
+`a_shell_that_prompts_late_is_never_typed_into_blind`,
+`a_tick_that_scanned_under_another_batch_state_commits_nothing` (with a
+second connection writing as the tick reads the batches),
+`a_batch_opened_by_another_connection_after_a_scan_voids_its_commit`,
+`a_scan_decodes_each_batch_from_the_bytes_it_compares`,
+`a_launch_carries_the_identity_it_validated`,
+`a_same_name_window_appearing_before_the_create_is_the_persons`,
+`a_holder_a_person_took_over_is_left_and_the_project_closes`, and pins for the
+validator's surviving controls (`only_the_exact_markers_classify_and_an_error_is_unknown`,
+`the_production_guards_refuse_what_they_claim_to`, `o5_…`, `o7_u5_…`, `u8_…`,
+`l6_…` (a Stop and, separately, a down written after the step's reread
+are both refused AT the door), `u7_a_refused_window_tag_is_not_redone`,
+`l10_…`, `c4_…`).
 
 ### A fresh pane is typed into only after its shell shows a prompt (2026-10-09, #325)
 

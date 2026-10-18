@@ -628,13 +628,25 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 /// cannot cross into another project/session. An unexpected recipe shape
 /// relaunches without resume rather than guessing where the subcommand goes.
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
-    match cmd.strip_prefix("command codex ") {
-        Some(rest) => {
-            let which = id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string());
-            format!("command codex resume {which} {rest}")
-        }
-        None => cmd.to_string(),
+    let which = id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string());
+    with_resume(cmd, &which).unwrap_or_else(|| cmd.to_string())
+}
+
+/// `resume <which>` inserted into the canonical recipe shape, or `None` when
+/// the recipe is not that shape — the ONE construction both forms share.
+fn with_resume(cmd: &str, which: &str) -> Option<String> {
+    cmd.strip_prefix("command codex ").map(|rest| format!("command codex resume {which} {rest}"))
+}
+
+/// The strict form for a restore after a reboot (board #422): `Some` only for
+/// the canonical `command codex …` recipe with a non-empty id. Any other
+/// shape is `None` — never the verbatim command, which would start a NEW
+/// conversation (review P1-C).
+pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
+    if !super::shared::exact_id_ok(id) {
+        return None;
     }
+    with_resume(cmd, &crate::shell::quote(id))
 }
 
 /// This backend's detection/relaunch row (board #129). `codex resume <id>`

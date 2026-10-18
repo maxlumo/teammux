@@ -342,9 +342,22 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 
 /// omp resume dialect: `--resume <id>` (id prefix), `--continue` follows the
 /// cwd-scoped breadcrumb inside the isolated PI_CODING_AGENT_DIR.
+/// The exact-resume line, the ONE construction `resume_command` and
+/// `resume_exact` share (board #422).
+fn exact_line(cmd: &str, id: &str) -> String {
+    format!("{cmd} --resume {}", crate::shell::quote(id))
+}
+
+/// The strict form for a restore after a reboot (board #422): `Some` only
+/// when this builder put the exact id on the line; an empty id or command
+/// is `None`, never a recent or blank start.
+pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
+    (!cmd.trim().is_empty() && super::shared::exact_id_ok(id)).then(|| exact_line(cmd, id))
+}
+
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     match id {
-        Some(id) => format!("{cmd} --resume {}", crate::shell::quote(id)),
+        Some(id) => exact_line(cmd, id),
         None => format!("{cmd} --continue"),
     }
 }

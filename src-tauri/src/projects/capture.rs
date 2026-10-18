@@ -253,7 +253,13 @@ pub const SESSION_SETTLE_SECS: u64 = 120;
 pub fn capture_once() -> Result<Vec<String>, String> {
     let ts = now();
     let sessions = agent_sessions();
-    let projects = with_store(|store| store.list_projects(false))?;
+    let socket = restore::socket_key();
+    // The restore batches of this socket (board #422), read before tmux is:
+    // an OPEN batch holds its projects' sessions, a closed one may have left
+    // windows it owns and never restored. Both come from ONE read with the
+    // revision the commit re-checks, so they are of one snapshot.
+    let (projects, scan) = with_store(|store| Ok((store.list_projects(false)?, store.batch_scan(&socket)?)))?;
+    let store::BatchScan { open: open_batch, last: last_batch, revision } = scan;
 
     // Phase 1 — no lock: which declared sessions are live, and what tmux shows.
     // ONE listing answers "which sessions are live" for every project, and it
@@ -265,14 +271,46 @@ pub fn capture_once() -> Result<Vec<String>, String> {
     let mut seen: Vec<String> = Vec::new();
     // (id, session, path, observed windows, managed agent windows)
     let mut observed: Vec<(String, String, String, Vec<Observed>, std::collections::HashSet<String>)> = Vec::new();
-    let mut incomplete: Option<String> = None;
+    let mut incomplete: Option<String> = match &open_batch {
+        Ok(None) => None,
+        Ok(Some(_)) => Some("a restore is in progress".to_string()),
+        Err(e) => Some(format!("the restore batch is unreadable: {e}")),
+    };
+    // Projects this tick must not fold: the open batch's, or — when a batch
+    // cannot be read — any whose session carries a restore's env.
+    let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
     for project in projects {
         if !live.contains(&project.session) {
             continue;
         }
         seen.push(project.id.clone());
+        let in_open = match &open_batch {
+            Ok(Some(b)) => b.projects.iter().any(|p| p.id == project.id),
+            Ok(None) => false,
+            Err(_) => restore_env(&project.session),
+        };
+        let unreadable_last = last_batch.is_err() && restore_env(&project.session);
+        if in_open || unreadable_last {
+            held.insert(project.id.clone());
+            continue;
+        }
+        // Windows a closed batch owns and never restored (a launch_unknown
+        // start, a kill left in place, its holder) — by ownership, never by
+        // name (review P1-A).
+        let unrestored = match &last_batch {
+            Ok(Some(b)) => match super::restore_run::unrestored_windows(b, &project.id) {
+                Ok(set) => set,
+                Err(e) => {
+                    held.insert(project.id.clone());
+                    incomplete = incomplete.or(Some(format!("{}: {e}", project.session)));
+                    continue;
+                }
+            },
+            _ => Default::default(),
+        };
         match observe(&project.session, &project.path, sessions) {
-            Ok(o) => {
+            Ok(mut o) => {
+                o.retain(|w| !unrestored.contains(&(w.window, w.window_name.clone())));
                 // Provenance is a file read: done here, outside the lock.
                 let managed = o
                     .iter()
@@ -290,7 +328,6 @@ pub fn capture_once() -> Result<Vec<String>, String> {
     tick_hook(TickPhase::Observed);
     let after = restore::tmux_now();
     let boot_id = restore::boot_id();
-    let socket = restore::socket_key();
 
     // Phase 2 — one short lock: fold the observations into the declarations,
     // and publish the checkpoint IN THE SAME TRANSACTION as the folds it
@@ -300,6 +337,10 @@ pub fn capture_once() -> Result<Vec<String>, String> {
         for id in &seen {
             store.mark_seen(id, ts)?;
         }
+        // Held projects were never observed (above): an OPEN batch owns its
+        // projects' sessions until it closes — a half-built session must not
+        // prune the slots it is about to recreate — and no checkpoint is
+        // published while a restore is in progress or a batch is unreadable.
         let mut folds = Vec::new();
         let mut checkpoint_projects = Vec::new();
         for (id, session, path, observed, managed) in observed {
@@ -337,10 +378,25 @@ pub fn capture_once() -> Result<Vec<String>, String> {
         }
         // An incomplete tick folds and advances no evidence: the previous
         // checkpoint stays.
+        let incomplete = incomplete.or_else(|| (!held.is_empty()).then(|| "a restore holds a project".to_string()));
         let checkpoint = restore::checkpoint_from(&before, &after, incomplete, checkpoint_projects, boot_id, ts).ok();
-        store.commit_tick(&folds, checkpoint.map(|cp| (socket.as_str(), cp)))?;
-        Ok(folds.into_iter().map(|(id, _)| id).collect())
+        // Committed only if the batches are still what this tick scanned
+        // under; a restore that began (or moved on) meanwhile voids the tick.
+        match store.commit_scanned(&folds, checkpoint.map(|cp| (socket.as_str(), cp)), Some((socket.as_str(), &revision)))? {
+            Some(_) => Ok(folds.into_iter().map(|(id, _)| id).collect()),
+            None => Ok(Vec::new()),
+        }
     })
+}
+
+/// Does `session` carry a restore batch in its environment? Asked only when
+/// a batch cannot be read (validator P2): such a session is held unfolded,
+/// every other project folds as usual. An unreadable answer holds it too.
+fn restore_env(session: &str) -> bool {
+    match tmux::run_tmux(&["display", "-p", "-t", &format!("={session}:"), "#{TMM_RESTORE_BATCH}"]) {
+        Ok(v) => !v.trim().is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// Where a test may act inside one capture tick (board #422): after the first

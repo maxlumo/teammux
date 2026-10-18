@@ -99,10 +99,27 @@ impl Store {
     /// incomplete observation) folds and advances no evidence. Returns the
     /// published gen.
     pub fn commit_tick(&mut self, folds: &[(String, Vec<Slot>)], checkpoint: Option<(&str, Checkpoint)>) -> Result<Option<u64>, String> {
+        Ok(self.commit_scanned(folds, checkpoint, None)?.flatten())
+    }
+
+    /// `commit_tick` for a tick that SCANNED with a snapshot of the socket's
+    /// restore batches (`batch_scan`): the batches are read again INSIDE
+    /// the same IMMEDIATE transaction, and when either changed since the scan
+    /// (a restore opened, advanced or closed meanwhile — in this process or
+    /// another gateway on the same state.db) the tick commits NOTHING and
+    /// answers `Ok(None)` (review round 2, P1-A residual). The batch writer
+    /// takes the same write lock, so no restore can begin between this check
+    /// and the commit.
+    pub fn commit_scanned(&mut self, folds: &[(String, Vec<Slot>)], checkpoint: Option<(&str, Checkpoint)>, scan: Option<(&str, &super::BatchRevision)>) -> Result<Option<Option<u64>>, String> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("tick transaction: {e}"))?;
+        if let Some((socket, seen)) = scan {
+            if super::restore_batch::revision_in(&tx, socket)? != *seen {
+                return Ok(None);
+            }
+        }
         let gen = match checkpoint {
             Some((socket, cp)) => Some(write_checkpoint(&tx, socket, cp)?),
             None => None,
@@ -111,7 +128,7 @@ impl Store {
             super::projects::write_slots(&tx, id, slots)?;
         }
         tx.commit().map_err(|e| format!("commit tick: {e}"))?;
-        Ok(gen)
+        Ok(Some(gen))
     }
 
     /// The socket's checkpoint. `Ok(None)` = none was ever published (the

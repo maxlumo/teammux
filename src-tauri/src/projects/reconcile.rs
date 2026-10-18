@@ -178,35 +178,65 @@ pub(super) fn slot_command_in(slot: &Slot, project_path: Option<&str>) -> Option
     (!command.trim().is_empty()).then_some(command)
 }
 
+/// The strict launch door for a restore after a reboot (board #422):
+/// `Ok(None)` for a shell (nothing is replayed), `Ok(Some(line))` for an
+/// agent ONLY when its exact conversation can be resumed — a managed agent
+/// through its recipe (`spawn::relaunch_line_exact`), an adopted one through
+/// its CLI's `resume_id` — and `Err` otherwise. Never `resume_recent`,
+/// `--resume` or a blank launch; `slot_command_in` keeps manual `up`'s
+/// behaviour unchanged.
+pub(crate) fn slot_command_exact(project_path: &str, slot: &Slot, managed: bool) -> Result<Option<String>, String> {
+    if slot.kind == SlotKind::Shell {
+        return Ok(None);
+    }
+    let id = slot.agent_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| format!("{}: no saved conversation", slot.window_name))?;
+    if managed {
+        match super::managed::managed_state(project_path, &slot.window_name) {
+            super::managed::ManagedState::Managed => {}
+            super::managed::ManagedState::Plain => return Err(format!("{}: the managed home is missing", slot.window_name)),
+            super::managed::ManagedState::Unknown(e) => return Err(format!("{}: the managed home cannot be read: {e}", slot.window_name)),
+        }
+        return super::spawn::relaunch_line_exact(project_path, &slot.window_name, id).map(Some);
+    }
+    let backend = slot.command.as_deref().unwrap_or("");
+    agents::launch_line_exact(backend, id).map(Some).ok_or_else(|| format!("{}: {backend} cannot resume an exact conversation", slot.window_name))
+}
+
+/// What is typed into an agent's pane for `cmd`: its tmm identity prefix,
+/// staged as a script in its home when it has one (the one shape `up` and
+/// the restore executor share).
+pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str) -> String {
+    let prefixed = if slot.kind == SlotKind::Agent {
+        format!(
+            "TMM_PROJECT={} TMM_AGENT={} {}",
+            crate::shell::quote(&project.session),
+            crate::shell::quote(&slot.window_name),
+            cmd
+        )
+    } else {
+        cmd.to_string()
+    };
+    let staged = (slot.kind == SlotKind::Agent)
+        .then(|| stage_relaunch_script(&project.path, &slot.window_name, &prefixed))
+        .flatten();
+    staged.unwrap_or(prefixed)
+}
+
 fn run_slot_command(project: &Project, slot: &Slot, target: &str) -> Result<(), String> {
     match slot_command_in(slot, Some(&project.path)) {
         // Agents get their tmm identity: the project is the session, the agent
         // name is the window. Resumed agents keep the user's own config (no
         // isolated home — that is spawn's job), but tmm works in their window
         // and telemetry can attribute their declarations.
-        Some(cmd) => {
-            let prefixed = if slot.kind == SlotKind::Agent {
-                format!(
-                    "TMM_PROJECT={} TMM_AGENT={} {}",
-                    crate::shell::quote(&project.session),
-                    crate::shell::quote(&slot.window_name),
-                    cmd
-                )
-            } else {
-                cmd
-            };
-            // NEVER send a long line via send-keys — tty shims swallow bursts
-            // ≳2KB (team/launch.rs), and a managed recipe can carry a big
-            // identity (claude's --append-system-prompt rides the cmd). Spawn
-            // learned this first and sources a script; the restart replay
-            // broke the same way when codex's ~6 KB line hit the pane half
-            // typed (owner, 2026-09-08: "codex 重启好像有点问题"). Same cure:
-            // stage the line as a script in the agent's home and source THAT.
-            let staged = (slot.kind == SlotKind::Agent)
-                .then(|| stage_relaunch_script(&project.path, &slot.window_name, &prefixed))
-                .flatten();
-            tmux::send_command(target, staged.as_deref().unwrap_or(&prefixed))
-        }
+        //
+        // NEVER send a long line via send-keys — tty shims swallow bursts
+        // ≳2KB (team/launch.rs), and a managed recipe can carry a big
+        // identity (claude's --append-system-prompt rides the cmd). Spawn
+        // learned this first and sources a script; the restart replay broke
+        // the same way when codex's ~6 KB line hit the pane half typed
+        // (owner, 2026-09-08: "codex 重启好像有点问题"). Same cure:
+        // `launch_text` stages the line as a script in the agent's home.
+        Some(cmd) => tmux::send_command(target, &launch_text(project, slot, &cmd)),
         None => Ok(()),
     }
 }

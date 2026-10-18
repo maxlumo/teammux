@@ -1,0 +1,337 @@
+//! The restore BATCH (board #422, round 2): the work in progress of one
+//! restore, frozen at its start and advanced one write-ahead step at a time.
+//!
+//! One family of the store (board #147). `meta restore_batch:<socket>` holds
+//! the OPEN batch of a tmux socket; `restore_last:<socket>` the last closed
+//! one. Every change is one IMMEDIATE transaction over the whole value, so a
+//! successor reads exactly what the owner last wrote — including the tmux
+//! step it had issued (`op`) and not yet seen the result of.
+
+use super::*;
+
+/// What a project of the batch is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectState {
+    Pending,
+    /// The claim (`new-session`) was issued or is about to be.
+    CreatingSession,
+    /// Our session exists and carries its tag; windows are being made.
+    Open,
+    Done,
+    Skipped,
+    Failed,
+}
+
+/// What a window of the batch is doing. `LaunchIssued` is written BEFORE the
+/// launch line is typed; from then on the window is never killed, renamed or
+/// retyped by the automatic path (`LaunchUnknown` when that step's outcome
+/// was not seen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowState {
+    Pending,
+    /// `new-window` issued (or about to be); at most an untagged placeholder exists.
+    Creating,
+    /// Tagged, nothing typed.
+    Created,
+    LaunchIssued,
+    Launched,
+    LaunchUnknown,
+    Skipped,
+    Failed,
+}
+
+/// The tmux step an item had issued and not yet seen the result of — what
+/// a successor must re-OBSERVE rather than redo (review, round 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchOp {
+    Claim,
+    TagSession,
+    CreateWindow,
+    TagWindow,
+    Rename,
+    Kill,
+    /// The holder's kill (only while another window exists, checked in-server).
+    HolderKill,
+    /// The holder's rename to a plain shell (it is the session's last window).
+    HolderRename,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchWindow {
+    /// The slot's position; the placeholder name and the window tag carry it.
+    pub ord: usize,
+    pub name: String,
+    pub kind: SlotKind,
+    pub managed: bool,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    pub state: WindowState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<BatchOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchProject {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub session: String,
+    pub autostart_only: bool,
+    pub state: ProjectState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<BatchOp>,
+    pub windows: Vec<BatchWindow>,
+}
+
+/// One restore: its full uuid (the authority every native tag carries), the
+/// boot and socket it belongs to, the tmux server it made its objects on
+/// (recorded by the first creation), the source checkpoint copied whole, and
+/// its projects. `closed` is `None` while open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Batch {
+    pub batch: String,
+    pub socket: String,
+    pub boot_id: Option<String>,
+    pub owner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<TmuxInstance>,
+    pub source: Checkpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<String>,
+    pub projects: Vec<BatchProject>,
+}
+
+const OPEN: &str = "restore_batch:";
+const LAST: &str = "restore_last:";
+
+/// The raw stored values of a socket's open and last batches: what a capture
+/// tick scanned under, compared again inside its commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchRevision {
+    pub open: Option<String>,
+    pub last: Option<String>,
+}
+
+/// What a capture tick scans under: the socket's open and last batches,
+/// decoded from the very bytes `revision` holds. An unreadable value is its
+/// own `Err`, so one bad batch holds conservatively without voiding the other.
+#[derive(Debug, Clone)]
+pub struct BatchScan {
+    pub open: Result<Option<Batch>, String>,
+    pub last: Result<Option<Batch>, String>,
+    pub revision: BatchRevision,
+}
+
+/// A test seam that runs just before the one batch read: another connection's
+/// write placed here would split "what was scanned" from "the revision" if
+/// a caller ever read the two apart.
+#[cfg(test)]
+pub(crate) static SCAN_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> = std::sync::Mutex::new(None);
+
+/// Both batch values in ONE statement, hence one SQLite read snapshot (WAL),
+/// and the caller decodes its batches from these same bytes (review round 2,
+/// P1-A residual). The scan and `commit_scanned`'s re-check both read here.
+pub(super) fn revision_in(conn: &rusqlite::Connection, socket: &str) -> Result<BatchRevision, String> {
+    scan_hook();
+    let (open_key, last_key) = (format!("{OPEN}{socket}"), format!("{LAST}{socket}"));
+    let err = |e: rusqlite::Error| format!("read batch: {e}");
+    let mut stmt = conn.prepare("SELECT key, value FROM meta WHERE key IN (?1, ?2)").map_err(err)?;
+    let mut rows = stmt.query(params![open_key, last_key]).map_err(err)?;
+    let mut rev = BatchRevision::default();
+    while let Some(row) = rows.next().map_err(err)? {
+        let (key, value): (String, String) = (row.get(0).map_err(err)?, row.get(1).map_err(err)?);
+        if key == open_key {
+            rev.open = Some(value);
+        } else {
+            rev.last = Some(value);
+        }
+    }
+    Ok(rev)
+}
+
+#[cfg(test)]
+fn scan_hook() {
+    if let Some(hook) = SCAN_HOOK.lock().unwrap().as_ref() {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn scan_hook() {}
+
+fn decode(key: &str, value: Option<&String>) -> Result<Option<Batch>, String> {
+    value.map(|v| serde_json::from_str(v).map_err(|e| format!("unreadable {key}: {e}"))).transpose()
+}
+
+impl Store {
+    /// The socket's OPEN batch. An unreadable value is an `Err`: a restore
+    /// that cannot read its own progress does nothing.
+    pub fn restore_batch(&self, socket: &str) -> Result<Option<Batch>, String> {
+        self.read_batch(&format!("{OPEN}{socket}"))
+    }
+
+    /// The socket's batches for a tick to scan under: one read, and the
+    /// decoded batches and the revision come from the same bytes.
+    pub fn batch_scan(&self, socket: &str) -> Result<BatchScan, String> {
+        let revision = revision_in(&self.conn, socket)?;
+        Ok(BatchScan {
+            open: decode(&format!("{OPEN}{socket}"), revision.open.as_ref()),
+            last: decode(&format!("{LAST}{socket}"), revision.last.as_ref()),
+            revision,
+        })
+    }
+
+    /// The socket's last CLOSED batch.
+    pub fn last_batch(&self, socket: &str) -> Result<Option<Batch>, String> {
+        self.read_batch(&format!("{LAST}{socket}"))
+    }
+
+    fn read_batch(&self, key: &str) -> Result<Option<Batch>, String> {
+        decode(key, self.meta_get(key)?.as_ref())
+    }
+
+    /// Write the open batch whole, in one IMMEDIATE transaction.
+    pub fn save_batch(&mut self, b: &Batch) -> Result<(), String> {
+        let value = serde_json::to_string(b).map_err(|e| format!("encode batch: {e}"))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("batch transaction: {e}"))?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![format!("{OPEN}{}", b.socket), value],
+        )
+        .map_err(|e| format!("write batch: {e}"))?;
+        tx.commit().map_err(|e| format!("commit batch: {e}"))
+    }
+
+    /// Close the batch: it becomes the socket's `restore_last` and the open
+    /// key goes, in one transaction.
+    pub fn close_batch(&mut self, b: &Batch) -> Result<(), String> {
+        let value = serde_json::to_string(b).map_err(|e| format!("encode batch: {e}"))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("batch transaction: {e}"))?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![format!("{LAST}{}", b.socket), value],
+        )
+        .map_err(|e| format!("write last batch: {e}"))?;
+        tx.execute("DELETE FROM meta WHERE key = ?1", params![format!("{OPEN}{}", b.socket)])
+            .map_err(|e| format!("drop open batch: {e}"))?;
+        tx.commit().map_err(|e| format!("commit batch close: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batch() -> Batch {
+        Batch {
+            batch: "0f8e1c2a-1111-4222-8333-444455556666".into(),
+            socket: "/s".into(),
+            boot_id: Some("boot".into()),
+            owner_pid: 1,
+            instance: None,
+            source: Checkpoint { gen: 3, at: 1, boot_id: Some("old".into()), tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![BatchProject {
+                id: "p".into(),
+                name: "p".into(),
+                path: "/w/p".into(),
+                session: "p".into(),
+                autostart_only: false,
+                state: ProjectState::Pending,
+                reason: None,
+                session_id: None,
+                holder_id: None,
+                op: None,
+                windows: vec![],
+            }],
+        }
+    }
+
+    /// The batch round-trips whole; closing moves it to `restore_last` and
+    /// leaves no open batch, in one transaction.
+    #[test]
+    fn a_batch_round_trips_and_closing_moves_it() {
+        let mut store = Store::open_memory().unwrap();
+        assert_eq!(store.restore_batch("/s").unwrap(), None);
+        let mut b = batch();
+        store.save_batch(&b).unwrap();
+        b.projects[0].state = ProjectState::CreatingSession;
+        b.projects[0].op = Some(BatchOp::Claim);
+        store.save_batch(&b).unwrap();
+        assert_eq!(store.restore_batch("/s").unwrap(), Some(b.clone()), "the issued step is on record");
+        b.closed = Some("done".into());
+        store.close_batch(&b).unwrap();
+        assert_eq!(store.restore_batch("/s").unwrap(), None);
+        assert_eq!(store.last_batch("/s").unwrap(), Some(b));
+        store.meta_set("restore_batch:/s", "{").unwrap();
+        assert!(store.restore_batch("/s").is_err(), "unreadable progress is an error, not 'no batch'");
+    }
+
+    /// P1-A residual, the commit side across connections: a scan, then
+    /// another connection (another gateway on the same state.db) opens a
+    /// batch; the commit made under the scan refuses, and the previous
+    /// checkpoint stands. The scan side is `a_tick_that_scanned_under_another_
+    /// batch_state_commits_nothing` (the capture tick, through `SCAN_HOOK`).
+    #[test]
+    fn a_batch_opened_by_another_connection_after_a_scan_voids_its_commit() {
+        let dir = std::env::temp_dir().join(format!("tmm-scan-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("state.db");
+        let mut ours = Store::open(&path).unwrap();
+        let mut theirs = Store::open(&path).unwrap();
+        let mut old = batch();
+        old.closed = Some("done".into());
+        ours.close_batch(&old).unwrap();
+        let cp = || Checkpoint { gen: 0, at: 1, boot_id: Some("boot".into()), tmux: None, projects: vec![] };
+        let gen = ours.commit_tick(&[], Some(("/s", cp()))).unwrap();
+        let scan = ours.batch_scan("/s").unwrap();
+        assert_eq!(scan.open, Ok(None));
+        assert_eq!(scan.last, Ok(Some(old)));
+        theirs.save_batch(&batch()).unwrap();
+        assert_eq!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &scan.revision))).unwrap(), None, "a stale scan commits nothing");
+        assert_eq!(ours.checkpoint("/s").unwrap().unwrap().gen, gen.unwrap(), "the previous checkpoint stands");
+        // Control: a scan of the current state commits.
+        let now = ours.batch_scan("/s").unwrap();
+        assert_eq!(now.open, Ok(Some(batch())));
+        assert!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &now.revision))).unwrap().is_some());
+        drop((ours, theirs));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each value decodes on its own: an unreadable last batch is its `Err`
+    /// while the open one still reads, both from the scanned bytes.
+    #[test]
+    fn a_scan_decodes_each_batch_from_the_bytes_it_compares() {
+        let mut store = Store::open_memory().unwrap();
+        store.save_batch(&batch()).unwrap();
+        store.meta_set("restore_last:/s", "{").unwrap();
+        let scan = store.batch_scan("/s").unwrap();
+        assert_eq!(scan.open, Ok(Some(batch())));
+        assert!(scan.last.is_err());
+        assert_eq!(scan.revision.last.as_deref(), Some("{"));
+        assert_eq!(scan.revision.open, Some(serde_json::to_string(&batch()).unwrap()));
+    }
+}

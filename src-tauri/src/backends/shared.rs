@@ -370,6 +370,15 @@ pub(crate) fn agent_launch_path(prepend: Option<&Path>, base: &str) -> String {
     agent_launch_path_from(home.as_deref(), prepend, base)
 }
 
+/// A conversation id the STRICT restore resume accepts (board #422 review
+/// P1-E): one data token — non-empty, not an option (`--last` is a CLI's
+/// recent selector, not an id), no control characters (a newline would
+/// submit half a line). The caller still shell-quotes it; each backend adds
+/// its own reserved selectors on top (dsh: `recent`).
+pub(crate) fn exact_id_ok(id: &str) -> bool {
+    !id.trim().is_empty() && !id.starts_with('-') && !id.chars().any(char::is_control)
+}
+
 /// Write the full launch command to `<agent home>/launch-<name>.sh`. The home
 /// is self-gitignored, and the script carries the same data as the backend
 /// config files beside it, so this adds no new exposure. Overwritten on every

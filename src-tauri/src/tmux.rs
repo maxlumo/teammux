@@ -184,7 +184,7 @@ pub(crate) fn session_confirmed_absent(error: &str) -> bool {
 /// with `\`, `"` and `$` escaped survive that parser byte-for-byte (verified on
 /// tmux 3.6a); single quotes cannot carry an embedded `'`. Not needed for argv
 /// arguments — those go to tmux as separate strings and are never re-parsed.
-fn tmux_quote(s: &str) -> String {
+pub(crate) fn tmux_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -1259,6 +1259,17 @@ pub const SHELL_READY: std::time::Duration = std::time::Duration::from_secs(5);
 /// shell that never settles) it returns false and the caller types anyway —
 /// never a hang. A dead pane returns false at once.
 pub fn wait_for_shell(pane: &str, deadline: std::time::Duration) -> bool {
+    let ready = wait_for_shell_on(get_socket().as_deref(), pane, deadline);
+    if !ready {
+        eprintln!("[tmux] {pane}: no shell prompt within {} ms — typing anyway", deadline.as_millis());
+    }
+    ready
+}
+
+/// `wait_for_shell` on a server named by the caller (board #422: the
+/// restore executor binds every tmux call to its batch's socket).
+pub(crate) fn wait_for_shell_on(socket: Option<&str>, pane: &str, deadline: std::time::Duration) -> bool {
+    let run_tmux = |args: &[&str]| run_tmux_on(socket, args);
     let start = std::time::Instant::now();
     let mut last: Option<String> = None;
     loop {
@@ -1279,8 +1290,9 @@ pub fn wait_for_shell(pane: &str, deadline: std::time::Duration) -> bool {
         } else {
             last = None;
         }
+        // `false` is the caller's to judge: `wait_for_shell`'s callers type
+        // anyway; the restore executor never does (board #422).
         if start.elapsed() >= deadline {
-            eprintln!("[tmux] {pane}: no shell prompt after {} ms — typing anyway", deadline.as_millis());
             return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
