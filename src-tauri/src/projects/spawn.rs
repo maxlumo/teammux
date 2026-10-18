@@ -187,6 +187,10 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
     // from a caller, still has to be a plain word here: it is about to be a
     // directory under `.tmm/agents/` and a tmux window name.
     super::agents::valid_name(&window_name)?;
+    // The window's identity is decided and nothing has been written for it
+    // yet: a hire, a team member or a fork is a START for its Stop intent
+    // (board #422, validator F1), under ONE permit taken here.
+    let permit = super::start_permit(req.session, &window_name)?;
 
     // Provenance for restarts (board #113): a registry-resolved spawn records
     // the DEF name (the window may be uniquified past it); a team member
@@ -196,7 +200,11 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
         let section = super::recipe::recipe_section(&agent_home(&workspace, &window_name));
         materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member)?
     };
-    launch_window(req, &workspace, &def, &window_name, m)
+    let launched = launch_window(req, &workspace, &def, &window_name, m)?;
+    if let Err(e) = permit.finish(true) {
+        eprintln!("projects: {window_name} launched but its stop mark was not cleared: {e}");
+    }
+    Ok(launched)
 }
 
 /// The definition a request launches: the one handed in, else the registry's by name.
@@ -229,6 +237,9 @@ fn check_cap(workspace: &str, panes: &[tmux::TmuxPane]) -> Result<(), String> {
 /// Open the window and start the CLI in it: everything AFTER an agent has been
 /// materialized (its recipe is written and its section released — the lock is
 /// never held across the slow tmux launch). `spawn` and `respawn` both end here.
+/// It never reads or clears a Stop intent: it runs under the permit of the
+/// verb that called it (`spawn` takes its own; a restart's `respawn` runs
+/// under the hub's, board #422).
 fn launch_window(req: &SpawnRequest, workspace: &str, def: &RegAgent, window_name: &str, m: Materialized) -> Result<Value, String> {
     let home = m.home;
     let env = m.env;
@@ -4144,7 +4155,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(production.matches("resume: true").count(), 1, "one place builds a resuming request (Respawn::request)");
         let hub_src = include_str!("../server/hub_rpc.rs");
         let hub = &hub_src[..hub_src.find("#[cfg(test)]").expect("a test module")];
-        assert!(hub.contains("crate::projects::spawn::respawn(session, agent)?"), "start_agent's fallback is respawn");
+        assert!(hub.contains("start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)"), "start_agent's fallback is respawn");
         assert!(!hub.contains("resume: true"), "the server builds no resuming request of its own");
         // The recipe is read, planned from and written inside ONE hold of its section
         // (#389 review): no section-less reader in between, and the hold ends before tmux.

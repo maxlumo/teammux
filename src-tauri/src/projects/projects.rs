@@ -276,28 +276,176 @@ pub(super) fn auto_adopt_with(created: &[(String, u64)], ts: u64) -> Result<Vec<
 }
 
 pub fn up(id: &str) -> Result<Value, String> {
+    up_with(id, reconcile::up)
+}
+
+/// `up`, with the reconcile as a seam for the tests. A successful up is the
+/// one way out of a person's down, and of the Stop of every agent it started
+/// (board #422) — but only of the intents that stood when it BEGAN: their
+/// versions are read first and cleared conditionally at the end, so a down
+/// or Stop issued while this up ran survives it (review P1-A). Success is per
+/// unit: the down mark goes only when no slot reported an error; a window's
+/// Stop mark only when that window came up created/existing with no error.
+fn up_with(id: &str, reconcile: impl FnOnce(&store::Project, &[store::Slot]) -> Result<reconcile::UpReport, String>) -> Result<Value, String> {
     let (project, slots) = load(id)?;
-    let report = reconcile::up(&project, &slots)?;
-    with_store(|store| store.mark_up(id, now()))?;
+    let (down, stopped) = with_store(|store| {
+        let down = store.project_down_version(id)?;
+        let mut stopped = Vec::new();
+        for slot in &slots {
+            if let Some(v) = store.slot_stopped_version(id, &slot.window_name)? {
+                stopped.push((slot.window_name.clone(), v));
+            }
+        }
+        Ok((down, stopped))
+    })?;
+    let report = reconcile(&project, &slots)?;
+    let clean = |r: &reconcile::SlotResult| (r.status == "created" || r.status == "existing") && r.error.is_none();
+    with_store(|store| {
+        store.mark_up(id, now())?;
+        if let Some(v) = &down {
+            if report.slots.iter().all(|r| r.error.is_none()) {
+                store.clear_project_down_if(id, v)?;
+            }
+        }
+        for (window, v) in &stopped {
+            if report.slots.iter().any(|r| r.window_name == *window && clean(r)) {
+                store.clear_slot_stopped_if(id, window, v)?;
+            }
+        }
+        Ok(())
+    })?;
     Ok(json!(report))
 }
 
 /// Restart ONE agent slot of a project (board #210): the window returns with
 /// its full recipe and exact conversation id; no other slot is touched and
 /// the project's `last_up_at` is not a project-level `up`, so it is left
-/// alone. `Ok(false)` = no such agent slot yet (the capture loop has not
-/// recorded it) or the window could not be created.
-pub fn up_agent(id: &str, window_name: &str) -> Result<bool, String> {
+/// alone. `Ok(None)` = no such agent slot yet (the capture loop has not
+/// recorded it). The caller judges the result, and clears a Stop only
+/// through `starting` (board #422).
+pub fn up_agent(id: &str, window_name: &str) -> Result<Option<reconcile::SlotResult>, String> {
     let (project, slots) = load(id)?;
-    Ok(match reconcile::up_agent(&project, &slots, window_name) {
-        Some(r) => r.status == "created" || r.status == "existing",
-        None => false,
-    })
+    Ok(reconcile::up_agent(&project, &slots, window_name))
+}
+
+/// Record that a person STOPPED one managed agent (board #422): written
+/// before the window is killed, so a restore after a reboot never starts what
+/// a person paused. A session that is no project has nothing to restore, and
+/// nothing to record.
+pub fn mark_agent_stopped(session: &str, agent: &str) -> Result<(), String> {
+    let Some(project) = project_for_session(session)? else { return Ok(()) };
+    with_store(|store| store.set_slot_stopped(&project.id, agent)).map(|_| ())
+}
+
+/// The ONE licence a top-level start verb holds to clear an agent's Stop
+/// (board #422, review P1-A residual). The verb — the hub's Start/Restart
+/// (taken before its kill), a team restart, a spawn or fork once its window
+/// name is decided — takes it BEFORE any side effect; it records the Stop
+/// version that stood then. Nested launches (`respawn`, `launch_window`)
+/// never read the mark: they run under the verb's permit. `finish(true)`
+/// clears exactly that version, once, at the verb's end; a failed start
+/// drops the permit and clears nothing; a Stop written meanwhile stands.
+#[must_use = "a start permit is finished by the verb that took it"]
+pub struct StartPermit {
+    stood: Option<(String, String, String)>,
+}
+
+pub fn start_permit(session: &str, agent: &str) -> Result<StartPermit, String> {
+    let stood = match project_for_session(session)? {
+        Some(project) => with_store(|store| store.slot_stopped_version(&project.id, agent))?.map(|v| (project.id, agent.to_string(), v)),
+        None => None,
+    };
+    Ok(StartPermit { stood })
+}
+
+impl StartPermit {
+    /// End the verb: on a clean success, clear the version this permit read.
+    pub fn finish(self, clean: bool) -> Result<(), String> {
+        match (clean, self.stood) {
+            (true, Some((id, window, v))) => with_store(|store| store.clear_slot_stopped_if(&id, &window, &v)).map(|_| ()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A kill through the Sessions page is a person's down (board #422,
+/// validator F3): recorded before `kill_session`, like `down`'s, for a
+/// session that is a project.
+pub fn record_session_kill(session: &str) -> Result<(), String> {
+    match with_store(|store| store.project_by_session(session))? {
+        Some(project) => with_store(|store| store.set_project_down(&project.id)).map(|_| ()),
+        None => Ok(()),
+    }
+}
+
+/// Close one window for the Sessions page (board #422, validator F3, review
+/// P1): ONE operation, resolve → mark → kill. The target is resolved to its
+/// session, name and native `@id` on this server; a managed agent's window
+/// gets its Stop mark; the kill goes to the `@id`, after the same server
+/// still shows that id under that session and name — never to the original
+/// string, which a renumber can point at another window. A target that is
+/// confirmed gone is done (`Ok`); one that cannot be resolved, or whose
+/// managed-ness cannot be read, is an `Err` and nothing is killed.
+pub fn close_window(target: &str) -> Result<(), String> {
+    close_window_with(target, || {}, || {})
+}
+
+fn close_window_with(target: &str, after_resolve: impl FnOnce(), before_kill: impl FnOnce()) -> Result<(), String> {
+    let Some(w) = tmux::resolve_window(target)? else { return Ok(()) };
+    // The project that declares this PHYSICAL session (no previous-name
+    // alias), and the window's managed-ness as a three-way answer: a marker
+    // that cannot be read is not "plain" (review, F3 residual).
+    let project = with_store(|store| store.project_by_session(&w.session))?;
+    let owner = match &project {
+        Some(p) => match super::managed::managed_state(&p.path, &w.name) {
+            super::managed::ManagedState::Managed => Some(p.id.clone()),
+            super::managed::ManagedState::Plain => None,
+            super::managed::ManagedState::Unknown(e) => {
+                return Err(format!("'{target}' was not closed — whether it is a managed agent cannot be read: {e}"));
+            }
+        },
+        None => None,
+    };
+    after_resolve();
+    if let Some(id) = owner {
+        // The Stop goes to the project resolved above, and only while it
+        // still declares this session: one object for the check, the intent
+        // key and the window that is killed.
+        with_store(|store| {
+            match store.project(&id)? {
+                Some(p) if p.session == w.session => store.set_slot_stopped(&id, &w.name).map(|_| ()),
+                _ => Err(format!("'{target}' was not closed — its project changed while it was being closed")),
+            }
+        })?;
+    }
+    before_kill();
+    match tmux::resolve_window(&w.id)? {
+        None => return Ok(()),
+        Some(now) if !now.same_server(&w) || now.session != w.session || now.name != w.name => {
+            return Err(format!("'{target}' changed before it could be closed — nothing was killed"));
+        }
+        Some(_) => {}
+    }
+    match tmux::kill_window(&w.id) {
+        Err(e) if e.contains("can't find window") => Ok(()),
+        other => other,
+    }
 }
 
 pub fn down(id: &str) -> Result<Value, String> {
+    down_with(id, reconcile::down)
+}
+
+/// `down`, with the close as a seam for the tests. The intent is durable
+/// BEFORE the kill (board #422): a crash between the two, or a kill that
+/// fails, must still leave "a person took this down" on record — and it
+/// stays until a successful `up`, whatever later ticks observe.
+fn down_with(id: &str, close: impl FnOnce(&store::Project) -> Result<(), String>) -> Result<Value, String> {
     let (project, _) = load(id)?;
-    reconcile::down(&project)?;
+    with_store(|store| store.set_project_down(id))?;
+    close(&project).map_err(|e| {
+        format!("'{}' is marked down and will not come back after a reboot, but its session did not close: {e}", project.name)
+    })?;
     Ok(json!({ "session": project.session, "live": false }))
 }
 
@@ -1422,9 +1570,17 @@ mod tests {
 
         down(&id).unwrap();
         assert!(!tmux::session_exists(session), "down kills the session");
+        // Board #422: the down is a durable intent, kept until a successful up.
+        assert!(with_store(|s| s.restore_intents()).unwrap().down.contains(&id), "down records the intent");
+        with_store(|s| s.set_slot_stopped(&id, "editor")).unwrap();
+        with_store(|s| s.set_slot_stopped(&id, "ghost")).unwrap();
 
         let report = up(&id).unwrap();
         assert_eq!(report["created_session"], true);
+        let intents = with_store(|s| s.restore_intents()).unwrap();
+        assert!(!intents.down.contains(&id), "a successful up clears it");
+        assert!(!intents.stopped.contains(&(id.clone(), "editor".into())), "and the stop of every window it started");
+        assert!(intents.stopped.contains(&(id.clone(), "ghost".into())), "control: a window it did not start keeps its mark");
         let windows: Vec<String> = tmux::list_named_windows(session)
             .into_iter()
             .map(|(n, _)| n)
@@ -1436,5 +1592,200 @@ mod tests {
         // Capturing a live project must not disturb a settled declaration.
         capture_once().unwrap();
         assert_eq!(with_store(|s| s.slots(&id)).unwrap().len(), 2);
+
+        // …and it publishes the restore checkpoint for this socket (board
+        // #422): the server it saw, and this project with its live windows.
+        let cp = with_store(|s| s.checkpoint(&super::super::restore::socket_key())).unwrap().expect("a complete tick publishes");
+        assert_eq!(cp.boot_id, super::super::restore::boot_id());
+        let super::super::restore::TmuxNow::Present { instance, .. } = super::super::restore::tmux_now() else { panic!("tmux is up") };
+        assert_eq!(cp.tmux.as_ref(), Some(&instance), "the server identity the tick saw");
+        let seen = cp.projects.iter().find(|p| p.id == id).expect("the live project is in the checkpoint");
+        let mut names: Vec<&str> = seen.windows.iter().map(|w| w.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["api", "editor"]);
+        // The next complete tick replaces it with a higher number.
+        capture_once().unwrap();
+        let next = with_store(|s| s.checkpoint(&super::super::restore::socket_key())).unwrap().unwrap();
+        assert_eq!(next.gen, cp.gen + 1);
+    }
+
+    /// Board #422 review P1-A: an up clears only the intents that stood when it
+    /// BEGAN, and only on success per unit. Through the `up_with` seam (the
+    /// reconcile is the barrier): a down and a Stop written while the up runs
+    /// survive it; a slot that came up with an error keeps both the project's
+    /// down and its own Stop; a clean up clears exactly what it read.
+    #[test]
+    fn an_up_clears_only_the_intents_it_read_and_only_on_success() {
+        use_test_store();
+        let dir = std::env::temp_dir().join(format!("tmm-upv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = id_of(&create(&dir.to_string_lossy(), Some("upv"), Some(&format!("upv{}", std::process::id())), None).unwrap());
+        let a = store::Slot { id: None, ord: 0, window_name: "a".into(), cwd: String::new(), kind: store::SlotKind::Agent, command: Some("kiro".into()), auto_run: true, agent_session_id: None, first_seen_at: 1, settled_at: Some(2) };
+        let b = store::Slot { window_name: "b".into(), ord: 1, ..a.clone() };
+        with_store(|s| s.replace_slots(&id, &[a, b])).unwrap();
+        let result = |name: &str, status: &'static str, error: Option<&str>| reconcile::SlotResult { window_name: name.into(), status, error: error.map(str::to_string) };
+        let report = |slots: Vec<reconcile::SlotResult>| reconcile::UpReport { session: "s".into(), created_session: true, slots };
+        let intents = || with_store(|s| s.restore_intents()).unwrap();
+        let stopped = |w: &str| intents().stopped.contains(&(id.clone(), w.to_string()));
+
+        // 1. Nothing stood at the start; a down and a Stop land mid-up: both stand.
+        up_with(&id, |_, _| {
+            with_store(|s| s.set_project_down(&id)).unwrap();
+            with_store(|s| s.set_slot_stopped(&id, "a")).unwrap();
+            Ok(report(vec![result("a", "created", None), result("b", "created", None)]))
+        })
+        .unwrap();
+        assert!(intents().down.contains(&id), "a down issued during the up survives it");
+        assert!(stopped("a"), "a Stop issued during the up survives it");
+
+        // 2. Both stood at the start, but NEWER versions replace them mid-up: both stand.
+        up_with(&id, |_, _| {
+            with_store(|s| s.set_project_down(&id)).unwrap();
+            with_store(|s| s.set_slot_stopped(&id, "a")).unwrap();
+            Ok(report(vec![result("a", "created", None), result("b", "created", None)]))
+        })
+        .unwrap();
+        assert!(intents().down.contains(&id) && stopped("a"), "only the versions read at the start may be cleared");
+
+        // 3. A window created WITH an error: the down and its Stop are kept;
+        //    the clean window's Stop goes.
+        with_store(|s| s.set_slot_stopped(&id, "b")).unwrap();
+        up_with(&id, |_, _| Ok(report(vec![result("a", "created", Some("launch failed")), result("b", "created", None)]))).unwrap();
+        assert!(intents().down.contains(&id), "a slot error keeps the project's down");
+        assert!(stopped("a"), "created-with-error is not a start");
+        assert!(!stopped("b"), "control: the clean window's Stop is cleared");
+
+        // 4. A clean up clears exactly what it read.
+        up_with(&id, |_, _| Ok(report(vec![result("a", "existing", None), result("b", "created", None)]))).unwrap();
+        assert!(!intents().down.contains(&id) && !stopped("a"));
+
+        let _ = delete(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #422 review P1 on F3: closing a window from the Sessions page is
+    /// ONE operation on ONE window. A lookup tmux cannot answer kills nothing;
+    /// a renumber between the lookup and the kill still kills the window whose
+    /// Stop was recorded (by its native @id), never the one that now holds the
+    /// index; a target already gone is done.
+    #[test]
+    fn closing_a_window_marks_and_kills_the_same_native_window() {
+        let mut scratch = tmux::Scratch::new("close");
+        use_test_store();
+        let path = scratch.path();
+        let session = scratch.session("s");
+        std::fs::create_dir_all(format!("{path}/.tmm/agents/dev")).unwrap();
+        std::fs::write(format!("{path}/.tmm/agents/dev/launch.json"), "{}").unwrap();
+        tmux::ensure_session(&session, &path).unwrap();
+        tmux::rename_window(&format!("{session}:^"), "keep").unwrap();
+        tmux::new_named_window(&session, "dev", &path).unwrap();
+        tmux::new_named_window(&session, "other", &path).unwrap();
+        let id = adopt(&session, None).unwrap()["project"]["id"].as_str().unwrap().to_string();
+        let stopped = |w: &str| with_store(|s| s.restore_intents()).unwrap().stopped.contains(&(id.clone(), w.to_string()));
+        let index_of = |name: &str| tmux::resolve_window(&format!("{session}:{name}")).unwrap().unwrap().index;
+
+        // Renumber between lookup and kill: dev moves away and `other` takes its index.
+        let dev_index = index_of("dev");
+        let target = format!("{session}:{dev_index}");
+        close_window_with(&target, || {}, || {
+            tmux::run_tmux(&["move-window", "-s", &format!("={session}:dev"), "-t", &format!("={session}:90")]).unwrap();
+            tmux::run_tmux(&["move-window", "-s", &format!("={session}:other"), "-t", &format!("={session}:{dev_index}")]).unwrap();
+        })
+        .unwrap();
+        assert!(stopped("dev"), "the managed window's Stop is recorded");
+        assert!(tmux::find_window_by_name(&session, "dev").is_none(), "the recorded window is the one killed");
+        assert!(tmux::find_window_by_name(&session, "other").is_some(), "the window now at its index survives");
+        assert!(!stopped("other"));
+
+        // Already gone: done, nothing recorded.
+        close_window(&format!("{session}:77")).unwrap();
+        close_window("@999999").unwrap();
+        // A plain window: killed, no Stop (control).
+        close_window(&format!("{session}:other")).unwrap();
+        assert!(tmux::find_window_by_name(&session, "other").is_none());
+        assert!(!stopped("other"));
+
+        // F3 residual: a managed-ness that cannot be READ is not "plain". An
+        // unreadable agents dir refuses the close: no kill, no mark.
+        use std::os::unix::fs::PermissionsExt;
+        tmux::new_named_window(&session, "dev", &path).unwrap();
+        let agents = std::path::PathBuf::from(&path).join(".tmm/agents");
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = close_window(&format!("{session}:dev"));
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(refused.as_ref().is_err_and(|e| e.contains("cannot be read")), "{refused:?}");
+        assert!(tmux::find_window_by_name(&session, "dev").is_some(), "nothing was killed");
+        with_store(|s| s.forget_slot_stopped(&id, "dev")).unwrap();
+        // The project resolved for the window is the one the Stop is written
+        // to: if it no longer declares the session by the time the mark is
+        // written, the close is refused — no Stop under another project's key.
+        let refused = close_window_with(&format!("{session}:dev"), || {
+            with_store(|s| s.set_session(&id, "elsewhere-422", &session)).unwrap();
+        }, || {});
+        assert!(refused.as_ref().is_err_and(|e| e.contains("project changed")), "{refused:?}");
+        assert!(tmux::find_window_by_name(&session, "dev").is_some(), "nothing was killed");
+        assert!(!stopped("dev"), "no Stop was written");
+        with_store(|s| s.set_session(&id, &session, "elsewhere-422")).unwrap();
+
+        // K4: the window is re-identified just before the kill. Renamed under
+        // the close (same @id, another name), it is not the window that was
+        // resolved and marked: refused, and it survives.
+        let refused = close_window_with(&format!("{session}:dev"), || {}, || {
+            tmux::run_tmux(&["rename-window", "-t", &format!("={session}:dev"), "renamed-422"]).unwrap();
+        });
+        assert!(refused.as_ref().is_err_and(|e| e.contains("changed before it could be closed")), "{refused:?}");
+        assert!(tmux::find_window_by_name(&session, "renamed-422").is_some(), "nothing was killed");
+        let _ = down(&id);
+    }
+
+    /// The other half: a lookup that fails for any reason but "not there" is
+    /// an error, and nothing is killed or recorded.
+    #[test]
+    fn a_window_lookup_tmux_cannot_answer_kills_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let scope = tmux::test_support::GlobalSocket::hold();
+        let server = tmux::test_support::PrivateTmux::start(&scope, "close-locked");
+        server.run(&["new-session", "-d", "-s", "lock", "-n", "w"]).unwrap();
+        let dir = std::env::temp_dir().join(format!("tmm-test-close-locked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        scope.set(Some(dir.join("x.sock").to_string_lossy().to_string()));
+        let got = close_window("lock:w");
+        scope.set(Some(server.socket().to_string()));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(got.as_ref().is_err_and(|e| e.contains("Permission denied")), "{got:?}");
+        assert!(server.run(&["has-session", "-t", "=lock:"]).is_ok(), "nothing was killed");
+        // A target that names no window is refused before anything runs —
+        // a bare `kill-window -t lock` would have killed lock's current window.
+        assert!(close_window("lock").is_err());
+        assert!(server.run(&["has-session", "-t", "=lock:"]).is_ok(), "the session's window is still there");
+        drop(server);
+    }
+
+    /// Board #422 (T3): the down intent is written BEFORE the kill, so a kill
+    /// that fails leaves the session alive AND marked — the error says so —
+    /// and nothing but a successful up removes the mark.
+    #[test]
+    fn a_down_whose_kill_fails_stays_on_record() {
+        use_test_store();
+        let dir = std::env::temp_dir().join(format!("tmm-down-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = id_of(&create(&dir.to_string_lossy(), Some("downfail"), Some(&format!("downfail{}", std::process::id())), None).unwrap());
+        let marked_before_close = std::cell::Cell::new(false);
+        let err = down_with(&id, |_| {
+            marked_before_close.set(with_store(|s| s.restore_intents()).unwrap().down.contains(&id));
+            Err("tmux error: refused".into())
+        })
+        .unwrap_err();
+        assert!(marked_before_close.get(), "the intent is durable before the kill runs");
+        assert!(err.contains("marked down") && err.contains("refused"), "{err}");
+        assert!(with_store(|s| s.restore_intents()).unwrap().down.contains(&id), "a failed kill does not undo the intent");
+        // Control: a successful close keeps it too; only up clears (pinned in the e2e test).
+        down_with(&id, |_| Ok(())).unwrap();
+        assert!(with_store(|s| s.restore_intents()).unwrap().down.contains(&id));
+        let _ = delete(&id);
+        assert!(!with_store(|s| s.restore_intents()).unwrap().down.contains(&id), "delete forgets it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

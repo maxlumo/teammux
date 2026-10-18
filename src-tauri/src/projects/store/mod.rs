@@ -12,7 +12,8 @@
 //! is the hub: the type, `open`/`open_memory`/`init`/`heal`, the family
 //! declarations and the row-type re-exports. Each table family is an
 //! `impl Store` block in its own file — `schema` (the ladder and the on-open
-//! repairs), `projects`, `registry`, `board`, `activity`, `rooms` — with its
+//! repairs), `projects`, `registry`, `board`, `activity`, `rooms`, `restore`
+//! (the reboot evidence, board #422) — with its
 //! tests beside it; a method that lands here instead of in its family is what
 //! the guard test at the bottom rejects.
 
@@ -24,11 +25,13 @@ mod activity;
 mod board;
 mod projects;
 mod registry;
+mod restore;
 mod rooms;
 mod schema;
 mod wakes;
 pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts};
 pub use projects::{Project, Slot, SlotKind};
+pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntents, TmuxInstance};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
 pub use rooms::HubMsg;
 pub use wakes::Wake;

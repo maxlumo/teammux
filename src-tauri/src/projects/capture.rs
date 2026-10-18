@@ -11,7 +11,7 @@
 //! that disappears simply leaves the declaration.
 
 use super::agents;
-use super::{agent_sessions, auto_adopt_once, is_managed_in, now, recovery, seed_builtin_skills, store, with_store};
+use super::{agent_sessions, auto_adopt_once, is_managed_in, now, recovery, restore, seed_builtin_skills, store, with_store};
 use std::time::Duration;
 use super::store::{Slot, SlotKind};
 use crate::tmux::{self, TmuxPane};
@@ -247,34 +247,65 @@ pub const SESSION_SETTLE_SECS: u64 = 120;
 /// `with_store`, so doing that under the lock stalled each of them behind the
 /// tick. Folding is a few SQLite statements per project and is all the lock
 /// protects.
+///
+/// The same tick publishes the restore checkpoint for its tmux socket (board
+/// #422), but only from a complete observation — see `restore::checkpoint_from`.
 pub fn capture_once() -> Result<Vec<String>, String> {
     let ts = now();
     let sessions = agent_sessions();
     let projects = with_store(|store| store.list_projects(false))?;
 
     // Phase 1 — no lock: which declared sessions are live, and what tmux shows.
+    // ONE listing answers "which sessions are live" for every project, and it
+    // is the first half of the restore checkpoint's server identity (board
+    // #422); a listing that failed sees no session, as `has-session` did.
+    let before = restore::tmux_now();
+    tick_hook(TickPhase::Listed);
+    let live = before.session_names();
     let mut seen: Vec<String> = Vec::new();
-    let mut observed: Vec<(String, String, Vec<Observed>)> = Vec::new();
+    // (id, session, path, observed windows, managed agent windows)
+    let mut observed: Vec<(String, String, String, Vec<Observed>, std::collections::HashSet<String>)> = Vec::new();
+    let mut incomplete: Option<String> = None;
     for project in projects {
-        if !tmux::session_exists(&project.session) {
+        if !live.contains(&project.session) {
             continue;
         }
         seen.push(project.id.clone());
         match observe(&project.session, &project.path, sessions) {
-            Ok(o) => observed.push((project.id, project.path, o)),
-            Err(_) => {} // session vanished mid-scan; next tick retries
+            Ok(o) => {
+                // Provenance is a file read: done here, outside the lock.
+                let managed = o
+                    .iter()
+                    .filter(|w| w.kind == store::SlotKind::Agent && is_managed_in(Some(&project.path), &w.window_name))
+                    .map(|w| w.window_name.clone())
+                    .collect();
+                observed.push((project.id, project.session, project.path, o, managed));
+            }
+            // Session vanished mid-scan; next tick retries — and this tick's
+            // observation is incomplete, so it publishes no checkpoint.
+            Err(e) => incomplete = incomplete.or(Some(format!("{}: {e}", project.session))),
         }
     }
+    // The second half: the same server must still be the one answering.
+    tick_hook(TickPhase::Observed);
+    let after = restore::tmux_now();
+    let boot_id = restore::boot_id();
+    let socket = restore::socket_key();
 
-    // Phase 2 — one short lock: fold the observations into the declarations.
+    // Phase 2 — one short lock: fold the observations into the declarations,
+    // and publish the checkpoint IN THE SAME TRANSACTION as the folds it
+    // describes (review P1-B): the checkpoint's windows are the very slots
+    // this tick writes, and a refused fold rolls both back.
     with_store(|store| {
         for id in &seen {
             store.mark_seen(id, ts)?;
         }
-        let mut touched = Vec::new();
-        for (id, path, observed) in observed {
+        let mut folds = Vec::new();
+        let mut checkpoint_projects = Vec::new();
+        for (id, session, path, observed, managed) in observed {
             // Deleted between the phases: nothing to fold into, and inserting
-            // slots for a vanished project would fail the whole tick.
+            // slots for a vanished project would fail the whole tick. Nothing
+            // to restore either, so it is not in the checkpoint.
             if store.project(&id)?.is_none() {
                 continue;
             }
@@ -295,14 +326,39 @@ pub fn capture_once() -> Result<Vec<String>, String> {
                 SETTLE_SECS,
                 &keep_missing,
             );
-            if !merged.dirty {
-                continue;
+            checkpoint_projects.push(store::CheckpointProject {
+                id: id.clone(),
+                session,
+                windows: restore::checkpoint_windows(&observed, &merged.slots, &managed),
+            });
+            if merged.dirty {
+                folds.push((id, merged.slots));
             }
-            store.replace_slots(&id, &merged.slots)?;
-            touched.push(id);
         }
-        Ok(touched)
+        // An incomplete tick folds and advances no evidence: the previous
+        // checkpoint stays.
+        let checkpoint = restore::checkpoint_from(&before, &after, incomplete, checkpoint_projects, boot_id, ts).ok();
+        store.commit_tick(&folds, checkpoint.map(|cp| (socket.as_str(), cp)))?;
+        Ok(folds.into_iter().map(|(id, _)| id).collect())
     })
+}
+
+/// Where a test may act inside one capture tick (board #422): after the first
+/// listing, and after the observation, before the second listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TickPhase {
+    Listed,
+    Observed,
+}
+
+#[cfg(test)]
+pub(crate) static TICK_HOOK: std::sync::Mutex<Option<Box<dyn FnMut(TickPhase) + Send>>> = std::sync::Mutex::new(None);
+
+fn tick_hook(_phase: TickPhase) {
+    #[cfg(test)]
+    if let Some(hook) = TICK_HOOK.lock().unwrap().as_mut() {
+        hook(_phase);
+    }
 }
 
 /// Background capturer, spawned once by the server.
@@ -342,6 +398,74 @@ pub async fn capture_loop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #422 (validator P5/P6): the capture tick's OWN completeness
+    /// wiring, on a real private server. A live project whose session
+    /// vanishes between the listing and its observation makes the tick
+    /// incomplete; a server replaced between the observation and the second
+    /// listing makes it name two servers. Neither publishes a checkpoint; an
+    /// undisturbed tick does (control).
+    #[test]
+    fn a_tick_disturbed_between_its_listings_publishes_no_checkpoint() {
+        super::super::tests::use_test_store();
+        let scope = tmux::test_support::GlobalSocket::hold();
+        let server = tmux::test_support::PrivateTmux::start(&scope, "tick");
+        let socket = server.socket().to_string();
+        let ws = std::env::temp_dir().join(format!("tmm-tick-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let cwd = ws.to_string_lossy().to_string();
+        let start = |s: &str| server.run(&["new-session", "-d", "-s", s, "-c", &cwd]).unwrap();
+        start("anchor");
+        let session = format!("tick{}", std::process::id());
+        start(&session);
+        super::super::adopt(&session, None).unwrap();
+        let gen = || with_store(|s| s.checkpoint(&socket)).unwrap().map(|c| c.gen);
+        let set_hook = |h: Option<Box<dyn FnMut(TickPhase) + Send>>| *TICK_HOOK.lock().unwrap() = h;
+
+        capture_once().unwrap();
+        let first = gen().expect("control: an undisturbed tick publishes");
+
+        // P5: the project's session vanishes after the listing.
+        let (sock, name) = (socket.clone(), session.clone());
+        set_hook(Some(Box::new(move |phase| {
+            if phase == TickPhase::Listed {
+                let _ = tmux::run_tmux_on(Some(&sock), &["kill-session", "-t", &format!("={name}:")]);
+            }
+        })));
+        let _ = capture_once();
+        set_hook(None);
+        assert_eq!(gen(), Some(first), "a vanished live project makes the tick incomplete");
+
+        // P6: the server is replaced between the observation and the second listing.
+        start(&session);
+        capture_once().unwrap();
+        let second = gen().unwrap();
+        assert_eq!(second, first + 1, "control: undisturbed again, it publishes");
+        let (sock, cwd2) = (socket.clone(), cwd.clone());
+        set_hook(Some(Box::new(move |phase| {
+            if phase == TickPhase::Observed {
+                tmux::test_support::destroy_private_server(&sock).unwrap();
+                // kill-server returns before the server is gone: wait until
+                // the socket answers "no server", so the new one is new.
+                let gone = (0..200).any(|_| {
+                    let absent = tmux::run_tmux_on(Some(&sock), &["list-sessions"]).is_err_and(|e| tmux::session_confirmed_absent(&e));
+                    if !absent {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    absent
+                });
+                assert!(gone, "the old server exited");
+                tmux::run_tmux_on(Some(&sock), &["new-session", "-d", "-s", "reborn", "-c", &cwd2]).unwrap();
+            }
+        })));
+        let _ = capture_once();
+        set_hook(None);
+        assert_eq!(gen(), Some(second), "a tick that saw two servers publishes nothing");
+
+        let _ = super::super::delete(&with_store(|s| s.project_by_session(&session)).unwrap().unwrap().id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 
     fn obs(name: &str, cwd: &str) -> Observed {
         Observed {

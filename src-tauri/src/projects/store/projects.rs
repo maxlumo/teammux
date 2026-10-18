@@ -375,6 +375,14 @@ impl Store {
         // person-needed paints too (board #362 c).
         tx.execute("DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1", params![super::person_paint_prefix(&session, None)])
             .map_err(|e| format!("delete project paint records: {e}"))?;
+        // And its restore intents (board #422): a project that no longer
+        // exists has nothing to suppress.
+        let (down, stopped) = super::restore::intent_keys(id);
+        tx.execute(
+            "DELETE FROM meta WHERE key = ?1 OR substr(key, 1, length(?2)) = ?2",
+            params![down, stopped],
+        )
+        .map_err(|e| format!("delete project restore intents: {e}"))?;
         let n = tx
             .execute("DELETE FROM projects WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -398,35 +406,41 @@ impl Store {
 
     pub fn replace_slots(&mut self, project_id: &str, slots: &[Slot]) -> Result<(), String> {
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM slots WHERE project_id = ?1", params![project_id])
-            .map_err(|e| format!("clear slots: {e}"))?;
-        {
-            let mut stmt = tx
-                .prepare(
-                    "INSERT INTO slots
-                       (project_id, ord, window_name, cwd, kind, command, auto_run,
-                        first_seen_at, settled_at, agent_session_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                )
-                .map_err(|e| e.to_string())?;
-            for (i, s) in slots.iter().enumerate() {
-                stmt.execute(params![
-                    project_id,
-                    i as i64,
-                    s.window_name,
-                    s.cwd,
-                    s.kind.as_str(),
-                    s.command,
-                    s.auto_run as i64,
-                    s.first_seen_at as i64,
-                    s.settled_at.map(|v| v as i64),
-                    s.agent_session_id,
-                ])
-                .map_err(|e| format!("insert slot {}: {e}", s.window_name))?;
-            }
-        }
+        write_slots(&tx, project_id, slots)?;
         tx.commit().map_err(|e| format!("commit slots: {e}"))
     }
+}
+
+/// A project's whole slot list, inside the caller's transaction: the one
+/// writer `replace_slots` and the capture tick's `commit_tick` share (board
+/// #422 — the tick's folds commit together with its restore checkpoint).
+pub(super) fn write_slots(tx: &rusqlite::Transaction<'_>, project_id: &str, slots: &[Slot]) -> Result<(), String> {
+    tx.execute("DELETE FROM slots WHERE project_id = ?1", params![project_id])
+        .map_err(|e| format!("clear slots: {e}"))?;
+    let mut stmt = tx
+        .prepare(
+            "INSERT INTO slots
+               (project_id, ord, window_name, cwd, kind, command, auto_run,
+                first_seen_at, settled_at, agent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .map_err(|e| e.to_string())?;
+    for (i, s) in slots.iter().enumerate() {
+        stmt.execute(params![
+            project_id,
+            i as i64,
+            s.window_name,
+            s.cwd,
+            s.kind.as_str(),
+            s.command,
+            s.auto_run as i64,
+            s.first_seen_at as i64,
+            s.settled_at.map(|v| v as i64),
+            s.agent_session_id,
+        ])
+        .map_err(|e| format!("insert slot {}: {e}", s.window_name))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

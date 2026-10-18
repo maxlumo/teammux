@@ -245,6 +245,13 @@ pub fn launch_for(backend: &str) -> Option<&'static str> {
     known().iter().find(|a| a.backend == backend).map(|a| a.launch)
 }
 
+/// Can `backend` go back to ONE exact conversation from the generic line
+/// (`resume_id`)? A restore after a reboot relaunches an adopted agent only
+/// then — never into "the newest one here" or a blank prompt (board #422).
+pub fn resumes_exactly(backend: &str) -> bool {
+    known().iter().any(|a| a.backend == backend && a.resume_id.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

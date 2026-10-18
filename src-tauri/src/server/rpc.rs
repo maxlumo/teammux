@@ -334,6 +334,10 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
 
         "kill_session" => {
             let name = param(p, "name")?;
+            // A person's down, durable before the kill (board #422, F3).
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            crate::projects::record_session_kill(name)
+                .map_err(|e| RpcError::Internal(format!("'{name}' was not killed — its down could not be recorded: {e}")))?;
             tmux::kill_session(name).map_err(RpcError::Internal)?;
             Ok(serde_json::json!({ "ok": true }))
         }
@@ -346,6 +350,11 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
 
         "kill_window" => {
             let target = param(p, "target")?;
+            // ONE close operation (board #422, F3): resolve the window to its
+            // native @id, record a managed agent's Stop, kill that @id.
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            crate::projects::close_window(target).map_err(|e| RpcError::Internal(format!("'{target}' was not killed: {e}")))?;
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             tmux::kill_window(target).map_err(RpcError::Internal)?;
             Ok(serde_json::json!({ "ok": true }))
         }
@@ -743,6 +752,44 @@ mod tests {
         assert!(valid_process_arg("--format=%h|%s|%ar|%an"));
         assert!(valid_process_arg("subject; $HOME & <literal>"));
         assert!(!valid_process_arg("bad\0argument"));
+    }
+
+    /// Board #422 (validator F3): a kill through the Sessions page is a
+    /// person's down / Stop, recorded before the kill — the session of a
+    /// project gets a down mark, a managed agent's window a Stop mark, and a
+    /// window that is no managed agent's gets none.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn sessions_page_kills_record_the_persons_intent() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-kill-{}", std::process::id());
+        let ws = std::env::temp_dir().join(format!("tmm-kill-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
+        let cwd = ws.to_string_lossy().to_string();
+        assert!(tmux::new_session(&session, Some(&cwd), Some("sleep 600")).is_ok());
+        tmux::rename_window(&format!("{session}:^"), "dev").unwrap();
+        tmux::new_named_window(&session, "plain", &cwd).unwrap();
+        tmux::new_named_window(&session, "keep", &cwd).unwrap();
+        crate::projects::adopt(&session, Some("kill-test")).unwrap();
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let call = |method: &str, params: serde_json::Value| handle_request(&Request { id: Some(1), method: method.into(), params }, "");
+        let intents = crate::projects::tests::restore_intents;
+
+        let r = call("kill_window", serde_json::json!({ "target": format!("{session}:plain") }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(!intents().stopped.contains(&(id.clone(), "plain".to_string())), "control: a plain window is no agent's Stop");
+        let r = call("kill_window", serde_json::json!({ "target": format!("{session}:dev") }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(intents().stopped.contains(&(id.clone(), "dev".to_string())), "a managed agent's window: its Stop");
+        assert!(!intents().down.contains(&id));
+        let r = call("kill_session", serde_json::json!({ "name": session }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(intents().down.contains(&id), "a project's session: its down");
+        assert!(!tmux::session_exists(&session));
+
+        let _ = crate::projects::delete(&id);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #56: the router answers `system_status` with the documented

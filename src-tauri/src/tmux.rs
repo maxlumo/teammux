@@ -1121,6 +1121,71 @@ pub fn ensure_session(session: &str, cwd: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// One window, named by everything a destructive act must agree on: the
+/// server that holds it, its session, its index and name, and its native
+/// `@id` — the id never follows a renumber, an index and a name do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowIdentity {
+    /// The server incarnation, as the restore checkpoint names it: socket,
+    /// pid and start time (a new server can reuse a pid and an `@id`).
+    pub socket: String,
+    pub server_pid: u32,
+    pub server_start: u64,
+    pub session: String,
+    pub index: usize,
+    pub name: String,
+    pub id: String,
+}
+
+impl WindowIdentity {
+    /// The same tmux server incarnation holds both.
+    pub fn same_server(&self, other: &WindowIdentity) -> bool {
+        (self.socket.as_str(), self.server_pid, self.server_start) == (other.socket.as_str(), other.server_pid, other.server_start)
+    }
+}
+
+/// Resolve a window target — `session:index`, `session:name` (a `.pane`
+/// suffix is ignored) or a native `@id` — by LISTING windows, never by
+/// `display-message`, which answers a missing target with some other window
+/// or with nothing and exit 0 (measured on tmux 3.6a, 2026-10-18).
+/// `Ok(None)` = confirmed absent (no server, no such session, no such
+/// window); `Err` = could not be checked.
+pub fn resolve_window(target: &str) -> Result<Option<WindowIdentity>, String> {
+    let fmt = "#{socket_path}<TMM_SEP>#{pid}<TMM_SEP>#{start_time}<TMM_SEP>#{session_name}<TMM_SEP>#{window_index}<TMM_SEP>#{window_name}<TMM_SEP>#{window_id}";
+    let (listing, want): (Result<String, String>, Box<dyn Fn(&WindowIdentity) -> bool>) = if target.starts_with('@') {
+        let id = target.to_string();
+        (run_tmux(&["list-windows", "-a", "-F", fmt]), Box::new(move |w: &WindowIdentity| w.id == id))
+    } else {
+        let (session, window) = target.split_once(':').ok_or_else(|| format!("'{target}' names no window"))?;
+        let window = window.split('.').next().unwrap_or(window).to_string();
+        let index = window.parse::<usize>().ok();
+        (
+            run_tmux(&["list-windows", "-t", &exact_session(session), "-F", fmt]),
+            Box::new(move |w: &WindowIdentity| match index {
+                Some(i) => w.index == i,
+                None => w.name == window,
+            }),
+        )
+    };
+    let out = match listing {
+        Ok(out) => out,
+        Err(e) if session_confirmed_absent(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for line in out.lines().filter(|l| !l.is_empty()) {
+        let f: Vec<&str> = line.split("<TMM_SEP>").collect();
+        let [socket, pid, start, session, index, name, id] = f[..] else { return Err(format!("unreadable list-windows line: {line}")) };
+        let (Ok(server_pid), Ok(server_start), Ok(index)) = (pid.parse(), start.parse(), index.parse()) else {
+            return Err(format!("unreadable list-windows line: {line}"));
+        };
+        let w = WindowIdentity { socket: socket.into(), server_pid, server_start, session: session.into(), index, name: name.into(), id: id.into() };
+        if want(&w) {
+            return Ok(Some(w));
+        }
+    }
+    Ok(None)
+}
+
 /// Find the active pane id of a window named `name` in `session`, if one exists.
 /// Used by the team supervisor to adopt an already-open agent window instead of
 /// launching a duplicate (idempotent across server restarts).
@@ -1640,6 +1705,20 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #422 (validator K9): a window identity's server is the full
+    /// incarnation — socket, pid AND start time — because a new server can
+    /// reuse a pid and an `@id`. Each half is pinned: the same pid with
+    /// another start time is another server, and so is another socket.
+    #[test]
+    fn same_server_compares_the_whole_incarnation() {
+        let w = WindowIdentity { socket: "/tmp/s".into(), server_pid: 7, server_start: 900, session: "a".into(), index: 1, name: "dev".into(), id: "@3".into() };
+        assert!(w.same_server(&w.clone()), "control: the same incarnation");
+        assert!(!w.same_server(&WindowIdentity { server_start: 950, ..w.clone() }), "same pid, a later start: a new server");
+        assert!(!w.same_server(&WindowIdentity { socket: "/tmp/other".into(), ..w.clone() }), "same pid and start, another socket");
+        assert!(!w.same_server(&WindowIdentity { server_pid: 8, ..w.clone() }));
+        assert!(w.same_server(&WindowIdentity { index: 2, name: "x".into(), ..w.clone() }), "the window fields are not the server's");
+    }
 
     /// Board #349: the destructive helper names its server on the command
     /// line, so a global pointed elsewhere cannot redirect it — proven with a

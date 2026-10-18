@@ -492,6 +492,132 @@ the managed home remains, so capture keeps the absent agent slot and its last
 exact id. If no id was captured yet, the isolated-home fallback above resumes
 the newest cwd conversation.
 
+## After a host reboot: the evidence (board #422, round 1)
+
+Incident, 2026-10-18 03:06: the devbox rebooted for a kernel patch. systemd
+brought the gateway back at 03:09, but tmux is not a unit, so every session
+was gone, and the owner rebuilt six projects by hand at 11:09. Everything a
+restore needs was already durable (the declaration, each agent's recipe and
+conversation id). What was missing is the decision: which projects were up
+when the host went down, and whether the host really went down.
+
+This round records the evidence and makes the decision as pure functions
+(`projects/restore.rs`, `store/restore.rs`). **Nothing brings a session back
+yet**: the executor, its single owner across gateways, and the input barrier
+for restored windows are later rounds, and `autostart` is still not acted on.
+
+- **The checkpoint is a complete observation, committed with its folds.**
+  Each capture tick lists its tmux socket's sessions ONCE (`list-sessions -F
+  '#{pid} #{start_time} #{socket_path} #{session_name}'`), and that listing
+  also decides which declared sessions are live. The tick publishes
+  `meta restore_checkpoint:<socket>` (the configured socket, else the
+  implicit default) only when three things hold. The listing succeeded
+  before AND after the observation, both times naming the same server
+  (`pid`, `start_time`, socket). Every live project's windows were read.
+  And every slot fold of the tick is written in the SAME IMMEDIATE
+  transaction (`Store::commit_tick`). A fold the store refuses, or a crash,
+  rolls the whole tick back, so the previous checkpoint and the previous
+  slots stay together (review P1-B). An incomplete observation still folds
+  but advances no evidence. The value is one JSON object: `{gen, at,
+  boot_id, tmux:{socket,pid,start_time}|null, projects:[{id, session,
+  windows:[{name, kind, managed, backend, agent_session_id}]}]}`. Each
+  window is described by the slot that tick folded for it. `managed` is the
+  window's provenance at that moment (`is_managed_in`). No server before
+  and after is a complete observation too: `tmux:null`, no projects.
+- **An empty tick keeps the last evidence of a server** (orchestrator's
+  decision on validator F4). Publishing a `tmux:null` checkpoint over one
+  that saw a server keeps that one as `restore_checkpoint_prev:<socket>`. A
+  further empty tick keeps it, and a tick that sees a server again drops it.
+  A restore reads `evidence(latest, prev)`: the kept one when the latest saw
+  no server and both are from the same boot, else the latest. So a tmux
+  death in the last tick before a reboot still restores. A kept checkpoint
+  from an earlier boot never does. The flip side is deliberate: "kill every
+  session by hand, then reboot" restores, unless a down was issued. A down
+  (or a kill through the Sessions page, below) is the way out.
+- **`tmux_now` keeps three answers apart.** Present (with the instance),
+  Absent (`session_confirmed_absent`: no server, no socket file, a stale
+  socket), and Unknown (anything else, e.g. `Permission denied`). Unknown is
+  never read as an empty server.
+- **A person's down and Stop are durable, versioned intents.**
+  `projects::down` writes `meta project_down:<id>` BEFORE it kills the
+  session. A kill that fails leaves the session alive and marked, and the
+  error says so. Stopping a managed agent (`hub_agent_stop` / `tmm agent
+  stop`, and a team restart's "no longer in team" stop) writes `meta
+  slot_stopped:<id>:<window>` before the kill. So does the Sessions page:
+  its `kill_session` writes the down for a project's session, and its
+  `kill_window` writes the Stop for a managed agent's window (validator F3).
+  A mark's value is its version, from the monotonic `restore_intent_seq`
+  counter, never a clock. No observation ever revokes an intent: a project
+  seen live after its down, the same second included, stays suppressed.
+- **Only a start clears an intent, and only the version it read** (review
+  P1-A). Each top-level start verb takes ONE `StartPermit` for its (project,
+  window) BEFORE any side effect, and the permit records the Stop version
+  that stood then. The verbs are the hub's Start/Restart (taken before its
+  kill), a team restart's member (likewise), a spawn (once its window name
+  is decided, before anything is written; a hire, a team member and a fork
+  all go through it, validator F1), and a project `up`. Nested launches
+  (`respawn`, `launch_window`, the resume) never read the mark: they run
+  under the verb's permit. The verb finishes the permit once, at its end,
+  and clears exactly that version (`DELETE … WHERE value = v`), only on an
+  error-free success. A Stop written while the verb ran, or a newer one that
+  replaced the version it read, stands. A project `up` (`up_with`) clears the
+  down only when no slot reported an error, and a window's Stop only when
+  that window came up created/existing with no error. A Start whose window
+  came back but whose CLI did not launch returns that error to the Hub
+  (`restart failed: …`); it is not a restart (review P2). `agent_remove`
+  forgets the agent's Stop whatever its version, and deleting the project
+  removes all of its marks. Every agent stop (the button, `tmm agent stop`,
+  a team restart's "no longer in team") is one helper, `stop_agent_window`:
+  the mark first, and a stop that cannot be recorded kills nothing.
+- **A Sessions-page close is one operation on one window** (review P1 on
+  F3). `close_window` resolves the target (`session:index`, `session:name`
+  or `@id`) by LISTING windows, never with `display-message`. That command
+  answers a missing target with some other window, or with nothing and exit
+  0 (measured, tmux 3.6a). The resolved identity is the server incarnation
+  (socket, pid, start time: the checkpoint's definition, since a new server
+  can reuse a pid and an `@id`), the session, the name and the native `@id`.
+  Managed-ness is asked three ways (`managed::managed_state`): Managed (a
+  marker is there), Plain (every marker confirmed absent), or Unknown (a
+  marker could not be read, e.g. an unreadable agents dir). Unknown refuses
+  the close; the readers' `is_managed_in` keeps its fail-open bool. The Stop
+  is written under the project that declares that PHYSICAL session, and only
+  while it still does. Then `close_window` re-checks that the same server
+  incarnation still shows that `@id` under that session and name, and kills
+  the `@id`. It never kills the original string, which a renumber can point
+  at another window. A target that is confirmed gone is done. A lookup tmux
+  cannot answer, a target that names no window, an unreadable marker, or a
+  project that changed meanwhile is an error, and nothing is killed.
+- **The trigger is a host reboot that took the server with it**
+  (`reboot_trigger`). Four conditions must all hold: restore is enabled; a
+  checkpoint exists for the socket; the checkpoint's boot id and the current
+  one are both known and differ (Linux `/proc/sys/kernel/random/boot_id`,
+  macOS `kern.bootsessionuuid`); and tmux is now Absent or another instance.
+  Everything else restores nothing: the last session killed while the
+  gateway was stopped, or a `kill-server`, with no reboot after it (same
+  boot; a reboot after it restores from the kept checkpoint, see "An empty
+  tick", unless a down was issued); a session missing from
+  a live server (same instance); an unknown boot or tmux state; and no
+  checkpoint (the first start after the upgrade). The checkpoint it judges
+  is `evidence(latest, prev)` (above).
+- **The plan** (`plan`) reads the checkpoint, the declaration and the intents
+  as they are now. A project comes back when the checkpoint saw it live and
+  it still exists, is not archived, has no down mark, and its directory is
+  there. Of its slots, only the ones live in the checkpoint, settled, and not
+  stopped come back, and only when the declaration still says what the
+  checkpoint saw. A different kind is `KindMismatch`: a window seen as a
+  shell is never planned as an agent, nor the reverse. An agent whose
+  backend or conversation id changed since is `ChangedSinceCheckpoint`. The
+  plan never takes the declaration's identity over the observation's. An
+  agent slot additionally needs its saved conversation
+  id and a provable identity: a managed agent needs a managed home whose
+  `launch.json` holds a command, and an adopted agent needs a CLI with an
+  exact `resume_id`. Otherwise it is skipped, never relaunched from the bare
+  backend line, a "most recent" resume or a blank prompt. Autostart projects
+  the checkpoint did not see are added only on request, as shell windows
+  only. Every skip carries its reason (`SkipReason`), so "why did X not come
+  back" has an answer. Restore never reads `last_seen_at`; it stays the MRU
+  sort key.
+
 ## Storage
 
 `state.db` — SQLite, ours, at `$XDG_CONFIG_HOME/tmux-mobile/state.db`
@@ -564,7 +690,8 @@ can reach it without a DOM.
 ## Known edges
 
 - `autostart` is stored but nothing acts on it yet (decision 3: manual restore
-  first).
+  first). Board #422 records the reboot evidence and plans the restore (see
+  "After a host reboot"); bringing sessions back is its later rounds.
 - A window renamed by hand looks like "old window gone, new window appeared":
   the old slot leaves the declaration and the new one has to settle again.
 - `up` restores windows, not panes: a split layout inside a window is not part
@@ -573,6 +700,79 @@ can reach it without a DOM.
 ## Rules and their reasons
 
 Each entry is a decision with the reason it was made; treat them as normative. They lived in the root `CLAUDE.md` until 2026-09-02 (board #73), when that file became an index and the rules moved next to the design they belong to.
+
+### Restore evidence is a complete observation; a person's down and Stop outlive it (2026-10-18, #422)
+
+The reboot restore acts on three kinds of fact, and they are kept apart. The
+declaration and the person's intents are one kind. The checkpoint, a
+complete observation, is the second. The restore batch, work in progress, is
+the third (later round). The reviewer's design P1s and round-1 findings are
+the reasons:
+
+- A checkpoint is published only from a tick that saw the whole server: the
+  same `(pid, start_time, socket)` before and after, and every live project's
+  windows read. A failed tmux query is Unknown and advances nothing. Equal
+  wall-clock seconds are not evidence, because `mark_seen` autocommits row by
+  row and `mark_up` also writes `last_seen_at`.
+- The checkpoint is committed in ONE transaction with the folds it describes,
+  and the plan refuses a window whose declaration no longer matches it. A
+  checkpoint committed before its folds, followed by a refused fold, left new
+  evidence beside old slots. A plan that took the declaration's kind would
+  then relaunch an old CLI in a window last seen as a shell (round-1 review
+  P1-B).
+- The down and Stop intents are written BEFORE the kill, and only an explicit
+  start removes them. With "a later live observation revokes it", a down that
+  committed while a capture was mid-observation would be resurrected after a
+  reboot. A start clears only the version it read at its beginning, and only
+  on a clean success, under ONE permit per top-level verb. Before that rule,
+  an old up or restart that returned after a newer Stop deleted that Stop; a
+  window created with a launch error counted as started; and a restart's
+  nested respawn re-read the mark and cleared a Stop written after the
+  restart began (round-1 review P1-A and its residual).
+- A Sessions-page close resolves, marks and kills ONE native window. A
+  lookup that failed used to kill anyway with no Stop, and a renumber could
+  record A and kill B (review P1 on F3).
+- Only a reboot triggers a restore: the boot id changed and the server
+  instance is gone. With a wall-clock comparison, a person's kill of the last
+  session while the gateway was stopped would restore against their act.
+- A managed agent comes back only through its recipe with its exact id.
+  The bare backend line runs the user-space config, whose hooks never fire
+  (the 2026-08-18 "deaf agent").
+
+Pinned by `t1_only_a_complete_observation_becomes_a_checkpoint`,
+`checkpoint_windows_are_the_folded_slots_of_the_live_windows`,
+`a_refused_fold_rolls_back_the_checkpoint_and_the_whole_tick`,
+`an_empty_tick_keeps_the_last_evidence_of_a_server`,
+`an_empty_latest_checkpoint_defers_to_the_kept_one_from_the_same_boot`,
+`the_tmux_server_reads_as_present_absent_or_unknown` (a real private server
+and a permission-denied socket), `t2_t3_a_down_suppresses_until_an_explicit_up_clears_it`,
+`a_down_whose_kill_fails_stays_on_record`,
+`intents_are_versioned_cleared_conditionally_and_scoped_exactly`,
+`an_up_clears_only_the_intents_it_read_and_only_on_success` (the reconcile
+is the barrier), `a_clean_start_clears_the_stop_it_found_and_a_later_stop_survives`
+(the real hub Stop → Start path, then the nested respawn fallback as the
+barrier: a newer Stop, or a first Stop, written during the launch survives;
+a failed launch clears nothing; a resumed window whose CLI did not launch is
+a restart error and keeps the mark),
+`a_team_restart_that_drops_a_member_records_its_stop`,
+`closing_a_window_marks_and_kills_the_same_native_window` (a renumber between
+lookup and kill; an unreadable agents dir, a project that changed meanwhile,
+and a window renamed before the kill refuse the close), `a_window_lookup_tmux_cannot_answer_kills_nothing`,
+`managed_state_tells_unreadable_from_absent`,
+`same_server_compares_the_whole_incarnation`,
+`a_tick_disturbed_between_its_listings_publishes_no_checkpoint` (the capture
+tick's own wiring on a real private server: a session that vanishes after the
+listing, and a server replaced before the second listing),
+`live_facts_read_the_recipe_and_the_resume_table`,
+`stopping_a_managed_agent_kills_the_window_and_says_so` (a failed start keeps
+the mark), `sessions_page_kills_record_the_persons_intent`,
+`every_managed_launch_is_a_start_for_the_stop_intent`,
+`the_plan_refuses_a_window_whose_declaration_disagrees_with_the_checkpoint`,
+`t4_only_a_seen_live_existing_reachable_project_is_planned`,
+`t5_only_live_unstopped_windows_with_a_provable_identity_are_planned`,
+`t6_only_a_reboot_that_took_the_server_restores` and
+`adopt_then_down_then_up_restores_the_workspace` (the real tick publishes;
+down marks, up clears).
 
 ### A fresh pane is typed into only after its shell shows a prompt (2026-10-09, #325)
 

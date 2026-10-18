@@ -54,6 +54,8 @@ pub fn agent_remove(session: &str, agent: &str) -> Result<Value, String> {
         return Err(format!("'{agent}' is not an agent of project '{}'", project.name));
     }
     let slot_removed = with_store(|store| store.delete_slot(&project.id, agent))?;
+    // A removed agent has no Stop left to honour (board #422).
+    with_store(|store| store.forget_slot_stopped(&project.id, agent))?;
     // The identity is gone for good: so are its accepted person-needed paints
     // (board #362 c). A stop or a restart keeps them; only a remove forgets.
     with_store(|store| store.forget_person_paints(session, agent))?;
@@ -142,8 +144,74 @@ pub fn is_managed_in(workspace: Option<&str>, window_name: &str) -> bool {
 /// stop-hook auto-post and `@all` delivery resumed for it (observed
 /// 2026-08-19).
 pub(super) fn home_is_managed(dir: &std::path::Path, window_name: &str) -> bool {
-    dir.join("launch.json").is_file()
-        || dir.join("agents").join(format!("{window_name}.json")).is_file()
+    // Fail-open by design for the readers (an unreadable marker reads as
+    // "not managed", as `is_file` always did); a destructive door asks
+    // `managed_state` instead.
+    matches!(marker_state(dir, window_name), ManagedState::Managed)
+}
+
+/// Is `window` a managed agent of `workspace`, as a DESTRUCTIVE door must ask
+/// it (board #422 review, F3 residual): `Managed` when a marker is there,
+/// `Plain` when every marker is confirmed absent, `Unknown` when one could
+/// not be read (permission, I/O) — never folded into "not managed". The same
+/// markers as `home_is_managed`, which is this answer with Unknown read as no.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedState {
+    Managed,
+    Plain,
+    Unknown(String),
+}
+
+pub fn managed_state(workspace: &str, window: &str) -> ManagedState {
+    match agents::home_dir(workspace, window) {
+        Some(dir) => marker_state(&dir, window),
+        // A name that can never be a home is never managed.
+        None => ManagedState::Plain,
+    }
+}
+
+fn marker_state(dir: &std::path::Path, window_name: &str) -> ManagedState {
+    let mut unknown = None;
+    for marker in [dir.join("launch.json"), dir.join("agents").join(format!("{window_name}.json"))] {
+        match std::fs::metadata(&marker) {
+            Ok(m) if m.is_file() => return ManagedState::Managed,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.kind() == std::io::ErrorKind::NotADirectory => {}
+            Err(e) => unknown = unknown.or(Some(format!("{}: {e}", marker.display()))),
+        }
+    }
+    match unknown {
+        Some(e) => ManagedState::Unknown(e),
+        None => ManagedState::Plain,
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    /// The tri-state the close door reads: a marker is Managed, confirmed
+    /// absence is Plain, an unreadable agents dir is Unknown — while the
+    /// readers' bool keeps reading Unknown as "not managed".
+    #[test]
+    fn managed_state_tells_unreadable_from_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = std::env::temp_dir().join(format!("tmm-mstate-{}", uuid::Uuid::new_v4()));
+        let agents = ws.join(".tmm/agents");
+        std::fs::create_dir_all(agents.join("dev")).unwrap();
+        std::fs::write(agents.join("dev/launch.json"), "{}").unwrap();
+        let path = ws.to_string_lossy().to_string();
+        assert_eq!(managed_state(&path, "dev"), ManagedState::Managed);
+        assert_eq!(managed_state(&path, "plain"), ManagedState::Plain, "no home: confirmed plain");
+        assert_eq!(managed_state("/nonexistent-tmm-ws", "dev"), ManagedState::Plain);
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let locked = managed_state(&path, "dev");
+        let fail_open = is_managed_in(Some(&path), "dev");
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&ws);
+        assert!(matches!(locked, ManagedState::Unknown(ref e) if e.contains("ermission")), "{locked:?}");
+        assert!(!fail_open, "the readers' bool is unchanged: unknown reads as not managed");
+    }
 }
 
 /// Who spawned this managed agent, read off its launch recipe. `None` means
@@ -338,12 +406,15 @@ mod tests {
         // Declared, never started (or started and stopped): no home on disk.
         with_store(|store| store.replace_slots(&id, &[slot("ghost")])).unwrap();
         assert!(managed_home(&session, "ghost").is_none(), "no home — that is the point");
+        // Its Stop (board #422) goes with it: nothing is left to suppress.
+        with_store(|store| store.set_slot_stopped(&id, "ghost")).unwrap();
 
         let r = agent_remove(&session, "ghost").unwrap();
         assert_eq!(r["slot_removed"].as_bool(), Some(true), "the declaration is what we can remove");
         assert_eq!(r["home_removed"].as_bool(), Some(false), "there was nothing to delete");
         let slots = with_store(|store| store.slots(&id)).unwrap();
         assert!(slots.is_empty(), "`up` cannot bring it back");
+        assert!(!with_store(|store| store.restore_intents()).unwrap().stopped.contains(&(id.clone(), "ghost".to_string())), "remove forgets the Stop");
         // Nothing left of it anywhere: now it IS an unknown name.
         assert!(agent_remove(&session, "ghost").is_err());
 

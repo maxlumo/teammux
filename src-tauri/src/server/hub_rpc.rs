@@ -820,22 +820,23 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // Stop needs something to stop. Restart does not: the isolated home
             // outlives the window, so `restart` doubles as "start it again"
             // after a stop — which is what the button does when it reads Start.
-            match (live, restart) {
-                (None, false) => {
-                    return Err(RpcError::InvalidParams(format!("no window named '{agent}' in session '{session}'")));
-                }
-                (Some(window), _) => {
-                    if let Err(e) = crate::tmux::kill_window(&format!("{session}:{window}")) {
-                        return Err(RpcError::Internal(e));
-                    }
-                }
-                (None, true) => {}
+            if live.is_none() && !restart {
+                return Err(RpcError::InvalidParams(format!("no window named '{agent}' in session '{session}'")));
             }
             if !restart {
+                stop_agent_window(session, agent).map_err(RpcError::Internal)?;
                 let _ = rooms::post(&room, agent, &format!("[tmm] stopped {agent}"));
                 return Ok(serde_json::json!({ "stopped": agent }));
             }
-            let resumed = start_agent(session, agent).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
+            // A restart is ONE start verb: its permit is taken here, before
+            // its kill, and finished once at its end (review P1-A residual).
+            let permit = crate::projects::start_permit(session, agent).map_err(RpcError::Internal)?;
+            if let Some(window) = live {
+                if let Err(e) = crate::tmux::kill_window(&format!("{session}:{window}")) {
+                    return Err(RpcError::Internal(e));
+                }
+            }
+            let resumed = start_agent(session, agent, permit).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
             let _ = rooms::post(&room, agent, &format!("[tmm] restarted {agent}"));
             Ok(serde_json::json!({ "restarted": agent, "resumed": resumed }))
         }
@@ -860,9 +861,11 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let mut errors = Vec::new();
             let mut stopped = Vec::new();
             for w in &plan.stop {
-                match window_of_agent(session, w).map(|n| crate::tmux::kill_window(&format!("{session}:{n}"))) {
-                    Some(Err(e)) => errors.push(serde_json::json!({ "name": w, "error": e })),
-                    _ => {
+                // Stopped by the definition's owner: the same Stop as the
+                // button's, durable before the kill (board #422).
+                match stop_agent_window(session, w) {
+                    Err(e) => errors.push(serde_json::json!({ "name": w, "error": e })),
+                    Ok(()) => {
                         let _ = rooms::post(&room, w, &format!("[tmm] stopped {w} — no longer in team {team}"));
                         stopped.push(w.clone());
                     }
@@ -882,13 +885,21 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             }
             let mut restarted = Vec::new();
             for w in &plan.restart {
+                // One start verb per member: the permit precedes its kill.
+                let permit = match crate::projects::start_permit(session, w) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        errors.push(serde_json::json!({ "name": w, "error": format!("restart failed: {e}") }));
+                        continue;
+                    }
+                };
                 if let Some(n) = window_of_agent(session, w) {
                     if let Err(e) = crate::tmux::kill_window(&format!("{session}:{n}")) {
                         errors.push(serde_json::json!({ "name": w, "error": e }));
                         continue;
                     }
                 }
-                match start_agent(session, w) {
+                match start_agent(session, w, permit) {
                     Ok(_) => {
                         let _ = rooms::post(&room, w, &format!("[tmm] restarted {w}"));
                         restarted.push(w.clone());
@@ -1002,25 +1013,71 @@ fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend>
 /// fork, a uniquified teammate or a team member is not in the registry under
 /// its window name (board #389). True when it resumed; `Err` is the spawn's
 /// own error, which the caller reports as `restart failed: …`.
+/// STOP one managed agent: the ONE mechanism behind the Stop button, `tmm
+/// agent stop` and a team restart's "no longer in team" (board #422). The
+/// Stop intent is durable BEFORE the kill — a restore after a reboot never
+/// starts what was paused — and a stop that cannot be recorded kills nothing.
+/// An agent with no live window is recorded as stopped all the same.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn start_agent(session: &str, agent: &str) -> Result<bool, String> {
+fn stop_agent_window(session: &str, agent: &str) -> Result<(), String> {
+    crate::projects::mark_agent_stopped(session, agent).map_err(|e| format!("'{agent}' was not stopped — the stop could not be recorded: {e}"))?;
+    match window_of_agent(session, agent) {
+        Some(window) => crate::tmux::kill_window(&format!("{session}:{window}")),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
+    start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)
+}
+
+/// The resume half of a start: bring the agent's materials up to date with
+/// the CURRENT definition + app-wide AGENTS.md (the recipe replay is
+/// verbatim, so whatever is on disk now is what the agent will be;
+/// `refresh_agent` re-materializes when the window name resolves to a
+/// registry def, else the hooks refresh still repairs observation), then
+/// recreate THIS slot from the declaration. `None` = no such slot yet.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str) -> Option<crate::projects::reconcile::SlotResult> {
+    if !crate::projects::spawn::refresh_agent(&project.path, session, agent) {
+        crate::projects::spawn::refresh_hooks(&project.path, agent);
+    }
+    crate::projects::up_agent(&project.id, agent).ok().flatten()
+}
+
+/// `start_agent`, with the resume and the fallback launch as seams for the
+/// tests. The caller's `permit` (taken before its kill) is the only read of the Stop
+/// mark; the resume and the respawn run under it and never read it, and it
+/// is finished ONCE here, clearing that version only on a clean start: a
+/// resume whose window came back with no launch error, or a respawn that
+/// launched (board #422). A window that came back but whose CLI did not
+/// launch is an error, not a restart (review P2).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn start_agent_with(
+    session: &str,
+    agent: &str,
+    permit: crate::projects::StartPermit,
+    resume: impl FnOnce(&crate::projects::store::Project, &str, &str) -> Option<crate::projects::reconcile::SlotResult>,
+    respawn: impl FnOnce(&str, &str) -> Result<serde_json::Value, String>,
+) -> Result<bool, String> {
     let mut resumed = false;
     if let Ok(Some(project)) = crate::projects::project_for_session(session) {
-        // Bring the agent's materials up to date with the CURRENT
-        // definition + app-wide AGENTS.md first: the recipe replay is
-        // verbatim, so whatever is on disk now is what the agent will
-        // be. `refresh_agent` re-materializes prompt/config/recipe
-        // when the window name resolves to a registry def; when it
-        // cannot (a uniquified teammate, a team-role synthetic), the
-        // hooks refresh below still repairs observation, exactly as
-        // before.
-        if !crate::projects::spawn::refresh_agent(&project.path, session, agent) {
-            crate::projects::spawn::refresh_hooks(&project.path, agent);
+        let r = resume(&project, session, agent);
+        if let Some(r) = r.filter(|r| r.status == "created" || r.status == "existing") {
+            if window_of_agent(session, agent).is_some() {
+                if let Some(e) = r.error {
+                    return Err(format!("{agent}'s window came back but its CLI did not launch: {e}"));
+                }
+                resumed = true;
+            }
         }
-        resumed = crate::projects::up_agent(&project.id, agent).unwrap_or(false) && window_of_agent(session, agent).is_some();
     }
     if !resumed {
-        crate::projects::spawn::respawn(session, agent)?;
+        respawn(session, agent)?;
+    }
+    if let Err(e) = permit.finish(true) {
+        eprintln!("hub: {agent} started but its stop mark was not cleared: {e}");
     }
     Ok(resumed)
 }
@@ -4881,8 +4938,152 @@ mod tests {
                 msgs.iter().any(|m| m["body"].as_str().unwrap_or("").contains("[tmm] stopped dev")),
                 "the room records it: {msgs:?}"
             );
+            // Board #422: the Stop is a durable intent a reboot restore honours.
+            let project = crate::projects::project_for_session(&session).unwrap().unwrap();
+            let intents = crate::projects::tests::restore_intents();
+            assert!(intents.stopped.contains(&(project.id.clone(), "dev".to_string())), "the stop is on record");
+            // A start that FAILS keeps the Stop it found (P1-A): this recipe
+            // names no backend, so neither the resume nor the respawn launches.
+            let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+            assert!(r.error.is_some(), "the start failed");
+            assert!(crate::projects::tests::restore_intents().stopped.contains(&(project.id, "dev".to_string())), "a failed start keeps the mark");
         }
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #422 P1-A through the REAL start path: Stop records a versioned
+    /// mark, the hub's Start (restart of a stopped agent) brings the window
+    /// back with no error and clears exactly that version; then the nested
+    /// fallback path, where a Stop recorded while the launch runs survives.
+    #[test]
+    fn a_clean_start_clears_the_stop_it_found_and_a_later_stop_survives() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-start-{}", std::process::id());
+        let ws = std::env::temp_dir().join(format!("tmm-start-ws-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::projects::spawn::LaunchRecipe {
+            backend: "kiro",
+            env: &[],
+            cmd: "sleep 600",
+            spawned_by: "",
+            team: None,
+            agent_def: "",
+            member: "",
+            from_member: "",
+            input_mode: "",
+        }
+        .write(&home)
+        .unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "sleep 600"])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(created, "the isolated test tmux starts a session");
+        // A second window keeps the session alive while dev is stopped.
+        crate::tmux::new_named_window(&session, "keep", &ws.to_string_lossy()).unwrap();
+        crate::projects::adopt(&session, Some("start-test")).unwrap();
+        let project = crate::projects::project_for_session(&session).unwrap().unwrap();
+        let stopped = || crate::projects::tests::restore_intents().stopped.contains(&(project.id.clone(), "dev".to_string()));
+
+        let r = handle_hub_request(&req("hub_agent_stop", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(stopped(), "the stop is on record");
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(window_of_agent(&session, "dev").is_some(), "the agent is back");
+        assert!(!stopped(), "a clean start clears the stop it found");
+
+        // The NESTED path (review P1-A residual): the verb's permit is the
+        // only read; the fallback launch runs under it. With no slot the
+        // start falls back to the respawn, injected here as the barrier: a
+        // newer Stop lands while it runs.
+        crate::projects::agent_remove(&session, "dev").unwrap();
+        let fallback = |mark: bool, ok: bool| {
+            move |s: &str, a: &str| {
+                if mark {
+                    crate::projects::mark_agent_stopped(s, a).unwrap();
+                }
+                if ok { Ok(serde_json::json!({})) } else { Err("launch failed".to_string()) }
+            }
+        };
+        // 1. A Stop stood (v1) when the verb began; a newer Stop (v2) lands
+        //    during the respawn; the start returns clean — v2 stands.
+        crate::projects::mark_agent_stopped(&session, "dev").unwrap();
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        assert_eq!(start_agent_with(&session, "dev", permit, resume_slot, fallback(true, true)), Ok(false), "the fallback ran");
+        assert!(stopped(), "a Stop written during the nested launch survives the verb");
+        // 2. No mark when the verb began; one appears during the respawn — it stands.
+        crate::projects::tests::forget_stop(&project.id, "dev");
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        start_agent_with(&session, "dev", permit, resume_slot, fallback(true, true)).unwrap();
+        assert!(stopped(), "no mark at the start, a mark during it: it stands");
+        // 3. A failed launch keeps the mark the verb read.
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        assert!(start_agent_with(&session, "dev", permit, resume_slot, fallback(false, false)).is_err());
+        assert!(stopped(), "a failed start clears nothing");
+        // Control: the same verb, clean and unraced, clears exactly what it read.
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        start_agent_with(&session, "dev", permit, resume_slot, fallback(false, true)).unwrap();
+        assert!(!stopped());
+
+        // A9: a resume whose window came back but whose CLI did not launch is
+        // a restart ERROR — the Hub says so — and the Stop it found stays.
+        crate::tmux::new_named_window(&session, "dev", &ws.to_string_lossy()).unwrap();
+        crate::projects::mark_agent_stopped(&session, "dev").unwrap();
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        let failed_cli = |_: &crate::projects::store::Project, _: &str, _: &str| {
+            Some(crate::projects::reconcile::SlotResult { window_name: "dev".into(), status: "created", error: Some("tmux error: pane in mode".into()) })
+        };
+        let got = start_agent_with(&session, "dev", permit, failed_cli, fallback(false, true));
+        assert!(got.as_ref().is_err_and(|e| e.contains("did not launch") && e.contains("pane in mode")), "{got:?}");
+        assert!(stopped(), "a window without its CLI is not a start");
+        // Control: the same resume with no error is a clean restart.
+        let permit = crate::projects::start_permit(&session, "dev").unwrap();
+        let clean_cli = |_: &crate::projects::store::Project, _: &str, _: &str| {
+            Some(crate::projects::reconcile::SlotResult { window_name: "dev".into(), status: "created", error: None })
+        };
+        assert_eq!(start_agent_with(&session, "dev", permit, clean_cli, fallback(false, false)), Ok(true));
+        assert!(!stopped());
+
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #422 (validator I9): a team restart that drops a member STOPS it
+    /// the way the button does — its Stop mark is written, so a reboot
+    /// restore does not bring back a member the definition no longer has.
+    /// Narrowed by `only` to the departed window, so nothing is spawned.
+    #[test]
+    fn a_team_restart_that_drops_a_member_records_its_stop() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-tdrop-{}", std::process::id());
+        let team = format!("tdrop{}", std::process::id());
+        let ws = std::env::temp_dir().join(format!("tmm-tdrop-ws-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/gone");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": team, "member": "gone" }).to_string()).unwrap();
+        crate::projects::teams_save(&serde_json::json!({ "name": team, "description": "", "members": serde_json::json!([
+            { "name": "keep", "agent": { "name": "", "backend": "kiro", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" } },
+        ]).to_string() }))
+        .unwrap();
+        let cwd = ws.to_string_lossy().to_string();
+        assert!(crate::tmux::new_session(&session, Some(&cwd), Some("sleep 600")).is_ok());
+        crate::tmux::rename_window(&format!("{session}:^"), "anchor").unwrap();
+        crate::tmux::new_named_window(&session, "gone", &cwd).unwrap();
+        crate::projects::adopt(&session, Some("tdrop")).unwrap();
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+
+        let r = handle_hub_request(&req("hub_team_restart", serde_json::json!({ "session": session, "team": team, "only": ["gone"] })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let result = r.result.unwrap();
+        assert_eq!(result["stopped"], serde_json::json!(["gone"]), "{result}");
+        assert!(window_of_agent(&session, "gone").is_none(), "the departed member's window is closed");
+        assert!(crate::projects::tests::restore_intents().stopped.contains(&(id.clone(), "gone".to_string())), "and its Stop is on record");
+
+        let _ = crate::projects::delete(&id);
+        crate::projects::teams_delete(&team).ok();
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -5303,7 +5504,7 @@ mod tests {
         let window = window_of_agent(&session, "rfe-2").expect("the agent is running");
         crate::tmux::kill_window(&format!("{session}:{window}")).unwrap();
         assert!(window_of_agent(&session, "rfe-2").is_none());
-        let resumed = start_agent(&session, "rfe-2").expect("the restart brings it back instead of losing it");
+        let resumed = start_agent(&session, "rfe-2", crate::projects::start_permit(&session, "rfe-2").unwrap()).expect("the restart brings it back instead of losing it");
         assert!(!resumed, "the slot was not settled, so this is the fresh-launch fallback");
         assert!(window_of_agent(&session, "rfe-2").is_some(), "and the agent is running again, in its own window");
         let again = recipe();

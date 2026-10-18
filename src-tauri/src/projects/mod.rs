@@ -30,6 +30,7 @@ pub(crate) mod recipe;
 pub mod reconcile;
 pub mod recovery;
 pub mod registry;
+pub mod restore;
 pub mod rooms;
 pub mod scratch;
 pub(crate) mod skills;
@@ -49,7 +50,7 @@ pub(crate) use registry::{with_registry_mcp, with_registry_skills};
 pub use managed::{agent_remove, deliver_chat_line, is_managed_in, joined_team, managed_home, member_of, spawned_by, team_of};
 pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_load, skill_read, skill_refresh, skill_save, skills_list};
 pub use capture::{SESSION_SETTLE_SECS, capture_loop, capture_once};
-pub use projects::{Refused, adopt, auto_adopt_once, create, delete, down, list, project_for_session, rename, set_archived, set_autostart, up, up_agent};
+pub use projects::{Refused, adopt, auto_adopt_once, create, delete, down, list, mark_agent_stopped, project_for_session, close_window, record_session_kill, rename, set_archived, set_autostart, start_permit, up, up_agent, StartPermit};
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -247,6 +248,17 @@ pub(crate) mod tests {
             let dir = crate::config::fresh_process_dir("tmm-projects-test");
             std::env::set_var("TMM_STATE_DB", dir.join("state.db"));
         });
+    }
+
+    /// The restore intents in the test store (board #422), for tests in other
+    /// module trees that cannot reach `with_store`.
+    pub(crate) fn restore_intents() -> store::RestoreIntents {
+        with_store(|s| s.restore_intents()).unwrap()
+    }
+
+    /// Forget one agent's Stop mark in the test store (board #422).
+    pub(crate) fn forget_stop(id: &str, window: &str) {
+        with_store(|s| s.forget_slot_stopped(id, window)).unwrap()
     }
 
     #[test]
