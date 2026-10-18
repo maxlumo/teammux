@@ -2291,8 +2291,79 @@ mod tests {
         fn posts(&self) -> Vec<(String, String, Vec<String>)> {
             self.spy.0.lock().unwrap().clone()
         }
+        /// `deliver_chat_line`, which every test asserts succeeded: on a
+        /// refusal it panics with WHY (board #421), so the next flake is
+        /// diagnosable — `diagnose` names the target, the panes, the warn
+        /// rows (an `undelivered` reason lands there), the readiness files
+        /// and the screen.
         fn deliver(&self, line: &str) -> bool {
-            crate::projects::deliver_chat_line(&self.session, "d1", line)
+            if crate::projects::deliver_chat_line(&self.session, "d1", line) {
+                return true;
+            }
+            panic!("rig.deliver refused {line:?}: {}", self.diagnose());
+        }
+        /// Everything a failed rig step needs to be read later (board #421:
+        /// two flakes left only a bare assert behind).
+        fn diagnose(&self) -> String {
+            // Never panics itself (review P2): a field that cannot be read
+            // says `unreadable: …`, so the failure it reports is not lost
+            // behind a second panic. Each read is guarded on its own.
+            fn field<T: std::fmt::Debug>(f: impl FnOnce() -> Result<T, String>) -> String {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                    Ok(Ok(v)) => format!("{v:?}"),
+                    Ok(Err(e)) => format!("unreadable: {e}"),
+                    Err(p) => format!("unreadable: {}", p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()),
+                }
+            }
+            let state = self.ws.join(".tmm/agents/d1/dsh/tmm");
+            let file = |n: &'static str| {
+                let path = state.join(n);
+                field(move || match std::fs::read_to_string(&path) {
+                    Ok(t) => Ok(t.trim().to_string()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("-".into()),
+                    Err(e) => Err(format!("{}: {e}", path.display())),
+                })
+            };
+            let ws = self.ws.clone();
+            let inbox_dir = self.root.join("inbox");
+            format!(
+                "target={} panes={} warns={} ready={} steer-ready={} run={} open={} handoff={} held={} busy={} tasks={} inbox={} screen tail={}",
+                field(|| Ok::<_, String>(crate::projects::delivery::agent_target(&self.session, "d1"))),
+                field(|| crate::tmux::list_panes(&self.session).map(|ps| ps.iter().map(|p| format!("{}:{} active={} cmd={}", p.window, p.window_name, p.active, p.current_command)).collect::<Vec<_>>())),
+                field(|| Ok::<_, String>(crate::projects::telemetry::recent_events(&self.session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect::<Vec<_>>())),
+                file("ready"), file("steer-ready"), file("run"),
+                field(|| Ok::<_, String>(state.join("open").exists())),
+                field(|| Ok::<_, String>(state.join("handoff").exists())),
+                field(|| Ok::<_, String>(self.held())),
+                field(|| Ok::<_, String>(self.busy())),
+                field(move || {
+                    let entries = std::fs::read_dir(&ws).map_err(|e| format!("{}: {e}", ws.display()))?;
+                    Ok::<_, String>(entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("task-")).count())
+                }),
+                field(move || {
+                    inbox_files(&inbox_dir)
+                        .iter()
+                        .map(|f| {
+                            let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
+                            let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", f.display()))?;
+                            Ok(v["payload"]["hook_event_name"].as_str().unwrap_or("?").to_string())
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                }),
+                field(|| Ok::<_, String>(self.screen().lines().rev().filter(|l| !l.trim().is_empty()).take(8).map(str::to_string).collect::<Vec<_>>())),
+            )
+        }
+        /// `dsh::tests::wait_for` that says, on a timeout, what the rig
+        /// looked like (`diagnose`).
+        fn wait_for(&self, what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            while std::time::Instant::now() < deadline {
+                if f() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("timed out waiting for {what}: {}", self.diagnose());
         }
         /// What `hub_agent_interrupt` does, in its order: the turn is ended and
         /// its held lines dropped app-side FIRST, then Escape goes in.
@@ -2848,6 +2919,40 @@ mod tests {
         crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
+    /// Board #421: a refused rig delivery says WHY. Its window gone, the
+    /// rig's `deliver` panics naming the missing target and what tmux
+    /// listed, never a bare `assertion failed`.
+    #[test]
+    fn a_refused_rig_delivery_says_why() {
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={}:", rig.session), "-n", "spare", "sleep 60"]).unwrap();
+        crate::tmux::run_tmux(&["kill-window", "-t", &rig.target]).unwrap();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.deliver("[tmm chat 2026-10-18 03:00] lead: @d1 into nothing")));
+        let msg = refused.expect_err("a delivery to a gone window is refused");
+        let msg = msg.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.starts_with("rig.deliver refused") && msg.contains("target=None") && msg.contains("spare"), "{msg}");
+    }
+
+    /// Review P2 on fac0989b: `diagnose` never panics itself. A corrupt
+    /// inbox file reads as `inbox=unreadable: <path>: <error>` while every
+    /// other field is still there.
+    #[test]
+    fn the_rig_diagnosis_survives_what_it_cannot_read() {
+        let Some(rig) = DshRig::start_in("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let dir = rig.root.join("inbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0-00000000000000000001-1.json"), "{ not json").unwrap();
+        let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.diagnose())).expect("diagnose never panics");
+        assert!(d.contains("inbox=unreadable: ") && d.contains("0-00000000000000000001-1.json"), "{d}");
+        assert!(d.contains("target=Some(") && d.contains("tasks=0") && d.contains("ready="), "the other fields are still read: {d}");
+    }
+
     /// Board #410, steer mode end to end — the generated plugin under the
     /// real pane, production delivery, the real helper and inbox, a fake
     /// dsh loop that claims steered input at its next step:
@@ -2865,7 +2970,6 @@ mod tests {
     ///   paste).
     #[test]
     fn steered_lines_join_the_running_turn_and_every_sender_gets_the_reply() {
-        use crate::backends::dsh::tests::wait_for;
         crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
         let Some(rig) = DshRig::start_in("steer") else {
             eprintln!("skipped: no zsh, node or tmux server");
@@ -2875,14 +2979,14 @@ mod tests {
         let consume_until = |what: &str, f: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
             while !f() {
-                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {}", rig.diagnose());
                 rig.hub.consume_inbox();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         };
         assert!(rig.deliver("[tmm chat 2026-10-17 05:00] lead: @d1 one"));
         consume_until("run 1's prompt", &|| rig.busy());
-        wait_for("the steer reader's claim", 10, || rig.steer_ready());
+        rig.wait_for("the steer reader's claim", 10, || rig.steer_ready());
         assert!(rig.deliver("[tmm chat 2026-10-17 05:01] reviewer: @d1 steer two"));
         assert!(rig.deliver("[tmm chat 2026-10-17 05:01] validator: @d1 steer three"));
         consume_until("both steers", &|| rig.steers(1).len() == 2 && crate::projects::telemetry::pending_receipts(&session, "d1").is_empty() && rig.held() == 0);
@@ -2903,7 +3007,7 @@ mod tests {
         // `started-2` before its turn opens) is held, then steered.
         std::fs::write(rig.ws.join("coldstart"), "").unwrap();
         assert!(rig.deliver("[tmm chat 2026-10-17 05:02] lead: @d1 two"));
-        wait_for("run 2", 10, || rig.tasks() == 2);
+        rig.wait_for("run 2", 10, || rig.tasks() == 2);
         assert!(!rig.steer_ready(), "no claim before the root turn opens");
         assert!(rig.deliver("[tmm chat 2026-10-17 05:02] reviewer: @d1 a long one\nwith a second line"));
         assert_eq!(rig.held(), 1, "nothing is typed into a TTY nobody reads");
@@ -2935,7 +3039,6 @@ mod tests {
     ///   not final, shown as not sent, nothing runs.
     #[test]
     fn a_line_typed_after_the_turn_ended_runs_next_only_from_a_clean_hand_off() {
-        use crate::backends::dsh::tests::wait_for;
         crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
         let Some(rig) = DshRig::start_in("steer") else {
             eprintln!("skipped: no zsh, node or tmux server");
@@ -2945,7 +3048,7 @@ mod tests {
         let consume_until = |what: &str, f: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
             while !f() {
-                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {}", rig.diagnose());
                 rig.hub.consume_inbox();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -2956,23 +3059,23 @@ mod tests {
         assert!(rig.deliver("[tmm chat 2026-10-17 05:10] lead: @d1 one"));
         consume_until("run 1's prompt", &|| rig.busy());
         rig.release(1);
-        wait_for("run 1's turn end", 10, || rig.ws.join("ended-1").is_file());
+        rig.wait_for("run 1's turn end", 10, || rig.ws.join("ended-1").is_file());
         assert!(!rig.steer_ready(), "no claim after the root turn ended");
         rig.type_keys(&format!("late $(touch {})", canary.display()), true);
         rig.type_keys("late two", true);
         rig.type_keys("a draft", false);
         std::thread::sleep(std::time::Duration::from_millis(300));
         std::fs::write(rig.ws.join("exit-1"), "").unwrap();
-        wait_for("run 2 from the hand-off", 10, || rig.tasks() == 2);
+        rig.wait_for("run 2 from the hand-off", 10, || rig.tasks() == 2);
         assert_eq!(rig.task(2), format!("late $(touch {})", canary.display()), "byte for byte, through the accept-line quoting");
         assert!(!canary.exists(), "nothing ran as shell code");
-        wait_for("run 2's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
+        rig.wait_for("run 2's prompt", 10, || rig.inbox_has("UserPromptSubmit"));
         let kinds: Vec<String> = rig.inbox().iter().map(|p| p["hook_event_name"].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds, ["Stop", "UserPromptSubmit"], "run 1's Stop before the handed-off run's prompt");
         consume_until("run 1's reply", &|| rig.posts().len() == 1);
         rig.release(2);
         std::fs::write(rig.ws.join("exit-2"), "").unwrap();
-        wait_for("run 3 from the hand-off", 10, || rig.tasks() == 3);
+        rig.wait_for("run 3 from the hand-off", 10, || rig.tasks() == 3);
         assert_eq!(rig.task(3), "late two");
         rig.release(3);
         std::fs::write(rig.ws.join("exit-3"), "").unwrap();
@@ -2985,13 +3088,13 @@ mod tests {
         assert!(rig.deliver("[tmm chat 2026-10-17 05:11] lead: @d1 four"));
         consume_until("run 4's prompt", &|| rig.busy() && rig.tasks() == 4);
         rig.release(4);
-        wait_for("run 4's turn end", 10, || rig.ws.join("ended-4").is_file());
+        rig.wait_for("run 4's turn end", 10, || rig.ws.join("ended-4").is_file());
         let raced = "[tmm chat 2026-10-17 05:11] reviewer: @d1 raced the end";
         crate::projects::telemetry::record_delivery(&session, "d1", raced, "");
         crate::tmux::send_command(&rig.target, raced).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         std::fs::write(rig.ws.join("exit-4"), "").unwrap();
-        wait_for("run 5 from the hand-off", 10, || rig.tasks() == 5);
+        rig.wait_for("run 5 from the hand-off", 10, || rig.tasks() == 5);
         assert_eq!(rig.task(5), raced);
         consume_until("its receipt settled by run 5's prompt", &|| crate::projects::telemetry::pending_receipts(&session, "d1").is_empty() && rig.busy());
         assert_eq!(crate::projects::telemetry::durable_prompts(&session).last().unwrap().0, "app");
@@ -3003,7 +3106,7 @@ mod tests {
         assert!(rig.deliver("[tmm chat 2026-10-17 05:12] lead: @d1 six"));
         consume_until("run 6's prompt", &|| rig.busy() && rig.tasks() == 6);
         rig.release(6);
-        wait_for("run 6's turn end", 10, || rig.ws.join("ended-6").is_file());
+        rig.wait_for("run 6's turn end", 10, || rig.ws.join("ended-6").is_file());
         rig.type_keys("\x1b[200~half a paste", false);
         std::thread::sleep(std::time::Duration::from_millis(300));
         std::fs::write(rig.ws.join("exit-6"), "").unwrap();
@@ -3016,7 +3119,7 @@ mod tests {
         assert!(rig.deliver("[tmm chat 2026-10-17 05:13] lead: @d1 seven"));
         consume_until("run 7's prompt", &|| rig.busy() && rig.tasks() == 7);
         rig.release(7);
-        wait_for("run 7's turn end", 10, || rig.ws.join("ended-7").is_file());
+        rig.wait_for("run 7's turn end", 10, || rig.ws.join("ended-7").is_file());
         rig.type_keys("killed with its reader", true);
         std::thread::sleep(std::time::Duration::from_millis(300));
         let pid: i32 = std::fs::read_to_string(rig.ws.join("ended-7")).unwrap().trim().parse().unwrap();
