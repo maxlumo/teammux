@@ -892,8 +892,10 @@ was broken out to another window has not ended that pane), retires it in the sam
   it is and whatever it is called now, and its slot's name in its project,
   whatever pane is active or split off, until its ORIGINAL pane is confirmed
   ended: one `list-panes -a` of the socket, with the server's pid and start
-  time in the same answer (never `display-message -t %N`, which on tmux 3.6a
-  answers for another pane when `%N` is gone). A pane missing from this
+  time in the same answer (never `display-message -t %N`: a gone `%N` is no
+  error there, tmux 3.6a answers it with EMPTY pane fields (measured
+  2026-10-19) and other builds have been reported to answer with another
+  pane's fields; both mean "not the pane asked for"). A pane missing from this
   instance, another instance, or no server ends it. An answer that cannot be
   read holds EVERY window (it cannot exclude that the target is the hold's
   pane), and so does a store that cannot be read. The capture tick's `prune`
