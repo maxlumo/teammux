@@ -76,6 +76,53 @@ mod tests {
                 thread::sleep(Duration::from_millis(50));
             }
         }
+
+        /// What a `GOT <repr>` probe has read so far, as ONE byte stream: the
+        /// repr bodies of its reads, concatenated in order. How tmux's writes
+        /// fall into the probe's reads is the host's scheduling, not tmux's
+        /// behaviour (board #430: under load `ab` and `\x03` arrived as one
+        /// read), so the bytes are asserted, not the chunks. Polls
+        /// until the stream contains `needle` (10 s), like `pane_shows`.
+        fn probe_stream(&self, needle: &str) -> (String, String) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let out = tmux::capture_pane(&self.name, Some(50)).unwrap_or_default();
+                let stream = probe_reads(&out).concat();
+                if stream.contains(needle) || std::time::Instant::now() >= deadline {
+                    return (stream, out);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    /// Each `GOT b'…'` line's repr body, in order. A bytes repr escapes every
+    /// byte on its own, so the bodies concatenate into the repr of the whole
+    /// stream (the payloads here hold no quote characters).
+    fn probe_reads(out: &str) -> Vec<String> {
+        out.lines()
+            .filter_map(|l| l.trim_end().strip_prefix("GOT b"))
+            .filter_map(|r| r.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')).or_else(|| r.strip_prefix('"').and_then(|r| r.strip_suffix('"'))))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn probe_reads_join_into_one_stream_however_the_reads_fell() {
+        let split = "PROBE_READY\nGOT b'ab'\nGOT b'\\x03'\nGOT b'cd'\nGOT b'\\x06'\nGOT b'\\x1b\\x14'\n";
+        let coalesced = "PROBE_READY\nGOT b'ab\\x03'\nGOT b'cd'\nGOT b'\\x06'\nGOT b'\\x1b\\x14'\n";
+        // ESC and its C0 byte in two reads: a legal split, the same stream.
+        let esc_apart = "PROBE_READY\nGOT b'ab\\x03cd\\x06'\nGOT b'\\x1b'\nGOT b'\\x14'\n";
+        for out in [split, coalesced, esc_apart] {
+            assert_eq!(probe_reads(out).concat(), "ab\\x03cd\\x06\\x1b\\x14", "{out}");
+            check_extended_keys_stream(&probe_reads(out).concat());
+        }
+        // A missing C0 byte, ESC and C0 reversed, and an extra byte still fail.
+        for bad in ["abcd\\x06\\x1b\\x14", "ab\\x03cd\\x06\\x14\\x1b", "ab\\x03cd\\x06\\x1b\\x14x"] {
+            let bad = bad.to_string();
+            assert!(std::panic::catch_unwind(move || check_extended_keys_stream(&bad)).is_err(), "accepted a wrong stream");
+        }
+        assert_eq!(probe_reads("GOT b\"it's\"\n"), vec!["it's".to_string()]);
     }
 
     impl Drop for TestSession {
@@ -213,24 +260,33 @@ mod tests {
                      [sys.stdout.write('GOT ' + repr(os.read(0, 64)) + '\\r\\n') or sys.stdout.flush() for _ in iter(int, 1)]";
         let script = s.probe(probe);
         s.spawn(&format!("python3 {script}"));
-        thread::sleep(Duration::from_millis(1500));
+        // PROBE_READY is printed after the modifyOtherKeys request, so a pane
+        // that shows it is already in extended key mode.
+        assert!(s.pane_shows("PROBE_READY", 50).contains("PROBE_READY"), "probe did not start");
 
         // Mixed literal payload: text + Ctrl-C + text, plus a lone Ctrl-F and
         // a Ctrl+Alt combo, exactly what the frontend key path produces.
         tmux::send_keys(s.name(), "ab\x03cd", true).unwrap();
         tmux::send_keys(s.name(), "\x06", true).unwrap();
         tmux::send_keys(s.name(), "\x1b\x14", true).unwrap();
-        thread::sleep(Duration::from_millis(600));
 
-        let output = tmux::capture_pane(s.name(), Some(50)).unwrap();
+        // The bytes, in order, however the probe's reads fell (board #430).
+        let (stream, output) = s.probe_stream("\\x1b\\x14");
         println!("probe output:\n{}", output);
-        assert!(output.contains("PROBE_READY"), "probe did not start");
-        assert!(output.contains("'ab'"), "leading literal text lost");
-        assert!(output.contains("\\x03"), "Ctrl-C byte dropped by extended-keys pane");
-        assert!(output.contains("'cd'"), "trailing literal text lost");
-        assert!(output.contains("\\x06"), "Ctrl-F byte dropped by extended-keys pane");
-        assert!(output.contains("\\x1b\\x14"), "Ctrl+Alt-T (ESC + C0) dropped or split");
+        check_extended_keys_stream(&stream);
         println!("✅ literal ctrl bytes reach an extended-keys pane");
+    }
+
+    /// t08's verdict on the probe's byte stream. Read boundaries are not key
+    /// boundaries (#430 review P1), so even ESC + the C0 byte of Ctrl+Alt-T is
+    /// judged as two ADJACENT bytes of the stream, never as one read.
+    fn check_extended_keys_stream(stream: &str) {
+        assert!(stream.starts_with("ab"), "leading literal text lost: {stream}");
+        assert!(stream.contains("\\x03"), "Ctrl-C byte dropped by extended-keys pane: {stream}");
+        assert!(stream.contains("\\x03cd"), "trailing literal text lost: {stream}");
+        assert!(stream.contains("\\x06"), "Ctrl-F byte dropped by extended-keys pane: {stream}");
+        assert!(stream.contains("\\x1b\\x14"), "Ctrl+Alt-T is not ESC immediately followed by its C0 byte: {stream}");
+        assert_eq!(stream, "ab\\x03cd\\x06\\x1b\\x14", "every byte, in order, nothing extra");
     }
 
     #[test]
@@ -250,26 +306,24 @@ mod tests {
 
         // 1) bracketed-paste pane
         s.spawn(&format!("BRACKET=1 python3 {script}"));
-        thread::sleep(Duration::from_millis(1500));
+        assert!(s.pane_shows("PROBE_READY", 50).contains("PROBE_READY"), "bracketed probe did not start");
         tmux::paste_text(s.name(), "line1\rline2\rline3").unwrap();
-        thread::sleep(Duration::from_millis(600));
-        let output = tmux::capture_pane(s.name(), Some(50)).unwrap();
+        // Asserted on the byte stream, not per read (board #430).
+        let (stream, output) = s.probe_stream("\\x1b[201~");
         println!("bracketed probe:\n{}", output);
-        assert!(output.contains("\\x1b[200~"), "missing bracketed paste start marker");
-        assert!(output.contains("\\x1b[201~"), "missing bracketed paste end marker");
-        assert!(output.contains("line1\\rline2\\rline3") || (output.contains("line1") && output.contains("line3")),
-            "pasted body lost");
+        assert!(stream.contains("\\x1b[200~"), "missing bracketed paste start marker: {stream}");
+        assert!(stream.contains("\\x1b[201~"), "missing bracketed paste end marker: {stream}");
+        assert!(stream.contains("line1\\rline2\\rline3"), "pasted body lost: {stream}");
         s.kill();
 
         // 2) legacy pane (no ?2004): raw text, no markers
         s.spawn(&format!("python3 {script}"));
-        thread::sleep(Duration::from_millis(1500));
+        assert!(s.pane_shows("PROBE_READY", 50).contains("PROBE_READY"), "legacy probe did not start");
         tmux::paste_text(s.name(), "plain\rpaste").unwrap();
-        thread::sleep(Duration::from_millis(600));
-        let output = tmux::capture_pane(s.name(), Some(50)).unwrap();
+        let (stream, output) = s.probe_stream("plain\\rpaste");
         println!("legacy probe:\n{}", output);
-        assert!(!output.contains("\\x1b[200~"), "legacy pane must not receive paste markers");
-        assert!(output.contains("plain") && output.contains("paste"), "pasted body lost");
+        assert!(!stream.contains("\\x1b[200~"), "legacy pane must not receive paste markers: {stream}");
+        assert!(stream.contains("plain\\rpaste"), "pasted body lost: {stream}");
         println!("✅ paste_text brackets iff the pane requested it");
     }
 }

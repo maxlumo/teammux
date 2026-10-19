@@ -530,6 +530,13 @@ flaky wall-clock assertions in the test.
   1 s stall timer's nudge after `sleep(3500 ms)` and read an empty log at load
   29. It now waits for the nudge (30 s bound) and then gives a second one a
   grace; a wait for something that must NOT happen can only miss, never flake.
+  How a writer's bytes fall into a reader's `read()` calls is scheduling,
+  not behaviour: the tmux key probes (`main.rs` t08/t09) assert on their
+  reads concatenated into one byte stream (`probe_reads`), waited for; even
+  the ESC + C0 bytes of a Ctrl+Alt key are two adjacent bytes of that stream,
+  never one read (a read boundary is not a key boundary, review P1). Reason:
+  board #430 — t08 asserted a read `'ab'` and failed at load ~30 when `ab`
+  and `\x03` arrived as one.
 - A test that feeds a child's stdin writes only what that child reads. Where
   the child rightly exits before reading (the hook helper with no pane, or an
   inbox `mktemp` cannot write into), the test lets it exit, tolerates the
