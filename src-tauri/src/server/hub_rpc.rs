@@ -237,6 +237,13 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         continue;
                     }
                 }
+                // A window a restore made and has not seen ready (board #422
+                // round 3) may still be a shell: a /word typed there runs a
+                // path. Refused for that window, like a refused typing.
+                if crate::projects::restore_hold::held(session, &pane.window_name) {
+                    refused.push(format!("{}: restoring, not ready", pane.window_name));
+                    continue;
+                }
                 // The receipt, recorded BEFORE typing like every delivery:
                 // only where this backend declares what its prompt hook
                 // echoes for a command (`Backend::command_echo`).
@@ -4251,6 +4258,69 @@ mod tests {
         // and the wire form has no `deliveries` key at all.
         assert!(warns[0].deliveries.is_empty(), "{:?}", warns[0].deliveries);
         assert!(serde_json::to_value(&warns[0]).unwrap().get("deliveries").is_none());
+    }
+
+    /// Board #422 round 3 (R4): a /command is the one typer outside
+    /// delivery, and it asks the same restore barrier. Into a window a
+    /// restore holds — its pane may still be a shell, where a /word runs a
+    /// path — it is refused for that window and nothing is typed. Control:
+    /// with the hold gone, the same command is typed.
+    #[test]
+    fn a_command_into_a_window_a_restore_holds_is_refused() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-cmd-held-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-cmd-held-ws-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/lead");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent lead", "team": "" }).to_string()).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("cmd-held-test")).expect("adopt project");
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let socket = crate::projects::restore::socket_key();
+        let launch = uuid::Uuid::new_v4().to_string();
+        let hold = crate::projects::store::Hold {
+            socket: socket.clone(),
+            project_id: id,
+            batch: "b-held".into(),
+            ord: 0,
+            slot: "lead".into(),
+            launch: launch.clone(),
+            stage: crate::projects::store::HoldStage::Planned,
+            pane: None,
+            since: 1,
+        };
+        let batch = crate::projects::store::Batch {
+            batch: "b-held".into(),
+            socket: format!("{socket}-unrelated"),
+            boot_id: None,
+            owner_pid: 0,
+            instance: None,
+            source: crate::projects::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![],
+        };
+        crate::projects::restore_hold::with_store_for_test(|s| s.open_batch(&batch, &[hold], "x")).unwrap();
+        let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "lead", "text": "/goal held" })), None);
+        let err = r.error.map(|e| e.message).unwrap_or_default();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let text = crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default();
+        assert!(err.contains("lead: restoring, not ready"), "{err:?}");
+        assert!(!text.contains("/goal held"), "nothing typed: {text:?}");
+        crate::projects::restore_hold::with_store_for_test(|s| s.retire_hold_if(&launch)).unwrap();
+        let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "lead", "text": "/goal free" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default().contains("/goal free"));
     }
 
     /// Board #264 × #257 (orchestrator 11:29): a CLI reads a command only as a

@@ -889,6 +889,8 @@ Two words for what we KNOW, because a sender can act on two — and a third, `un
 
 NO retry and NO queue (the classification is `projects::delivery::offline_mentions`, beside the one typing path, with `offline_line` as its wording): a message to nobody is not stored for later. What exists is the room — the message is there, and `tmm log` or the feed is where a late-starting agent reads it. Holding it would mean inventing a second queue beside the one the deliveries table already is (#249), and delivering it on start would type a line whose moment has passed.
 
+**After a reboot restore, a mention before the agent's window exists is offline (board #422 round 3).** The restore makes each agent window under a placeholder and gives it the agent's name only at its launch; until then a mention of that agent is said offline like any missing window. This is a v1 limit: the restore barrier holds lines for windows that exist (agent-status.md), it does not queue lines for windows not yet made.
+
 ### One team selection, exact member delivery (#239, 2026-09-23)
 
 Owner: "如果是一个 team 的话，我点击 team 的名称，可以一次性选中该
@@ -1059,6 +1061,8 @@ Owner, 10:55: "回复时可以直接点击某一条消息，底下应该出现�
 - **The sender.** `hub_command` takes an optional `from` (absent = `human`). The room line `[tmm] /compact → dev` is posted under it, so the feed shows the agent's own bubble. `all` skips the sender's own pane, and a command to itself is refused before anything is typed, because it would land in the very turn that sent it.
 - **Who can be commanded.** `@human` is a chat recipient, never a command target: `tmm send "@human /compact"` stays a room message with its exact body (validator 08:34, orchestrator 08:36). A named target that is no managed agent fails loudly (exit 4, "no managed agent named 'ghost'"), because a command aimed at nobody is a mistake, not a room note. `tmm` checks the roster (`hub_agents`) before `hub_command`. The routing is `send_route` in `tmm.rs`, pinned by `tmm_send_routes_a_command_like_the_composer_but_never_to_the_human`. Negative control: without the `@human` rule it fails.
 - **Pinned by** `an_agents_command_names_it_skips_it_and_is_refused_to_itself` (real tmux). Negative control: the pre-#274 `hub_command` types `all` into the sender and records it as human.
+
+**Not into a window a restore holds (board #422 round 3).** `hub_command` is the one typer outside `projects::delivery`, so it asks the same barrier delivery asks (`restore_hold::held`): a window a reboot restore made and has not seen ready may still be a shell, where a `/word` runs a path. That window is refused with `restoring, not ready` and nothing is typed; the other targets of an `all` are unaffected. Pinned by `a_command_into_a_window_a_restore_holds_is_refused`.
 
 ### An address starts a word (board #248, 2026-09-27)
 

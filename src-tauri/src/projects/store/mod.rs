@@ -13,7 +13,7 @@
 //! declarations and the row-type re-exports. Each table family is an
 //! `impl Store` block in its own file — `schema` (the ladder and the on-open
 //! repairs), `projects`, `registry`, `board`, `activity`, `rooms`, `restore`
-//! (the reboot evidence, board #422), `restore_batch` (its work in progress) — with its
+//! (the reboot evidence, board #422), `restore_batch` (its work in progress), `restore_hold` (the input barrier of a restored window) — with its
 //! tests beside it; a method that lands here instead of in its family is what
 //! the guard test at the bottom rejects.
 
@@ -27,6 +27,7 @@ mod projects;
 mod registry;
 mod restore;
 mod restore_batch;
+mod restore_hold;
 mod rooms;
 mod schema;
 mod wakes;
@@ -34,6 +35,7 @@ pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLi
 pub use projects::{Project, Slot, SlotKind};
 pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntents, TmuxInstance};
 pub use restore_batch::{Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, ProjectState, WindowState};
+pub use restore_hold::{Hold, HoldPane, HoldStage, UNKNOWN_BOOT};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
 pub use rooms::HubMsg;
 pub use wakes::Wake;
@@ -146,6 +148,7 @@ impl Store {
         self.ensure_delivery_command()?;
         self.ensure_delivery_ask_at()?;
         self.ensure_wakes()?;
+        self.ensure_restore_holds()?;
         self.ensure_hub_read()
     }
 

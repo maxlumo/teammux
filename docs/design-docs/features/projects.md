@@ -621,8 +621,8 @@ input barrier for restored windows, and `autostart` is still not acted on.
 ## After a host reboot: the executor (board #422, round 2)
 
 `projects/restore_run.rs` brings a plan back, and `store/restore_batch.rs`
-holds its progress. Tests are its only caller in this round; round 3 wires
-`restore_run::run` into gateway start, together with the input barrier.
+holds its progress. Round 3 wires it into gateway start, off by default
+(`restore_on_start`), together with the input barrier (next section).
 
 - **The gate holds for both paths.** Restore off, or a boot that cannot be
   read, does nothing before any write. An open batch is then neither
@@ -826,6 +826,102 @@ can reach it without a DOM.
   reopened, and the restored agent — in a brand-new pane — answered PINEAPPLE
   when asked what it had been told to remember. The slot held the same
   conversation id that `kiro-cli chat -l` listed for that directory.
+
+## After a host reboot: the input barrier and the start (board #422, round 3)
+
+`store/restore_hold.rs` keeps one HOLD per agent slot a restore plans: the
+input barrier of that window, bound to the exact incarnation the restore
+makes. A hold outlives its batch: closing a batch releases nothing, and a
+later batch cannot drop it.
+
+- **A hold moves forward only, one generation at a time.** `prepare` writes
+  it `planned`, with its batch, in one transaction. The window's create binds
+  it (`bound`) to the socket's tmux instance and the native `$session`,
+  `@window`, `%pane` and pane pid, in the same transaction as the window's
+  `Created`. The door arms it (`armed`) in the same transaction as
+  `LaunchIssued`, before anything is typed. Every write after a read is
+  conditional on the hold's launch uuid (`launch`, also carried by the batch
+  window), so a stale writer changes nothing. A hold that cannot be bound or
+  armed means the barrier is not this window's: nothing is typed into it.
+- **A hold retires only when nothing of ours exists, or its pane is
+  confirmed gone.** Skipped or failed with no window of ours known (a Stop
+  before the create, a person's window of that name, a refused create)
+  deletes the hold with the window's state. A window we made keeps it until a
+  kill whose PANE is then observed absent from the whole server (one
+`list-panes -a` with the instance, the barrier's own judgment: a window
+moved to another session is not gone, and a window killed after its pane
+was broken out to another window has not ended that pane), retires it in the same
+  transaction; a refused kill, or one whose answer was lost while the window
+  is still there, keeps it (review H1 P1-D). A typed window, `launch_unknown`
+  included, keeps it.
+- **Until this boot is decided, a capture tick commits nothing over another
+  boot's evidence.** `restore_decided:<socket>` names the boot a prepare
+  decided for, whatever it decided (a batch, off, no trigger, already
+  restored, an empty plan; `unknown` when the boot cannot be read). While the
+  socket's latest or kept previous checkpoint is of ANOTHER known boot and the
+  marker does not name the tick's boot, `commit_scanned` commits no fold and
+  no checkpoint, an incomplete tick included: the evidence and the slots the
+  plan compares it with cannot move before the decision. A capture of any
+  gateway that scanned before the decision and commits after it is caught by
+  the batch-revision check. A tick of unknown boot folds as before but never
+  publishes over a checkpoint of known boot. Fail-closed: those folds can
+  shrink what a later readable boot restores (a changed slot is skipped by
+  its kind or identity), not keep the plan's input intact.
+- **A held window gets nothing typed by the app.** `restore_hold::held` is the
+  one question: `delivery::strict_occupied` asks it first, for every backend,
+  so every delivery and flush trigger holds; `hub_command` asks it and
+  refuses that window ("restoring, not ready"), because a /word typed into a
+  shell runs a path. A person typing in the terminal view is not barred.
+  Every hold of the SOCKET is asked, so a window moved to another session
+  keeps its barrier: a bound or armed hold holds its pane's window wherever
+  it is and whatever it is called now, and its slot's name in its project,
+  whatever pane is active or split off, until its ORIGINAL pane is confirmed
+  ended: one `list-panes -a` of the socket, with the server's pid and start
+  time in the same answer (never `display-message -t %N`, which on tmux 3.6a
+  answers for another pane when `%N` is gone). A pane missing from this
+  instance, another instance, or no server ends it. An answer that cannot be
+  read holds EVERY window (it cannot exclude that the target is the hold's
+  pane), and so does a store that cannot be read. The capture tick's `prune`
+  retires the ended ones, and a planned hold whose batch is no longer open,
+  each conditional on the exact row it judged (generation, stage and pane): a
+  row that moved on meanwhile is not deleted (review H1 P1-C).
+  Releasing a held window on its positive startup evidence is round 3's
+  second hand-off; until then a hold lasts until its pane ends.
+- **The start awaits the decision; the windows come in the background.**
+  `server::start_with_socket_ready` awaits `restore_run::prepare_on_start`
+  right after the turn-fact replay, before the hook inbox, capture, the start
+  flush, wakes and the first accept; `continue_schedule` runs the tmux work
+  on its own thread once the room poster is in place. `run` is `prepare` and
+  one `continue_batch` pass. `restore_on_start` (config.toml) is false by
+  default: round 4 turns it on with its live acceptance.
+- **Every decision is published under the owner lease.** prepare takes the
+  lock before ANY write of `restore_decided`, the off, unknown-boot, already
+  restored and empty-plan outcomes included; Busy writes nothing, and the
+  owner decides (review H1 P1-A).
+- **One lease, then a schedule.** The first pass consumes the lock prepare
+  took (never a second acquire); a pass that leaves the batch open (a shell
+  not ready, an Unknown to re-observe, an error) is followed by others at
+  `PASS_DELAYS`, ABSOLUTE offsets from the schedule's start (30 s, 2 min,
+  10 min: a slow pass shortens the next wait), each re-entering `run` with its own
+  acquire, and none retypes a `launch_issued` window. A start that found the
+  lock held observes on the same schedule and takes over only when the lock
+  is free. Exhausted holding the lock, the batch it ran (re-read under the
+  lock) is closed `failed: not finished after 4 passes: <reason>`, the windows
+  it made and never typed into are killed by round 2's guarded kill (their
+  holds retire only when the kill is confirmed; a kill already issued is
+  re-observed, never re-sent), and each unfinished project's room is told
+  once, naming `tmm project up` (the door that exists today);
+  exhausted while another owner holds the lock, nothing is written.
+- **A boot no prepare decided for is decided before the next tick.** Each
+  capture tick first asks `decide_if_needed`: when the tick's boot is known
+  and `restore_decided` does not name it (the boot became readable, or a
+  decision write failed), it prepares as a start does and runs that
+  schedule; a prepare it cannot make (another owner holds the lock, an
+  error) is said once per change of reason.
+- **v1 limit, mentions before the window exists.** A mention or wake for a
+  slot whose window the restore has not made yet is said offline, as for any
+  missing window: the barrier holds typing into windows, it does not queue
+  lines for windows that do not exist.
 
 ## Known edges
 

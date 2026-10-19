@@ -327,7 +327,7 @@ pub fn capture_once() -> Result<Vec<String>, String> {
     // The second half: the same server must still be the one answering.
     tick_hook(TickPhase::Observed);
     let after = restore::tmux_now();
-    let boot_id = restore::boot_id();
+    let boot_id = restore::tick_boot();
 
     // Phase 2 — one short lock: fold the observations into the declarations,
     // and publish the checkpoint IN THE SAME TRANSACTION as the folds it
@@ -379,10 +379,13 @@ pub fn capture_once() -> Result<Vec<String>, String> {
         // An incomplete tick folds and advances no evidence: the previous
         // checkpoint stays.
         let incomplete = incomplete.or_else(|| (!held.is_empty()).then(|| "a restore holds a project".to_string()));
-        let checkpoint = restore::checkpoint_from(&before, &after, incomplete, checkpoint_projects, boot_id, ts).ok();
+        let checkpoint = restore::checkpoint_from(&before, &after, incomplete, checkpoint_projects, boot_id.clone(), ts).ok();
         // Committed only if the batches are still what this tick scanned
         // under; a restore that began (or moved on) meanwhile voids the tick.
-        match store.commit_scanned(&folds, checkpoint.map(|cp| (socket.as_str(), cp)), Some((socket.as_str(), &revision)))? {
+        // And only once a prepare has decided for this boot while another
+        // boot's evidence is stored (board #422 round 3): the decision reads
+        // that evidence and the slots it is compared with.
+        match store.commit_scanned(&folds, checkpoint.map(|cp| (socket.as_str(), cp)), Some((socket.as_str(), &revision, boot_id.as_deref())))? {
             Some(_) => Ok(folds.into_iter().map(|(id, _)| id).collect()),
             None => Ok(Vec::new()),
         }
@@ -435,9 +438,15 @@ pub async fn capture_loop() {
                 if let Err(e) = auto_adopt_once() {
                     eprintln!("projects: auto-track failed: {e}");
                 }
+                // A boot no prepare has decided for yet (it became readable,
+                // or a decision write failed) is decided before the tick,
+                // which otherwise commits nothing over the old evidence.
+                super::restore_run::decide_if_needed();
                 if let Err(e) = capture_once() {
                     eprintln!("projects: capture failed: {e}");
                 }
+                // Restore holds whose pane is confirmed gone (board #422).
+                super::restore_hold::prune();
                 // Piggybacks on the capture cadence: a transient model error is
                 // noticed within one tick, and the backoff ladder is measured in
                 // tens of seconds, so 20s granularity costs nothing.

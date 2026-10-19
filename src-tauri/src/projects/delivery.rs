@@ -116,6 +116,11 @@ pub fn input_mode_seen(session: &str, window: &str, pane: &str, screen: &str) ->
 /// from turn state: an app-side end (an interrupt ends the turn before the
 /// shell returns), a lost Stop or an expired receipt clock is not readiness.
 fn strict_occupied(session: &str, window: &str) -> Option<bool> {
+    // A window a restore made and has not seen ready (board #422 round 3)
+    // is occupied for EVERY backend: its pane may still be a shell.
+    if super::restore_hold::held(session, window) {
+        return Some(true);
+    }
     let (backend, _) = recipe_mode(session, window)?;
     if !backend.loses_busy_input() {
         return None;

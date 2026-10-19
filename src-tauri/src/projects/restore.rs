@@ -41,6 +41,19 @@ pub fn boot_id() -> Option<String> {
     raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The boot a capture tick names: `boot_id`, which a test may pin
+/// (`TICK_BOOT`) to the boot its restore inputs claim.
+pub fn tick_boot() -> Option<String> {
+    #[cfg(test)]
+    if let Some(b) = TICK_BOOT.lock().unwrap().clone() {
+        return Some(b);
+    }
+    boot_id()
+}
+
+#[cfg(test)]
+pub(crate) static TICK_BOOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// The socket this gateway's tmux commands reach: the configured one, else
 /// the implicit per-user default. It keys the checkpoint.
 pub fn socket_key() -> String {

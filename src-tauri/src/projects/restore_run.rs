@@ -38,6 +38,7 @@ pub enum RunOutcome {
 }
 
 /// The inputs a gateway start (round 3) or a manual run (round 4) supplies.
+#[derive(Debug, Clone)]
 pub struct RunInputs {
     pub socket: String,
     pub enabled: bool,
@@ -49,7 +50,7 @@ pub struct RunInputs {
 
 /// The one restore owner per state.db: `flock(LOCK_EX|LOCK_NB)` on
 /// `<state dir>/restore.lock`, released by the OS when the process dies.
-pub(crate) struct OwnerLock {
+pub struct OwnerLock {
     _file: std::fs::File,
 }
 
@@ -261,6 +262,7 @@ fn observe_session(socket: &str, session: &str, batch: &str) -> SessionSeen {
 struct WindowSeen {
     id: String,
     pane: String,
+    pane_pid: Option<u32>,
     name: String,
     tag: String,
 }
@@ -269,7 +271,7 @@ struct WindowSeen {
 /// identity is checked in the same answer. `Err` = could not be read, or
 /// the answering server is not the batch's.
 fn observe_windows(socket: &str, session_id: &str, instance: &TmuxInstance) -> Result<Option<Vec<WindowSeen>>, String> {
-    let fmt = format!("#{{pid}}{SEP}#{{start_time}}{SEP}#{{window_id}}{SEP}#{{pane_id}}{SEP}#{{window_name}}{SEP}#{{@tmm_rw}}");
+    let fmt = format!("#{{pid}}{SEP}#{{start_time}}{SEP}#{{window_id}}{SEP}#{{pane_id}}{SEP}#{{pane_pid}}{SEP}#{{window_name}}{SEP}#{{@tmm_rw}}");
     let out = match tmux::run_tmux_on(Some(socket), &["list-windows", "-t", session_id, "-F", &fmt]) {
         Ok(out) => out,
         Err(e) if tmux::session_confirmed_absent(&e) => return Ok(None),
@@ -278,11 +280,11 @@ fn observe_windows(socket: &str, session_id: &str, instance: &TmuxInstance) -> R
     let mut seen = Vec::new();
     for line in out.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split(SEP).collect();
-        let [pid, start, id, pane, name, tag] = f[..] else { return Err(format!("unreadable list-windows line: {line}")) };
+        let [pid, start, id, pane, pane_pid, name, tag] = f[..] else { return Err(format!("unreadable list-windows line: {line}")) };
         if pid != instance.pid.to_string() || start != instance.start_time.to_string() {
             return Err("another tmux server answered".into());
         }
-        seen.push(WindowSeen { id: id.into(), pane: pane.into(), name: name.into(), tag: tag.into() });
+        seen.push(WindowSeen { id: id.into(), pane: pane.into(), pane_pid: pane_pid.parse().ok(), name: name.into(), tag: tag.into() });
     }
     Ok(Some(seen))
 }
@@ -292,36 +294,357 @@ fn observe_windows(socket: &str, session_id: &str, instance: &TmuxInstance) -> R
 /// Take the owner lock, continue the socket's open batch from the batch
 /// ALONE, or — with none open — judge the reboot trigger on the evidence and
 /// start a batch from round 1's plan; then execute it as far as it can go.
+/// `prepare` and one `continue_batch` pass, in one call.
 pub fn run(inputs: &RunInputs) -> Result<RunOutcome, String> {
-    // The gate holds for BOTH paths, before any write (review P1-D): off, or
-    // a boot that cannot be read, does nothing — an open batch is neither
-    // continued nor closed.
+    match prepare(inputs)? {
+        Prepared::Busy => Ok(RunOutcome::Busy),
+        Prepared::Nothing(why) => Ok(RunOutcome::Nothing(why)),
+        Prepared::Closed { batch, closed } => Ok(RunOutcome::Ran { batch, closed: Some(closed) }),
+        Prepared::Ready { lease, batch } => continue_batch(lease, batch),
+    }
+}
+
+/// What a prepare decided.
+pub enum Prepared {
+    /// Another owner holds the restore lock; it decides.
+    Busy,
+    /// Nothing to restore, and why; the decision is recorded.
+    Nothing(String),
+    /// An open batch of another boot was closed FAILED.
+    Closed { batch: String, closed: String },
+    /// A batch to execute, with the lease that guards it.
+    Ready { lease: OwnerLock, batch: Batch },
+}
+
+/// The small durable decision a gateway start AWAITS before its capture and
+/// deliveries start (board #422 round 3, P1-A): the gate, the lock, the open
+/// batch or the trigger and the plan — SQLite plus one `list-sessions`. A
+/// batch it opens is written with a planned hold for every agent slot and
+/// this boot's `restore_decided`, in one transaction; every other outcome
+/// records the decision alone. Until that marker names this boot, no capture
+/// tick of any gateway commits over another boot's evidence. Window creation
+/// is `continue_batch`'s, in the background.
+pub fn prepare(inputs: &RunInputs) -> Result<Prepared, String> {
+    let socket = inputs.socket.as_str();
+    let decided = inputs.boot_now.clone().unwrap_or_else(|| super::store::UNKNOWN_BOOT.to_string());
+    let nothing = |why: &str| -> Result<Prepared, String> {
+        with_store(|s| s.set_restore_decided(socket, &decided))?;
+        Ok(Prepared::Nothing(why.to_string()))
+    };
+    // Every branch that PUBLISHES a decision does so under the owner lease
+    // (review H1 P1-A): a decision written while another owner is reading
+    // the old evidence would let captures move it first. Busy writes
+    // nothing; that owner decides.
+    let Some(lease) = OwnerLock::try_acquire()? else { return Ok(Prepared::Busy) };
+    // The gate holds for BOTH paths, before any batch write (review P1-D):
+    // off, or a boot that cannot be read, does nothing — an open batch is
+    // neither continued nor closed.
     if !inputs.enabled {
-        return Ok(RunOutcome::Nothing("restore on start is off".into()));
+        return nothing("restore on start is off");
     }
     if inputs.boot_now.is_none() {
-        return Ok(RunOutcome::Nothing("the host's boot identity is unknown".into()));
+        return nothing("the host's boot identity is unknown");
     }
-    let Some(_lock) = OwnerLock::try_acquire()? else { return Ok(RunOutcome::Busy) };
-    let socket = inputs.socket.as_str();
     let open = with_store(|s| s.restore_batch(socket))?;
-    let mut b = match open {
-        Some(b) if b.boot_id.is_some() && b.boot_id == inputs.boot_now => b,
-        Some(b) if b.boot_id.is_none() => {
-            return Ok(RunOutcome::Nothing("the open restore's boot identity is unknown; left as is".into()));
+    match open {
+        Some(b) if b.boot_id.is_some() && b.boot_id == inputs.boot_now => {
+            with_store(|s| s.set_restore_decided(socket, &decided))?;
+            Ok(Prepared::Ready { lease, batch: b })
         }
+        Some(b) if b.boot_id.is_none() => nothing("the open restore's boot identity is unknown; left as is"),
         Some(mut b) => {
             // A second host reboot during a half-done batch: its objects died
             // with the old server. Closed FAILED; nothing is re-planned
             // automatically (orchestrator, 23:54).
             close(&mut b, "failed: the host rebooted during the restore")?;
-            return Ok(RunOutcome::Ran { batch: b.batch, closed: b.closed });
+            with_store(|s| s.set_restore_decided(socket, &decided))?;
+            Ok(Prepared::Closed { batch: b.batch, closed: b.closed.unwrap_or_default() })
         }
         None => match start_batch(inputs)? {
-            Ok(b) => b,
-            Err(why) => return Ok(RunOutcome::Nothing(why)),
+            Ok(b) => {
+                let holds = planned_holds(&b);
+                with_store(|s| s.open_batch(&b, &holds, &decided))?;
+                Ok(Prepared::Ready { lease, batch: b })
+            }
+            Err(why) => nothing(&why),
         },
+    }
+}
+
+// ---- the gateway start and the continuation schedule (round 3) ---------
+
+/// The restore inputs a gateway start reads: this socket, the config's
+/// `restore_on_start` (default off until the live acceptance, round 4), the
+/// host's boot, and autostart projects (shells only when not in the
+/// checkpoint).
+pub fn start_inputs() -> RunInputs {
+    RunInputs {
+        socket: restore::socket_key(),
+        enabled: crate::config::restore_on_start(),
+        boot_now: restore::boot_id(),
+        include_autostart: true,
+    }
+}
+
+/// What a gateway runs in the background after its awaited prepare.
+pub enum Start {
+    /// The first pass, under the lease prepare took, then the schedule.
+    Pass(OwnerLock, Batch),
+    /// Another owner held the lock: observe on the schedule; take over only
+    /// when the lock is ours.
+    Observe,
+}
+
+/// The awaited half of a gateway start: `prepare`, said on stderr. `None`
+/// when nothing runs in the background (decided, closed, or an error that
+/// leaves no batch of ours).
+pub fn prepare_on_start(inputs: &RunInputs) -> Option<Start> {
+    match prepare(inputs) {
+        Ok(Prepared::Ready { lease, batch }) => {
+            eprintln!("projects: restore {} after a host reboot: {} project(s)", batch.batch, batch.projects.len());
+            Some(Start::Pass(lease, batch))
+        }
+        Ok(Prepared::Busy) => {
+            eprintln!("projects: another gateway owns the restore; observing");
+            Some(Start::Observe)
+        }
+        Ok(Prepared::Nothing(why)) => {
+            eprintln!("projects: no restore at start: {why}");
+            None
+        }
+        Ok(Prepared::Closed { batch, closed }) => {
+            eprintln!("projects: restore {batch}: {closed}");
+            None
+        }
+        Err(e) => {
+            eprintln!("projects: the restore could not be prepared: {e}");
+            Some(Start::Observe)
+        }
+    }
+}
+
+/// The passes after the first, as ABSOLUTE offsets in seconds from the
+/// schedule's start (one start instant; a long pass shortens the next wait,
+/// never shifts the plan): an open batch that a pass could not finish (a
+/// shell not ready, an Unknown to re-observe, an error) is continued at
+/// each; nothing else is (orchestrator ruling 1).
+pub const PASS_DELAYS: [u64; 3] = [30, 120, 600];
+
+/// Test seam: a nonzero value is the length of one "second" in ms.
+#[cfg(test)]
+pub(crate) static PASS_SECOND_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sleep until `offset` seconds after `start`, whatever the passes took.
+fn wait_until(start: std::time::Instant, offset: u64) {
+    #[allow(unused_mut)]
+    let mut second = std::time::Duration::from_secs(1);
+    #[cfg(test)]
+    {
+        let unit = PASS_SECOND_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if unit > 0 {
+            second = std::time::Duration::from_millis(unit);
+        }
+    }
+    let target = second * offset as u32;
+    if let Some(left) = target.checked_sub(since(start)) {
+        sleep_for(left);
+    }
+}
+
+/// Test seam: a virtual clock in ms since the schedule's start. While set,
+/// the schedule reads it instead of the wall clock and its waits advance it
+/// instead of sleeping, so a test of the plan is exact, not timed.
+#[cfg(test)]
+pub(crate) static VIRTUAL_MS: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+fn since(start: std::time::Instant) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(ms) = *VIRTUAL_MS.lock().unwrap() {
+        return std::time::Duration::from_millis(ms);
+    }
+    start.elapsed()
+}
+
+fn sleep_for(d: std::time::Duration) {
+    #[cfg(test)]
+    if let Some(ms) = VIRTUAL_MS.lock().unwrap().as_mut() {
+        *ms += d.as_millis() as u64;
+        return;
+    }
+    std::thread::sleep(d);
+}
+
+/// How a schedule ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleEnd {
+    /// The batch closed (by a pass, or by another owner), or no batch is open.
+    Finished,
+    /// Exhausted while another owner held the lock: nothing written.
+    Observed,
+    /// Exhausted holding the lock: the batch was closed FAILED.
+    GaveUp(String),
+}
+
+/// The background half: the first pass (or none, when observing), then a
+/// pass at each `PASS_DELAYS` offset while the batch stays open. Every later
+/// pass re-enters `run`, which re-checks the gate, the boot and the lock and
+/// never retypes a `launch_issued` window. Exhausted holding the lock: the
+/// batch is closed FAILED with the last reason and one room line per
+/// unfinished project; exhausted while Busy: nothing.
+pub fn continue_schedule(inputs: RunInputs, start: Start) -> ScheduleEnd {
+    let (mut first, mut batch) = match start {
+        Start::Pass(lease, b) => {
+            let id = b.batch.clone();
+            (Some((lease, b)), Some(id))
+        }
+        Start::Observe => (None, None),
     };
+    let mut last = String::new();
+    let mut busy = false;
+    // Owner: a pass now, then one at each offset. Observer: only the offsets.
+    let start = std::time::Instant::now();
+    let offsets: Vec<u64> = if first.is_some() { std::iter::once(0).chain(PASS_DELAYS).collect() } else { PASS_DELAYS.to_vec() };
+    for offset in offsets {
+        wait_until(start, offset);
+        let outcome = match first.take() {
+            Some((lease, b)) => continue_batch(lease, b),
+            None => run(&inputs),
+        };
+        busy = false;
+        match outcome {
+            Ok(RunOutcome::Busy) => {
+                busy = true;
+                last = "another owner is restoring".into();
+            }
+            Ok(RunOutcome::Nothing(_)) => return ScheduleEnd::Finished,
+            Ok(RunOutcome::Ran { closed: Some(_), .. }) => return ScheduleEnd::Finished,
+            Ok(RunOutcome::Ran { batch: id, closed: None }) => {
+                batch = Some(id);
+                last = "windows not finished".into();
+            }
+            Err(e) => {
+                eprintln!("projects: restore pass failed: {e}");
+                last = e;
+            }
+        }
+    }
+    if busy {
+        eprintln!("projects: the restore schedule ended while another owner restores; it continues that batch");
+        return ScheduleEnd::Observed;
+    }
+    match batch.map(|id| give_up(&inputs, &id, &last)) {
+        Some(Ok(end)) => end,
+        Some(Err(e)) => {
+            eprintln!("projects: the restore could not be closed: {e}");
+            ScheduleEnd::GaveUp(e)
+        }
+        None => ScheduleEnd::Finished,
+    }
+}
+
+/// Close an exhausted batch: only BY the lock holder, only the batch this
+/// schedule ran (re-read under the lock), killing the windows it made and
+/// never typed into (round 2's guarded kill: their holds retire with them),
+/// then one room line per project left unfinished.
+fn give_up(inputs: &RunInputs, id: &str, reason: &str) -> Result<ScheduleEnd, String> {
+    let Some(_lease) = OwnerLock::try_acquire()? else { return Ok(ScheduleEnd::Observed) };
+    let Some(mut b) = with_store(|s| s.restore_batch(&inputs.socket))? else { return Ok(ScheduleEnd::Finished) };
+    if b.batch != id {
+        return Ok(ScheduleEnd::Finished);
+    }
+    for pi in 0..b.projects.len() {
+        for wi in 0..b.projects[pi].windows.len() {
+            let w = &b.projects[pi].windows[wi];
+            match (w.state, w.op, w.window_id.is_some()) {
+                // A kill already issued is only re-observed, never re-sent.
+                (WindowState::Created, Some(BatchOp::Kill), _) => observe_kill(&mut b, pi, wi)?,
+                (WindowState::Created, _, true) => kill_owned(&mut b, pi, wi, "not started before the restore gave up".into())?,
+                _ => {}
+            }
+        }
+    }
+    let word = format!("failed: not finished after {} passes: {reason}", PASS_DELAYS.len() + 1);
+    let unfinished: Vec<BatchProject> = b
+        .projects
+        .iter()
+        .filter(|p| !matches!(p.state, ProjectState::Done | ProjectState::Skipped | ProjectState::Failed))
+        .cloned()
+        .collect();
+    close(&mut b, &word)?;
+    for p in unfinished {
+        let room = with_store(|s| s.project(&p.id)).ok().flatten().map(|r| if r.room.is_empty() { format!("proj:{}", r.session) } else { r.room }).unwrap_or_else(|| format!("proj:{}", p.session));
+        let _ = super::rooms::post(&room, "tmm", &format!("[tmm] the restore after a host reboot did not finish ({reason}); start what is missing with `tmm project up {}`", p.session));
+    }
+    Ok(ScheduleEnd::GaveUp(word))
+}
+
+/// Before a capture tick (board #422 round 3): when the tick's boot is
+/// known and no prepare has decided for it — the boot became readable, or a
+/// decision write failed — prepare now, as a start does, and run its
+/// schedule in the background. Said once per change of reason when it
+/// cannot decide, so a tick never refuses silently.
+pub fn decide_if_needed() {
+    static SAID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let Some(boot) = restore::tick_boot() else { return };
+    let inputs = start_inputs();
+    match with_store(|s| s.restore_decided(&inputs.socket)) {
+        Ok(Some(b)) if b == boot => return,
+        Ok(_) => {}
+        Err(e) => {
+            let mut said = SAID.lock().unwrap();
+            if *said != e {
+                eprintln!("projects: the restore decision cannot be read: {e}");
+                *said = e;
+            }
+            return;
+        }
+    }
+    let inputs = RunInputs { boot_now: Some(boot), ..inputs };
+    let said = |why: String| {
+        let mut said = SAID.lock().unwrap();
+        if *said != why {
+            eprintln!("projects: the restore decision for this boot is not made yet: {why}");
+            *said = why;
+        }
+    };
+    match prepare(&inputs) {
+        Ok(Prepared::Ready { lease, batch }) => {
+            std::thread::spawn(move || continue_schedule(inputs, Start::Pass(lease, batch)));
+        }
+        // The owner decides; its decision lets the ticks commit.
+        Ok(Prepared::Busy) => said("another owner holds the restore lock".into()),
+        Ok(_) => {}
+        Err(e) => said(e),
+    }
+}
+
+/// One planned hold per agent slot of a new batch.
+fn planned_holds(b: &Batch) -> Vec<super::store::Hold> {
+    let since = super::now();
+    b.projects
+        .iter()
+        .flat_map(|p| {
+            p.windows.iter().filter_map(move |w| {
+                w.launch.clone().map(|launch| super::store::Hold {
+                    socket: b.socket.clone(),
+                    project_id: p.id.clone(),
+                    batch: b.batch.clone(),
+                    ord: w.ord,
+                    slot: w.name.clone(),
+                    launch,
+                    stage: super::store::HoldStage::Planned,
+                    pane: None,
+                    since,
+                })
+            })
+        })
+        .collect()
+}
+
+/// Execute an open batch as far as it can go this pass, under the lease
+/// `prepare` (or a later pass's own acquire) took — never a second fd.
+pub fn continue_batch(lease: OwnerLock, mut b: Batch) -> Result<RunOutcome, String> {
+    let _lease = lease;
     b.owner_pid = std::process::id();
     save(&b)?;
     match execute(&mut b) {
@@ -383,6 +706,8 @@ fn start_batch(inputs: &RunInputs) -> Result<Result<Batch, String>, String> {
                     reason: None,
                     window_id: None,
                     pane_id: None,
+                    pane_pid: None,
+                    launch: (w.kind == SlotKind::Agent).then(|| uuid::Uuid::new_v4().to_string()),
                     op: None,
                 })
                 .collect(),
@@ -463,10 +788,63 @@ fn set_project(b: &mut Batch, pi: usize, state: ProjectState, reason: Option<Str
 
 fn set_window(b: &mut Batch, pi: usize, wi: usize, state: WindowState, reason: Option<String>, op: Option<BatchOp>) -> Result<(), String> {
     let w = &mut b.projects[pi].windows[wi];
+    // A slot that ends with NOTHING of ours known to exist (skipped before a
+    // create, a refused create) retires its hold in the same transaction
+    // (board #422 round 3). A window we made keeps it until its pane is
+    // confirmed gone (`set_window_retiring` after a confirmed kill, or the
+    // prune): untyped is not ended (review H1 P1-D).
+    let untyped = matches!(w.state, WindowState::Pending | WindowState::Creating | WindowState::Created);
+    let retire = (untyped && w.window_id.is_none() && matches!(state, WindowState::Skipped | WindowState::Failed)).then(|| w.launch.clone()).flatten();
     w.state = state;
     w.reason = reason;
     w.op = op;
-    save(b)
+    match retire {
+        Some(launch) => with_store(|s| s.save_batch_retiring(b, &launch)),
+        None => save(b),
+    }
+}
+
+/// `set_window` for a window whose pane is CONFIRMED gone (a kill applied
+/// in-server, or observed absent): its hold retires in the same transaction.
+fn set_window_retiring(b: &mut Batch, pi: usize, wi: usize, state: WindowState, reason: Option<String>) -> Result<(), String> {
+    let w = &mut b.projects[pi].windows[wi];
+    w.state = state;
+    w.reason = reason;
+    w.op = None;
+    match w.launch.clone() {
+        Some(launch) => with_store(|s| s.save_batch_retiring(b, &launch)),
+        None => save(b),
+    }
+}
+
+/// The window is tagged and nothing is typed: `Created`, with its hold bound
+/// to this exact window in the same transaction (board #422 round 3). A hold
+/// that is no longer planned and not already bound to this pane means the
+/// barrier is not this window's: it is never launched.
+fn set_created(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
+    let w = b.projects[pi].windows[wi].clone();
+    let Some(launch) = w.launch.clone() else {
+        return set_window(b, pi, wi, WindowState::Created, None, None);
+    };
+    let pane = match (b.instance.clone(), b.projects[pi].session_id.clone(), w.window_id.clone(), w.pane_id.clone(), w.pane_pid) {
+        (Some(instance), Some(session_id), Some(window_id), Some(pane_id), Some(pane_pid)) => {
+            super::store::HoldPane { instance, session_id, window_id, pane_id, pane_pid }
+        }
+        _ => return set_window(b, pi, wi, WindowState::Failed, Some("no window identity for its input barrier".into()), None),
+    };
+    {
+        let w = &mut b.projects[pi].windows[wi];
+        w.state = WindowState::Created;
+        w.reason = None;
+        w.op = None;
+    }
+    if with_store(|s| s.save_batch_binding(b, &launch, &pane))? {
+        return Ok(());
+    }
+    match with_store(|s| s.hold_by_launch(&launch))? {
+        Some(h) if h.pane.as_ref() == Some(&pane) => save(b),
+        _ => set_window(b, pi, wi, WindowState::Failed, Some("its input barrier is gone; nothing was typed".into()), None),
+    }
 }
 
 /// The declaration as it is NOW against the FROZEN plan: the old plan is no
@@ -790,17 +1168,18 @@ fn create_window(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         tmux::tmux_quote(&sid),
         tmux::tmux_quote(&placeholder(&b.batch, w.ord)),
         tmux::tmux_quote(&cwd),
-        tmux::tmux_quote("#{window_id} #{pane_id}")
+        tmux::tmux_quote("#{window_id} #{pane_id} #{pane_pid}")
     );
     let step = Step { op: "create_window", project: b.projects[pi].id.clone(), ord: Some(w.ord) };
     match guarded(&b.socket, &step, &sid, &cond, &action)? {
         Outcome::Applied(ids) => {
             let mut it = ids.split_whitespace();
-            match (it.next(), it.next()) {
-                (Some(wid), Some(pane)) if wid.starts_with('@') && pane.starts_with('%') => {
+            match (it.next(), it.next(), it.next().and_then(|p| p.parse::<u32>().ok())) {
+                (Some(wid), Some(pane), Some(pid)) if wid.starts_with('@') && pane.starts_with('%') => {
                     let w = &mut b.projects[pi].windows[wi];
                     w.window_id = Some(wid.into());
                     w.pane_id = Some(pane.into());
+                    w.pane_pid = Some(pid);
                     tag_window(b, pi, wi)
                 }
                 _ => observe_created(b, pi, wi),
@@ -835,6 +1214,7 @@ fn observe_created(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
                 let w = &mut b.projects[pi].windows[wi];
                 w.window_id = Some(s.id);
                 w.pane_id = Some(s.pane);
+                w.pane_pid = s.pane_pid;
                 tag_window(b, pi, wi)
             }
             None => set_window(b, pi, wi, WindowState::Failed, Some("indeterminate: new-window".into()), None),
@@ -859,17 +1239,17 @@ fn tag_window(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
     let tag_action = format!("set-option -w -t {} @tmm_rw {}", tmux::tmux_quote(&wid), tmux::tmux_quote(&tag));
     let outcome = guarded(&b.socket, &step, &wid, &cond, &tag_action)?;
     if let Outcome::Applied(_) = outcome {
-        return set_window(b, pi, wi, WindowState::Created, None, None);
+        return set_created(b, pi, wi);
     }
     // Refused or Unknown: re-observe by id on the batch's server.
     match observe_windows(&b.socket, &sid, &inst) {
         Ok(Some(seen)) => match seen.into_iter().find(|s| s.id == wid) {
-            Some(s) if s.tag == tag => set_window(b, pi, wi, WindowState::Created, None, None),
+            Some(s) if s.tag == tag => set_created(b, pi, wi),
             Some(s) if s.tag.is_empty() && s.name == placeholder(&b.batch, w.ord) && matches!(outcome, Outcome::Unknown(_)) => {
                 // Present, ours by birth name, untagged: the install is
                 // redone under the same guard (idempotent, not blind).
                 match guarded(&b.socket, &step, &wid, &cond, &tag_action)? {
-                    Outcome::Applied(_) => set_window(b, pi, wi, WindowState::Created, None, None),
+                    Outcome::Applied(_) => set_created(b, pi, wi),
                     _ => set_window(b, pi, wi, WindowState::Creating, Some("indeterminate: tag".into()), Some(BatchOp::TagWindow)),
                 }
             }
@@ -929,8 +1309,23 @@ fn launch(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         if !ready {
             return set_window(b, pi, wi, WindowState::Created, Some("shell not ready; not started".into()), None);
         }
-        // Write-ahead: from here the window is never killed, renamed or retyped.
-        set_window(b, pi, wi, WindowState::LaunchIssued, None, None)?;
+        // Write-ahead: from here the window is never killed, renamed or
+        // retyped. An agent's hold is armed in the same transaction, and a
+        // hold that cannot be armed types nothing (board #422 round 3).
+        match w.launch.clone() {
+            Some(launch) => {
+                {
+                    let ww = &mut b.projects[pi].windows[wi];
+                    ww.state = WindowState::LaunchIssued;
+                    ww.reason = None;
+                    ww.op = None;
+                }
+                if !with_store(|s| s.save_batch_arming(b, &launch))? {
+                    return set_window(b, pi, wi, WindowState::Failed, Some("its input barrier is not this window's; nothing was typed".into()), None);
+                }
+            }
+            None => set_window(b, pi, wi, WindowState::LaunchIssued, None, None)?,
+        }
         // The typing goes to the PANE the window was created with, and only
         // while that window still has exactly that one pane (review P1-B):
         // a split or a moved window refuses, nothing is typed.
@@ -997,27 +1392,47 @@ fn kill_owned(b: &mut Batch, pi: usize, wi: usize, why: String) -> Result<(), St
     set_window(b, pi, wi, WindowState::Created, Some(why.clone()), Some(BatchOp::Kill))?;
     let step = Step { op: "kill", project: b.projects[pi].id.clone(), ord: Some(w.ord) };
     match guarded(&b.socket, &step, &wid, &cond, &format!("kill-window -t {}", tmux::tmux_quote(&wid)))? {
-        Outcome::Applied(_) | Outcome::Refused => set_window(b, pi, wi, WindowState::Failed, Some(why), None),
+        // The window is gone; its PANE may not be (moved out by break-pane
+        // or move-pane before the kill): retired only on the same whole-
+        // server judgment the barrier makes (review H1 P1-D, Applied half).
+        Outcome::Applied(_) => match pane_of(b, pi, wi).and_then(|p| super::restore_hold::pane_ended(&b.socket, &p)) {
+            Some(true) => set_window_retiring(b, pi, wi, WindowState::Failed, Some(why)),
+            _ => set_window(b, pi, wi, WindowState::Failed, Some(format!("{why}; window killed, its pane not confirmed gone")), None),
+        },
+        // Refused: our guard did not hold, so the kill did not run and the
+        // window may still be there — its hold stays (the prune decides).
+        Outcome::Refused => set_window(b, pi, wi, WindowState::Failed, Some(format!("{why}; kill refused, left in place")), None),
         Outcome::Unknown(_) => observe_kill(b, pi, wi),
     }
 }
 
 /// A kill whose answer was not seen: gone is done; present is left in place
 /// and reported — never killed a second time.
+/// The native identity of a window this batch made, as its hold records it.
+fn pane_of(b: &Batch, pi: usize, wi: usize) -> Option<super::store::HoldPane> {
+    let w = &b.projects[pi].windows[wi];
+    Some(super::store::HoldPane {
+        instance: b.instance.clone()?,
+        session_id: b.projects[pi].session_id.clone()?,
+        window_id: w.window_id.clone()?,
+        pane_id: w.pane_id.clone()?,
+        pane_pid: w.pane_pid?,
+    })
+}
+
 fn observe_kill(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
-    let w = b.projects[pi].windows[wi].clone();
-    let why = w.reason.clone().unwrap_or_default();
-    let (Some(inst), Some(sid), Some(wid)) = (b.instance.clone(), b.projects[pi].session_id.clone(), w.window_id.clone()) else {
+    let why = b.projects[pi].windows[wi].reason.clone().unwrap_or_default();
+    let Some(pane) = pane_of(b, pi, wi) else {
         return set_window(b, pi, wi, WindowState::Failed, Some(why), None);
     };
-    match observe_windows(&b.socket, &sid, &inst) {
+    // Decided by the window's PANE on the whole server (review H1 P1-D
+    // residual): a window moved to another session is not gone.
+    match super::restore_hold::pane_ended(&b.socket, &pane) {
+        Some(true) => set_window_retiring(b, pi, wi, WindowState::Failed, Some(why)),
         // Present: left in place, reported, final — never killed a second time.
-        Ok(Some(seen)) if seen.iter().any(|s| s.id == wid) => {
-            set_window(b, pi, wi, WindowState::Failed, Some(format!("{why}; kill indeterminate, left in place")), Some(BatchOp::Kill))
-        }
-        Ok(_) => set_window(b, pi, wi, WindowState::Failed, Some(why), None),
+        Some(false) => set_window(b, pi, wi, WindowState::Failed, Some(format!("{why}; kill indeterminate, left in place")), Some(BatchOp::Kill)),
         // Not readable: the step stays issued, to be re-observed next pass.
-        Err(_) => set_window(b, pi, wi, WindowState::Created, Some(why), Some(BatchOp::Kill)),
+        None => set_window(b, pi, wi, WindowState::Created, Some(why), Some(BatchOp::Kill)),
     }
 }
 
@@ -1301,6 +1716,11 @@ mod tests {
 
     fn publish(socket: &str, projects: &[&Proj]) {
         fast_shell(socket);
+        *super::super::restore::TICK_BOOT.lock().unwrap() = Some("boot-after".into());
+        // This boot is decided, as a gateway start's prepare would have it,
+        // so the test's own capture ticks commit; a test of the undecided
+        // window clears it (`undecide`).
+        with_store(|s| s.set_restore_decided(socket, "boot-after")).unwrap();
         let mut cps = Vec::new();
         for p in projects {
             let slots = with_store(|s| s.slots(&p.id)).unwrap();
@@ -1326,7 +1746,9 @@ mod tests {
         with_store(|s| s.commit_tick(&[], Some((socket, cp)))).unwrap();
     }
 
+    /// The restore inputs of a test, and the boot its capture ticks name.
     fn inputs(socket: &str) -> RunInputs {
+        *super::super::restore::TICK_BOOT.lock().unwrap() = Some("boot-after".into());
         RunInputs { socket: socket.into(), enabled: true, boot_now: Some("boot-after".into()), include_autostart: false }
     }
 
@@ -1497,6 +1919,847 @@ mod tests {
             let (sid, cond) = session_cond(&b, pi).unwrap();
             assert_eq!(guarded(&socket, &step, &sid, &cond, "display -p x").unwrap(), Outcome::Refused);
         }
+    }
+
+    // ---- round 3: holds through the executor ----------------------------
+
+    fn holds(socket: &str, p: &Proj) -> Vec<super::super::store::Hold> {
+        with_store(|s| s.project_holds(socket, &p.id)).unwrap()
+    }
+
+    /// A prepare that opens a batch writes, in the same transaction, a
+    /// PLANNED hold for every agent slot (none for a shell) and this boot's
+    /// decision. The window create binds it to the exact native window; the
+    /// door arms it BEFORE the launch is typed.
+    #[test]
+    fn holds_are_planned_with_the_batch_bound_at_create_and_armed_before_typing() {
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-hold");
+        let socket = server.socket().to_string();
+        let p = declare("r3hold", vec![agent_slot("dev"), shell_slot("sh1")]);
+        publish(&socket, &[&p]);
+        with_store(|s| s.set_restore_decided(&socket, "older")).unwrap();
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"), "decided with the batch");
+        let planned = holds(&socket, &p);
+        assert_eq!(planned.len(), 1, "one hold, for the agent slot only: {planned:?}");
+        assert_eq!((planned[0].slot.as_str(), planned[0].stage, planned[0].pane.is_none()), ("dev", HoldStage::Planned, true));
+        let launch = batch.projects[0].windows.iter().find(|w| w.name == "dev").unwrap().launch.clone();
+        assert_eq!(launch.as_deref(), Some(planned[0].launch.as_str()), "the batch window carries its hold's generation");
+        // At the door, the hold is already armed and bound to the window made.
+        let (sock, pid) = (socket.clone(), p.id.clone());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let at_door = seen.clone();
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.op == "launch" && s.ord == Some(0) {
+                let h = with_store(|st| st.project_holds(&sock, &pid)).unwrap();
+                let b = with_store(|st| st.restore_batch(&sock)).unwrap().unwrap();
+                *at_door.lock().unwrap() = Some((h, b));
+            }
+            Mangle::Run
+        })));
+        continue_batch(lease, batch).unwrap();
+        set_hook(None);
+        let (h, b) = seen.lock().unwrap().clone().expect("the launch step ran");
+        let w = b.projects[0].windows.iter().find(|w| w.name == "dev").unwrap();
+        assert_eq!(w.state, WindowState::LaunchIssued);
+        assert_eq!(h[0].stage, HoldStage::Armed, "armed before the typing");
+        let pane = h[0].pane.clone().expect("bound");
+        assert_eq!(Some(pane.pane_id.clone()), w.pane_id);
+        assert_eq!(Some(pane.window_id.clone()), w.window_id);
+        assert_eq!(Some(pane.session_id.clone()), b.projects[0].session_id);
+        assert_eq!(Some(pane.instance.clone()), b.instance);
+        assert_eq!(Some(pane.pane_pid), w.pane_pid);
+        assert_eq!(starts(&p, "dev"), 1);
+        assert_eq!(holds(&socket, &p)[0].stage, HoldStage::Armed, "a launched window keeps its hold");
+    }
+
+    /// A slot that ends before anything is typed (here a Stop at the door)
+    /// retires its hold with the window's record. A halt right after the
+    /// write-ahead `LaunchIssued` leaves the hold armed: the typing may have
+    /// happened.
+    #[test]
+    fn a_slot_ended_untyped_retires_its_hold_and_a_halt_after_the_write_ahead_keeps_it() {
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-retire");
+        let socket = server.socket().to_string();
+        let p = declare("r3retire", vec![agent_slot("dev"), agent_slot("dev2")]);
+        publish(&socket, &[&p]);
+        let pid = p.id.clone();
+        let mut fired = false;
+        set_hook(Some(Box::new(move |s: &Step| {
+            if !fired && s.op == "tag_window" && s.ord == Some(0) {
+                fired = true;
+                with_store(|st| st.set_slot_stopped(&pid, "dev")).unwrap();
+            }
+            if s.op == "launch" && s.ord == Some(1) {
+                return Mangle::HaltBefore;
+            }
+            Mangle::Run
+        })));
+        run(&inputs(&socket)).unwrap();
+        set_hook(None);
+        assert_eq!(window_state(&socket, &p.id, "dev").0, WindowState::Failed);
+        assert_eq!(window_state(&socket, &p.id, "dev2").0, WindowState::LaunchIssued);
+        let left = holds(&socket, &p);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!((left[0].slot.as_str(), left[0].stage), ("dev2", HoldStage::Armed));
+    }
+
+    // ---- round 3: the decision gate at the capture tick -----------------
+
+    /// A1 / A7: a capture of this boot's server, before any prepare decided
+    /// for this boot, moves neither the old boot's evidence nor the slots a
+    /// plan compares it with (an extra window is not added, a vanished shell
+    /// not dropped). A second connection — another gateway — that opens a
+    /// batch while the tick scans voids it too. Once decided, a tick commits.
+    #[test]
+    fn a_capture_before_the_decision_moves_neither_the_evidence_nor_the_slots() {
+        use super::super::capture::{TickPhase, TICK_HOOK};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-gate");
+        let socket = server.socket().to_string();
+        let p = declare("r3gate", vec![shell_slot("sh1"), shell_slot("sh2")]);
+        publish(&socket, &[&p]);
+        with_store(|s| s.set_restore_decided(&socket, "older")).unwrap();
+        let cwd = p.ws.to_string_lossy().to_string();
+        server.run(&["new-session", "-d", "-s", &p.session, "-c", &cwd, "-n", "sh1"]).unwrap();
+        tmux::new_named_window(&p.session, "extra", &cwd).unwrap();
+        let slots = || with_store(|s| s.slots(&p.id)).unwrap().into_iter().map(|s| s.window_name).collect::<Vec<_>>();
+        let evidence = || with_store(|s| s.checkpoint(&socket)).unwrap();
+        let (was, cp) = (slots(), evidence());
+        super::super::capture_once().unwrap();
+        assert_eq!(slots(), was, "no fold before the decision");
+        assert_eq!(evidence(), cp, "no checkpoint before the decision");
+        let plan_has_sh2 = || {
+            let intents = with_store(|s| s.restore_intents()).unwrap();
+            let plan = restore::plan(cp.as_ref().unwrap(), &declared().unwrap(), &intents, false, &restore::LiveFacts);
+            plan.projects.iter().any(|q| q.windows.iter().any(|w| w.name == "sh2"))
+        };
+        assert!(plan_has_sh2(), "the plan still has every window");
+        // Another gateway's prepare lands while this tick scans: decision and
+        // batch through a SECOND connection.
+        let db = super::super::db_path();
+        let mut other_batch = with_store(|s| s.restore_batch(&socket)).unwrap();
+        assert!(other_batch.is_none());
+        let fake = Batch {
+            batch: uuid::Uuid::new_v4().to_string(),
+            socket: socket.clone(),
+            boot_id: Some("boot-after".into()),
+            owner_pid: 0,
+            instance: None,
+            source: cp.clone().unwrap(),
+            closed: None,
+            projects: vec![],
+        };
+        other_batch = Some(fake.clone());
+        *TICK_HOOK.lock().unwrap() = Some(Box::new(move |phase| {
+            if phase == TickPhase::Listed {
+                if let Some(b) = other_batch.take() {
+                    let mut s = super::super::store::Store::open(&db).unwrap();
+                    s.open_batch(&b, &[], "boot-after").unwrap();
+                }
+            }
+        }));
+        super::super::capture_once().unwrap();
+        *TICK_HOOK.lock().unwrap() = None;
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"), "the other gateway decided");
+        assert_eq!(slots(), was, "a tick that scanned before that decision commits nothing");
+        assert_eq!(evidence(), cp);
+        assert!(plan_has_sh2());
+        // Control: with the batch closed and the boot decided, a tick commits.
+        let mut closed = fake;
+        closed.closed = Some("done".into());
+        with_store(|s| s.close_batch(&closed)).unwrap();
+        super::super::capture_once().unwrap();
+        assert!(slots().contains(&"extra".to_string()), "{:?}", slots());
+        assert_ne!(evidence(), cp);
+    }
+
+    // ---- round 3: the barrier ---------------------------------------------
+
+    fn screen_of(pane: &str) -> String {
+        tmux::capture_pane_plain(pane, Some(0)).unwrap_or_default()
+    }
+
+    /// T8 and B1/B2/B5: a window the restore launched is HELD for every
+    /// typer — a new delivery, and a held line at the server-start flush —
+    /// whatever its pane arrangement or name becomes: split with another
+    /// pane active, renamed. Only its original pane ending ends the hold;
+    /// the tick's prune then retires it, and the normal rules apply.
+    #[test]
+    fn a_restored_window_is_held_however_it_is_arranged_until_its_pane_ends() {
+        use super::super::restore_hold::{held, prune};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-held");
+        let socket = server.socket().to_string();
+        let p = declare("r3held", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        assert_eq!(window_state(&socket, &p.id, "dev").0, WindowState::Launched);
+        assert_eq!(wait_starts(&p, "dev", 1), 1);
+        let b = batch_of(&socket);
+        let w = b.projects[0].windows[0].clone();
+        let (pane, wid) = (w.pane_id.clone().unwrap(), w.window_id.clone().unwrap());
+        assert!(held(&p.session, "dev"));
+        // A new delivery is held, not typed.
+        assert!(super::super::delivery::deliver(&p.session, "dev", &pane, "TOKEN-ONE", 0, ""));
+        assert_eq!(super::super::telemetry::held_rows(&p.session, "dev").len(), 1);
+        // The server-start flush types nothing either.
+        super::super::delivery::flush_on_start();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen_of(&pane).contains("TOKEN-ONE"), "nothing typed");
+        // Split, the new pane active: still held.
+        server.run(&["split-window", "-t", &wid, "/bin/sh"]).unwrap();
+        assert!(held(&p.session, "dev"), "a split is not the end of the pane");
+        // Renamed: held under both names.
+        server.run(&["rename-window", "-t", &wid, "devx"]).unwrap();
+        assert!(held(&p.session, "devx") && held(&p.session, "dev"));
+        assert!(prune().is_empty(), "nothing to retire while the pane lives");
+        // The original pane ends: void, and the prune retires it.
+        server.run(&["kill-pane", "-t", &pane]).unwrap();
+        assert!(!held(&p.session, "devx") && !held(&p.session, "dev"));
+        assert_eq!(prune().len(), 1);
+        assert!(holds(&socket, &p).is_empty());
+    }
+
+    /// B4: another tmux instance on the socket — its `%N` and pids may be
+    /// reused — is not the hold's object: void, retired.
+    #[test]
+    fn a_new_server_on_the_socket_voids_the_hold() {
+        use super::super::restore_hold::{held, prune};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-inst");
+        let socket = server.socket().to_string();
+        let p = declare("r3inst", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        assert!(held(&p.session, "dev"));
+        let _ = server.run(&["kill-server"]);
+        let mut started = Err(String::new());
+        for _ in 0..50 {
+            started = server.run(&["new-session", "-d", "-s", &p.session, "-n", "dev", "/bin/sh"]).map(|_| ());
+            if started.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        started.expect("a new server on the same socket");
+        // Reuse the hold's own `%N` on the new server: the instance, not the
+        // pane id, is what says it is another object.
+        let pane = holds(&socket, &p)[0].pane.clone().unwrap().pane_id;
+        for _ in 0..20 {
+            let panes = server.run(&["list-panes", "-a", "-F", "#{pane_id}"]).unwrap();
+            if panes.lines().any(|l| l == pane) {
+                break;
+            }
+            server.run(&["new-window", "-d", "-t", &p.session, "/bin/sh"]).unwrap();
+        }
+        assert!(server.run(&["list-panes", "-a", "-F", "#{pane_id}"]).unwrap().lines().any(|l| l == pane), "the pane id is reused");
+        assert!(!held(&p.session, "dev"), "another instance");
+        assert_eq!(prune().len(), 1);
+    }
+
+    /// B6: an answer that cannot be read is no proof the pane ended: held,
+    /// and the prune retires nothing. Here the socket refuses the connection
+    /// (its mode taken away), an error that is not "no server".
+    #[test]
+    fn an_unreadable_answer_holds_and_retires_nothing() {
+        use super::super::restore_hold::{held, prune};
+        use std::os::unix::fs::PermissionsExt;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-unk");
+        let socket = server.socket().to_string();
+        let p = declare("r3unk", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        assert!(held(&p.session, "dev"));
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = tmux::run_tmux_on(Some(&socket), &["list-panes", "-a"]);
+        let (still, retired) = (held(&p.session, "dev"), prune());
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(unreadable.as_ref().is_err_and(|e| !tmux::session_confirmed_absent(e)), "the fixture makes an unreadable answer: {unreadable:?}");
+        assert!(still, "an unreadable answer holds");
+        assert!(retired.is_empty(), "and retires nothing");
+        assert_eq!(holds(&socket, &p).len(), 1);
+    }
+
+    /// A planned hold whose batch is no longer open was never bound (nothing
+    /// was made for it): the prune retires it. While its batch is open it
+    /// holds its slot's name.
+    #[test]
+    fn a_planned_hold_holds_its_slot_while_its_batch_is_open() {
+        use super::super::restore_hold::{held, prune};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-plan");
+        let socket = server.socket().to_string();
+        let p = declare("r3plan", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        drop(lease);
+        assert!(held(&p.session, "dev"));
+        assert!(!held(&p.session, "other"), "only its slot");
+        assert!(prune().is_empty(), "its batch is open");
+        let mut c = batch;
+        c.closed = Some("failed: test".into());
+        with_store(|s| s.close_batch(&c)).unwrap();
+        assert_eq!(prune().len(), 1);
+        assert!(!held(&p.session, "dev"));
+    }
+
+    // ---- round 3: the start and the continuation schedule ---------------
+
+    fn pass_unit(ms: u64) {
+        PASS_SECOND_MS.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn slow_shell(p: &Proj, socket: &str, secs: u32) -> StepHook {
+        let slow = p.ws.join("slow-shell.sh");
+        std::fs::write(&slow, format!("#!/bin/sh\nsleep {secs}\nexec /bin/sh -i\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (sock, slow_s) = (socket.to_string(), slow.to_string_lossy().to_string());
+        let mut fired = false;
+        Box::new(move |s: &Step| {
+            if !fired && s.op == "create_window" {
+                fired = true;
+                tmux::run_tmux_on(Some(&sock), &["set-option", "-g", "default-shell", &slow_s]).unwrap();
+            }
+            Mangle::Run
+        })
+    }
+
+    /// A2: a pass that leaves the batch open (a shell not ready) is followed
+    /// by the next scheduled pass, which launches once the prompt is there;
+    /// nothing is typed ahead and nothing twice.
+    #[test]
+    fn an_open_batch_is_continued_on_the_schedule_until_its_shell_is_ready() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-sched");
+        let socket = server.socket().to_string();
+        let p = declare("r3sched", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        set_hook(Some(slow_shell(&p, &socket, 3)));
+        PROMPT_WAIT_MS.store(1000, std::sync::atomic::Ordering::SeqCst);
+        pass_unit(50);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let end = continue_schedule(inputs(&socket), Start::Pass(lease, batch));
+        set_hook(None);
+        PROMPT_WAIT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        pass_unit(0);
+        assert_eq!(end, ScheduleEnd::Finished);
+        assert_eq!(window_state(&socket, &p.id, "dev").0, WindowState::Launched);
+        assert_eq!(wait_starts(&p, "dev", 1), 1, "launched once");
+    }
+
+    /// A3: an observer (its prepare found the lock held) continues the same
+    /// batch once the owner is gone — the OS released its lock.
+    #[test]
+    fn an_observer_takes_over_the_batch_once_the_owner_is_gone() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-obs");
+        let socket = server.socket().to_string();
+        let p = declare("r3obs", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, .. } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        pass_unit(20);
+        let i = inputs(&socket);
+        let observer = std::thread::spawn(move || continue_schedule(i, Start::Observe));
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert_eq!(window_state(&socket, &p.id, "dev").0, WindowState::Pending, "busy: the observer did nothing yet");
+        drop(lease);
+        let end = observer.join().unwrap();
+        pass_unit(0);
+        assert_eq!(end, ScheduleEnd::Finished);
+        assert_eq!(window_state(&socket, &p.id, "dev").0, WindowState::Launched);
+    }
+
+    /// A8: an observer that exhausts its schedule while the owner lives
+    /// writes nothing and closes nothing.
+    #[test]
+    fn an_observer_never_closes_a_live_owners_batch() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-obs2");
+        let socket = server.socket().to_string();
+        let p = declare("r3obs2", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, .. } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let before = with_store(|s| s.restore_batch(&socket)).unwrap();
+        pass_unit(1);
+        let end = continue_schedule(inputs(&socket), Start::Observe);
+        pass_unit(0);
+        assert_eq!(end, ScheduleEnd::Observed);
+        assert_eq!(with_store(|s| s.restore_batch(&socket)).unwrap(), before, "byte for byte");
+        drop(lease);
+    }
+
+    /// A4: exhausted holding the lock, the batch is closed FAILED with its
+    /// reason; the window it made and never typed into is killed (guarded),
+    /// its hold retired with it, and the project's room is told once.
+    #[test]
+    fn an_exhausted_schedule_closes_the_batch_and_says_so() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-give");
+        let socket = server.socket().to_string();
+        let p = declare("r3give", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        set_hook(Some(slow_shell(&p, &socket, 600)));
+        PROMPT_WAIT_MS.store(200, std::sync::atomic::Ordering::SeqCst);
+        pass_unit(1);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let end = continue_schedule(inputs(&socket), Start::Pass(lease, batch));
+        set_hook(None);
+        PROMPT_WAIT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        pass_unit(0);
+        let ScheduleEnd::GaveUp(word) = end else { panic!("{end:?}") };
+        assert!(word.starts_with("failed: not finished after 4 passes"), "{word}");
+        let last = with_store(|s| s.last_batch(&socket)).unwrap().unwrap();
+        assert_eq!(last.closed.as_deref(), Some(word.as_str()));
+        let w = &last.projects[0].windows[0];
+        assert_eq!(w.state, WindowState::Failed);
+        assert!(holds(&socket, &p).is_empty(), "its hold retired with the kill");
+        let names = server.run(&["list-windows", "-t", &p.session, "-F", "#{window_name}"]).unwrap_or_default();
+        assert!(!names.lines().any(|n| n == placeholder(&last.batch, w.ord)), "the untyped window is gone: {names}");
+        let room = format!("proj:{}", p.session);
+        let page = super::super::rooms::history_page(&room, None, 20).to_string();
+        assert_eq!(page.matches("the restore after a host reboot did not finish").count(), 1, "{page}");
+        assert_eq!(starts(&p, "dev"), 0, "nothing typed");
+    }
+
+    /// A5 / R7: off (the default) and "nothing to restore" schedule nothing;
+    /// both record the decision for this boot.
+    #[test]
+    fn a_start_with_restore_off_or_nothing_to_do_schedules_nothing() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-off");
+        let socket = server.socket().to_string();
+        let p = declare("r3off", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        with_store(|s| s.set_restore_decided(&socket, "older")).unwrap();
+        assert!(!crate::config::restore_on_start(), "off unless config.toml says so");
+        let off = RunInputs { enabled: false, ..inputs(&socket) };
+        assert!(prepare_on_start(&off).is_none());
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"));
+        assert!(with_store(|s| s.restore_batch(&socket)).unwrap().is_none(), "no batch");
+        assert!(holds(&socket, &p).is_empty());
+        // A boot already restored: nothing, decided.
+        run(&inputs(&socket)).unwrap();
+        with_store(|s| s.set_restore_decided(&socket, "older")).unwrap();
+        assert!(prepare_on_start(&inputs(&socket)).is_none());
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"));
+    }
+
+    /// A9: the first background pass runs under the lease prepare handed
+    /// over, never a second acquire (which would be Busy against it).
+    #[test]
+    fn the_first_pass_runs_under_the_lease_prepare_took() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-lease");
+        let socket = server.socket().to_string();
+        let p = declare("r3lease", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let in_pass = seen.clone();
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.op == "claim" {
+                *in_pass.lock().unwrap() = Some(OwnerLock::try_acquire().unwrap().is_none());
+            }
+            Mangle::Run
+        })));
+        pass_unit(10_000);
+        let t0 = std::time::Instant::now();
+        let end = continue_schedule(inputs(&socket), Start::Pass(lease, batch));
+        pass_unit(0);
+        set_hook(None);
+        assert_eq!(end, ScheduleEnd::Finished);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "the FIRST pass did the work, before any wait: {:?}", t0.elapsed());
+        assert_eq!(*seen.lock().unwrap(), Some(true), "and held the lease while it did");
+    }
+
+    /// The unknown → known path: a marker that does not name the tick's
+    /// boot (here `unknown`, as a start with an unreadable boot writes)
+    /// refuses the ticks until `decide_if_needed` prepares for the boot now
+    /// readable; then a tick commits.
+    #[test]
+    fn a_boot_that_becomes_readable_is_decided_before_the_next_tick() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-known");
+        let socket = server.socket().to_string();
+        let p = declare("r3known", vec![shell_slot("sh1")]);
+        publish(&socket, &[&p]);
+        with_store(|s| s.set_restore_decided(&socket, super::super::store::UNKNOWN_BOOT)).unwrap();
+        let cwd = p.ws.to_string_lossy().to_string();
+        server.run(&["new-session", "-d", "-s", &p.session, "-c", &cwd, "-n", "sh1"]).unwrap();
+        tmux::new_named_window(&p.session, "extra", &cwd).unwrap();
+        let slots = || with_store(|s| s.slots(&p.id)).unwrap().into_iter().map(|s| s.window_name).collect::<Vec<_>>();
+        super::super::capture_once().unwrap();
+        assert!(!slots().contains(&"extra".to_string()), "refused while undecided");
+        decide_if_needed();
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"));
+        super::super::capture_once().unwrap();
+        assert!(slots().contains(&"extra".to_string()), "{:?}", slots());
+    }
+
+    // ---- round 3 H1 review: the append ----------------------------------
+
+    /// P1-A: a decision is published only under the owner lease. While
+    /// another owner holds it (and may be reading the old evidence), a
+    /// prepare with restore off, or with an unknown boot, is Busy and writes
+    /// nothing, so a capture still commits nothing over the evidence.
+    #[test]
+    fn a_decision_is_published_only_under_the_owner_lease() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-lease2");
+        let socket = server.socket().to_string();
+        let p = declare("r3lease2", vec![shell_slot("sh1")]);
+        publish(&socket, &[&p]);
+        with_store(|s| s.set_restore_decided(&socket, "older")).unwrap();
+        let cwd = p.ws.to_string_lossy().to_string();
+        server.run(&["new-session", "-d", "-s", &p.session, "-c", &cwd, "-n", "sh1"]).unwrap();
+        tmux::new_named_window(&p.session, "extra", &cwd).unwrap();
+        let owner = OwnerLock::try_acquire().unwrap().expect("the other owner");
+        let off = RunInputs { enabled: false, ..inputs(&socket) };
+        let blind = RunInputs { boot_now: None, ..inputs(&socket) };
+        assert!(matches!(prepare(&off).unwrap(), Prepared::Busy));
+        assert!(matches!(prepare(&blind).unwrap(), Prepared::Busy));
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("older"), "nothing published");
+        let slots = || with_store(|s| s.slots(&p.id)).unwrap().into_iter().map(|s| s.window_name).collect::<Vec<_>>();
+        super::super::capture_once().unwrap();
+        assert!(!slots().contains(&"extra".to_string()), "the gate still holds");
+        drop(owner);
+        assert!(matches!(prepare(&off).unwrap(), Prepared::Nothing(_)));
+        assert_eq!(with_store(|s| s.restore_decided(&socket)).unwrap().as_deref(), Some("boot-after"));
+    }
+
+    /// P1-B: a renamed window, or one moved to another session, stays held;
+    /// and when the socket cannot be read every window is held (it cannot be
+    /// excluded that the target is the hold's pane) — a delivery is kept,
+    /// not typed.
+    #[test]
+    fn a_renamed_or_moved_window_stays_held_and_an_unreadable_answer_holds_every_window() {
+        use super::super::restore_hold::held;
+        use std::os::unix::fs::PermissionsExt;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-move");
+        let socket = server.socket().to_string();
+        let p = declare("r3move", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let w = batch_of(&socket).projects[0].windows[0].clone();
+        let (pane, wid) = (w.pane_id.unwrap(), w.window_id.unwrap());
+        server.run(&["rename-window", "-t", &wid, "devx"]).unwrap();
+        server.run(&["new-session", "-d", "-s", "elsewhere", "/bin/sh"]).unwrap();
+        server.run(&["move-window", "-s", &wid, "-t", "elsewhere:"]).unwrap();
+        assert!(held("elsewhere", "devx"), "moved: held where it is now");
+        assert!(held(&p.session, "dev"), "and under its slot's name");
+        assert!(!held("elsewhere", "sh"), "another window of that session is not");
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let any = (held("elsewhere", "devx"), held(&p.session, "anything"));
+        let kept = super::super::delivery::deliver("elsewhere", "devx", &pane, "TOKEN-UNK", 0, "");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(any, (true, true), "unreadable: every window held");
+        assert!(kept && super::super::telemetry::held_rows("elsewhere", "devx").len() == 1, "the line is kept");
+        assert!(!screen_of(&pane).contains("TOKEN-UNK"));
+    }
+
+    /// P1-C: prune's verdict is conditional on the row it judged. A planned
+    /// hold (its batch no longer open) that is bound and armed between the
+    /// verdict and the retire is not deleted.
+    #[test]
+    fn prune_never_retires_a_hold_that_moved_on_after_its_verdict() {
+        use super::super::restore_hold::{prune, PRUNE_HOOK};
+        use super::super::store::{HoldPane, HoldStage};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-race");
+        let socket = server.socket().to_string();
+        let p = declare("r3race", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        drop(lease);
+        let mut closed = batch;
+        closed.closed = Some("failed: test".into());
+        with_store(|s| s.close_batch(&closed)).unwrap();
+        let db = super::super::db_path();
+        let sock = socket.clone();
+        *PRUNE_HOOK.lock().unwrap() = Some(Box::new(move |h| {
+            if h.stage == HoldStage::Planned {
+                let pane = HoldPane {
+                    instance: TmuxInstance { socket: sock.clone(), pid: 1, start_time: 1 },
+                    session_id: "$1".into(),
+                    window_id: "@1".into(),
+                    pane_id: "%1".into(),
+                    pane_pid: 1,
+                };
+                super::super::store::Store::open(&db).unwrap().advance_hold_for_test(&h.launch, &pane).unwrap();
+            }
+        }));
+        let retired = prune();
+        *PRUNE_HOOK.lock().unwrap() = None;
+        assert!(retired.is_empty(), "{retired:?}");
+        let left = holds(&socket, &p);
+        assert_eq!((left.len(), left[0].stage), (1, HoldStage::Armed), "the armed row stands");
+    }
+
+    /// P1-D: a kill our guard refused, or one whose answer was lost while the
+    /// window is still there, keeps the hold; an exhausted close never
+    /// re-sends a kill already issued — it re-observes.
+    #[test]
+    fn a_kill_not_confirmed_keeps_the_hold_and_is_never_sent_twice() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-kill");
+        let socket = server.socket().to_string();
+        let p = declare("r3kill", vec![agent_slot("dev"), agent_slot("dev2"), agent_slot("dev3")]);
+        publish(&socket, &[&p]);
+        let pid = p.id.clone();
+        let (sock, kills) = (socket.clone(), std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let seen = kills.clone();
+        set_hook(Some(Box::new(move |s: &Step| {
+            // Each agent is stopped after its window is made, so its door
+            // refuses and kills the window it made.
+            if s.op == "tag_window" {
+                let name = ["dev", "dev2", "dev3"][s.ord.unwrap()];
+                with_store(|st| st.set_slot_stopped(&pid, name)).unwrap();
+            }
+            if s.op == "kill" {
+                seen.lock().unwrap().push(s.ord);
+                return match s.ord {
+                    // dev: the guard refuses (its tag taken away first).
+                    Some(0) => {
+                        let b = with_store(|st| st.restore_batch(&sock)).unwrap().unwrap();
+                        let wid = b.projects[0].windows[0].window_id.clone().unwrap();
+                        tmux::run_tmux_on(Some(&sock), &["set-option", "-w", "-u", "-t", &wid, "@tmm_rw"]).unwrap();
+                        Mangle::Run
+                    }
+                    // dev2: the answer is lost, and the window is moved to
+                    // another session meanwhile: its pane is still alive.
+                    Some(1) => {
+                        let b = with_store(|st| st.restore_batch(&sock)).unwrap().unwrap();
+                        let wid = b.projects[0].windows[1].window_id.clone().unwrap();
+                        let _ = tmux::run_tmux_on(Some(&sock), &["new-session", "-d", "-s", "moved-to", "/bin/sh"]);
+                        tmux::run_tmux_on(Some(&sock), &["move-window", "-s", &wid, "-t", "moved-to:"]).unwrap();
+                        Mangle::Lost
+                    }
+                    // dev3: issued, the run stops before it runs.
+                    _ => Mangle::HaltBefore,
+                };
+            }
+            Mangle::Run
+        })));
+        let _ = run(&inputs(&socket));
+        set_hook(None);
+        let b = batch_of(&socket);
+        let state = |n: &str| b.projects[0].windows.iter().find(|w| w.name == n).unwrap().clone();
+        assert_eq!(state("dev").state, WindowState::Failed);
+        assert!(state("dev").reason.unwrap_or_default().contains("kill refused, left in place"));
+        assert!(state("dev2").reason.unwrap_or_default().contains("left in place"));
+        assert_eq!((state("dev3").state, state("dev3").op), (WindowState::Created, Some(BatchOp::Kill)));
+        let names: Vec<String> = holds(&socket, &p).into_iter().map(|h| h.slot).collect();
+        assert_eq!(names, ["dev", "dev2", "dev3"], "every unconfirmed kill keeps its hold");
+        // Exhausted: dev3's issued kill is re-observed, never re-sent.
+        let id = b.batch.clone();
+        set_hook(Some(Box::new({
+            let seen = kills.clone();
+            move |s: &Step| {
+                if s.op == "kill" {
+                    seen.lock().unwrap().push(s.ord);
+                }
+                Mangle::Run
+            }
+        })));
+        give_up(&inputs(&socket), &id, "test").unwrap();
+        set_hook(None);
+        assert_eq!(*kills.lock().unwrap(), [Some(0), Some(1), Some(2)], "one kill step per window, ever");
+        let last = with_store(|s| s.last_batch(&socket)).unwrap().unwrap();
+        assert!(last.projects[0].windows[2].reason.clone().unwrap_or_default().contains("left in place"), "{:?}", last.projects[0].windows[2]);
+        assert_eq!(holds(&socket, &p).len(), 3);
+    }
+
+    /// P1-D, Applied half: a kill applied to the window is not the end of
+    /// the hold's pane when that pane was moved out first (split, then
+    /// break-pane): the hold stays, and still holds the pane where it is.
+    #[test]
+    fn an_applied_kill_of_a_window_whose_pane_moved_out_keeps_the_hold() {
+        use super::super::restore_hold::held;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-break");
+        let socket = server.socket().to_string();
+        let p = declare("r3break", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let pid = p.id.clone();
+        let sock = socket.clone();
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.op == "tag_window" {
+                with_store(|st| st.set_slot_stopped(&pid, "dev")).unwrap();
+            }
+            if s.op == "kill" {
+                let b = with_store(|st| st.restore_batch(&sock)).unwrap().unwrap();
+                let w = &b.projects[0].windows[0];
+                let (wid, pane) = (w.window_id.clone().unwrap(), w.pane_id.clone().unwrap());
+                tmux::run_tmux_on(Some(&sock), &["split-window", "-d", "-t", &wid, "/bin/sh"]).unwrap();
+                tmux::run_tmux_on(Some(&sock), &["break-pane", "-d", "-s", &pane, "-n", "broke-out"]).unwrap();
+            }
+            Mangle::Run
+        })));
+        run(&inputs(&socket)).unwrap();
+        set_hook(None);
+        let (st, why) = window_state(&socket, &p.id, "dev");
+        assert_eq!(st, WindowState::Failed);
+        assert!(why.unwrap_or_default().contains("its pane not confirmed gone"));
+        assert_eq!(holds(&socket, &p).len(), 1, "the pane lives on: the hold stays");
+        assert!(held(&p.session, "broke-out"), "and holds the pane where it went");
+    }
+
+    /// P1D-b (validator, 1dff73e9): an unseen kill whose pane cannot be
+    /// judged — the same %N alive under another process (respawn-pane -k) —
+    /// is neither retired nor re-killed: the window stays Created with its
+    /// kill issued, the hold stays, and a later pass only re-observes.
+    #[test]
+    fn an_unseen_kill_whose_pane_cannot_be_judged_keeps_everything() {
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-unseen");
+        let socket = server.socket().to_string();
+        let p = declare("r3unseen", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let pid = p.id.clone();
+        let sock = socket.clone();
+        let kills = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = kills.clone();
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.op == "tag_window" {
+                with_store(|st| st.set_slot_stopped(&pid, "dev")).unwrap();
+            }
+            if s.op == "kill" {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let b = with_store(|st| st.restore_batch(&sock)).unwrap().unwrap();
+                let pane = b.projects[0].windows[0].pane_id.clone().unwrap();
+                tmux::run_tmux_on(Some(&sock), &["respawn-pane", "-k", "-t", &pane, "/bin/sh"]).unwrap();
+                return Mangle::Lost;
+            }
+            Mangle::Run
+        })));
+        let _ = run(&inputs(&socket));
+        let _ = run(&inputs(&socket));
+        set_hook(None);
+        let w = batch_of(&socket).projects[0].windows[0].clone();
+        assert_eq!((w.state, w.op), (WindowState::Created, Some(BatchOp::Kill)), "the kill stays issued, to be re-observed");
+        let h = holds(&socket, &p);
+        assert_eq!((h.len(), h[0].stage), (1, HoldStage::Bound), "the hold stays");
+        assert_eq!(kills.load(std::sync::atomic::Ordering::SeqCst), 1, "never re-sent, across passes");
+    }
+
+    /// P2: the schedule's offsets are absolute from its start: a slow pass
+    /// shortens the next wait instead of pushing the plan back. On the
+    /// virtual clock (no sleep, no tolerance), a first pass that takes 2 s
+    /// still has the passes start at exactly 0, 30, 120 and 600 s.
+    #[test]
+    fn the_schedule_runs_at_offsets_from_its_start() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-offs");
+        let socket = server.socket().to_string();
+        let p = declare("r3offs", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let starts_at = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = starts_at.clone();
+        let mut slow = slow_shell(&p, &socket, 600);
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.op == "project" {
+                let mut clock = VIRTUAL_MS.lock().unwrap();
+                let now = clock.unwrap();
+                let mut v = seen.lock().unwrap();
+                v.push(now);
+                if v.len() == 1 {
+                    *clock = Some(now + 2000);
+                }
+            }
+            slow(s)
+        })));
+        PROMPT_WAIT_MS.store(50, std::sync::atomic::Ordering::SeqCst);
+        *VIRTUAL_MS.lock().unwrap() = Some(0);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let end = continue_schedule(inputs(&socket), Start::Pass(lease, batch));
+        *VIRTUAL_MS.lock().unwrap() = None;
+        set_hook(None);
+        PROMPT_WAIT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(end, ScheduleEnd::GaveUp(_)), "{end:?}");
+        assert_eq!(*starts_at.lock().unwrap(), [0, 30_000, 120_000, 600_000]);
+    }
+
+    // ---- round 3 H1: the validator's surviving controls, pinned ----------
+
+    /// B-g: the hold's `%N` alive with ANOTHER pane process (respawned) is
+    /// not proof of anything: held. B-h: a hold row the store cannot read
+    /// holds too.
+    #[test]
+    fn a_respawned_pane_or_an_unreadable_hold_row_holds() {
+        use super::super::restore_hold::held;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-pid");
+        let socket = server.socket().to_string();
+        let p = declare("r3pid", vec![agent_slot("dev"), agent_slot("dev2")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let b = batch_of(&socket);
+        let pane = b.projects[0].windows[0].pane_id.clone().unwrap();
+        server.run(&["rename-window", "-t", b.projects[0].windows[0].window_id.as_deref().unwrap(), "devx"]).unwrap();
+        server.run(&["respawn-pane", "-k", "-t", &pane, "/bin/sh"]).unwrap();
+        let pid = server.run(&["display-message", "-p", "-t", &pane, "#{pane_pid}"]).unwrap();
+        assert_ne!(pid.trim(), b.projects[0].windows[0].pane_pid.unwrap().to_string(), "another process under the same %N");
+        assert!(held(&p.session, "devx"), "a pid mismatch is unknown: held, renamed or not");
+        assert!(held(&p.session, "unrelated"), "unknown holds every window, not only its own");
+        assert_eq!(super::super::restore_hold::prune().len(), 0, "and never retired");
+        let launch = b.projects[0].windows[1].launch.clone().unwrap();
+        server.run(&["kill-pane", "-t", &pane]).unwrap();
+        assert!(!held(&p.session, "unrelated"), "control: with that pane gone, an unrelated window is free");
+        with_store(|s| s.corrupt_hold_for_test(&launch)).unwrap();
+        assert!(held(&p.session, "unrelated"), "an unreadable store holds");
+    }
+
+    /// L-a / L-b: only the lock holder closes, and only the batch it ran.
+    #[test]
+    fn give_up_closes_only_under_the_lock_and_only_its_own_batch() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-gu");
+        let socket = server.socket().to_string();
+        let p = declare("r3gu", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let Prepared::Ready { lease, batch } = prepare(&inputs(&socket)).unwrap() else { panic!("a batch") };
+        let before = with_store(|s| s.restore_batch(&socket)).unwrap();
+        assert_eq!(give_up(&inputs(&socket), &batch.batch, "test").unwrap(), ScheduleEnd::Observed, "another owner holds the lock");
+        assert_eq!(with_store(|s| s.restore_batch(&socket)).unwrap(), before, "untouched");
+        drop(lease);
+        assert_eq!(give_up(&inputs(&socket), "another-batch", "test").unwrap(), ScheduleEnd::Finished, "not the batch it ran");
+        assert_eq!(with_store(|s| s.restore_batch(&socket)).unwrap(), before, "untouched");
+        assert!(matches!(give_up(&inputs(&socket), &batch.batch, "test").unwrap(), ScheduleEnd::GaveUp(_)), "its own, under the lock");
+        assert!(with_store(|s| s.restore_batch(&socket)).unwrap().is_none());
     }
 
     // ---- review round 2: P1-A ownership-based capture exclusion ----------

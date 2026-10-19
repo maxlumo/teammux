@@ -25,6 +25,10 @@ struct FileConfig {
     // (board #323). Absolute. Unset: the UI embedded in the binary (feature
     // `embed-ui`), else none. Read from config.toml only.
     ui_dir: Option<String>,
+    // Bring back, at gateway start, the sessions and agents a host reboot
+    // took down (board #422). Default false until the live acceptance of
+    // round 4; read once per start (and per decision a capture tick needs).
+    restore_on_start: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -40,6 +44,16 @@ pub struct Config {
     pub disconnect_grace_secs: u64,
     pub kiro_engine: String,
     pub ui_dir: Option<String>,
+}
+
+/// `restore_on_start` in config.toml (board #422), side-effect free; false
+/// when unset or unreadable.
+pub fn restore_on_start() -> bool {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|t| toml::from_str::<FileConfig>(&t).ok())
+        .and_then(|c| c.restore_on_start)
+        .unwrap_or(false)
 }
 
 /// The kiro engine door, side-effect free (no token/machine-id seeding — the

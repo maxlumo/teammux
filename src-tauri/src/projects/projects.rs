@@ -1596,7 +1596,7 @@ mod tests {
         // …and it publishes the restore checkpoint for this socket (board
         // #422): the server it saw, and this project with its live windows.
         let cp = with_store(|s| s.checkpoint(&super::super::restore::socket_key())).unwrap().expect("a complete tick publishes");
-        assert_eq!(cp.boot_id, super::super::restore::boot_id());
+        assert_eq!(cp.boot_id, super::super::restore::tick_boot());
         let super::super::restore::TmuxNow::Present { instance, .. } = super::super::restore::tmux_now() else { panic!("tmux is up") };
         assert_eq!(cp.tmux.as_ref(), Some(&instance), "the server identity the tick saw");
         let seen = cp.projects.iter().find(|p| p.id == id).expect("the live project is in the checkpoint");

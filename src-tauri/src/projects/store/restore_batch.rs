@@ -78,6 +78,12 @@ pub struct BatchWindow {
     pub window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
+    /// The launch uuid of an agent slot: its hold's generation, and what its
+    /// start line carries as `TMM_LAUNCH` (board #422 round 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<BatchOp>,
 }
@@ -210,6 +216,45 @@ impl Store {
 
     /// Write the open batch whole, in one IMMEDIATE transaction.
     pub fn save_batch(&mut self, b: &Batch) -> Result<(), String> {
+        self.save_batch_with(b, |_| Ok(true)).map(|_| ())
+    }
+
+    /// Open a batch with a planned hold for each of its agent slots and the
+    /// boot decision that opened it, in ONE transaction (board #422 round 3).
+    pub fn open_batch(&mut self, b: &Batch, holds: &[Hold], boot: &str) -> Result<(), String> {
+        self.save_batch_with(b, |tx| {
+            for h in holds {
+                super::restore_hold::insert_hold(tx, h)?;
+            }
+            super::restore_hold::write_decided(tx, &b.socket, boot)?;
+            Ok(true)
+        })
+        .map(|_| ())
+    }
+
+    /// Write the batch and bind the planned hold `launch` to `pane`, in one
+    /// transaction. `false` = the hold was no longer planned (a newer
+    /// generation, or gone): NOTHING is written.
+    pub fn save_batch_binding(&mut self, b: &Batch, launch: &str, pane: &HoldPane) -> Result<bool, String> {
+        self.save_batch_with(b, |tx| super::restore_hold::bind_hold_in(tx, launch, pane))
+    }
+
+    /// Write the batch (its window now `LaunchIssued`) and arm the bound hold
+    /// `launch`, in one transaction; `false` = nothing written.
+    pub fn save_batch_arming(&mut self, b: &Batch, launch: &str) -> Result<bool, String> {
+        self.save_batch_with(b, |tx| super::restore_hold::arm_hold_in(tx, launch))
+    }
+
+    /// Write the batch and retire the hold `launch` (a slot skipped or a
+    /// window killed before any typing), in one transaction. A hold already
+    /// gone is no reason to lose the batch write.
+    pub fn save_batch_retiring(&mut self, b: &Batch, launch: &str) -> Result<(), String> {
+        self.save_batch_with(b, |tx| super::restore_hold::retire_hold_in(tx, launch).map(|_| true)).map(|_| ())
+    }
+
+    /// The batch write plus `also`, in one IMMEDIATE transaction; committed
+    /// only when `also` answers true.
+    fn save_batch_with(&mut self, b: &Batch, also: impl FnOnce(&rusqlite::Transaction) -> Result<bool, String>) -> Result<bool, String> {
         let value = serde_json::to_string(b).map_err(|e| format!("encode batch: {e}"))?;
         let tx = self
             .conn
@@ -220,7 +265,11 @@ impl Store {
             params![format!("{OPEN}{}", b.socket), value],
         )
         .map_err(|e| format!("write batch: {e}"))?;
-        tx.commit().map_err(|e| format!("commit batch: {e}"))
+        if !also(&tx)? {
+            return Ok(false);
+        }
+        tx.commit().map_err(|e| format!("commit batch: {e}"))?;
+        Ok(true)
     }
 
     /// Close the batch: it becomes the socket's `restore_last` and the open
@@ -311,12 +360,12 @@ mod tests {
         assert_eq!(scan.open, Ok(None));
         assert_eq!(scan.last, Ok(Some(old)));
         theirs.save_batch(&batch()).unwrap();
-        assert_eq!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &scan.revision))).unwrap(), None, "a stale scan commits nothing");
+        assert_eq!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &scan.revision, Some("boot")))).unwrap(), None, "a stale scan commits nothing");
         assert_eq!(ours.checkpoint("/s").unwrap().unwrap().gen, gen.unwrap(), "the previous checkpoint stands");
         // Control: a scan of the current state commits.
         let now = ours.batch_scan("/s").unwrap();
         assert_eq!(now.open, Ok(Some(batch())));
-        assert!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &now.revision))).unwrap().is_some());
+        assert!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &now.revision, Some("boot")))).unwrap().is_some());
         drop((ours, theirs));
         let _ = std::fs::remove_dir_all(&dir);
     }

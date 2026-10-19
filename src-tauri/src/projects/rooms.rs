@@ -478,6 +478,10 @@ mod tests {
         assert_eq!(history_page(&room, None, 100)["messages"].as_array().unwrap().len(), 1);
     }
 
+    /// The legacy rows carry seqs far above any the process-shared test
+    /// store holds: an earlier test that posts to a room (board #422's
+    /// restore give-up line) takes seq 1..n, and `INSERT OR IGNORE` would
+    /// skip a legacy row of the same seq.
     #[test]
     fn legacy_import_copies_proj_rooms_once_and_skips_team_rooms() {
         crate::projects::tests::use_test_store();
@@ -493,9 +497,9 @@ mod tests {
                    to_json TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL
                  );
                  INSERT INTO messages (seq, id, ts, room, sender, to_json, kind, body) VALUES
-                   (1, 'a', 100, 'proj:blog', 'human', '[\"lead\"]', 'msg', 'old task'),
-                   (2, 'b', 200, 'content-team', 'manager', '[]', 'msg', 'team room stays'),
-                   (3, 'c', 300, 'proj:blog', 'lead', '[]', 'msg', 'old reply');",
+                   (900000001, 'a', 100, 'proj:blog', 'human', '[\"lead\"]', 'msg', 'old task'),
+                   (900000002, 'b', 200, 'content-team', 'manager', '[]', 'msg', 'team room stays'),
+                   (900000003, 'c', 300, 'proj:blog', 'lead', '[]', 'msg', 'old reply');",
             )
             .unwrap();
         }
@@ -505,8 +509,8 @@ mod tests {
         let msgs = page["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2);
         // Seq/id/ts survive the copy — cursors held by clients stay valid.
-        assert_eq!(msgs[0]["seq"], 1);
-        assert_eq!(msgs[1]["seq"], 3);
+        assert_eq!(msgs[0]["seq"], 900000001);
+        assert_eq!(msgs[1]["seq"], 900000003);
         assert_eq!(msgs[0]["id"], "a");
         // The team room did not come along.
         assert!(history_page("content-team", None, 10)["messages"].as_array().unwrap().is_empty());
@@ -515,7 +519,7 @@ mod tests {
         assert_eq!(again, 0);
         // New appends continue ABOVE the imported log positions.
         let fresh = post("proj:blog", "human", "new work").unwrap();
-        assert!(fresh["seq"].as_i64().unwrap() > 3);
+        assert!(fresh["seq"].as_i64().unwrap() > 900000003);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

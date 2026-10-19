@@ -110,14 +110,38 @@ impl Store {
     /// answers `Ok(None)` (review round 2, P1-A residual). The batch writer
     /// takes the same write lock, so no restore can begin between this check
     /// and the commit.
-    pub fn commit_scanned(&mut self, folds: &[(String, Vec<Slot>)], checkpoint: Option<(&str, Checkpoint)>, scan: Option<(&str, &super::BatchRevision)>) -> Result<Option<Option<u64>>, String> {
+    ///
+    /// The scan also names the tick's boot (board #422 round 3, P1-A): while
+    /// the socket still holds evidence of ANOTHER known boot (its latest or
+    /// kept previous checkpoint) and no prepare has decided for this boot
+    /// (`restore_decided`), the tick commits NOTHING — no fold, no checkpoint
+    /// — whatever its checkpoint is, so neither the evidence nor the slots a
+    /// plan compares it with can move before the decision. A tick of UNKNOWN
+    /// boot folds as before but never publishes over a checkpoint of known
+    /// boot (that one stays the last known evidence).
+    pub fn commit_scanned(&mut self, folds: &[(String, Vec<Slot>)], checkpoint: Option<(&str, Checkpoint)>, scan: Option<(&str, &super::BatchRevision, Option<&str>)>) -> Result<Option<Option<u64>>, String> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("tick transaction: {e}"))?;
-        if let Some((socket, seen)) = scan {
+        let mut checkpoint = checkpoint;
+        if let Some((socket, seen, boot)) = scan {
             if super::restore_batch::revision_in(&tx, socket)? != *seen {
                 return Ok(None);
+            }
+            let [latest, prev] = evidence_boots(&tx, socket);
+            match boot {
+                Some(boot) => {
+                    let other = [&latest, &prev].iter().any(|b| matches!(b, Some(b) if b.as_deref() != Some(boot)));
+                    if other && super::restore_hold::decided_in(&tx, socket)?.as_deref() != Some(boot) {
+                        return Ok(None);
+                    }
+                }
+                None => {
+                    if matches!(latest, Some(Some(_))) {
+                        checkpoint = None;
+                    }
+                }
             }
         }
         let gen = match checkpoint {
@@ -239,6 +263,23 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+/// The boots of the socket's stored evidence, `[latest, kept previous]`:
+/// `None` where there is no such checkpoint, `Some(None)` for one of unknown
+/// boot. An unreadable value counts as a boot of its own, so it is protected
+/// like any other evidence until a decision is made.
+fn evidence_boots(tx: &rusqlite::Transaction, socket: &str) -> [Option<Option<String>>; 2] {
+    [CHECKPOINT, CHECKPOINT_PREV].map(|prefix| {
+        let raw: Option<String> = tx
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![format!("{prefix}{socket}")], |r| r.get(0))
+            .optional()
+            .unwrap_or(Some(String::new()));
+        raw.map(|v| match serde_json::from_str::<Checkpoint>(&v) {
+            Ok(cp) => cp.boot_id,
+            Err(_) => Some("<unreadable>".to_string()),
+        })
+    })
 }
 
 /// Write `cp` as the socket's checkpoint inside the caller's transaction,
@@ -378,6 +419,74 @@ mod tests {
         // Control: the same tick without the refused fold commits both together.
         assert_eq!(store.commit_tick(&folds[..1], Some(("/s", cp(&["a"])))).unwrap(), Some(2));
         assert_eq!(store.slots("a").unwrap()[0].window_name, "new");
+    }
+
+    /// Board #422 round 3, P1-A: while another boot's evidence is stored
+    /// (the latest or the kept previous checkpoint) and no prepare has
+    /// decided for this tick's boot, the tick commits NOTHING — its
+    /// checkpoint, and every fold the plan would compare that evidence
+    /// with (a vanished shell dropped, a kind changed). Once decided, the
+    /// same tick commits. With no other boot's evidence there is nothing to
+    /// protect and it commits undecided.
+    #[test]
+    fn a_tick_before_the_decision_moves_neither_the_evidence_nor_the_slots() {
+        let rev = super::super::BatchRevision::default();
+        let mut store = Store::open_memory().unwrap();
+        store.insert_project(&project("a")).unwrap();
+        // The evidence of the boot before: a's two shells were live.
+        let before = cp(&["a"]);
+        assert_eq!(store.commit_tick(&[("a".into(), vec![slot("w", 0), slot("w2", 1)])], Some(("/s", before.clone()))).unwrap(), Some(1));
+        let mut agent = slot("w", 0);
+        agent.kind = SlotKind::Agent;
+        let folds = vec![("a".to_string(), vec![agent])];
+        let mut now = cp(&["a"]);
+        now.boot_id = Some("boot-b".into());
+        let names = |s: &Store| s.slots("a").unwrap().into_iter().map(|s| (s.window_name, s.kind)).collect::<Vec<_>>();
+        let was = names(&store);
+        assert_eq!(store.commit_scanned(&folds, Some(("/s", now.clone())), Some(("/s", &rev, Some("boot-b")))).unwrap(), None, "undecided: refused whole");
+        assert_eq!(names(&store), was, "no fold: the vanished shell and the old kind stand");
+        assert_eq!(store.checkpoint("/s").unwrap().unwrap(), Checkpoint { gen: 1, ..before.clone() }, "the evidence stands");
+        // A checkpoint-less tick (an incomplete scan) cannot slip folds past it.
+        assert_eq!(store.commit_scanned(&folds, None, Some(("/s", &rev, Some("boot-b")))).unwrap(), None);
+        assert_eq!(names(&store), was);
+        // A decision for ANOTHER boot is no decision for this one.
+        store.set_restore_decided("/s", "boot-a").unwrap();
+        assert_eq!(store.commit_scanned(&folds, Some(("/s", now.clone())), Some(("/s", &rev, Some("boot-b")))).unwrap(), None);
+        // The kept previous checkpoint is evidence too: the latest here is
+        // this boot's (it saw no server), the kept one the boot before's.
+        let mut absent = now.clone();
+        absent.tmux = None;
+        absent.projects.clear();
+        store.commit_tick(&[], Some(("/s", absent))).unwrap();
+        assert_eq!(store.checkpoint_prev("/s").unwrap().and_then(|c| c.boot_id).as_deref(), Some("boot-a"));
+        assert_eq!(store.commit_scanned(&folds, Some(("/s", now.clone())), Some(("/s", &rev, Some("boot-b")))).unwrap(), None, "refused by the kept one");
+        // Decided for this boot: the same tick commits.
+        store.set_restore_decided("/s", "boot-b").unwrap();
+        assert!(store.commit_scanned(&folds, Some(("/s", now.clone())), Some(("/s", &rev, Some("boot-b")))).unwrap().is_some());
+        assert_eq!(names(&store), [("w".to_string(), SlotKind::Agent)]);
+        // Control: on a socket with only this boot's evidence, undecided commits.
+        assert!(store.commit_scanned(&[], Some(("/t", now.clone())), Some(("/t", &rev, Some("boot-b")))).unwrap().is_some());
+        assert!(store.commit_scanned(&[], Some(("/t", now)), Some(("/t", &rev, Some("boot-b")))).unwrap().is_some());
+    }
+
+    /// A tick of UNKNOWN boot folds as before, but never publishes over a
+    /// checkpoint of known boot: that one stays the last known evidence. Over
+    /// one of unknown boot, or none, it publishes.
+    #[test]
+    fn an_unknown_boot_tick_folds_but_never_replaces_known_evidence() {
+        let rev = super::super::BatchRevision::default();
+        let mut store = Store::open_memory().unwrap();
+        store.insert_project(&project("a")).unwrap();
+        store.commit_tick(&[], Some(("/s", cp(&["a"])))).unwrap();
+        let mut blind = cp(&[]);
+        blind.boot_id = None;
+        let out = store.commit_scanned(&[("a".into(), vec![slot("w9", 0)])], Some(("/s", blind.clone())), Some(("/s", &rev, None))).unwrap();
+        assert_eq!(out, Some(None), "committed, with no checkpoint published");
+        assert_eq!(store.slots("a").unwrap()[0].window_name, "w9", "the fold committed");
+        assert_eq!(store.checkpoint("/s").unwrap().unwrap().boot_id.as_deref(), Some("boot-a"), "the known evidence stands");
+        // Control: over no checkpoint, or one of unknown boot, it publishes.
+        assert_eq!(store.commit_scanned(&[], Some(("/u", blind.clone())), Some(("/u", &rev, None))).unwrap(), Some(Some(1)));
+        assert_eq!(store.commit_scanned(&[], Some(("/u", blind)), Some(("/u", &rev, None))).unwrap(), Some(Some(2)));
     }
 
     /// Down and Stop intents carry a version from one monotonic counter; a

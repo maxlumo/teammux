@@ -246,6 +246,23 @@ pub async fn start_with_socket_ready(
             eprintln!("⚠  the turn-fact replay at start did not finish ({e}); each session is recovered when first touched");
         }
     }
+    // Board #422 round 3: the reboot restore's small durable decision — the
+    // trigger, the batch with a hold for every planned agent slot, and this
+    // boot's `restore_decided` — is AWAITED here, before the hook inbox,
+    // capture, the start flush, wakes and the first accept. Window creation
+    // runs in the background below. Off unless `restore_on_start`.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let restore_start = {
+        let inputs = crate::projects::restore_run::start_inputs();
+        let decide = inputs.clone();
+        match tokio::task::spawn_blocking(move || crate::projects::restore_run::prepare_on_start(&decide)).await {
+            Ok(start) => start.map(|s| (inputs, s)),
+            Err(e) => {
+                eprintln!("⚠  the reboot restore's prepare did not finish ({e})");
+                None
+            }
+        }
+    };
     tokio::spawn(notifications.clone().run());
 
     // Fold live tmux state back into the project declarations. Nobody
@@ -270,6 +287,11 @@ pub async fn start_with_socket_ready(
         // longer depends on a team bus being configured.
         let poster: Arc<dyn crate::agent_notifications::RoomPoster> = Arc::new(HubRoomPoster);
         notifications.set_room_poster(poster);
+        // The restore's tmux work, after the room poster is in place; its
+        // windows are held from their creation (restore_hold).
+        if let Some((inputs, start)) = restore_start {
+            std::thread::spawn(move || crate::projects::restore_run::continue_schedule(inputs, start));
+        }
         // Lines held for a busy queue-mode agent (board #257) whose turn a
         // restart finds over are typed now, not at the first feed read.
         tokio::task::spawn_blocking(crate::projects::delivery::flush_on_start);
@@ -386,6 +408,36 @@ mod start_order {
             assert!(replay < at(later), "the replay is awaited before {later}");
         }
         assert_eq!(start.matches("recover_on_start").count(), 1, "one replay, awaited, nowhere else in the start");
+    }
+
+    /// Board #422 round 3: the reboot restore's prepare (its decision, the
+    /// batch and its holds) is AWAITED before the hook inbox, capture, the
+    /// start flush, wakes, `ready` and the first accept; its tmux work is
+    /// spawned after the room poster is installed, never awaited.
+    #[test]
+    fn the_restore_is_prepared_before_any_delivery_path_and_run_after_the_room_poster() {
+        let src = include_str!("mod.rs");
+        let start = &src[src.find("pub async fn start_with_socket_ready(").unwrap()..];
+        let start = &start[..start.find("\n}\n").unwrap()];
+        let at = |needle: &str| start.find(needle).unwrap_or_else(|| panic!("{needle} missing from the start sequence"));
+        let prepare = at("crate::projects::restore_run::prepare_on_start(&decide)).await");
+        assert!(at("tokio::task::spawn_blocking(crate::projects::telemetry::recover_on_start).await") < prepare);
+        for later in [
+            "tokio::spawn(notifications.clone().run());",
+            "tokio::spawn(crate::projects::capture_loop());",
+            "crate::projects::delivery::flush_on_start",
+            "tokio::spawn(crate::projects::wakes::run(",
+            "tx.send(())",
+            "listener.accept()",
+        ] {
+            assert!(prepare < at(later), "the prepare is awaited before {later}");
+        }
+        let run = at("crate::projects::restore_run::continue_schedule(inputs, start)");
+        assert!(at("notifications.set_room_poster(poster);") < run, "the room poster is in place first");
+        assert!(start.contains("std::thread::spawn(move || crate::projects::restore_run::continue_schedule(inputs, start));"), "on its own thread");
+        assert!(!start.contains(".join()"), "never joined: the listener does not wait for the windows");
+        assert!(!start[run..].starts_with("crate::projects::restore_run::continue_schedule(inputs, start)).await"), "never awaited");
+        assert_eq!(start.matches("prepare_on_start").count(), 1);
     }
 }
 
