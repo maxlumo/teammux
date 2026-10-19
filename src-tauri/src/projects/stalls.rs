@@ -302,7 +302,16 @@ mod tests {
         record_prompt(&s, w, "[tmm chat 10:00] human: continue");
         let second = empty_end(&s, w);
         assert!(second > first);
-        std::thread::sleep(Duration::from_millis(3500));
+        // Wait for the fact the assertion reads, the timer's nudge, under a
+        // generous bound (board #429: a fixed 3.5 s sleep after a 1 s timer
+        // read an empty log at load 29). Then a grace for a second nudge: a
+        // wait for something that must NOT happen can only miss, never flake.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while acted.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the timer never nudged within 30 s");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(1500));
         assert_eq!(*acted.lock().unwrap(), vec![second], "one timer, one nudge, for the end that is still the newest");
         assert!(arm_nudge(&s, w).is_none(), "and the allowance is spent");
     }

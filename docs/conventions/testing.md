@@ -525,6 +525,11 @@ flaky wall-clock assertions in the test.
   failed twice under load (at load ~246, and at ~210-240 in the #422 gate):
   `tasks() == 2` was observed, then `task(2)` read an empty file the dsh
   stand-in had created and not yet written.
+  A fixed sleep is the same mistake with a clock: board #429,
+  `two_empty_turns_before_a_nudge_send_exactly_one_for_the_latest` asserted a
+  1 s stall timer's nudge after `sleep(3500 ms)` and read an empty log at load
+  29. It now waits for the nudge (30 s bound) and then gives a second one a
+  grace; a wait for something that must NOT happen can only miss, never flake.
 - A test that feeds a child's stdin writes only what that child reads. Where
   the child rightly exits before reading (the hook helper with no pane, or an
   inbox `mktemp` cannot write into), the test lets it exit, tolerates the
