@@ -297,7 +297,12 @@ tmux session name is the real conflict — `path` is merely indexed, and the
 workspace directory is decided by `pick_workspace` over ALL windows: most
 frequent cwd wins, `$HOME` only wins when nothing else is on offer, ties break
 toward the shortest path (the one closest to a project root when windows sit in
-sibling subdirs). A window that does sit outside the project keeps an absolute
+sibling subdirs). `$HOME` is recognised by directory identity (`same_dir`), not
+spelling (board #427): a pane's cwd is the physical path, so where `$HOME` is
+a symlink (the dev host: `/home/cfu` → `/local/home/cfu`) a parked window
+read `/local/home/cfu`, escaped the string filter, tied a project window 1:1
+and won by coming first. A cwd whose comparison cannot be resolved counts as
+`$HOME`: it never outranks a workspace. A window that does sit outside the project keeps an absolute
 cwd, so it is restored where it was.
 
 The session's own `#{session_path}` comes before the windows (board #421,

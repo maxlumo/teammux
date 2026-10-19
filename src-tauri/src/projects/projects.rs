@@ -897,18 +897,26 @@ pub(super) fn choose_workspace(declared: &str, cwds: &[String], home: &str) -> O
 
 /// Whether a session's `#{session_path}` names its workspace: an existing
 /// directory that is known NOT to be `$HOME` (a parked start says nothing, as
-/// in `pick_workspace`). Known by directory identity (`same_dir`), never by
-/// spelling: on this host `$HOME` is `/home/cfu` and its canonical path
-/// `/local/home/cfu` (review P1-A); a path that cannot be resolved is not
-/// known to be anything, so the windows decide.
+/// in `pick_workspace`).
 pub(super) fn declares_workspace(declared: &str, home: &str) -> bool {
-    !declared.is_empty() && std::path::Path::new(declared).is_dir() && same_dir(declared, home) == Some(false)
+    !declared.is_empty() && std::path::Path::new(declared).is_dir() && known_not_home(declared, home)
+}
+
+/// The one test of "this directory is not `$HOME`", for a session's path and
+/// for every window's cwd alike: by directory identity (`same_dir`), never by
+/// spelling. On this host `$HOME` is `/home/cfu` and its canonical path
+/// `/local/home/cfu`, which is what a pane's cwd reads (#421 review P1-A,
+/// #427). A comparison that cannot be resolved is not known to be anything
+/// else, so it counts as `$HOME`: it never outranks a real workspace.
+fn known_not_home(path: &str, home: &str) -> bool {
+    same_dir(path, home) == Some(false)
 }
 
 /// Choose the directory that best represents a set of window cwds.
 ///
 /// Most frequent wins; `$HOME` only wins when nothing else is on offer (a
-/// parked shell is not a workspace); ties break toward the shortest path, which
+/// parked shell is not a workspace), and is recognised by directory identity
+/// under any spelling (`known_not_home`, #427); ties break toward the shortest path, which
 /// is the one closest to a project root when windows sit in sibling subdirs.
 pub(super) fn pick_workspace(cwds: &[String], home: &str) -> Option<String> {
     let mut counts: Vec<(&str, usize)> = Vec::new();
@@ -918,11 +926,10 @@ pub(super) fn pick_workspace(cwds: &[String], home: &str) -> Option<String> {
             None => counts.push((cwd.as_str(), 1)),
         }
     }
-    let home_trimmed = home.trim_end_matches('/');
     let best = |only_non_home: bool| -> Option<&str> {
         counts
             .iter()
-            .filter(|(p, _)| !only_non_home || p.trim_end_matches('/') != home_trimmed)
+            .filter(|(p, _)| !only_non_home || known_not_home(p, home))
             .copied()
             .reduce(|a, b| {
                 if b.1 > a.1 || (b.1 == a.1 && b.0.len() < a.0.len()) {
@@ -1515,6 +1522,30 @@ mod tests {
             Some("/w/app"),
         );
         assert_eq!(pick_workspace(&[], home), None);
+    }
+
+    /// Board #427: a window parked in `$HOME` is `$HOME` under any spelling.
+    /// A pane's cwd is the physical path (`/proc/<pid>/cwd`), while `$HOME`
+    /// may be a symlink to it (this host: `/home/cfu` → `/local/home/cfu`):
+    /// compared as strings, the parked window tied the project window 1:1
+    /// and won the tie by coming first. Real directories here.
+    #[test]
+    fn a_parked_window_is_home_under_any_spelling() {
+        let fx = std::env::temp_dir().join(format!("tmm-427-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(fx.join("home")).unwrap();
+        std::fs::create_dir_all(fx.join("proj")).unwrap();
+        let fx = fx.canonicalize().unwrap();
+        std::os::unix::fs::symlink(fx.join("home"), fx.join("home-alias")).unwrap();
+        std::os::unix::fs::symlink(fx.join("loop"), fx.join("loop")).unwrap();
+        let s = |p: &str| fx.join(p).to_string_lossy().to_string();
+        let (home, alias, proj, looped) = (s("home"), s("home-alias"), s("proj"), s("loop"));
+        assert_eq!(pick_workspace(&[home.clone(), proj.clone()], &alias).as_deref(), Some(proj.as_str()), "the physical cwd of a symlinked $HOME");
+        assert_eq!(pick_workspace(&[alias.clone(), proj.clone()], &home).as_deref(), Some(proj.as_str()), "a cwd spelled by the alias");
+        assert_eq!(pick_workspace(&[format!("{home}/"), proj.clone()], &alias).as_deref(), Some(proj.as_str()));
+        assert_eq!(pick_workspace(&[home.clone(), home.clone()], &alias).as_deref(), Some(home.as_str()), "nothing else on offer: $HOME is the answer");
+        assert_eq!(same_dir(&looped, &home), None, "the fixture's comparison is unresolvable");
+        assert_eq!(pick_workspace(&[looped.clone(), proj.clone()], &home).as_deref(), Some(proj.as_str()), "an unresolvable cwd never outranks a workspace");
+        let _ = std::fs::remove_dir_all(&fx);
     }
 
     /// Board #421: a session is adopted at the directory it was made in,
