@@ -260,7 +260,14 @@ fn launch_window(req: &SpawnRequest, workspace: &str, def: &RegAgent, window_nam
     // owns the conversation, so resume recent even when the slot/exact id raced
     // the capture tick.
     let launch_cmd = launch_command(&m.cmd, &def.backend, req.brief, req.by, req.resume);
-    let full = format!("{} {}", prefix, launch_cmd);
+    // A slot a restore still holds keeps its barrier through a respawn: a
+    // new generation for this pane, named on the line (board #422).
+    // Nothing is typed when that cannot be settled (review P1-B).
+    let launch = match super::restore_hold::before_launch(req.session, window_name, &pane)? {
+        super::restore_hold::Launch::NoHold => String::new(),
+        super::restore_hold::Launch::Replaced(l) => format!("TMM_LAUNCH={l} "),
+    };
+    let full = format!("{launch}{} {}", prefix, launch_cmd);
     // NEVER send the full line via send-keys — see team/launch.rs: tty shims
     // swallow bursts ≳2KB. Source a script instead.
     let script = shared::write_launch_script(&home, window_name, &full)?;

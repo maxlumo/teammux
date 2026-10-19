@@ -190,13 +190,13 @@ test('no agent state is painted as distress: a failed turn end rests (#354)', ()
 });
 
 test('an agent at rest that a person must unblock wears the one amber, by its detail (board #362 c)', () => {
-  for (const d of ['auth_expired', 'conversation_blocked', 'recovery_exhausted']) {
+  for (const d of ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready']) {
     assert.ok(needsPerson(d), d);
     assert.equal(stateDotColor('idle', d), 'var(--status-warn)', d);
     assert.equal(stateDotColor('idle', d), stateDotColor('waiting'), `${d}: the same amber as an ask, no new colour`);
     assert.ok(stateNeedsYou('idle', d), d);
   }
-  assert.deepEqual([...PERSON_DETAILS], ['auth_expired', 'conversation_blocked', 'recovery_exhausted']);
+  assert.deepEqual([...PERSON_DETAILS], ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready']);
   // Every other detail leaves the state's own colour alone.
   for (const d of ['', 'last_turn_failed', 'last_turn_empty', 'permission_required', 'Bash npm test', undefined]) {
     assert.ok(!needsPerson(d), String(d));

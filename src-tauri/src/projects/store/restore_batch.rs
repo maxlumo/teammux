@@ -105,6 +105,57 @@ pub struct BatchProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<BatchOp>,
     pub windows: Vec<BatchWindow>,
+    /// Set when the project finished (`restore_run::finalize`): its outcome
+    /// is then SETTLED from its windows (`settle`), again whenever a release
+    /// makes one of them `Launched` (board #422 round 3 review P1-E).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Finished>,
+}
+
+/// How a project finished: the note its finish carried (the holder's fate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finished {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The reason of a finished project none of whose windows was restored.
+pub const NO_WINDOW: &str = "no window could be restored";
+
+/// A finished project's outcome, from its windows: the ONE rule the owner's
+/// finish and a release both apply. Any window `Launched`: done (with the
+/// note); none: failed, "no window could be restored". Not finished: as is.
+pub fn settle(p: &mut BatchProject) {
+    let Some(f) = &p.finished else { return };
+    if p.windows.iter().any(|w| w.state == WindowState::Launched) {
+        p.state = ProjectState::Done;
+        p.reason = f.note.clone();
+    } else {
+        p.state = ProjectState::Failed;
+        p.reason = Some(match &f.note {
+            Some(n) if n.starts_with("no window") => n.clone(),
+            Some(n) => format!("{NO_WINDOW}; {n}"),
+            None => NO_WINDOW.into(),
+        });
+    }
+}
+
+/// The word a batch closes with once every project has finished.
+pub fn finished_word(b: &Batch) -> &'static str {
+    if b.projects.iter().any(|p| p.state == ProjectState::Failed) {
+        "done with failures"
+    } else {
+        "done"
+    }
+}
+
+/// Settle every finished project again, and a batch closed by its finish
+/// with the word that now follows.
+fn resettle(b: &mut Batch) {
+    b.projects.iter_mut().for_each(settle);
+    if matches!(b.closed.as_deref(), Some("done") | Some("done with failures")) {
+        b.closed = Some(finished_word(b).into());
+    }
 }
 
 /// One restore: its full uuid (the authority every native tag carries), the
@@ -183,6 +234,68 @@ fn scan_hook() {
 #[cfg(not(test))]
 fn scan_hook() {}
 
+/// The reason a window's record carries once its hold was released
+/// (board #422 round 3): the release wrote `Launched` for it. Display only;
+/// the merge keys on the state and the launch, never on this text.
+pub const RELEASED: &str = "released after positive evidence";
+
+/// In the caller's transaction: the window of `project_id`'s slot `ord` in
+/// batch `batch` whose launch uuid is `launch` becomes `Launched`
+/// (`RELEASED`), in whichever of the socket's open and last batches IS that
+/// batch. A newer batch, another launch, or a window that was never typed
+/// into is left alone.
+pub(super) fn mark_released_in(tx: &rusqlite::Transaction, socket: &str, project_id: &str, batch: &str, ord: usize, launch: &str) -> Result<(), String> {
+    for key in [format!("{OPEN}{socket}"), format!("{LAST}{socket}")] {
+        let value: Option<String> = tx
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("read batch: {e}"))?;
+        let Some(mut b) = decode(&key, value.as_ref())?.filter(|b| b.batch == batch) else { continue };
+        let w = b.projects.iter_mut().filter(|p| p.id == project_id).flat_map(|p| p.windows.iter_mut()).find(|w| w.ord == ord && w.launch.as_deref() == Some(launch));
+        if let Some(w) = w.filter(|w| matches!(w.state, WindowState::LaunchIssued | WindowState::LaunchUnknown | WindowState::Launched)) {
+            if w.state != WindowState::Launched {
+                w.state = WindowState::Launched;
+                w.reason = Some(RELEASED.into());
+            }
+            resettle(&mut b);
+            let value = serde_json::to_string(&b).map_err(|e| format!("encode batch: {e}"))?;
+            tx.execute("UPDATE meta SET value = ?2 WHERE key = ?1", params![key, value]).map_err(|e| format!("write batch: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// The owner writes its batch whole from its own copy, which a release
+/// (another process, or the hook consumer) may have advanced meanwhile: a
+/// stored window the release made `Launched` (same project, ord and launch)
+/// stays so, and is merged INTO the owner's copy, whose finished projects
+/// are settled again — so every later decision of the owner reads the same
+/// state the store holds (review P1-E). A stored value that cannot be read
+/// is an error: it is never overwritten blind.
+fn keep_released(tx: &rusqlite::Transaction, b: &mut Batch) -> Result<(), String> {
+    let key = format!("{OPEN}{}", b.socket);
+    let value: Option<String> = tx
+        .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read batch: {e}"))?;
+    let Some(stored) = decode(&key, value.as_ref())?.filter(|s| s.batch == b.batch) else { return Ok(()) };
+    let mut changed = false;
+    for sp in &stored.projects {
+        for sw in sp.windows.iter().filter(|w| w.state == WindowState::Launched && w.launch.is_some()) {
+            let mine = b.projects.iter_mut().filter(|p| p.id == sp.id).flat_map(|p| p.windows.iter_mut()).find(|w| w.ord == sw.ord && w.launch == sw.launch);
+            if let Some(w) = mine.filter(|w| w.state != WindowState::Launched) {
+                w.state = WindowState::Launched;
+                w.reason = sw.reason.clone();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        resettle(b);
+    }
+    Ok(())
+}
+
 fn decode(key: &str, value: Option<&String>) -> Result<Option<Batch>, String> {
     value.map(|v| serde_json::from_str(v).map_err(|e| format!("unreadable {key}: {e}"))).transpose()
 }
@@ -214,19 +327,22 @@ impl Store {
         decode(key, self.meta_get(key)?.as_ref())
     }
 
-    /// Write the open batch whole, in one IMMEDIATE transaction.
-    pub fn save_batch(&mut self, b: &Batch) -> Result<(), String> {
+    /// Write the open batch whole, in one IMMEDIATE transaction. `b` comes
+    /// back as written: merged with what a release stored meanwhile.
+    pub fn save_batch(&mut self, b: &mut Batch) -> Result<(), String> {
         self.save_batch_with(b, |_| Ok(true)).map(|_| ())
     }
 
     /// Open a batch with a planned hold for each of its agent slots and the
     /// boot decision that opened it, in ONE transaction (board #422 round 3).
     pub fn open_batch(&mut self, b: &Batch, holds: &[Hold], boot: &str) -> Result<(), String> {
-        self.save_batch_with(b, |tx| {
+        let mut b = b.clone();
+        let socket = b.socket.clone();
+        self.save_batch_with(&mut b, |tx| {
             for h in holds {
                 super::restore_hold::insert_hold(tx, h)?;
             }
-            super::restore_hold::write_decided(tx, &b.socket, boot)?;
+            super::restore_hold::write_decided(tx, &socket, boot)?;
             Ok(true)
         })
         .map(|_| ())
@@ -235,31 +351,32 @@ impl Store {
     /// Write the batch and bind the planned hold `launch` to `pane`, in one
     /// transaction. `false` = the hold was no longer planned (a newer
     /// generation, or gone): NOTHING is written.
-    pub fn save_batch_binding(&mut self, b: &Batch, launch: &str, pane: &HoldPane) -> Result<bool, String> {
+    pub fn save_batch_binding(&mut self, b: &mut Batch, launch: &str, pane: &HoldPane) -> Result<bool, String> {
         self.save_batch_with(b, |tx| super::restore_hold::bind_hold_in(tx, launch, pane))
     }
 
     /// Write the batch (its window now `LaunchIssued`) and arm the bound hold
     /// `launch`, in one transaction; `false` = nothing written.
-    pub fn save_batch_arming(&mut self, b: &Batch, launch: &str) -> Result<bool, String> {
+    pub fn save_batch_arming(&mut self, b: &mut Batch, launch: &str) -> Result<bool, String> {
         self.save_batch_with(b, |tx| super::restore_hold::arm_hold_in(tx, launch))
     }
 
     /// Write the batch and retire the hold `launch` (a slot skipped or a
     /// window killed before any typing), in one transaction. A hold already
     /// gone is no reason to lose the batch write.
-    pub fn save_batch_retiring(&mut self, b: &Batch, launch: &str) -> Result<(), String> {
+    pub fn save_batch_retiring(&mut self, b: &mut Batch, launch: &str) -> Result<(), String> {
         self.save_batch_with(b, |tx| super::restore_hold::retire_hold_in(tx, launch).map(|_| true)).map(|_| ())
     }
 
     /// The batch write plus `also`, in one IMMEDIATE transaction; committed
     /// only when `also` answers true.
-    fn save_batch_with(&mut self, b: &Batch, also: impl FnOnce(&rusqlite::Transaction) -> Result<bool, String>) -> Result<bool, String> {
-        let value = serde_json::to_string(b).map_err(|e| format!("encode batch: {e}"))?;
+    fn save_batch_with(&mut self, b: &mut Batch, also: impl FnOnce(&rusqlite::Transaction) -> Result<bool, String>) -> Result<bool, String> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("batch transaction: {e}"))?;
+        keep_released(&tx, b)?;
+        let value = serde_json::to_string(&*b).map_err(|e| format!("encode batch: {e}"))?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
             params![format!("{OPEN}{}", b.socket), value],
@@ -274,12 +391,13 @@ impl Store {
 
     /// Close the batch: it becomes the socket's `restore_last` and the open
     /// key goes, in one transaction.
-    pub fn close_batch(&mut self, b: &Batch) -> Result<(), String> {
-        let value = serde_json::to_string(b).map_err(|e| format!("encode batch: {e}"))?;
+    pub fn close_batch(&mut self, b: &mut Batch) -> Result<(), String> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("batch transaction: {e}"))?;
+        keep_released(&tx, b)?;
+        let value = serde_json::to_string(&*b).map_err(|e| format!("encode batch: {e}"))?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
             params![format!("{LAST}{}", b.socket), value],
@@ -315,6 +433,7 @@ mod tests {
                 session_id: None,
                 holder_id: None,
                 op: None,
+                finished: None,
                 windows: vec![],
             }],
         }
@@ -327,13 +446,13 @@ mod tests {
         let mut store = Store::open_memory().unwrap();
         assert_eq!(store.restore_batch("/s").unwrap(), None);
         let mut b = batch();
-        store.save_batch(&b).unwrap();
+        store.save_batch(&mut b.clone()).unwrap();
         b.projects[0].state = ProjectState::CreatingSession;
         b.projects[0].op = Some(BatchOp::Claim);
-        store.save_batch(&b).unwrap();
+        store.save_batch(&mut b.clone()).unwrap();
         assert_eq!(store.restore_batch("/s").unwrap(), Some(b.clone()), "the issued step is on record");
         b.closed = Some("done".into());
-        store.close_batch(&b).unwrap();
+        store.close_batch(&mut b.clone()).unwrap();
         assert_eq!(store.restore_batch("/s").unwrap(), None);
         assert_eq!(store.last_batch("/s").unwrap(), Some(b));
         store.meta_set("restore_batch:/s", "{").unwrap();
@@ -353,13 +472,13 @@ mod tests {
         let mut theirs = Store::open(&path).unwrap();
         let mut old = batch();
         old.closed = Some("done".into());
-        ours.close_batch(&old).unwrap();
+        ours.close_batch(&mut old.clone()).unwrap();
         let cp = || Checkpoint { gen: 0, at: 1, boot_id: Some("boot".into()), tmux: None, projects: vec![] };
         let gen = ours.commit_tick(&[], Some(("/s", cp()))).unwrap();
         let scan = ours.batch_scan("/s").unwrap();
         assert_eq!(scan.open, Ok(None));
         assert_eq!(scan.last, Ok(Some(old)));
-        theirs.save_batch(&batch()).unwrap();
+        theirs.save_batch(&mut batch().clone()).unwrap();
         assert_eq!(ours.commit_scanned(&[], Some(("/s", cp())), Some(("/s", &scan.revision, Some("boot")))).unwrap(), None, "a stale scan commits nothing");
         assert_eq!(ours.checkpoint("/s").unwrap().unwrap().gen, gen.unwrap(), "the previous checkpoint stands");
         // Control: a scan of the current state commits.
@@ -375,7 +494,7 @@ mod tests {
     #[test]
     fn a_scan_decodes_each_batch_from_the_bytes_it_compares() {
         let mut store = Store::open_memory().unwrap();
-        store.save_batch(&batch()).unwrap();
+        store.save_batch(&mut batch().clone()).unwrap();
         store.meta_set("restore_last:/s", "{").unwrap();
         let scan = store.batch_scan("/s").unwrap();
         assert_eq!(scan.open, Ok(Some(batch())));

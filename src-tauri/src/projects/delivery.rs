@@ -177,7 +177,8 @@ pub fn switch_input_mode(session: &str, window: &str, target: &str, want: &'stat
         let screen = crate::tmux::capture_pane_plain(target, Some(0)).unwrap_or_default();
         input_mode_seen(session, window, &pane, &screen)
     };
-    switch_with(session, window, target, want, read, || crate::tmux::send_keys(target, key, false), SWITCH_VERIFY)
+    // Through the one send door: the named key only, readiness required.
+    switch_with(session, window, target, want, read, || send_key_into(session, window, target, key, false), SWITCH_VERIFY)
 }
 
 const SWITCH_VERIFY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -550,7 +551,7 @@ fn deliver_gated(
 /// its message, so the feed draws no ring that promises a check. A refusal
 /// is said at once, as for any line (#250).
 fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
-    match type_text(target, line) {
+    match type_text(session, window, target, line) {
         Ok(()) => {
             telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id]);
             super::vitals::sniff_window_soon(session, window);
@@ -571,7 +572,7 @@ fn overdue(held: &[super::store::DeliveryRow]) -> bool {
 /// The pre-#257 path: type the line, then record the promise its echo will
 /// settle; a refusal is said at once and records nothing (#250).
 fn type_now(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
-    match type_text(target, line) {
+    match type_text(session, window, target, line) {
         Ok(()) => {
             telemetry::record_typed(session, window, line, ask_at, msg_id);
             // A line just landed in this pane: sniff its vitals once the TUI
@@ -681,7 +682,7 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: bool) {
         eprintln!("⚠️  could not release held deliveries for {session}:{window} ({e}); kept held");
         return;
     }
-    match type_text(target, &text) {
+    match type_text(session, window, target, &text) {
         Ok(()) => super::vitals::sniff_window_soon(session, window),
         Err(e) => {
             if let Err(err) = telemetry::rehold(&ids) {
@@ -707,7 +708,7 @@ fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::stor
     }
     let msgs: Vec<&str> = batch.iter().map(|r| r.msg_id.as_str()).collect();
     let shown = batch.iter().map(|r| r.shown()).collect::<Vec<_>>().join(SEPARATOR);
-    match type_text(target, text) {
+    match type_text(session, window, target, text) {
         Ok(()) => {
             telemetry::record_steered(session, window, &shown, &msgs);
             super::vitals::sniff_window_soon(session, window);
@@ -742,8 +743,56 @@ fn first_prompt(lines: &[&str], max: usize) -> usize {
 }
 
 #[cfg(not(test))]
-fn type_text(target: &str, text: &str) -> Result<(), String> {
-    crate::tmux::send_command(target, text)
+fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+    send_into(session, window, target, text)
+}
+
+/// THE send door (board #422 round 3, H2 review P1-D): every input typed
+/// into an agent's pane — a delivery typed now or steered, a held batch's
+/// flush, a verbatim `/command` (`hub_command`) — is written here. For a
+/// window a restore released, the write is bound to that generation's own
+/// pane: aimed at its `%id` and run in the server only while its instance,
+/// its `%id` and its process are the bound ones (`tmux::with_write_guard`),
+/// so a pane respawned or swapped after the target was resolved refuses it
+/// and the caller keeps the line. A slot whose restore is still in progress,
+/// or whose holds cannot be read, gets nothing (`restore_hold::send_gate`,
+/// read here, at the write). Every other window is typed as always.
+pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+    let guard = gate(session, window, target, false)?;
+    crate::tmux::with_write_guard(guard, || crate::tmux::send_command(target, text))
+}
+
+/// The same door for ONE named key — never text, never an Enter: the CLI's
+/// input-mode toggle (readiness required, like any input) and the one
+/// interrupt, Escape (`interrupt`: never refused for readiness — a person
+/// may always cancel — but still written only into the bound pane's own
+/// identity, so it never lands in a respawned or swapped stranger).
+pub(crate) fn send_key_into(session: &str, window: &str, target: &str, key: &str, interrupt: bool) -> Result<(), String> {
+    let guard = gate(session, window, target, interrupt)?;
+    crate::tmux::with_write_guard(guard, || crate::tmux::send_keys(target, key, false))
+}
+
+/// What a refusal by the restore barrier says (the door's own decision, or
+/// the in-server guard): not a failed write, so nothing was spent.
+pub(crate) const BARRED: &str = "barred by a restore: ";
+
+/// Was this send refused by the restore barrier (nothing was written)?
+pub(crate) fn barred(e: &str) -> bool {
+    e.starts_with(BARRED) || e == crate::tmux::BOUND_REFUSED
+}
+
+/// ONE read decides, at the write itself: ordinary, bound, or nothing.
+fn gate(session: &str, window: &str, target: &str, interrupt: bool) -> Result<Option<crate::tmux::WriteGuard>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return match super::restore_hold::send_gate(session, window, target, interrupt).map_err(|e| format!("{BARRED}{e}"))? {
+        super::restore_hold::SendGate::Ordinary => Ok(None),
+        super::restore_hold::SendGate::Bound(g) => Ok(Some(g)),
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (session, window, target, interrupt);
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -755,10 +804,10 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn type_text(target: &str, text: &str) -> Result<(), String> {
+fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
     let faked = TYPED.with(|t| t.borrow().is_some());
     if !faked {
-        return crate::tmux::send_command(target, text);
+        return send_into(session, window, target, text);
     }
     if let Some(e) = REFUSE.with(|r| r.borrow().clone()) {
         return Err(e);

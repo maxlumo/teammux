@@ -96,6 +96,8 @@ pub fn person_remedy(detail: &str) -> Option<&'static str> {
         "auth_expired" => Some("run mwinit, then restart it"),
         "conversation_blocked" => Some("save its state, then clear the conversation"),
         EXHAUSTED => Some("auto-continue stopped; needs a person"),
+        // A reboot restore started it and has not seen it ready (board #422).
+        super::telemetry::RESTORE_NOT_READY_DETAIL => Some("restored, not ready; type a prompt into it"),
         _ => None,
     }
 }
@@ -265,6 +267,14 @@ pub fn headless_error_tail(text: &str) -> bool {
     crate::backends::kiro::TRANSIENT.iter().any(|m| c.contains(m)) || c.contains("requestid")
 }
 
+/// An incident's attempts and timing before a decision (`Tracker::send_mark`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SendMark {
+    attempts: u32,
+    sent_at: u64,
+    next_at: u64,
+}
+
 #[derive(Default)]
 struct Rec {
     /// Which error instance this incident is about (`error_signature`). A
@@ -403,6 +413,38 @@ impl Tracker {
         Decision::Send { attempt: rec.attempts }
     }
 
+    /// Where the window's incident about `sig` stood before a decision (its
+    /// attempts and timing), so a send the restore barrier refused can be
+    /// taken back. Another signature's record is replaced by `decide`, so it
+    /// marks a fresh incident.
+    pub fn send_mark(&self, session: &str, window: &str, sig: &str) -> SendMark {
+        match self.map.get(&(session.to_string(), window.to_string())) {
+            Some(r) if r.sig == sig => SendMark { attempts: r.attempts, sent_at: r.sent_at, next_at: r.next_at },
+            _ => SendMark::default(),
+        }
+    }
+
+    /// Take back the `Send` decided at `now` whose `continue` the restore
+    /// barrier refused (board #422 round 3): nothing was typed, so no
+    /// attempt is spent and, for a first attempt, no ladder was started.
+    /// (The said cap the start cleared stays cleared: no cap can follow
+    /// without another start, which clears it again.)
+    pub fn undo_send(&mut self, session: &str, window: &str, mark: SendMark, now: u64) {
+        let key = (session.to_string(), window.to_string());
+        if let Some(rec) = self.map.get_mut(&key) {
+            rec.attempts = mark.attempts;
+            rec.sent_at = mark.sent_at;
+            rec.next_at = mark.next_at;
+        }
+        if mark.attempts == 0 {
+            if let Some(starts) = self.starts.get_mut(&key) {
+                if let Some(i) = starts.iter().rposition(|&t| t == now) {
+                    starts.remove(i);
+                }
+            }
+        }
+    }
+
     /// A tool call from the window CONFIRMS an open incident — the model
     /// answered, so the `continue` (or something else) worked. It must never
     /// erase the record: the error text is still painted, and a wiped record
@@ -469,6 +511,18 @@ pub(crate) fn retain_windows_for_test(session: &str, live: &[String]) {
 fn tracker() -> &'static Mutex<Tracker> {
     static T: OnceLock<Mutex<Tracker>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(Tracker::default()))
+}
+
+/// Test seam: open an unconfirmed incident on a window.
+#[cfg(test)]
+pub(crate) fn open_incident_for_test(session: &str, window: &str) {
+    tracker().lock().unwrap().map.insert((session.to_string(), window.to_string()), Rec { sig: "test".into(), ..Rec::default() });
+}
+
+/// Test seam: is the window's incident confirmed (`None`: no incident)?
+#[cfg(test)]
+pub(crate) fn incident_confirmed_for_test(session: &str, window: &str) -> Option<bool> {
+    tracker().lock().unwrap().map.get(&(session.to_string(), window.to_string())).map(|r| r.confirmed)
 }
 
 /// Called by telemetry on every observed tool call and every turn end with a
@@ -603,13 +657,17 @@ pub fn check_once() {
                 tracker().lock().unwrap().clear(&project.session, &p.window_name);
                 continue;
             };
-            let decision = tracker().lock().unwrap().decide(
-                &project.session,
-                &p.window_name,
-                now_secs(),
-                &sig,
-                |sent_at| super::telemetry::turn_fact_since(&project.session, &p.window_name, sent_at),
-            );
+            // The mark and the decision under one lock, at one `now`: a send
+            // the barrier refuses is taken back exactly.
+            let now = now_secs();
+            let (mark, decision) = {
+                let mut t = tracker().lock().unwrap();
+                let mark = t.send_mark(&project.session, &p.window_name, &sig);
+                let decision = t.decide(&project.session, &p.window_name, now, &sig, |sent_at| {
+                    super::telemetry::turn_fact_since(&project.session, &p.window_name, sent_at)
+                });
+                (mark, decision)
+            };
             // Recovery stopped for this incident (capped or given up): the
             // agent needs a person, and the turn end the hooks never sent is
             // recorded once for the incident (board #362 c).
@@ -619,18 +677,21 @@ pub fn check_once() {
                 commit_exhausted(&project.session, &p.window_name, capped, newest, seen);
             }
             match decision {
-                Decision::Send { attempt } => {
-                    if crate::tmux::send_command(&target, CONTINUE_LINE).is_ok() {
-                        super::telemetry::record_recovery(
-                            &project.session,
-                            &p.window_name,
-                            &format!(
-                                "auto-continue {attempt}/{MAX_ATTEMPTS} — transient model error in {}",
-                                p.window_name
-                            ),
-                        );
-                    }
-                }
+                // Automated input: through the one send door (board #422
+                // round 3). A restore barrier's refusal wrote nothing, so it
+                // spends nothing of the incident's budget.
+                Decision::Send { attempt } => match super::delivery::send_into(&project.session, &p.window_name, &target, CONTINUE_LINE) {
+                    Ok(()) => super::telemetry::record_recovery(
+                        &project.session,
+                        &p.window_name,
+                        &format!(
+                            "auto-continue {attempt}/{MAX_ATTEMPTS} — transient model error in {}",
+                            p.window_name
+                        ),
+                    ),
+                    Err(e) if super::delivery::barred(&e) => tracker().lock().unwrap().undo_send(&project.session, &p.window_name, mark, now),
+                    Err(_) => {}
+                },
                 Decision::Confirmed { first: true } => {
                     super::telemetry::record_recovery(
                         &project.session,
@@ -1071,6 +1132,135 @@ mod tests {
         assert!(!q.contains("\ncontinue"), "a quote gets nothing: {q:?}");
         assert!(!ki.contains("\ncontinue"), "a kiro pane painting claude's block gets nothing: {ki:?}");
         assert_eq!(notes, vec!["auto-continue 1/4 — transient model error in cl".to_string()], "one send, one record, over two ticks");
+    }
+
+    /// Board #422 round 3 (validator, orchestrator 14:56): the auto-continue
+    /// is AUTOMATED input and goes through the one send door. A restoring
+    /// (ARMED) window painting a transient error gets no `continue`; a
+    /// RELEASED one whose pane is respawned between the door's resolve and
+    /// its write gets none either (the in-server guard refuses), nor does it
+    /// once its identity no longer reads. A refusal spends nothing of the
+    /// incident's budget: once the hold is gone, the very next tick types
+    /// the FIRST attempt (a spent attempt would wait out its 30 s backoff).
+    #[test]
+    fn a_restoring_window_painting_a_transient_error_gets_no_continue_and_keeps_its_budget() {
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-hold");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/cl");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "claude", "cmd": "claude", "team": "" }).to_string()).unwrap();
+        let paint = ws.join("paint.txt");
+        std::fs::write(&paint, CLAUDE_503_NARROW).unwrap();
+        let show = format!("cat {}; cat", paint.display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "57", "-y", "36", "-s", &session, "-n", "cl", "-c", &ws.to_string_lossy(), &show])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-hold-test")).expect("adopt");
+        let id = super::super::project_for_session(&session).unwrap().unwrap().id;
+        let socket = super::super::restore::socket_key();
+        let identity = || -> super::super::store::HoldPane {
+            let f: Vec<String> = crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("={session}:cl"), "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"])
+                .unwrap().trim().split('\t').map(str::to_string).collect();
+            super::super::store::HoldPane {
+                instance: super::super::store::TmuxInstance { socket: socket.clone(), pid: f[4].parse().unwrap(), start_time: f[5].parse().unwrap() },
+                session_id: f[3].clone(),
+                window_id: f[2].clone(),
+                pane_id: f[0].clone(),
+                pane_pid: f[1].parse().unwrap(),
+            }
+        };
+        let pane = identity().pane_id;
+        let hold = super::super::store::Hold {
+            socket: socket.clone(),
+            project_id: id.clone(),
+            batch: "b-rec".into(),
+            ord: 0,
+            slot: "cl".into(),
+            launch: uuid::Uuid::new_v4().to_string(),
+            stage: super::super::store::HoldStage::Armed,
+            pane: Some(identity()),
+            since: 1,
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
+        };
+        let batch = super::super::store::Batch {
+            batch: "b-rec".into(),
+            socket: format!("{socket}-unrelated"),
+            boot_id: None,
+            owner_pid: 0,
+            instance: None,
+            source: super::super::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![],
+        };
+        super::super::restore_hold::with_store_for_test(|s| s.open_batch(&batch, &[hold], "x")).unwrap();
+        let current = || super::super::restore_hold::with_store_for_test(|s| s.project_holds(&socket, &id)).unwrap().pop().unwrap();
+        let screen = || crate::tmux::capture_pane_plain(&pane, Some(0)).unwrap_or_default();
+        let notes = || -> Vec<String> { super::super::telemetry::recent_events(&session, 0).into_iter().map(|e| e.text).filter(|t| t.starts_with("auto-continue")).collect() };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // ARMED: the door refuses, twice over two ticks.
+        check_once();
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen().contains("\ncontinue"), "a restoring window gets nothing: {:?}", screen());
+        assert!(notes().is_empty(), "{:?}", notes());
+        // RELEASED, respawned between the door's resolve and its write.
+        let armed = current();
+        assert!(super::super::restore_hold::with_store_for_test(|s| s.install_hold(&armed, &uuid::Uuid::new_v4().to_string(), super::super::store::HoldStage::Released, armed.pane.as_ref().unwrap(), 1)).unwrap());
+        let (p2, cmd) = (pane.clone(), show.clone());
+        crate::tmux::BEFORE_GUARDED_WRITE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &p2, &cmd]).unwrap();
+            }))
+        });
+        check_once();
+        assert!(crate::tmux::BEFORE_GUARDED_WRITE.with(|h| h.borrow().is_none()), "the write was guarded");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen().contains("\ncontinue"), "the respawned process got neither the text nor the Enter: {:?}", screen());
+        // Its identity no longer reads (same %id, another process): refused.
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen().contains("\ncontinue"), "{:?}", screen());
+        assert!(notes().is_empty(), "{:?}", notes());
+        // No hold: the ordinary path, with the whole budget intact.
+        let gone = current().launch;
+        assert!(super::super::restore_hold::with_store_for_test(|s| s.retire_hold_if(&gone)).unwrap());
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(screen().contains("\ncontinue"), "the window is ordinary again: {:?}", screen());
+        assert_eq!(notes(), vec!["auto-continue 1/4 — transient model error in cl".to_string()], "the refusals spent nothing");
+    }
+
+    /// The take-back itself (board #422 round 3): a refused send restores the
+    /// incident's attempts, timing and ladder start exactly — and a mark
+    /// taken for another signature marks a fresh incident.
+    #[test]
+    fn undo_send_takes_back_exactly_what_the_refused_send_spent() {
+        let mut t = Tracker::default();
+        let never = |_| false;
+        let m0 = t.send_mark("s", "w", "a");
+        assert_eq!(t.decide("s", "w", 100, "a", never), Decision::Send { attempt: 1 });
+        t.undo_send("s", "w", m0, 100);
+        assert_eq!(t.decide("s", "w", 100, "a", never), Decision::Send { attempt: 1 }, "no backoff was started");
+        assert_eq!(t.starts[&("s".to_string(), "w".to_string())], vec![100], "one ladder start, not two");
+        let m1 = t.send_mark("s", "w", "a");
+        assert_eq!(t.decide("s", "w", 200, "a", never), Decision::Send { attempt: 2 });
+        t.undo_send("s", "w", m1, 200);
+        assert_eq!(t.decide("s", "w", 129, "a", never), Decision::Wait, "the first attempt's backoff stands");
+        assert_eq!(t.decide("s", "w", 200, "a", never), Decision::Send { attempt: 2 });
+        // Another error instance: decide replaces the record, the mark is fresh.
+        let m2 = t.send_mark("s", "w", "b");
+        assert_eq!(t.decide("s", "w", 300, "b", never), Decision::Send { attempt: 1 });
+        t.undo_send("s", "w", m2, 300);
+        assert_eq!(t.decide("s", "w", 300, "b", never), Decision::Send { attempt: 1 }, "not the old incident's 2 attempts");
     }
 
     /// Board #362 c, end to end on real managed panes painting the real
@@ -2121,9 +2311,9 @@ mod tests {
         tm::PERSIST_IN_TEST.with(|p| p.set(true));
         let barriers: [(&str, &dyn Fn(&str)); 5] = [
             ("a new prompt", &|s| { tm::record_prompt(s, "w", "[tmm chat 2026-10-16 00:10] human: @w next"); }),
-            ("a tool call", &|s| tm::record_tool(s, "w", "Bash", "npm test")),
+            ("a tool call", &|s| { tm::record_tool(s, "w", "Bash", "npm test"); }),
             ("an ask", &|s| tm::record_notification(s, "w", "permission_required")),
-            ("a real hook end", &|s| tm::record_notification_with(s, "w", "completed", crate::backends::EndQuality::Said)),
+            ("a real hook end", &|s| { tm::record_notification_with(s, "w", "completed", crate::backends::EndQuality::Said); }),
             ("an interrupt", &|s| tm::record_interrupt(s, "w")),
         ];
         for (what, barrier) in barriers {

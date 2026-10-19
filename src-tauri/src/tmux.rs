@@ -930,12 +930,12 @@ pub fn send_keys(target: &str, keys: &str, literal: bool) -> Result<(), String> 
         // `--` ends option parsing: a key string starting with `-` (`-R`,
         // `-X`) is a key name — or literal text, tmux's fallback for a name it
         // does not know — never a send-keys flag. Verified on tmux 3.6a.
-        run_tmux(&["send-keys", "-t", target, "--", keys])?;
+        write_pane(&["send-keys", "-t", target, "--", keys])?;
         return Ok(());
     }
     let flush = |buf: &mut String| -> Result<(), String> {
         if !buf.is_empty() {
-            run_tmux(&["send-keys", "-t", target, "-l", "--", buf])?;
+            write_pane(&["send-keys", "-t", target, "-l", "--", buf])?;
             buf.clear();
         }
         Ok(())
@@ -947,20 +947,100 @@ pub fn send_keys(target: &str, keys: &str, literal: bool) -> Result<(), String> 
             if let Some(name) = chars.peek().copied().and_then(c0_key_name) {
                 chars.next();
                 flush(&mut buf)?;
-                run_tmux(&["send-keys", "-t", target, "--", &format!("M-{name}")])?;
+                write_pane(&["send-keys", "-t", target, "--", &format!("M-{name}")])?;
                 continue;
             }
         }
         match c0_key_name(c) {
             Some(name) => {
                 flush(&mut buf)?;
-                run_tmux(&["send-keys", "-t", target, "--", name])?;
+                write_pane(&["send-keys", "-t", target, "--", name])?;
             }
             None => buf.push(c),
         }
     }
     flush(&mut buf)?;
     Ok(())
+}
+
+/// The in-server condition a write into a RESTORE-BOUND pane runs under
+/// (board #422 round 3, H2 review P1-D): the tmux instance, the pane's
+/// native id and its process. Set for one typing operation by the delivery
+/// door (`with_write_guard`); every write of that operation — the text, a
+/// paste, an Escape, the Enter — goes to that `%id` inside `if-shell -F`
+/// on the whole identity, so a pane respawned after its target was resolved
+/// (same `%id`, another process) or another server refuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteGuard {
+    pub pid: u32,
+    pub start_time: u64,
+    pub pane_id: String,
+    pub pane_pid: u32,
+}
+
+/// What a guarded write answers when its pane is not the bound one.
+pub const BOUND_REFUSED: &str = "the restored pane is not the one this window is bound to";
+
+thread_local! {
+    static WRITE_GUARD: std::cell::RefCell<Option<WriteGuard>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with every pane write of this thread under `guard` (none: as
+/// always).
+pub fn with_write_guard<T>(guard: Option<WriteGuard>, f: impl FnOnce() -> T) -> T {
+    let before = WRITE_GUARD.with(|g| g.replace(guard));
+    let out = f();
+    WRITE_GUARD.with(|g| g.replace(before));
+    out
+}
+
+/// Every write a typing operation makes into its target pane. Unguarded:
+/// the command as given. Guarded: the same command aimed at the guard's
+/// `%id`, run only while the server, the pane and its process are the bound
+/// ones; anything else is `Err`, nothing written.
+fn write_pane(args: &[&str]) -> Result<(), String> {
+    let Some(g) = WRITE_GUARD.with(|g| g.borrow().clone()) else {
+        return run_tmux(args).map(|_| ());
+    };
+    // Only the TARGET option is rewritten: never anything after `--`, where
+    // the payload begins (a literal `-t` is text, H2 review P2).
+    let mut parts: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    let mut options = true;
+    while let Some(a) = it.next() {
+        parts.push(a.to_string());
+        if options && *a == "--" {
+            options = false;
+        } else if options && *a == "-t" {
+            it.next();
+            parts.push(g.pane_id.clone());
+        }
+    }
+    let action = parts.iter().map(|p| tmux_quote(p)).collect::<Vec<_>>().join(" ");
+    let eq = |f: &str, v: &str| format!("#{{==:#{{{f}}},{v}}}");
+    let cond = format!(
+        "#{{&&:#{{&&:{},{}}},#{{&&:{},{}}}}}",
+        eq("pid", &g.pid.to_string()),
+        eq("start_time", &g.start_time.to_string()),
+        eq("pane_id", &g.pane_id),
+        eq("pane_pid", &g.pane_pid.to_string())
+    );
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_GUARDED_WRITE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+    let out = run_tmux(&["if-shell", "-F", "-t", &g.pane_id, &cond, &format!("{action} ; display -p TMM_BOUND_OK"), "display -p TMM_BOUND_REFUSED"])?;
+    match out.trim() {
+        "TMM_BOUND_OK" => Ok(()),
+        "TMM_BOUND_REFUSED" => Err(BOUND_REFUSED.into()),
+        other => Err(format!("a bound write's answer is unclassified: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs once right before the next guarded write.
+    pub(crate) static BEFORE_GUARDED_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
 /// One mutex per pane target, so concurrent deliveries cannot interleave.
@@ -1131,7 +1211,7 @@ pub fn paste_text(target: &str, text: &str) -> Result<(), String> {
     }
     #[cfg(test)]
     PASTE_GAP.with(|gap| std::thread::sleep(gap.get()));
-    if let Err(e) = run_tmux(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", target]) {
+    if let Err(e) = write_pane(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", target]) {
         // -d deletes only on success; leave no named buffer behind.
         let _ = run_tmux(&["delete-buffer", "-b", &buffer]);
         return Err(e);

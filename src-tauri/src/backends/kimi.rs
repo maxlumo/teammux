@@ -36,6 +36,11 @@
 /// queued line became its own turn with its own prompt hook and reply.
 pub(crate) const SWITCHES_INPUT_MODE: bool = false;
 
+/// What releases a restored kimi window (board #422 round 3): its
+/// `SessionStart` with `source: resume` only — measured on kimi 2.1.1 with
+/// `-S <id>`; a fresh start has no startup signal (agents-overview.md).
+pub(crate) const RESTORE_EVIDENCE: Option<super::RestoreEvidence> = Some(super::RestoreEvidence::SessionStartResume);
+
 /// kimi `[thinking].effort` (its config-files doc): low / medium / high /
 /// xhigh / max; bound as `thinkingEffort` in the wire (measured with `max`).
 /// A model whose `support_efforts` lacks the value falls back to its default.
@@ -176,9 +181,11 @@ use super::shared;
 /// The events a managed kimi subscribes to — the same six the other
 /// backends read, in kimi's own names. `Interrupt` is the Escape end of a
 /// turn (fires INSTEAD of `Stop`); without it an interrupted turn never
-/// closes. `timeout` is kimi's per-hook cap in seconds (default 30) — the
+/// closes. `SessionStart` is a restored window's release evidence (board
+/// #422 round 3: with `source: resume` only, measured on 2.1.1), never a
+/// turn fact. `timeout` is kimi's per-hook cap in seconds (default 30) — the
 /// helper only appends one file, 5 s is generous.
-pub(crate) const HOOK_EVENTS: [&str; 7] = [
+pub(crate) const HOOK_EVENTS: [&str; 8] = [
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
@@ -186,6 +193,7 @@ pub(crate) const HOOK_EVENTS: [&str; 7] = [
     "Stop",
     "StopFailure",
     "Interrupt",
+    "SessionStart",
 ];
 
 /// The `[[hooks]]` rows as TOML values, one per event.

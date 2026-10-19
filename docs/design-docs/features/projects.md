@@ -900,8 +900,198 @@ was broken out to another window has not ended that pane), retires it in the sam
   retires the ended ones, and a planned hold whose batch is no longer open,
   each conditional on the exact row it judged (generation, stage and pane): a
   row that moved on meanwhile is not deleted (review H1 P1-C).
-  Releasing a held window on its positive startup evidence is round 3's
-  second hand-off; until then a hold lasts until its pane ends.
+- **Release is positive evidence of THIS launch, measured per backend.**
+  The restore's start line carries `TMM_LAUNCH=<launch uuid>`
+  (`reconcile::launch_text`). `Backend::restore_evidence` (each backend's
+  own `RESTORE_EVIDENCE`, beside its measurement; `restore_hold::evidence_for`
+  reads it) is the table of what releases a held window; one row adds a
+  backend:
+
+  | backend | evidence | measured on |
+  |---|---|---|
+  | dsh | its readiness file names this launch for this pane's process (`tmm/ready` = `<pid> <pane> <launch>`, `tmm/steer-ready` = `<pid> <run> steer <launch>`; `dsh::input_ready_for_launch`) | the product's own files |
+  | claude | its `SessionStart` envelope of this launch | Claude Code 2.1.303 |
+  | kimi | its `SessionStart` envelope with `source: resume` of this launch (a restore always resumes; a fresh kimi start has no startup signal) | kimi 2.1.1, `-S <id>`, single line and a two-line bracketed paste |
+  | every backend | the accepted `UserPromptSubmit` of this launch (a person typed into it) | — |
+
+  kiro-cli 2.31.0 is not measured (an isolated home stops at its sign-in
+  screen): v1 kiro is released only by a person's prompt. For dsh the
+  door first removes the home's readiness files, then arms the hold, so no
+  file of an earlier start can be read as this launch's; the capture tick
+  (`release_ready`) and the barrier's own read release on it. A REAL
+  generated shell pins the chain end to end, with no model call:
+  `a_real_dsh_shell_from_the_restart_door_names_its_launch_in_readiness_and_hooks`
+  starts it through `up_agent` (the hold's next generation, `TMM_LAUNCH` on
+  the recipe's line), and its `ready`, the plugin's `steer-ready` and the
+  production helper's envelope all carry that uuid. The readiness check
+  reads each file once and judges its launch and its owner from the same
+  bytes. A prompt
+  releases only once its fact reached the log
+  (`telemetry::record_prompt_outcome`: `acked` is the receipt answer,
+  `row` the durable row; a person's own prompt is not acked and is
+  persisted), and that row is the incarnation's first accepted fact
+  (`accepted_seq`). `restore_hold::on_prompt` and `on_session_start` take
+  the launch and the pane of the envelope; a hold of another pane or launch
+  is not theirs.
+- **A release merges, then releases with its batch record, then flushes.**
+  Every release, on every path, first confirms the window in the server
+  and gives it the slot's name (`restore_run::merge_held`, one guarded
+  `rename-window`, a no-op when the name is already the slot's; H2 review
+  P1-D): the condition is the hold's instance, its NATIVE SESSION, window,
+  pane and pane process, a name that is its placeholder or its slot, and an
+  AUTHORIZATION as this hold's object — the restore made it (the window's
+  `@tmm_rw`, the session's `@tmm_rs` and `TMM_RESTORE_BATCH` all name this
+  batch) or the launch door that installed this generation made it (the
+  window's `@tmm_rl` names this launch). A missing or empty tag is not
+  ownership. Then the slot's name in the project's session must lead to
+  THIS pane (`tmux::find_window_by_name`): a same-name window at the old
+  place, a split with another pane active, a window moved to another session
+  are never the target. A pane that cannot be checked, or a recipe or store
+  that cannot be read, is "cannot verify now" (`Err`): the evidence is kept
+  and tried again, never consumed. Refused or another window answering: the
+  hold stays armed and `merging`, the room is told once (`[tmm] restored dev
+  is running as <session>:<name>`), and the capture tick retries; a merging
+  hold is not "not ready". Pinned by
+  `a_release_types_only_into_the_holds_own_window_in_its_own_session`.
+  Confirmed, ONE transaction sets
+  the hold `released` (the row and its generation stay) and its window's
+  record in its batch `Launched` ("released after positive evidence"),
+  conditional on the batch uuid, the project, the slot's ord and the
+  window's launch uuid, in whichever of the socket's open and last batches
+  is that batch: the capture then observes the window like any other. The
+  batch owner writes its batch whole from its own copy, so `save_batch` and
+  `close_batch` keep a stored window the release made `Launched` (same
+  project, ord and launch; keyed on the state, never on the reason text) and
+  MERGE it into the owner's copy, which comes back as written: every later
+  decision of the owner reads the state the store holds (H2 review P1-E). A
+  finished project's outcome is settled from its windows by ONE rule,
+  `store::settle` (any window Launched: done; none: "no window could be
+  restored"), which the owner's finish (`finalize` records `finished` with
+  its note) and a release both apply, and a batch closed "done" or "done
+  with failures" takes the word that then follows. A stored batch that
+  cannot be read is an error: it is never overwritten from a copy. Pinned
+  by `a_release_between_the_owners_window_action_and_its_finish_is_what_the_finish_reads`
+  (released before the holder step: done, "done", observed by the next
+  capture) and `a_release_marks_its_batch_window_launched_and_the_owners_copy_keeps_it`.
+  Then the held lines are flushed by the slot's own rules. From the release
+  on, the slot is BOUND to that generation's own pane, in the ONE send door
+  every input branch takes (H2 review P1-D residuals): `delivery::send_into`
+  — a delivery typed now or steered, a held batch's flush, a hub @mention,
+  a verbatim `/command` (`hub_command`) — together with
+  `restore_hold::held`, which every delivery decision, flush trigger and
+  command already asks. While the slot's name leads anywhere but the bound
+  pane (moved away, a same-name window first) or it cannot be checked,
+  `held` bars typing into it: lines stay held, a command is refused. At the
+  write itself, `send_into` decides from ONE read of the slot's current
+  holds (`restore_hold::send_gate`): no live hold confirmed → written as
+  always; a hold still in progress (planned, bound, armed) or holds that
+  cannot be read → nothing is written and the line is kept (a restart of an
+  in-progress restore can install an armed generation between the outer
+  check and the write); a RELEASED hold → the write is bound: every write
+  of the operation — text, paste, Escape, Enter — goes to that row's `%id`
+  inside `if-shell -F` on the instance, the `%id` and the pane's process
+  (`tmux::with_write_guard`), so a pane respawned after the target was
+  resolved (same `%id`, a new process), or another server, refuses it and
+  the caller keeps the line. Only the target option is rewritten: nothing
+  after `--`, where the payload begins (a literal `-t` is text). The same
+  door carries the automated and keyed input too (round 3, orchestrator
+  14:56/14:59): the recovery's auto-continue (`recovery::check_once` types
+  `continue` through `send_into`; a barrier refusal is taken back with
+  `Tracker::undo_send`, so it spends no attempt, backoff or ladder start),
+  and ONE named key through `delivery::send_key_into` — the CLI's live
+  mode toggle (`switch_input_mode`: readiness required like any input,
+  guarded on a released hold, the key only, never an Enter) and the one
+  interrupt, Escape (`hub_agent_interrupt`), which is EXEMPT from
+  readiness (a person may always cancel: a bound or armed hold's alive pane
+  takes it too, a planned one is not the restore's window yet) but is
+  written under the same identity guard, so it never lands in a respawned
+  or unreadable pane; its queue-cancel and state reset are unchanged and
+  the room line is posted only after the key went in. For every bound
+  write the door also checks that the caller's target leads to the bound
+  `%id` (the screen a caller read is that pane's). Raw terminal keys and
+  paste from the Terminal page, and the launch doors, are out of scope: a
+  person typing in the terminal has taken over. Pinned by
+  `a_restoring_window_painting_a_transient_error_gets_no_continue_and_keeps_its_budget`,
+  `undo_send_takes_back_exactly_what_the_refused_send_spent` and
+  `the_mode_toggle_and_the_interrupt_go_through_the_send_door`. The binding ends with a lifecycle
+  operation: restart, replace, stop, the pane's confirmed end. A prompt
+  opened a turn, so the held lines wait for that turn's end. Pinned by
+  `a_release_types_only_into_the_holds_own_window_in_its_own_session` and
+  `every_input_branch_types_a_released_slot_only_into_its_bound_pane`. The barrier's read releases a dsh
+  window only when it already carries its slot's name (the same in-server
+  confirmation runs), and never flushes: a read never types.
+- **An envelope is attributed by its generation.**
+  `restore_hold::attribute(pane, launch)`. An envelope that CARRIES a launch
+  is never "legacy normal": only the live hold row of THAT launch, on this
+  socket, bound to this pane, routes it — `Slot` while the hold is still
+  blocking (every fact under the slot's name in its project's session,
+  whatever the window is called now), `Own` once released (routed as
+  usual). No such row (retired, never existed, another pane or socket, its
+  pane ended): `Drop`. An envelope with NO launch from a pane with a live
+  hold is dropped too; only one with no launch from a pane with no live
+  hold is normal. A hold or pane that cannot be read is `Unknown`: the
+  envelope is kept and judged again (H2 review P1-C). This closes the
+  reviewer's interleaving: an envelope checked against its pane, then an
+  ordinary restart that kills that pane and retires the released row, then
+  the attribution — it writes nothing for the slot's next incarnation. The
+  answer only routes: `Slot` and `Own` facts are written under their
+  generation, in the row's own transaction, and a refused fact has no
+  effect at all — no row, no live state, no feed line, no reply post, no
+  command row stepped, no recovery budget refilled (agent-notifications.md).
+  Known edge: a CLI a person starts by hand inside a held pane is not
+  tracked until that pane ends. Pinned by
+  `an_envelope_is_attributed_by_its_panes_hold_and_its_launch` and, through
+  the consumer, `a_restored_windows_envelopes_are_attributed_by_its_hold_and_launch`.
+- **Every door that types an agent's launch asks `before_launch` first.**
+  `reconcile::run_slot_command` (`up`, the hub and `tmm` restart) and
+  `spawn::launch_window` (spawn, team spawn, respawn). The door consumes ONLY
+  the generation its start verb read before its kill: `start_permit`, taken
+  before the kill, records it (`restore_hold::intent`; a hold that cannot
+  be read refuses the verb there). A hold that appeared, or another
+  generation installed, since then is another launch's: the door types
+  NOTHING (`Err`). The hold it consumes decides (H2 review P1-B and the
+  orchestrator's STAGE ruling, 2026-10-19):
+  - still in progress (planned, bound, armed; not ready or merging
+    included): REPLACED in one conditional write by a new ARMED generation
+    bound to the target pane, before anything is typed; the window is
+    tagged `@tmm_rl=<uuid>` (its creation authorization, below) and the
+    line carries `TMM_LAUNCH`. A restart is a new incarnation, not evidence.
+    If the prune retired the row between the verb's kill and its door,
+    `Store::install_hold` installs that generation again; another
+    generation holding the slot means nothing is written.
+  - released: an ORDINARY restart. The barrier guards machine-resumed
+    launches only: the released row is retired once the restart's own kill
+    has ended its pane, no hold is installed, the line names no launch, and
+    the new CLI has today's admission. A pane still alive, or one that
+    cannot be checked, types nothing. The retire IS the authorization
+    (`Store::retire_released_as_seen`, one transaction): the row as read is
+    deleted, or it is gone and the slot has no other hold (the prune took
+    it); a successor generation holding the slot means the retire is lost
+    and nothing is typed. Late envelopes of the released launch
+    are dropped by the attribution rule below. A new armed barrier here
+    would hold every restarted kiro (it has no startup evidence) until a
+    person types, which today's product does not do (tenet 3).
+  - none confirmed: `NoHold`, a plain launch. A store or pane that cannot
+    be read, or a lost CAS: `Err`, nothing typed.
+
+  A Stop needs no path of its own: its kill ends the pane, and the prune
+  retires the hold only once that end is confirmed. Every install of a
+  generation retires the slot's OTHER rows (any batch, e.g. an earlier
+  boot's) in the same transaction (`insert_hold`, `install_hold`): a slot
+  has ONE current incarnation, the one the status reads. Pinned by
+  `a_restart_of_a_held_slot_installs_a_new_generation_before_typing`.
+- **Not ready is a report, never a release.** A bound or armed hold past
+  `NOT_READY_SECS` (120 s) with no evidence and no accepted fact of its
+  launch is marked once (`tick_not_ready`) and its project's room is told
+  once: `[tmm] dev was restored but has not shown it is ready; 2 lines held;
+  type a prompt into it`. The report is claimed and then posted; a post that
+  fails gives the claim back, so `reported` means posted and the next tick
+  tries again (the merging line works the same way, `merge_reported`). The
+  claim re-checks, in its own write, what the tick read: an accepted fact
+  or a merge pending since then is no longer "not ready", so a tick paused
+  between its read and its write posts no wrong line (validator V10). Its
+  lines stay held. The status reads the mark from the slot's ONE current
+  hold row at read time (agent-status.md); the tick feeds nothing to it.
 - **The start awaits the decision; the windows come in the background.**
   `server::start_with_socket_ready` awaits `restore_run::prepare_on_start`
   right after the turn-fact replay, before the hook inbox, capture, the start

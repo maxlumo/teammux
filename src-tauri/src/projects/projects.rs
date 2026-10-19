@@ -348,6 +348,11 @@ pub fn mark_agent_stopped(session: &str, agent: &str) -> Result<(), String> {
 #[must_use = "a start permit is finished by the verb that took it"]
 pub struct StartPermit {
     stood: Option<(String, String, String)>,
+    /// The slot's restore hold as it stood when the verb began (board #422
+    /// round 3, review P1-B): the verb's launch door installs the next
+    /// generation of THAT hold even if a prune retired its row after the
+    /// verb's kill. A hold that cannot be read refuses the verb here.
+    _intent: super::restore_hold::Intent,
 }
 
 pub fn start_permit(session: &str, agent: &str) -> Result<StartPermit, String> {
@@ -355,13 +360,14 @@ pub fn start_permit(session: &str, agent: &str) -> Result<StartPermit, String> {
         Some(project) => with_store(|store| store.slot_stopped_version(&project.id, agent))?.map(|v| (project.id, agent.to_string(), v)),
         None => None,
     };
-    Ok(StartPermit { stood })
+    let _intent = super::restore_hold::intent(session, agent)?;
+    Ok(StartPermit { stood, _intent })
 }
 
 impl StartPermit {
     /// End the verb: on a clean success, clear the version this permit read.
     pub fn finish(self, clean: bool) -> Result<(), String> {
-        match (clean, self.stood) {
+        match (clean, &self.stood) {
             (true, Some((id, window, v))) => with_store(|store| store.clear_slot_stopped_if(&id, &window, &v)).map(|_| ()),
             _ => Ok(()),
         }

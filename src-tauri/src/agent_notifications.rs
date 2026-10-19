@@ -47,11 +47,18 @@ struct InboxEnvelope {
     tmm_tmux: Option<String>,
     /// The launch uuid (`TMM_LAUNCH`) of the window incarnation that produced it,
     /// written by the helper only when it is exactly a 36-character `[0-9a-f-]`
-    /// uuid (board #422 H2 reads it; nothing in this file does yet). Top level,
-    /// next to `backend` and `pane_id`, never inside `payload`.
+    /// uuid. Top level, next to `backend` and `pane_id`, never inside
+    /// `payload`. Read against the pane's restore hold (board #422,
+    /// `restore_hold::attribute`).
     #[serde(default)]
-    #[allow(dead_code)]
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
     launch: Option<String>,
+    /// The launch of the restore hold this envelope was attributed to (board
+    /// #422): its facts are the logical slot's (`resolved` names the slot),
+    /// and its prompt or `SessionStart` may release that hold.
+    #[serde(skip)]
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+    restore: Option<String>,
     /// The pane as ONE checked tmux response resolved it (`check_pane`, board #425):
     /// session, window, pane index. Set by `consume_file` before anything else
     /// reads the envelope, so the numbered mark, the turn fact and the reply edge
@@ -318,7 +325,26 @@ impl AgentNotificationHub {
         // both for this envelope alone, and its result is what every later step uses.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         match check_pane(&envelope, &metadata, unavailable) {
-            Ok(pane) => envelope.resolved = Some(pane),
+            // The pane's restore hold decides whose envelope it is (board
+            // #422): this launch's is the logical slot's; another
+            // incarnation's is dropped before any fact, ack or reply edge.
+            // One that cannot be judged is kept (review P1-C).
+            Ok(pane) => match crate::projects::restore_hold::attribute(&envelope.pane_id, envelope.launch.as_deref()) {
+                crate::projects::restore_hold::Attribution::Normal => envelope.resolved = Some(pane),
+                crate::projects::restore_hold::Attribution::Slot { session, slot, launch } => {
+                    envelope.resolved = Some((session, slot, pane.2));
+                    envelope.restore = Some(launch);
+                }
+                crate::projects::restore_hold::Attribution::Own { launch } => {
+                    envelope.resolved = Some(pane);
+                    envelope.restore = Some(launch);
+                }
+                crate::projects::restore_hold::Attribution::Drop(why) => return Err(Consume::Drop(why)),
+                crate::projects::restore_hold::Attribution::Unknown(why) => {
+                    blocked.insert(envelope.pane_id.clone());
+                    return Err(Consume::Unavailable(why));
+                }
+            },
             Err(out) => {
                 if matches!(out, Consume::Unavailable(_)) {
                     blocked.insert(envelope.pane_id.clone());
@@ -326,13 +352,19 @@ impl AgentNotificationHub {
                 return Err(out);
             }
         }
+        #[cfg(test)]
+        if let Some(hook) = AFTER_ATTRIBUTED.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if let Some(seq) = envelope.payload.get("tmm_seq").and_then(Value::as_u64) {
             let pane = envelope.pane_id.clone();
             if blocked.contains(&pane) {
                 return Err(Consume::Defer);
             }
-            let out = self.consume_numbered(path, envelope, seq);
+            let generation = generation_of(&envelope);
+            let (out, went) = crate::projects::telemetry::with_generation(generation.as_ref().map(|(s, w, l)| (s.as_str(), w.as_str(), l.as_str())), || self.consume_numbered(path, envelope, seq));
+            let out = generation_outcome(out, went);
             if matches!(out, Err(Consume::Retain(_))) {
                 blocked.insert(pane);
             }
@@ -348,7 +380,14 @@ impl AgentNotificationHub {
                 return Err(Consume::Defer);
             }
             // (The pane was verified in `check_pane`; an unavailable tmux fenced it there.)
-            return self.consume_envelope(envelope);
+            // A restored window's facts are written only under its generation.
+            let generation = generation_of(&envelope);
+            let (out, went) = crate::projects::telemetry::with_generation(generation.as_ref().map(|(s, w, l)| (s.as_str(), w.as_str(), l.as_str())), || self.consume_envelope(envelope));
+            let out = generation_outcome(out, went);
+            if matches!(out, Err(Consume::Retain(_))) {
+                blocked.insert(pane);
+            }
+            return out;
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
@@ -416,6 +455,18 @@ impl AgentNotificationHub {
     }
 
     fn consume_envelope(&self, envelope: InboxEnvelope) -> Result<(), Consume> {
+        // A CLI's `SessionStart` is never a turn fact. For a restored window
+        // it may be its release evidence (board #422: claude's of any source,
+        // kimi's `resume`, `restore_hold::evidence_for`); otherwise nothing.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if envelope.payload.get("hook_event_name").and_then(Value::as_str) == Some("SessionStart") {
+            if let Some(launch) = &envelope.restore {
+                let source = envelope.payload.get("source").and_then(Value::as_str);
+                // It writes no fact: a store failure keeps it for a retry.
+                crate::projects::restore_hold::on_session_start(launch, &envelope.pane_id, source).map_err(|e| Consume::Retain(format!("its release could not be recorded ({e})")))?;
+            }
+            return Ok(());
+        }
         // A SUB-AGENT thread's event is the agent's own work, like a tool call
         // (board #169; codex 0.153.4 runs spawn_agent children in-process and
         // the managed hooks fire for every thread — see backends/codex.rs for
@@ -481,7 +532,8 @@ impl AgentNotificationHub {
                         return Ok(());
                     }
                 } else {
-                    crate::projects::telemetry::record_tool(&session, &window, &tool, &detail);
+                    // (Under a restore generation, its row is the hold's acceptance too.)
+                    let _ = crate::projects::telemetry::record_tool(&session, &window, &tool, &detail);
                 }
                 // The pane just painted a tool row — the freshest moment to
                 // read its status furniture. Throttled + async inside.
@@ -497,12 +549,32 @@ impl AgentNotificationHub {
             let (session, window, _) = envelope.pane()?;
             if let Some(prompt) = prompt_text(&envelope.payload) {
                 if !prompt.trim().is_empty() {
+                    // A restored window's prompt may not reach the log under its
+                    // generation: its turn's reply edge is put back as it was.
+                    let edge_before = envelope.restore.as_ref().and_then(|_| self.state.lock().unwrap().reply_targets.get(&window_key(&session, &window)).cloned());
                     self.start_turn(&session, &window, &prompt);
-                    crate::projects::telemetry::record_prompt(&session, &window, &prompt);
+                    let outcome = crate::projects::telemetry::record_prompt_outcome(&session, &window, &prompt);
+                    if crate::projects::telemetry::generation_write_failed() {
+                        let mut state = self.state.lock().unwrap();
+                        match edge_before {
+                            Some(edge) => state.reply_targets.insert(window_key(&session, &window), edge),
+                            None => state.reply_targets.remove(&window_key(&session, &window)),
+                        };
+                        return Err(Consume::Retain("its prompt did not reach the log under its restore generation".into()));
+                    }
                     // A numbered producer's prompt that did not reach the log
                     // stops here: not accepted, retried (round 5 P1-C).
                     if crate::projects::telemetry::numbered_write_failed() {
                         return Err(Consume::Retain("its prompt did not reach the log".into()));
+                    }
+                    // A person's prompt into a restored window: released once
+                    // its fact is in the log, then merged and flushed (#422).
+                    // Its row already marked the release pending: a release
+                    // this cannot complete is completed by the capture tick.
+                    if let Some(launch) = &envelope.restore {
+                        if let Err(e) = crate::projects::restore_hold::on_prompt(launch, &envelope.pane_id, outcome.row) {
+                            eprintln!("hooks: the restored {window}'s release is left to the capture tick: {e}");
+                        }
                     }
                     // A prompt settled: for a CLI that loses typed text (dsh,
                     // board #410), its run is up, and a steer-mode reader may
@@ -558,7 +630,8 @@ impl AgentNotificationHub {
             // placeholder, real text, or nothing usable) is written WITH the
             // end, in one step: a separate "and it was empty" write could land
             // on a different end.
-            crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality);
+            // (Under a restore generation, its row is the hold's acceptance too.)
+            let _ = crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality);
             // A turn edge (stop, ask) means the CLI just repainted its footer —
             // the context-usage number is at its freshest right here.
             crate::projects::vitals::sniff_window_soon(&session, &window);
@@ -568,7 +641,7 @@ impl AgentNotificationHub {
         // BEFORE the room post and the flush (round 5 P1-C): retrying a known
         // failure repeats no visible effect; only a crash may.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if crate::projects::telemetry::numbered_write_failed() {
+        if crate::projects::telemetry::numbered_write_failed() || crate::projects::telemetry::generation_write_failed() {
             return Err(Consume::Retain("its end fact did not reach the log".into()));
         }
         #[cfg(test)]
@@ -851,6 +924,29 @@ impl From<&str> for Consume {
 }
 
 
+/// The restore generation an attributed envelope's facts are written under:
+/// the window they are recorded as, and the hold's launch (board #422).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn generation_of(envelope: &InboxEnvelope) -> Option<(String, String, String)> {
+    let (session, window, _) = envelope.resolved.clone()?;
+    envelope.restore.clone().map(|launch| (session, window, launch))
+}
+
+/// How a consumption under a restore generation ends (H2 review P1-C): every
+/// fenced write landed — as `out` says; the hold carries another launch now
+/// — the envelope is another incarnation's and is dropped, having written
+/// nothing; a write failed otherwise — kept and retried, having written
+/// nothing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn generation_outcome(out: Result<(), Consume>, went: crate::projects::telemetry::GenerationWrite) -> Result<(), Consume> {
+    use crate::projects::telemetry::GenerationWrite;
+    match went {
+        GenerationWrite::Ok => out,
+        GenerationWrite::Replaced => Err(Consume::Drop("its restore generation was replaced before its facts were written".into())),
+        GenerationWrite::Failed => Err(Consume::Retain("a fact of its restore generation did not reach the log".into())),
+    }
+}
+
 /// Whose pane is this, and does it exist there? (board #425, orchestrator and reviewer
 /// ruling.) A pane id is meaningful only to the tmux server INCARNATION that issued it:
 /// a new server reuses the path, the pid and `%0`, so none of them alone names one.
@@ -960,7 +1056,7 @@ fn kept_summary(kept: usize, oldest: std::time::Duration) {
         return;
     }
     *last = Some(std::time::Instant::now());
-    eprintln!("⚠  {kept} agent notification(s) kept in the inbox while tmux cannot be asked (the oldest has waited {}s)", oldest.as_secs());
+    eprintln!("⚠  {kept} agent notification(s) kept in the inbox while tmux or the restore holds cannot be read (the oldest has waited {}s)", oldest.as_secs());
 }
 
 /// Say once per file that it is being kept for a retry, not at every poll.
@@ -983,6 +1079,8 @@ thread_local! {
     /// before it is acted on — where a test replaces the tmux server to prove nothing carries
     /// over from one envelope's check to the next.
     static AFTER_CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    /// Test seam (board #422): runs once between an envelope's attribution and its facts' writes.
+    static AFTER_ATTRIBUTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     /// Test seam: the named point at which consumption "crashes" once.
     static CRASH: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
 }
@@ -1400,6 +1498,7 @@ mod tests {
             tmm_tmux: None,
             launch: None,
             resolved: None,
+            restore: None,
         };
         assert_eq!(
             normalize(&envelope(
@@ -1506,6 +1605,7 @@ mod tests {
             tmm_tmux: None,
             launch: None,
             resolved: None,
+            restore: None,
         };
         for backend in ["claude", "codex"] {
             assert!(
@@ -1536,6 +1636,7 @@ mod tests {
             tmm_tmux: None,
             launch: None,
             resolved: None,
+            restore: None,
         };
         assert!(is_user_prompt_submit(&envelope(
             json!({"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"0199-abc"})
@@ -2145,7 +2246,7 @@ mod tests {
         let (s, w) = (format!("quality-{}", uuid::Uuid::new_v4()), "dev");
         let stop = |payload: Value| {
             record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
-            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None };
+            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None };
             let n = normalize_in(&envelope, Some(&home)).unwrap();
             record_notification_with(&s, w, &n.kind, n.quality);
             n.quality
@@ -2233,6 +2334,262 @@ mod tests {
         let said = status();
         assert_eq!((said.state.as_str(), said.detail.as_str()), ("idle", ""), "a turn with something to say names nothing");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #422 round 3 through the consumer (S1, C1, the revision-4 cell):
+    /// a restored window's envelopes are attributed by its hold and launch.
+    /// Before the release, one with no launch or another uuid is dropped (no
+    /// fact) — a SessionStart included; this launch's tool call is recorded
+    /// under the logical slot while the window still has its placeholder
+    /// name, and is the incarnation's first accepted fact; this launch's
+    /// prompt is recorded under the slot, opens the reply edge, merges the
+    /// window into its slot and releases the hold. After it, a late prompt
+    /// with no launch and a late Stop of an old uuid change nothing — no
+    /// fact, the edge kept — and this launch's Stop ends the turn and posts
+    /// the reply to its requester. A second window's ask of its own launch is
+    /// its first accepted fact, and its SessionStart of its own launch
+    /// releases it (claude: any source) without becoming a fact.
+    #[test]
+    fn a_restored_windows_envelopes_are_attributed_by_its_hold_and_launch() {
+        use crate::projects::store::{Batch, Checkpoint, Hold, HoldPane, HoldStage, TmuxInstance};
+        use crate::projects::telemetry::{derive, held_rows, recent_events, turn_version, PERSIST_IN_TEST, RESTORE_NOT_READY_DETAIL};
+        crate::projects::tests::use_test_store();
+        let scope = crate::tmux::test_support::GlobalSocket::hold();
+        let server = crate::tmux::test_support::PrivateTmux::start(&scope, "an-422");
+        let ws = std::env::temp_dir().join(format!("tmm-an422-{}", uuid::Uuid::new_v4().simple()));
+        for slot in ["dev", "rev"] {
+            let home = ws.join(".tmm/agents").join(slot);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), json!({"backend": "claude", "cmd": "claude"}).to_string()).unwrap();
+        }
+        let ws = ws.canonicalize().unwrap();
+        let batch = uuid::Uuid::new_v4().to_string();
+        let session = format!("an422-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let ph = format!("tmm-r-{batch}-0");
+        let cwd = ws.to_string_lossy().to_string();
+        server.run(&["new-session", "-d", "-s", &session, "-n", &ph, "-c", &cwd, "sleep 600"]).unwrap();
+        server.run(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "rev", "-c", &cwd, "sleep 600"]).unwrap();
+        crate::projects::adopt(&session, Some(&session)).expect("adopt");
+        let project = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let socket = crate::projects::restore::socket_key();
+        let fmt = "#{window_name}\t#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}";
+        let listing = server.run(&["list-panes", "-s", "-t", &format!("={session}:"), "-F", fmt]).unwrap();
+        let pane_of = |name: &str| -> HoldPane {
+            let line = listing.lines().find(|l| l.starts_with(&format!("{name}\t"))).unwrap();
+            let f: Vec<&str> = line.split('\t').collect();
+            HoldPane {
+                instance: TmuxInstance { socket: socket.clone(), pid: f[5].parse().unwrap(), start_time: f[6].parse().unwrap() },
+                session_id: f[4].into(),
+                window_id: f[3].into(),
+                pane_id: f[1].into(),
+                pane_pid: f[2].parse().unwrap(),
+            }
+        };
+        let (dev, rev) = (pane_of(&ph), pane_of("rev"));
+        // The restore's own objects: the session and both windows carry its tags.
+        server.run(&["set-option", "-w", "-t", &dev.window_id, "@tmm_rw", &format!("{batch}:0")]).unwrap();
+        server.run(&["set-option", "-w", "-t", &rev.window_id, "@tmm_rw", &format!("{batch}:1")]).unwrap();
+        server.run(&["set-option", "-t", &format!("={session}:"), "@tmm_rs", &batch]).unwrap();
+        server.run(&["set-environment", "-t", &format!("={session}:"), "TMM_RESTORE_BATCH", &batch]).unwrap();
+        let (l_dev, l_rev) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        let hold = |ord: usize, slot: &str, launch: &str, pane: &HoldPane| Hold {
+            socket: socket.clone(),
+            project_id: project.clone(),
+            batch: batch.clone(),
+            ord,
+            slot: slot.into(),
+            launch: launch.into(),
+            stage: HoldStage::Armed,
+            pane: Some(pane.clone()),
+            since: crate::projects::now(),
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
+        };
+        let unrelated = Batch {
+            batch: "b-unrelated".into(),
+            socket: format!("{socket}-unrelated"),
+            boot_id: None,
+            owner_pid: 0,
+            instance: None,
+            source: Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![],
+        };
+        let holds = [hold(0, "dev", &l_dev, &dev), hold(1, "rev", &l_rev, &rev)];
+        crate::projects::restore_hold::with_store_for_test(|s| s.open_batch(&unrelated, &holds, "x")).unwrap();
+        let stored = |launch: &str| crate::projects::restore_hold::with_store_for_test(|s| s.hold_by_launch(launch)).unwrap().unwrap();
+
+        struct Spy(std::sync::Mutex<Vec<(String, Vec<String>)>>);
+        impl RoomPoster for Spy {
+            fn post_final(&self, _session: &str, agent: &str, _body: &str, reply_to: &[String]) -> Result<(), String> {
+                self.0.lock().unwrap().push((agent.into(), reply_to.to_vec()));
+                Ok(())
+            }
+        }
+        let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
+        let root = std::env::temp_dir().join(format!("tmm-an422-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.set_room_poster(spy.clone());
+        let n = std::cell::Cell::new(0);
+        let feed = |pane: &HoldPane, launch: Option<&str>, payload: Value| {
+            n.set(n.get() + 1);
+            let mut env = json!({"backend": "claude", "pane_id": pane.pane_id, "payload": payload});
+            if let Some(l) = launch {
+                env["launch"] = l.into();
+            }
+            std::fs::write(root.join("inbox").join(format!("{:03}.json", n.get())), serde_json::to_vec(&env).unwrap()).unwrap();
+            hub.consume_inbox();
+            assert!(inbox_files(&root.join("inbox")).is_empty(), "consumed or dropped, never kept");
+        };
+        let prompt = |text: &str| json!({"hook_event_name": "UserPromptSubmit", "prompt": text, "session_id": "s1"});
+        let stop = json!({"hook_event_name": "Stop", "last_assistant_message": "done and verified", "session_id": "s1"});
+        let facts = || recent_events(&session, 0).into_iter().map(|e| (e.window, e.kind)).collect::<Vec<_>>();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let sql = |q: &str| crate::projects::restore_hold::with_store_for_test(|s| s.exec_test_sql(q)).unwrap();
+        let kept = |pane: &HoldPane, launch: Option<&str>, payload: Value| {
+            n.set(n.get() + 1);
+            let mut env = json!({"backend": "claude", "pane_id": pane.pane_id, "payload": payload});
+            if let Some(l) = launch {
+                env["launch"] = l.into();
+            }
+            std::fs::write(root.join("inbox").join(format!("{:03}.json", n.get())), serde_json::to_vec(&env).unwrap()).unwrap();
+            hub.consume_inbox();
+            !inbox_files(&root.join("inbox")).is_empty()
+        };
+
+        let other = uuid::Uuid::new_v4().to_string();
+        // P1-C: the holds cannot be read — an envelope with no launch is KEPT,
+        // never taken as normal; once they read again it is dropped.
+        sql(&format!("UPDATE restore_holds SET stage = 'bogus' WHERE launch = '{l_dev}'"));
+        assert!(kept(&dev, None, prompt("while the holds cannot be read")), "kept, to be judged again");
+        assert!(facts().is_empty());
+        sql(&format!("UPDATE restore_holds SET stage = 'armed' WHERE launch = '{l_dev}'"));
+        hub.consume_inbox();
+        assert!(inbox_files(&root.join("inbox")).is_empty() && facts().is_empty(), "judged once readable: dropped, nothing written");
+        feed(&dev, None, prompt("no launch"));
+        feed(&dev, Some(&other), prompt("another launch"));
+        feed(&dev, None, json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
+        assert!(facts().is_empty(), "nothing of another incarnation is a fact: {:?}", facts());
+        assert_eq!(stored(&l_dev).stage, HoldStage::Armed);
+        // Past its deadline: idle + restore_not_ready, and a line for it is held.
+        crate::projects::restore_hold::with_store_for_test(|s| s.age_hold_for_test(&l_dev, 200)).unwrap();
+        crate::projects::restore_hold::tick_not_ready();
+        let st = derive(&session, "dev", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", RESTORE_NOT_READY_DETAIL));
+        assert!(crate::projects::delivery::deliver(&session, "dev", &dev.pane_id, "TOKEN-HELD", 0, ""));
+        assert_eq!(held_rows(&session, "dev").len(), 1);
+        feed(&dev, Some(&l_dev), json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s1"}));
+        assert_eq!(facts(), vec![("dev".to_string(), "tool".to_string())], "under the slot's name, not the placeholder's");
+        assert!(stored(&l_dev).accepted_seq.is_some(), "the first durably accepted fact of this launch");
+        assert_eq!(stored(&l_dev).stage, HoldStage::Armed, "a tool call is not release evidence");
+        assert_eq!(derive(&session, "dev", 0).state, "running", "this launch's accepted fact wins at once, with no tick (review P1-A)");
+        feed(&dev, Some(&l_dev), prompt("[tmm chat 2026-10-19 10:40] lead: @dev go on"));
+        assert_eq!(stored(&l_dev).stage, HoldStage::Released, "a person's prompt of this launch releases");
+        let names = server.run(&["list-windows", "-t", &format!("={session}:"), "-F", "#{window_name}"]).unwrap();
+        assert!(names.lines().any(|n| n == "dev") && !names.contains(&ph), "merged into its slot: {names}");
+        assert!(hub.holds_edge(&session, "dev"), "the prompt opened the slot's reply edge");
+        assert_eq!(derive(&session, "dev", 0).state, "running");
+        assert_eq!(held_rows(&session, "dev").len(), 1, "the release's flush keeps the line for the open turn's end");
+        // Late envelopes of another incarnation after the release (S1, C1).
+        let (before, version) = (facts(), turn_version(&session, "dev"));
+        feed(&dev, None, prompt("a late prompt with no launch"));
+        feed(&dev, Some(&other), stop.clone());
+        assert_eq!((facts(), turn_version(&session, "dev")), (before, version), "dropped: no turn fact");
+        assert!(hub.holds_edge(&session, "dev") && spy.0.lock().unwrap().is_empty(), "the edge is kept and nothing posted");
+        feed(&dev, Some(&l_dev), stop.clone());
+        assert_eq!(facts().last(), Some(&("dev".to_string(), "notif".to_string())));
+        assert_eq!(spy.0.lock().unwrap().clone(), vec![("dev".to_string(), vec!["lead".to_string()])], "this launch's Stop answers the requester");
+        // V6: the listing cannot be read: a launch-less END from the
+        // restored pane is kept as Unknown, never written as Normal; judged
+        // once readable (a live hold, no launch): dropped.
+        let (before, version) = (facts(), turn_version(&session, "dev"));
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(true));
+        let still = kept(&dev, None, stop.clone());
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(still, "kept while its pane cannot be checked");
+        assert_eq!((facts(), turn_version(&session, "dev")), (before.clone(), version), "nothing written");
+        hub.consume_inbox();
+        assert!(inbox_files(&root.join("inbox")).is_empty(), "judged once readable: dropped");
+        assert_eq!((facts(), turn_version(&session, "dev")), (before, version));
+        // P1-C residual (1): attributed to rev's launch, then a replace to a
+        // new generation before its facts are written: its END and its TOOL
+        // write nothing AND have no effect — the new generation's command row
+        // is not stepped, its recovery incident is not confirmed.
+        let rev_facts = || facts().into_iter().filter(|(w, _)| w == "rev").count();
+        let commands = || crate::projects::restore_hold::with_store_for_test(|s| s.pending_deliveries(&session, Some("rev"))).unwrap().into_iter().filter(|r| r.command.is_some()).count();
+        crate::projects::telemetry::record_command_delivery(&session, "rev", "/goal next", "");
+        crate::projects::recovery::open_incident_for_test(&session, "rev");
+        let (cmd_before, rev_before) = (commands(), rev_facts());
+        assert_eq!(cmd_before, 1);
+        let mut l_rev = l_rev.clone();
+        for event in [stop.clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s2"})] {
+            let (gen, rev_pane, next) = (stored(&l_rev), rev.clone(), uuid::Uuid::new_v4().to_string());
+            let installed = next.clone();
+            AFTER_ATTRIBUTED.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    assert!(crate::projects::restore_hold::with_store_for_test(|s| s.install_hold(&gen, &installed, HoldStage::Armed, &rev_pane, crate::projects::now())).unwrap());
+                }))
+            });
+            feed(&rev, Some(&l_rev), event);
+            l_rev = next;
+            assert_eq!((rev_facts(), commands()), (rev_before, cmd_before), "the old generation's fact wrote nothing and stepped no command row");
+            assert_eq!(crate::projects::recovery::incident_confirmed_for_test(&session, "rev"), Some(false), "nor confirmed the new generation's incident");
+        }
+        assert!(spy.0.lock().unwrap().iter().all(|(w, _)| w != "rev"), "nothing posted for it");
+        // rev's current generation: an ask of it is an accepted fact.
+        feed(&rev, Some(&l_rev), json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "allow?", "session_id": "s2"}));
+        assert!(stored(&l_rev).accepted_seq.is_some(), "an ask of this launch is an accepted fact too");
+        assert_eq!(rev_facts(), rev_before + 1);
+        feed(&rev, Some(&other), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s2"}));
+        assert_eq!(stored(&l_rev).stage, HoldStage::Armed, "another launch's SessionStart is no evidence");
+        // P1-C: its release cannot be written: the one SessionStart is kept,
+        // and it releases once the store takes the write.
+        sql("CREATE TEMP TRIGGER an422 BEFORE UPDATE ON restore_holds BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+        assert!(kept(&rev, Some(&l_rev), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s2"})), "kept for a retry");
+        assert_eq!(stored(&l_rev).stage, HoldStage::Armed);
+        sql("DROP TRIGGER an422;");
+        // P1-C residual (2): attributed, then the release's own listing
+        // fails: kept again (cannot verify now), and completed on recovery.
+        AFTER_ATTRIBUTED.with(|h| *h.borrow_mut() = Some(Box::new(|| crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(true)))));
+        hub.consume_inbox();
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(!inbox_files(&root.join("inbox")).is_empty(), "release unverifiable: the SessionStart is kept");
+        assert_eq!(stored(&l_rev).stage, HoldStage::Armed);
+        hub.consume_inbox();
+        assert!(inbox_files(&root.join("inbox")).is_empty());
+        assert_eq!(stored(&l_rev).stage, HoldStage::Released);
+        assert_eq!(rev_facts(), rev_before + 1, "a SessionStart is never a turn fact");
+        // The STAGE ruling's non-degradation clause (the reviewer's
+        // interleaving): dev's envelope of its launch is checked, then — before
+        // its attribution — an ordinary restart kills dev's pane, retires its
+        // released row and starts a new CLI with no hold. The old envelope
+        // writes nothing for the new incarnation; the new CLI's own
+        // launch-less prompt is ordinary.
+        let (before, version) = (facts(), turn_version(&session, "dev"));
+        let edge = hub.holds_edge(&session, "dev");
+        let (s2, old_wid, cwd2) = (session.clone(), dev.window_id.clone(), cwd.clone());
+        let new_pane = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let np = new_pane.clone();
+        let socket2 = socket.clone();
+        AFTER_CHECKED.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                crate::tmux::run_tmux_on(Some(&socket2), &["kill-window", "-t", &old_wid]).unwrap();
+                let pane = crate::tmux::run_tmux_on(Some(&socket2), &["new-window", "-d", "-t", &format!("={s2}:"), "-n", "dev", "-c", &cwd2, "-P", "-F", "#{pane_id}", "sleep 600"]).unwrap().trim().to_string();
+                assert_eq!(crate::projects::restore_hold::before_launch(&s2, "dev", &pane), Ok(crate::projects::restore_hold::Launch::NoHold), "an ordinary restart");
+                *np.borrow_mut() = pane;
+            }))
+        });
+        feed(&dev, Some(&l_dev), prompt("[tmm chat 2026-10-19 13:00] lead: @dev an old incarnation's prompt"));
+        assert!(crate::projects::restore_hold::with_store_for_test(|s| s.hold_by_launch(&l_dev)).unwrap().is_none(), "the released row was retired");
+        assert_eq!((facts(), turn_version(&session, "dev"), hub.holds_edge(&session, "dev")), (before.clone(), version, edge), "the old prompt wrote nothing for the new slot");
+        let fresh = HoldPane { pane_id: new_pane.borrow().clone(), ..dev.clone() };
+        feed(&fresh, None, prompt("the new CLI's own prompt"));
+        assert!(facts().len() > before.len() && facts().last() == Some(&("dev".to_string(), "prompt".to_string())), "an ordinary prompt of the new CLI: {:?}", facts());
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     /// kimi end to end (board #224), the three edges claude's review asked
@@ -2477,14 +2834,28 @@ mod tests {
         }
     }
 
+    struct RigParts {
+        ws: PathBuf,
+        root: PathBuf,
+        hub: AgentNotificationHub,
+        spy: std::sync::Arc<RigSpy>,
+        zsh: PathBuf,
+        bin: PathBuf,
+        zdot: PathBuf,
+        dsh_home: PathBuf,
+    }
+
     impl DshRig {
         fn start() -> Option<DshRig> {
             Self::start_in("queue")
         }
         /// The rig with the given input mode (board #410) rendered into the
         /// agent's recipe and home, as spawn does.
-        fn start_in(mode: &str) -> Option<DshRig> {
-            use crate::backends::dsh::tests::{pane_id, wait_for, which};
+        /// Everything but the pane: the workspace with its generated dsh
+        /// home (plugin, zshenv, zshrc wired to the production notify
+        /// helper), the fake `dsh` loop, the hub and its room.
+        fn materialize(mode: &str) -> Option<RigParts> {
+            use crate::backends::dsh::tests::which;
             crate::projects::tests::use_test_store();
             let (zsh, node) = (which("zsh")?, which("node")?);
             let ws_raw = std::env::temp_dir().join(format!("tmm-dsh-e2e-{}", uuid::Uuid::new_v4()));
@@ -2573,6 +2944,13 @@ mod tests {
             std::fs::write(bin.join("dsh"), format!("#!/bin/sh\nexec {} {} \"$@\"\n", q(&node), q(&ws.join("driver.mjs")))).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            Some(RigParts { ws, root, hub, spy, zsh, bin, zdot, dsh_home })
+        }
+
+        fn start_in(mode: &str) -> Option<DshRig> {
+            use crate::backends::dsh::tests::{pane_id, wait_for};
+            let RigParts { ws, root, hub, spy, zsh, bin, zdot, dsh_home } = Self::materialize(mode)?;
+            let q = |p: &Path| crate::shell::quote_always(&p.to_string_lossy());
             let session = format!("tmm-dsh-e2e-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let cmd = format!(
                 "env -i HOME={} TERM=xterm-256color LANG=C.UTF-8 TMUX_PANE=\"$TMUX_PANE\" PATH={}:/usr/bin:/bin ZDOTDIR={} DSH_HOME={} {} -i",
@@ -2597,6 +2975,90 @@ mod tests {
             let rig = DshRig { ws, root, hub, spy, session, target, adopted_from, shell, observe: pgrep_session, budget: std::time::Duration::from_secs(5) };
             wait_for("the dsh prompt", 15, || rig.ready());
             Some(rig)
+        }
+        /// The rig launched through the PRODUCTION restart door (board #422
+        /// round 3, H2 review P2): the slot `d1` has a restore hold, and
+        /// `up_agent` creates its window, installs the hold's next
+        /// generation and types the recipe's line — `TMM_LAUNCH=<uuid> …
+        /// exec zsh -i`, sourced into the pane's own shell — so the managed
+        /// zsh, its readiness files and its hooks get the uuid the way a
+        /// restored dsh does. Returns the rig and that launch.
+        fn start_restored(mode: &str) -> Option<(DshRig, String)> {
+            use crate::backends::dsh::tests::wait_for;
+            let RigParts { ws, root, hub, spy, zsh, bin, zdot, dsh_home } = Self::materialize(mode)?;
+            let home = ws.join(".tmm/agents/d1");
+            let path = format!("{}:{}:/usr/bin:/bin", bin.display(), zsh.parent().unwrap().display());
+            let recipe = json!({
+                "backend": "dsh", "input_mode": mode, "cmd": crate::backends::dsh::LAUNCH,
+                "env": [["ZDOTDIR", zdot.to_string_lossy()], ["DSH_HOME", dsh_home.to_string_lossy()], ["PATH", path]],
+            });
+            std::fs::write(home.join("launch.json"), recipe.to_string()).unwrap();
+            let session = format!("tmm-dsh-rs-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let outer = format!("env -i HOME={} TERM=xterm-256color LANG=C.UTF-8 PS1='outer$ ' /bin/sh", crate::shell::quote_always(&ws.to_string_lossy()));
+            if crate::tmux::run_tmux(&["new-session", "-d", "-s", &session, "-n", "outer", "-c", &ws.to_string_lossy(), &outer]).is_err() {
+                let _ = std::fs::remove_dir_all(&ws);
+                return None;
+            }
+            // The window `up` makes runs a plain shell, as on a host whose login shell is sh.
+            crate::tmux::run_tmux(&["set-option", "-t", &format!("={session}:"), "default-shell", "/bin/sh"]).unwrap();
+            let adopted = crate::projects::adopt(&session, Some(&session)).expect("adopt the scratch session as a project");
+            let adopted_from = format!("stored={}", adopted["project"]["path"]);
+            let project = crate::projects::project_for_session(&session).unwrap().unwrap();
+            let mut slots = crate::projects::restore_hold::with_store_for_test(|s| s.slots(&project.id)).unwrap();
+            slots.push(crate::projects::store::Slot {
+                id: None,
+                ord: slots.len() as i64,
+                window_name: "d1".into(),
+                cwd: String::new(),
+                kind: crate::projects::store::SlotKind::Agent,
+                command: Some("dsh".into()),
+                auto_run: true,
+                agent_session_id: None,
+                first_seen_at: 1,
+                settled_at: Some(1),
+            });
+            crate::projects::restore_hold::with_store_for_test(|s| s.replace_slots(&project.id, &slots)).unwrap();
+            let socket = crate::projects::restore::socket_key();
+            let planned = crate::projects::store::Hold {
+                socket: socket.clone(),
+                project_id: project.id.clone(),
+                batch: format!("b-{session}"),
+                ord: 0,
+                slot: "d1".into(),
+                launch: uuid::Uuid::new_v4().to_string(),
+                stage: crate::projects::store::HoldStage::Planned,
+                pane: None,
+                since: crate::projects::now(),
+                accepted_seq: None,
+                not_ready: false,
+                reported: false,
+                merging: false,
+            };
+            let unrelated = crate::projects::store::Batch {
+                batch: planned.batch.clone(),
+                socket: format!("{socket}-unrelated"),
+                boot_id: None,
+                owner_pid: 0,
+                instance: None,
+                source: crate::projects::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+                closed: None,
+                projects: vec![],
+            };
+            crate::projects::restore_hold::with_store_for_test(|s| s.open_batch(&unrelated, &[planned], "x")).unwrap();
+            let r = crate::projects::up_agent(&project.id, "d1").unwrap().expect("the slot");
+            assert_eq!((r.status, r.error.as_deref()), ("created", None), "{r:?}");
+            let hold = crate::projects::restore_hold::with_store_for_test(|s| s.project_holds(&socket, &project.id)).unwrap().pop().expect("its generation");
+            let target = crate::tmux::find_window_by_name(&session, "d1").expect("d1's pane");
+            assert_eq!(hold.pane.as_ref().map(|p| p.pane_id.clone()), Some(target.clone()), "the generation is bound to the pane typed into");
+            let shell = crate::tmux::run_tmux(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
+                .and_then(|s| s.trim().parse::<u32>().map_err(|e| format!("pane_pid {s:?}: {e}")))
+                .and_then(|pid| match unsafe { libc::getsid(pid as libc::pid_t) } {
+                    sid if sid == pid as libc::pid_t => Ok(pid),
+                    sid => Err(format!("pane pid {pid} does not lead its own session (getsid = {sid})")),
+                });
+            let rig = DshRig { ws, root, hub, spy, session, target, adopted_from, shell, observe: pgrep_session, budget: std::time::Duration::from_secs(5) };
+            wait_for("the managed dsh prompt", 20, || rig.ready());
+            Some((rig, hold.launch))
         }
         fn ready(&self) -> bool {
             crate::tmux::capture_pane_plain(&self.target, Some(20)).unwrap_or_default().contains(crate::backends::dsh::READY_MARKER)
@@ -3497,6 +3959,38 @@ mod tests {
         assert_eq!(rows().last().map(|r| r.0.clone()), Some("notif".to_string()), "nothing reopened the turn");
         rig.mode("prompt", None);
         crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
+    /// Board #422 round 3, H2 review P2: a REAL generated dsh shell, started
+    /// through the production restart door (`up_agent` → `before_launch` →
+    /// the recipe line with `TMM_LAUNCH`), names that launch in the
+    /// readiness file its `zle-line-init` writes; the barrier is released on
+    /// it by the production check; a person's line then opens a steer run
+    /// whose claim names it too, and the hook envelope the production helper
+    /// publishes carries it at top level; consumed, its prompt is recorded
+    /// for `d1`. No model is called.
+    #[test]
+    fn a_real_dsh_shell_from_the_restart_door_names_its_launch_in_readiness_and_hooks() {
+        use crate::backends::dsh::tests::wait_for;
+        let Some((rig, launch)) = DshRig::start_restored("steer") else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let state = rig.ws.join(".tmm/agents/d1/dsh/tmm");
+        let field = |file: &str, at: usize| std::fs::read_to_string(state.join(file)).ok().and_then(|t| t.split_whitespace().nth(at).map(str::to_string));
+        assert_eq!(field("ready", 2).as_deref(), Some(launch.as_str()), "the generated shell names its launch: {}", rig.diagnose());
+        assert_eq!(crate::projects::restore_hold::release_ready(), vec![launch.clone()], "released on this launch's readiness");
+        rig.type_keys("hello from a person", true);
+        wait_for("the run's steer claim", 15, || rig.steer_ready());
+        assert_eq!(field("steer-ready", 3).as_deref(), Some(launch.as_str()), "the plugin's claim names it too");
+        wait_for("the run's prompt envelope", 10, || rig.inbox_has("UserPromptSubmit"));
+        let envelopes: Vec<Value> = inbox_files(&rig.root.join("inbox")).iter().map(|f| serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+        let prompt = envelopes.iter().find(|e| e["payload"]["hook_event_name"] == "UserPromptSubmit").unwrap();
+        assert_eq!(prompt["launch"], launch.as_str(), "the production helper wrote the launch at top level: {prompt}");
+        rig.hub.consume_inbox();
+        let recorded = crate::projects::telemetry::recent_events(&rig.session, 0).into_iter().any(|e| e.window == "d1" && e.kind == "prompt" && e.text.contains("hello from a person"));
+        assert!(recorded, "its prompt is d1's: {}", rig.diagnose());
+        rig.release(1);
     }
 
     /// Board #421: a refused rig delivery says WHY. Its window gone, the

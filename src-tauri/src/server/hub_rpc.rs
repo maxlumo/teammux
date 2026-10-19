@@ -252,7 +252,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     .and_then(|echo| {
                         crate::projects::telemetry::record_command_delivery(session, &pane.window_name, &echo, &msg_id)
                     });
-                match crate::tmux::send_command(&target, text) {
+                // Through the one send door: a restore-bound window is
+                // written only while its bound pane is the one there.
+                match crate::projects::delivery::send_into(session, &pane.window_name, &target, text) {
                     Ok(()) => sent.push(pane.window_name.clone()),
                     // Board #250: a pane in copy-mode refuses. The same plain
                     // warn as a refused chat line, on THAT window, whatever the
@@ -676,7 +678,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             if let Some(hub) = notifications {
                 hub.end_turn(session, agent);
             }
-            crate::tmux::send_keys(&format!("{session}:{window}"), "Escape", false).map_err(RpcError::Internal)?;
+            // Through the one send door as THE interrupt: never refused for
+            // readiness, but written only into a restored window's own pane.
+            crate::projects::delivery::send_key_into(session, agent, &format!("{session}:{window}"), "Escape", true).map_err(RpcError::Internal)?;
             // The room records what the app did on a person's behalf —
             // same rule as stop/restart/remove. The client's sys
             // grammar already speaks `interrupted` (amber: a turn was
@@ -4298,6 +4302,10 @@ mod tests {
             stage: crate::projects::store::HoldStage::Planned,
             pane: None,
             since: 1,
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
         };
         let batch = crate::projects::store::Batch {
             batch: "b-held".into(),
@@ -4321,6 +4329,347 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default().contains("/goal free"));
+    }
+
+    /// Board #422 round 3, H2 review P1-D residuals: a slot a restore
+    /// RELEASED is bound to that generation's own pane, in the ONE send door
+    /// every input branch takes — a hub @mention (delivery) and a verbatim
+    /// `hub_command` alike. In place: both are typed, under the in-server
+    /// guard, with the text intact. The window swapped for a same-name one:
+    /// the command is refused, the mention is held, nothing reaches the
+    /// impostor. Back in place but its pane respawned after the door
+    /// resolved it (same `%id`, a new process): the guarded write is refused
+    /// and the new process gets neither the text nor the Enter.
+    #[test]
+    fn every_input_branch_types_a_released_slot_only_into_its_bound_pane() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-bound-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-bound-ws-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/lead");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "claude", "cmd": "claude", "team": "" }).to_string()).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        let elsewhere = format!("{session}-elsewhere");
+        let _cleanup2 = KillOnDrop(elsewhere.clone(), ws.clone());
+        crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "spare", "cat"]).unwrap();
+        crate::projects::adopt(&session, Some("bound-test")).expect("adopt project");
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let id2 = id.clone();
+        let socket = crate::projects::restore::socket_key();
+        let f: Vec<String> = crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("={session}:lead"), "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"])
+            .unwrap()
+            .trim()
+            .split('\t')
+            .map(str::to_string)
+            .collect();
+        let (pane, wid) = (f[0].clone(), f[2].clone());
+        let hold = crate::projects::store::Hold {
+            socket: socket.clone(),
+            project_id: id,
+            batch: "b-bound".into(),
+            ord: 0,
+            slot: "lead".into(),
+            launch: uuid::Uuid::new_v4().to_string(),
+            stage: crate::projects::store::HoldStage::Released,
+            pane: Some(crate::projects::store::HoldPane {
+                instance: crate::projects::store::TmuxInstance { socket: socket.clone(), pid: f[4].parse().unwrap(), start_time: f[5].parse().unwrap() },
+                session_id: f[3].clone(),
+                window_id: wid.clone(),
+                pane_id: pane.clone(),
+                pane_pid: f[1].parse().unwrap(),
+            }),
+            since: 1,
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
+        };
+        let batch = crate::projects::store::Batch {
+            batch: "b-bound".into(),
+            socket: format!("{socket}-unrelated"),
+            boot_id: None,
+            owner_pid: 0,
+            instance: None,
+            source: crate::projects::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![],
+        };
+        crate::projects::restore_hold::with_store_for_test(|s| s.open_batch(&batch, &[hold], "x")).unwrap();
+        let screen = |t: &str| crate::tmux::capture_pane_plain(t, Some(0)).unwrap_or_default();
+        let wait_for = |t: &str, text: &str| (0..100).any(|_| screen(t).contains(text) || { std::thread::sleep(std::time::Duration::from_millis(30)); false });
+        let command = |text: &str| handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "lead", "text": text })), None).error.map(|e| e.message).unwrap_or_default();
+        let mention = |body: &str| handle_hub_request(&req("hub_post", serde_json::json!({ "session": session, "from": "human", "body": body })), None);
+        // In place: both branches are typed under the guard, text intact.
+        assert_eq!(command("/goal one #422 $HOME; \"q\""), "");
+        assert!(wait_for(&pane, "/goal one #422 $HOME; \"q\""), "{}", screen(&pane));
+        mention("@lead in place");
+        assert!(wait_for(&pane, "in place"), "{}", screen(&pane));
+        // A binding that cannot be read writes nothing.
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(true));
+        let unread = crate::projects::delivery::send_into(&session, "lead", &pane, "four");
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(unread.is_err());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!screen(&pane).contains("four"), "{}", screen(&pane));
+        // Nor do holds the store cannot read.
+        let launch0 = crate::projects::restore_hold::with_store_for_test(|s| s.project_holds(&socket, &id2)).unwrap().pop().unwrap().launch;
+        crate::projects::restore_hold::with_store_for_test(|s| s.corrupt_hold_for_test(&launch0)).unwrap();
+        let unread = crate::projects::delivery::send_into(&session, "lead", &pane, "five");
+        crate::projects::restore_hold::with_store_for_test(|s| s.exec_test_sql(&format!("UPDATE restore_holds SET stage = 'released' WHERE launch = '{launch0}'"))).unwrap();
+        assert!(unread.is_err());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!screen(&pane).contains("five"), "{}", screen(&pane));
+        // Swapped right before the write (after every check passed): the
+        // name-resolved target now leads to a same-name window, and the
+        // write still goes to the bound %id, never to the impostor.
+        crate::tmux::run_tmux(&["new-session", "-d", "-s", &elsewhere, "cat"]).unwrap();
+        let (w2, s2, e2) = (wid.clone(), session.clone(), elsewhere.clone());
+        let raced = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let r2 = raced.clone();
+        crate::tmux::BEFORE_GUARDED_WRITE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                crate::tmux::run_tmux(&["move-window", "-s", &w2, "-t", &format!("={e2}:")]).unwrap();
+                *r2.lock().unwrap() = crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={s2}:"), "-n", "lead", "-P", "-F", "#{pane_id}", "cat"]).unwrap().trim().to_string();
+            }))
+        });
+        let index_target = format!("{session}:{}", crate::tmux::run_tmux(&["display-message", "-p", "-t", &pane, "#{window_index}.#{pane_index}"]).unwrap().trim());
+        assert_eq!(crate::projects::delivery::send_into(&session, "lead", &index_target, "/goal raced"), Ok(()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen(&raced.lock().unwrap()).contains("raced"), "the impostor at the resolved index got nothing");
+        assert!(wait_for(&pane, "/goal raced"), "the bound pane did: {}", screen(&pane));
+        crate::tmux::run_tmux(&["kill-pane", "-t", &raced.lock().unwrap()]).unwrap();
+        crate::tmux::run_tmux(&["move-window", "-s", &wid, "-t", &format!("={session}:")]).unwrap();
+        // Swapped: moved away, a same-name window in its place.
+        crate::tmux::run_tmux(&["move-window", "-s", &wid, "-t", &format!("={elsewhere}:")]).unwrap();
+        let impostor = crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "lead", "-P", "-F", "#{pane_id}", "cat"]).unwrap().trim().to_string();
+        assert!(command("/goal two").contains("lead: restoring, not ready"), "the command is refused");
+        mention("@lead while swapped");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "lead").len(), 1, "the mention is held");
+        assert!(!screen(&impostor).contains("two") && !screen(&impostor).contains("while swapped"), "nothing reached the impostor");
+        // Back in place. Between the outer checks and the send door's read, a
+        // restart of the in-progress restore replaces the generation with an
+        // ARMED one: the door's one read refuses, the held line is kept and
+        // the pane gets nothing.
+        crate::tmux::run_tmux(&["kill-pane", "-t", &impostor]).unwrap();
+        crate::tmux::run_tmux(&["move-window", "-s", &wid, "-t", &format!("={session}:")]).unwrap();
+        let current = || crate::projects::restore_hold::with_store_for_test(|s| s.project_holds(&socket, &id2)).unwrap().pop().unwrap();
+        let released = current();
+        let l2 = uuid::Uuid::new_v4().to_string();
+        let (rel, l2c) = (released.clone(), l2.clone());
+        *crate::projects::restore_hold::BEFORE_SEND_GATE.lock().unwrap() = Some(Box::new(move || {
+            assert!(crate::projects::restore_hold::with_store_for_test(|s| s.install_hold(&rel, &l2c, crate::projects::store::HoldStage::Armed, rel.pane.as_ref().unwrap(), 1)).unwrap());
+        }));
+        crate::projects::delivery::flush(&session, "lead");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(current().stage, crate::projects::store::HoldStage::Armed, "(the replace happened)");
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "lead").len(), 1, "the held line is kept");
+        assert!(!screen(&pane).contains("while swapped"), "the armed generation's pane got nothing: {}", screen(&pane));
+        // (back to a released generation for the next case)
+        let armed = current();
+        assert!(crate::projects::restore_hold::with_store_for_test(|s| s.install_hold(&armed, &uuid::Uuid::new_v4().to_string(), crate::projects::store::HoldStage::Released, armed.pane.as_ref().unwrap(), 1)).unwrap());
+        // Respawned between the door's resolve and its write.
+        let p2 = pane.clone();
+        crate::tmux::BEFORE_GUARDED_WRITE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &p2, "cat"]).unwrap();
+            }))
+        });
+        let err = command("/goal three");
+        assert!(err.contains(crate::tmux::BOUND_REFUSED), "{err:?}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!screen(&pane).contains("three"), "the new process got neither the text nor the Enter: {}", screen(&pane));
+        // P2: a guarded write's payload is never read as options — a literal
+        // `-t`, alone or after a C0 key, is typed as it is.
+        let f: Vec<String> = crate::tmux::run_tmux(&["display-message", "-p", "-t", &pane, "#{pane_pid}\t#{pid}\t#{start_time}"]).unwrap().trim().split('\t').map(str::to_string).collect();
+        let guard = crate::tmux::WriteGuard { pid: f[1].parse().unwrap(), start_time: f[2].parse().unwrap(), pane_id: pane.clone(), pane_pid: f[0].parse().unwrap() };
+        crate::tmux::with_write_guard(Some(guard), || {
+            crate::tmux::send_keys(&pane, "P2:", true).unwrap();
+            crate::tmux::send_keys(&pane, "-t", true).unwrap();
+            crate::tmux::send_keys(&pane, "\x0b-t|", true).unwrap();
+        });
+        assert!(wait_for(&pane, "P2:-t^K-t|"), "typed as it is: {}", screen(&pane));
+        assert!(!screen(&pane).contains("-t%"), "{}", screen(&pane));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #422 round 3 (orchestrator 14:59, the reviewer's version): the
+    /// live mode toggle goes through the one send door — refused on an
+    /// in-progress hold, guarded on a released one, the named key only and
+    /// never an Enter — and the one interrupt, Escape, is EXEMPT from
+    /// readiness but written through the same identity guard: it reaches a
+    /// bound ARMED or RELEASED pane, and never a respawned or unreadable
+    /// one. Its queue-cancel and derived state are as before; the room line
+    /// is posted only once the key went in.
+    #[test]
+    fn the_mode_toggle_and_the_interrupt_go_through_the_send_door() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-door-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-door-ws-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/lead");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent lead", "team": "", "input_mode": "queue" }).to_string()).unwrap();
+        // Prints every byte it reads as `key:<od -c>` (an Enter is `key:\r`),
+        // and kiro's toast when it reads its toggle, Ctrl+S. It clears the
+        // screen when it starts, so a respawned pane shows only its own keys.
+        let keys = ws.join("keys.sh");
+        std::fs::write(&keys, "stty raw -echo\nprintf '\\033[H\\033[2J'\nwhile :; do k=$(dd bs=1 count=1 2>/dev/null | od -An -c | tr -d ' '); printf 'key:%s\\r\\n' \"$k\"; [ \"$k\" = 023 ] && printf '\\342\\227\\217 Switched to steer mode\\r\\n'; done\n").unwrap();
+        // argv[0] says kiro-cli: the pane reads as a kiro pane, as `exec -a`
+        // makes it in the #260 detection fixture.
+        let run = format!("bash -c 'exec -a kiro-cli bash {}'", keys.display());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), &run])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("door-test")).expect("adopt project");
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let socket = crate::projects::restore::socket_key();
+        let identity = || -> crate::projects::store::HoldPane {
+            let f: Vec<String> = crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("={session}:lead"), "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"])
+                .unwrap().trim().split('\t').map(str::to_string).collect();
+            crate::projects::store::HoldPane {
+                instance: crate::projects::store::TmuxInstance { socket: socket.clone(), pid: f[4].parse().unwrap(), start_time: f[5].parse().unwrap() },
+                session_id: f[3].clone(),
+                window_id: f[2].clone(),
+                pane_id: f[0].clone(),
+                pane_pid: f[1].parse().unwrap(),
+            }
+        };
+        let pane = identity().pane_id;
+        let hold = crate::projects::store::Hold {
+            socket: socket.clone(),
+            project_id: id.clone(),
+            batch: "b-door".into(),
+            ord: 0,
+            slot: "lead".into(),
+            launch: uuid::Uuid::new_v4().to_string(),
+            stage: crate::projects::store::HoldStage::Armed,
+            pane: Some(identity()),
+            since: 1,
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
+        };
+        let batch = crate::projects::store::Batch {
+            batch: "b-door".into(),
+            socket: format!("{socket}-unrelated"),
+            boot_id: None,
+            owner_pid: 0,
+            instance: None,
+            source: crate::projects::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
+            closed: None,
+            projects: vec![],
+        };
+        crate::projects::restore_hold::with_store_for_test(|s| s.open_batch(&batch, &[hold], "x")).unwrap();
+        let current = || crate::projects::restore_hold::with_store_for_test(|s| s.project_holds(&socket, &id)).unwrap().pop().unwrap();
+        let replace = |stage| {
+            let old = current();
+            assert!(crate::projects::restore_hold::with_store_for_test(|s| s.install_hold(&old, &uuid::Uuid::new_v4().to_string(), stage, &identity(), 1)).unwrap());
+        };
+        let screen = || crate::tmux::capture_pane_plain(&pane, Some(0)).unwrap_or_default();
+        let keys_seen = || screen().lines().filter(|l| l.starts_with("key:")).map(str::to_string).collect::<Vec<_>>();
+        let wait_keys = |n: usize| (0..100).any(|_| keys_seen().len() >= n || { std::thread::sleep(std::time::Duration::from_millis(30)); false });
+        let respawn_before_write = || {
+            let (p2, r2) = (pane.clone(), run.clone());
+            crate::tmux::BEFORE_GUARDED_WRITE.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &p2, &r2]).unwrap();
+                }))
+            });
+        };
+        let mode = || handle_hub_request(&req("hub_agent_input_mode", serde_json::json!({ "session": session, "agent": "lead", "mode": "steer" })), None).error.map(|e| e.message);
+        let interrupt = || handle_hub_request(&req("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "lead" })), None).error.map(|e| e.message);
+        let interrupted_rows = || {
+            let page = rooms::history_page(&project_room(&session), None, 50);
+            page["messages"].as_array().unwrap().iter().filter(|m| m["body"].as_str().unwrap_or("").contains("[tmm] interrupted lead")).count()
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // ARMED. The toggle is refused, nothing typed.
+        let err = mode().unwrap_or_default();
+        assert!(err.contains("restoring, not ready"), "{err:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(keys_seen().is_empty(), "{:?}", screen());
+        // The interrupt is not: Escape alone, into the bound pane, and said.
+        telemetry::record_prompt(&session, "lead", "the long thing");
+        assert_eq!(interrupt(), None);
+        assert!(wait_keys(1), "{:?}", screen());
+        assert_eq!(keys_seen(), vec!["key:033".to_string()], "Escape alone, no Enter");
+        assert_eq!(telemetry::derive(&session, "lead", 0).state, "idle", "the interrupt still ends the turn");
+        assert_eq!(interrupted_rows(), 1);
+        // Respawned between the door's resolve and the Escape: refused, unsaid.
+        respawn_before_write();
+        let err = interrupt().unwrap_or_default();
+        assert!(err.contains(crate::tmux::BOUND_REFUSED), "{err:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(keys_seen().is_empty(), "the new process got nothing: {:?}", screen());
+        assert_eq!(interrupted_rows(), 1, "no room line for a key that never went in");
+        // That identity no longer reads (same %id, another process): refused.
+        let err = interrupt().unwrap_or_default();
+        assert!(err.contains("cannot be checked"), "{err:?}");
+        // Nor when the holds cannot be read at all.
+        replace(crate::projects::store::HoldStage::Armed);
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(true));
+        let err = interrupt().unwrap_or_default();
+        crate::projects::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(!err.is_empty(), "an unreadable identity is refused");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(keys_seen().is_empty(), "{:?}", screen());
+        assert_eq!(interrupted_rows(), 1);
+
+        // RELEASED. Escape reaches its bound pane.
+        replace(crate::projects::store::HoldStage::Released);
+        assert_eq!(interrupt(), None);
+        assert!(wait_keys(1), "{:?}", screen());
+        assert_eq!(keys_seen(), vec!["key:033".to_string()]);
+        assert_eq!(interrupted_rows(), 2);
+        // A target that does not lead to the bound pane (the screen a caller
+        // read is another object): refused, nothing typed into either.
+        let spare = crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "spare", "-P", "-F", "#{pane_id}", "cat"]).unwrap().trim().to_string();
+        let err = crate::projects::delivery::send_key_into(&session, "lead", &spare, "Z", false).unwrap_err();
+        assert!(err.contains("is not the restored lead's pane"), "{err:?}");
+        let err = crate::projects::delivery::send_into(&session, "lead", &spare, "elsewhere").unwrap_err();
+        assert!(err.contains("is not the restored lead's pane"), "{err:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(keys_seen(), vec!["key:033".to_string()], "the bound pane got nothing: {:?}", screen());
+        let shown = crate::tmux::capture_pane_plain(&spare, Some(0)).unwrap_or_default();
+        assert!(!shown.contains('Z') && !shown.contains("elsewhere"), "nor did the other: {shown:?}");
+        // The toggle, respawned between resolve and write: refused, nothing typed.
+        crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &pane, &run]).unwrap();
+        replace(crate::projects::store::HoldStage::Released);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        respawn_before_write();
+        let err = mode().unwrap_or_default();
+        assert!(err.contains(crate::tmux::BOUND_REFUSED), "{err:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(keys_seen().is_empty(), "the new process got no toggle: {:?}", screen());
+
+        // No hold: an ordinary target gets exactly one toggle, no Enter.
+        let gone = current().launch;
+        assert!(crate::projects::restore_hold::with_store_for_test(|s| s.retire_hold_if(&gone)).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(mode(), None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(keys_seen(), vec!["key:023".to_string()], "one toggle, never an Enter: {:?}", screen());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #264 × #257 (orchestrator 11:29): a CLI reads a command only as a

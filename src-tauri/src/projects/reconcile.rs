@@ -205,10 +205,14 @@ pub(crate) fn slot_command_exact(project_path: &str, slot: &Slot, managed: bool)
 /// What is typed into an agent's pane for `cmd`: its tmm identity prefix,
 /// staged as a script in its home when it has one (the one shape `up` and
 /// the restore executor share).
-pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str) -> String {
+/// `launch` is a restore's launch uuid (board #422 round 3): it rides as
+/// `TMM_LAUNCH` so the CLI's hooks (the notify helper) and dsh's readiness
+/// files name this incarnation. Only a uuid is ever passed.
+pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str, launch: Option<&str>) -> String {
     let prefixed = if slot.kind == SlotKind::Agent {
+        let launch = launch.filter(|l| l.len() == 36 && l.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).map(|l| format!("TMM_LAUNCH={l} ")).unwrap_or_default();
         format!(
-            "TMM_PROJECT={} TMM_AGENT={} {}",
+            "{launch}TMM_PROJECT={} TMM_AGENT={} {}",
             crate::shell::quote(&project.session),
             crate::shell::quote(&slot.window_name),
             cmd
@@ -236,7 +240,18 @@ fn run_slot_command(project: &Project, slot: &Slot, target: &str) -> Result<(), 
         // the same way when codex's ~6 KB line hit the pane half typed
         // (owner, 2026-09-08: "codex 重启好像有点问题"). Same cure:
         // `launch_text` stages the line as a script in the agent's home.
-        Some(cmd) => tmux::send_command(target, &launch_text(project, slot, &cmd)),
+        // A slot a restore still holds keeps its barrier through a restart:
+        // a new generation for this pane, named on the line (board #422).
+        Some(cmd) => {
+            let launch = match slot.kind {
+                SlotKind::Agent => match super::restore_hold::before_launch(&project.session, &slot.window_name, target)? {
+                    super::restore_hold::Launch::NoHold => None,
+                    super::restore_hold::Launch::Replaced(l) => Some(l),
+                },
+                _ => None,
+            };
+            tmux::send_command(target, &launch_text(project, slot, &cmd, launch.as_deref()))
+        }
         None => Ok(()),
     }
 }

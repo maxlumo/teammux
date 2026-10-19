@@ -857,6 +857,15 @@ impl Store {
     /// activity row from the ids that were won and the row's stamp (its `ts`,
     /// `stamp_activity`). Returns them, the row id and that ts.
     pub fn settle_prompt(&mut self, candidates: &[i64], row: impl FnOnce(&[i64], u64) -> PromptRow) -> Result<(Vec<i64>, i64, u64), String> {
+        self.settle_prompt_in(candidates, None, row)
+    }
+
+    /// `settle_prompt` for a restored window's envelope of `generation`
+    /// (board #422 round 3, H2 review P1-C): the receipts, the prompt row
+    /// AND the hold's acceptance are one transaction, committed only while
+    /// the hold still carries that launch (`accept_in_generation`). Replaced
+    /// meanwhile: nothing is written, `Err(GENERATION_REPLACED)`.
+    pub fn settle_prompt_in(&mut self, candidates: &[i64], generation: Option<&str>, row: impl FnOnce(&[i64], u64) -> PromptRow) -> Result<(Vec<i64>, i64, u64), String> {
         let ts = self.stamp_activity();
         let tx = self.conn.transaction().map_err(|e| format!("prompt settlement transaction: {e}"))?;
         let mut won = Vec::new();
@@ -876,8 +885,45 @@ impl Store {
         )
         .map_err(|e| format!("insert activity: {e}"))?;
         let id = tx.last_insert_rowid();
+        if let Some(launch) = generation {
+            accept_in_generation(&tx, launch, id, true)?;
+        }
         tx.commit().map_err(|e| format!("prompt settlement commit: {e}"))?;
         Ok((won, id, ts))
+    }
+
+    /// `publish_activity` for a restored window's envelope of `generation`:
+    /// the row and the hold's acceptance in ONE transaction, committed only
+    /// while the hold still carries that launch. Replaced meanwhile: no row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_activity_in(
+        &mut self,
+        generation: &str,
+        session: &str,
+        window: &str,
+        kind: &str,
+        text: &str,
+        tool: &str,
+        via: &str,
+        state: &str,
+        deliveries: &str,
+        requesters: Option<&str>,
+    ) -> (u64, Result<i64, String>) {
+        let ts = self.stamp_activity();
+        let written = (|| {
+            let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| format!("activity transaction: {e}"))?;
+            tx.execute(
+                "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
+                 VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![session, window, ts as i64, kind, text, tool, via, state, deliveries, requesters],
+            )
+            .map_err(|e| format!("insert activity: {e}"))?;
+            let id = tx.last_insert_rowid();
+            accept_in_generation(&tx, generation, id, kind == "prompt")?;
+            tx.commit().map_err(|e| format!("commit activity: {e}"))?;
+            Ok(id)
+        })();
+        (ts, written)
     }
 
     /// Forget every outstanding line of a window (it no longer exists, so it can
@@ -1270,4 +1316,27 @@ mod tests {
         let expected: Vec<String> = (0..TOTAL).map(|n| format!("e{n}")).collect();
         assert_eq!(seen, expected, "and the walk reassembles the log in order");
     }
+}
+
+/// What a fenced write answers when the hold no longer carries its launch.
+pub const GENERATION_REPLACED: &str = "its restore generation was replaced";
+
+/// In the caller's transaction: the hold of `launch` takes `row` as its first
+/// accepted fact (if none), and a PROMPT while it is armed marks its
+/// evidence accepted and its release pending (`merging`: the capture tick
+/// completes a release this call's caller could not). No hold with that
+/// launch: `Err(GENERATION_REPLACED)`, and the caller rolls back.
+fn accept_in_generation(tx: &rusqlite::Transaction, launch: &str, row: i64, prompt: bool) -> Result<(), String> {
+    let n = tx
+        .execute(
+            "UPDATE restore_holds SET accepted_seq = COALESCE(accepted_seq, ?2),
+               merging = CASE WHEN ?3 AND stage = 'armed' THEN 1 ELSE merging END
+             WHERE launch = ?1",
+            rusqlite::params![launch, row, prompt],
+        )
+        .map_err(|e| format!("accept in generation: {e}"))?;
+    if n == 0 {
+        return Err(GENERATION_REPLACED.into());
+    }
+    Ok(())
 }

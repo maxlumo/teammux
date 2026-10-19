@@ -445,8 +445,11 @@ pub async fn capture_loop() {
                 if let Err(e) = capture_once() {
                     eprintln!("projects: capture failed: {e}");
                 }
-                // Restore holds whose pane is confirmed gone (board #422).
+                // Restore holds: released on their measured evidence, and
+                // retired when their pane is confirmed gone (board #422).
+                super::restore_hold::release_ready();
                 super::restore_hold::prune();
+                super::restore_hold::tick_not_ready();
                 // Piggybacks on the capture cadence: a transient model error is
                 // noticed within one tick, and the backoff ladder is measured in
                 // tens of seconds, so 20s granularity costs nothing.

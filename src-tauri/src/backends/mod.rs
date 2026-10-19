@@ -50,6 +50,17 @@ pub enum AppCommand {
     NewConversation,
 }
 
+/// The kinds of release evidence a backend may have (`Backend::restore_evidence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreEvidence {
+    /// The managed shell's readiness file naming this launch.
+    Readiness,
+    /// The CLI's `SessionStart` envelope of this launch.
+    SessionStart,
+    /// The CLI's `SessionStart` envelope of this launch with `source: resume`.
+    SessionStartResume,
+}
+
 /// The closed set of agent CLIs this app can spawn (board #101/#127). An enum
 /// rather than a trait object on purpose: the set is closed, and every
 /// per-concern method below is an EXHAUSTIVE match with one-line arms into
@@ -368,6 +379,20 @@ impl Backend {
     /// typed at rest that has not echoed yet already counts as the open
     /// turn (the run is cold-starting). Every other backend takes typed text
     /// at any time.
+    /// What may release a window of this backend that a reboot restore
+    /// holds (board #422 round 3): ONLY what was measured to mean "a line
+    /// typed now is read as a prompt", stated in the backend's own file with
+    /// its version. `None`: held until a person's own prompt of that launch.
+    pub fn restore_evidence(self) -> Option<RestoreEvidence> {
+        match self {
+            Backend::Dsh => dsh::RESTORE_EVIDENCE,
+            Backend::Claude => claude::RESTORE_EVIDENCE,
+            Backend::Kimi => kimi::RESTORE_EVIDENCE,
+            // No startup signal measured (kiro: not yet; codex, grok, omp: none).
+            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp => None,
+        }
+    }
+
     pub fn loses_busy_input(self) -> bool {
         match self {
             Backend::Dsh => dsh::LOSES_BUSY_INPUT,

@@ -9,6 +9,11 @@
 /// Claude has no mode in which a queued line becomes its own turn.
 pub(crate) const SWITCHES_INPUT_MODE: bool = false;
 
+/// What releases a restored claude window (board #422 round 3): its
+/// `SessionStart`, of any source — measured on Claude Code 2.1.303, a line
+/// typed the moment it fires was submitted (agents-overview.md).
+pub(crate) const RESTORE_EVIDENCE: Option<super::RestoreEvidence> = Some(super::RestoreEvidence::SessionStart);
+
 /// Claude's own warning text names its effort levels: "Valid values: low,
 /// medium, high, xhigh, max" (claude 2.1.239, measured 2026-08-22).
 pub(crate) fn effort_values() -> &'static [&'static str] {
@@ -159,7 +164,10 @@ pub(crate) fn claude_hooks(notify: &str) -> Value {
         "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
         "Notification": [ { "matcher": "permission_prompt|agent_needs_input|agent_completed", "hooks": [ { "type": "command", "command": notify } ] } ],
         "Stop": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
-        "StopFailure": [ { "hooks": [ { "type": "command", "command": notify } ] } ]
+        "StopFailure": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
+        // A restored window's release evidence (board #422 round 3, measured
+        // on 2.1.303: a line typed right after it is read). Never a turn fact.
+        "SessionStart": [ { "hooks": [ { "type": "command", "command": notify } ] } ]
     })
 }
 

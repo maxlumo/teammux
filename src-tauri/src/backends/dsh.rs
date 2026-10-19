@@ -55,6 +55,10 @@
 pub(crate) const SWITCHES_INPUT_MODE: bool = true;
 pub(crate) const LOSES_BUSY_INPUT: bool = true;
 
+/// What releases a restored dsh window (board #422 round 3): the managed
+/// shell's own readiness file naming that launch (`input_ready_for_launch`).
+pub(crate) const RESTORE_EVIDENCE: Option<super::RestoreEvidence> = Some(super::RestoreEvidence::Readiness);
+
 /// The deepseek-official route's reasoning levels (dsh providers guide:
 /// "its models already offer off, low, high, and max"); written as the
 /// profile's `agent-default-model.reasoningEffort`.
@@ -268,6 +272,9 @@ const MODE = (() => {{ try {{ return readFileSync(join(STATE, 'input_mode'), 'ut
 // The run's identity the shell minted at its accept-line (`tmm/run`); the
 // readiness claim names it, so a claim another run left is never believed.
 const RUN = (() => {{ try {{ return readFileSync(join(STATE, 'run'), 'utf8').trim() }} catch {{ return '' }} }})()
+// The restore launch the shell was started by (board #422 round 3), named in
+// the claim; empty for any other start.
+const LAUNCH = /^[0-9a-f-]{{36}}$/.test(process.env.TMM_LAUNCH || '') ? process.env.TMM_LAUNCH : ''
 const LINE_MAX = 256 * 1024
 
 // Control characters made inert for an echo: a pasted escape sequence is
@@ -443,7 +450,7 @@ function steerReader(ctx) {{
   const claim = () => {{
     const ok = open && raw && createUser !== null && agent !== null && reader.admits()
     try {{
-      if (ok) put('steer-ready', `${{process.pid}} ${{RUN}} steer`)
+      if (ok) put('steer-ready', `${{process.pid}} ${{RUN}} steer ${{LAUNCH}}`.trimEnd())
       else unlinkSync(join(STATE, 'steer-ready'))
     }} catch {{}}
   }}
@@ -917,6 +924,11 @@ case ${{TMM_DSH_SESSION-}} in
   *) [[ $TMM_DSH_SESSION =~ '^session-[A-Za-z0-9-]+$' ]] && print -r -- $TMM_DSH_SESSION >| $_tmm_state/session ;;
 esac
 unset TMM_DSH_SESSION
+# The restore launch this shell was started by (board #422 round 3): its
+# readiness files name it, so a restore believes only THIS launch's. Kept
+# exported: the runs' hooks carry it too.
+typeset -g _tmm_launch=${{TMM_LAUNCH-}}
+[[ $_tmm_launch =~ '^[0-9a-f-]{{36}}$' ]] || _tmm_launch=
 rm -f -- $_tmm_state/ready $_tmm_state/steer-ready
 # A run the previous shell never finished — its window was killed or the
 # agent restarted mid-turn — still owes its turn an end, or the lines held
@@ -1112,7 +1124,7 @@ _tmm_ready() {{
   # prompt of a line typed now. It names this shell, so a file this shell
   # outlives is never believed.
   if [[ -z $BUFFER ]]; then
-    print -r -- "$$ ${{TMUX_PANE-}}" >| $_tmm_state/ready
+    print -r -- "$$ ${{TMUX_PANE-}} $_tmm_launch" >| $_tmm_state/ready
   else
     _tmm_unready=1
   fi
@@ -1129,7 +1141,7 @@ _tmm_redraw() {{
   _tmm_replay=0
   if (( _tmm_unready )); then
     _tmm_unready=0
-    print -r -- "$$ ${{TMUX_PANE-}}" >| $_tmm_state/ready
+    print -r -- "$$ ${{TMUX_PANE-}} $_tmm_launch" >| $_tmm_state/ready
   fi
 }}
 zle -N zle-line-pre-redraw _tmm_redraw
@@ -1330,10 +1342,31 @@ pub(crate) fn input_ready(home: &Path, pane_pid: Option<u32>) -> bool {
     shell_ready(home, pane_pid) || steer_ready(home, pane_pid)
 }
 
+/// `input_ready` for a RESTORE launch (board #422 round 3): the same checks,
+/// and the file names this launch — `tmm/ready` as `<pid> <pane> <launch>`,
+/// `tmm/steer-ready` as `<pid> <run> steer <launch>` — so a readiness file of
+/// any other start (a pre-reboot one whose pid was reused included) is not
+/// this launch's evidence.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn input_ready_for_launch(home: &Path, pane_pid: Option<u32>, launch: &str) -> bool {
+    let state = home.join("dsh").join("tmm");
+    // Each file is read ONCE: its launch field and its readiness are judged
+    // from the same bytes.
+    let read = |file: &str| std::fs::read_to_string(state.join(file)).ok();
+    let names = |text: &str, at: usize| text.split_whitespace().nth(at) == Some(launch);
+    let shell = read("ready").is_some_and(|t| names(&t, 2) && shell_ready_in(&t, pane_pid));
+    shell || read("steer-ready").is_some_and(|t| names(&t, 3) && read("run").is_some_and(|run| steer_ready_in(&t, &run, pane_pid)))
+}
+
 /// The managed shell is at its prompt (`tmm/ready`, `<pid> <pane>`).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn shell_ready(home: &Path, pane_pid: Option<u32>) -> bool {
-    let Ok(text) = std::fs::read_to_string(home.join("dsh").join("tmm").join("ready")) else { return false };
+    std::fs::read_to_string(home.join("dsh").join("tmm").join("ready")).is_ok_and(|t| shell_ready_in(&t, pane_pid))
+}
+
+/// `shell_ready`, judged from the file's bytes `text`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn shell_ready_in(text: &str, pane_pid: Option<u32>) -> bool {
     let Some(pid) = text.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()).filter(|p| *p > 1) else { return false };
     if pane_pid != Some(pid as u32) {
         return false;
@@ -1355,8 +1388,19 @@ fn steer_ready(home: &Path, pane_pid: Option<u32>) -> bool {
     let state = home.join("dsh").join("tmm");
     let Ok(text) = std::fs::read_to_string(state.join("steer-ready")) else { return false };
     let Ok(run) = std::fs::read_to_string(state.join("run")) else { return false };
+    steer_ready_in(&text, &run, pane_pid)
+}
+
+/// `steer_ready`, judged from the claim's bytes `text` and the run file's `run`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn steer_ready_in(text: &str, run: &str, pane_pid: Option<u32>) -> bool {
     let words: Vec<&str> = text.split_whitespace().collect();
-    let [pid, claimed, "steer"] = words[..] else { return false };
+    let (pid, claimed) = match words[..] {
+        [pid, claimed, "steer"] => (pid, claimed),
+        // A restore launch's claim names it (board #422 round 3).
+        [pid, claimed, "steer", launch] if launch.len() == 36 && launch.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') => (pid, claimed),
+        _ => return false,
+    };
     let Some(pid) = pid.parse::<i32>().ok().filter(|p| *p > 1) else { return false };
     if claimed.is_empty() || claimed != run.trim() || pane_pid.is_none() || parent_of(pid) != pane_pid {
         return false;

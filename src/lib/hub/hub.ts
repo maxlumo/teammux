@@ -75,9 +75,11 @@ export function stateNeedsYou(state: string, detail = ''): boolean {
  * (board #362 c), as the server derives them: its CLI's newest paint was an
  * expired credential (`auth_expired`) or a conversation that fails every
  * turn (`conversation_blocked`), or auto-continue stopped for its errors
- * (`recovery_exhausted`). Never auto-continued; each has its remedy in the
- * hover (`hubDetail_<detail>`). */
-export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted'];
+ * (`recovery_exhausted`), or a reboot restore started it and has not seen it
+ * ready (`restore_not_ready`, board #422: a prompt typed into it releases
+ * it). Never auto-continued; each has its remedy in the hover
+ * (`hubDetail_<detail>`). */
+export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready'];
 
 export function needsPerson(detail: string | undefined | null): boolean {
   return !!detail && PERSON_DETAILS.includes(detail);

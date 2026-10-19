@@ -269,8 +269,29 @@ of bad news:
   writes `launch`, the window incarnation's `TMM_LAUNCH`, top level beside `backend`
   and `pane_id` (never inside `payload`), only when it is exactly a 36-character
   `[0-9a-f-]` uuid and left out otherwise, so nothing needs escaping; both fields are
-  `Option` with `serde(default)`, an old envelope parses, and #422 H2 reads `launch`
-  (nothing here does yet).
+  `Option` with `serde(default)`, an old envelope parses. Right after the pane is
+  checked, `restore_hold::attribute(pane, launch)` decides whose envelope it is (board
+  #422 round 3, projects.md): an envelope that CARRIES a launch is attributed only by
+  the live hold row of that launch on this pane — the logical slot's while it blocks
+  (`Slot`: `resolved` names the slot), routed as usual once released (`Own`) — and is
+  DROPPED when there is none, never taken as legacy normal (a restore-launched CLI's
+  envelope checked before an ordinary restart retired its row writes nothing for the
+  new CLI). An envelope with no launch from a pane with a live hold is dropped; from a
+  pane with none it is normal. A hold or pane that cannot be read is `Unknown`, and
+  the envelope is KEPT and tried again (H2 review P1-C). Attribution only routes:
+  `Slot` and `Own` envelopes are consumed under `telemetry::with_generation`, which
+  writes every turn fact of that window (prompt, end, ask, tool) ONLY while the hold
+  still carries the launch, in the same transaction as the row, and records the row as
+  the hold's first accepted fact there too (`Store::publish_activity_in`,
+  `settle_prompt_in`; a prompt also marks the release pending). A fact its generation
+  refused has no effect at all: no row, no live state, no feed line, no reply post, no
+  command row stepped, no recovery budget refilled; it is dropped. Any other failed
+  fenced write keeps the envelope. An attributed prompt then calls
+  `restore_hold::on_prompt`; a release it cannot complete is completed by the capture
+  tick from the pending mark its row committed. A `SessionStart` (subscribed by claude
+  and kimi for this) is never a turn fact: attributed, it goes to
+  `restore_hold::on_session_start`; a release that cannot be verified or written now
+  keeps it for a retry; otherwise it is ignored.
   **The consumer asks ONE question per envelope** (`tmux::resolve_pane_checked`): one
   tmux response returns the answering server's incarnation (`socket,pid,start_time`)
   AND the pane's native id, session, window and index, and the envelope's expected

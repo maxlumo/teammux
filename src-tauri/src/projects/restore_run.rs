@@ -635,6 +635,10 @@ fn planned_holds(b: &Batch) -> Vec<super::store::Hold> {
                     stage: super::store::HoldStage::Planned,
                     pane: None,
                     since,
+                    accepted_seq: None,
+                    not_ready: false,
+                    reported: false,
+                    merging: false,
                 })
             })
         })
@@ -646,7 +650,7 @@ fn planned_holds(b: &Batch) -> Vec<super::store::Hold> {
 pub fn continue_batch(lease: OwnerLock, mut b: Batch) -> Result<RunOutcome, String> {
     let _lease = lease;
     b.owner_pid = std::process::id();
-    save(&b)?;
+    save(&mut b)?;
     match execute(&mut b) {
         Ok(()) => {}
         Err(e) if e == HALTED => return Ok(RunOutcome::Ran { batch: b.batch, closed: None }),
@@ -690,6 +694,7 @@ fn start_batch(inputs: &RunInputs) -> Result<Result<Batch, String>, String> {
             session_id: None,
             holder_id: None,
             op: None,
+            finished: None,
             windows: p
                 .windows
                 .into_iter()
@@ -736,7 +741,7 @@ fn declared() -> Result<Vec<restore::Declared>, String> {
     })
 }
 
-fn save(b: &Batch) -> Result<(), String> {
+fn save(b: &mut Batch) -> Result<(), String> {
     with_store(|s| s.save_batch(b))
 }
 
@@ -772,8 +777,7 @@ fn execute(b: &mut Batch) -> Result<(), String> {
     }
     let unfinished = b.projects.iter().any(|p| !matches!(p.state, ProjectState::Done | ProjectState::Skipped | ProjectState::Failed));
     if !unfinished {
-        let failed = b.projects.iter().any(|p| p.state == ProjectState::Failed);
-        close(b, if failed { "done with failures" } else { "done" })?;
+        close(b, super::store::finished_word(b))?;
     }
     Ok(())
 }
@@ -1295,7 +1299,7 @@ fn launch(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         Err(why) => return kill_owned(b, pi, wi, why),
     };
     if let (Some(line), Ok(row)) = (line, &row) {
-        let text = super::reconcile::launch_text(row, &slot, &line);
+        let text = super::reconcile::launch_text(row, &slot, &line, w.launch.as_deref());
         // The launch is typed ONLY into a shell whose prompt was seen — the
         // observable edge, never a timeout (validator load finding,
         // orchestrator 00:55): a shell still starting when the host is busy
@@ -1308,6 +1312,15 @@ fn launch(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         };
         if !ready {
             return set_window(b, pi, wi, WindowState::Created, Some("shell not ready; not started".into()), None);
+        }
+        // A dsh home's readiness files are reset BEFORE the hold is armed
+        // (board #422 round 3, P1-C): readiness is read only in `armed`, so a
+        // file of any earlier start cannot be taken for this launch's. A
+        // reset that fails types nothing.
+        if w.launch.is_some() && w.backend.as_deref() == Some("dsh") {
+            if let Err(e) = reset_dsh_readiness(&row.path, &w.name) {
+                return set_window(b, pi, wi, WindowState::Created, Some(format!("readiness could not be reset: {e}")), None);
+            }
         }
         // Write-ahead: from here the window is never killed, renamed or
         // retyped. An agent's hold is armed in the same transaction, and a
@@ -1345,6 +1358,40 @@ fn launch(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         }
     }
     rename(b, pi, wi)
+}
+
+/// The ownership check every release makes, and the merge of a held window
+/// into its slot (board #422 round 3, H2 review P1-D), as ONE guarded step:
+/// in the server, the window must still be the hold's own object — the
+/// instance, the NATIVE SESSION it was bound in, the window, the pane and its
+/// process — carry either its placeholder or the slot's name, and be
+/// AUTHORIZED as this hold's: either the restore made it (the window's
+/// `@tmm_rw`, the session's `@tmm_rs` and `TMM_RESTORE_BATCH` all name this
+/// batch) or the launch door that installed this generation made it (the
+/// window's `@tmm_rl` names this launch, `before_launch`). A missing or
+/// empty tag is NOT ownership (H2 review P1-D residual). Then it is given
+/// the slot's name (a no-op when it has it). `Some(true)` Applied,
+/// `Some(false)` Refused, `None` its answer was not seen.
+pub(crate) fn merge_held(h: &super::store::Hold) -> Option<bool> {
+    let p = h.pane.as_ref()?;
+    let either = |a: String, b: String| format!("#{{||:{a},{b}}}");
+    let restored = all(vec![eq("@tmm_rw", &format!("{}:{}", h.batch, h.ord)), eq("@tmm_rs", &h.batch), eq("TMM_RESTORE_BATCH", &h.batch)]);
+    let mut parts = instance_parts(&p.instance);
+    parts.extend([
+        eq("session_id", &p.session_id),
+        eq("window_id", &p.window_id),
+        eq("pane_id", &p.pane_id),
+        eq("pane_pid", &p.pane_pid.to_string()),
+        either(eq("window_name", &placeholder(&h.batch, h.ord)), eq("window_name", &h.slot)),
+        either(restored, eq("@tmm_rl", &h.launch)),
+    ]);
+    let step = Step { op: "merge", project: h.project_id.clone(), ord: Some(h.ord) };
+    let action = format!("rename-window -t {} {}", tmux::tmux_quote(&p.window_id), tmux::tmux_quote(&h.slot));
+    match guarded(&h.socket, &step, &p.pane_id, &all(parts), &action) {
+        Ok(Outcome::Applied(_)) => Some(true),
+        Ok(Outcome::Refused) => Some(false),
+        _ => None,
+    }
 }
 
 fn rename(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
@@ -1408,6 +1455,19 @@ fn kill_owned(b: &mut Batch, pi: usize, wi: usize, why: String) -> Result<(), St
 
 /// A kill whose answer was not seen: gone is done; present is left in place
 /// and reported — never killed a second time.
+/// Remove a dsh home's readiness files; absent is reset.
+fn reset_dsh_readiness(project_path: &str, window: &str) -> Result<(), String> {
+    let home = super::agents::home_dir(project_path, window).ok_or("no agent home")?;
+    for f in ["ready", "steer-ready"] {
+        match std::fs::remove_file(home.join("dsh").join("tmm").join(f)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{f}: {e}")),
+        }
+    }
+    Ok(())
+}
+
 /// The native identity of a window this batch made, as its hold records it.
 fn pane_of(b: &Batch, pi: usize, wi: usize) -> Option<super::store::HoldPane> {
     let w = &b.projects[pi].windows[wi];
@@ -1554,18 +1614,14 @@ fn holder_rename(b: &mut Batch, pi: usize, step: &Step, hid: &str, cond: &str, a
 
 /// The project's result from its windows: Done when one was restored,
 /// otherwise Failed; `note` is what the holder step left to say.
+/// The project finished: its outcome is settled from its windows by the
+/// store's one rule (`store::settle`), which a later release applies again.
 fn finalize(b: &mut Batch, pi: usize, note: Option<String>) -> Result<(), String> {
-    let launched = b.projects[pi].windows.iter().any(|w| w.state == WindowState::Launched);
-    if launched {
-        set_project(b, pi, ProjectState::Done, note, None)
-    } else {
-        let why = match note {
-            Some(n) if n.starts_with("no window") => n,
-            Some(n) => format!("no window could be restored; {n}"),
-            None => "no window could be restored".into(),
-        };
-        set_project(b, pi, ProjectState::Failed, Some(why), None)
-    }
+    let p = &mut b.projects[pi];
+    p.finished = Some(super::store::Finished { note });
+    p.op = None;
+    super::store::settle(p);
+    save(b)
 }
 
 /// The windows of `project`'s session that belong to `b` and were NOT
@@ -2075,7 +2131,7 @@ mod tests {
         // Control: with the batch closed and the boot decided, a tick commits.
         let mut closed = fake;
         closed.closed = Some("done".into());
-        with_store(|s| s.close_batch(&closed)).unwrap();
+        with_store(|s| s.close_batch(&mut closed.clone())).unwrap();
         super::super::capture_once().unwrap();
         assert!(slots().contains(&"extra".to_string()), "{:?}", slots());
         assert_ne!(evidence(), cp);
@@ -2212,7 +2268,7 @@ mod tests {
         assert!(prune().is_empty(), "its batch is open");
         let mut c = batch;
         c.closed = Some("failed: test".into());
-        with_store(|s| s.close_batch(&c)).unwrap();
+        with_store(|s| s.close_batch(&mut c.clone())).unwrap();
         assert_eq!(prune().len(), 1);
         assert!(!held(&p.session, "dev"));
     }
@@ -2500,7 +2556,7 @@ mod tests {
         drop(lease);
         let mut closed = batch;
         closed.closed = Some("failed: test".into());
-        with_store(|s| s.close_batch(&closed)).unwrap();
+        with_store(|s| s.close_batch(&mut closed.clone())).unwrap();
         let db = super::super::db_path();
         let sock = socket.clone();
         *PRUNE_HOOK.lock().unwrap() = Some(Box::new(move |h| {
@@ -2762,6 +2818,779 @@ mod tests {
         assert!(with_store(|s| s.restore_batch(&socket)).unwrap().is_none());
     }
 
+    // ---- round 3 H2: release on measured evidence ------------------------
+
+    /// dsh: the door resets the home's readiness files before arming; a
+    /// readiness file of another start (an old one, another launch's uuid)
+    /// does not release; one naming THIS launch for this pane's process does,
+    /// and the hold stays as `released` with its generation.
+    #[test]
+    fn a_dsh_hold_is_released_only_by_readiness_naming_its_launch() {
+        use super::super::restore_hold::held;
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-dsh");
+        let socket = server.socket().to_string();
+        let slot = Slot { command: Some("dsh".into()), agent_session_id: Some("session-r3d1".into()), ..agent_slot("d1") };
+        let p = declare("r3dsh", vec![slot]);
+        let home = p.ws.join(".tmm/agents/d1");
+        let mut recipe: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
+        recipe["backend"] = "dsh".into();
+        std::fs::write(home.join("launch.json"), recipe.to_string()).unwrap();
+        let state = home.join("dsh/tmm");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("ready"), format!("{} %0", std::process::id())).unwrap();
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let w = batch_of(&socket).projects[0].windows[0].clone();
+        assert!(matches!(w.state, WindowState::Launched | WindowState::LaunchIssued | WindowState::LaunchUnknown), "{:?} {:?}", w.state, w.reason);
+        assert!(!state.join("ready").exists(), "the door reset the old readiness file");
+        let (launch, pane, pane_pid) = (w.launch.clone().unwrap(), w.pane_id.clone().unwrap(), w.pane_pid.unwrap());
+        let staged = std::fs::read_to_string(home.join("launch-d1.sh")).unwrap();
+        assert!(staged.contains(&format!("TMM_LAUNCH={launch} ")), "the start line carries this launch: {staged}");
+        assert!(held(&p.session, "d1"));
+        std::fs::write(state.join("ready"), format!("{pane_pid} {pane} {}", uuid::Uuid::new_v4())).unwrap();
+        assert!(held(&p.session, "d1"), "another launch's readiness is not this one's");
+        std::fs::write(state.join("ready"), format!("{pane_pid} {pane}")).unwrap();
+        assert!(held(&p.session, "d1"), "a file naming no launch is not either");
+        std::fs::write(state.join("ready"), format!("{pane_pid} {pane} {launch}")).unwrap();
+        assert!(!held(&p.session, "d1"), "this launch's readiness releases");
+        assert_eq!(holds(&socket, &p)[0].stage, HoldStage::Released, "the row stays, released");
+    }
+
+    /// Replace and the STAGE ruling (H2 review P1-B residual): a restart of a
+    /// slot whose restore is still in progress installs a NEW armed
+    /// generation before anything is typed. A restart of a RELEASED slot is
+    /// an ordinary restart: its row is retired once the restart's kill ended
+    /// its pane, no hold is installed, the line names no launch, and a late
+    /// envelope of the released launch is dropped. The verb consumes only the
+    /// generation it read before its kill: a prune between its kill and its
+    /// door installs that generation again; another launch's generation
+    /// appearing meanwhile makes its door type nothing. A hold or a pane
+    /// that cannot be read types nothing.
+    #[test]
+    fn a_restart_of_a_held_slot_installs_a_new_generation_before_typing() {
+        use super::super::restore_hold::{attribute, before_launch, held, prune, Attribution};
+        use super::super::store::{HoldPane, HoldStage};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-repl");
+        let socket = server.socket().to_string();
+        let p = declare("r3repl", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let old = holds(&socket, &p)[0].clone();
+        assert_eq!(old.stage, HoldStage::Armed);
+        // Another window keeps the session alive while dev's is gone.
+        server.run(&["new-window", "-d", "-t", &format!("={}:", p.session), "-n", "spare", "/bin/sh"]).unwrap();
+        let staged = || std::fs::read_to_string(p.ws.join(".tmm/agents/dev/launch-dev.sh")).unwrap_or_default();
+        let kill = |h: &super::super::store::Hold| server.run(&["kill-window", "-t", &h.pane.clone().unwrap().window_id]).unwrap();
+        let dev_pane = || -> HoldPane {
+            let id = tmux::find_window_by_name(&p.session, "dev").unwrap();
+            let f: Vec<String> = server.run(&["display-message", "-p", "-t", &id, "#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"]).unwrap().trim().split('\t').map(str::to_string).collect();
+            HoldPane { instance: TmuxInstance { socket: socket.clone(), pid: f[3].parse().unwrap(), start_time: f[4].parse().unwrap() }, session_id: f[2].clone(), window_id: f[1].clone(), pane_id: id, pane_pid: f[0].parse().unwrap() }
+        };
+        // 1. Still in progress: a new armed generation on the new pane.
+        kill(&old);
+        let r = super::super::up_agent(&p.id, "dev").unwrap().unwrap();
+        assert_eq!((r.status, r.error.as_deref()), ("created", None), "{r:?}");
+        let now = holds(&socket, &p);
+        assert_eq!(now.len(), 1);
+        assert_ne!(now[0].launch, old.launch, "a new generation");
+        assert_eq!(now[0].stage, HoldStage::Armed);
+        assert_eq!(Some(dev_pane().pane_id), now[0].pane.clone().map(|p| p.pane_id), "bound to the new pane");
+        assert!(staged().contains(&format!("TMM_LAUNCH={} ", now[0].launch)), "{}", staged());
+        assert!(with_store(|s| s.hold_by_launch(&old.launch)).unwrap().is_none(), "the old uuid is gone");
+        // 2. Released, then restarted: an ordinary restart.
+        let gen2 = now[0].clone();
+        with_store(|s| s.release_hold_if(&gen2.launch, &[HoldStage::Armed])).unwrap();
+        kill(&gen2);
+        // (Its row pruned between the door's read and its retire, and no
+        // successor: still an ordinary restart.)
+        *super::super::restore_hold::BEFORE_RETIRE.lock().unwrap() = Some(Box::new(|| {
+            assert_eq!(super::super::restore_hold::prune().len(), 1);
+        }));
+        super::super::up_agent(&p.id, "dev").unwrap();
+        assert!(holds(&socket, &p).is_empty(), "the released row is retired, no new hold");
+        assert!(!staged().contains("TMM_LAUNCH="), "the line names no launch: {}", staged());
+        assert!(!held(&p.session, "dev"), "today's admission");
+        let p3 = dev_pane().pane_id;
+        assert!(matches!(attribute(&gen2.pane.clone().unwrap().pane_id, Some(&gen2.launch)), Attribution::Drop(_)), "a late END of the released launch writes nothing");
+        assert!(matches!(attribute(&p3, Some(&gen2.launch)), Attribution::Drop(_)), "whatever pane it names");
+        assert_eq!(attribute(&p3, None), Attribution::Normal, "the new CLI's own envelopes are ordinary");
+        // A restore generation in progress again, for the next cases.
+        let arm = |launch: &str| {
+            let h = super::super::store::Hold { launch: launch.into(), stage: HoldStage::Armed, pane: Some(dev_pane()), since: super::super::now(), ..gen2.clone() };
+            with_store(|s| s.install_hold(&gen2, launch, HoldStage::Armed, h.pane.as_ref().unwrap(), h.since)).unwrap();
+            holds(&socket, &p)[0].clone()
+        };
+        // V9/V9b (validator): the ordinary restart's fail-closed arms — a
+        // released slot whose pane is still alive, or cannot be checked,
+        // types nothing.
+        let alive = arm(&uuid::Uuid::new_v4().to_string());
+        with_store(|s| s.release_hold_if(&alive.launch, &[HoldStage::Armed])).unwrap();
+        let target = dev_pane().pane_id;
+        let r = before_launch(&p.session, "dev", &target);
+        assert!(r.as_ref().is_err_and(|e| e.contains("still running")), "{r:?}");
+        super::super::restore_hold::LIST_FAILS.with(|f| f.set(true));
+        let r = before_launch(&p.session, "dev", &target);
+        super::super::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(r.as_ref().is_err_and(|e| e.contains("cannot be checked")), "{r:?}");
+        assert!(with_store(|s| s.retire_hold_if(&alive.launch)).unwrap());
+        // 2a. Released again; between the door's read and its retire, another
+        //     launch installs a successor: the retire is lost, nothing typed.
+        let rel = arm(&uuid::Uuid::new_v4().to_string());
+        with_store(|s| s.release_hold_if(&rel.launch, &[HoldStage::Armed])).unwrap();
+        let rel = holds(&socket, &p)[0].clone();
+        kill(&rel);
+        let succ = uuid::Uuid::new_v4().to_string();
+        let (r2, s2) = (rel.clone(), succ.clone());
+        *super::super::restore_hold::BEFORE_RETIRE.lock().unwrap() = Some(Box::new(move || {
+            assert!(with_store(|s| s.install_hold(&r2, &s2, HoldStage::Armed, r2.pane.as_ref().unwrap(), super::super::now())).unwrap());
+        }));
+        let typed = staged();
+        let r = super::super::up_agent(&p.id, "dev").unwrap().unwrap();
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("replaced by another launch")), "{r:?}");
+        assert_eq!(staged(), typed, "nothing staged or typed");
+        assert_eq!(holds(&socket, &p)[0].launch, succ, "the successor is kept");
+        assert_eq!(prune(), vec![succ.clone()], "(its pane is the killed one)");
+        // 2b. A verb that began with NO hold, and a restore generation
+        //     appears before its door: it is another launch's, nothing typed.
+        let permit = super::super::start_permit(&p.session, "dev").unwrap();
+        let appeared = arm(&uuid::Uuid::new_v4().to_string());
+        let typed = staged();
+        kill(&appeared);
+        let r = super::super::up_agent(&p.id, "dev").unwrap().unwrap();
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("appeared after this start began")), "{r:?}");
+        assert_eq!(staged(), typed, "nothing staged or typed");
+        drop(permit);
+        assert_eq!(prune(), vec![appeared.launch.clone()]);
+        // 3. A restart whose kill is followed by the prune before its door.
+        let armed = arm(&uuid::Uuid::new_v4().to_string());
+        let permit = super::super::start_permit(&p.session, "dev").unwrap();
+        kill(&armed);
+        assert_eq!(prune(), vec![armed.launch.clone()], "its pane ended: the prune retired it");
+        assert!(holds(&socket, &p).is_empty());
+        super::super::up_agent(&p.id, "dev").unwrap();
+        let gen4 = holds(&socket, &p);
+        assert_eq!(gen4.len(), 1, "the verb's door installed the generation it started from");
+        assert_eq!(gen4[0].stage, HoldStage::Armed);
+        assert!(held(&p.session, "dev"), "the barrier is there");
+        permit.finish(true).unwrap();
+        // 4. Verb A starts from gen4; another launch B installs gen5 before
+        //    A's door: A types nothing and gen5 stays.
+        let permit = super::super::start_permit(&p.session, "dev").unwrap();
+        let gen5 = uuid::Uuid::new_v4().to_string();
+        assert!(with_store(|s| s.install_hold(&gen4[0], &gen5, HoldStage::Armed, gen4[0].pane.as_ref().unwrap(), super::super::now())).unwrap());
+        let typed = staged();
+        kill(&gen4[0]);
+        let r = super::super::up_agent(&p.id, "dev").unwrap().unwrap();
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("since this start began")), "{r:?}");
+        assert_eq!(staged(), typed, "nothing staged or typed");
+        assert_eq!(holds(&socket, &p)[0].launch, gen5, "B's generation is kept");
+        drop(permit);
+        // 5. Nothing is typed when the hold or the pane cannot be read.
+        assert!(before_launch(&p.session, "dev", "%99999").is_err(), "a pane that cannot be read");
+        with_store(|s| s.corrupt_hold_for_test(&gen5)).unwrap();
+        assert!(super::super::start_permit(&p.session, "dev").is_err(), "the verb is refused before its kill");
+        // (A's door made its window and typed nothing into it.)
+        server.run(&["kill-window", "-t", &dev_pane().window_id]).unwrap();
+        let r = super::super::up_agent(&p.id, "dev").unwrap().unwrap();
+        assert!(r.error.is_some(), "{r:?}");
+        assert_eq!(staged(), typed, "no launch line was staged or typed");
+    }
+
+    /// V11 (validator, 95b78e72): the launch door's identity read must name
+    /// the pane it asked about. A new pane that is gone before the read, and
+    /// an answer for ANOTHER pane (the door would bind the generation to it),
+    /// both type nothing: no generation installed, no window tagged.
+    #[test]
+    fn a_launch_door_whose_pane_is_gone_or_answered_for_another_installs_nothing() {
+        use super::super::restore_hold::{before_launch, PANE_ANSWER};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-gone");
+        let socket = server.socket().to_string();
+        let p = declare("r3gone", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let before = holds(&socket, &p);
+        assert_eq!(before.len(), 1);
+        let dev = before[0].pane.clone().unwrap();
+        let tag = || server.run(&["show-options", "-wqv", "-t", &dev.window_id, "@tmm_rl"]).unwrap_or_default();
+        let tagged = tag();
+        let gone = server.run(&["new-window", "-d", "-t", &format!("={}:", p.session), "-n", "spare", "-P", "-F", "#{pane_id}", "/bin/sh"]).unwrap().trim().to_string();
+        let other = server.run(&["display-message", "-p", "-t", &dev.pane_id, "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"]).unwrap().trim().to_string();
+        server.run(&["kill-pane", "-t", &gone]).unwrap();
+        let same = |hs: Vec<super::super::store::Hold>| hs.iter().map(|h| (h.launch.clone(), h.stage, h.pane.clone())).collect::<Vec<_>>();
+        // Gone before the read.
+        let r = before_launch(&p.session, "dev", &gone);
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(same(holds(&socket, &p)), same(before.clone()), "no generation installed");
+        // Answered for another pane (the restored dev's own, alive).
+        PANE_ANSWER.with(|a| *a.borrow_mut() = Some(other));
+        let r = before_launch(&p.session, "dev", &gone);
+        assert!(r.as_ref().is_err_and(|e| e.contains("unreadable")), "{r:?}");
+        assert_eq!(same(holds(&socket, &p)), same(before), "not bound to the other pane");
+        assert_eq!(tag(), tagged, "its window is not tagged");
+    }
+
+    /// K-spawn (validator, 95b78e72): the SPAWN door (`spawn::launch_window`,
+    /// a hire or a restart's fallback) asks `before_launch` like reconcile's:
+    /// spawning into a slot a restore still holds installs a new armed
+    /// generation bound to the new pane before anything is typed, and its
+    /// launch line names it as `TMM_LAUNCH`.
+    #[test]
+    fn a_spawn_into_a_held_slot_replaces_its_generation_and_names_it_on_the_line() {
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-spawn");
+        let socket = server.socket().to_string();
+        let p = declare("r3spawn", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let old = holds(&socket, &p)[0].clone();
+        assert_eq!(old.stage, HoldStage::Armed);
+        server.run(&["new-window", "-d", "-t", &format!("={}:", p.session), "-n", "spare", "/bin/sh"]).unwrap();
+        server.run(&["kill-window", "-t", &old.pane.clone().unwrap().window_id]).unwrap();
+        super::super::registry_save(&serde_json::json!({ "name": "r3spdef", "backend": "kiro", "system": "Spawn door.", "skills": "[]", "mcp": "[]" })).unwrap();
+        let r = super::super::spawn::spawn(&super::super::spawn::SpawnRequest {
+            session: &p.session,
+            agent: "r3spdef",
+            window_name: Some("dev".into()),
+            resume: true,
+            ..Default::default()
+        });
+        super::super::registry_delete("r3spdef").ok();
+        assert!(r.is_ok(), "{r:?}");
+        let now = holds(&socket, &p);
+        assert_eq!(now.len(), 1);
+        assert_ne!(now[0].launch, old.launch, "a new generation");
+        assert_eq!(now[0].stage, HoldStage::Armed);
+        let pane = tmux::find_window_by_name(&p.session, "dev").unwrap();
+        assert_eq!(now[0].pane.clone().map(|h| h.pane_id), Some(pane), "bound to the spawned pane");
+        let staged = std::fs::read_to_string(p.ws.join(".tmm/agents/dev/launch-dev.sh")).unwrap_or_default();
+        assert!(staged.contains(&format!("TMM_LAUNCH={} ", now[0].launch)), "the line names it: {staged}");
+    }
+
+    /// 3d: past the deadline with no evidence, a held window is reported once
+    /// in its room and derives idle + restore_not_ready; a room line that
+    /// could not be posted is not "reported" and the next tick posts it. The
+    /// status is read from the hold row at read time (review P1-A): a fact
+    /// of this launch accepted while a tick is paused between its read and
+    /// its writes still takes the window out, with no tick after it; so does
+    /// the release. The deadline itself writes no turn fact.
+    #[test]
+    fn a_held_window_past_its_deadline_is_reported_once_and_shown_as_needing_a_person() {
+        use super::super::restore_hold::{tick_not_ready, TICK_HOOK};
+        use super::super::store::HoldStage;
+        use super::super::telemetry::{derive, RESTORE_NOT_READY_DETAIL};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-nr");
+        let socket = server.socket().to_string();
+        let p = declare("r3nr", vec![agent_slot("dev"), Slot { ord: 1, ..agent_slot("dev2") }, Slot { ord: 2, ..agent_slot("dev3") }]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let hold_of = |slot: &str| holds(&socket, &p).into_iter().find(|h| h.slot == slot).unwrap();
+        let (h, h2, h3) = (hold_of("dev"), hold_of("dev2"), hold_of("dev3"));
+        tick_not_ready();
+        // V10 (validator): dev3's evidence was accepted but its merge was
+        // refused (merging): past the deadline it is NOT "not ready" — no
+        // room line, no mark, no detail.
+        with_store(|s| s.mark_hold_merging_if(&h3.launch)).unwrap();
+        with_store(|s| s.age_hold_for_test(&h3.launch, 200)).unwrap();
+        tick_not_ready();
+        assert!(!hold_of("dev3").not_ready && !hold_of("dev3").reported, "a merging hold is not reported");
+        assert_ne!(derive(&p.session, "dev3", 0).detail, RESTORE_NOT_READY_DETAIL);
+        let any_line = || super::super::rooms::history_page(&format!("proj:{}", p.session), None, 50).to_string();
+        assert!(!any_line().contains("dev3 was restored but has not shown it is ready"), "{}", any_line());
+        assert_ne!(derive(&p.session, "dev", 0).detail, RESTORE_NOT_READY_DETAIL, "not before the deadline");
+        // dev2: a tick paused between its read and its writes while this
+        // launch's first fact is accepted: the window is out at once.
+        with_store(|s| s.age_hold_for_test(&h2.launch, 200)).unwrap();
+        let launch2 = h2.launch.clone();
+        *TICK_HOOK.lock().unwrap() = Some(Box::new(move || {
+            with_store(|s| s.accept_hold_fact_if(&launch2, 1)).unwrap();
+        }));
+        tick_not_ready();
+        *TICK_HOOK.lock().unwrap() = None;
+        assert!(!hold_of("dev2").not_ready && !hold_of("dev2").reported, "the claim re-checks in its own write: nothing from the stale read");
+        assert_ne!(derive(&p.session, "dev2", 0).detail, RESTORE_NOT_READY_DETAIL, "the accepted fact wins over the paused tick");
+        assert!(!super::super::rooms::history_page(&format!("proj:{}", p.session), None, 50).to_string().contains("dev2 was restored but has not shown it is ready"), "no wrong room line");
+        with_store(|s| s.age_hold_for_test(&h.launch, 200)).unwrap();
+        let facts_before = super::super::telemetry::turn_version(&p.session, "dev");
+        let room = format!("proj:{}", p.session);
+        let lines = || super::super::rooms::history_page(&room, None, 20).to_string().matches("dev was restored but has not shown it is ready").count();
+        // The room cannot take the line: not reported, so the next tick posts it.
+        let sql = |q: &str| with_store(|s| s.exec_test_sql(q)).unwrap();
+        sql("CREATE TEMP TRIGGER nr422 BEFORE INSERT ON hub_msgs BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+        tick_not_ready();
+        sql("DROP TRIGGER nr422;");
+        assert_eq!(lines(), 0);
+        assert!(!hold_of("dev").reported, "a line that was not posted is not reported");
+        tick_not_ready();
+        tick_not_ready();
+        assert_eq!(lines(), 1, "posted once the room takes it, and only once");
+        let st = derive(&p.session, "dev", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", RESTORE_NOT_READY_DETAIL));
+        assert_eq!(super::super::telemetry::turn_version(&p.session, "dev"), facts_before, "the deadline writes no turn fact");
+        // This launch's first accepted fact: out at once, no tick after it.
+        with_store(|s| s.accept_hold_fact_if(&h.launch, 1)).unwrap();
+        assert_ne!(derive(&p.session, "dev", 0).detail, RESTORE_NOT_READY_DETAIL);
+        // Released: no detail either.
+        with_store(|s| s.release_hold_if(&h.launch, &[HoldStage::Armed])).unwrap();
+        assert_ne!(derive(&p.session, "dev", 0).detail, RESTORE_NOT_READY_DETAIL);
+    }
+
+    /// 3c, a person's prompt (B7, B9, C2, C2b, R3): only a prompt of THIS
+    /// launch from the hold's pane whose fact reached the log releases. A
+    /// window still carrying its placeholder is merged first: a lost or a
+    /// refused rename keeps the hold (merging, one room line) and the tick
+    /// retries; once merged, the hold is released with its batch record
+    /// (`Launched`, so the capture observes it) and the held line is flushed
+    /// by the slot's own rules — the prompt opened a turn, so it waits for
+    /// that turn's end.
+    #[test]
+    fn a_persisted_prompt_of_this_launch_merges_releases_and_flushes_by_the_slots_rules() {
+        use super::super::restore_hold::{held, on_prompt, release_ready, Release};
+        use super::super::store::HoldStage;
+        use super::super::telemetry::{held_rows, record_notification, record_prompt_outcome, PERSIST_IN_TEST};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-pr");
+        let socket = server.socket().to_string();
+        let p = declare("r3pr", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        // The launch is typed without its Enter: the window keeps its placeholder.
+        set_hook(Some(once(&p.id, "launch", Some(0), Mangle::TextOnly)));
+        run(&inputs(&socket)).unwrap();
+        set_hook(None);
+        let b = batch_of(&socket);
+        let w = b.projects[0].windows[0].clone();
+        assert_eq!(w.state, WindowState::LaunchUnknown);
+        let (launch, pane, wid) = (w.launch.clone().unwrap(), w.pane_id.clone().unwrap(), w.window_id.clone().unwrap());
+        let ph = placeholder(&b.batch, 0);
+        assert!(names(&server, &p.session).contains(&ph));
+        assert!(super::super::delivery::deliver(&p.session, "dev", &pane, "TOKEN-PR", 0, ""));
+        assert_eq!(held_rows(&p.session, "dev").len(), 1);
+        let stage = || holds(&socket, &p)[0].clone();
+        // C2: a prompt whose write failed; another pane; another launch.
+        assert_eq!(on_prompt(&launch, &pane, None), Ok(Release::Not));
+        assert_eq!(on_prompt(&launch, "%99999", Some(1)), Ok(Release::Not));
+        assert_eq!(on_prompt(&uuid::Uuid::new_v4().to_string(), &pane, Some(1)), Ok(Release::Not));
+        assert_eq!((stage().stage, stage().accepted_seq), (HoldStage::Armed, None));
+        // A person's prompt, persisted (C2b: not acked, persisted).
+        PERSIST_IN_TEST.with(|f| f.set(true));
+        // Recorded as the consumer records an attributed prompt: under its
+        // generation, the row and the hold's acceptance in one transaction.
+        let (typed, went) = super::super::telemetry::with_generation(Some((&p.session, "dev", &launch)), || record_prompt_outcome(&p.session, "dev", "a person typed this"));
+        assert_eq!(went, super::super::telemetry::GenerationWrite::Ok);
+        PERSIST_IN_TEST.with(|f| f.set(false));
+        assert!(!typed.acked && typed.persisted(), "{typed:?}");
+        // B9: the merge's answer is lost: held, merging, told once.
+        set_hook(Some(once(&p.id, "merge", Some(0), Mangle::Lost)));
+        assert_eq!(on_prompt(&launch, &pane, typed.row), Ok(Release::Merging));
+        set_hook(None);
+        assert_eq!((stage().stage, stage().merging, stage().accepted_seq), (HoldStage::Armed, true, typed.row));
+        assert!(held(&p.session, "dev"));
+        // B7: renamed by a person meanwhile: the tick's merge is refused.
+        server.run(&["rename-window", "-t", &wid, "mine"]).unwrap();
+        assert!(release_ready().is_empty());
+        assert!(held(&p.session, "dev") && names(&server, &p.session).contains(&"mine".to_string()), "a person's name is not overwritten");
+        let room = || super::super::rooms::history_page(&format!("proj:{}", p.session), None, 20).to_string();
+        assert_eq!(room().matches("restored dev is running as").count(), 1, "{}", room());
+        // Its placeholder back: the tick merges and releases.
+        server.run(&["rename-window", "-t", &wid, &ph]).unwrap();
+        assert_eq!(release_ready(), vec![launch.clone()]);
+        assert!(names(&server, &p.session).contains(&"dev".to_string()));
+        assert_eq!((stage().stage, stage().merging), (HoldStage::Released, false));
+        assert_eq!(window_state(&socket, &p.id, "dev"), (WindowState::Launched, Some(super::super::store::RELEASED.into())));
+        assert!(unrestored_windows(&batch_of(&socket), &p.id).unwrap().is_empty(), "the capture observes it now");
+        // R3: the prompt's turn is open, so the line waits for its end.
+        assert!(!held(&p.session, "dev"));
+        assert_eq!(held_rows(&p.session, "dev").len(), 1, "kept for the turn's end");
+        record_notification(&p.session, "dev", "completed");
+        super::super::delivery::flush(&p.session, "dev");
+        assert!(held_rows(&p.session, "dev").is_empty());
+        let typed_in = (0..100).any(|_| {
+            let seen = screen_of(&pane).contains("TOKEN-PR");
+            if !seen {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            seen
+        });
+        assert!(typed_in, "flushed into the merged window");
+    }
+
+    /// 3c, the envelope rule (S1, C1 and the no-uuid cell of revision 4):
+    /// while held, this launch's envelope is the logical slot's and any other
+    /// (another uuid, none) is dropped; released, its own launch is normal and
+    /// a late one of another or no launch is still dropped; a pane with no
+    /// hold, or whose pane ended, is normal.
+    #[test]
+    fn an_envelope_is_attributed_by_its_panes_hold_and_its_launch() {
+        use super::super::restore_hold::{attribute, Attribution};
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-attr");
+        let socket = server.socket().to_string();
+        let p = declare("r3attr", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let w = batch_of(&socket).projects[0].windows[0].clone();
+        let (launch, pane, wid) = (w.launch.clone().unwrap(), w.pane_id.clone().unwrap(), w.window_id.clone().unwrap());
+        let other = uuid::Uuid::new_v4().to_string();
+        let dropped = |a: Attribution| matches!(a, Attribution::Drop(_));
+        // Renamed by a person: still the slot's.
+        server.run(&["rename-window", "-t", &wid, "mine"]).unwrap();
+        assert_eq!(attribute(&pane, Some(&launch)), Attribution::Slot { session: p.session.clone(), slot: "dev".into(), launch: launch.clone() });
+        assert!(dropped(attribute(&pane, Some(&other))), "another launch");
+        assert!(dropped(attribute(&pane, None)), "no launch");
+        assert_eq!(attribute("%99999", None), Attribution::Normal, "a pane with no hold");
+        // V6: its pane cannot be checked — this launch's and a launch-less
+        // envelope are kept as Unknown, never Normal; another launch has no
+        // generation here at all and is dropped.
+        super::super::restore_hold::LIST_FAILS.with(|f| f.set(true));
+        let unchecked = (attribute(&pane, Some(&launch)), attribute(&pane, None), attribute(&pane, Some(&other)));
+        super::super::restore_hold::LIST_FAILS.with(|f| f.set(false));
+        assert!(matches!(unchecked, (Attribution::Unknown(_), Attribution::Unknown(_), Attribution::Drop(_))), "{unchecked:?}");
+        with_store(|s| s.release_hold_if(&launch, &[HoldStage::Armed])).unwrap();
+        assert_eq!(attribute(&pane, Some(&launch)), Attribution::Own { launch: launch.clone() }, "released: its own launch is routed as usual, under its generation");
+        assert!(dropped(attribute(&pane, Some(&other))), "a late envelope of an old launch after the release");
+        assert!(dropped(attribute(&pane, None)), "and one with no launch");
+        // Another window keeps the session alive while dev's pane ends.
+        server.run(&["new-window", "-d", "-t", &format!("={}:", p.session), "-n", "spare", "/bin/sh"]).unwrap();
+        server.run(&["kill-pane", "-t", &pane]).unwrap();
+        assert_eq!(attribute(&pane, None), Attribution::Normal, "its pane ended: nothing of the restore's is left there");
+        assert!(dropped(attribute(&pane, Some(&launch))), "but an envelope carrying its launch is never legacy normal");
+        // Its row retired too (the ordinary restart): still dropped.
+        assert_eq!(super::super::restore_hold::prune(), vec![launch.clone()]);
+        assert!(dropped(attribute(&pane, Some(&launch))), "a launch with no live generation is dropped");
+    }
+
+    /// Review P1-E: a release lands while the owner still holds its copy in
+    /// which the window is `launch_unknown` — between its window action and
+    /// the holder step that finishes the project. The owner's finish reads
+    /// the merged state: the window is Launched, the project done, the batch
+    /// closed "done", and the next capture observes the window.
+    #[test]
+    fn a_release_between_the_owners_window_action_and_its_finish_is_what_the_finish_reads() {
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-own");
+        let socket = server.socket().to_string();
+        let p = declare("r3own", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        let (id, sock) = (p.id.clone(), socket.clone());
+        let mut typed = false;
+        set_hook(Some(Box::new(move |s: &Step| {
+            if s.project != id {
+                return Mangle::Run;
+            }
+            match s.op {
+                // The launch's Enter is not sent: the owner records launch_unknown.
+                "launch" if !typed => {
+                    typed = true;
+                    Mangle::TextOnly
+                }
+                // Before the finish: the window's evidence arrives and releases it.
+                // (merged into its slot first, as every release does).
+                "holder_kill" => {
+                    let h = with_store(|st| st.socket_holds(&sock)).unwrap().into_iter().next().unwrap();
+                    // (by hand: `merge_held` asks this very hook for its step)
+                    let wid = h.pane.clone().unwrap().window_id;
+                    tmux::run_tmux_on(Some(&sock), &["rename-window", "-t", &wid, "dev"]).unwrap();
+                    assert!(with_store(|st| st.release_hold_if(&h.launch, &[HoldStage::Armed])).unwrap());
+                    Mangle::Run
+                }
+                _ => Mangle::Run,
+            }
+        })));
+        run(&inputs(&socket)).unwrap();
+        set_hook(None);
+        let b = batch_of(&socket);
+        assert_eq!(b.projects[0].windows[0].state, WindowState::Launched, "{:?}", b.projects[0].windows[0]);
+        assert_eq!(project_state(&socket, &p.id), (ProjectState::Done, None), "the finish read the merged window");
+        assert_eq!(b.closed.as_deref(), Some("done"));
+        assert!(unrestored_windows(&b, &p.id).unwrap().is_empty());
+        super::super::capture_once().unwrap();
+        let cp = with_store(|s| s.checkpoint(&socket)).unwrap().unwrap();
+        let names: Vec<String> = cp.projects.iter().find(|q| q.id == p.id).map(|q| q.windows.iter().map(|w| w.name.clone()).collect()).unwrap_or_default();
+        assert_eq!(names, vec!["dev".to_string()], "the released window is observed as its slot");
+    }
+
+    /// Review P1-D: every release confirms in the server that the window is
+    /// still the hold's own object in its own native session, carries no
+    /// other restore's tags, and is the one the slot's name leads to in its
+    /// project's session (where a flush types). Moved to another session, a
+    /// same-name window at the old place, a session tagged by another
+    /// restore, a NEW session under the project's name holding the window,
+    /// the restore's window tag stripped: held, the line not typed anywhere.
+    /// Released, then the target swapped before the flush: the flush, and
+    /// every later ordinary flush, resolves through the one delivery door,
+    /// bound to the released generation's own pane — held while the name
+    /// leads elsewhere, typed into that `%id` once it leads to it again
+    /// (review P1-D residuals).
+    #[test]
+    fn a_release_types_only_into_the_holds_own_window_in_its_own_session() {
+        use super::super::restore_hold::{held, on_session_start, release_ready, Release};
+        use super::super::store::HoldStage;
+        use super::super::telemetry::held_rows;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-own2");
+        let socket = server.socket().to_string();
+        let p = declare("r3mv", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let w = batch_of(&socket).projects[0].windows[0].clone();
+        let (launch, pane, wid) = (w.launch.clone().unwrap(), w.pane_id.clone().unwrap(), w.window_id.clone().unwrap());
+        let batch = batch_of(&socket).batch;
+        let at = format!("={}:", p.session);
+        server.run(&["new-window", "-d", "-t", &at, "-n", "spare", "/bin/sh"]).unwrap();
+        // V7 (validator): in place, but the ownership step's answer is lost:
+        // not confirmed, so not released.
+        set_hook(Some(once(&p.id, "merge", Some(0), Mangle::Lost)));
+        assert_eq!(on_session_start(&launch, &pane, Some("startup")), Ok(Release::Merging), "an unconfirmed ownership check is not a release");
+        set_hook(None);
+        assert_eq!(holds(&socket, &p)[0].stage, HoldStage::Armed);
+        assert!(super::super::delivery::deliver(&p.session, "dev", &pane, "TOKEN-MV", 0, ""));
+        // Moved to another session, and a same-name window at the old place.
+        server.run(&["new-session", "-d", "-s", "elsewhere", "/bin/sh"]).unwrap();
+        server.run(&["move-window", "-s", &wid, "-t", "=elsewhere:"]).unwrap();
+        let impostor = server.run(&["new-window", "-d", "-t", &at, "-n", "dev", "-P", "-F", "#{pane_id}", "/bin/sh"]).unwrap().trim().to_string();
+        let stage = || holds(&socket, &p)[0].stage;
+        assert_eq!(on_session_start(&launch, &pane, Some("startup")), Ok(Release::Merging), "moved: not released");
+        assert_eq!(stage(), HoldStage::Armed);
+        assert!(held(&p.session, "dev"), "the moved window keeps its barrier");
+        // Back in its session, but the slot's name leads to the impostor first.
+        server.run(&["move-window", "-s", &wid, "-t", &at]).unwrap();
+        assert!(release_ready().is_empty(), "the name leads to another window: not released");
+        server.run(&["kill-pane", "-t", &impostor]).unwrap();
+        // Its session tagged by another restore.
+        server.run(&["set-option", "-t", &at, "@tmm_rs", "another-batch"]).unwrap();
+        assert!(release_ready().is_empty(), "another restore's session: not released");
+        assert_eq!(held_rows(&p.session, "dev").len(), 1, "nothing was typed meanwhile");
+        server.run(&["set-option", "-t", &at, "@tmm_rs", &batch]).unwrap();
+        // Its session renamed away and a NEW session under the project's
+        // name taking the window: the name leads to it, but it is not in
+        // the native session it was bound in.
+        let sid = server.run(&["display-message", "-p", "-t", &at, "#{session_id}"]).unwrap().trim().to_string();
+        server.run(&["rename-session", "-t", &sid, "r3mv-old"]).unwrap();
+        server.run(&["new-session", "-d", "-s", &p.session, "/bin/sh"]).unwrap();
+        server.run(&["move-window", "-s", &wid, "-t", &at]).unwrap();
+        assert!(release_ready().is_empty(), "another native session under the same name: not released");
+        server.run(&["move-window", "-s", &wid, "-t", "=r3mv-old:"]).unwrap();
+        server.run(&["kill-session", "-t", &at]).unwrap();
+        server.run(&["rename-session", "-t", &sid, &p.session]).unwrap();
+        // The restore's window tag stripped: not this hold's object any more.
+        server.run(&["set-option", "-w", "-t", &wid, "-u", "@tmm_rw"]).unwrap();
+        assert!(release_ready().is_empty(), "a missing tag is not ownership");
+        server.run(&["set-option", "-w", "-t", &wid, "@tmm_rw", &format!("{batch}:0")]).unwrap();
+        // Released, then — before its flush types — the window is moved away
+        // and a same-name window takes the old place: the verified pane is
+        // checked again at the moment of typing, and the line stays held.
+        let (sock, wid2, at2) = (socket.clone(), wid.clone(), at.clone());
+        let impostor2 = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let imp = impostor2.clone();
+        *super::super::restore_hold::AFTER_RELEASE.lock().unwrap() = Some(Box::new(move || {
+            tmux::run_tmux_on(Some(&sock), &["move-window", "-s", &wid2, "-t", "=elsewhere:"]).unwrap();
+            *imp.lock().unwrap() = tmux::run_tmux_on(Some(&sock), &["new-window", "-d", "-t", &at2, "-n", "dev", "-P", "-F", "#{pane_id}", "/bin/sh"]).unwrap().trim().to_string();
+        }));
+        assert_eq!(release_ready(), vec![launch.clone()], "its own window, in its own session: released");
+        assert_eq!(stage(), HoldStage::Released);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(held_rows(&p.session, "dev").len(), 1, "the target changed between the release and the typing: kept");
+        assert!(!screen_of(&impostor2.lock().unwrap()).contains("TOKEN-MV") && !screen_of(&pane).contains("TOKEN-MV"), "typed nowhere");
+        // Every later ORDINARY flush goes through the same door, bound to
+        // the released generation's pane: still held, typed nowhere.
+        super::super::delivery::flush(&p.session, "dev");
+        super::super::delivery::flush_idle(&p.session);
+        super::super::delivery::flush_on_start();
+        assert!(held(&p.session, "dev"), "the name leads to another object: typing into the slot is barred");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(held_rows(&p.session, "dev").len(), 1, "an ordinary flush does not bypass the binding");
+        assert!(!screen_of(&impostor2.lock().unwrap()).contains("TOKEN-MV") && !screen_of(&pane).contains("TOKEN-MV"), "typed nowhere");
+        // Back in its own session, but the name still leads to the same-name
+        // window first: still no target.
+        server.run(&["move-window", "-s", &wid, "-t", &at]).unwrap();
+        assert!(held(&p.session, "dev"), "the name leads to the other window first: still barred");
+        super::super::delivery::flush(&p.session, "dev");
+        assert_eq!(held_rows(&p.session, "dev").len(), 1);
+        // The authorized object where the name leads: typed into its %id.
+        server.run(&["kill-pane", "-t", &impostor2.lock().unwrap()]).unwrap();
+        assert!(!held(&p.session, "dev"), "its own pane where the name leads");
+        super::super::delivery::flush(&p.session, "dev");
+        let typed = (0..100).any(|_| {
+            let seen = screen_of(&pane).contains("TOKEN-MV");
+            if !seen {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            seen
+        });
+        assert!(typed, "flushed into the hold's own pane");
+        let _ = server.run(&["kill-session", "-t", "=elsewhere"]);
+    }
+
+    /// V5 (validator): a hold of ANOTHER gateway's socket — its own server,
+    /// whose pane carries the same `%id` as this one's restored pane — is
+    /// never released by evidence this gateway consumes: the other socket's
+    /// hold stays armed, and so does this one's (the evidence names a launch
+    /// that is not its own).
+    #[test]
+    fn evidence_never_releases_another_sockets_hold_with_the_same_pane_id() {
+        use super::super::restore_hold::{on_prompt, on_session_start, Release};
+        use super::super::store::{HoldPane, HoldStage};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let other = crate::tmux::test_support::PrivateServer::new("r3-v5o");
+        let server = PrivateTmux::start(&scope, "r3-v5");
+        let socket = server.socket().to_string();
+        let p = declare("r3v5", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let mine = holds(&socket, &p)[0].clone();
+        let pane = mine.pane.clone().unwrap().pane_id;
+        // The other server: panes until one has the same id, in a window named as the slot.
+        let on = |args: &[&str]| tmux::run_tmux_on(Some(&other.socket), args).unwrap();
+        on(&["new-session", "-d", "-s", "o", "/bin/sh"]);
+        let mut theirs = on(&["display-message", "-p", "-t", "=o:", "#{pane_id}"]).trim().to_string();
+        while theirs != pane {
+            theirs = on(&["new-window", "-d", "-t", "=o:", "-P", "-F", "#{pane_id}", "/bin/sh"]).trim().to_string();
+        }
+        let f: Vec<String> = on(&["display-message", "-p", "-t", &theirs, "#{pane_pid}\t#{window_id}\t#{session_id}\t#{pid}\t#{start_time}"]).trim().split('\t').map(str::to_string).collect();
+        on(&["rename-window", "-t", &f[1], "dev"]);
+        let launch = uuid::Uuid::new_v4().to_string();
+        // Authorized as that generation's window, as a launch door tags it.
+        on(&["set-option", "-w", "-t", &f[1], "@tmm_rl", &launch]);
+        let foreign = super::super::store::Hold {
+            socket: other.socket.clone(),
+            project_id: p.id.clone(),
+            batch: "b-other".into(),
+            ord: 0,
+            slot: "dev".into(),
+            launch: launch.clone(),
+            stage: HoldStage::Armed,
+            pane: Some(HoldPane {
+                instance: TmuxInstance { socket: other.socket.clone(), pid: f[3].parse().unwrap(), start_time: f[4].parse().unwrap() },
+                session_id: f[2].clone(),
+                window_id: f[1].clone(),
+                pane_id: theirs.clone(),
+                pane_pid: f[0].parse().unwrap(),
+            }),
+            since: super::super::now(),
+            accepted_seq: None,
+            not_ready: false,
+            reported: false,
+            merging: false,
+        };
+        let unrelated = Batch { batch: "b-other".into(), socket: format!("{}-unrelated", other.socket), boot_id: None, owner_pid: 0, instance: None, source: Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] }, closed: None, projects: vec![] };
+        with_store(|s| s.open_batch(&unrelated, &[foreign], "x")).unwrap();
+        assert_eq!(on_session_start(&launch, &pane, Some("startup")), Ok(Release::Not), "another socket's hold is not this gateway's");
+        // V5b: an envelope carrying that launch from this gateway's pane of
+        // the same id is not attributed to the other socket's row.
+        assert!(matches!(super::super::restore_hold::attribute(&pane, Some(&launch)), super::super::restore_hold::Attribution::Drop(_)), "another socket's generation routes nothing here");
+        // Even when that other socket key names THIS server (an alias of the
+        // same tmux), bound to this very pane: its row is not this gateway's.
+        let alias = uuid::Uuid::new_v4().to_string();
+        let ours = holds(&socket, &p)[0].clone();
+        let aliased = super::super::store::Hold { socket: format!("{socket}-alias"), batch: "b-alias".into(), slot: "dev-alias".into(), launch: alias.clone(), ..ours.clone() };
+        with_store(|s| s.open_batch(&unrelated, &[aliased], "x")).unwrap();
+        assert!(matches!(super::super::restore_hold::attribute(&pane, Some(&alias)), super::super::restore_hold::Attribution::Drop(_)), "a row of another socket key, on this server's own pane, routes nothing here");
+        assert_eq!(on_prompt(&launch, &pane, Some(1)), Ok(Release::Not));
+        assert_eq!(with_store(|s| s.hold_by_launch(&launch)).unwrap().unwrap().stage, HoldStage::Armed, "the other socket's hold stays armed");
+        assert_eq!(holds(&socket, &p)[0].stage, HoldStage::Armed, "and so does this one's");
+    }
+
+    /// Review P1-A residual: a slot has ONE current incarnation. A newer
+    /// generation (a later boot's plan) retires the slot's older rows in its
+    /// own transaction, so an old row reported not ready never decides the
+    /// new incarnation's status: its accepted fact reads running, no prune
+    /// needed.
+    #[test]
+    fn a_newer_generation_retires_the_slots_older_rows_and_its_own_state_shows() {
+        use super::super::restore_hold::tick_not_ready;
+        use super::super::store::HoldStage;
+        use super::super::telemetry::{derive, record_tool, with_generation, GenerationWrite, PERSIST_IN_TEST, RESTORE_NOT_READY_DETAIL};
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-cur");
+        let socket = server.socket().to_string();
+        let p = declare("r3cur", vec![agent_slot("dev")]);
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let l1 = holds(&socket, &p)[0].clone();
+        with_store(|s| s.age_hold_for_test(&l1.launch, 200)).unwrap();
+        tick_not_ready();
+        assert_eq!(derive(&p.session, "dev", 0).detail, RESTORE_NOT_READY_DETAIL);
+        // The next plan's generation of the same slot, in another batch.
+        let l2 = super::super::store::Hold { batch: "b-next".into(), launch: uuid::Uuid::new_v4().to_string(), stage: HoldStage::Armed, since: super::super::now(), not_ready: false, reported: false, ..l1.clone() };
+        let unrelated = Batch { batch: "b-next".into(), socket: format!("{socket}-unrelated"), boot_id: None, owner_pid: 0, instance: None, source: Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] }, closed: None, projects: vec![] };
+        with_store(|s| s.open_batch(&unrelated, &[l2.clone()], "x")).unwrap();
+        let now: Vec<String> = holds(&socket, &p).into_iter().map(|h| h.launch).collect();
+        assert_eq!(now, vec![l2.launch.clone()], "the older row is retired with the install");
+        PERSIST_IN_TEST.with(|f| f.set(true));
+        let (_, went) = with_generation(Some((&p.session, "dev", &l2.launch)), || record_tool(&p.session, "dev", "Bash", "ls"));
+        PERSIST_IN_TEST.with(|f| f.set(false));
+        assert_eq!(went, GenerationWrite::Ok);
+        assert_eq!(derive(&p.session, "dev", 0).state, "running", "the current incarnation's own state");
+    }
+
+    /// 3c, SessionStart: evidence exactly where it was measured — claude's
+    /// of any source, kimi's only with `source: resume`, no other backend's
+    /// (grok here; kiro is v1 not-ready the same way)
+    /// — and only of this launch from the hold's pane.
+    #[test]
+    fn a_session_start_of_this_launch_releases_only_where_it_was_measured() {
+        use super::super::restore_hold::{on_session_start, Release};
+        use super::super::store::HoldStage;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let server = PrivateTmux::start(&scope, "r3-ss");
+        let socket = server.socket().to_string();
+        let mut slots = vec![agent_slot("c1"), agent_slot("k1"), agent_slot("x1")];
+        for (i, s) in slots.iter_mut().enumerate() {
+            s.ord = i as i64;
+        }
+        let p = declare("r3ss", slots);
+        for (name, backend) in [("k1", "kimi"), ("x1", "grok")] {
+            let home = p.ws.join(".tmm/agents").join(name);
+            let mut recipe: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap();
+            recipe["backend"] = backend.into();
+            std::fs::write(home.join("launch.json"), recipe.to_string()).unwrap();
+        }
+        publish(&socket, &[&p]);
+        run(&inputs(&socket)).unwrap();
+        let b = batch_of(&socket);
+        let of = |name: &str| {
+            let w = b.projects[0].windows.iter().find(|w| w.name == name).unwrap_or_else(|| panic!("{name}: {:?}", b.projects[0].windows));
+            assert!(w.launch.is_some(), "{name}: {w:?}");
+            (w.launch.clone().unwrap(), w.pane_id.clone().unwrap())
+        };
+        let stage = |launch: &str| with_store(|s| s.hold_by_launch(launch)).unwrap().map(|h| h.stage);
+        assert_eq!(holds(&socket, &p).len(), 3, "{:?}", b.projects[0].windows);
+        let (c, cp) = of("c1");
+        assert!(super::super::delivery::deliver(&p.session, "c1", &cp, "TOKEN-SS", 0, ""));
+        assert_eq!(super::super::telemetry::held_rows(&p.session, "c1").len(), 1);
+        assert_eq!(on_session_start(&uuid::Uuid::new_v4().to_string(), &cp, Some("startup")), Ok(Release::Not), "another launch");
+        assert_eq!(on_session_start(&c, "%99999", Some("startup")), Ok(Release::Not), "another pane");
+        assert_eq!(on_session_start(&c, &cp, Some("startup")), Ok(Release::Released), "claude: any source");
+        assert_eq!(stage(&c), Some(HoldStage::Released));
+        assert!(super::super::telemetry::held_rows(&p.session, "c1").is_empty(), "no turn is open: its held line is flushed at the release");
+        let (k, kp) = of("k1");
+        assert_eq!(on_session_start(&k, &kp, Some("startup")), Ok(Release::Not), "kimi: a fresh start is no evidence");
+        assert_eq!(on_session_start(&k, &kp, None), Ok(Release::Not));
+        assert_eq!(on_session_start(&k, &kp, Some("resume")), Ok(Release::Released));
+        let (x, xp) = of("x1");
+        assert_eq!(on_session_start(&x, &xp, Some("resume")), Ok(Release::Not), "no measured evidence for grok");
+        assert_eq!(stage(&x), Some(HoldStage::Armed));
+    }
+
     // ---- review round 2: P1-A ownership-based capture exclusion ----------
 
     #[test]
@@ -2825,8 +3654,9 @@ mod tests {
         assert!(slots(&plain.id).contains(&"extra".to_string()), "a plain project still folds");
         assert!(!slots(&ours.id).contains(&"extra".to_string()), "a restore's session is held");
         assert_eq!(with_store(|s| s.checkpoint(&socket)).unwrap().unwrap().gen, gen, "no checkpoint");
-        with_store(|s| s.meta_set(&format!("restore_batch:{socket}"), "")).ok();
-        with_store(|s| s.close_batch(&Batch { batch: "x".into(), socket: socket.clone(), boot_id: None, owner_pid: 0, instance: None, source: Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] }, closed: Some("cleanup".into()), projects: vec![] })).unwrap();
+        // (an unreadable open batch is never overwritten: it is removed first)
+        with_store(|s| s.exec_test_sql(&format!("DELETE FROM meta WHERE key = 'restore_batch:{socket}'"))).unwrap();
+        with_store(|s| s.close_batch(&mut Batch { batch: "x".into(), socket: socket.clone(), boot_id: None, owner_pid: 0, instance: None, source: Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] }, closed: Some("cleanup".into()), projects: vec![] })).unwrap();
     }
 
     /// C5: capture's exclusion needs the SESSION's facts too — a window whose
@@ -3138,7 +3968,7 @@ mod tests {
             closed: None,
             projects: vec![BatchProject {
                 id: "own".into(), name: "own".into(), path: "/".into(), session: "own".into(), autostart_only: false,
-                state: ProjectState::Open, reason: None, session_id: Some(sid.clone()), holder_id: None, op: None, windows: vec![],
+                state: ProjectState::Open, reason: None, session_id: Some(sid.clone()), holder_id: None, op: None, finished: None, windows: vec![],
             }],
         };
         let (_, scond) = session_cond(&batch, 0).unwrap();
@@ -3401,7 +4231,7 @@ mod tests {
         let (f, sock) = (fake.clone(), socket.clone());
         *TICK_HOOK.lock().unwrap() = Some(Box::new(move |phase| {
             if phase == TickPhase::Listed {
-                with_store(|s| s.save_batch(&f)).unwrap();
+                with_store(|s| s.save_batch(&mut f.clone())).unwrap();
             }
             let _ = &sock;
         }));
@@ -3415,7 +4245,7 @@ mod tests {
             if phase == TickPhase::Listed {
                 let mut c = f2.clone();
                 c.closed = Some("done".into());
-                with_store(|s| s.close_batch(&c)).unwrap();
+                with_store(|s| s.close_batch(&mut c.clone())).unwrap();
             }
         }));
         super::super::capture_once().unwrap();
@@ -3441,11 +4271,12 @@ mod tests {
             session_id: None,
             holder_id: None,
             op: None,
+            finished: None,
             windows: vec![],
         }];
         *super::super::store::SCAN_HOOK.lock().unwrap() = Some(Box::new(move || {
             if let Some(mut s) = other.lock().unwrap().take() {
-                s.save_batch(&f3).unwrap();
+                s.save_batch(&mut f3.clone()).unwrap();
             }
         }));
         super::super::capture_once().unwrap();
@@ -3455,7 +4286,7 @@ mod tests {
         assert_eq!(with_store(|s| s.checkpoint(&socket)).unwrap().unwrap().gen, gen, "no checkpoint");
         let mut c = fake.clone();
         c.closed = Some("done".into());
-        with_store(|s| s.close_batch(&c)).unwrap();
+        with_store(|s| s.close_batch(&mut c.clone())).unwrap();
         // Control: an undisturbed tick commits.
         super::super::capture_once().unwrap();
         assert!(slots().contains(&"extra".to_string()));
@@ -4016,7 +4847,7 @@ mod tests {
         // A launch_unknown placeholder after the close is not folded either.
         let q = declare("t11q", vec![agent_slot("dev")]);
         publish(&socket, &[&q]);
-        with_store(|s| { let mut l = s.last_batch(&socket)?.unwrap(); l.boot_id = Some("older".into()); s.close_batch(&l) }).unwrap();
+        with_store(|s| { let mut l = s.last_batch(&socket)?.unwrap(); l.boot_id = Some("older".into()); s.close_batch(&mut l.clone()) }).unwrap();
         set_hook(Some(once(&q.id, "launch", Some(0), Mangle::TextOnly)));
         run(&inputs(&socket)).unwrap();
         set_hook(None);
