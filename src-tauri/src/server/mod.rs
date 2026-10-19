@@ -250,7 +250,7 @@ pub async fn start_with_socket_ready(
     // trigger, the batch with a hold for every planned agent slot, and this
     // boot's `restore_decided` — is AWAITED here, before the hook inbox,
     // capture, the start flush, wakes and the first accept. Window creation
-    // runs in the background below. Off unless `restore_on_start`.
+    // runs in the background below. On unless `restore_on_start = false`.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let restore_start = {
         let inputs = crate::projects::restore_run::start_inputs();

@@ -1195,7 +1195,7 @@ mod tests {
             batch: "b-rec".into(),
             socket: format!("{socket}-unrelated"),
             boot_id: None,
-            owner_pid: 0,
+            owner_pid: 0, attempt: 0,
             instance: None,
             source: super::super::store::Checkpoint { gen: 0, at: 0, boot_id: None, tmux: None, projects: vec![] },
             closed: None,

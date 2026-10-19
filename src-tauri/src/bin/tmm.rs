@@ -129,6 +129,9 @@ USAGE (human or agent — self-management):
   tmm project down <session>          kill the session, keep the declaration
   tmm project archive <session>       remove from projects (session survives)
   tmm project unarchive <session>     bring an archived project back to the list
+  tmm project restore [--run|--abandon]   after a host reboot: show what would come back and
+                                      why (reads only); --run starts it now (in the background);
+                                      --abandon closes an open restore, touching no window
   tmm registry list                   centrally-defined agents
   tmm teams list                      configured agent teams (members + roles)
   tmm teams save --name <n> --def '<members json>' [--description <text>]
@@ -1018,6 +1021,22 @@ async fn main() {
                 println!("✓ renamed {name} → {new_name} (session {session})");
             }
         }
+        ("project", rest) if rest.first().map(String::as_str) == Some("restore") => {
+            // Board #422 round 4: the reboot restore's manual doors. Without
+            // a flag it only reads; `--run` is accepted under the restore
+            // lock and runs in the gateway's background; `--abandon` closes
+            // the open batch and writes nothing in tmux.
+            let (run, abandon) = (flags.contains_key("run"), flags.contains_key("abandon"));
+            if run && abandon {
+                fail(EXIT_USAGE, "project restore takes --run or --abandon, not both");
+            }
+            if rest.len() > 1 {
+                fail(EXIT_USAGE, "project restore takes no session: it restores what the last checkpoint saw (tmm project restore [--run|--abandon])");
+            }
+            let action = if run { "run" } else if abandon { "abandon" } else { "show" };
+            let r = rpc(&ctx, "project_restore", json!({ "action": action })).await;
+            if ctx.json { println!("{r}"); } else { print!("{}", restore_text(action, &r)); }
+        }
         ("project", rest) if matches!(rest.first().map(String::as_str), Some("up" | "down" | "archive" | "unarchive" | "delete")) => {
             let action = rest[0].clone();
             let Some(name) = rest.get(1).cloned() else {
@@ -1605,6 +1624,71 @@ fn task_value(t: &tasks::Task) -> Value {
 /// one line per item (board #418 review P2-C). JSON keeps the original.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `tmm project restore`'s human text (board #422 round 4), from the RPC's
+/// answer: what a run starts from, each project and window with its state
+/// or plan and the reason, and what a `--run` / `--abandon` did.
+fn restore_text(action: &str, r: &Value) -> String {
+    let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let why = |v: &Value| match v.get("reason").and_then(|x| x.as_str()) {
+        Some(w) if !w.is_empty() => format!(": {w}"),
+        _ => String::new(),
+    };
+    let mut out = String::new();
+    let batch_lines = |out: &mut String, b: &Value| {
+        for p in b.get("projects").and_then(|v| v.as_array()).into_iter().flatten() {
+            out.push_str(&format!("  {} ({}) — {}{}\n", s(p, "name"), s(p, "session"), s(p, "state"), why(p)));
+            for w in p.get("windows").and_then(|v| v.as_array()).into_iter().flatten() {
+                out.push_str(&format!("    {} — {}{}\n", s(w, "name"), s(w, "state"), why(w)));
+            }
+        }
+    };
+    match action {
+        "run" => {
+            out.push_str(&format!("✓ restore {} accepted ({}, attempt {}); it runs in the gateway's background — `tmm project restore` shows its progress\n", s(r, "batch"), s(r, "mode"), r["attempt"]));
+            batch_lines(&mut out, &r["items"]);
+        }
+        "abandon" => match r["abandoned"].as_bool() {
+            Some(true) => out.push_str(&format!("✓ restore {} abandoned; no window was touched\n", s(r, "batch"))),
+            _ => out.push_str(&format!("nothing to abandon: {}\n", s(r, "reason"))),
+        },
+        _ => {
+            let switch = if r["restore_on_start"].as_bool() == Some(true) { "on" } else { "off" };
+            out.push_str(&format!("restore on start: {switch} · boot {}\n", r["boot_id"].as_str().unwrap_or("unknown")));
+            match s(r, "source").as_str() {
+                source @ ("open" | "last") => {
+                    let b = &r["batch"];
+                    let which = if source == "open" { "open" } else { "last (closed)" };
+                    let closed = match b.get("closed").and_then(|x| x.as_str()) {
+                        Some(c) => format!(": {c}"),
+                        None => String::new(),
+                    };
+                    out.push_str(&format!("{which} restore {} (attempt {}){closed}\n", s(b, "batch"), b["attempt"]));
+                    batch_lines(&mut out, b);
+                }
+                "plan" => {
+                    let plan = &r["plan"];
+                    out.push_str("a --run would restore, from the latest checkpoint:\n");
+                    for p in plan.get("projects").and_then(|v| v.as_array()).into_iter().flatten() {
+                        let shells = if p["autostart_only"].as_bool() == Some(true) { " — shells only (autostart)" } else { "" };
+                        out.push_str(&format!("  {} ({}){shells}\n", s(p, "name"), s(p, "session")));
+                        for w in p.get("windows").and_then(|v| v.as_array()).into_iter().flatten() {
+                            out.push_str(&format!("    {} — {}\n", s(w, "name"), s(w, "kind")));
+                        }
+                        for w in p.get("skipped").and_then(|v| v.as_array()).into_iter().flatten() {
+                            out.push_str(&format!("    {} — not restored: {}\n", s(w, "name"), s(w, "text")));
+                        }
+                    }
+                    for p in plan.get("skipped").and_then(|v| v.as_array()).into_iter().flatten() {
+                        out.push_str(&format!("  {} — not restored: {}\n", s(p, "name"), s(p, "text")));
+                    }
+                }
+                _ => out.push_str(&format!("nothing to restore: {}\n", s(r, "reason"))),
+            }
+        }
+    }
+    out
 }
 
 /// `tmm skills load` as text (board #418): one header line (name ·
@@ -2459,6 +2543,30 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Board #422 round 4: `tmm project restore`'s text — a show names the
+    /// switch, the boot, and each project and window with its reason; a run
+    /// says it was accepted and runs in the background; an abandon says no
+    /// window was touched.
+    #[test]
+    fn project_restore_prints_its_source_and_what_each_door_did() {
+        let plan = serde_json::json!({ "restore_on_start": false, "boot_id": "b1", "source": "plan", "plan": {
+            "projects": [{ "name": "App", "session": "app", "autostart_only": false,
+                "windows": [{ "name": "dev", "kind": "agent" }],
+                "skipped": [{ "name": "dev2", "reason": "no_saved_conversation", "text": "no saved conversation" }] }],
+            "skipped": [{ "id": "x", "name": "Old", "reason": "archived", "text": "the project is archived" }] } });
+        let t = super::restore_text("show", &plan);
+        assert!(t.starts_with("restore on start: off · boot b1\n"), "{t}");
+        assert!(t.contains("  App (app)\n    dev — agent\n    dev2 — not restored: no saved conversation\n  Old — not restored: the project is archived\n"), "{t}");
+        let open = serde_json::json!({ "restore_on_start": true, "boot_id": null, "source": "open", "batch": { "batch": "u1", "attempt": 1, "closed": null,
+            "projects": [{ "name": "App", "session": "app", "state": "open", "reason": null, "windows": [{ "name": "dev", "state": "launch_unknown", "reason": "left as is" }] }] } });
+        let t = super::restore_text("show", &open);
+        assert!(t.contains("boot unknown") && t.contains("open restore u1 (attempt 1)\n  App (app) — open\n    dev — launch_unknown: left as is\n"), "{t}");
+        let run = serde_json::json!({ "accepted": true, "mode": "new", "batch": "u2", "attempt": 1, "items": { "projects": [] } });
+        assert!(super::restore_text("run", &run).starts_with("✓ restore u2 accepted (new, attempt 1); it runs in the gateway's background"));
+        assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": true, "batch": "u2" })), "✓ restore u2 abandoned; no window was touched\n");
+        assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": false, "reason": "no restore is open" })), "nothing to abandon: no restore is open\n");
+    }
+
     /// Board #362 c: a detail that needs a person names what to do; every
     /// other detail prints as before.
     #[test]

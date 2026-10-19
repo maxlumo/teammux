@@ -236,6 +236,54 @@ and a control that breaks the product on purpose would reach the wrong process. 
 the group while its leader is not yet reaped; signal 0 still finds a zombie, so "gone"
 means reaped.
 
+## The reboot restore has one live acceptance, and it gates the default (board #422 round 4)
+
+`scripts/restore-acceptance.sh <tmm>` runs a real gateway (`tmm gateway
+start`) and a real private tmux server on a rig of its own, with fake
+`claude` and `kiro-cli` on PATH that log their argv and every typed line and
+fire their own hooks through the helper the app wrote. The rig covers the
+claude and kiro fakes only; the real generated dsh shell's restore chain
+(readiness naming its launch, through the production launch door) is
+covered by the Rust fixtures `a_dsh_hold_is_released_only_by_readiness_naming_its_launch`
+and `a_real_dsh_shell_from_the_restart_door_names_its_launch_in_readiness_and_hooks`
+(the real generated shell), which the validator runs on the final
+tree (orchestrator ruling, 2026-10-19 22:42). It proves the
+baseline capture (a checkpoint naming both agents' conversation ids), the
+four negatives (old tmux still running; unchanged boot; `restore_on_start =
+false`; no checkpoint: nothing restored), the positive on the DEFAULT config
+(both sessions back, each agent with its exact id and launch uuid, claude
+released by its SessionStart, the fake kiro HELD with its backlog untyped
+until the rig types into its pane as a person, then released and the
+backlog delivered, one restore line per room), the person's door through
+the real CLI and the authenticated RPC with the switch off (`tmm project
+restore --run` accepted and run in the background, both sessions back;
+`--abandon` with nothing open says so and touches no pane), and that a
+wrong token executes nothing. `restore_on_start` defaults to true only
+because this passes; a change to the restore runs it again.
+
+- **The boot id is injected by a namespace only.** The gateway runs under
+  `unshare --user --map-root-user --mount` with a file bind-mounted over
+  `/proc/sys/kernel/random/boot_id` (measured on kernel 6.12 / util-linux
+  2.37: the fake id reads back inside, the host's is unchanged outside, and
+  tmux clients cross the boundary both ways). There is no production env
+  door for the boot id: a process's environment must not be able to fake a
+  reboot. The rig checks the host's own boot id before and after.
+- **In Docker the rig container runs with `--security-opt
+  seccomp=unconfined`.** Docker's default seccomp profile refuses `unshare`
+  ("Operation not permitted", measured on Docker 25.0.14), and runc refuses a
+  `-v` mount over a `/proc` path. The flag belongs to that disposable test
+  container only, which mounts no owner credentials, real config or host
+  tmux socket and keeps a private/loopback network and the RPC auth. It is
+  not a relaxation of the production or the general e2e configuration. A
+  rig that cannot inject the boot id fails; a skip is not acceptance.
+- **It follows #406 and #425.** `env -i` with only HOME, PATH,
+  XDG_CONFIG/DATA/STATE_HOME, TMUX_TMPDIR, LANG, TERM and SHELL, all under
+  the rig; host `127.0.0.1` set explicitly (the default is `0.0.0.0`);
+  config, `state.db` and socket asserted inside the rig before each start;
+  the gateway is stopped only by the pid it recorded and only while that
+  pid carries the rig's HOME; tmux only through `-S` on the rig's socket. No
+  owner login is read and no model is called.
+
 ## Multi-server work ends in the Docker environment (board #352)
 
 Owner, 2026-10-12: "像你测试整体效果的时候，比如模拟多个连接，可以用 docker 做环境隔离来最终测试".

@@ -95,6 +95,14 @@ pub fn post(room: &str, from: &str, body: &str) -> Result<serde_json::Value, Str
     post_routed(room, from, body, &[])
 }
 
+/// Push rows a store transaction already committed (a line recorded once by
+/// its id, board #422 round 4) through the same channel `post` uses.
+pub fn push_stored(msgs: &[HubMsg]) {
+    for m in msgs {
+        let _ = channel().send(message_json(m).to_string());
+    }
+}
+
 /// One PAGE of `room`'s messages, oldest first, walking backwards:
 /// `{ messages, has_more, head_seq }`. `before_seq` is exclusive; `None` is
 /// the newest page.

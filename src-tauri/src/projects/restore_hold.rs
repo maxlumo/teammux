@@ -271,9 +271,9 @@ enum Seen {
 /// Every pane of the socket's server, with the server's identity in the same
 /// answer: `None` = no server; `Err` = it could not be read. ONE listing,
 /// never a `display-message -t %N`: a gone `%N` is no error there (`display
-/// -p -t %99999 x` prints `x`). tmux 3.6a answers it with EMPTY pane fields
-/// (measured 2026-10-19), other builds have been reported to answer with
-/// another pane's; neither is the pane asked for.
+/// -p -t %99999 x` prints `x`); tmux 3.6a answers it with EMPTY pane fields
+/// (measured 2026-10-19). Any answer not naming the pane asked about is not
+/// that pane.
 struct Listing {
     instance: (u32, u64),
     /// pane id → (pane pid, session name, window name).
@@ -522,10 +522,10 @@ pub fn before_launch(session: &str, window: &str, target: &str) -> Result<Launch
     let unreadable = || format!("the new pane's identity is unreadable ({out:?}); nothing was typed");
     let f: Vec<&str> = out.trim_end().splitn(6, '\t').collect();
     let [pane_id, pane_pid, window_id, session_id, pid, start] = f[..] else { return Err(unreadable()) };
-    // The answer must name the pane asked about. A gone target is no error:
-    // tmux 3.6a answers it with empty pane fields (the parse below refuses
-    // them), other builds have been reported to answer with ANOTHER pane's
-    // (refused here).
+    // The answer must name the pane asked about: any answer that does not is
+    // not that pane. (A gone target is no error: tmux 3.6a answers it with
+    // empty pane fields, measured 2026-10-19, which the parse below refuses
+    // too.)
     if target.starts_with('%') && pane_id != target {
         return Err(unreadable());
     }

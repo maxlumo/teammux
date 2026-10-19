@@ -535,7 +535,7 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
         | "teams_list" | "teams_save" | "teams_delete"
         | "skills_list" | "skills_save" | "skills_delete" | "skills_refresh" | "skills_read"
         | "skills_import" | "skills_files" | "skills_file" | "skills_load"
-        | "mcp_list" | "mcp_save" | "mcp_delete" => {
+        | "mcp_list" | "mcp_save" | "mcp_delete" | "project_restore" => {
             handle_project_request(req.method.as_str(), p)
         }
 
@@ -588,6 +588,8 @@ fn handle_project_request(method: &str, p: &serde_json::Value) -> Result<serde_j
             projects::adopt(&session, p.get("name").and_then(|v| v.as_str()))
         }),
         "project_up" => need_id("id").and_then(|id| projects::up(&id)),
+        // Board #422 round 4: the reboot restore's manual doors, one RPC.
+        "project_restore" => projects::restore_run::restore_rpc(p.get("action").and_then(|v| v.as_str()).unwrap_or("show")),
         "project_down" => need_id("id").and_then(|id| projects::down(&id)),
         // The name is a label, so this touches nothing else: the session stays
         // the project's identity and the chat room keeps its key.

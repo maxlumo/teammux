@@ -26,7 +26,7 @@ mod board;
 mod projects;
 mod registry;
 mod restore;
-mod restore_batch;
+pub(crate) mod restore_batch;
 mod restore_hold;
 mod rooms;
 mod schema;
@@ -37,7 +37,7 @@ pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntent
 pub use restore_batch::{finished_word, settle, Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, Finished, ProjectState, WindowState, NO_WINDOW, RELEASED};
 pub use restore_hold::{Hold, HoldPane, HoldStage, UNKNOWN_BOOT};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
-pub use rooms::HubMsg;
+pub use rooms::{HubMsg, OnceLine};
 pub use wakes::Wake;
 
 pub struct Store {

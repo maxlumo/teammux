@@ -163,9 +163,15 @@ detail, and the stop itself stays in the activity log and the feed.
 | Telemetry: tool rows, prompt rows, warnings | ✅ | ❌ | ❌ |
 | Reply targets (activity recovery), pending deliveries | ✅ | ✅ | ❌ (turn gone) |
 | The agent process itself | ✅ (tmux outlives us) | ✅ | ❌ |
+| The agent's window and conversation, brought back | n/a | n/a | ⚠️ when `restore_on_start` is on, or by `tmm project restore --run` (#422) |
 
 The asymmetry in the last three rows is the honest summary of this design: **the
 conversation is durable, the observation is not.**
+
+After a host reboot (#422): settled windows that were live at the last
+checkpoint come back; agents relaunch with their saved conversation id;
+processes, split layouts, plain shells' running commands and sessions created
+after the last tick do not (projects.md § Known edges).
 
 One more thing does NOT survive that the table cannot show: a **running CLI's
 config**. The CLI reads it once at launch, so `refresh_hooks` patching the disk

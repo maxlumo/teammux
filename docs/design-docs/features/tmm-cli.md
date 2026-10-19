@@ -79,6 +79,8 @@ tmm spawn --team <team> [--brief <text>]     start a configured team (all member
 tmm project list                     ● live / ○ down, session + path
 tmm project create <path> [--name n] [--session s] [--with-agent <backend>]
 tmm project up|down|archive|unarchive|delete|rename <session>
+tmm project restore [--run|--abandon]   the reboot restore: show (reads only) |
+                                     run now (accepted, then background) | abandon
 
 # identity assets (central registry)
 tmm registry list|save|delete        agent definitions (--backend --system --model
@@ -475,6 +477,7 @@ a teammate:
 | Runtime team | `tmm agent team <name> <team\|->` | drag the card onto a team (mouse/pen); card menu: Move to team t / Leave team t (#384) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |
 | Project | `tmm project up\|down\|archive\|unarchive\|delete <session>` | header: Open / Close / Delete (archive is the list's own action); recycle bin: Restore (#415) |
+| Reboot restore | `tmm project restore [--run\|--abandon]` | none: an operator's door; the project room carries each restore's line (#422 round 4, projects.md § the manual doors) |
 | Board hand-off | `tmm board assign <id> <name\|->` | Board detail: the assignee picker (its first row clears it) |
 | Skill | `tmm skills list\|load <name>` (root, SKILL.md, the other files' paths) | Agents > Skills: the list and the skill editor's file preview (#418) |
 

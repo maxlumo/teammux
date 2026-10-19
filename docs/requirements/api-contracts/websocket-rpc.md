@@ -145,6 +145,7 @@ Projects section hides itself when these return -32601. See
 | `project_adopt` | `session`, `name?` | `{project, slots}` — takes a live session's windows as the declaration |
 | `project_up` | `id` | `{session, created_session, slots: [{window_name, status, error?}]}` |
 | `project_down` | `id` | `{session, live: false}` — kills the session, keeps the declaration |
+| `project_restore` | `action`: `show` (default) \| `run` \| `abandon` | show: `{socket, restore_on_start, boot_id, source: open\|last\|plan\|none, batch?\|plan?\|reason?}`, reads only; run: `{accepted, mode: continue\|retry\|new, batch, attempt, items}` once admitted under the restore lock (execution continues in the background); abandon: `{abandoned, batch?\|reason?}`. Refused: a held lock, an unknown boot (run), an unknown action (board #422 round 4) |
 | `project_archive` | `id`, `archived?` | Hides/unhides without deleting |
 | `project_rename` | `id`, `name` | `{id, name, session, session_renamed}` — renames the tmux session to `slug(name)` too. The chat room is recorded on the project so it does NOT move, the Board rows move transactionally to the new session key, and the previous session name stays reserved/resolving for agents already running with `TMM_PROJECT` (another project cannot reuse the alias) |
 | `project_autostart` | `id`, `autostart?` | Flag only; no boot integration yet |

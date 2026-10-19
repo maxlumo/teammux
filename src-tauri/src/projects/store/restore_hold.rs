@@ -655,6 +655,9 @@ mod tests {
             pane_pid: None,
             launch: Some(launch.into()),
             op: None,
+            typed: Some(true),
+            released: false,
+            create_issued: Some(true),
         };
         let project = |id: &str, windows: Vec<BatchWindow>| BatchProject {
             id: id.into(),
@@ -674,7 +677,7 @@ mod tests {
             batch: "b".into(),
             socket: "/s".into(),
             boot_id: None,
-            owner_pid: 1,
+            owner_pid: 1, attempt: 0,
             instance: None,
             source: Checkpoint { gen: 0, at: 1, boot_id: None, tmux: None, projects: vec![] },
             closed: None,
@@ -682,9 +685,11 @@ mod tests {
                 project("p", vec![window(0, "L1", WindowState::LaunchUnknown), window(1, "L2", WindowState::Created)]),
                 // Another project's slot of the same ord.
                 project("q", vec![window(0, "L1", WindowState::LaunchUnknown)]),
+                // A window the owner already confirmed `Launched`.
+                project("r", vec![window(0, "L5", WindowState::Launched)]),
             ],
         };
-        let mut holds = vec![hold("L1", 0), hold("L2", 1)];
+        let mut holds = vec![hold("L1", 0), hold("L2", 1), Hold { project_id: "r".into(), ..hold("L5", 0) }];
         for h in &mut holds {
             h.stage = HoldStage::Armed;
             h.pane = Some(pane());
@@ -700,6 +705,9 @@ mod tests {
         assert_eq!(rec(&store, true, 1, 0).0, WindowState::LaunchUnknown, "another project's slot is not this hold's");
         assert!(store.release_hold_if("L2", &[HoldStage::Armed]).unwrap());
         assert_eq!(rec(&store, true, 0, 1).0, WindowState::Created, "a window never typed into is not made Launched");
+        // Confirmed Launched by the owner before its release: marked all the same.
+        assert!(store.release_hold_if("L5", &[HoldStage::Armed]).unwrap());
+        assert!(store.restore_batch("/s").unwrap().unwrap().projects[2].windows[0].released, "marked released all the same");
         // The owner saves and closes from its copy taken before the release;
         // its copy comes back merged, and its finished projects settled again.
         let mut copy = owner.clone();
@@ -710,10 +718,19 @@ mod tests {
         assert_eq!(rec(&store, true, 0, 0), (WindowState::Launched, Some(RELEASED.into())), "a save does not take it back");
         assert_eq!(copy.projects[0].windows[0].state, WindowState::Launched, "the owner's copy is the merged state");
         assert_eq!((copy.projects[0].state, copy.projects[0].reason.clone()), (ProjectState::Done, None), "and its outcome follows its windows");
+        // Released BEFORE the owner's own `Launched` (its rename): the
+        // release stays recorded in the owner's copy and the store.
+        let mut renamed = owner.clone();
+        (renamed.projects[0].windows[0].state, renamed.projects[0].windows[0].reason) = (WindowState::Launched, None);
+        store.save_batch(&mut renamed).unwrap();
+        assert!(renamed.projects[0].windows[0].released, "merged into the owner's copy");
+        let stored = store.restore_batch("/s").unwrap().unwrap();
+        assert!(stored.projects[0].windows[0].released, "the rename does not take the release back");
         let mut closing = owner.clone();
         closing.closed = Some("done with failures".into());
         store.close_batch(&mut closing).unwrap();
-        assert_eq!(rec(&store, false, 0, 0), (WindowState::Launched, Some(RELEASED.into())), "nor does the close");
+        let last = store.last_batch("/s").unwrap().unwrap();
+        assert!(last.projects[0].windows[0].state == WindowState::Launched && last.projects[0].windows[0].released, "nor does the close");
         // A stored batch that cannot be read is an error, never overwritten.
         let mut again = owner.clone();
         again.batch = "b".into();

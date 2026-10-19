@@ -12,7 +12,7 @@ tmux_socket = ""               # optional, tmux -S path
 tls_cert = ""                  # optional, PEM cert for wss://
 tls_key = ""                   # optional, PEM private key for wss://
 disconnect_grace_secs = 600    # optional
-restore_on_start = false       # optional; board #422
+restore_on_start = true        # optional; board #422 (false turns the automatic start off)
 ui_dir = ""                    # optional, absolute path of a built web UI (dist/)
 ```
 
@@ -23,6 +23,6 @@ Default scrollback: 500 lines.
 Per-agent settings are not in this file: each registry definition (backend, model, effort, input mode `queue`|`steer`, prompt, skills, MCP) lives in `state.db` and is edited in Settings → Agents or with `tmm registry save`. The input mode is offered only for kiro and codex; see agents-overview.md § The input mode.
 `kiro_engine` (default `v2`; env `KIRO_ENGINE`): the kiro-cli agent engine managed kiro agents launch with — `v2` (the CLI's default) or `v3` (kiro-cli 2.22.1's KAS engine). Read at spawn and at every refresh; an agent takes it at its next restart. Under `v3` each managed kiro agent also gets a symlink `<ws>/.kiro/agents/<name>.json` into its isolated home (see agents-overview.md § kiro 2.22.1). Board #207.
 
-Default restore_on_start: false. When true, a gateway start after a host reboot brings back the sessions and agents the last checkpoint saw live (board #422; `docs/design-docs/features/projects.md` § After a host reboot). Off until the live acceptance of round 4.
+Default restore_on_start: true (since board #422 round 4's live acceptance, `scripts/restore-acceptance.sh`). A gateway start after a host reboot brings back the sessions and agents the last checkpoint saw live (`docs/design-docs/features/projects.md` § After a host reboot); `false` turns that off, and so does a config.toml that cannot be read or parsed (said on stderr by kind and line/column only, never the file's text, which holds the token: a person's opt-out is never lost to a torn file). The switch governs only the automatic start: `tmm project restore --run` is the person's door either way, and `tmm project restore` shows the switch's state.
 
 Default disconnect_grace_secs: 600 (10 min). Delay before a disconnected client's tmux window is auto-resized back; set to 0 for legacy immediate restore. See `docs/design-docs/features/disconnect-grace.md`.

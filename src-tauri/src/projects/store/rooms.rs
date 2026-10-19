@@ -21,6 +21,40 @@ pub struct HubMsg {
     pub body: String,
 }
 
+/// One system line whose message id is its identity (board #422 round 4):
+/// the report of one event, written at most once, in the caller's
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnceLine {
+    pub room: String,
+    pub id: String,
+    pub sender: String,
+    pub body: String,
+}
+
+/// In the caller's transaction: append `line` unless a message with its id
+/// exists (`hub_msgs.id` is UNIQUE). `Some(row)` = inserted now, for the
+/// caller to push AFTER its commit; `None` = already recorded.
+pub(super) fn hub_append_once_in(conn: &rusqlite::Connection, line: &OnceLine, ts: i64) -> Result<Option<HubMsg>, String> {
+    let n = conn
+        .execute(
+            "INSERT INTO hub_msgs (id, ts, room, sender, to_json, kind, body)
+             VALUES (?1, ?2, ?3, ?4, '[]', 'msg', ?5) ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![line.id, ts, line.room, line.sender, line.body],
+        )
+        .map_err(|e| format!("append hub message: {e}"))?;
+    Ok((n == 1).then(|| HubMsg {
+        seq: conn.last_insert_rowid(),
+        id: line.id.clone(),
+        ts,
+        room: line.room.clone(),
+        sender: line.sender.clone(),
+        to_json: "[]".into(),
+        kind: "msg".into(),
+        body: line.body.clone(),
+    }))
+}
+
 /// Shared row mapper for every `SELECT seq, id, ts, room, sender, to_json,
 /// kind, body FROM …` read (hub_msgs and the legacy import alike).
 fn hub_msg_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HubMsg> {

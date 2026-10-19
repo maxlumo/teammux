@@ -26,8 +26,9 @@ struct FileConfig {
     // `embed-ui`), else none. Read from config.toml only.
     ui_dir: Option<String>,
     // Bring back, at gateway start, the sessions and agents a host reboot
-    // took down (board #422). Default false until the live acceptance of
-    // round 4; read once per start (and per decision a capture tick needs).
+    // took down (board #422). Default true since the live acceptance of
+    // round 4 (false turns it off; an unreadable file is off); read once per
+    // start (and per decision a capture tick needs).
     restore_on_start: Option<bool>,
 }
 
@@ -46,14 +47,34 @@ pub struct Config {
     pub ui_dir: Option<String>,
 }
 
-/// `restore_on_start` in config.toml (board #422), side-effect free; false
-/// when unset or unreadable.
+/// `restore_on_start` in config.toml (board #422), side-effect free. ON only
+/// for a config that says so or that is VALID and does not mention it — the
+/// default flipped with the round 4 live acceptance
+/// (`scripts/restore-acceptance.sh`). A config.toml that cannot be read or
+/// parsed is OFF, said on stderr: a person's opt-out must not be lost to a
+/// torn file (round 4 review P1-D). A person's `tmm project restore --run`
+/// has its own admission and does not ask this.
 pub fn restore_on_start() -> bool {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|t| toml::from_str::<FileConfig>(&t).ok())
-        .and_then(|c| c.restore_on_start)
-        .unwrap_or(false)
+    restore_switch(config_path().as_path(), std::fs::read_to_string(config_path())).unwrap_or_else(|e| {
+        eprintln!("config: automatic restore is OFF: {e}");
+        false
+    })
+}
+
+/// The switch from one read of `path` (`restore_on_start`): absent file or
+/// key → on; the key's value; unreadable or unparseable → `Err`.
+fn restore_switch(path: &std::path::Path, read: std::io::Result<String>) -> Result<bool, String> {
+    match read {
+        // Never `{e}`: toml's message quotes the offending line, and
+        // config.toml holds the gateway token (round 4 review). The same
+        // kind-and-position text `tmm setup` prints (`validate_file`).
+        Ok(text) => match toml::from_str::<FileConfig>(&text) {
+            Ok(c) => Ok(c.restore_on_start.unwrap_or(true)),
+            Err(_) => Err(format!("{} cannot be parsed ({})", path.display(), validate_file(&text).err().unwrap_or_else(|| "not valid TOML".into()))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!("{} cannot be read ({e})", path.display())),
+    }
 }
 
 /// The kiro engine door, side-effect free (no token/machine-id seeding — the
@@ -554,6 +575,58 @@ pub fn touch_session(name: &str) -> Result<(), String> {
     std::fs::write(session_usage_path(), json).map_err(|e| e.to_string())
 }
 
+
+#[cfg(test)]
+mod restore_switch_tests {
+    use super::restore_switch;
+    use std::io::{Error, ErrorKind};
+    /// Round 4 review P1-D: the default is ON only for a valid config without
+    /// the key (or no file at all); a file that cannot be read or parsed is
+    /// OFF, never "the default", so a person's `false` survives a torn file.
+    #[test]
+    fn the_restore_switch_is_on_by_default_and_off_when_the_config_cannot_be_read() {
+        let p = std::path::Path::new("/c/config.toml");
+        assert_eq!(restore_switch(p, Err(Error::from(ErrorKind::NotFound))), Ok(true), "no file: the default");
+        assert_eq!(restore_switch(p, Ok("port = 1\n".into())), Ok(true), "valid, no key: the default");
+        assert_eq!(restore_switch(p, Ok("restore_on_start = true\n".into())), Ok(true));
+        assert_eq!(restore_switch(p, Ok("restore_on_start = false\n".into())), Ok(false));
+        let torn = restore_switch(p, Ok("restore_on_start = false\nport = \"".into()));
+        assert!(torn.as_ref().is_err_and(|e| e.contains("cannot be parsed")), "{torn:?}");
+        // A torn token line: OFF, located, and the token never printed.
+        let leak = restore_switch(p, Ok("token = \"SENTINEL_SECRET\nrestore_on_start = false\n".into()));
+        let msg = leak.as_ref().err().cloned().unwrap_or_default();
+        assert!(msg.contains("cannot be parsed") && msg.contains("line "), "{msg}");
+        assert!(!msg.contains("SENTINEL") && !msg.contains("token ="), "the diagnostic must not quote the file: {msg}");
+        let denied = restore_switch(p, Err(Error::from(ErrorKind::PermissionDenied)));
+        assert!(denied.as_ref().is_err_and(|e| e.contains("cannot be read")), "{denied:?}");
+    }
+
+    /// Validator N3: the wrapper the start reads applies the rule — a torn
+    /// config.toml in this process's config dir is OFF, a valid one without
+    /// the key ON. The file before is restored (the dir is shared per
+    /// process).
+    #[test]
+    fn restore_on_start_is_off_for_a_torn_config_toml() {
+        struct Back(std::path::PathBuf, Option<String>);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(t) => std::fs::write(&self.0, t).unwrap(),
+                    None => {
+                        let _ = std::fs::remove_file(&self.0);
+                    }
+                }
+            }
+        }
+        let path = super::config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _back = Back(path.clone(), std::fs::read_to_string(&path).ok());
+        std::fs::write(&path, "restore_on_start = false\nport = \"").unwrap();
+        assert!(!super::restore_on_start(), "a torn file is off");
+        std::fs::write(&path, "port = 1\n").unwrap();
+        assert!(super::restore_on_start(), "control: a valid file without the key is on");
+    }
+}
 
 #[cfg(test)]
 mod engine_tests {

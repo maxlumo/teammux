@@ -819,6 +819,23 @@ impl Store {
         self.conn.execute_batch(sql).map_err(|e| e.to_string())
     }
 
+    /// Test-only: every row of `tables`, as text, in rowid order — what a
+    /// "writes nothing" test compares before and after.
+    #[cfg(test)]
+    pub fn dump_for_test(&self, tables: &[&str]) -> Result<String, String> {
+        let mut out = String::new();
+        for t in tables {
+            let mut stmt = self.conn.prepare(&format!("SELECT * FROM {t} ORDER BY rowid")).map_err(|e| e.to_string())?;
+            let n = stmt.column_count();
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let cells: Vec<String> = (0..n).map(|i| format!("{:?}", row.get::<_, rusqlite::types::Value>(i).ok())).collect();
+                out.push_str(&format!("{t}: {}\n", cells.join(" | ")));
+            }
+        }
+        Ok(out)
+    }
+
     /// Test-only: pretend every outstanding row of a session was typed at `ts`.
     #[cfg(test)]
     pub fn backdate_deliveries(&self, session: &str, ts: u64) -> Result<usize, String> {

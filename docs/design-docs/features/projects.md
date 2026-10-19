@@ -518,8 +518,11 @@ when the host went down, and whether the host really went down.
 
 Round 1 records the evidence and makes the decision as pure functions
 (`projects/restore.rs`, `store/restore.rs`). Round 2 adds the executor
-(below). **Nothing calls it at gateway start yet**: that waits for round 3's
-input barrier for restored windows, and `autostart` is still not acted on.
+(below). Round 3 adds the input barrier and calls it at gateway start; round
+4 adds the manual doors (`tmm project restore`), the project room line and,
+with its live acceptance, turns `restore_on_start` on by default. `autostart` acts only
+here: a project the checkpoint did not see live but that is marked autostart
+comes back with its SHELL windows only.
 
 - **The checkpoint is a complete observation, committed with its folds.**
   Each capture tick lists its tmux socket's sessions ONCE (`list-sessions -F
@@ -636,8 +639,9 @@ input barrier for restored windows, and `autostart` is still not acted on.
 ## After a host reboot: the executor (board #422, round 2)
 
 `projects/restore_run.rs` brings a plan back, and `store/restore_batch.rs`
-holds its progress. Round 3 wires it into gateway start, off by default
-(`restore_on_start`), together with the input barrier (next section).
+holds its progress. Round 3 wires it into gateway start (`restore_on_start`,
+on by default since round 4's live acceptance), together with the input
+barrier (next section).
 
 - **The gate holds for both paths.** Restore off, or a boot that cannot be
   read, does nothing before any write. An open batch is then neither
@@ -893,9 +897,9 @@ was broken out to another window has not ended that pane), retires it in the sam
   whatever pane is active or split off, until its ORIGINAL pane is confirmed
   ended: one `list-panes -a` of the socket, with the server's pid and start
   time in the same answer (never `display-message -t %N`: a gone `%N` is no
-  error there, tmux 3.6a answers it with EMPTY pane fields (measured
-  2026-10-19) and other builds have been reported to answer with another
-  pane's fields; both mean "not the pane asked for"). A pane missing from this
+  error there, tmux 3.6a answers it with EMPTY pane fields, measured
+  2026-10-19; the rule is that any answer not naming the pane asked about
+  is not that pane). A pane missing from this
   instance, another instance, or no server ends it. An answer that cannot be
   read holds EVERY window (it cannot exclude that the target is the hold's
   pane), and so does a store that cannot be read. The capture tick's `prune`
@@ -961,6 +965,11 @@ was broken out to another window has not ended that pane), retires it in the sam
   conditional on the batch uuid, the project, the slot's ord and the
   window's launch uuid, in whichever of the socket's open and last batches
   is that batch: the capture then observes the window like any other. The
+  window also records `released`: a monotonic fact the release writes even
+  on a window the owner already confirmed `Launched` (its rename may come
+  first), which no owner save takes back. The round 4 room line counts a
+  ready agent by it, never by the reason text (found by the live acceptance
+  rig, 2026-10-19: both agents were released and the record said neither). The
   batch owner writes its batch whole from its own copy, so `save_batch` and
   `close_batch` keep a stored window the release made `Launched` (same
   project, ord and launch; keyed on the state, never on the reason text) and
@@ -1099,8 +1108,14 @@ was broken out to another window has not ended that pane), retires it in the sam
   right after the turn-fact replay, before the hook inbox, capture, the start
   flush, wakes and the first accept; `continue_schedule` runs the tmux work
   on its own thread once the room poster is in place. `run` is `prepare` and
-  one `continue_batch` pass. `restore_on_start` (config.toml) is false by
-  default: round 4 turns it on with its live acceptance.
+  one `continue_batch` pass. `restore_on_start` (config.toml) is ON by
+  default since round 4's live acceptance (`scripts/restore-acceptance.sh`);
+  `restore_on_start = false` turns the automatic start off, and so does a
+  config.toml that cannot be read or parsed (fail-closed, said on stderr by
+  kind and line/column only — never the file's text, which holds the
+  gateway token: the default applies only to a valid config without the key; round 4
+  review P1-D, pinned by
+  `the_restore_switch_is_on_by_default_and_off_when_the_config_cannot_be_read`).
 - **Every decision is published under the owner lease.** prepare takes the
   lock before ANY write of `restore_decided`, the off, unknown-boot, already
   restored and empty-plan outcomes included; Busy writes nothing, and the
@@ -1109,15 +1124,17 @@ was broken out to another window has not ended that pane), retires it in the sam
   took (never a second acquire); a pass that leaves the batch open (a shell
   not ready, an Unknown to re-observe, an error) is followed by others at
   `PASS_DELAYS`, ABSOLUTE offsets from the schedule's start (30 s, 2 min,
-  10 min: a slow pass shortens the next wait), each re-entering `run` with its own
-  acquire, and none retypes a `launch_issued` window. A start that found the
+  10 min: a slow pass shortens the next wait), each with its own acquire
+  (`resume`: only the batch and attempt the schedule was admitted with, round
+  4), and none retypes a `launch_issued` window. A start that found the
   lock held observes on the same schedule and takes over only when the lock
   is free. Exhausted holding the lock, the batch it ran (re-read under the
   lock) is closed `failed: not finished after 4 passes: <reason>`, the windows
   it made and never typed into are killed by round 2's guarded kill (their
   holds retire only when the kill is confirmed; a kill already issued is
   re-observed, never re-sent), and each unfinished project's room is told
-  once, naming `tmm project up` (the door that exists today);
+  once, in the close's transaction (round 4, § the manual doors), naming
+  `tmm project up`;
   exhausted while another owner holds the lock, nothing is written.
 - **A boot no prepare decided for is decided before the next tick.** Each
   capture tick first asks `decide_if_needed`: when the tick's boot is known
@@ -1130,11 +1147,142 @@ was broken out to another window has not ended that pane), retires it in the sam
   missing window: the barrier holds typing into windows, it does not queue
   lines for windows that do not exist.
 
+## After a host reboot: the manual doors (board #422, round 4)
+
+One RPC, `project_restore { action }`, behind `tmm project restore`
+(revision 1 of the round 4 plan, reviewer CLEAR 19:12):
+
+- **`show`** (no flag) reads only: no lock, no write, no tmux command. It
+  answers what a run would start from NOW, in this order: the socket's open
+  batch; else this boot's last closed batch; else the plan from the latest
+  checkpoint, every skip with its reason. It also states `restore_on_start`
+  and the boot id. It is a snapshot: a later `--run` reads again under the
+  lock and reports what it actually accepted.
+- **`--run`** is admitted under the restore lock, before any tmux write, and
+  answers within the RPC with `{accepted, mode, batch, attempt, items}`. The
+  existing background continuation then executes the batch. A held lock
+  refuses ("another gateway is restoring"), and so does an unknown boot:
+  show and abandon still work then. The admission:
+  - an open batch of THIS boot is continued as it stands, as a new attempt
+    (`attempt + 1`), so the schedule that ran it before stops;
+  - an open batch of another boot is closed FAILED, as a start closes it;
+  - an open batch whose boot is unknown is left for `--abandon`;
+  - this boot's last CLOSED batch is retried under its own uuid while the
+    server it made its objects on still answers (below); that server gone,
+    or a batch that never had one, its objects cannot exist and a new batch
+    plans afresh; a server that cannot be read runs nothing;
+  - otherwise a NEW batch from the latest checkpoint, at attempt 1 (0 is the
+    automatic start's).
+  The person asserts the loss, so the switch (R0), the reboot test (R2/R3)
+  and "this boot was already restored" do not apply. A checkpoint (R1), the
+  plan, the down/Stop suppression, the executor's rereads and the strict
+  launch door all do, and an existing session is still skipped whole.
+- **A retry rebuilds only what was never typed into and is confirmed
+  gone.** One IMMEDIATE transaction under the lock (`reopen_batch`) moves the
+  last batch back to open as attempt + 1, with the planned holds it needs,
+  and only while the stored last batch is still the bytes the admission read
+  (a release that marked a window meanwhile is never overwritten) and each
+  planned hold's slot still holds exactly what the admission read there (no
+  row, or that one generation): a restart or spawn installs a generation
+  without the restore lock and without touching the batch, and the retry
+  must never retire it (round 4 review P1-B,
+  `a_retry_never_replaces_a_generation_installed_after_its_read`). Either
+  change refuses the whole retry, nothing written.
+  - Per window: Pending stays and runs; Creating and Created, an issued
+    create or kill included, are continued and re-observed by the executor,
+    never re-sent; LaunchIssued, LaunchUnknown, Launched and Skipped are
+    shown only. Failed is rebuilt ONLY when it was never typed into and its
+    pane is confirmed absent from the whole instance (`pane_ended`: a pane
+    moved or broken out elsewhere is not absent, an unreadable listing
+    confirms nothing). With no ids at all, only a create that was never
+    issued or that the server refused counts as gone (`create_issued`,
+    written ahead of `new-window`): a create whose receipt was lost may have
+    made a window no id names, so it is shown only (round 4 review P1-C,
+    `a_retry_never_rebuilds_a_window_whose_create_may_have_happened`). It
+    then becomes Pending with its ids cleared and, for an agent, a fresh
+    planned generation. An agent slot another launch holds
+    now is shown only.
+  - `typed` is that fact: written true in the SAME transaction as the
+    `LaunchIssued` that precedes any typing, never cleared, `false` from the
+    plan on. "Failed" alone proves nothing (a shell whose typed command's
+    outcome was unseen ends Failed), and a record from before the field is
+    no proof of "never typed".
+  - Per project: Skipped is shown only (a foreign session among them); a
+    finished project with something to retry reopens when its session is
+    ours on this instance by its batch env, and the executor's guarded steps
+    check every object again; it is claimed again (`new-session`, which a
+    taken name refuses) when its session is confirmed gone; otherwise it is
+    shown only. Pending, CreatingSession and Open continue as they stand.
+- **`--abandon`** takes the lock, closes the open batch FAILED `abandoned`,
+  and writes nothing in tmux. Holds and held lines stay: they outlive every
+  batch and end only on evidence or a lifecycle act. Nothing open answers
+  the same every time.
+- **A continuation consumes only its admission.** A schedule's owner passes
+  after the first call `resume(Admitted { batch, attempt })`, which executes
+  the open batch only while it is still that batch at that attempt. A batch
+  abandoned, closed, or continued by another attempt ends the schedule, which
+  never admits anything itself; its give-up checks the attempt too. The
+  manual continuation therefore runs with `restore_on_start` off, and stops
+  after `--abandon`. An observer (an automatic start that found the lock
+  held) has no admission until its own prepare takes the lease; from that
+  pass on it owns exactly that (batch, attempt) and resumes only it (round
+  4 review P1-A). A follower that never took one never closes or kills
+  anything. Pinned by `an_observer_that_takes_over_owns_only_that_admission`.
+- **The report line is one hub_msgs row per event** (revision 1, P1-B). A
+  project that becomes terminal in an attempt (finished, skipped whole, or
+  failed before its windows) is reported in the SAME transaction as the
+  batch save that makes it so (`save_batch_reporting`); give-up reports each
+  unfinished project in the close's transaction (`close_batch_reporting`).
+  - The message id is the identity: `restore:<batch>:<attempt>:<project
+    id>:<finished|gave_up>`, inserted `ON CONFLICT(id) DO NOTHING`. Only the
+    call that inserted the row pushes it, after its commit, through the
+    rooms channel every post uses (`rooms::push_stored`). There is no second
+    "said" mark: the row is the one fact. A crash inside the transaction
+    leaves neither row nor terminal state; after the commit, the row is in
+    history and a successor's re-finalize, an old owner's stale save or a
+    second gateway's connection insert nothing; a later batch replacing
+    `restore_last` does not touch `hub_msgs`. A person's retry is a new
+    attempt, so it has its own line.
+  - The line is built from the batch as stored (a release merged), and is
+    the execution summary at that moment: `[tmm] restored after a host
+    reboot: 3 windows created (2 agents relaunched with their saved
+    conversation, 1 confirmed ready), 1 launch result unconfirmed (rev), 1
+    skipped (no saved conversation: dev2), 1 failed (aux: …)`. Created means
+    confirmed (`Launched`); ready means the hold was released on evidence;
+    a launch written ahead and not confirmed (`LaunchIssued`,
+    `LaunchUnknown`, e.g. the owner died before typing) is "launch result
+    unconfirmed", never relaunched, and `typed` proves no start. A person's
+    run says `restored by \`tmm project restore\` (attempt N)`, never "after
+    a host reboot"; a project skipped whole says `not restored …: <reason>`.
+    A later release that turns a closed project Done posts no second line.
+
+Pinned by `the_read_only_restore_shows_its_source_and_writes_nothing`,
+`a_manual_run_is_admitted_first_and_its_continuation_runs_with_the_switch_off`,
+`a_continuation_consumes_only_its_admitted_attempt_and_stops_after_abandon`,
+`the_manual_doors_refuse_an_unknown_boot_a_held_lock_and_an_unknown_action`
+and the CLI's `project_restore_prints_its_source_and_what_each_door_did`;
+the retry by
+`a_retry_rebuilds_only_untyped_windows_confirmed_gone_and_never_retouches_a_launch`
+and `a_retry_reopens_our_session_never_a_foreign_one_and_reclaims_one_that_is_gone`;
+the report line by `the_room_line_counts_only_what_the_restore_confirmed`,
+`the_room_line_is_one_row_per_attempt_whatever_dies_or_races` and
+`a_retry_records_its_own_line_and_keeps_the_first`.
+
 ## Known edges
 
-- `autostart` is stored but nothing acts on it yet (decision 3: manual restore
-  first). Board #422 records the reboot evidence and plans the restore (see
-  "After a host reboot"); bringing sessions back is its later rounds.
+- **After a host reboot** (board #422; it replaces the old "manual restore
+  first" decision, which the 2026-10-18 03:06 reboot showed to cost a person
+  six projects by hand): settled windows that were live at the last
+  checkpoint come back, and agents relaunch with their saved conversation id
+  through the strict launch door. What does NOT come back: running
+  processes (a new CLI process resumes the conversation), split layouts
+  inside a window, a plain shell's running command, a session or window
+  created after the last capture tick, a slot a person downed or stopped,
+  a managed agent whose home is gone, and an agent with no saved
+  conversation. `autostart` brings back a project the checkpoint did not see
+  live with its shells only. `restore_on_start` is on by default (false
+  turns the automatic start off); `tmm project restore --run` is the
+  person's door either way.
 - A window renamed by hand looks like "old window gone, new window appeared":
   the old slot leaves the declaration and the new one has to settle again.
 - `up` restores windows, not panes: a split layout inside a window is not part
