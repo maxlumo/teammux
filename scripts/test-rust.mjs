@@ -17,6 +17,9 @@
 // before the run and is removed after it. The real server's socket is simply
 // not where the test process will look:
 //   - TMUX and TMUX_PANE are unset, so no test inherits "the pane we are in";
+//     TMUX_SOCKET too: Config::from_parts takes it before anything else, so an
+//     exported path to the real server would be followed by any gateway a test
+//     starts, TMUX_TMPDIR or not (board #425 review);
 //   - TMUX_TMPDIR is a fresh `mkdtemp`, so the "default" server tmux resolves
 //     is an empty one under that dir, created on demand and killed with it.
 // Nothing here reaches the developer's tmux at all.
@@ -27,8 +30,14 @@
 // it was never given (an agent pane carries TMM_PROJECT/TMM_AGENT; whatever
 // the caller has, the suite must not inherit it). This removes the
 // caller's inherited routing, identity and credential; it is not a network
-// sandbox (HOME, XDG_CONFIG_HOME, HOST/PORT and config.toml still resolve), so
-// a test that talks to a gateway sets its own endpoint and config on its child.
+// sandbox (HOME, HOST/PORT and config.toml still resolve), so a test that talks
+// to a gateway sets its own endpoint and config on its child.
+// And one layer further (board #425, validator incident 2026-10-19 03:17): the
+// config directory is resolved from XDG_CONFIG_HOME BEFORE HOME, so a rig that
+// set only HOME ran a gateway on the real ~/.config and consumed the real hook
+// inbox. The three XDG roots are therefore the throwaway dir's too: whatever a
+// test starts, it reads and writes a config, data and state directory that did
+// not exist before the run (HOME stays: cargo's own toolchain lives under it).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,20 +83,24 @@ export function cargoArgs(extra = []) {
 /** The environment the cargo process gets: the caller's, minus the two
  * variables that point at a real tmux, every `TMM_*` (the caller's gateway,
  * identity and state) and `TOKEN` (the credential Config::load reads), plus
- * TMUX_TMPDIR = `dir`. */
+ * TMUX_TMPDIR = `dir` and the three XDG roots under it. */
 export function isolatedEnv(base, dir) {
   const env = { ...base };
   delete env.TMUX;
   delete env.TMUX_PANE;
+  delete env.TMUX_SOCKET;     // Config prefers it to TMUX_TMPDIR: an inherited path would name the real server
   delete env.TOKEN;
   for (const key of Object.keys(env)) if (key.startsWith('TMM_')) delete env[key];
   env.TMUX_TMPDIR = dir;
+  env.XDG_CONFIG_HOME = join(dir, 'xdg-config');
+  env.XDG_DATA_HOME = join(dir, 'xdg-data');
+  env.XDG_STATE_HOME = join(dir, 'xdg-state');
   return env;
 }
 
 export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, env = process.env, log = console.error } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'tmm-test-rust-'));
-  log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir} (TMUX/TMUX_PANE/TMM_*/TOKEN unset), --test-threads=1`);
+  log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir}, XDG_{CONFIG,DATA,STATE}_HOME under it (TMUX/TMUX_PANE/TMM_*/TOKEN unset), --test-threads=1`);
   try {
     const result = spawn('cargo', cargoArgs(extra), { cwd: repoRoot, env: isolatedEnv(env, dir), stdio: 'inherit' });
     if (result.error) {

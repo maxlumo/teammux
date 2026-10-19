@@ -185,6 +185,57 @@ correctly. Cleanup after the incident (2026-10-16) killed the leftover rig
 servers this way: three by `-S`, and four `tmm-test-own-a-*` servers from
 10-12 by pid, since their socket files were already gone.
 
+## A rig owns its whole environment, not just HOME (board #425)
+
+Incident, 2026-10-19 03:17: a validator's browser rig started a release
+gateway with `HOME=/tmp/val424rig/home` and a private `TMUX_SOCKET`, but the
+shell exported `XDG_CONFIG_HOME=/home/cfu/.config`, and the config directory is
+`$XDG_CONFIG_HOME/tmux-mobile` first, `$HOME/.config/tmux-mobile` only without
+it (`config::dirs_next`). The "isolated" gateway ran on the REAL config: it
+consumed and dropped eleven real hook notifications from the real inbox,
+rewrote the real notify helper and could have written to the real `state.db`.
+(Checked afterwards: the real `state.db` has no `restore_checkpoint*` key and no
+row naming the rig's socket; the live build predates the checkpoint code, so
+nothing inert was written either. The eleven envelopes were deleted and are not
+recoverable; the product half, [agent-notifications.md](../design-docs/features/agent-notifications.md),
+now keeps an envelope instead of dropping it when tmux cannot be reached.) The
+same rig recipe was used for #420.
+
+The rule, next to #406's: **a rig that starts a gateway, `tmm` or anything that
+reads the config sets, to its own directory, every variable that decides where
+that thing looks**, and proves it before the first start:
+- `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` (setting only
+  `HOME` does nothing while `XDG_CONFIG_HOME` is exported);
+- `TMUX_TMPDIR` (created first, see above) and `TMUX_SOCKET` (which a gateway's
+  config prefers to `TMUX_TMPDIR`, so an exported path to the real server would be
+  followed whatever the directory is);
+- every `TMM_*` and `TOKEN` (unset, or set to the rig's own).
+- **Assert the resolved config dir before starting.** Print it from the
+  binary or compute it the way `config::dirs_next` does, and stop unless it is
+  under the rig's directory: `case "$cfg" in "$RIG"/*) ;; *) echo "config dir
+  outside the rig: $cfg"; exit 1;; esac`. A rig that cannot show its config dir
+  is not isolated.
+- A rig started from an agent's shell inherits that shell's variables; start it
+  with `env -i` plus an explicit list, not with a few overrides on top of the
+  inheritance.
+`scripts/test-rust.mjs` is the one helper the repository itself ships for a
+test process, so the rule is baked in there once: `TMUX_TMPDIR` and the three
+XDG roots are subdirectories of its throwaway dir, and `TMUX`, `TMUX_PANE`,
+`TMUX_SOCKET`, every `TMM_*` and `TOKEN` are removed (pinned by
+`scripts/test-rust.test.ts`, the poison values never connected to); `HOME` is left
+alone because the Rust toolchain lives under it. It is not a network sandbox:
+`HOST`, `PORT`, `TLS_*` and `config.toml` still resolve, so a test that starts a
+gateway sets its own endpoint. An ad-hoc rig has no wrapper, so the list above is its checklist.
+
+The same ownership rule covers PROCESSES: a test that starts a process tree (a fake
+`tmux` the helper probes, a hung child) starts it in a process group of its own
+(`process_group(0)`), has the fake write its own pid first, and cleans up and checks
+through that group and that pid. It never runs `pkill -f` or `pgrep -f` on a command
+line: a pattern is shared by every parallel run and by other agents' tasks on this host,
+and a control that breaks the product on purpose would reach the wrong process. Signal
+the group while its leader is not yet reaped; signal 0 still finds a zombie, so "gone"
+means reaped.
+
 ## Multi-server work ends in the Docker environment (board #352)
 
 Owner, 2026-10-12: "像你测试整体效果的时候，比如模拟多个连接，可以用 docker 做环境隔离来最终测试".

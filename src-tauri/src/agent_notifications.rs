@@ -37,6 +37,43 @@ struct InboxEnvelope {
     backend: String,
     pane_id: String,
     payload: Value,
+    /// The tmux server the producer was running under, `socket,pid,start_time`,
+    /// written by the notify helper at production time (board #425). A pane id
+    /// only means something to the server instance that issued it; this is what
+    /// the consumer verifies it against. Absent from an older helper's envelope
+    /// (the legacy path), and treated as absent if it is not plain path
+    /// characters and digits.
+    #[serde(default)]
+    tmm_tmux: Option<String>,
+    /// The launch uuid (`TMM_LAUNCH`) of the window incarnation that produced it,
+    /// written by the helper only when it is exactly a 36-character `[0-9a-f-]`
+    /// uuid (board #422 H2 reads it; nothing in this file does yet). Top level,
+    /// next to `backend` and `pane_id`, never inside `payload`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    launch: Option<String>,
+    /// The pane as ONE checked tmux response resolved it (`check_pane`, board #425):
+    /// session, window, pane index. Set by `consume_file` before anything else
+    /// reads the envelope, so the numbered mark, the turn fact and the reply edge
+    /// all act on the pane that was verified — never on a second, unverified
+    /// resolve of the same `%N` (the server may have been replaced in between).
+    #[serde(skip)]
+    resolved: Option<(String, String, usize)>,
+}
+
+impl InboxEnvelope {
+    /// The verified pane: the one answer `consume_file` checked. Only a unit test that builds an
+    /// envelope by hand, and never went through `consume_file`, may ask tmux again; in the product an
+    /// unchecked envelope is kept (an unreadable answer), never acted on and never dropped.
+    fn pane(&self) -> Result<(String, String, usize), String> {
+        match &self.resolved {
+            Some(pane) => Ok(pane.clone()),
+            #[cfg(test)]
+            None => tmux::resolve_pane_id(&self.pane_id),
+            #[cfg(not(test))]
+            None => Err("invalid pane: this envelope was not checked against tmux".to_string()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -208,14 +245,32 @@ impl AgentNotificationHub {
         // Producers (panes) with an envelope not yet accepted in this pass:
         // their later envelopes wait behind it (review round 5 P1-B).
         let mut blocked = std::collections::HashSet::new();
+        // Only a NEGATIVE answer is remembered for the pass (tmux could not be asked: the
+        // next envelope does not spawn another doomed query). A positive one never
+        // authorises anything beyond the envelope it was asked for (board #425).
+        let mut unavailable: Option<String> = None;
+        // Envelopes kept because tmux could not be asked, and the oldest's age.
+        let (mut kept, mut oldest) = (0usize, std::time::Duration::ZERO);
         for path in inbox_files(&self.root.join("inbox")) {
-            match self.consume_file(&path, &mut blocked) {
+            match self.consume_file(&path, &mut blocked, &mut unavailable) {
                 Ok(()) => {}
                 // A numbered envelope that is not yet ACCEPTED stays in the
                 // inbox and is consumed again at the next pass (board #404).
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 Err(Consume::Retain(why)) => {
                     retain_note(&path, &why);
+                    continue;
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Err(Consume::Unavailable(why)) => {
+                    retain_note(&path, &format!("kept, it will be tried again: {why}"));
+                    kept += 1;
+                    oldest = oldest.max(std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default());
+                    continue;
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Err(Consume::Foreign(why)) => {
+                    retain_note(&path, &format!("left in the inbox, not this gateway's: {why}"));
                     continue;
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -241,16 +296,36 @@ impl AgentNotificationHub {
             }
             let _ = std::fs::remove_file(path);
         }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        kept_summary(kept, oldest);
     }
 
-    fn consume_file(&self, path: &Path, blocked: &mut std::collections::HashSet<String>) -> Result<(), Consume> {
+    fn consume_file(
+        &self,
+        path: &Path,
+        blocked: &mut std::collections::HashSet<String>,
+        #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_variables))] unavailable: &mut Option<String>,
+    ) -> Result<(), Consume> {
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
         if metadata.len() > MAX_INBOX_BYTES {
             return Err("payload too large".into());
         }
-        let envelope: InboxEnvelope =
+        #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_mut))]
+        let mut envelope: InboxEnvelope =
             serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("invalid envelope: {e}"))?;
+        // Whose pane is this, and does it exist THERE? (board #425) ONE tmux response answers
+        // both for this envelope alone, and its result is what every later step uses.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        match check_pane(&envelope, &metadata, unavailable) {
+            Ok(pane) => envelope.resolved = Some(pane),
+            Err(out) => {
+                if matches!(out, Consume::Unavailable(_)) {
+                    blocked.insert(envelope.pane_id.clone());
+                }
+                return Err(out);
+            }
+        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if let Some(seq) = envelope.payload.get("tmm_seq").and_then(Value::as_u64) {
             let pane = envelope.pane_id.clone();
@@ -263,9 +338,23 @@ impl AgentNotificationHub {
             }
             return out;
         }
+        // An UN-numbered producer's later envelope waits behind one kept for an unavailable
+        // tmux too (the fence is set where that is decided, in `check_pane`'s caller above):
+        // an END must not be recorded ahead of the prompt that opened its turn (board #425).
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let pane = envelope.pane_id.clone();
+            if blocked.contains(&pane) {
+                return Err(Consume::Defer);
+            }
+            // (The pane was verified in `check_pane`; an unavailable tmux fenced it there.)
+            return self.consume_envelope(envelope);
+        }
         #[cfg(any(target_os = "android", target_os = "ios"))]
-        let _ = blocked;
-        self.consume_envelope(envelope)
+        {
+            let _ = blocked;
+            self.consume_envelope(envelope)
+        }
     }
 
     /// A numbered envelope (board #404: dsh's plugin and shell) is ACCEPTED,
@@ -283,7 +372,8 @@ impl AgentNotificationHub {
     /// window every backend has (agent-notifications.md).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn consume_numbered(&self, path: &Path, envelope: InboxEnvelope, seq: u64) -> Result<(), Consume> {
-        let (session, window, _) = tmux::resolve_pane_id(&envelope.pane_id).map_err(Consume::Drop)?;
+        // The pane was resolved and checked in `consume_file` (one response, one instance).
+        let (session, window, _) = envelope.pane().map_err(Consume::from)?;
         let key = window_key(&session, &window);
         let cached = self.state.lock().unwrap().seq_marks.get(&key).copied();
         let mark = match cached {
@@ -357,7 +447,7 @@ impl AgentNotificationHub {
                 if is_user_prompt_submit(&envelope) {
                     if let Some(brief) = prompt_text(&envelope.payload) {
                         if !brief.trim().is_empty() {
-                            let (session, window, _) = tmux::resolve_pane_id(&envelope.pane_id)?;
+                            let (session, window, _) = envelope.pane()?;
                             crate::projects::telemetry::record_tool(
                                 &session,
                                 &window,
@@ -379,7 +469,7 @@ impl AgentNotificationHub {
         if let Some((tool, detail)) = tool_event_parts(&envelope) {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
-                let (session, window, _) = tmux::resolve_pane_id(&envelope.pane_id)?;
+                let (session, window, _) = envelope.pane()?;
                 // The CLI's own housekeeping (kiro v3's post-turn `memory`
                 // auto-capture, board #227) counts as work only inside an
                 // open turn; after the Stop it is dropped, or the finished
@@ -404,7 +494,7 @@ impl AgentNotificationHub {
         // also the input half of the transcript and the delivery receipt.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if is_user_prompt_submit(&envelope) {
-            let (session, window, _) = tmux::resolve_pane_id(&envelope.pane_id)?;
+            let (session, window, _) = envelope.pane()?;
             if let Some(prompt) = prompt_text(&envelope.payload) {
                 if !prompt.trim().is_empty() {
                     self.start_turn(&session, &window, &prompt);
@@ -442,7 +532,7 @@ impl AgentNotificationHub {
         if is_idle_nudge(&envelope) {
             return Ok(());
         }
-        let (session, window, pane) = tmux::resolve_pane_id(&envelope.pane_id)?;
+        let (session, window, pane) = envelope.pane()?;
         // The agent's managed home, by NAME (pane → window → `managed_home`),
         // for a backend whose reply lives in its own session store: never
         // searched for by workspace, so two agents of one backend in one
@@ -606,12 +696,71 @@ pane="${{TMUX_PANE:-}}"
 case "$pane" in %*[!0-9]*|%|"") exit $fail ;; esac
 inbox={inbox}
 mkdir -p "$inbox" || exit $fail
+# The inbox must be writable BEFORE the payload is read: a helper that cannot publish exits
+# without reading (the receipt test holds stdin open and waits for that exit; board #428).
 tmp=$(mktemp "$inbox/.tmp.XXXXXX") || exit $fail
-trap 'rm -f "$tmp"' EXIT
 payload=
 IFS= read -r payload || true
-[ -n "$payload" ] || exit $fail
-printf '{{"backend":"%s","pane_id":"%s","payload":%s}}\n' "$backend" "$pane" "$payload" > "$tmp" || exit $fail
+[ -n "$payload" ] || {{ rm -f "$tmp"; exit $fail; }}
+# Which tmux server this pane belongs to (board #425): $TMUX is `socket,pid,session`,
+# and the server's start time is asked once from inside the pane. A pane id means
+# something only to the server that issued it, and a new server reuses the path,
+# the pid and `%0`; the consumer verifies this triple. Plain path characters and
+# digits only, and any failure leaves the field out (the envelope is then an
+# identity-less one, which the consumer treats as before).
+tmm_tmux=
+case "${{TMUX:-}}" in
+  ?*,*,*)
+    sock="${{TMUX%%,*}}"; rest="${{TMUX#*,}}"; spid="${{rest%%,*}}"
+    case "$sock$spid" in
+      *[!A-Za-z0-9/_.:+-]*|"") ;;
+      *)
+        case "$spid" in
+          ''|*[!0-9]*) ;;
+          *)
+            # BOUNDED (board #425 review): the probe runs in the background with a one second
+            # budget and is killed (KILL, TERM may be ignored) and reaped when it overruns;
+            # on expiry the envelope is published without the field, as an identity-less one.
+            # The publish below never waits on tmux. No coreutils `timeout` is assumed.
+            probe="$tmp.probe"
+            ( exec tmux -S "$sock" display-message -p '#{{start_time}}' </dev/null >"$probe" 2>/dev/null ) &
+            tp=$!
+            ( sleep 1; kill -9 "$tp" ) >/dev/null 2>&1 &
+            wd=$!
+            wait "$tp" 2>/dev/null; rc=$?
+            kill "$wd" 2>/dev/null
+            started=$(cat "$probe" 2>/dev/null)
+            rm -f "$probe"
+            # Only a probe that EXITED 0 has answered: one killed at the budget (137), signalled,
+            # or failed after printing digits left a partial or stale number, and a wrong start
+            # time makes the consumer drop a real envelope as an older server's.
+            [ "$rc" = 0 ] || started=
+            case "$started" in ''|*[!0-9]*) ;; *) tmm_tmux="$sock,$spid,$started" ;; esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+# The cleanup trap is set only now, after every background job is gone: bash (this `sh` on
+# many hosts) lets a subshell killed with TERM run the EXIT trap it inherited, so a trap set
+# earlier made the killed watchdog delete $tmp and $tmp.probe from under the helper (an
+# envelope lost, or its start time). SIGKILL never ran the trap anyway.
+trap 'rm -f "$tmp" "$tmp.probe"' EXIT
+# The launch uuid of the window this hook runs in (board #422 H2): only a
+# 36-character [0-9a-f-] uuid is written, so no escaping is ever needed; anything
+# else leaves the field out.
+launch=
+case "${{TMM_LAUNCH:-}}" in
+  *[!0-9a-f-]*|"") ;;
+  *)
+    case "${{#TMM_LAUNCH}}" in 36) launch="$TMM_LAUNCH" ;; esac
+    ;;
+esac
+extra=
+[ -n "$tmm_tmux" ] && extra="$extra\"tmm_tmux\":\"$tmm_tmux\","
+[ -n "$launch" ] && extra="$extra\"launch\":\"$launch\","
+printf '{{"backend":"%s","pane_id":"%s",%s"payload":%s}}\n' "$backend" "$pane" "$extra" "$payload" > "$tmp" || exit $fail
 # The number also rides the file name, zero-padded, so two envelopes of one
 # pane written in the same second are consumed in the order they were made.
 # Without one the name keeps its old `<secs>-<pid>` shape.
@@ -644,6 +793,19 @@ enum Consume {
     Drop(String),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Retain(String),
+    /// tmux could not be asked, or answered something we cannot read (board #425,
+    /// `tmux::Fact::{Unavailable, Unknown}`): what the envelope is about is not
+    /// known to be gone. Kept for the next pass, however long it takes, and its
+    /// pane's later envelopes wait behind it; never a drop.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Unavailable(String),
+    /// Not this gateway's to consume (board #425): written for another tmux
+    /// server, or without an identity and from before this server started. Left
+    /// untouched in the inbox for whoever it belongs to; never delivered, never
+    /// dropped, and it does not fence this server's own panes (a pane id is only
+    /// unique per server).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Foreign(String),
     /// Kept, silently: an earlier envelope of the same producer is not yet
     /// accepted, and this one waits behind it (round 5 P1-B).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -668,6 +830,16 @@ struct EndTail {
 
 impl From<String> for Consume {
     fn from(e: String) -> Self {
+        // What a failed tmux call says decides keep or remove (board #425): only an
+        // envelope that is itself invalid, or whose object a server ANSWERED is
+        // gone, is dropped; a tmux that could not be asked, or that answered
+        // something we do not read, is not a verdict on the envelope.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        match tmux::classify(&e) {
+            tmux::Fact::Unavailable => return Consume::Unavailable(format!("tmux cannot be reached: {}", e.trim())),
+            tmux::Fact::Unknown => return Consume::Unavailable(format!("tmux gave no answer we can read: {}", e.trim())),
+            tmux::Fact::Missing | tmux::Fact::Invalid => {}
+        }
         Consume::Drop(e)
     }
 }
@@ -678,6 +850,118 @@ impl From<&str> for Consume {
     }
 }
 
+
+/// Whose pane is this, and does it exist there? (board #425, orchestrator and reviewer
+/// ruling.) A pane id is meaningful only to the tmux server INCARNATION that issued it:
+/// a new server reuses the path, the pid and `%0`, so none of them alone names one.
+/// The notify helper writes the producing server's `socket,pid,start_time` into the
+/// envelope (`tmm_tmux`). ONE tmux response (`tmux::resolve_pane_checked`) returns the
+/// server's incarnation AND the pane's session/window/index; the envelope's expected
+/// instance and pane are compared in that same response, and the verified pane is what
+/// the numbered mark, the turn fact and the reply edge then use — there is no second
+/// resolve to be attributed to the first. Through the one definition
+/// (`tmux::Incarnation`, also `WindowIdentity`'s):
+/// * same socket, same pid, same start → this server's: consume it;
+/// * same socket, another pid or start → that server is gone, and its pane ids with it:
+///   dropped, naming both;
+/// * another socket → another gateway's envelope (a stray gateway that reads this inbox
+///   while connected elsewhere): left untouched, not delivered, not dropped, and it does
+///   not fence this server's panes;
+/// * no identity (an older helper's envelope, or a field that is not plain path
+///   characters and digits): a COMPATIBILITY DOWNGRADE, not a proof of the same
+///   incarnation. It is consumed as before only when its file time is readable and not
+///   before this server started; older than the server it is left untouched (it cannot
+///   be this server's), and an unreadable time is Unknown: kept. Time only ever keeps.
+/// Only after that is "the pane is not there" a verdict, and only about this instance.
+/// A server that cannot be asked keeps the envelope (`Consume::from`); only that
+/// negative answer is remembered for the pass.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn check_pane(
+    envelope: &InboxEnvelope,
+    metadata: &std::fs::Metadata,
+    unavailable: &mut Option<String>,
+) -> Result<(String, String, usize), Consume> {
+    if let Some(error) = unavailable.as_ref() {
+        return Err(Consume::from(error.clone()));
+    }
+    // (Test seam: tmux "flickers" for this one call, with tmux's own wording, so the
+    // classification is what decides, not the seam.)
+    #[cfg(test)]
+    let checked = if crash_at("tmux_unreachable") || crash_at("tmux_unreachable_unnumbered") {
+        Err("tmux error: error connecting to /tmp/flicker (No such file or directory)".to_string())
+    } else if crash_at("tmux_unknown") {
+        // A failed spawn: tmux was never asked, so nothing is known (and, unlike a
+        // connection error, it is not remembered for the pass).
+        Err("Failed to run tmux: No such file or directory (os error 2)".to_string())
+    } else {
+        tmux::resolve_pane_checked(&envelope.pane_id)
+    };
+    #[cfg(not(test))]
+    let checked = tmux::resolve_pane_checked(&envelope.pane_id);
+    let checked = match checked {
+        Ok(checked) => checked,
+        Err(e) => {
+            if tmux::classify(&e) == tmux::Fact::Unavailable {
+                *unavailable = Some(e.clone());
+            }
+            return Err(Consume::from(e));
+        }
+    };
+    #[cfg(test)]
+    if let Some(hook) = AFTER_CHECKED.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+    let current = &checked.server;
+    match envelope.tmm_tmux.as_deref().and_then(tmux::Incarnation::parse) {
+        Some(made) if made.socket != current.socket => {
+            return Err(Consume::Foreign(format!(
+                "it was written for the tmux server at {} (pid {}), this gateway talks to {} (pid {})",
+                made.socket, made.pid, current.socket, current.pid
+            )))
+        }
+        Some(made) if made != *current => {
+            return Err(Consume::Drop(format!(
+                "stale: it was written by tmux server pid {} started at {}; this one is pid {} started at {}: that server is gone, and its pane ids with it",
+                made.pid, made.start, current.pid, current.start
+            )))
+        }
+        Some(_) => {}
+        None => legacy_verdict(metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()), current.start)?,
+    }
+    match checked.pane {
+        Some(pane) => Ok((pane.session, pane.window, pane.index)),
+        None => Err(Consume::Drop(format!("the tmux server that answered (pid {}, started at {}) has no pane {}", current.pid, current.start, envelope.pane_id))),
+    }
+}
+
+/// An envelope with no identity (a compatibility downgrade, not a proof): consumed only
+/// when its file time is readable and not before this server started.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn legacy_verdict(written: Option<u64>, server_start: u64) -> Result<(), Consume> {
+    match written {
+        Some(written) if written < server_start => Err(Consume::Foreign(format!(
+            "it names no tmux server and was written at {written}, before this one started at {server_start}: it cannot be this server's"
+        ))),
+        Some(_) => Ok(()),
+        None => Err(Consume::Unavailable("its file time cannot be read, so it cannot be told from an older server's".to_string())),
+    }
+}
+
+/// One line per pass that kept envelopes because tmux could not be asked (never a
+/// room line), at most once a minute: how many, and how long the oldest has waited.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn kept_summary(kept: usize, oldest: std::time::Duration) {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if kept == 0 {
+        return;
+    }
+    let mut last = LAST.lock().unwrap();
+    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    eprintln!("⚠  {kept} agent notification(s) kept in the inbox while tmux cannot be asked (the oldest has waited {}s)", oldest.as_secs());
+}
 
 /// Say once per file that it is being kept for a retry, not at every poll.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -695,6 +979,10 @@ fn retain_note(path: &Path, why: &str) {
 
 #[cfg(test)]
 thread_local! {
+    /// Test seam (board #425): runs once, right after an envelope's checked tmux response and
+    /// before it is acted on — where a test replaces the tmux server to prove nothing carries
+    /// over from one envelope's check to the next.
+    static AFTER_CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     /// Test seam: the named point at which consumption "crashes" once.
     static CRASH: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
 }
@@ -1109,6 +1397,9 @@ mod tests {
             backend: backend.into(),
             pane_id: "%1".into(),
             payload,
+            tmm_tmux: None,
+            launch: None,
+            resolved: None,
         };
         assert_eq!(
             normalize(&envelope(
@@ -1212,6 +1503,9 @@ mod tests {
             backend: backend.into(),
             pane_id: "%1".into(),
             payload,
+            tmm_tmux: None,
+            launch: None,
+            resolved: None,
         };
         for backend in ["claude", "codex"] {
             assert!(
@@ -1239,6 +1533,9 @@ mod tests {
             backend: "omp".into(),
             pane_id: "%1".into(),
             payload,
+            tmm_tmux: None,
+            launch: None,
+            resolved: None,
         };
         assert!(is_user_prompt_submit(&envelope(
             json!({"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"0199-abc"})
@@ -1848,7 +2145,7 @@ mod tests {
         let (s, w) = (format!("quality-{}", uuid::Uuid::new_v4()), "dev");
         let stop = |payload: Value| {
             record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
-            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload };
+            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None };
             let n = normalize_in(&envelope, Some(&home)).unwrap();
             record_notification_with(&s, w, &n.kind, n.quality);
             n.quality
@@ -4106,5 +4403,671 @@ mod tests {
         assert_eq!(live[0], "orchestrator");
         let restarted = AgentNotificationHub::load_at(root.clone());
         assert_eq!(restarted.take_reply_targets(&session, "v"), live, "recovery folds to the same capped edge");
+    }
+    /// A prompt envelope for tmux pane `pane_id`, optionally written under the tmux server `made_by`
+    /// (`socket,pid,start_time`, what the notify helper records).
+    fn prompt_envelope(pane_id: &str, line: &str, made_by: Option<&str>) -> Vec<u8> {
+        let mut e = json!({
+            "backend": "kiro", "pane_id": pane_id,
+            "payload": { "hook_event_name": "userPromptSubmit", "cwd": "/tmp", "prompt": line }
+        });
+        if let Some(made_by) = made_by {
+            e["tmm_tmux"] = json!(made_by);
+        }
+        serde_json::to_vec(&e).unwrap()
+    }
+
+    fn set_age(path: &Path, age: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - age).unwrap();
+    }
+
+    /// The server the held global socket names, as the notify helper would write it.
+    fn identity_of_the_server() -> String {
+        let i = crate::tmux::server_incarnation().expect("the private server answers");
+        format!("{},{},{}", i.socket, i.pid, i.start)
+    }
+
+    fn prompts(session: &str) -> usize {
+        crate::projects::telemetry::recent_events(session, 0).iter().filter(|e| e.kind == "prompt").count()
+    }
+
+    /// Board #425 (validator incident 2026-10-19 03:17): a gateway that looked at a
+    /// socket where nothing was listening DROPPED eleven real hook envelopes as
+    /// "invalid". A connection error is not a verdict on the envelope: it stays in
+    /// the inbox however long that takes, and is delivered when THE SAME server is
+    /// back. A malformed file, and a pane the server (the right one) answers does
+    /// not exist, are still dropped, once.
+    #[test]
+    fn an_envelope_for_an_unreachable_server_is_kept_and_delivered_when_that_server_is_back() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-back");
+        let session = format!("tmm-back-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let real = tmux.socket().to_string();
+        let made_by = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-back-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let line = "[tmm chat] human: @dev back proof";
+        std::fs::write(inbox.join("1-late.json"), prompt_envelope("%0", line, Some(&made_by))).unwrap();
+        std::fs::write(inbox.join("2-garbage.json"), b"not json at all").unwrap();
+
+        guard.set(Some(format!("{real}.nowhere")));                    // the gateway looks at a socket with nothing on it
+        hub.consume_inbox();
+        assert!(inbox.join("1-late.json").exists(), "tmux cannot be reached: the envelope stays");
+        assert!(!inbox.join("2-garbage.json").exists(), "a malformed envelope is dropped, once, whatever tmux is doing");
+        set_age(&inbox.join("1-late.json"), std::time::Duration::from_secs(25 * 3600));
+        hub.consume_inbox();
+        assert!(inbox.join("1-late.json").exists(), "and it keeps staying, a day on: waiting is no verdict");
+        assert_eq!(prompts(&session), 0);
+
+        guard.set(Some(real));                                          // the same server, back
+        hub.consume_inbox();
+        assert!(!inbox.join("1-late.json").exists(), "delivered, then removed");
+        assert_eq!(prompts(&session), 1, "the prompt reached its window's record");
+
+        // The right server ANSWERS that this pane does not exist: that is a verdict.
+        std::fs::write(inbox.join("3-gone.json"), prompt_envelope("%987", line, Some(&made_by))).unwrap();
+        hub.consume_inbox();
+        assert!(!inbox.join("3-gone.json").exists(), "a pane the server does not have is gone for good");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A pane id means something only to the server INCARNATION that issued it. A new
+    /// server on the same socket reuses `%0`, so an envelope written under the old
+    /// one must not act on the new one's pane — not even a fresh file, not even with
+    /// the same pid and another start time. (Reviewer P1-B, orchestrator ruling.)
+    #[test]
+    fn an_envelope_from_another_incarnation_of_the_server_is_dropped_never_delivered() {
+        use crate::tmux::test_support::{destroy_private_server, GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-incarnation");
+        let session = format!("tmm-incarnation-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the first server starts");
+        let old = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-incarnation-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let line = "[tmm chat] human: @dev incarnation proof";
+        // The first server dies with an envelope on its way; a new one takes the path and the first pane id.
+        std::fs::write(inbox.join("1-old.json"), prompt_envelope("%0", line, Some(&old))).unwrap();
+        destroy_private_server(tmux.socket()).expect("the first server is destroyed");
+        // The dying server may still be removing its socket: start the new one when the path is free.
+        let mut started = Err("never tried".to_string());
+        for _ in 0..100 {
+            started = tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]);
+            if started.is_ok() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        started.expect("a new server starts on the same socket");
+        let new = identity_of_the_server();
+        assert_ne!(old, new, "control: another incarnation");
+        hub.consume_inbox();
+        assert!(!inbox.join("1-old.json").exists(), "dropped: its server is gone, and its pane ids with it (a file younger than any probe)");
+        assert_eq!(prompts(&session), 0, "and acted on nobody's pane");
+
+        // Same socket, same pid, another start time: another incarnation (the host rebooted, the pid came round).
+        let current = crate::tmux::server_incarnation().unwrap();
+        let reborn = format!("{},{},{}", current.socket, current.pid, current.start.saturating_sub(7));
+        std::fs::write(inbox.join("2-reborn.json"), prompt_envelope("%0", line, Some(&reborn))).unwrap();
+        hub.consume_inbox();
+        assert!(!inbox.join("2-reborn.json").exists(), "same pid, different birth: not this server's");
+        assert_eq!(prompts(&session), 0);
+
+        // Control: an envelope written under THIS incarnation is delivered.
+        std::fs::write(inbox.join("3-now.json"), prompt_envelope("%0", line, Some(&new))).unwrap();
+        hub.consume_inbox();
+        assert!(!inbox.join("3-now.json").exists());
+        assert_eq!(prompts(&session), 1, "this incarnation's own envelope is delivered");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An envelope written for ANOTHER server is not this gateway's: it stays, untouched, for the
+    /// gateway it belongs to — even when this gateway's own tmux answers — and it does not stop this
+    /// server's panes (a pane id is unique only per server).
+    #[test]
+    fn another_servers_envelope_is_left_untouched_and_does_not_fence_ours() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-foreign");
+        let session = format!("tmm-foreign-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let mine = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-foreign-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let line = "[tmm chat] human: @dev foreign proof";
+        std::fs::write(inbox.join("1-foreign.json"), prompt_envelope("%0", line, Some("/tmp/elsewhere/real-default,4242,1700000000"))).unwrap();
+        std::fs::write(inbox.join("2-mine.json"), prompt_envelope("%0", line, Some(&mine))).unwrap();
+        hub.consume_inbox();
+        hub.consume_inbox();
+        assert!(inbox.join("1-foreign.json").exists(), "another server's envelope: untouched, not dropped");
+        assert!(!inbox.join("2-mine.json").exists(), "ours, for the same pane id, is not held up behind it");
+        assert_eq!(prompts(&session), 1, "exactly ours was delivered");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// No identity (an older helper's envelope): there is nothing to verify, so it is consumed as
+    /// before when it was written after the server started; time only ever KEEPS it otherwise (it
+    /// cannot be this server's), and never deletes it, not after a day of an unreachable tmux either.
+    #[test]
+    fn an_envelope_without_an_identity_is_delivered_only_when_younger_than_the_server_and_never_deleted() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-legacy");
+        let session = format!("tmm-legacy-{}", std::process::id());
+        let real = tmux.socket().to_string();
+        let root = std::env::temp_dir().join(format!("tmm-legacy-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let line = "[tmm chat] human: @dev legacy proof";
+        let day = std::time::Duration::from_secs(3600);
+        std::fs::write(inbox.join("1-old.json"), prompt_envelope("%0", line, None)).unwrap();
+        set_age(&inbox.join("1-old.json"), 25 * day);
+        hub.consume_inbox();                                            // no server at all
+        assert!(inbox.join("1-old.json").exists(), "a day of an unreachable tmux deletes nothing");
+
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the server starts");
+        hub.consume_inbox();
+        assert!(inbox.join("1-old.json").exists(), "older than this server: it cannot be this server's, so it is kept, not delivered and not dropped");
+        assert_eq!(prompts(&session), 0);
+        std::fs::write(inbox.join("2-new.json"), prompt_envelope("%0", line, None)).unwrap();
+        hub.consume_inbox();
+        assert!(!inbox.join("2-new.json").exists());
+        assert_eq!(prompts(&session), 1, "written after the server started: consumed as before");
+        assert!(inbox.join("1-old.json").exists(), "and the old one is still there");
+        // A file time that cannot be read (here: before 1970, which `duration_since(UNIX_EPOCH)` refuses) is
+        // Unknown all the way through `consume_inbox`: kept, not read as "written when the server started".
+        std::fs::write(inbox.join("3-unreadable.json"), prompt_envelope("%0", line, None)).unwrap();
+        let before_1970 = std::fs::OpenOptions::new().write(true).open(inbox.join("3-unreadable.json")).unwrap();
+        before_1970.set_modified(std::time::UNIX_EPOCH - std::time::Duration::from_secs(86_400)).unwrap();
+        drop(before_1970);
+        hub.consume_inbox();
+        assert!(inbox.join("3-unreadable.json").exists(), "an unreadable file time keeps the envelope");
+        assert_eq!(prompts(&session), 1, "and does not deliver it");
+        guard.set(Some(real));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A NUMBERED envelope (dsh's plugin and shell, board #404) takes the same door: kept while the
+    /// server is unreachable, its producer's later envelope waiting behind it, and both accepted in
+    /// order once the same server answers.
+    #[test]
+    fn numbered_envelopes_wait_for_an_unreachable_tmux_in_order() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-numbered");
+        let session = format!("tmm-numbered-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let real = tmux.socket().to_string();
+        let made_by = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-numbered-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let numbered = |seq: u64, line: &str| serde_json::to_vec(&json!({
+            "backend": "dsh", "pane_id": "%0", "tmm_tmux": made_by,
+            "payload": { "tmm_seq": seq, "hook_event_name": "UserPromptSubmit", "prompt": line, "session_id": "s1" }
+        })).unwrap();
+        let (first, second) = (inbox.join("1792351000-00000000000000000001-9.json"), inbox.join("1792351000-00000000000000000002-9.json"));
+        std::fs::write(&first, numbered(1_000_000_000_000_001, "[tmm chat] human: @dev first")).unwrap();
+        std::fs::write(&second, numbered(1_000_000_000_000_002, "[tmm chat] human: @dev second")).unwrap();
+        guard.set(Some(format!("{real}.nowhere")));
+        hub.consume_inbox();
+        assert!(first.exists() && second.exists(), "both wait: tmux cannot be reached");
+        guard.set(Some(real));
+        hub.consume_inbox();
+        assert!(!first.exists() && !second.exists(), "both accepted once the same server answers");
+        let lines: Vec<String> = crate::projects::telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "prompt").map(|e| e.text).collect();
+        assert!(lines.len() >= 2 && lines.windows(2).any(|w| w[0].contains("first") && w[1].contains("second")), "in producer order: {lines:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The fence (board #404, round 5 P1-B) holds for an unavailable tmux too: when the FIRST of a
+    /// producer's numbered envelopes cannot be resolved because tmux flickered, the second must not be
+    /// accepted ahead of it in the same pass — its number would then be below the mark and the first
+    /// would be dropped as "came after the edge it precedes". Next pass: both, in order.
+    #[test]
+    fn an_unreachable_first_envelope_fences_its_producers_second_in_the_same_pass() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-fence");
+        let session = format!("tmm-fence-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let made_by = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-fence-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let numbered = |seq: u64, line: &str| serde_json::to_vec(&json!({
+            "backend": "dsh", "pane_id": "%0", "tmm_tmux": made_by,
+            "payload": { "tmm_seq": seq, "hook_event_name": "UserPromptSubmit", "prompt": line, "session_id": "s1" }
+        })).unwrap();
+        let (first, second) = (inbox.join("1792351000-00000000000000000001-9.json"), inbox.join("1792351000-00000000000000000002-9.json"));
+        std::fs::write(&first, numbered(2_000_000_000_000_001, "[tmm chat] human: @dev first")).unwrap();
+        std::fs::write(&second, numbered(2_000_000_000_000_002, "[tmm chat] human: @dev second")).unwrap();
+        CRASH.with(|c| *c.borrow_mut() = Some("tmux_unreachable"));      // tmux flickers for the first resolve only
+        hub.consume_inbox();
+        assert!(first.exists(), "the first waits");
+        assert!(second.exists(), "and the second waits behind it, though tmux answers again");
+        assert_eq!(prompts(&session), 0, "nothing was recorded out of order");
+        hub.consume_inbox();
+        assert!(!first.exists() && !second.exists());
+        let lines: Vec<String> = crate::projects::telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "prompt").map(|e| e.text).collect();
+        assert!(lines.windows(2).any(|w| w[0].contains("first") && w[1].contains("second")), "in producer order: {lines:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Un-numbered producers (kiro, claude, codex …) get the same fence: a prompt kept because tmux
+    /// flickered must not be overtaken by its END in the same pass — the turn would read as running
+    /// with its reply recorded before it. A one-call seam makes the FIRST resolve fail only.
+    #[test]
+    fn an_unreachable_prompt_fences_its_ends_for_an_unnumbered_producer() {
+        fenced_unnumbered_prompt("tmux_unreachable_unnumbered");
+    }
+
+    /// The same for a tmux answer we cannot read (a failed spawn, `Failed to run tmux`): kept like an
+    /// unreachable server, never dropped as invalid (validator I9), and, because only a connection error
+    /// is remembered for the pass, the END that follows is judged by its own check and must still be
+    /// held back by the fence rather than overtake the prompt.
+    #[test]
+    fn an_unreadable_tmux_answer_keeps_the_prompt_and_fences_its_end() {
+        fenced_unnumbered_prompt("tmux_unknown");
+    }
+
+    fn fenced_unnumbered_prompt(point: &'static str) {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, &format!("inbox-fence-un-{point}"));
+        let session = format!("tmm-fenceun-{point}-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let made_by = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-fenceun-hub-{point}-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let (prompt, end) = (inbox.join("1792351000-100.json"), inbox.join("1792351000-101.json"));
+        std::fs::write(&prompt, prompt_envelope("%0", "[tmm chat] human: @dev unnumbered prompt", Some(&made_by))).unwrap();
+        std::fs::write(&end, serde_json::to_vec(&json!({
+            "backend": "kiro", "pane_id": "%0", "tmm_tmux": made_by,
+            "payload": { "hook_event_name": "stop", "cwd": "/tmp", "session_id": "c1", "assistant_response": "done" }
+        })).unwrap()).unwrap();
+        CRASH.with(|c| *c.borrow_mut() = Some(point));
+        hub.consume_inbox();
+        assert!(prompt.exists(), "the prompt waits");
+        assert!(end.exists(), "and its END waits behind it, though tmux answers again");
+        let kinds = |s: &str| crate::projects::telemetry::recent_events(s, 0).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+        assert!(!kinds(&session).iter().any(|k| k == "prompt" || k == "completed" || k == "end"), "nothing recorded out of order: {:?}", kinds(&session));
+        hub.consume_inbox();
+        assert!(!prompt.exists() && !end.exists(), "next pass: both, in order");
+        let k = kinds(&session);
+        let (p, e) = (k.iter().position(|x| x == "prompt"), k.iter().position(|x| x != "prompt" && x != "tool"));
+        assert!(p.is_some(), "the prompt was recorded: {k:?}");
+        if let Some(e) = e { assert!(p.unwrap() < e, "prompt before its end: {k:?}"); }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What a failed tmux call says decides keep or remove (reviewer, orchestrator): only an invalid
+    /// envelope and a server's own "no such pane" remove; a tmux that could not be asked, or that
+    /// answered what we do not read, keeps — a failed spawn and an unreadable reply are never "invalid".
+    /// P1-B residual (board #425 review): ONE checked resolve per envelope. A positive answer for one
+    /// envelope never authorises the next: here the server is REPLACED (same socket, `%0` reused)
+    /// right after the first envelope's check. The first lands in the first server's pane; an old
+    /// envelope after the replacement is dropped and does not land in the new pane; a NEW envelope
+    /// after it is delivered, not deleted as stale by a cached old identity. Numbered and un-numbered.
+    fn replaced_between_envelopes(numbered: bool) {
+        use crate::tmux::test_support::{destroy_private_server, GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tag = if numbered { "inbox-swap-n" } else { "inbox-swap-u" };
+        let tmux = PrivateTmux::start(&guard, tag);
+        let (first_session, second_session) = (format!("tmm-swap-a-{numbered}-{}", std::process::id()), format!("tmm-swap-b-{numbered}-{}", std::process::id()));
+        tmux.run(&["new-session", "-d", "-s", &first_session, "sleep 60"]).expect("the first server starts");
+        let old = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-swap-hub-{numbered}-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let envelope = move |seq: u64, line: &str, made_by: &str| -> Vec<u8> {
+            let mut payload = json!({ "hook_event_name": if numbered { "UserPromptSubmit" } else { "userPromptSubmit" }, "cwd": "/tmp", "prompt": line, "session_id": "s1" });
+            if numbered { payload["tmm_seq"] = json!(3_000_000_000_000_000u64 + seq); }
+            serde_json::to_vec(&json!({ "backend": if numbered { "dsh" } else { "kiro" }, "pane_id": "%0", "tmm_tmux": made_by, "payload": payload })).unwrap()
+        };
+        let name = |n: u64| if numbered { inbox.join(format!("1792351000-{n:020}-9.json")) } else { inbox.join(format!("1792351000-{}.json", 100 + n)) };
+        let (a_old, b_new, c_old) = (name(1), name(2), name(3));
+        std::fs::write(&a_old, envelope(1, "[tmm chat] human: @dev swap first", &old)).unwrap();
+        std::fs::write(&b_new, envelope(2, "[tmm chat] human: @dev swap placeholder", &old)).unwrap();
+        std::fs::write(&c_old, envelope(3, "[tmm chat] human: @dev swap stale", &old)).unwrap();
+        let (socket, second, b_path) = (tmux.socket().to_string(), second_session.clone(), b_new.clone());
+        let write_b = move |made_by: String| std::fs::write(&b_path, envelope(2, "[tmm chat] human: @dev swap second", &made_by)).unwrap();
+        AFTER_CHECKED.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+            // The server is replaced right after the first envelope's check: same socket, the first pane id again.
+            destroy_private_server(&socket).expect("the first server is destroyed");
+            let mut started = Err("never tried".to_string());
+            for _ in 0..100 {
+                started = crate::tmux::run_tmux_on(Some(&socket), &["new-session", "-d", "-s", &second, "sleep 60"]);
+                if started.is_ok() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            started.expect("a new server starts on the same socket");
+            let i = crate::tmux::server_incarnation().expect("the new server answers");
+            write_b(format!("{},{},{}", i.socket, i.pid, i.start));      // the new server's own envelope
+        })));
+        hub.consume_inbox();
+        assert!(!a_old.exists() && !b_new.exists() && !c_old.exists(), "all three were consumed or dropped");
+        assert_eq!(prompts(&first_session), 1, "the first envelope landed in the pane of the server it was checked against");
+        assert_eq!(prompts(&second_session), 1, "the new server's own envelope was delivered, not deleted by a cached old identity — and the old one did not land in its pane");
+        let lines: Vec<String> = crate::projects::telemetry::recent_events(&second_session, 0).into_iter().filter(|e| e.kind == "prompt").map(|e| e.text).collect();
+        assert!(lines.iter().all(|l| l.contains("swap second")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unnumbered_envelope_is_checked_alone_when_the_server_is_replaced_between_envelopes() {
+        replaced_between_envelopes(false);
+    }
+
+    #[test]
+    fn a_numbered_envelope_is_checked_alone_when_the_server_is_replaced_between_envelopes() {
+        replaced_between_envelopes(true);
+    }
+
+    /// An envelope with no identity is a compatibility downgrade: an unreadable file time is Unknown and
+    /// keeps; older than the server keeps untouched; only a readable time at or after the start is consumed.
+    #[test]
+    fn an_identityless_envelope_is_judged_by_a_readable_file_time_or_kept() {
+        assert!(matches!(legacy_verdict(None, 100), Err(Consume::Unavailable(_))), "an unreadable time is Unknown: kept");
+        assert!(matches!(legacy_verdict(Some(99), 100), Err(Consume::Foreign(_))), "older than the server: untouched");
+        assert!(legacy_verdict(Some(100), 100).is_ok() && legacy_verdict(Some(101), 100).is_ok());
+    }
+
+    /// Runs the real helper against a fake `tmux` (`body` is its shell script after `#!/bin/sh`). The helper
+    /// is its own process group, so everything it starts is ours and nothing else is touched: a leak is
+    /// cleaned by that group and found by the probe's own pid, which the fake writes down before anything
+    /// else. Returns the published envelope, how long the helper took, and the probe's pid.
+    fn helper_against_fake_tmux(body: &str) -> (Value, std::time::Duration, i32) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        let root = std::env::temp_dir().join(format!("tmm-hang-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        let fake_dir = root.join("fakebin");
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        let pid_file = root.join("probe.pid");
+        std::fs::write(fake_dir.join("tmux"), format!("#!/bin/sh\necho $$ > '{}'\n{body}\n", pid_file.display())).unwrap();
+        std::fs::set_permissions(fake_dir.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg(hub.helper_path()).arg("kiro").env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_dir.display()))
+            .env("HOME", std::env::temp_dir())
+            .env("TMUX_PANE", "%0")
+            .env("TMUX", "/tmp/tmm-hang-425/sock,4242,0")
+            .stdin(std::process::Stdio::piped())
+            .process_group(0);
+        let started = std::time::Instant::now();
+        let mut child = cmd.spawn().unwrap();
+        let group = child.id() as i32;
+        {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"{\"hook_event_name\":\"stop\"}\n").unwrap();
+        }
+        // Bounded here too: a helper that waits for the hung tmux fails this test instead of hanging it. The
+        // group is signalled while the leader is not yet reaped, so the kernel still holds its id.
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if started.elapsed() > std::time::Duration::from_secs(8) {
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&root);
+                panic!("the helper was still waiting for the fake tmux after 8 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let took = started.elapsed();
+        assert!(status.success());
+        let pid: i32 = std::fs::read_to_string(&pid_file).expect("the fake tmux ran and wrote its pid").trim().parse().unwrap();
+        let files: Vec<_> = std::fs::read_dir(root.join("inbox")).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        let listing: Vec<_> = std::fs::read_dir(root.join("inbox")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "the envelope was published ({body:?}, {took:?}, status {status:?}): {listing:?}");
+        let v: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        assert_eq!(v["payload"]["hook_event_name"], "stop");
+        assert!(std::fs::read_dir(root.join("inbox")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("probe")), "no probe file left");
+        // The probe is gone and reaped. Reaped matters: signal 0 still finds a zombie. The group still holds
+        // its members' id while any is alive, so a leak is killed through it and nothing else.
+        for _ in 0..30 {
+            if unsafe { libc::kill(pid, 0) } != 0 { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            let _ = std::fs::remove_dir_all(&root);
+            panic!("the probe (pid {pid}) was left behind");
+        }
+        let _ = std::fs::remove_dir_all(root);
+        (v, took, pid)
+    }
+
+    /// P1-E (board #425 review): the helper's start-time probe is bounded. A tmux that never answers and
+    /// ignores TERM, even after printing a number, must not hold the hook: the envelope is published
+    /// atomically WITHOUT the field, within the budget, and no probe process is left behind.
+    #[test]
+    fn a_hung_tmux_does_not_hold_the_helper_and_leaves_no_probe_behind() {
+        for body in ["trap '' TERM\nexec sleep 120", "trap '' TERM\necho 1792351058\nexec sleep 120"] {
+            let (v, took, _) = helper_against_fake_tmux(body);
+            assert!(took < std::time::Duration::from_secs(4), "the helper returned within its budget, not after the hung tmux: {took:?}");
+            assert!(v.get("tmm_tmux").is_none(), "without the instance field (the legacy path), whatever it printed first: {v}");
+        }
+    }
+
+    /// The probe's number is an identity only when the probe EXITED 0 (reviewer, round 3): a number printed
+    /// before a failure is not a start time, and a wrong one makes the consumer drop a real envelope as an
+    /// older server's. A clean exit still carries it.
+    #[test]
+    fn the_probe_identity_is_used_only_when_tmux_exits_cleanly() {
+        let (v, _, _) = helper_against_fake_tmux("echo 1792351058\nexit 1");
+        assert!(v.get("tmm_tmux").is_none(), "a number then a failure is no identity: {v}");
+        let (v, _, _) = helper_against_fake_tmux("echo 1792351058\nkill -9 $$");
+        assert!(v.get("tmm_tmux").is_none(), "a number then a signal is no identity: {v}");
+        // A clean answer is carried.
+        let (v, _, _) = helper_against_fake_tmux("echo 1792351058");
+        assert_eq!(v["tmm_tmux"], "/tmp/tmm-hang-425/sock,4242,1792351058", "a clean answer is carried: {v}");
+    }
+
+    /// The helper's cleanup trap is armed only after its watchdog is gone. Bash lets a background subshell
+    /// killed with TERM run the EXIT trap it inherited, which deleted the probe file or the envelope's temp
+    /// file from under the helper: found under load, an envelope silently lost or stripped of its identity
+    /// about one run in thirty. The window is the instant between the watchdog's fork and its first command,
+    /// so no fixture can hit it on demand; the order is pinned in the generated script instead.
+    #[test]
+    fn the_helpers_cleanup_trap_is_armed_after_its_background_jobs_are_gone() {
+        let root = std::env::temp_dir().join(format!("tmm-trap-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        let script = std::fs::read_to_string(hub.helper_path()).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(script.matches("trap '").count(), 1, "one cleanup trap");
+        let (trap, reaped, watchdog_gone) = (script.find("trap '").unwrap(), script.find("wait \"$tp\"").unwrap(), script.find("kill \"$wd\"").unwrap());
+        assert!(trap > reaped && trap > watchdog_gone, "the trap comes after the probe was waited for and the watchdog killed");
+    }
+
+    /// An empty payload publishes nothing and leaves nothing behind: the temp file the helper made before
+    /// it read (the inbox must be writable first, board #428) is removed by the helper itself, because its
+    /// cleanup trap is armed later. A numbered producer is told (exit 1), any other caller is not.
+    #[test]
+    fn an_empty_payload_publishes_nothing_and_leaves_no_temp_file() {
+        let root = std::env::temp_dir().join(format!("tmm-empty-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        for (seq, expect) in [(None, Some(0)), (Some("9"), Some(1))] {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg(hub.helper_command("dsh")).env_remove("TMM_HOOK_SEQ").env("TMUX_PANE", "%7").stdin(std::process::Stdio::null());
+            if let Some(seq) = seq { cmd.env("TMM_HOOK_SEQ", seq); }
+            assert_eq!(cmd.status().unwrap().code(), expect, "exit for seq {seq:?}");
+            let left: Vec<_> = std::fs::read_dir(root.join("inbox")).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert!(left.is_empty(), "nothing published and no temp file left (seq {seq:?}): {left:?}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only a CONNECTION error is remembered for the rest of the pass (every later envelope would get the
+    /// same answer). An answer we cannot read is not: it says nothing about the next envelope, which is
+    /// asked for itself. Here pane A's envelope meets an unreadable answer and is kept; pane B's, in the
+    /// same pass, is checked and delivered.
+    #[test]
+    fn an_unreadable_answer_for_one_pane_does_not_keep_another_panes_envelope() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        crate::projects::tests::use_test_store();
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-unknown-scope");
+        let (a, b) = (format!("tmm-scope-a-{}", std::process::id()), format!("tmm-scope-b-{}", std::process::id()));
+        tmux.run(&["new-session", "-d", "-s", &a, "sleep 60"]).expect("the private server starts");
+        tmux.run(&["new-session", "-d", "-s", &b, "sleep 60"]).expect("a second session");
+        let pane_of = |session: &str| tmux.run(&["display-message", "-p", "-t", session, "#{pane_id}"]).expect("the pane id").trim().to_string();
+        let (pane_a, pane_b) = (pane_of(&a), pane_of(&b));
+        assert_ne!(pane_a, pane_b);
+        let made_by = identity_of_the_server();
+        let root = std::env::temp_dir().join(format!("tmm-scope-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let (for_a, for_b) = (inbox.join("1792351000-100.json"), inbox.join("1792351000-101.json"));
+        std::fs::write(&for_a, prompt_envelope(&pane_a, "[tmm chat] human: @dev for a", Some(&made_by))).unwrap();
+        std::fs::write(&for_b, prompt_envelope(&pane_b, "[tmm chat] human: @dev for b", Some(&made_by))).unwrap();
+        CRASH.with(|c| *c.borrow_mut() = Some("tmux_unknown"));
+        hub.consume_inbox();
+        assert!(for_a.exists(), "the envelope that met the unreadable answer is kept");
+        assert!(!for_b.exists(), "another pane's envelope is asked for itself and consumed in the same pass");
+        assert_eq!((prompts(&a), prompts(&b)), (0, 1));
+        hub.consume_inbox();
+        assert!(!for_a.exists());
+        assert_eq!(prompts(&a), 1, "and the kept one is delivered next pass");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_tmux_failure_is_classified_by_what_it_proves() {
+        use crate::tmux::{classify, Fact};
+        for e in ["tmux error: error connecting to /tmp/s/sock (No such file or directory)\n", "tmux error: no server running on /tmp/tmux-1000/default\n", "tmux error: lost server\n", "tmux error: server exited unexpectedly\n"] {
+            assert_eq!(classify(e), Fact::Unavailable, "{e}");
+        }
+        for e in ["tmux error: can't find pane: %987\n", "tmux error: can't find window: x\n", "tmux error: can't find session: x\n", "missing session", "missing window", "missing pane"] {
+            assert_eq!(classify(e), Fact::Missing, "{e}");
+        }
+        for e in ["Failed to run tmux: Resource temporarily unavailable (os error 11)", "tmux error: some wording we have no class for\n", "invalid pane", "unreadable server identity: \"\""] {
+            assert_eq!(classify(e), Fact::Unknown, "a failed spawn or an unreadable reply is never invalid: {e}");
+        }
+        assert_eq!(classify("invalid tmux pane id"), Fact::Invalid);
+        assert_eq!(classify("invalid envelope: expected value at line 1"), Fact::Invalid);
+    }
+
+    /// Both producer-side fields are optional at the top level, so an old envelope parses and a new one
+    /// carries them next to backend and pane_id (board #425, #422 H2: one helper format change).
+    #[test]
+    fn an_envelope_parses_with_or_without_the_producing_instance_and_the_launch_uuid() {
+        let old: InboxEnvelope = serde_json::from_str(r#"{"backend":"kiro","pane_id":"%1","payload":{"a":1}}"#).unwrap();
+        assert!(old.tmm_tmux.is_none() && old.launch.is_none());
+        let new: InboxEnvelope = serde_json::from_str(r#"{"backend":"kiro","pane_id":"%1","tmm_tmux":"/tmp/s,12,34","launch":"0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b47","payload":{"a":1}}"#).unwrap();
+        assert_eq!(new.tmm_tmux.as_deref(), Some("/tmp/s,12,34"));
+        assert_eq!(new.launch.as_deref(), Some("0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b47"));
+        assert_eq!(new.payload["a"], 1);
+    }
+
+    #[test]
+    fn a_server_identity_is_plain_path_characters_and_digits_or_nothing() {
+        use crate::tmux::Incarnation;
+        let i = Incarnation::parse("/tmp/tmux-1000/default,1234,1792351058").unwrap();
+        assert_eq!((i.socket.as_str(), i.pid, i.start), ("/tmp/tmux-1000/default", 1234, 1792351058));
+        for bad in ["", "/tmp/s,1", "/tmp/s,x,1", "/tmp/s,1,x", "/tmp/with space/s,1,2", "/tmp/q\"uote/s,1,2", ",1,2", "/tmp/s,1,2,3"] {
+            assert!(Incarnation::parse(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    /// The helper side, end to end through /bin/sh against a private server: an envelope written from
+    /// inside a pane names its server's socket, pid and start time (read back from the server itself);
+    /// outside tmux, or if tmux cannot be asked, the field is left out and the envelope is identity-less.
+    #[test]
+    fn the_helper_records_the_producing_server_and_leaves_it_out_when_it_cannot() {
+        use crate::tmux::test_support::{GlobalSocket, PrivateTmux};
+        let guard = GlobalSocket::hold();
+        let tmux = PrivateTmux::start(&guard, "inbox-helper");
+        let session = format!("tmm-helper-{}", std::process::id());
+        tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
+        let incarnation = crate::tmux::server_incarnation().unwrap();
+        let root = std::env::temp_dir().join(format!("tmm-helper-hub-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.ensure_helper().unwrap();
+        let tmux_bin = String::from_utf8(std::process::Command::new("which").arg("tmux").output().unwrap().stdout).unwrap();
+        let tmux_dir = Path::new(tmux_bin.trim()).parent().unwrap().to_string_lossy().to_string();
+        let run = |env: &[(&str, String)], path: &str| {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg(hub.helper_path()).arg("kiro").env_clear().env("PATH", path).env("HOME", std::env::temp_dir());
+            for (k, v) in env { cmd.env(k, v); }
+            let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"{\"hook_event_name\":\"stop\"}\n").unwrap();
+            assert!(child.wait().unwrap().success());
+            let mut files: Vec<_> = std::fs::read_dir(root.join("inbox")).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+            files.sort();
+            let last = files.pop().expect("an envelope was written");
+            let v: Value = serde_json::from_slice(&std::fs::read(&last).unwrap()).unwrap();
+            let _ = std::fs::remove_file(last);
+            v
+        };
+        let in_pane = [("TMUX_PANE", "%0".to_string()), ("TMUX", format!("{},{},0", incarnation.socket, incarnation.pid))];
+        let v = run(&in_pane, &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert_eq!(v["tmm_tmux"], format!("{},{},{}", incarnation.socket, incarnation.pid, incarnation.start), "the helper asked the server itself");
+        assert_eq!(v["pane_id"], "%0");
+        assert_eq!(v["payload"]["hook_event_name"], "stop", "and the payload is untouched");
+        // Outside tmux: no TMUX, so no identity; the envelope is the old shape.
+        let v = run(&[("TMUX_PANE", "%0".to_string())], &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert!(v.get("tmm_tmux").is_none(), "{v}");
+        // The server cannot be asked from the hook (the socket is gone): the field is left out, the envelope still lands.
+        let v = run(&[("TMUX_PANE", "%0".to_string()), ("TMUX", "/tmp/nowhere-425/sock,1,0".to_string())], &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert!(v.get("tmm_tmux").is_none(), "{v}");
+        // The launch uuid (#422 H2): written only when it is exactly a 36-character [0-9a-f-] uuid, beside tmm_tmux.
+        let uuid = "0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b47".to_string();
+        let mut with_launch = in_pane.to_vec();
+        with_launch.push(("TMM_LAUNCH", uuid.clone()));
+        let v = run(&with_launch, &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert_eq!(v["launch"], uuid.as_str(), "{v}");
+        assert!(v.get("tmm_tmux").is_some(), "both fields ride together: {v}");
+        assert!(v["payload"].get("launch").is_none(), "top level, never inside the payload");
+        let v = run(&[("TMUX_PANE", "%0".to_string()), ("TMM_LAUNCH", uuid.clone())], &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert_eq!(v["launch"], uuid.as_str(), "the launch field does not depend on tmux");
+        assert!(v.get("tmm_tmux").is_none(), "{v}");
+        for bad in ["0B3C9D52-7E1A-4F0C-9A55-3D2E6F8A1B47", "0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b4", "0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b477", "0b3c9d52-7e1a-4f0c-9a55-3d2e6f8a1b4\"", "0b3c9d52 7e1a-4f0c-9a55-3d2e6f8a1b47", "x"] {
+            let v = run(&[("TMUX_PANE", "%0".to_string()), ("TMM_LAUNCH", bad.to_string())], &format!("{tmux_dir}:/usr/bin:/bin"));
+            assert!(v.get("launch").is_none(), "{bad:?} is not a launch uuid: {v}");
+            assert_eq!(v["pane_id"], "%0", "and the envelope still lands: {v}");
+        }
+        // A server that answers on a socket path with a SPACE in it is still not trusted: the field is
+        // plain path characters only, and a path that needs quoting is left to the identity-less path.
+        let spaced_dir = std::env::temp_dir().join(format!("tmm test spaced {}", std::process::id()));
+        std::fs::create_dir_all(&spaced_dir).unwrap();
+        let spaced = spaced_dir.join(format!("{}spaced-{}.sock", crate::tmux::test_support::PRIVATE_PREFIX, std::process::id())).to_string_lossy().to_string();
+        crate::tmux::run_tmux_on(Some(&spaced), &["new-session", "-d", "-s", "spaced", "sleep 60"]).expect("a server on a spaced socket");
+        let spaced_pid = crate::tmux::run_tmux_on(Some(&spaced), &["display-message", "-p", "#{pid}"]).unwrap().trim().to_string();
+        let v = run(&[("TMUX_PANE", "%0".to_string()), ("TMUX", format!("{spaced},{spaced_pid},0"))], &format!("{tmux_dir}:/usr/bin:/bin"));
+        let _ = crate::tmux::test_support::destroy_private_server(&spaced);
+        let _ = std::fs::remove_dir_all(&spaced_dir);
+        assert!(v.get("tmm_tmux").is_none(), "a path with a space is not written even when its server answers: {v}");
+        assert_eq!(v["pane_id"], "%0");
+        // A socket path that is not plain characters is not trusted.
+        let v = run(&[("TMUX_PANE", "%0".to_string()), ("TMUX", "/tmp/a b/sock,1,0".to_string())], &format!("{tmux_dir}:/usr/bin:/bin"));
+        assert!(v.get("tmm_tmux").is_none(), "{v}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

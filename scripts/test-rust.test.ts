@@ -57,8 +57,27 @@ test('the test process cannot see its caller\'s gateway, identity or token: ever
   assert.deepEqual(Object.keys(env).filter((k) => k.startsWith('TMM_')), []);
   assert.equal(env.TOKEN, undefined, 'Config::load reads bare TOKEN');
   assert.equal(env.TMUX_MOBILE_GATEWAY_TMM, '/x/tmm', 'only the TMM_ prefix');
-  assert.equal(env.XDG_CONFIG_HOME, '/c');
   assert.equal(env.PATH, '/bin');
+});
+
+test('an exported TMUX_SOCKET cannot point a test\'s gateway at the real server (#425 review)', () => {
+  // Poison value only: nothing here connects to it. Config::from_parts prefers TMUX_SOCKET over everything.
+  const env = isolatedEnv({ TMUX_SOCKET: '/tmp/tmux-1000/real-default', TMUX: '/tmp/tmux-1000/default,1,0', PATH: '/bin' }, '/tmp/iso-x');
+  assert.equal(env.TMUX_SOCKET, undefined);
+  assert.equal(env.TMUX_TMPDIR, '/tmp/iso-x');
+});
+
+test('a test process cannot reach the real config, data or state dir: the XDG roots are the run dir\'s (#425)', () => {
+  // The incident: a rig that set only HOME ran a gateway on the real ~/.config,
+  // because the config dir is XDG_CONFIG_HOME first, HOME second.
+  const env = isolatedEnv({ XDG_CONFIG_HOME: '/home/x/.config', XDG_DATA_HOME: '/home/x/.local/share', XDG_STATE_HOME: '/home/x/.local/state', HOME: '/home/x', PATH: '/bin' }, '/tmp/iso-x');
+  assert.equal(env.XDG_CONFIG_HOME, '/tmp/iso-x/xdg-config');
+  assert.equal(env.XDG_DATA_HOME, '/tmp/iso-x/xdg-data');
+  assert.equal(env.XDG_STATE_HOME, '/tmp/iso-x/xdg-state');
+  assert.equal(env.HOME, '/home/x', 'HOME stays: the toolchain lives under it');
+  // And they are set even when the caller had none: HOME alone would still resolve .config under it.
+  const bare = isolatedEnv({ HOME: '/home/x', PATH: '/bin' }, '/tmp/iso-y');
+  assert.equal(bare.XDG_CONFIG_HOME, '/tmp/iso-y/xdg-config');
 });
 
 test('a run creates the dir, hands it to cargo, kills only servers under it by -S, and removes it', async () => {

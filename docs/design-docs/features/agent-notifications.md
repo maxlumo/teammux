@@ -229,6 +229,106 @@ and runs `consume_inbox` on tokio's blocking pool: the scan is synchronous end
 to end (directory listing, file reads, tmux subprocesses, bus posts), and on a
 runtime worker it stalled every RPC sharing that thread for the duration.
 
+**An envelope is dropped only for what it IS, or for a server that provably ended
+(board #425, 2026-10-19).** Incident: a validator's browser rig started a gateway
+with a private `HOME` and a private tmux socket, but the shell still exported
+`XDG_CONFIG_HOME`, which the config directory prefers over `HOME`; the gateway ran
+on the REAL config dir, consumed eleven real hook envelopes from the real inbox in
+22 seconds, and dropped every one as "ignored" because `tmux: error connecting to
+<the rig's socket>` was filed under the same `Consume::Drop` as a malformed file.
+Their turn facts and final replies never reached the room (and are not
+recoverable). Three rules came out of it, each a typed answer rather than a list
+of bad news:
+* **What a failed tmux call proves** (`tmux::classify` → `Fact`): `Unavailable` (no
+  socket, nothing listening, the server died under the command: "error connecting
+  to", "no server running", "lost server", "server exited unexpectedly") and
+  `Unknown` (tmux could not be run, EAGAIN; an answer we do not read) keep the
+  envelope in the inbox, however long it takes: no deadline, no age, no deletion
+  for waiting. The warn line says once per file that it is kept and why, and a pass
+  that kept envelopes logs one summary line (count, oldest age), at most once a
+  minute, never a room line. `Missing` (a server ANSWERED that the pane does not
+  exist, which tmux 3.6a does as exit 0 with empty fields) and `Invalid` (a
+  malformed envelope or pane id, anything not tmux's) drop once, naming the reason.
+  A failed spawn or an unreadable reply is never "invalid".
+* **Whose pane is this, and does it exist there?** A pane id means something only
+  to the server INCARNATION that issued it: a new server reuses the socket path, the
+  pid and `%0`. The notify helper therefore writes `tmm_tmux` into every envelope: the
+  producing server's `socket,pid,start_time` (`$TMUX` gives the first two; the start
+  time is asked once from inside the pane with `tmux -S <socket> display -p
+  '#{start_time}'`; plain path characters and digits only, any failure leaves the field
+  out). **That probe is bounded**: it runs in the background with a one-second budget,
+  is killed with KILL when it overruns (TERM can be ignored) and reaped, and then the
+  envelope is published WITHOUT the field, as an identity-less one. Its number counts only
+  when the probe EXITED 0: a number printed before a failure, a signal or the KILL is a
+  partial answer, and a wrong start time would make the consumer drop a real envelope as
+  an older server's. The helper's cleanup trap is armed only after the probe phase,
+  because bash lets a subshell killed with TERM (the watchdog) run the EXIT trap it
+  inherited, which deleted the probe file or the envelope's temp file from under the
+  helper (observed under load, an envelope silently lost about one run in thirty); the atomic publish
+  never waits on tmux, and no coreutils `timeout` is assumed. The same helper change
+  writes `launch`, the window incarnation's `TMM_LAUNCH`, top level beside `backend`
+  and `pane_id` (never inside `payload`), only when it is exactly a 36-character
+  `[0-9a-f-]` uuid and left out otherwise, so nothing needs escaping; both fields are
+  `Option` with `serde(default)`, an old envelope parses, and #422 H2 reads `launch`
+  (nothing here does yet).
+  **The consumer asks ONE question per envelope** (`tmux::resolve_pane_checked`): one
+  tmux response returns the answering server's incarnation (`socket,pid,start_time`)
+  AND the pane's native id, session, window and index, and the envelope's expected
+  instance and pane are compared in that same response. The verified pane then flows
+  through the numbered mark, the turn fact and the reply edge: nothing inside resolves
+  `%N` a second time, so a server replaced between a check and its use cannot have
+  one's answer attributed to the other, and a positive answer never authorises the next
+  envelope (only a NEGATIVE one, "tmux cannot be asked", is remembered for the pass, so
+  the pass does not spawn a doomed query per file). The comparison goes through the one
+  definition (`tmux::Incarnation`, also what `WindowIdentity::same_server` compares,
+  board #422): the same triple is consumed; the same socket with another pid OR another
+  start time is a server that is gone, so the envelope is **dropped**, naming both;
+  ANOTHER socket is another gateway's envelope (the stray gateway that reads this inbox
+  while connected elsewhere): **left untouched** in the inbox, not delivered, not
+  dropped, and it does not fence this server's own panes. Only after the instance
+  matches is "no such pane" a verdict, and only about THAT instance: an empty or
+  different `pane_id` in the response is `Missing` for the checked server, never taken
+  from another server's empty fields. An envelope with no identity (an older helper's,
+  or a probe that expired) is a **compatibility downgrade, not a proof of the same
+  incarnation**: it is consumed as before only when its file time is readable and not
+  before this server started; older than the server it is left untouched (it cannot be
+  this server's); an unreadable file time is Unknown and kept. Time only ever keeps
+  here, never delivers on its own, never deletes. A server that cannot be asked keeps
+  every envelope. Consequence recorded for #422: a Stop written just before a host
+  reboot is `Missing` after the restore (a new server), and its final reply is not
+  recorded in the room, unless the restore records the room line from the envelope alone.
+* **Order is kept while one is kept.** The fence of a numbered producer (#404) also
+  holds for an unavailable tmux, and now for UN-numbered producers too (kiro, claude,
+  codex …): a prompt kept for a flicker is not overtaken by its END in the same
+  pass. It is per pane, and an envelope left for another server does not count.
+At-least-once is unchanged: a tmux failure that interrupts a consumption after a
+visible effect can repeat that effect on the retry, like a crash between an effect
+and the file's removal. The helper now costs one `tmux display` per hook.
+Pinned by `an_envelope_for_an_unreachable_server_is_kept_and_delivered_when_that_server_is_back`
+(the same private server unreachable, a day on, then back: delivered, the malformed
+one dropped once), `an_envelope_from_another_incarnation_of_the_server_is_dropped_never_delivered`
+(a new server on the same socket reusing `%0`, including a file younger than any
+probe, and the same pid with another start time),
+`an_unnumbered_envelope_is_checked_alone_when_the_server_is_replaced_between_envelopes`
+and `a_numbered_envelope_is_checked_alone_when_the_server_is_replaced_between_envelopes`
+(the server is replaced right after the first envelope's check, `%0` reused: the first lands
+in its own server's pane, the old envelope after the replacement does not land in the new
+pane, the new server's own envelope is not deleted by a cached old identity),
+`a_hung_tmux_does_not_hold_the_helper_and_leaves_no_probe_behind` (a fake tmux that hangs
+and ignores TERM, with or without a number printed first: the helper exits within budget, the
+envelope is published without the field, no probe process is left),
+`the_probe_identity_is_used_only_when_tmux_exits_cleanly` (a number then exit 1 or a signal:
+no identity; a clean answer is carried), `an_empty_payload_publishes_nothing_and_leaves_no_temp_file`, `an_unreadable_answer_for_one_pane_does_not_keep_another_panes_envelope` (only a connection error is remembered for the pass), the legacy test's pre-1970 file time (an unreadable time is kept through `consume_inbox`), `the_helpers_cleanup_trap_is_armed_after_its_background_jobs_are_gone`
+(the order in the generated script: the race is an instant after the watchdog's fork, which no fixture can hit on demand), `an_identityless_envelope_is_judged_by_a_readable_file_time_or_kept`, `another_servers_envelope_is_left_untouched_and_does_not_fence_ours`,
+`an_envelope_without_an_identity_is_delivered_only_when_younger_than_the_server_and_never_deleted`,
+`numbered_envelopes_wait_for_an_unreachable_tmux_in_order`,
+`an_unreachable_first_envelope_fences_its_producers_second_in_the_same_pass`,
+`an_unreachable_prompt_fences_its_ends_for_an_unnumbered_producer`,
+`a_tmux_failure_is_classified_by_what_it_proves`, `a_server_identity_is_plain_path_characters_and_digits_or_nothing`
+and `the_helper_records_the_producing_server_and_leaves_it_out_when_it_cannot`.
+The process half of the incident is in
+[testing.md](../../conventions/testing.md#a-rig-owns-its-whole-environment-not-just-home-board-425).
+
 ## Backend Mapping
 
 - Claude Code: `Notification` maps permission/input/completion notification

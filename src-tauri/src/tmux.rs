@@ -100,6 +100,142 @@ fn find_tmux() -> String {
     "tmux".to_string()
 }
 
+/// What a failed tmux call says about the thing it asked about (board #425).
+/// The consumer of a hook envelope decides whether to KEEP or REMOVE it on this
+/// alone, so the boundary is "provably ended" against "cannot tell", never "the
+/// text did not match a list of bad news":
+/// * `Unavailable`: the server could not be reached (no socket, nothing
+///   listening, it died under the command). Nothing is known about the object.
+/// * `Missing`: a server ANSWERED that the pane/window/session does not exist.
+///   On the instance that answered, the object has ended.
+/// * `Unknown`: tmux could not be run (EAGAIN …), answered something we do not
+///   read, or answered with an error we have no class for. Nothing is known.
+/// * `Invalid`: not a tmux condition at all (a malformed pane id, or an error
+///   from somewhere else): the caller's own input is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fact {
+    Unavailable,
+    Missing,
+    Unknown,
+    Invalid,
+}
+
+/// The one reading of the `Err(String)` of `run_tmux` and the helpers built on it
+/// (`resolve_pane_id`). A narrow adapter over tmux 3.6's wording, not a refactor
+/// of every caller: only the inbox door asks.
+pub fn classify(error: &str) -> Fact {
+    if ["error connecting to", "no server running", "lost server", "server exited unexpectedly"].iter().any(|m| error.contains(m)) {
+        Fact::Unavailable
+    } else if error.starts_with("tmux error:") {
+        if error.contains("can't find pane") || error.contains("can't find window") || error.contains("can't find session") {
+            Fact::Missing
+        } else {
+            Fact::Unknown
+        }
+    } else if ["missing session", "missing window", "missing pane"].iter().any(|m| error.starts_with(m)) {
+        // `resolve_pane_id` on tmux 3.6a: a server that has no such pane answers
+        // exit 0 with every field empty (measured, 2026-10-19; `resolve_window` records
+        // the same of display-message). The server ANSWERED, so on this instance the pane is gone.
+        Fact::Missing
+    } else if error.starts_with("Failed to run tmux") || ["invalid pane", "unreadable server identity"].iter().any(|m| error.starts_with(m)) {
+        Fact::Unknown
+    } else {
+        Fact::Invalid
+    }
+}
+
+/// The incarnation of a tmux server: its socket, its pid AND when it started.
+/// A new server can reuse a path, a pid and a pane id, so none of them alone
+/// names one; this triple is the one definition (`WindowIdentity::same_server`
+/// and the hook envelope's producing-instance field both use it, board #422,
+/// #425).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Incarnation {
+    pub socket: String,
+    pub pid: u32,
+    pub start: u64,
+}
+
+impl Incarnation {
+    /// `socket,pid,start`: the form the notify helper writes into an envelope. Plain path characters
+    /// and digits only; anything else is "no identity", not a partial one.
+    pub fn parse(text: &str) -> Option<Incarnation> {
+        let mut parts = text.splitn(3, ',');
+        let (socket, pid, start) = (parts.next()?, parts.next()?, parts.next()?);
+        let plain = |c: char| c.is_ascii_alphanumeric() || "/_.:+-".contains(c);
+        if socket.is_empty() || !socket.chars().all(plain) || !pid.chars().all(|c| c.is_ascii_digit()) || !start.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(Incarnation { socket: socket.to_string(), pid: pid.parse().ok()?, start: start.parse().ok()? })
+    }
+}
+
+/// The server we talk to, asked once.
+pub fn server_incarnation() -> Result<Incarnation, String> {
+    let out = run_tmux(&["display-message", "-p", "#{socket_path}<TMM_SEP>#{pid}<TMM_SEP>#{start_time}"])?;
+    incarnation_of(out.trim_end_matches('\n').split("<TMM_SEP>").collect::<Vec<_>>().as_slice()).ok_or_else(|| format!("unreadable server identity: {out:?}"))
+}
+
+/// The server's own report of itself, as it is: unlike the envelope's field this
+/// does not restrict the socket path's characters (a path with a space is a real
+/// server; it just cannot be written into an envelope).
+fn incarnation_of(fields: &[&str]) -> Option<Incarnation> {
+    let [socket, pid, start] = fields[..] else { return None };
+    if socket.is_empty() {
+        return None;
+    }
+    Some(Incarnation { socket: socket.to_string(), pid: pid.parse().ok()?, start: start.parse().ok()? })
+}
+
+/// A pane id resolved AND checked in ONE tmux response (board #425 review): the
+/// incarnation of the server that answered, and what that same server says about
+/// the pane. Two questions asked separately ("which server is this?", then "where
+/// is `%0`?") leave a window in which the server is replaced between them and the
+/// second answer is attributed to the first; one response cannot be split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedPane {
+    /// The server that answered this very query.
+    pub server: Incarnation,
+    /// `None`: that server has no such pane (it answered, with every pane field
+    /// empty or naming another pane). Missing is judged on THIS instance only.
+    pub pane: Option<PaneFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneFacts {
+    pub session: String,
+    pub window: String,
+    pub index: usize,
+}
+
+pub fn resolve_pane_checked(pane_id: &str) -> Result<CheckedPane, String> {
+    if !pane_id.starts_with('%') || !pane_id[1..].chars().all(|c| c.is_ascii_digit()) {
+        return Err("invalid tmux pane id".into());
+    }
+    let out = run_tmux(&[
+        "display-message", "-t", pane_id, "-p",
+        "#{socket_path}<TMM_SEP>#{pid}<TMM_SEP>#{start_time}<TMM_SEP>#{pane_id}<TMM_SEP>#{session_name}<TMM_SEP>#{window_name}<TMM_SEP>#{pane_index}",
+    ])?;
+    checked_from_output(pane_id, &out)
+}
+
+/// The reading of the one response (see `resolve_pane_checked`), apart from the tmux call so it
+/// can be tested with answers tmux gives only in awkward circumstances.
+fn checked_from_output(pane_id: &str, out: &str) -> Result<CheckedPane, String> {
+    let fields: Vec<&str> = out.trim_end_matches('\n').split("<TMM_SEP>").collect();
+    let [socket, pid, start, native, session, window, index] = fields[..] else {
+        return Err(format!("unreadable server identity: {out:?}"));
+    };
+    let server = incarnation_of(&[socket, pid, start]).ok_or_else(|| format!("unreadable server identity: {out:?}"))?;
+    // A target tmux does not have is answered with exit 0 and empty pane fields (measured, 3.6a); a
+    // pane field naming ANOTHER pane is not an answer about this one either.
+    if native != pane_id || session.is_empty() || window.is_empty() {
+        return Ok(CheckedPane { server, pane: None });
+    }
+    let index = index.parse().map_err(|_| format!("unreadable server identity: {out:?}"))?;
+    Ok(CheckedPane { server, pane: Some(PaneFacts { session: session.to_string(), window: window.to_string(), index }) })
+}
+
 pub(crate) fn run_tmux(args: &[&str]) -> Result<String, String> {
     run_tmux_on(get_socket().as_deref(), args)
 }
@@ -1149,7 +1285,12 @@ pub struct WindowIdentity {
 impl WindowIdentity {
     /// The same tmux server incarnation holds both.
     pub fn same_server(&self, other: &WindowIdentity) -> bool {
-        (self.socket.as_str(), self.server_pid, self.server_start) == (other.socket.as_str(), other.server_pid, other.server_start)
+        self.incarnation() == other.incarnation()
+    }
+
+    /// The server half: the one definition of "the same server" (see `Incarnation`).
+    pub fn incarnation(&self) -> Incarnation {
+        Incarnation { socket: self.socket.clone(), pid: self.server_pid, start: self.server_start }
     }
 }
 
@@ -1726,6 +1867,25 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #425: the one checked response is read as a pane of THAT server only when it names
+    /// the pane asked about; an empty answer, or another pane's, is "no such pane" on the server
+    /// that answered, never a pane of this one.
+    #[test]
+    fn the_checked_response_is_a_pane_only_when_it_names_the_pane_asked_about() {
+        let sep = "<TMM_SEP>";
+        let line = |native: &str, session: &str, window: &str, index: &str| format!("/tmp/s{sep}4242{sep}1700000000{sep}{native}{sep}{session}{sep}{window}{sep}{index}\n");
+        let ok = checked_from_output("%3", &line("%3", "work", "dev", "1")).unwrap();
+        assert_eq!(ok.server, Incarnation { socket: "/tmp/s".into(), pid: 4242, start: 1700000000 });
+        assert_eq!(ok.pane, Some(PaneFacts { session: "work".into(), window: "dev".into(), index: 1 }));
+        assert_eq!(checked_from_output("%3", &line("", "", "", "")).unwrap().pane, None, "tmux's empty answer for a pane it does not have");
+        assert_eq!(checked_from_output("%3", &line("%7", "work", "dev", "1")).unwrap().pane, None, "another pane's fields are not this pane's");
+        assert_eq!(checked_from_output("%3", &line("%3", "", "dev", "1")).unwrap().pane, None);
+        assert!(checked_from_output("%3", "garbage").is_err());
+        assert!(checked_from_output("%3", &format!("{sep}x{sep}y{sep}%3{sep}a{sep}b{sep}0")).is_err(), "an unreadable server identity is not a pane");
+        // A socket path with a space is a real server; it just cannot be written into an envelope.
+        assert!(checked_from_output("%3", &format!("/tmp/a b/s{sep}1{sep}2{sep}%3{sep}w{sep}n{sep}0")).unwrap().pane.is_some());
+    }
 
     /// Board #422 (validator K9): a window identity's server is the full
     /// incarnation — socket, pid AND start time — because a new server can
