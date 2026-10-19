@@ -481,6 +481,31 @@ flaky wall-clock assertions in the test.
   #428 — `the_helpers_exit_is_a_receipt_only_for_a_numbered_producer` wrote
   unconditionally and got EPIPE in 1 of 20 runs writing at once and 20 of 20
   after a 0.2 s delay (validator, #425 gate).
+- A rig cleans up only what has stopped writing, and forgets what it put in
+  the shared store. `kill-session` returns before the pane's processes have
+  exited, and a dying shell still writes its state files, so `DshRig`'s drop
+  removes the workspace only once the pane's process session — the pane pid
+  taken at start, verified as its session's leader — is OBSERVED gone
+  (`pgrep -s` exits 1; SIGKILL to that session only, after 5 s). A failed
+  observation (`pgrep` missing or exiting 2, no pane pid at start) or a
+  session still alive after the SIGKILL is not gone: the drop keeps the
+  workspace and prints one `DshRig cleanup incomplete: …` line (review P1-B).
+  It deletes the project row it adopted into the per-process test store in
+  every case. Reason: board #421 — at load ~105-246 the old drop
+  left `/tmp/tmm-dsh-e2e-…/.tmm/agents/d1/` half-removed (`ready`, `seq`,
+  `.zsh_history` rewritten by the dying shell, no `launch.json`) with its row
+  still in the store, and four `live_config` tests plus a `hub_rpc` test that
+  walk every project failed on "d1 (not confirmed) … it has no launch
+  recipe". `a_dropped_rig_leaves_no_workspace_and_no_project_row` pins the
+  clean path, `a_rig_drop_settles_only_on_an_observed_gone` and
+  `a_rig_drop_keeps_its_workspace_unless_its_processes_are_gone` the rest,
+  and `a_pgrep_that_cannot_answer_is_unknown` the `pgrep` mapping itself (a
+  missing program and one exiting 2, run for real: an injected observer pins
+  nothing about the mapping, validator C6/C7).
+  The settle fixture runs its budget on a simulated clock (`RigClock`) with
+  observations that each take 120 ms of real time: on the wall clock, a
+  writer that ends inside the 150 ms budget was killed whenever the host
+  scheduled the test late (review P2).
 - Rust tests never see the operator's `~/.config/tmux-mobile`. Under
   `cfg(test)` the lib's `config::dirs_next()` is ONE empty temp directory
   per test process (`/tmp/tmm-config-test-<pid>`), so every

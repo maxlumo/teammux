@@ -279,6 +279,17 @@ impl Store {
             .map_err(|e| format!("get project by previous session: {e}"))
     }
 
+    /// A row's previous session name, which `Project` does not carry (board
+    /// #421: a failed rig step names the alias a match could have come by).
+    #[cfg(test)]
+    pub fn prev_session(&self, id: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row("SELECT prev_session FROM projects WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .map(Option::flatten)
+            .map_err(|e| format!("get previous session: {e}"))
+    }
+
     pub fn set_archived(&self, id: &str, archived: bool, now: u64) -> Result<(), String> {
         let at = if archived { Some(now as i64) } else { None };
         self.conn

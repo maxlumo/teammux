@@ -295,6 +295,15 @@ pub fn window_activity_times(session: &str) -> Vec<(usize, u64)> {
         .collect()
 }
 
+/// The directory a session was made in: `new-session -c`, else the making
+/// client's cwd. A declaration, stable for the session's life — unlike a
+/// pane's `#{pane_current_path}`, which is wherever its foreground process
+/// happens to be at the instant of the read (board #421).
+pub fn session_path(session: &str) -> Result<String, String> {
+    let out = run_tmux(&["display-message", "-p", "-t", &exact_session(session), "#{session_path}"])?;
+    Ok(out.trim_end_matches(['\r', '\n']).to_string())
+}
+
 /// 列出某个 session 的所有 pane
 pub fn list_panes(session: &str) -> Result<Vec<TmuxPane>, String> {
     let target = exact_session(session);

@@ -300,6 +300,16 @@ toward the shortest path (the one closest to a project root when windows sit in
 sibling subdirs). A window that does sit outside the project keeps an absolute
 cwd, so it is restored where it was.
 
+The session's own `#{session_path}` comes before the windows (board #421,
+2026-10-19): it is the directory the session was made in (`new-session -c`,
+or the making client's cwd), fixed for the session's life, while a window's
+cwd is its foreground process's at the instant of the read. It wins when it is
+a directory known NOT to be `$HOME` — by directory identity (`same_dir`), not
+spelling, since `$HOME` may be a symlink (on the dev host `/home/cfu` is
+`/local/home/cfu`); a start in `$HOME` (`tmux new` from a fresh terminal)
+says nothing, and neither does a path that cannot be resolved, so the windows
+decide as above.
+
 `project_create` had to learn the same lesson a second time (owner report,
 2026-08-19): the schema had moved uniqueness to `session`, but `create` still
 opened with "is there a project at this canonical path? → return it", so
@@ -937,6 +947,25 @@ was broken out to another window has not ended that pane), retires it in the sam
 
 Each entry is a decision with the reason it was made; treat them as normative. They lived in the root `CLAUDE.md` until 2026-09-02 (board #73), when that file became an index and the rules moved next to the design they belong to.
 
+### An adopted session's workspace is where it was made, not where a pane is now (2026-10-19, #421)
+
+`session_workspace` answers `#{session_path}` when that is an existing
+directory known not to be `$HOME` by directory identity (`same_dir`; a
+symlinked `$HOME` must not win under its other spelling, review P1-A), and
+only otherwise asks the windows
+(`pick_workspace`). Reason: a pane's `#{pane_current_path}` is the cwd of
+its foreground process at the instant of the read, and the project path is
+written once, at adopt. Under load a dsh test rig adopted right after its
+`new-session -c <ws>` got a project at `<ws>/.tmm/agents/d1/dsh` once
+(builder-2's run, load ~105-130) and at `/tmp` once (kiro's, load
+150-200). The rig's delivery then found no recipe and refused
+(`target=None`). What process held those cwds was not identified: probes of
+the rig's pane, every ~5 ms through startup and through a run, saw only
+`<ws>`. The declaration does not depend on it. `$HOME` stays a non-answer
+because of the case above. Pinned by
+`a_session_is_adopted_at_the_directory_it_was_made_in`; without the
+`session_path` step it adopts the pane's subdirectory.
+
 ### Restore evidence is a complete observation; a person's down and Stop outlive it (2026-10-18, #422)
 
 The reboot restore acts on three kinds of fact, and they are kept apart. The
@@ -1144,7 +1173,7 @@ a project (`state.db`, `src-tauri/src/projects/`) is a directory + the windows i
 
 **Every session is a project**: `auto_adopt_once` on the capture tick adopts anything untracked (that is also the migration for pre-existing sessions), guarded by a 120 s session age and "archived is never re-adopted" (the `tmm-team-` prefix exclusion died with the Team system, board #100). There is ONE create path — the `+` calls `project_create` + `project_up`, and its agent presets seed an agent slot rather than a raw command, because a shell command is observed-only and never replayed. `up` matches windows BY NAME and only creates what is missing (the session may be the one you're typing in), `down` kills the session and keeps the declaration, and the capture loop folds live tmux back in — nobody hand-writes a project. One rule keeps it honest: a window must survive 120 s to become restorable, and an ordinary vanished window leaves the declaration; a managed agent's isolated home is durable membership, so Stop retains its absent slot/session id and only Remove ejects it. There is NO topology history — the declaration is the last observed state, which is what "restore what I had before closing/rebooting" means; a 20-deep snapshot list was removed as dead weight (its `restore` rewrote the declaration without projecting it, so a live project's next capture tick undid it).
 
-**Identity is the SESSION, not the path** — several sessions parked in `$HOME` is normal, so `UNIQUE` sits on `session`; the workspace dir comes from `pick_workspace` over ALL windows (most frequent, `$HOME` only as a last resort), never from the focused pane. Migrations MUST `PRAGMA foreign_keys=OFF`: libsqlite3-sys defaults them ON, so a table rebuild's `DROP TABLE` cascades the children away. Only agent slots are relaunched: an observed `npm run dev` is recorded, never replayed. `projects/agents.rs` is ONE table for detection and relaunch so they cannot disagree (a pane's agent is the exact program name of its shallowest agent process — `detect_processes`, a deeper match is a subprocess); for MANAGED windows `detect_pane` reads the backend off the launch recipe FIRST, because the sniff lies for our own spawns — the npm codex runs as `node` with nothing saying "codex" anywhere, so a spawned codex fell out of delivery/roster/vitals/recovery until the record beat the sniff (measured 2026-08-22). And there is ONE way to ask about a pane — `agents::detect_pane(ws, &pane)`: the recipe, else the listing's process-derived `TmuxPane::agent` — because seven call sites used to assemble a detection haystack by hand and one did it differently (the capturer read `child_cmd` and not the window name; the roster, delivery, vitals and recovery read the window name and not `child_cmd`), so the declaration and the roster could disagree about whether the same window was an agent (2026-09-03 review). The client used to be the eighth: its own regex over command + title + child argv, which is how a stale title painted a shell as grok (board #260); it now reads `agent` off the pane.
+**Identity is the SESSION, not the path** — several sessions parked in `$HOME` is normal, so `UNIQUE` sits on `session`; the workspace dir is the session's own `#{session_path}` unless that is `$HOME` (#421), else `pick_workspace` over ALL windows (most frequent, `$HOME` only as a last resort), never the focused pane. Migrations MUST `PRAGMA foreign_keys=OFF`: libsqlite3-sys defaults them ON, so a table rebuild's `DROP TABLE` cascades the children away. Only agent slots are relaunched: an observed `npm run dev` is recorded, never replayed. `projects/agents.rs` is ONE table for detection and relaunch so they cannot disagree (a pane's agent is the exact program name of its shallowest agent process — `detect_processes`, a deeper match is a subprocess); for MANAGED windows `detect_pane` reads the backend off the launch recipe FIRST, because the sniff lies for our own spawns — the npm codex runs as `node` with nothing saying "codex" anywhere, so a spawned codex fell out of delivery/roster/vitals/recovery until the record beat the sniff (measured 2026-08-22). And there is ONE way to ask about a pane — `agents::detect_pane(ws, &pane)`: the recipe, else the listing's process-derived `TmuxPane::agent` — because seven call sites used to assemble a detection haystack by hand and one did it differently (the capturer read `child_cmd` and not the window name; the roster, delivery, vitals and recovery read the window name and not `child_cmd`), so the declaration and the roster could disagree about whether the same window was an agent (2026-09-03 review). The client used to be the eighth: its own regex over command + title + child argv, which is how a stale title painted a shell as grok (board #260); it now reads `agent` off the pane.
 
 **An agent resumes its conversation, not a blank prompt**: the notify hooks already carry `session_id`, the hub keeps the last one per tmux window, the capturer stamps it onto the slot (sticky — a quiet cycle must not erase it), and managed `up` prefers `--resume-id`/`--resume <id>`/`codex resume <id>`/`grok --resume <id>`. If the exact id has not reached `state.db` before the 20-second capture tick, the isolated-home fallback is `kiro-cli chat --resume` / `claude --continue` / `grok --continue` / `codex resume --last`; the Codex form is safe only here because CODEX_HOME is per-agent and `--last` is cwd-filtered, while the generic shared-home path still starts clean.
 

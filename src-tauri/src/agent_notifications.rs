@@ -2083,6 +2083,87 @@ mod tests {
         spy: std::sync::Arc<RigSpy>,
         session: String,
         target: String,
+        adopted_from: String,
+        /// The pane's process, read once the pane exists and verified as the
+        /// leader of its own session (review P1-B): what the drop waits
+        /// for, and the only thing it may SIGKILL. `Err` says why it is not
+        /// known, and then the drop keeps the workspace.
+        shell: Result<u32, String>,
+        /// How the drop observes that session (`pgrep -s`), and its wait
+        /// before the SIGKILL and after it; fixtures replace both.
+        observe: fn(u32) -> Liveness,
+        budget: std::time::Duration,
+    }
+
+    /// What an observation of the rig's process session can say. Only
+    /// `Gone` lets the drop remove what those processes might still write.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Liveness {
+        Alive,
+        Gone,
+        Unknown(String),
+    }
+
+    /// `pgrep -s <sid>`: 0 = a process is in it, 1 = none, anything else
+    /// (or no pgrep at all) = not known.
+    fn pgrep_session(sid: u32) -> Liveness {
+        session_liveness("pgrep", sid)
+    }
+
+    /// `pgrep_session` with the program named, so the fixtures run the real
+    /// mapping against a program that is missing or exits 2 (validator C6/C7).
+    fn session_liveness(pgrep: &str, sid: u32) -> Liveness {
+        match std::process::Command::new(pgrep).args(["-s", &sid.to_string()]).output() {
+            Err(e) => Liveness::Unknown(format!("pgrep did not run: {e}")),
+            Ok(o) => match o.status.code() {
+                Some(0) => Liveness::Alive,
+                Some(1) => Liveness::Gone,
+                code => Liveness::Unknown(format!("pgrep -s {sid} exited {code:?}: {}", String::from_utf8_lossy(&o.stderr).trim())),
+            },
+        }
+    }
+
+    /// Wait up to `budget` for `Gone`; still alive then, `kill` once and
+    /// wait as long again. The answer is the last observation.
+    fn settle(observe: impl FnMut() -> Liveness, kill: impl FnOnce(), budget: std::time::Duration) -> Liveness {
+        settle_on(&RealClock, observe, kill, budget)
+    }
+
+    /// The time `settle` reads and spends (#421 review): the wall clock in
+    /// the drop, a simulated one in the fixtures, so a budget's expiry is
+    /// decided by the simulation and never by the host's scheduling.
+    trait RigClock {
+        fn now(&self) -> std::time::Instant;
+        fn sleep(&self, d: std::time::Duration);
+    }
+    struct RealClock;
+    impl RigClock for RealClock {
+        fn now(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+        fn sleep(&self, d: std::time::Duration) {
+            std::thread::sleep(d)
+        }
+    }
+
+    fn settle_on(clock: &dyn RigClock, mut observe: impl FnMut() -> Liveness, kill: impl FnOnce(), budget: std::time::Duration) -> Liveness {
+        let wait = |observe: &mut dyn FnMut() -> Liveness| {
+            let deadline = clock.now() + budget;
+            loop {
+                let seen = observe();
+                if seen == Liveness::Gone || clock.now() >= deadline {
+                    return seen;
+                }
+                clock.sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        match wait(&mut observe) {
+            Liveness::Alive => {
+                kill();
+                wait(&mut observe)
+            }
+            seen => seen,
+        }
     }
 
     /// The rig's room: records each post; `fail` posts are refused first
@@ -2204,9 +2285,19 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&ws);
                 return None;
             }
-            crate::projects::adopt(&session, Some(&session)).expect("adopt the scratch session as a project");
+            let before = crate::tmux::run_tmux(&["list-panes", "-s", "-t", &session, "-F", "#{window_index}:#{pane_current_path}|#{session_path}"]).unwrap_or_else(|e| format!("unreadable: {e}"));
+            let adopted = crate::projects::adopt(&session, Some(&session)).expect("adopt the scratch session as a project");
+            // What the adoption saw (board #421): the pane cwds read just
+            // before it, and the path it stored.
+            let adopted_from = format!("panes_before=[{}] stored={}", before.trim(), adopted["project"]["path"]);
             let target = pane_id(&session);
-            let rig = DshRig { ws, root, hub, spy, session, target };
+            let shell = crate::tmux::run_tmux(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
+                .and_then(|s| s.trim().parse::<u32>().map_err(|e| format!("pane_pid {s:?}: {e}")))
+                .and_then(|pid| match unsafe { libc::getsid(pid as libc::pid_t) } {
+                    sid if sid == pid as libc::pid_t => Ok(pid),
+                    sid => Err(format!("pane pid {pid} does not lead its own session (getsid = {sid})")),
+                });
+            let rig = DshRig { ws, root, hub, spy, session, target, adopted_from, shell, observe: pgrep_session, budget: std::time::Duration::from_secs(5) };
             wait_for("the dsh prompt", 15, || rig.ready());
             Some(rig)
         }
@@ -2337,8 +2428,11 @@ mod tests {
             let project = crate::projects::project_for_session(&self.session);
             let workspace = project.as_ref().ok().cloned().flatten().map(|p| p.path);
             let inputs = format!(
-                "project={} detect={} managed={}",
+                "project={} match={} adopted_from={} tmux_now={} detect={} managed={}",
                 field(|| project.clone().map(|p| p.map(|p| p.path))),
+                field(|| crate::projects::projects::project_match(&self.session)),
+                field(|| Ok::<_, String>(self.adopted_from.clone())),
+                field(|| crate::tmux::run_tmux(&["display-message", "-p", "-t", &self.target, "pane_current_path=#{pane_current_path} session_path=#{session_path} pane_pid=#{pane_pid}"]).map(|s| s.trim().to_string())),
                 field(|| {
                     let panes = crate::tmux::list_panes(&self.session)?;
                     Ok::<_, String>(
@@ -2399,11 +2493,176 @@ mod tests {
     }
 
     impl Drop for DshRig {
+        /// Leave nothing a later test can trip over (board #421). A
+        /// `kill-session` returns before the pane's shell has exited, and a
+        /// dying shell still writes its state files (`ready`, `seq`, its
+        /// history): removed at once, the workspace survived half-deleted,
+        /// without `launch.json`. So the workspace and the hub directory are
+        /// removed only once the pane's whole process session (the identity
+        /// taken at start) is observed `Gone`; `Unknown` or still `Alive`
+        /// after the SIGKILL keeps both and says so in one line (review
+        /// P1-B). The project row the rig adopted into the shared test store
+        /// is forgotten either way. Never panics: a panic in a drop during an
+        /// unwind aborts the run.
         fn drop(&mut self) {
             let _ = crate::tmux::run_tmux(&["kill-session", "-t", &self.session]);
-            let _ = std::fs::remove_dir_all(&self.ws);
-            let _ = std::fs::remove_dir_all(&self.root);
+            let state = match &self.shell {
+                Err(why) => Liveness::Unknown(why.clone()),
+                Ok(sid) => {
+                    let (sid, observe) = (*sid, self.observe);
+                    settle(
+                        || observe(sid),
+                        || {
+                            let _ = std::process::Command::new("pkill").args(["-KILL", "-s", &sid.to_string()]).status();
+                        },
+                        self.budget,
+                    )
+                }
+            };
+            if let Err(e) = crate::projects::tests::forget_session_project(&self.session) {
+                eprintln!("DshRig cleanup incomplete: the project row of {} is not forgotten: {e}", self.session);
+            }
+            if state == Liveness::Gone {
+                let _ = std::fs::remove_dir_all(&self.ws);
+                let _ = std::fs::remove_dir_all(&self.root);
+            } else {
+                eprintln!("DshRig cleanup incomplete: kept {} and {}: its processes are {state:?}", self.ws.display(), self.root.display());
+            }
         }
+    }
+
+    /// Board #421, review P1-B: only a confirmed `Gone` is `Gone`. An
+    /// observation that cannot say keeps saying so, and a session still
+    /// alive after its wait is killed once and reported as it is then.
+    /// Every observation here is SLOW, as `pgrep` is on a loaded host (120 ms
+    /// of real time against a 150 ms budget), and the budget runs on a
+    /// simulated clock: whether it expires is decided by the simulation, so
+    /// the writer that ends inside it is never killed however the host
+    /// schedules this test (review P2: on the wall clock it was).
+    #[test]
+    fn a_rig_drop_settles_only_on_an_observed_gone() {
+        struct SimClock(std::time::Instant, std::cell::Cell<std::time::Duration>);
+        impl RigClock for SimClock {
+            fn now(&self) -> std::time::Instant {
+                self.0 + self.1.get()
+            }
+            fn sleep(&self, d: std::time::Duration) {
+                self.1.set(self.1.get() + d);
+            }
+        }
+        let clock = SimClock(std::time::Instant::now(), std::cell::Cell::new(std::time::Duration::ZERO));
+        let slow = || std::thread::sleep(std::time::Duration::from_millis(120));
+        let budget = std::time::Duration::from_millis(150);
+        let kills = std::cell::Cell::new(0);
+        let unknown = || Liveness::Unknown("pgrep -s 1 exited Some(2)".into());
+        let observed = settle_on(&clock, || {
+            slow();
+            unknown()
+        }, || kills.set(kills.get() + 1), budget);
+        assert_eq!(observed, unknown(), "a failed observation is never Gone");
+        assert_eq!(kills.get(), 0, "and nothing is killed on a guess");
+        let observed = settle_on(&clock, || {
+            slow();
+            Liveness::Alive
+        }, || kills.set(kills.get() + 1), budget);
+        assert_eq!(observed, Liveness::Alive, "alive past the budget");
+        assert_eq!(kills.get(), 1, "killed once, by the identity it was given");
+        let mut seen = vec![Liveness::Gone, Liveness::Alive, Liveness::Alive];
+        let observed = settle_on(&clock, || {
+            slow();
+            seen.pop().unwrap_or(Liveness::Gone)
+        }, || kills.set(kills.get() + 1), budget);
+        assert_eq!(observed, Liveness::Gone, "a writer that ends inside the budget");
+        assert_eq!(kills.get(), 1, "is never killed");
+        assert!(matches!(pgrep_session(u32::MAX), Liveness::Gone | Liveness::Unknown(_)), "no such session is never Alive");
+    }
+
+    /// Board #421, validator C6/C7: the real `pgrep` mapping. A program that
+    /// cannot be started, or one that exits 2, is `Unknown`, never `Gone`;
+    /// this test's own session is `Alive`.
+    #[test]
+    fn a_pgrep_that_cannot_answer_is_unknown() {
+        let dir = std::env::temp_dir().join(format!("tmm-421-pgrep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exits2 = dir.join("pgrep");
+        std::fs::write(&exits2, "#!/bin/sh\necho 'pgrep: bad session' >&2\nexit 2\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exits2, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let own = unsafe { libc::getsid(0) } as u32;
+        let missing = session_liveness(&dir.join("absent").to_string_lossy(), own);
+        assert!(matches!(&missing, Liveness::Unknown(why) if why.contains("did not run")), "{missing:?}");
+        let two = session_liveness(&exits2.to_string_lossy(), own);
+        assert!(matches!(&two, Liveness::Unknown(why) if why.contains("Some(2)") && why.contains("bad session")), "{two:?}");
+        assert_eq!(pgrep_session(own), Liveness::Alive, "this test's own session");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #421, review P1-B: the real rig keeps its workspace whenever
+    /// its processes are not observed gone — no pane pid taken at start,
+    /// `pgrep` failing, still alive after the budget — and forgets its
+    /// project row in every case.
+    #[test]
+    fn a_rig_drop_keeps_its_workspace_unless_its_processes_are_gone() {
+        type Case = (&'static str, fn(&mut DshRig));
+        let cases: [Case; 3] = [
+            ("no pane pid at start", |r| r.shell = Err("pane_pid unreadable".into())),
+            ("pgrep exits 2", |r| r.observe = |_| Liveness::Unknown("pgrep -s exited Some(2)".into())),
+            ("alive past the budget", |r| {
+                r.observe = |_| Liveness::Alive;
+                r.budget = std::time::Duration::from_millis(200);
+            }),
+        ];
+        for (what, spoil) in cases {
+            let Some(mut rig) = DshRig::start() else {
+                eprintln!("skipped: no zsh, node or tmux server");
+                return;
+            };
+            let (session, ws, root) = (rig.session.clone(), rig.ws.clone(), rig.root.clone());
+            let sid = rig.shell.clone().expect("the rig knows its pane's process");
+            spoil(&mut rig);
+            drop(rig);
+            assert!(ws.join(".tmm/agents/d1/launch.json").is_file(), "{what}: the workspace is kept whole");
+            assert!(crate::projects::project_for_session(&session).unwrap().is_none(), "{what}: the row is forgotten anyway");
+            // The fixture's own cleanup, now that the session is observed gone.
+            assert_eq!(settle(|| pgrep_session(sid), || {}, std::time::Duration::from_secs(10)), Liveness::Gone, "{what}");
+            let _ = std::fs::remove_dir_all(&ws);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Board #421: a dropped rig leaves nothing a later test trips over —
+    /// neither the home a dying process of its pane rewrote after the
+    /// hangup (it survived half-removed, without `launch.json`), nor its
+    /// project row in the shared test store (every later test that walks
+    /// projects then reported a stranger's `d1`).
+    #[test]
+    fn a_dropped_rig_leaves_no_workspace_and_no_project_row() {
+        let Some(rig) = DshRig::start() else {
+            eprintln!("skipped: no zsh, node or tmux server");
+            return;
+        };
+        let (session, ws) = (rig.session.clone(), rig.ws.clone());
+        let home = ws.join(".tmm/agents/d1");
+        // A process of the pane that writes into the home 0.3 s after the
+        // hangup, as the dying shell writes its state files.
+        rig.type_keys(
+            &format!(
+                "!sh -c 'trap \"sleep 0.3; mkdir -p {h}; echo late > {h}/late; exit 0\" HUP; : > {w}/writer-up; while :; do sleep 0.05; done'",
+                h = home.display(),
+                w = ws.display()
+            ),
+            true,
+        );
+        rig.wait_for("the late writer", 10, || ws.join("writer-up").exists());
+        let shell = crate::tmux::run_tmux(&["display-message", "-p", "-t", &rig.target, "#{pane_pid}"]).unwrap().trim().to_string();
+        drop(rig);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let live = std::process::Command::new("pgrep").args(["-s", &shell]).output().unwrap();
+        assert!(!live.status.success(), "the pane's session {shell} is gone: {}", String::from_utf8_lossy(&live.stdout));
+        assert!(!ws.exists(), "the workspace is removed, not rewritten after the drop: {:?}", std::fs::read_dir(&home).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
+        assert!(crate::projects::project_for_session(&session).unwrap().is_none(), "the rig's project row is forgotten");
+        let listed = crate::projects::list(true).unwrap().to_string();
+        assert!(!listed.contains(&session), "no listed project names {session}: {listed}");
     }
 
     /// Board #404 P1-A and P1-C, end to end through production code.

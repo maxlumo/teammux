@@ -804,6 +804,31 @@ pub fn project_for_session(session: &str) -> Result<Option<store::Project>, Stri
     })
 }
 
+/// Which row `project_for_session` answers with, and by which column (board
+/// #421: a rig's project read `/tmp`; this tells its own row from another
+/// test's row reached by a session or a previous-session name).
+#[cfg(test)]
+pub fn project_match(session: &str) -> Result<String, String> {
+    with_store(|store| {
+        let (how, found) = match store.project_by_session(session)? {
+            Some(p) => ("session", Some(p)),
+            None => ("prev_session", store.project_by_prev_session(session)?),
+        };
+        Ok(match found {
+            None => "none".to_string(),
+            Some(p) => format!(
+                "by {how}: id={} name={} session={} prev_session={:?} path={} created_at={}",
+                p.id,
+                p.name,
+                p.session,
+                store.prev_session(&p.id)?,
+                p.path,
+                p.created_at
+            ),
+        })
+    })
+}
+
 pub(super) fn load(id: &str) -> Result<(Project, Vec<Slot>), String> {
     with_store(|store| {
         let project = store
@@ -833,8 +858,16 @@ pub(super) fn free_session_name(store: &Store, base: &str, id: &str) -> Result<S
 /// often a shell parked in `$HOME`, which says nothing about the workspace (a
 /// real case: a session whose second window ran an agent in
 /// `~/work/poc/260728-ds160` while the focused first window sat in `$HOME`).
-/// Ask every window and let `pick_workspace` decide.
+///
+/// The session's own `#{session_path}` comes first (board #421): it is the
+/// directory the session was made in, while a pane's cwd is its foreground
+/// process's at the instant of the read — a dsh rig adopted right after its
+/// `new-session -c <ws>` got a project at `<ws>/.tmm/agents/d1/dsh` once and
+/// at `/tmp` once. A session made in `$HOME` (`tmux new` from a fresh terminal) says
+/// nothing about its workspace either, so then every window is asked and
+/// `pick_workspace` decides.
 pub(super) fn session_workspace(session: &str) -> Result<String, String> {
+    let declared = tmux::session_path(session)?;
     let panes = tmux::list_panes(session)?;
     let mut cwds: Vec<(usize, String)> = Vec::new();
     for pane in &panes {
@@ -849,8 +882,27 @@ pub(super) fn session_workspace(session: &str) -> Result<String, String> {
     }
     cwds.sort_by_key(|(w, _)| *w);
     let ordered: Vec<String> = cwds.into_iter().map(|(_, p)| p).collect();
-    pick_workspace(&ordered, &tmux::home_dir())
+    choose_workspace(&declared, &ordered, &tmux::home_dir())
         .ok_or_else(|| format!("cannot determine a directory for session {session}"))
+}
+
+/// The session's own path when it declares a workspace, else the windows'
+/// verdict (`pick_workspace`).
+pub(super) fn choose_workspace(declared: &str, cwds: &[String], home: &str) -> Option<String> {
+    if declares_workspace(declared, home) {
+        return Some(declared.to_string());
+    }
+    pick_workspace(cwds, home)
+}
+
+/// Whether a session's `#{session_path}` names its workspace: an existing
+/// directory that is known NOT to be `$HOME` (a parked start says nothing, as
+/// in `pick_workspace`). Known by directory identity (`same_dir`), never by
+/// spelling: on this host `$HOME` is `/home/cfu` and its canonical path
+/// `/local/home/cfu` (review P1-A); a path that cannot be resolved is not
+/// known to be anything, so the windows decide.
+pub(super) fn declares_workspace(declared: &str, home: &str) -> bool {
+    !declared.is_empty() && std::path::Path::new(declared).is_dir() && same_dir(declared, home) == Some(false)
 }
 
 /// Choose the directory that best represents a set of window cwds.
@@ -1463,6 +1515,70 @@ mod tests {
             Some("/w/app"),
         );
         assert_eq!(pick_workspace(&[], home), None);
+    }
+
+    /// Board #421: a session is adopted at the directory it was made in,
+    /// whatever directory its pane's foreground process is in at the instant
+    /// of the read. The pane here has gone into its agent's home (where a
+    /// dsh rig's project once landed); the project is still the session's
+    /// path. A start in `$HOME` (by directory identity, any spelling), an
+    /// empty answer or a gone directory says nothing, and the windows are
+    /// asked as before.
+    #[test]
+    fn a_session_is_adopted_at_the_directory_it_was_made_in() {
+        // `$HOME` by directory identity, on real directories (review P1-A):
+        // a real home, a symlink alias of it, and a project elsewhere.
+        let fx = std::env::temp_dir().join(format!("tmm-421-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(fx.join("home")).unwrap();
+        std::fs::create_dir_all(fx.join("proj")).unwrap();
+        let fx = fx.canonicalize().unwrap();
+        std::os::unix::fs::symlink(fx.join("home"), fx.join("home-alias")).unwrap();
+        let s = |p: &str| fx.join(p).to_string_lossy().to_string();
+        let (home, alias, proj) = (s("home"), s("home-alias"), s("proj"));
+        assert!(!declares_workspace(&home, &home), "an existing $HOME");
+        assert!(!declares_workspace(&format!("{home}/"), &home));
+        assert!(!declares_workspace(&alias, &home), "$HOME under a symlink alias");
+        assert!(!declares_workspace(&home, &alias), "$HOME spelled by its alias, the session at its canonical path");
+        assert!(!declares_workspace("", &home));
+        assert!(!declares_workspace(&s("gone"), &home), "a directory that no longer exists");
+        assert!(declares_workspace(&proj, &home));
+        assert_eq!(
+            choose_workspace(&alias, &[proj.clone()], &home).as_deref(),
+            Some(proj.as_str()),
+            "a session made in $HOME's alias: the pane in the project decides"
+        );
+        assert_eq!(choose_workspace(&proj, &[home.clone()], &home).as_deref(), Some(proj.as_str()), "the declaration over a parked pane");
+        // Fail closed (validator C2b): a comparison with `$HOME` that cannot
+        // be resolved (a symlink loop: same_dir is None) is no declaration,
+        // and the pane decides.
+        std::os::unix::fs::symlink(fx.join("loop"), fx.join("loop")).unwrap();
+        let looped = s("loop");
+        assert_eq!(same_dir(&proj, &looped), None, "the fixture's comparison is unresolvable");
+        assert!(!declares_workspace(&proj, &looped), "an unresolvable comparison is not a declaration");
+        let other = s("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_eq!(choose_workspace(&proj, &[other.clone()], &looped).as_deref(), Some(other.as_str()), "the pane cwd wins");
+        let _ = std::fs::remove_dir_all(&fx);
+
+        let home = &tmux::home_dir();
+        let mut scratch = tmux::Scratch::new("made-in");
+        use_test_store();
+        let path = scratch.path();
+        assert!(declares_workspace(&path, home));
+        let sub = format!("{path}/.tmm/agents/d1/dsh");
+        std::fs::create_dir_all(&sub).unwrap();
+        let session = &scratch.session("s");
+        tmux::ensure_session(session, &path).unwrap();
+        tmux::send_command(session, &format!("cd {}", crate::shell::quote_always(&sub))).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tmux::list_panes(session).unwrap()[0].current_path != sub {
+            assert!(std::time::Instant::now() < deadline, "the pane went into {sub}: {:?}", tmux::list_panes(session));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let adopted = adopt(session, None).unwrap();
+        let id = adopted["project"]["id"].as_str().unwrap().to_string();
+        assert_eq!(adopted["project"]["path"], path.as_str(), "the session's path, not the pane's cwd");
+        delete(&id).unwrap();
     }
 
     /// Auto-tracking is what makes "every session is a project" true, including

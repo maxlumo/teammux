@@ -258,6 +258,16 @@ pub(crate) mod tests {
         with_store(|s| s.restore_intents()).unwrap()
     }
 
+    /// Forget one test's project by its session, row and slots (board #421):
+    /// a rig that leaves its adopted row in this per-process store hands every
+    /// later test that walks projects a stranger's windows.
+    pub(crate) fn forget_session_project(session: &str) -> Result<(), String> {
+        with_store(|s| match s.project_by_session(session)? {
+            Some(p) => s.delete_project(&p.id).map(|_| ()),
+            None => Ok(()),
+        })
+    }
+
     /// Forget one agent's Stop mark in the test store (board #422).
     pub(crate) fn forget_stop(id: &str, window: &str) {
         with_store(|s| s.forget_slot_stopped(id, window)).unwrap()
