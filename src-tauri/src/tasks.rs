@@ -456,14 +456,18 @@ fn create_window(session: &str, name: &str, cwd: &str) -> Result<String> {
 /// reason (board #407: a server inherited from the tmux server's environment
 /// sent a human's task to a gateway its starter never named). The config dir
 /// travels only when the starter has one: it is not ours to blank for every
-/// program the task runs.
-pub fn starter_env(project: Option<&str>, agent: Option<&str>, config: Option<&str>, server: Option<&str>) -> Vec<(String, String)> {
+/// program the task runs. `TMM_SOCKET` (board #440) travels like
+/// `TMM_SERVER`: always written, the starter's EFFECTIVE local socket after
+/// tmm's selection table, empty when it had none, so a stale tmux-global
+/// value never sends a task's tmm to another gateway's socket.
+pub fn starter_env(project: Option<&str>, agent: Option<&str>, config: Option<&str>, server: Option<&str>, socket: Option<&str>) -> Vec<(String, String)> {
     let mut env = vec![
         ("TMM_PROJECT".to_string(), project.unwrap_or_default().to_string()),
         ("TMM_AGENT".to_string(), agent.unwrap_or_default().to_string()),
     ];
     if let Some(c) = config { env.push(("XDG_CONFIG_HOME".into(), c.into())); }
     env.push(("TMM_SERVER".into(), server.unwrap_or_default().into()));
+    env.push(("TMM_SOCKET".into(), socket.unwrap_or_default().into()));
     env
 }
 
@@ -959,7 +963,7 @@ mod tests {
         let session = "tmm-test-starter";
         let name = format!("tmm-test-id-{}", std::process::id());
         let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
-        let print = sh("echo \"agent=[$TMM_AGENT] project=[$TMM_PROJECT] server=[$TMM_SERVER]\"; sleep 300");
+        let print = sh("echo \"agent=[$TMM_AGENT] project=[$TMM_PROJECT] server=[$TMM_SERVER] socket=[$TMM_SOCKET]\"; sleep 300");
         let said = |name: &str| {
             std::thread::sleep(std::time::Duration::from_millis(300));
             logs(name, 5, Some("agent=")).unwrap()
@@ -968,15 +972,17 @@ mod tests {
         tmux::run_tmux(&["set-environment", "-g", "TMM_AGENT", "stale"]).unwrap();
         tmux::run_tmux(&["set-environment", "-g", "TMM_PROJECT", "stale"]).unwrap();
         tmux::run_tmux(&["set-environment", "-g", "TMM_SERVER", "ws://stale:1"]).unwrap();
+        // Board #440: another gateway's socket in the tmux server's environment.
+        tmux::run_tmux(&["set-environment", "-g", "TMM_SOCKET", "/stale/sock/gateway.sock"]).unwrap();
 
-        let dev = starter_env(Some("my proj#x"), Some("dev"), None, Some("ws://h:1"));
+        let dev = starter_env(Some("my proj#x"), Some("dev"), None, Some("ws://h:1"), Some("/cfg/sock/gateway.sock"));
         start(&name, &print, Some(session), true, None, &dev).unwrap();
-        assert!(said(&name).contains("agent=[dev] project=[my proj#x] server=[ws://h:1]"), "{}", said(&name));
+        assert!(said(&name).contains("agent=[dev] project=[my proj#x] server=[ws://h:1] socket=[/cfg/sock/gateway.sock]"), "{}", said(&name));
 
-        let human = starter_env(Some("blog"), None, None, None);
+        let human = starter_env(Some("blog"), None, None, None, None);
         start(&name, &print, Some(session), true, None, &human).unwrap();
         let out = said(&name);
-        assert!(out.lines().last().unwrap_or("").contains("agent=[] project=[blog] server=[]"), "a reused window, the human: {out}");
+        assert!(out.lines().last().unwrap_or("").contains("agent=[] project=[blog] server=[] socket=[]"), "a reused window, the human: {out}");
         let _ = tmux::kill_session(session);
     }
 

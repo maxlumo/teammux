@@ -1657,6 +1657,27 @@ mod tests {
         assert!(normalize(&envelope(json!({"hook_event_name":"SessionStart"}))).is_err());
     }
 
+    /// Board #440: a hook's envelope never touches the network, so no auth
+    /// refusal or lockout can drop a turn fact. The helper is a shell script
+    /// that writes the inbox and nothing else: it names no network tool, no
+    /// URL, no `tmm`, no `/dev/tcp`. Its one external call is `tmux` (the
+    /// server's start time, over the pane's own socket).
+    #[cfg(unix)]
+    #[test]
+    fn the_hook_helper_never_opens_a_network_connection() {
+        let root = std::env::temp_dir().join(format!("tmm-agent-helper-net-{}", uuid::Uuid::new_v4()));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.write_helper().unwrap();
+        let script = std::fs::read_to_string(hub.helper_path()).unwrap();
+        for word in ["curl", "wget", "nc ", "ncat", "socat", "/dev/tcp", "/dev/udp", "ws://", "wss://", "http://", "https://", "tmm ", "ssh ", "python", "perl"] {
+            assert!(!script.contains(word), "the helper names {word:?}");
+        }
+        let commands: Vec<&str> = script.lines().map(str::trim).filter(|l| l.starts_with("( exec ")).collect();
+        assert_eq!(commands, vec![r#"( exec tmux -S "$sock" display-message -p '#{start_time}' </dev/null >"$probe" 2>/dev/null ) &"#], "its one external program is tmux");
+        assert!(script.contains(r#"mv "$tmp" "$inbox/$name.json""#), "and it publishes by renaming into the inbox");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn helper_is_tmux_scoped_and_best_effort_without_server() {

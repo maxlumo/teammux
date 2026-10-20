@@ -194,6 +194,12 @@ fn backends_help() -> String {
 
 struct Ctx {
     server: String,
+    /// The local socket to try first (board #440), per `socket_for`; None =
+    /// TCP only.
+    socket: Option<std::path::PathBuf>,
+    /// What that socket's gateway must say it is, after login: THIS config's
+    /// port and canonical config dir.
+    endpoint: Value,
     token: String,
     project: Option<String>,
     agent: Option<String>,
@@ -319,9 +325,13 @@ async fn main() {
     }
 
     let cfg = tmux_mobile::config::Config::load();
+    let explicit = flags.get("server").cloned().flatten().is_some() || std::env::var("TMM_SERVER").is_ok_and(|s| !s.is_empty());
     let server = server_for(flags.get("server").cloned().flatten(), std::env::var("TMM_SERVER").ok(), cfg.port);
+    let config_dir = tmux_mobile::config::config_dir();
     let ctx = Ctx {
         server,
+        socket: socket_for(explicit, std::env::var_os("TMM_SOCKET"), &config_dir).unwrap_or_else(|e| fail(EXIT_USAGE, &e)),
+        endpoint: own_endpoint(cfg.port, &config_dir),
         token: std::env::var("TMM_TOKEN").ok().unwrap_or(cfg.token),
         project: flags.get("project").cloned().flatten().or_else(|| std::env::var("TMM_PROJECT").ok()).filter(|s| !s.is_empty()),
         agent: flags.get("agent").cloned().flatten().or_else(|| std::env::var("TMM_AGENT").ok()).filter(|s| !s.is_empty()),
@@ -1458,7 +1468,12 @@ fn cmd_task(rest: &[String], cmdv: &[String], flags: &Flags, json: bool) {
             // The server this task was started against, flag or env
             // (validator 09:31): its sends and its wake reach the same one.
             let server = flags.get("server").cloned().flatten().or_else(|| env("TMM_SERVER"));
-            let starter_env = tasks::starter_env(project.as_deref(), starter.as_deref(), env("XDG_CONFIG_HOME").as_deref(), server.as_deref());
+            // And the local socket this starter would use (board #440): the
+            // candidate AFTER the selection table, so a task of a shell that
+            // derived its socket keeps it, and an explicit TCP starter's is ''.
+            let socket = socket_for(server.is_some(), std::env::var_os("TMM_SOCKET"), &tmux_mobile::config::config_dir()).unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+            let socket = socket.as_ref().map(|p| p.to_string_lossy().to_string());
+            let starter_env = tasks::starter_env(project.as_deref(), starter.as_deref(), env("XDG_CONFIG_HOME").as_deref(), server.as_deref(), socket.as_deref());
             // `--wake [@who]` (board #275): when the task ends by itself, the
             // server gets a wake for @who (default: the agent starting it).
             let wake = flags.contains_key("wake").then(|| {
@@ -2160,12 +2175,55 @@ async fn rpc_needing(ctx: &Ctx, need: &str, method: &str, params: Value) -> Valu
 }
 
 async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>) -> Result<Value, (i32, String)> {
+    // ONE deadline for both transports (board #440): a socket that falls
+    // back to TCP never doubles the connect timeout.
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+    #[cfg(unix)]
+    if let Some(path) = &ctx.socket {
+        match local_connect(path, deadline).await {
+            Local::Ready(stream) => {
+                let (ws, _) = tokio::time::timeout_at(deadline, tokio_tungstenite::client_async("ws://localhost/", stream))
+                    .await
+                    .map_err(|_| (EXIT_NET, format!("the local socket {} did not finish the handshake in time", path.display())))?
+                    .map_err(|e| (EXIT_NET, format!("the local socket {} refused the handshake: {e}", path.display())))?;
+                // Never retried over TCP from here on: a send or a spawn must
+                // not run twice, and a bad token must not reach the lockout.
+                return session(ws, ctx, method, params, need, Some(&ctx.endpoint)).await;
+            }
+            Local::Absent => {}
+            Local::Refused(why) => return Err((EXIT_NET, why)),
+        }
+    }
     let connect = tokio_tungstenite::connect_async(&ctx.server);
-    let (mut ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+    let (ws, _) = tokio::time::timeout_at(deadline, connect)
         .await
         .map_err(|_| (EXIT_NET, format!("server not reachable at {} (2s timeout) — is tmux-mobile running?", ctx.server)))?
-        .map_err(|e| (EXIT_NET, format!("server not reachable at {}: {e}", ctx.server)))?;
+        .map_err(|e| (EXIT_NET, tcp_connect_failure(&ctx.server, &e)))?;
+    session(ws, ctx, method, params, need, None).await
+}
 
+/// What a failed TCP connect says (board #440). Nothing listening is "not
+/// reachable"; a connection the server took and then dropped during the
+/// handshake may be the per-IP auth lockout, which refuses before the
+/// WebSocket upgrade. It is named as the possible cause, with the real error.
+fn tcp_connect_failure(server: &str, e: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error;
+    match e {
+        Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound | std::io::ErrorKind::AddrNotAvailable) => {
+            format!("server not reachable at {server}: {e}")
+        }
+        Error::Url(_) => format!("server not reachable at {server}: {e}"),
+        _ => format!("{server} refused the connection during the handshake (possibly the per-IP auth lockout, 60 s): {e}"),
+    }
+}
+
+/// The login and the one call, on whichever transport was chosen. `endpoint`
+/// is set for a local socket: its gateway must say it is THIS config's
+/// (port and canonical config dir), or nothing is sent after the login.
+async fn session<S>(mut ws: tokio_tungstenite::WebSocketStream<S>, ctx: &Ctx, method: &str, params: Value, need: Option<&str>, endpoint: Option<&Value>) -> Result<Value, (i32, String)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // Plain token auth (loopback default). id 1 = auth, id 2 = the call.
     let auth = json!({ "id": 1, "method": "auth", "params": { "token": ctx.token } });
     ws.send(Message::Text(auth.to_string().into()))
@@ -2174,6 +2232,15 @@ async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>
     let auth_reply = read_reply(&mut ws, 1).await?;
     if auth_reply.get("error").is_some() {
         return Err((EXIT_AUTH, "auth rejected — check token in config.toml or $TMM_TOKEN".into()));
+    }
+    if let Some(want) = endpoint {
+        let got = auth_reply.pointer("/result/endpoint").cloned().unwrap_or(Value::Null);
+        if &got != want {
+            let _ = ws.close(None).await;
+            return Err((EXIT_NET, format!(
+                "the local socket answered for another gateway ({got}), not this config's ({want}) — a stale TMM_SOCKET? Nothing was sent."
+            )));
+        }
     }
     if let Some(need) = need {
         let has = auth_reply
@@ -2292,6 +2359,76 @@ async fn follow_log(ctx: &Ctx, session: &str, mut since: i64, limit: i64) {
             Err((code, msg)) => fail(code, &msg),
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The local socket tmm tries first (board #440), by the selection table:
+/// an EXPLICIT target (`--server`, a non-empty `TMM_SERVER`) is always TCP;
+/// else a non-empty, absolute `TMM_SOCKET` (an agent's recipe, a task's
+/// starter); else, `TMM_SOCKET` unset (a person's own shell), this config's
+/// own `<config>/sock/gateway.sock`. Set but empty (masked by a starter that
+/// had none) means none. A RELATIVE one is a configuration error, said and
+/// refused (review P2): it is not a socket that failed a check, and silently
+/// turning it into TCP would read as one.
+fn socket_for(explicit: bool, env: Option<std::ffi::OsString>, config_dir: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
+    if explicit || !cfg!(unix) { return Ok(None); }
+    match env {
+        None => Ok(Some(config_dir.join("sock").join("gateway.sock"))),
+        Some(v) if v.is_empty() => Ok(None),
+        Some(v) => {
+            let p = std::path::PathBuf::from(v);
+            if p.is_absolute() { Ok(Some(p)) } else { Err(format!("TMM_SOCKET must be an absolute path, got {}", p.display())) }
+        }
+    }
+}
+
+/// What THIS config's gateway says it is over its local socket: its port and
+/// canonical config dir (the server's `endpoint`, recorded at bind).
+fn own_endpoint(port: u16, config_dir: &std::path::Path) -> Value {
+    let canon = std::fs::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
+    json!({ "port": port, "config": canon.to_string_lossy() })
+}
+
+#[cfg(unix)]
+enum Local {
+    /// Connected, to a socket of this user, held by a peer of this user.
+    Ready(tokio::net::UnixStream),
+    /// Nothing there yet (no file, or no listener; nothing was sent): TCP.
+    Absent,
+    /// Refused, with why. Never a fallback: the token is not sent anywhere.
+    Refused(String),
+}
+
+/// Open the local socket only if it is what this user's gateway makes: a
+/// 0600 socket of this uid in a 0700 directory of this uid, answered by a
+/// process of this uid (board #440). The token is sent only after that.
+#[cfg(unix)]
+async fn local_connect(path: &std::path::Path, deadline: tokio::time::Instant) -> Local {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let me = unsafe { libc::geteuid() };
+    let refused = |why: String| Local::Refused(format!("the local socket {} is not used: {why}", path.display()));
+    let node = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Local::Absent,
+        Err(e) => return refused(e.to_string()),
+    };
+    if !node.file_type().is_socket() || node.uid() != me || node.mode() & 0o777 != 0o600 {
+        return refused(format!("not this user's 0600 socket (mode {:o}, uid {})", node.mode() & 0o777, node.uid()));
+    }
+    let parent = path.parent().and_then(|d| std::fs::symlink_metadata(d).ok());
+    if !parent.is_some_and(|d| d.is_dir() && d.uid() == me && d.mode() & 0o777 == 0o700) {
+        return refused("its directory is not this user's 0700 directory".into());
+    }
+    let stream = match tokio::time::timeout_at(deadline, tokio::net::UnixStream::connect(path)).await {
+        Err(_) => return refused("connect timed out".into()),
+        Ok(Err(e)) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => return Local::Absent,
+        Ok(Err(e)) => return refused(e.to_string()),
+        Ok(Ok(s)) => s,
+    };
+    match tmux_mobile::server::local_peer_uid(&stream) {
+        Ok(uid) if uid == me => Local::Ready(stream),
+        Ok(uid) => refused(format!("its peer is uid {uid}, not this user")),
+        Err(e) => refused(format!("its peer cannot be identified ({e})")),
     }
 }
 
@@ -2782,9 +2919,9 @@ mod tests {
         assert_eq!(tmux_mobile::address::mention_names(&body), vec!["lead".to_string()], "the log's @all addresses nobody: {body}");
         assert_eq!(task_end_body("dev", "t", "", "15", None, ""), "@dev task t killed:15. Continue the work this task was for: read the output and post the result.");
         assert!(body.ends_with("```\nContinue the work this task was for: read the output and post the result."), "the instruction rides last, after the log: {body}");
-        let shell = wake_shell("build", "lead", "/bin/tmm", &tasks::starter_env(Some("my proj"), Some("dev"), None, None));
-        assert_eq!(shell, "TMM_PROJECT='my proj' TMM_AGENT='dev' TMM_SERVER='' '/bin/tmm' task wake 'build' --to 'lead' --code '#{pane_dead_status}' --signal '#{pane_dead_signal}' >/dev/null 2>&1");
-        let human = wake_shell("a#b", "x", "/t", &tasks::starter_env(Some("p"), None, Some("/c"), Some("ws://s")));
+        let shell = wake_shell("build", "lead", "/bin/tmm", &tasks::starter_env(Some("my proj"), Some("dev"), None, None, None));
+        assert_eq!(shell, "TMM_PROJECT='my proj' TMM_AGENT='dev' TMM_SERVER='' TMM_SOCKET='' '/bin/tmm' task wake 'build' --to 'lead' --code '#{pane_dead_status}' --signal '#{pane_dead_signal}' >/dev/null 2>&1");
+        let human = wake_shell("a#b", "x", "/t", &tasks::starter_env(Some("p"), None, Some("/c"), Some("ws://s"), None));
         assert!(human.contains("'a##b'"), "a literal # is escaped for tmux");
         assert!(human.starts_with("TMM_PROJECT='p' TMM_AGENT='' XDG_CONFIG_HOME='/c' TMM_SERVER='ws://s' "), "{human}");
     }
@@ -2798,8 +2935,30 @@ mod tests {
         assert_eq!(server_for(None, None, 7), "ws://127.0.0.1:7");
         assert_eq!(server_for(None, Some("ws://e:1".into()), 7), "ws://e:1");
         assert_eq!(server_for(Some("ws://f:2".into()), Some("ws://e:1".into()), 7), "ws://f:2");
-        let shell = wake_shell("t", "x", "/t", &tasks::starter_env(Some("p"), None, None, None));
-        assert!(shell.starts_with("TMM_PROJECT='p' TMM_AGENT='' TMM_SERVER='' "), "a starter without a server gives the wake none: {shell}");
+        let shell = wake_shell("t", "x", "/t", &tasks::starter_env(Some("p"), None, None, None, None));
+        assert!(shell.starts_with("TMM_PROJECT='p' TMM_AGENT='' TMM_SERVER='' TMM_SOCKET='' "), "a starter without a server gives the wake none: {shell}");
+        // Board #440: a starter whose shell derived its socket hands it on.
+        let shell = wake_shell("t", "x", "/t", &tasks::starter_env(Some("p"), None, None, None, Some("/c/sock/gateway.sock")));
+        assert!(shell.starts_with("TMM_PROJECT='p' TMM_AGENT='' TMM_SERVER='' TMM_SOCKET='/c/sock/gateway.sock' "), "{shell}");
+    }
+
+    /// Board #440: the selection table. An explicit target is always TCP; an
+    /// agent's or a task's TMM_SOCKET is used as given; a person's own shell
+    /// (unset) derives this config's socket; a masked one ('') or a relative
+    /// one means none.
+    #[test]
+    fn the_local_socket_is_chosen_by_the_selection_table() {
+        use std::ffi::OsString;
+        let cfg = std::path::Path::new("/c");
+        let derived = Some(std::path::PathBuf::from("/c/sock/gateway.sock"));
+        assert_eq!(socket_for(true, None, cfg), Ok(None), "--server or TMM_SERVER: TCP");
+        assert_eq!(socket_for(true, Some(OsString::from("/r/sock/gateway.sock")), cfg), Ok(None), "an explicit target beats a recipe's socket");
+        assert_eq!(socket_for(false, None, cfg), Ok(derived), "a person's own shell derives this config's socket");
+        assert_eq!(socket_for(false, Some(OsString::new()), cfg), Ok(None), "masked by a starter that had none");
+        assert_eq!(socket_for(false, Some(OsString::from("/r/sock/gateway.sock")), cfg), Ok(Some("/r/sock/gateway.sock".into())), "the recipe's, as given");
+        assert_eq!(socket_for(false, Some(OsString::from("rel/gateway.sock")), cfg), Err("TMM_SOCKET must be an absolute path, got rel/gateway.sock".into()), "a relative path is a configuration error");
+        assert_eq!(socket_for(true, Some(OsString::from("rel/gateway.sock")), cfg), Ok(None), "but an explicit target never reads it");
+        assert_eq!(own_endpoint(9899, std::path::Path::new("/no/such/dir")), json!({ "port": 9899, "config": "/no/such/dir" }));
     }
 
     /// Board #277: the built-in tmm-cli skill is how an agent learns tmm, so

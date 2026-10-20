@@ -371,6 +371,10 @@ fn materialize(
     let mut env = prepared.env;
     env.push(("TMM_PROJECT".into(), session.to_string()));
     env.push(("TMM_AGENT".into(), window_name.to_string()));
+    // The local socket this gateway actually bound (board #440), or '' when
+    // it has none: the agent's tmm reaches THIS gateway outside the TCP
+    // lockout, and an empty value masks a stale one in the tmux environment.
+    env.push(("TMM_SOCKET".into(), crate::server::bound_local_socket().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
     // The MCP config is findable from ANY cwd, not just under the workspace.
     env.push(("TMM_MCP_CONFIG".into(), mcp_config.to_string_lossy().to_string()));
     // tmm sits next to the server binary, while user-installed backends and
@@ -2916,6 +2920,11 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo")), &solo, "mvsolo", "proj", &ws_str, "", "human", None, "mvsolo", "", "").unwrap();
         let recipe = || read(&agent_home(&ws_str, "mvsolo").join("launch.json"));
         let before = recipe();
+        // Board #440: the recipe carries TMM_SOCKET, the socket this gateway
+        // bound ('' here, where none is bound), so a restart replays it and a
+        // stale tmux-global value is masked.
+        let socket: Vec<_> = before["env"].as_array().unwrap().iter().filter(|kv| kv[0] == "TMM_SOCKET").collect();
+        assert_eq!(socket, vec![&json!(["TMM_SOCKET", crate::server::bound_local_socket().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()])], "{before}");
 
         assert!(set_agent_team(&ws_str, "mvsolo", "ghost", &|_| Ok(Vec::new())).unwrap_err().contains("team 'ghost' has no member in this project"));
         assert_eq!(recipe(), before, "a refused move writes nothing");

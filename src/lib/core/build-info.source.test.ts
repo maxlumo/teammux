@@ -27,8 +27,11 @@ test('BOTH login answers carry the build, and nothing else builds one', async ()
   assert.equal(conn.split('crate::build_info::json()').length - 1, 2, 'the sealed (v2) answer and the plain one');
   const sealed = conn.match(/"e2e":e2e_version[^\n]*/u)?.[0] ?? '';
   assert.match(sealed, /"build":crate::build_info::json\(\)/u, 'the sealed answer');
-  const plain = conn.match(/Response::ok\(req\.id, serde_json::json!\(\{ "authenticated": true[^\n]*/u)?.[0] ?? '';
+  // Board #440: the plain answer is built first (a LOCAL login adds its
+  // `endpoint`), then sent.
+  const plain = conn.match(/let mut answer = serde_json::json!\(\{ "authenticated": true[^\n]*/u)?.[0] ?? '';
   assert.match(plain, /"build": crate::build_info::json\(\)/u, 'the plain answer');
+  assert.match(conn, /let r = Response::ok\(req\.id, answer\);/u, 'and that answer is the one sent');
 });
 
 test('the repository link has ONE home: About, not the connect form', async () => {

@@ -236,6 +236,16 @@ and a control that breaks the product on purpose would reach the wrong process. 
 the group while its leader is not yet reaped; signal 0 still finds a zombie, so "gone"
 means reaped.
 
+## A rig cannot reach the live gateway, by network or by socket (board #440)
+
+Incident, 2026-10-20 14:52:36 to 14:53:37: a validator's #438 rig ran `tmm gateway install` with a rig HOME but no rig config.toml. Its preflight probed the DEFAULT port 9899 (the live gateway) with the rig's token. Five failures tripped the per-IP auth lockout (MAX_AUTH_FAILURES 5, AUTH_LOCKOUT_SECS 60) for 127.0.0.1, which is every agent's tmm on this host, so for a minute every `tmm` call was refused. No hook envelope was lost, because the hook helper only writes the inbox and opens no socket (`the_hook_helper_never_opens_a_network_connection`). The product half is websocket-server.md § Two transports: this host's own tmm now reaches its gateway over a 0600 socket that has no lockout.
+
+The rule, on top of #406 and #425: **a rig that starts a gateway or runs `tmm` cannot reach the live one, by any path.**
+- **Its own config.toml.** Under its own `XDG_CONFIG_HOME`, written before the first command: `port`, `host = "127.0.0.1"`, `token` and an ABSOLUTE `tmux_socket`. Env overrides alone are not enough, because `--service` and `install` read the file. A relative `tmux_socket` becomes `tmux -S <name>` in the gateway's cwd: a #439 rig left `tmux -S rig439` running in /tmp/builder439 that way.
+- **`env -i`** with only `HOME`, `PATH`, the rig's `XDG_*` and the rig's own values. No inherited `XDG_CONFIG_HOME`, `TMM_SERVER`, `TMM_SOCKET` or `TMM_TOKEN` can point back at the owner's.
+- **A network namespace** whenever a step could dial a default port: `install`, `status`, a probe, or a `tmm` with no `--server`. Use `unshare -rn sh -c 'ip link set lo up; …'`. Checked on this host: inside `unshare -rn`, a dial to 127.0.0.1:9899 fails with "Network is unreachable".
+- **The netns does not isolate the socket.** A filesystem socket is reached by its path, not over the network. What keeps a rig's tmm off the owner's `<config>/sock/gateway.sock` is the rig's own `XDG_CONFIG_HOME` (its derived socket path is then its own) and `env -i` (no inherited `TMM_SOCKET`). "9899 is unreachable in the netns" is never counted as proof that the rig cannot reach the live gateway.
+
 ## The reboot restore has one live acceptance, and it gates the default (board #422 round 4)
 
 `scripts/restore-acceptance.sh <tmm>` runs a real gateway (`tmm gateway

@@ -106,6 +106,27 @@ Global flags: `--project <session>`, `--agent <name>`, `--server <ws://…>`,
 `--output json` (every read). Token from `config.toml`, overridable with
 `$TMM_TOKEN`; server from `$TMM_SERVER`, default `ws://127.0.0.1:<port>`.
 
+### Which transport (board #440)
+The gateway also listens on a 0600 Unix socket, `<config>/sock/gateway.sock`, which carries no per-IP auth lockout (websocket-server.md § Two transports). On this host 127.0.0.1 is every agent's tmm, the Vite proxy and the SSH tunnel at once: five bad tokens from a rig that probed the default port locked the whole team out of tmm for 60 s (validator, 2026-10-20 14:52). No hook envelope was lost: the hook helper only writes the inbox and opens no socket (`the_hook_helper_never_opens_a_network_connection`).
+
+| target | `TMM_SOCKET` | transport |
+|---|---|---|
+| `--server <url>` or a non-empty `TMM_SERVER` | any | TCP to that url, always |
+| neither (the default target, this config's port) | non-empty, absolute (an agent's recipe, a task's starter) | that socket |
+| neither | unset (a person's own shell) | this config's `<config>/sock/gateway.sock` |
+| neither | set but empty (a starter that had none) | TCP to the default |
+| neither | relative | a usage error, exit 5: not a socket, and not silently TCP |
+
+So another port, a proxy URL or a remote host is always explicit and always TCP. Before the token is sent, the socket must be a 0600 socket of this uid in a 0700 directory of this uid, and its peer must be this uid (SO_PEERCRED / getpeereid). After the login, the gateway's `endpoint` must be THIS config's (`{port, config}`: its port and canonical config dir). If not, nothing more is sent: a stale `TMM_SOCKET` pointing at another gateway is an error, not a silent switch.
+
+Only a socket that is absent or has no listener (ENOENT, ECONNREFUSED, before any byte) falls back to TCP, inside the same 2 s connect deadline. A failed check, a refused login, a dropped handshake or a lost answer is an error, never retried over TCP: a send or a spawn must not run twice, and a bad token must not reach the TCP lockout by a fallback.
+
+A TCP handshake the server drops before the upgrade says `… refused the connection during the handshake (possibly the per-IP auth lockout, 60 s): <error>`, the possible cause next to the real error.
+
+An agent's recipe writes `TMM_SOCKET` (the socket its gateway bound, `''` when none; agents-overview.md). `tasks::starter_env` and the wake hook carry the starter's EFFECTIVE candidate after this table, always written like `TMM_SERVER`, so a stale tmux-global value is masked. Agents spawned before the gateway had a socket carry no `TMM_SOCKET`, so they derive this config's socket like a person's shell does, unless they have an explicit `TMM_SERVER`. Those keep TCP (the v1 scope: not every local tmm escapes the lockout).
+
+Pinned by `src-tauri/tests/local_socket_cli.rs` (the real CLI against a fake TCP gateway and a fake socket gateway: each row above, the endpoint mismatch, the refused login and the lost answer with no TCP retry, a 0666 socket or a 0755 directory refused before any byte, and the lockout wording) and `the_local_socket_is_chosen_by_the_selection_table`.
+
 Central assets (skills, MCP defs, registry agents, teams) are the app's own
 store; how they materialize into agents — built-in skills, one-url import,
 isolated homes — is [agents-overview.md](agents-overview.md).
@@ -344,6 +365,8 @@ human started inherited whatever server the tmux server's environment
 carried: a test runner with `TMM_SERVER=ws://127.0.0.1:9899` exported seeded
 its private tmux server with it, and the task read `server=[ws://127.0.0.1:9899]`
 for a starter with none.
+`TMM_SOCKET` travels the same way (board #440): always written, the starter's
+effective local socket after the transport table above, `''` when it had none.
 `XDG_CONFIG_HOME` travels only when the starter has it, because it is read by
 every program the task runs, not only tmm. A task pane is not its starter's turn (board #285), so a
 task's `@<starter>` send reaches the starter too. A task no longer has to

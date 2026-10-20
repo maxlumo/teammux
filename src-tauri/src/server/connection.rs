@@ -209,6 +209,30 @@ async fn subscription_loop(
     }
 }
 
+/// Who is on the other end, as the accept site knows it (board #440). A TCP
+/// peer has an address and is subject to the per-IP auth lockout; a `Local`
+/// peer came through the gateway's own 0600 Unix socket and is not: it
+/// neither checks the lockout, nor counts a failure into it, nor clears a TCP
+/// counter by succeeding. No made-up 127.0.0.1 stands in for it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Peer {
+    Tcp(SocketAddr),
+    Local,
+}
+
+impl Peer {
+    /// The lockout's key, for the peers it applies to.
+    fn tracked_ip(&self) -> Option<std::net::IpAddr> {
+        match self { Peer::Tcp(a) => Some(a.ip()), Peer::Local => None }
+    }
+}
+
+impl std::fmt::Display for Peer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Peer::Tcp(a) => write!(f, "{a}"), Peer::Local => f.write_str("local socket") }
+    }
+}
+
 /// What every connection shares with the server (board #151): built once at
 /// the accept site and cloned per connection — every member is an `Arc` or a
 /// `Copy`, so the clone is six pointer bumps. Per-connection facts (`addr`,
@@ -222,16 +246,20 @@ pub struct ConnContext {
     pub resize_tracker: ResizeTracker,
     pub grace_secs: u64,
     pub notifications: NotificationHub,
+    /// What a LOCAL login is told about the gateway it reached (board #440):
+    /// this config's TCP port and canonical config dir, recorded at bind, so a
+    /// tmm can refuse a socket that is not its own config's gateway.
+    pub endpoint: Arc<serde_json::Value>,
 }
 
 pub async fn handle_connection(stream: TcpStream, addr: SocketAddr, ctx: ConnContext) {
-    dispatch(stream, addr, ctx, false).await
+    dispatch(stream, Peer::Tcp(addr), ctx, false).await
 }
 
 /// The one door for a connection, plain or TLS (board #323, `dispatch.rs`):
 /// read the request head (bounded), route it, and hand the handler a
 /// stream that replays every byte already read.
-pub(super) async fn dispatch<S>(mut stream: S, addr: SocketAddr, ctx: ConnContext, tls: bool)
+pub(super) async fn dispatch<S>(mut stream: S, peer: Peer, ctx: ConnContext, tls: bool)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -239,33 +267,36 @@ where
     let (bytes, end) = match read_head(&mut stream).await {
         Ok(h) => h,
         Err(why) => {
-            eprintln!("❌ {addr}: {why}");
+            eprintln!("❌ {peer}: {why}");
             return;
         }
     };
     let route = classify(&bytes[..end]);
     let stream = Prefixed::new(bytes, stream);
-    match route {
-        Route::Download => return handle_http_download(stream, addr, ctx.token).await,
-        Route::Static { head, target, accept } => return super::ui::serve(stream, head, &target, &accept).await,
-        Route::Bad => return super::ui::bad_request(stream).await,
-        Route::WebSocket => {}
+    // The local socket is tmm's door: WebSocket only, no downloads or UI.
+    match (peer, route) {
+        (_, Route::WebSocket) => {}
+        (Peer::Local, _) => return super::ui::bad_request(stream).await,
+        (Peer::Tcp(addr), Route::Download) => return handle_http_download(stream, addr, ctx.token).await,
+        (Peer::Tcp(_), Route::Static { head, target, accept }) => return super::ui::serve(stream, head, &target, &accept).await,
+        (Peer::Tcp(_), Route::Bad) => return super::ui::bad_request(stream).await,
     }
 
     let conn_id = CONN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let conn_started_at = std::time::Instant::now();
-    println!("📱 Client connected{}: {} (conn_id={})", if tls { " (TLS)" } else { "" }, addr, conn_id);
+    println!("📱 Client connected{}: {} (conn_id={})", if tls { " (TLS)" } else { "" }, peer, conn_id);
 
     // Check if IP is locked out, and opportunistically GC old entries so
-    // the tracker doesn't grow unbounded under a distributed scan.
-    {
+    // the tracker doesn't grow unbounded under a distributed scan. A local
+    // peer has no IP and is never locked out (board #440).
+    if let Some(ip) = peer.tracked_ip() {
         let mut tracker = ctx.auth_tracker.lock().await;
         tracker.retain(|_ip, (_fails, since)| {
             since.elapsed().as_secs() < AUTH_TRACKER_GC_AFTER_SECS
         });
-        if let Some((fails, since)) = tracker.get(&addr.ip()) {
+        if let Some((fails, since)) = tracker.get(&ip) {
             if *fails >= MAX_AUTH_FAILURES && since.elapsed().as_secs() < AUTH_LOCKOUT_SECS {
-                eprintln!("🚫 Rejected {} (locked out, {} failures)", addr, fails);
+                eprintln!("🚫 Rejected {} (locked out, {} failures)", peer, fails);
                 return;
             }
         }
@@ -274,25 +305,26 @@ where
     let ws_stream = match accept_async_with_config(stream, Some(ws_config())).await {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("❌ {} handshake failed for {}: {}", if tls { "WSS" } else { "WebSocket" }, addr, e);
+            eprintln!("❌ {} handshake failed for {}: {}", if tls { "WSS" } else { "WebSocket" }, peer, e);
             return;
         }
     };
 
-    handle_connection_ws(ws_stream, addr, ctx, conn_id, conn_started_at).await;
+    handle_connection_ws(ws_stream, peer, ctx, conn_id, conn_started_at).await;
 }
 
-pub(super) async fn handle_connection_ws<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, addr: SocketAddr, ctx: ConnContext, conn_id: u64, conn_started_at: std::time::Instant)
+pub(super) async fn handle_connection_ws<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, peer: Peer, ctx: ConnContext, conn_id: u64, conn_started_at: std::time::Instant)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnContext { token, machine_id, auth_tracker, resize_tracker, grace_secs, notifications } = ctx;
-    // Check if IP is locked out
-    {
+    let ConnContext { token, machine_id, auth_tracker, resize_tracker, grace_secs, notifications, endpoint } = ctx;
+    let addr = peer;
+    // Check if IP is locked out (a local peer never is, board #440).
+    if let Some(ip) = peer.tracked_ip() {
         let tracker = auth_tracker.lock().await;
-        if let Some((fails, since)) = tracker.get(&addr.ip()) {
+        if let Some((fails, since)) = tracker.get(&ip) {
             if *fails >= MAX_AUTH_FAILURES && since.elapsed().as_secs() < AUTH_LOCKOUT_SECS {
-                eprintln!("🚫 Rejected {} (locked out, {} failures)", addr, fails);
+                eprintln!("🚫 Rejected {} (locked out, {} failures)", peer, fails);
                 return;
             }
         }
@@ -570,7 +602,7 @@ where
                         mac.update(&cn);
                         if mac.verify_slice(&proof_bytes).is_ok() {
                             authenticated = true;
-                            auth_tracker.lock().await.remove(&addr.ip());
+                            if let Some(ip) = peer.tracked_ip() { auth_tracker.lock().await.remove(&ip); }
                             // Split into two independent cipher halves — one
                             // for the receive path (this task), one for the
                             // send path (send task). Under v2 they hold
@@ -582,7 +614,9 @@ where
                             // cipher ready. We enqueue it first, then the
                             // auth response.
                             let _ = out_tx.send(Outbound::InitCipher(HalfCipher::new(&send_key)));
-                            let resp = serde_json::to_string(&serde_json::json!({"result":{"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version,"build":crate::build_info::json(),"caps":super::LOGIN_CAPS}})).unwrap();
+                            let mut result = serde_json::json!({"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version,"build":crate::build_info::json(),"caps":super::LOGIN_CAPS});
+                            if peer == Peer::Local { result["endpoint"] = (*endpoint).clone(); }
+                            let resp = serde_json::to_string(&serde_json::json!({ "result": result })).unwrap();
                             let _ = out_tx.send(Outbound::Encrypted(resp));
                             #[cfg(not(any(target_os = "android", target_os = "ios")))]
                             {
@@ -590,12 +624,15 @@ where
                             }
                             continue;
                         } else {
-                            let mut tracker = auth_tracker.lock().await;
-                            let entry = tracker.entry(addr.ip()).or_insert((0, tokio::time::Instant::now()));
-                            if entry.1.elapsed().as_secs() >= AUTH_LOCKOUT_SECS { *entry = (0, tokio::time::Instant::now()); }
-                            entry.0 += 1;
-                            eprintln!("🚫 Auth failed from {} (attempt {})", addr, entry.0);
-                            drop(tracker);
+                            if let Some(ip) = peer.tracked_ip() {
+                                let mut tracker = auth_tracker.lock().await;
+                                let entry = tracker.entry(ip).or_insert((0, tokio::time::Instant::now()));
+                                if entry.1.elapsed().as_secs() >= AUTH_LOCKOUT_SECS { *entry = (0, tokio::time::Instant::now()); }
+                                entry.0 += 1;
+                                eprintln!("🚫 Auth failed from {} (attempt {})", peer, entry.0);
+                            } else {
+                                eprintln!("🚫 Auth failed from {} (not counted: no lockout here)", peer);
+                            }
                             let r = Response::err(req.id, ERR_AUTH, "invalid proof".into());
                             let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
                             why = Some("auth refused (invalid proof)".into());
@@ -604,8 +641,12 @@ where
                     } else if provided_token_matches(plain_token, &token) {
                         // Legacy plain token auth (http:// fallback)
                         authenticated = true;
-                        auth_tracker.lock().await.remove(&addr.ip());
-                        let r = Response::ok(req.id, serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname, "build": crate::build_info::json(), "caps": super::LOGIN_CAPS }));
+                        if let Some(ip) = peer.tracked_ip() { auth_tracker.lock().await.remove(&ip); }
+                        let mut answer = serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname, "build": crate::build_info::json(), "caps": super::LOGIN_CAPS });
+                        // Only a LOCAL login, and only once it succeeded, is
+                        // told which gateway it reached (board #440).
+                        if peer == Peer::Local { answer["endpoint"] = (*endpoint).clone(); }
+                        let r = Response::ok(req.id, answer);
                         let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         {
@@ -613,13 +654,17 @@ where
                         }
                         continue;
                     } else {
-                        let mut tracker = auth_tracker.lock().await;
-                        let entry = tracker.entry(addr.ip()).or_insert((0, tokio::time::Instant::now()));
-                        if entry.1.elapsed().as_secs() >= AUTH_LOCKOUT_SECS { *entry = (0, tokio::time::Instant::now()); }
-                        entry.0 += 1;
-                        let fails = entry.0;
-                        drop(tracker);
-                        eprintln!("🚫 Auth failed from {} (attempt {})", addr, fails);
+                        if let Some(ip) = peer.tracked_ip() {
+                            let mut tracker = auth_tracker.lock().await;
+                            let entry = tracker.entry(ip).or_insert((0, tokio::time::Instant::now()));
+                            if entry.1.elapsed().as_secs() >= AUTH_LOCKOUT_SECS { *entry = (0, tokio::time::Instant::now()); }
+                            entry.0 += 1;
+                            let fails = entry.0;
+                            drop(tracker);
+                            eprintln!("🚫 Auth failed from {} (attempt {})", peer, fails);
+                        } else {
+                            eprintln!("🚫 Auth failed from {} (not counted: no lockout here)", peer);
+                        }
                         let r = Response::err(req.id, ERR_AUTH, "invalid token".into());
                         let _ = out_tx.send(Outbound::Plain(serde_json::to_string(&r).unwrap()));
                         why = Some("auth refused (invalid token)".into());
@@ -814,7 +859,7 @@ where
     let up = conn_started_at.elapsed().as_secs();
     let why = why.unwrap_or_else(|| "peer ended the stream (no close frame)".into());
     #[cfg(test)]
-    DISCONNECTS.lock().unwrap().push((addr.port(), why.clone()));
+    DISCONNECTS.lock().unwrap().push((match peer { Peer::Tcp(a) => a.port(), Peer::Local => 0 }, why.clone()));
     println!(
         "👋 Client disconnected: {} (conn_id={}, authed={}, up={}s, reason={})",
         addr, conn_id, authenticated, up, why
@@ -978,5 +1023,116 @@ mod disconnect_reason_tests {
         assert_eq!(reason_of(silent).await, "our auth deadline");
         assert_eq!(reason_of(deaf).await, "our ping deadline (no pong)");
         drop((ws, quiet));
+    }
+}
+
+/// Board #440: the lockout belongs to TCP peers only. A login through the
+/// local socket is never refused by it, never counted into it, never clears
+/// it, and is the only login told the gateway's endpoint.
+#[cfg(all(test, unix))]
+mod local_peer_tests {
+    use super::*;
+    use crate::agent_notifications::AgentNotificationHub;
+
+    fn ctx(tracker: AuthTracker) -> ConnContext {
+        ConnContext {
+            token: Arc::new("tok-440".into()),
+            machine_id: Arc::new("m-440".into()),
+            auth_tracker: tracker,
+            resize_tracker: Arc::new(std::sync::Mutex::new(Default::default())),
+            grace_secs: 0,
+            notifications: Arc::new(AgentNotificationHub::load()),
+            endpoint: Arc::new(serde_json::json!({ "port": 19440, "config": "/cfg" })),
+        }
+    }
+
+    /// One plain-token login over an in-process socket pair, as `peer`.
+    async fn login(peer: Peer, tracker: &AuthTracker, token: &str) -> String {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, peer, ctx(tracker.clone()), false));
+        let (mut ws, _) = match tokio_tungstenite::client_async("ws://local/", client).await {
+            Ok(ws) => ws,
+            Err(e) => return format!("handshake refused: {e}"),
+        };
+        let _nonce = ws.next().await;
+        ws.send(Message::Text(format!(r#"{{"id":1,"method":"auth","params":{{"token":"{token}"}}}}"#).into())).await.unwrap();
+        let reply = ws.next().await.and_then(|m| m.ok()).map(|m| m.to_text().unwrap_or("").to_string()).unwrap_or_default();
+        let _ = ws.close(None).await;
+        reply
+    }
+
+    fn locked(tracker: &AuthTracker, ip: std::net::IpAddr) {
+        tracker.try_lock().unwrap().insert(ip, (MAX_AUTH_FAILURES, tokio::time::Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn a_local_login_ignores_the_tcp_lockout_and_never_feeds_or_clears_it() {
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        let lo: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        locked(&tracker, lo);
+        // The control: a TCP peer from the locked IP is refused before the handshake.
+        let tcp = login(Peer::Tcp("127.0.0.1:5555".parse().unwrap()), &tracker, "tok-440").await;
+        assert!(tcp.starts_with("handshake refused"), "a locked TCP peer is refused: {tcp}");
+        // The local peer logs in although 127.0.0.1 is locked, and is told the endpoint.
+        let ok = login(Peer::Local, &tracker, "tok-440").await;
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["result"]["authenticated"], true, "{ok}");
+        assert_eq!(v["result"]["endpoint"], serde_json::json!({ "port": 19440, "config": "/cfg" }));
+        assert_eq!(tracker.lock().await.get(&lo).map(|e| e.0), Some(MAX_AUTH_FAILURES), "a local success never clears the TCP counter");
+        // A bad token over the local socket: refused, and not counted anywhere.
+        let bad = login(Peer::Local, &tracker, "tok-wrong").await;
+        assert!(bad.contains("invalid token"), "{bad}");
+        let snapshot: Vec<_> = tracker.lock().await.iter().map(|(ip, (n, _))| (*ip, *n)).collect();
+        assert_eq!(snapshot, vec![(lo, MAX_AUTH_FAILURES)], "a local failure adds nothing");
+    }
+
+    /// The encrypted login's failure branch too: a bad proof over the local
+    /// socket is refused and counted nowhere.
+    #[tokio::test]
+    async fn a_bad_proof_over_the_local_socket_is_refused_and_not_counted() {
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, Peer::Local, ctx(tracker.clone()), false));
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://local/", client).await.unwrap();
+        let _nonce = ws.next().await;
+        let auth = serde_json::json!({ "id": 1, "method": "auth", "params": { "client_nonce": "00".repeat(16), "proof": "00".repeat(32), "e2e": 2 } });
+        ws.send(Message::Text(auth.to_string().into())).await.unwrap();
+        let reply = ws.next().await.and_then(|m| m.ok()).map(|m| m.to_text().unwrap_or("").to_string()).unwrap_or_default();
+        assert!(reply.contains("invalid proof"), "{reply}");
+        assert!(tracker.lock().await.is_empty(), "a local failure adds nothing to the lockout");
+        // The control: the same bad proof from a TCP peer IS counted.
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, Peer::Tcp("10.4.4.4:1".parse().unwrap()), ctx(tracker.clone()), false));
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://local/", client).await.unwrap();
+        let _nonce = ws.next().await;
+        ws.send(Message::Text(auth.to_string().into())).await.unwrap();
+        let _ = ws.next().await;
+        assert_eq!(tracker.lock().await.get(&"10.4.4.4".parse().unwrap()).map(|e| e.0), Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_tcp_login_still_counts_and_is_never_told_the_endpoint() {
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        let peer = Peer::Tcp("10.1.2.3:40000".parse().unwrap());
+        for _ in 0..MAX_AUTH_FAILURES {
+            assert!(login(peer, &tracker, "tok-wrong").await.contains("invalid token"));
+        }
+        assert_eq!(tracker.lock().await.get(&"10.1.2.3".parse().unwrap()).map(|e| e.0), Some(MAX_AUTH_FAILURES));
+        assert!(login(peer, &tracker, "tok-440").await.starts_with("handshake refused"), "locked after five");
+        let other = login(Peer::Tcp("10.9.9.9:1".parse().unwrap()), &tracker, "tok-440").await;
+        let v: serde_json::Value = serde_json::from_str(&other).unwrap();
+        assert_eq!(v["result"]["authenticated"], true);
+        assert!(v["result"].get("endpoint").is_none(), "a TCP login is not told the endpoint: {other}");
+    }
+
+    #[tokio::test]
+    async fn the_local_socket_serves_websocket_only() {
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, Peer::Local, ctx(Arc::new(Mutex::new(HashMap::new()))), false));
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        client.write_all(b"GET /dl?path=%2Fetc%2Fpasswd&exp=1&sig=x HTTP/1.1\r\nHost: h\r\n\r\n").await.unwrap();
+        let mut out = String::new();
+        let _ = client.read_to_string(&mut out).await;
+        assert!(out.starts_with("HTTP/1.1 400"), "no download over the local socket: {out}");
     }
 }

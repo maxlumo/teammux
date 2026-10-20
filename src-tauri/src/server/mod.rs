@@ -13,8 +13,11 @@ mod hub_rpc;
 mod rpc;
 mod connection;
 mod dispatch;
+mod local_socket;
 pub mod ui;
-pub use connection::{handle_connection, ConnContext};
+pub use connection::{handle_connection, ConnContext, Peer};
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+pub use local_socket::{path_in as local_socket_path, peer_uid as local_peer_uid};
 use connection::enable_tcp_keepalive;
 
 pub type NotificationHub = Arc<AgentNotificationHub>;
@@ -231,6 +234,13 @@ pub async fn start_with_socket_ready(
     let machine_id = Arc::new(machine_id.to_string());
     let auth_tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
     let resize_tracker: ResizeTracker = Arc::new(std::sync::Mutex::new(ResizeTrackerInner::default()));
+    // What a local login is told (board #440): this config's port and its
+    // canonical config dir, so a tmm can refuse a socket of another gateway.
+    let config_dir = crate::config::config_dir();
+    let endpoint = Arc::new(serde_json::json!({
+        "port": port,
+        "config": std::fs::canonicalize(&config_dir).unwrap_or_else(|_| config_dir.clone()).to_string_lossy(),
+    }));
     let notifications = Arc::new(AgentNotificationHub::load());
     notifications.ensure_helper().map_err(|error| format!("Failed to prepare agent notification helper: {error}"))?;
     // Board #394: every session's turn facts are replayed from the activity
@@ -338,6 +348,40 @@ pub async fn start_with_socket_ready(
     }
     println!("   Methods: auth, list_sessions, list_panes, capture_pane, send_keys, send_command, new_session, kill_session, subscribe, unsubscribe");
 
+    // The local door (board #440), after the TCP bind succeeded: a 0600 Unix
+    // socket in `<config>/sock/`, no IP lockout. Any failure leaves this
+    // gateway TCP-only with the reason said; it never stops the start.
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+    {
+        let ctx = ConnContext {
+            token: token.clone(),
+            machine_id: machine_id.clone(),
+            auth_tracker: auth_tracker.clone(),
+            resize_tracker: resize_tracker.clone(),
+            grace_secs: disconnect_grace_secs,
+            notifications: notifications.clone(),
+            endpoint: endpoint.clone(),
+        };
+        // Every step that can fail comes BEFORE the announcement and the
+        // published path (review P2): a failure drops the socket (its own
+        // node removed) and nothing says it is ready.
+        let opened = local_socket::open(&config_dir).and_then(|socket| {
+            let listener = socket.listener.try_clone().and_then(tokio::net::UnixListener::from_std)
+                .map_err(|e| format!("{}: {e}", socket.path.display()))?;
+            Ok((socket, listener))
+        });
+        match opened {
+            Ok((socket, listener)) => {
+                println!("🔌 local socket: {}", socket.path.display());
+                // Published once per process, for its life: the socket task
+                // below owns the socket until the process ends.
+                let _ = BOUND_LOCAL_SOCKET.set(socket.path.clone());
+                tokio::spawn(serve_local(socket, listener, ctx));
+            }
+            Err(why) => eprintln!("⚠  local socket unavailable ({why}); this gateway is TCP only, and a local tmm uses TCP"),
+        }
+    }
+
     if let Some(tx) = ready {
         let _ = tx.send(());
     }
@@ -358,18 +402,111 @@ pub async fn start_with_socket_ready(
             resize_tracker: resize_tracker.clone(),
             grace_secs: disconnect_grace_secs,
             notifications: notifications.clone(),
+            endpoint: endpoint.clone(),
         };
         if let Some(ref acceptor) = tls_acceptor {
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
                 match acceptor.accept(stream).await {
-                    Ok(tls_stream) => connection::dispatch(tls_stream, addr, ctx, true).await,
+                    Ok(tls_stream) => connection::dispatch(tls_stream, Peer::Tcp(addr), ctx, true).await,
                     Err(e) => eprintln!("❌ TLS handshake failed for {}: {}", addr, e),
                 }
             });
         } else {
             tokio::spawn(handle_connection(stream, addr, ctx));
         }
+    }
+}
+
+/// The local socket this gateway bound, once it is accepted on (board #440):
+/// what a spawn writes into an agent's recipe as `TMM_SOCKET`.
+static BOUND_LOCAL_SOCKET: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn bound_local_socket() -> Option<std::path::PathBuf> {
+    BOUND_LOCAL_SOCKET.get().cloned()
+}
+
+/// Accept on the local socket for the gateway's life (board #440). The
+/// socket (and its claim) lives as long as this task.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+async fn serve_local(socket: local_socket::LocalSocket, listener: tokio::net::UnixListener, ctx: ConnContext) {
+    let me = unsafe { libc::geteuid() };
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => { eprintln!("❌ local socket accept: {e}"); continue; }
+        };
+        let peer = local_socket::peer_uid(&stream);
+        tokio::spawn(admit_local(stream, peer, me, ctx.clone()));
+    }
+    #[allow(unreachable_code)]
+    { drop(socket); }
+}
+
+/// The local door's one gate, for every accepted stream (review P1-B): only
+/// a peer whose credentials say THIS uid reaches the WebSocket and the token
+/// auth; another uid, or credentials that cannot be read, is closed before a
+/// byte is read or written. `peer` is what SO_PEERCRED / getpeereid said,
+/// passed in so a test can drive the refusal without a second user.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+async fn admit_local<S>(stream: S, peer: std::io::Result<u32>, me: u32, ctx: ConnContext)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    match peer {
+        Ok(uid) if uid == me => connection::dispatch(stream, Peer::Local, ctx, false).await,
+        other => eprintln!("🚫 local socket: peer is not this user ({other:?}); closed"),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod admit_local_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncReadExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    fn ctx() -> ConnContext {
+        ConnContext {
+            token: Arc::new("tok-adm".into()),
+            machine_id: Arc::new("m".into()),
+            auth_tracker: Arc::new(Mutex::new(HashMap::new())),
+            resize_tracker: Arc::new(std::sync::Mutex::new(Default::default())),
+            grace_secs: 0,
+            notifications: Arc::new(AgentNotificationHub::load()),
+            endpoint: Arc::new(serde_json::json!({ "port": 1, "config": "/c" })),
+        }
+    }
+
+    /// Another uid, or unreadable credentials: closed before any byte, so a
+    /// client that sends a WebSocket upgrade reads nothing back.
+    #[tokio::test]
+    async fn a_peer_of_another_uid_or_unknown_credentials_is_closed_before_a_byte() {
+        for peer in [Ok(4242u32), Err(std::io::Error::from_raw_os_error(libc::ENOTCONN))] {
+            let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+            let what = format!("{peer:?}");
+            tokio::spawn(admit_local(server, peer, 1000, ctx()));
+            use tokio::io::AsyncWriteExt;
+            let _ = client.write_all(b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await;
+            // Bounded: an open door would answer the upgrade and keep the
+            // stream open, which must fail here, not hang.
+            let mut out = Vec::new();
+            let read = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_to_end(&mut out)).await;
+            assert!(read.is_ok(), "{what}: the stream was not closed (got {:?})", String::from_utf8_lossy(&out));
+            assert!(out.is_empty(), "{what}: nothing is answered, got {:?}", String::from_utf8_lossy(&out));
+        }
+    }
+
+    /// The same entry with this uid: the WebSocket and the token auth.
+    #[tokio::test]
+    async fn this_uid_reaches_the_token_auth() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(admit_local(server, Ok(1000), 1000, ctx()));
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://local/", client).await.unwrap();
+        let _nonce = ws.next().await;
+        ws.send(Message::Text(r#"{"id":1,"method":"auth","params":{"token":"tok-adm"}}"#.into())).await.unwrap();
+        let reply = ws.next().await.unwrap().unwrap();
+        assert!(reply.to_text().unwrap().contains("\"authenticated\":true"), "{reply:?}");
     }
 }
 
