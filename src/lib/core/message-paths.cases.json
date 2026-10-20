@@ -75,6 +75,7 @@
   {"body": "`lab/`", "feed": [], "files": []},
   {"body": "```\n`lab/out/x/`\n```", "feed": [], "files": []},
   {"body": "[`lab/out/x/`](https://x.dev)", "feed": [], "files": []},
+  {"body": "[`foo/bar/`](docs/a.md)", "feed": ["docs/a.md"], "files": ["docs/a.md"]},
   {"body": "[see `lab/out/x/`][1]\n\n[1]: https://x.dev/", "feed": [], "files": []},
   {"body": "https://h.dev/?q=`lab/out/x/`", "feed": [], "files": []}
 ]
