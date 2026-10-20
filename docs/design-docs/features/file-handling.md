@@ -168,6 +168,31 @@ share a 32px pointer / 44px coarse minimum before the divider. Long names may
 still wrap rather than being truncated to enforce an artificial fixed height.
 The independent listing width and linked-preview Back history are unchanged.
 
+The preview header is one list row high (#435, owner 2026-10-20: "文件预览页的上边
+标题栏有点过高了，和本身文件那个栏里的一行的高度一致吧，不然太占空间"). It takes the
+row's own metric, `--files-row-height`, as its minimum and no block padding;
+its controls (28px on a pointer, 30px on touch inside `.compact-tools`) sit
+inside it. Measured in headless Chromium with the app's CSS: before, the
+header was 44px against a 32px row on a pointer and 46px against 44px on
+touch; after, 32/32 and 44/44.
+
+On a 390px phone it was still about 1.6 rows (validator, real browser: 69px,
+two lines) because the name's 160px flex-basis plus back and six 30px tools
+did not fit, so the tools wrapped even for a short name. The header's name now
+shrinks first (`flex: 1 1 0; min-width: 0`) and is ONE line cut with an
+ellipsis (`white-space: pre`), and its full text is the span's `title`; the
+tools keep their count and hit boxes (orchestrator ruling). Measured in the
+same harness at 390px with a coarse pointer, back + six tools: 68px (short
+name) and 78px (a 75-character name) before, 44px against the 44px row for
+both after, the long name cut; desktop 1280 stays 32/32. The header's name and
+a list row's name follow different rules on purpose: in the list the name is
+the content and wraps rather than being truncated (#164); in the header it
+labels the open file, the bar is chrome, and the name can be read whole in the
+list and the title. The editor's unsaved `*` is its own `flex: none` sibling
+after the name (`.preview-dirty`), never part of the cut text, so a long name
+cannot hide it (validator P1 on 07f4c8f5; measured at 390 coarse with the
+75-character name: the mark 7px wide, after the name and inside the 44px bar).
+
 Toolbar packing follows measured content width, the native target size and
 the gap, not a device-specific item count. If all actions fit, all remain
 visible. Otherwise reserve one target for More and put only trailing actions

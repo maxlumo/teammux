@@ -1966,7 +1966,7 @@
     <div class="preview-header compact-tools">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToList} />
       {#if !listShown}{@render serverDoor()}{/if}
-      <span class="preview-name">{currentFile.name}</span>
+      <span class="preview-name" title={currentFile.name}>{currentFile.name}</span>
       <div class="preview-actions">
         {#if isLinedPreview}
           <CommandButton variant="icon" icon={wrapLines ? 'wrap-text' : 'no-wrap'} label={t('editorWrap')}
@@ -2000,7 +2000,8 @@
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backToPreview} />
       {#if !listShown}{@render serverDoor()}{/if}
-      <span class="preview-name">{currentFile.name}{isEdited ? ' *' : ''}</span>
+      <span class="preview-name" title={currentFile.name}>{currentFile.name}</span>
+      {#if isEdited}<span class="preview-dirty">*</span>{/if}
       <div class="preview-actions">
         <CommandButton variant="icon" icon={wrapLines ? 'wrap-text' : 'no-wrap'} label={t('editorWrap')} pressed={wrapLines}
           onclick={() => { wrapLines = !wrapLines; requestAnimationFrame(syncEditorScroll); }} />
@@ -2126,7 +2127,7 @@
     <div class="preview-header">
       <CommandButton variant="icon" icon="arrow-left" label={t('back')} onclick={backFromInfo} />
       {#if !listShown}{@render serverDoor()}{/if}
-      <span class="preview-name">{currentFile?.name}</span>
+      <span class="preview-name" title={currentFile?.name}>{currentFile?.name}</span>
       <div class="preview-actions">
         {#if isPreviewable(currentFile?.stat, currentFile?.name)}
           <CommandButton variant="icon" icon="eye" label={t('preview')} onclick={() => loadPreviewContent(currentFile)} />
@@ -2430,15 +2431,27 @@
   .file-actions { display: flex; flex: none; gap: 0; padding-right: 4px; }
   .empty, .loading { padding: 40px; text-align: center; color: var(--text3); font-size: var(--fs-body); }
 
-  /* Preview header */
+  /* Preview header: one list row high (board #435, owner 2026-10-20: "文件预览
+     页的上边标题栏有点过高了，和本身文件那个栏里的一行的高度一致吧"). The row's
+     own metric, `--files-row-height` (32px pointer / 44px coarse), is its
+     minimum, with no block padding: its controls (28px pointer / 30px on
+     touch inside .compact-tools) sit inside that height. The NAME is one
+     line here, cut with an ellipsis, and shrinks first (flex-basis 0), so
+     the bar stays one row on a 390px phone too; its full text is the
+     span's title. A list row's name still wraps (#164): that rule is for
+     the list, where the name is the content; here the bar is chrome. */
   .preview-header {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 10px;
+    min-height: var(--files-row-height);
     border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
   .preview-name {
-    flex: 1 1 160px; min-width: 0; font-size: var(--fs-body); font-weight: 500;
-    white-space: pre-wrap; overflow-wrap: anywhere;
+    flex: 1 1 0; min-width: 0; font-size: var(--fs-body); font-weight: 500;
+    white-space: pre; overflow: hidden; text-overflow: ellipsis;
   }
+  /* The editor's unsaved mark sits OUTSIDE the cut name, so a long name can
+     never hide it (validator P1 on 07f4c8f5). */
+  .preview-dirty { flex: none; font-size: var(--fs-body); font-weight: 500; }
   .preview-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; max-width: 100%; }
   /* Reading mode (board #226): the header steps away as a cut — the same
      treatment the tab bar gets while the keyboard is up (motion principle
