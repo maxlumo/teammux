@@ -37,7 +37,7 @@ pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntent
 pub use restore_batch::{finished_word, settle, Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, Finished, ProjectState, WindowState, NO_WINDOW, RELEASED};
 pub use restore_hold::{Hold, HoldPane, HoldStage, UNKNOWN_BOOT};
 pub use registry::{RegAgent, RegMcp, RegSkill, RegTeam};
-pub use rooms::{HubMsg, OnceLine};
+pub use rooms::{HubMsg, OnceLine, SearchPage};
 pub use wakes::Wake;
 
 pub struct Store {

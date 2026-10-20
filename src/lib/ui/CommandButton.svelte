@@ -26,6 +26,10 @@
     round?: boolean;
     controls?: string;
     hasPopup?: 'menu' | 'dialog' | 'listbox';
+    /** What the command IS, when its visible `label` is only a name or a shortened
+     * form of it (the search button wearing an agent's name, board #432): the
+     * accessible name and the hover card's title. The label stays the visible text. */
+    title?: string;
     disabled?: boolean;
     destructiveConfirm?: boolean;
     onclick?: (event: MouseEvent) => void;
@@ -33,7 +37,7 @@
   } & ({ pending?: false; icon?: string } | { pending: boolean; icon: string });
   let {
     label, icon = '', variant = 'secondary', iconOnly = false,
-    pressed, expanded, inside = false, bare = false, round = false, controls, hasPopup,
+    pressed, expanded, inside = false, bare = false, round = false, controls, hasPopup, title,
     disabled = false, pending = false, destructiveConfirm = false,
     onclick = () => {}, element = $bindable(null),
   }: Props = $props();
@@ -49,10 +53,10 @@
 <button type="button" class="command-button"
   class:primary={solid} class:secondary={variant === 'secondary'}
   class:danger={variant === 'danger'} class:icon-only={compact} class:solid class:bare={bare && !solid} class:round class:pending class:engaged
-  disabled={disabled || pending} aria-label={label} aria-busy={pending || undefined}
+  disabled={disabled || pending} aria-label={title ?? label} aria-busy={pending || undefined}
   aria-pressed={pressed} aria-expanded={expanded} aria-controls={controls} aria-haspopup={hasPopup}
   bind:this={element}
-  use:hoverInfo={() => compact ? { title: label } : null}
+  use:hoverInfo={() => compact ? { title: title ?? label } : title ? { title } : null}
   onclick={(event) => { if (!disabled && !pending) onclick(event); }}>
   {#if icon}
     <span class="command-icon" class:spinning={pending} class:flip={disclosure} class:on={disclosure && expanded} aria-hidden="true">

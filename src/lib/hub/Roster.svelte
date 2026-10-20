@@ -441,7 +441,6 @@
               {#if mentioned}<span class="agent-mention" aria-hidden="true">@</span>{/if}
               {#if unread.has(a.name)}<span class="unread-dot appear-pop" aria-hidden="true"></span>{/if}
             </span>
-            {#if filterAgent === a.name}<span class="agent-filter" aria-hidden="true"><Icon name="filter" size={12} /></span>{/if}
             {#if expanded && a.vitals?.context_pct != null}<span class="ctx-value">{a.vitals.context_pct}%</span>{/if}
           </button>
           {#if showStop(a.name)}
@@ -522,7 +521,6 @@
               {#if backendIcon(backend)}<img class="ava dim" src={backendIcon(backend)} alt={backend} />{:else}<span class="ava dim">{name.slice(0, 1).toUpperCase()}</span>{/if}
             </span>
             <span class="a-name strip-label">{name}</span>
-            {#if filterAgent === name}<span class="agent-filter" aria-hidden="true"><Icon name="filter" size={12} /></span>{/if}
           </button>
       {/snippet}
       <!-- Spawning opens a closed project too; keep its entry even in an empty room. -->
@@ -792,7 +790,6 @@
      变暗了，没有任何提示…这个 Filter 和正常状态的差异太小了"; then "放大镜好像不
      太好…用平常我们那种沙漏过滤的样式"). Its own flex child, not a row of the
      marks column: three stacked marks would exceed the strip and grow it. */
-  .agent-filter { display: inline-flex; flex: none; color: var(--accent-ink); }
   .agent-mention { color: var(--accent-ink); font-family: var(--font-mono); font-size: var(--fs-meta); font-weight: 600; }
   /* Stop stands on the dot: absolutely placed by overDot, so it never widens
      the card (#180's concern) and the dot yields to it while shown. */

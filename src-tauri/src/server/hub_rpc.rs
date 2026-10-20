@@ -417,12 +417,17 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
 
         // Keyword search over the room's FULL history — `hub_log` pages, this
         // finds (owner, 2026-09-07: "log是不是也加上关键字搜索能力…也可以加一个
-        // --global 跨项目会话全局搜索"). `grep` is a term LIST, any-match,
-        // substring, ASCII-case-insensitive, against body and sender.
-        // `global: true` widens the scope to EVERY room; each hit carries its
-        // `room` field so a cross-project answer stays readable. Newest `limit`
-        // hits, oldest first, archived messages filtered out per room on the
-        // way — same one-way mirror as `hub_log`.
+        // --global 跨项目会话全局搜索"). `grep` is a term LIST, substring,
+        // ASCII-case-insensitive, against body and sender: ANY term by default
+        // (`tmm log --grep`), EVERY term with `all` (the Hub's search box, which
+        // narrows as words are added — board #432). `global: true` widens the
+        // scope to EVERY room; each hit carries its `room` field so a
+        // cross-project answer stays readable. Newest `limit` hits, oldest
+        // first, and `more`: older hits exist. `from` keeps only the messages that
+        // name SENT (the Hub's agent filter scopes its search by sender). Archived messages never match
+        // (excluded in the query, so `limit` and `more` count what a reader can
+        // see) — same one-way mirror as `hub_log`. A store that cannot be read
+        // is an error, not an empty answer.
         "hub_search" => {
             let terms: Vec<String> = p
                 .get("grep")
@@ -432,30 +437,17 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             if terms.iter().all(|t| t.trim().is_empty()) {
                 return Err(RpcError::InvalidParams("grep must be a non-empty array of search terms".into()));
             }
+            // One LIKE pair per term: an authenticated client must not be able to make one query of
+            // any size (board #432 review). The Hub's box states the same cap (hub-search.ts).
+            if terms.len() > MAX_SEARCH_TERMS || terms.iter().map(String::len).sum::<usize>() > MAX_SEARCH_BYTES {
+                return Err(RpcError::InvalidParams(format!("grep takes at most {MAX_SEARCH_TERMS} terms and {MAX_SEARCH_BYTES} bytes")));
+            }
             let global = p.get("global").and_then(|v| v.as_bool()).unwrap_or(false);
+            let all = p.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            let from = p.get("from").and_then(|v| v.as_str());
             let limit = p.get("limit").and_then(|v| v.as_i64()).unwrap_or(50).clamp(1, 500);
             let scope = if global { None } else { Some(room.as_str()) };
-            let mut result = rooms::search_messages(scope, &terms, limit);
-            if let Some(msgs) = result.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                // Archived = hidden everywhere, including from search. The ids
-                // are per room, so a global result set asks once per room it
-                // actually touched.
-                let rooms: std::collections::BTreeSet<String> = msgs
-                    .iter()
-                    .filter_map(|m| m.get("room").and_then(|v| v.as_str()).map(str::to_string))
-                    .collect();
-                for r in rooms {
-                    let hidden = crate::projects::archived_ids(&r);
-                    if hidden.is_empty() {
-                        continue;
-                    }
-                    msgs.retain(|m| {
-                        m.get("room").and_then(|v| v.as_str()) != Some(r.as_str())
-                            || !m.get("id").and_then(|v| v.as_str()).is_some_and(|i| hidden.iter().any(|h| h == i))
-                    });
-                }
-            }
-            Ok(result)
+            Ok(rooms::search_messages(scope, &terms, all, from, limit).map_err(RpcError::Internal)?)
         }
 
         // Deleting a message is TWO steps, because a transcript is a record and a
@@ -1662,6 +1654,11 @@ fn board_dispatch(name: &str, managed: bool, post: impl FnOnce() -> Result<serde
 /// original title and body ride in full; only the discussion under the issue
 /// gets a budget, so a long thread — or ONE giant note — can never inject an
 /// unbounded wall of text into the agent's pane.
+/// `hub_search` limits (board #432): terms and their total size. `SEARCH_MAX_TERMS` in
+/// `src/lib/hub/hub-search.ts` states the first to the reader; a source test pins the two together.
+pub(crate) const MAX_SEARCH_TERMS: usize = 32;
+const MAX_SEARCH_BYTES: usize = 4096;
+
 const ASSIGN_NOTES_BUDGET: usize = 1200;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Below this many characters of remaining budget a partial note is not worth
@@ -3673,6 +3670,42 @@ mod tests {
         let msgs = search(serde_json::json!(["old", "new"]));
         assert_eq!(msgs.len(), 1, "the archived hit is filtered: {msgs:?}");
         assert_eq!(msgs[0]["body"], "old");
+    }
+
+    /// Board #432: `all` makes every term required (the Hub's search box), the
+    /// default stays any-term, and `more` says older hits exist.
+    #[test]
+    fn hub_search_all_narrows_and_more_reports_older_hits() {
+        crate::projects::tests::use_test_store();
+        let (session, room) = unique("srch-all");
+        let tag = format!("w{}", uuid::Uuid::new_v4().simple());
+        rooms::seed_msg(&room, &format!("{room}-1"), 100, "a", &[], &format!("{tag} alpha"));
+        rooms::seed_msg(&room, &format!("{room}-2"), 200, "a", &[], &format!("{tag} beta"));
+        rooms::seed_msg(&room, &format!("{room}-3"), 300, "a", &[], &format!("{tag} alpha beta"));
+        let ask = |extra: serde_json::Value| {
+            let mut p = serde_json::json!({ "session": session, "grep": [tag, "alpha", "beta"] });
+            for (k, v) in extra.as_object().unwrap() { p[k] = v.clone(); }
+            handle_hub_request(&req("hub_search", p), None).result.expect("result")
+        };
+        assert_eq!(ask(serde_json::json!({}))["messages"].as_array().unwrap().len(), 3, "default: any term");
+        let narrowed = ask(serde_json::json!({ "all": true }));
+        assert_eq!(narrowed["messages"].as_array().unwrap().len(), 1, "all: every term");
+        assert_eq!(narrowed["more"], false);
+        let capped = ask(serde_json::json!({ "limit": 2 }));
+        assert_eq!(capped["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(capped["more"], true, "an older hit exists behind the page");
+        // One query of any size is not available to a client: terms and bytes are capped.
+        let many: Vec<String> = (0..=MAX_SEARCH_TERMS).map(|n| format!("t{n}")).collect();
+        let r = handle_hub_request(&req("hub_search", serde_json::json!({ "session": session, "grep": many })), None);
+        assert!(r.error.is_some(), "{} terms are one too many", many.len());
+        let ok: Vec<String> = (0..MAX_SEARCH_TERMS).map(|n| format!("t{n}")).collect();
+        assert!(handle_hub_request(&req("hub_search", serde_json::json!({ "session": session, "grep": ok })), None).error.is_none(), "the cap itself is allowed");
+        let big = vec!["x".repeat(MAX_SEARCH_BYTES + 1)];
+        assert!(handle_hub_request(&req("hub_search", serde_json::json!({ "session": session, "grep": big })), None).error.is_some(), "and so is its size");
+        // `from` keeps one sender's messages (the Hub's agent filter).
+        let by_a = ask(serde_json::json!({ "from": "a" }));
+        assert_eq!(by_a["messages"].as_array().unwrap().len(), 3, "all three were said by a");
+        assert_eq!(ask(serde_json::json!({ "from": "b" }))["messages"].as_array().unwrap().len(), 0);
     }
 
     /// `global: true` widens the scope to EVERY room; each hit carries its

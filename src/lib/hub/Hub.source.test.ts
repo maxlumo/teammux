@@ -94,7 +94,7 @@ test('Hub keeps Feed coordination and exposes only the agreed reading boundary (
   assert.match(source, /feedView\?\.resetForRoom\(\);/u);
   assert.match(source, /following = !jumpIntent;\n\s*if \(feed\.length && !jumpIntent\) scrollFeed\(true\);/u,
     'room entry keeps its original tail intent — unless a centre jump owns the landing (#322)');
-  assert.match(source, /if \(filterAgent\) \{ filterAgent = ''; return true; \}/u);
+  assert.match(source, /if \(filterAgent\) \{ setFilter\('', 'user'\); return true; \}/u);
   assert.doesNotMatch(source, /onclearfilter/u, 'the filter shows and leaves in the strip, not a feed banner (owner, 2026-09-23)');
   assert.match(source, /--msg-max: min\(84%, 1360px\);/u,
     'the parent width token still agrees with Feed measurement');
@@ -222,7 +222,9 @@ test('Back keeps the original priority and current live guards in one dispatcher
     create: 'if (!createOpen) return false; if (!createEl?.goBack()) createOpen = false; return true;',
     rename: 'if (renaming) { renaming = false; return true; }',
     jumpFilter: 'if (filterBefore) { restoreFilter(); return true; }',
-    filter: "if (filterAgent) { filterAgent = ''; return true; }",
+    // #432: the search box closes first, then the reading filter peels, through the one writer.
+    search: 'if (search.open) { search.close(); return true; }',
+    filter: "if (filterAgent) { setFilter('', 'user'); return true; }",
     reply: 'if (replyTo) { replyTo = null; return true; }',
     files: "if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true;",
     drawer: 'if (termOpen) { closeDrawer(); return true; }',
@@ -234,7 +236,7 @@ test('Back keeps the original priority and current live guards in one dispatcher
     assert.ok(region.includes(`backLayers.register('${layer}', () => { ${guard}${suffix} })`),
       `${layer} keeps its current guard/action inside a live callback`);
   }
-  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 13, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first');
+  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 14, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first; the search box (#432) closes before the filter peels');
   assert.match(source, /registerBack=\{onGoBack \? backLayers\.register : null\}/u,
     'Composer registers its remaining palette slot with the same registry');
   assert.match(region, /onGoBack\(backLayers\.back\);/u);
@@ -264,8 +266,8 @@ test('the filter and the detail level are reachable from menus, not only from a 
   // menu still carries the three detail levels with the current one ticked.
   const items = source.slice(source.indexOf('function agentItems'), source.indexOf('function projectItems'));
   assert.equal([...items.matchAll(/filterItem\(name\)/g)].length, 2, 'live AND stopped agents get the filter verb');
-  assert.match(source, /icon: 'filter',\s*onselect: \(\) => toggleFilter\(name\)/u, 'one funnel for the filter verb — the menu row and the card mark share it');
-  assert.match(source, /function toggleFilter\(name\) \{\s*filterAgent = filterAgent === name \? '' : name;/u,
+  assert.match(source, /icon: 'filter',\s*onselect: \(\) => toggleFilter\(name\)/u, 'one funnel glyph for the filter verb in the menu (the card no longer wears one: the search button is the filter\u2019s face, #432)');
+  assert.match(source, /function toggleFilter\(name\) \{\s*setFilter\(filterAgent === name \? '' : name, 'user'\);/u,
     '#168 ContextMenu retains the toggle without selecting or opening a second menu');
   assert.match(source, /projectItems\(selectedRow, true\)/u, 'the title caret asks for the view rows');
   const lv = source.slice(source.indexOf('function feedLevelItems'), source.indexOf('// The same dismissal'));
@@ -279,7 +281,7 @@ test('the filter and the detail level are reachable from menus, not only from a 
   assert.match(source, /label: t\('hubOnlyMine'\), icon: filterAgent === HUMAN \? 'check' : 'circle', onselect: \(\) => toggleFilter\(HUMAN\)/u);
   assert.match(source, /if \(filterAgent && filterAgent !== HUMAN && !managedAgents\.some/u, 'the human is not an agent that can leave the room');
   assert.match(source, /filterAgent=\{filterAgent === HUMAN \? '' : filterAgent\}/u, 'no agent card wears the Only-mine mark');
-  assert.match(source, /backLayers\.register\('filter', \(\) => \{ if \(filterAgent\) \{ filterAgent = ''; return true; \}/u, 'Back peels it like any filter');
+  assert.match(source, /backLayers\.register\('filter', \(\) => \{ if \(filterAgent\) \{ setFilter\('', 'user'\); return true; \}/u, 'Back peels it like any filter');
 });
 
 test('agent restart remains one parent action for roster and context menu (board #89)', async () => {

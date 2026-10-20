@@ -146,12 +146,15 @@ pub fn message_by_ref(room: &str, re: &str) -> Option<serde_json::Value> {
     found.ok().flatten().map(|m| message_json(&m))
 }
 
-/// The newest `limit` messages matching ANY of `terms`, oldest first:
-/// `{ "messages": [...] }`. `room = None` searches EVERY room; each hit's
-/// `room` field says where it was said.
-pub fn search_messages(room: Option<&str>, terms: &[String], limit: i64) -> serde_json::Value {
-    let msgs = with_store(|s| s.hub_search(room, terms, limit)).unwrap_or_default();
-    serde_json::json!({ "messages": msgs.iter().map(message_json).collect::<Vec<_>>() })
+/// The newest `limit` messages matching `terms` (any of them, or every one
+/// with `all`), oldest first: `{ "messages": [...], "more": bool }`, `more`
+/// = older hits exist. `room = None` searches EVERY room; each hit's `room`
+/// field says where it was said. `from` keeps only that sender's messages. A store that cannot be read is an ERROR,
+/// never an empty answer (board #432: "no matches" must not be what a broken
+/// database looks like).
+pub fn search_messages(room: Option<&str>, terms: &[String], all: bool, from: Option<&str>, limit: i64) -> Result<serde_json::Value, String> {
+    let page = with_store(|s| s.hub_search(room, terms, all, from, limit))?;
+    Ok(serde_json::json!({ "messages": page.hits.iter().map(message_json).collect::<Vec<_>>(), "more": page.more }))
 }
 
 /// Newest message timestamp (ms) per room: `{ "<room>": ts }` — orders the
@@ -478,7 +481,7 @@ mod tests {
 
         // Exact lookup, search, room ordering, deletion.
         assert_eq!(message_by_id(&room, m1["id"].as_str().unwrap()).unwrap(), m1);
-        let hits = search_messages(Some(&room), &["START".into()], 10);
+        let hits = search_messages(Some(&room), &["START".into()], false, None, 10).unwrap();
         assert_eq!(hits["messages"].as_array().unwrap().len(), 1, "case-insensitive body match");
         let latest = room_latest();
         assert_eq!(latest[&room], m2["ts"], "the room's newest ts orders the sidebar");

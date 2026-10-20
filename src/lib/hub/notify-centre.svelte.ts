@@ -46,7 +46,15 @@ export interface Alert {
   failed?: string;
 }
 
-export interface JumpRequest { alert: Alert; n: number }
+/** What a jump needs to find a message (board #432). A bell entry is one; a
+ * search hit is another, and a hit is NOT recorded as a notification. */
+export type JumpTarget = Pick<Alert, 'server' | 'room' | 'session' | 'id' | 'seq'> & { key?: string };
+/** How a jump reports where it ended. Absent, the bell's own way: the AlertLog
+ * entry of the target's `key` is marked viewed or failed. A search passes its
+ * own, bound to the search generation that asked, so a late jump cannot close
+ * a panel that was reopened or write into one that has moved on. */
+export interface JumpReport { viewed(): void; failed(reason: string): void }
+export interface JumpRequest { alert: JumpTarget; n: number; report?: JumpReport }
 
 type Store = Pick<Storage, 'getItem' | 'setItem'>;
 
@@ -155,7 +163,7 @@ export interface CentreSurface {
   /** A request for the Hub to open an entry's message; `n` makes a newer
    * request supersede an older one still in flight. */
   readonly jump: JumpRequest | null;
-  requestJump(alert: Alert): void;
+  requestJump(alert: JumpTarget, report?: JumpReport): void;
   isCurrent(n: number): boolean;
   /** The request `n` is done (landed, failed, or invalidated): it is never
    * replayed. A newer request is left alone. */
@@ -173,7 +181,7 @@ export function createCentreSurface(): CentreSurface {
     toggle(trigger) { state.open = state.open === trigger ? null : trigger; },
     close() { state.open = null; },
     get jump(): JumpRequest | null { return state.jump; },
-    requestJump(alert) { state.jump = { alert, n: ++jumps }; },
+    requestJump(alert, report) { state.jump = { alert, n: ++jumps, ...(report ? { report } : {}) }; },
     isCurrent(n) { return state.jump?.n === n; },
     consume(n) { if (state.jump?.n === n) state.jump = null; },
     reset() { state.jump = null; state.open = null; },
@@ -204,7 +212,7 @@ export function createCentre(log: AlertLog, surface: CentreSurface = centreSurfa
     toggle(trigger: HTMLElement) { surface.toggle(trigger); },
     close() { surface.close(); },
     get jump(): JumpRequest | null { return surface.jump; },
-    requestJump(alert: Alert) { surface.requestJump(alert); },
+    requestJump(alert: JumpTarget, report?: JumpReport) { surface.requestJump(alert, report); },
     isCurrent(n: number) { return surface.isCurrent(n); },
     consume(n: number) { surface.consume(n); },
   };

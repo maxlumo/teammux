@@ -7,7 +7,7 @@ import type { HubBackLayer } from './hub-back.ts';
 // The contract is independent of the implementation's order table.
 const priority: HubBackLayer[] = [
   'lightbox', 'contextMenu', 'palette',
-  'action', 'trash', 'picker', 'create', 'rename', 'filter', 'files', 'drawer', 'sidebar',
+  'action', 'trash', 'picker', 'create', 'rename', 'search', 'filter', 'files', 'drawer', 'sidebar',
 ];
 
 test('registry dispatch follows the fixed priority, not registration order', () => {

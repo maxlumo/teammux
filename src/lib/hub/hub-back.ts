@@ -1,6 +1,6 @@
 const ORDER = [
   'lightbox', 'contextMenu', 'palette',
-  'action', 'trash', 'picker', 'create', 'rename', 'filter', 'files', 'drawer', 'sidebar',
+  'action', 'trash', 'picker', 'create', 'rename', 'search', 'filter', 'files', 'drawer', 'sidebar',
 ] as const;
 
 export type HubBackLayer = typeof ORDER[number];

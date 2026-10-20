@@ -4398,3 +4398,363 @@ test('a manual room choice ends a pending jump at once, even B → C → B (#322
     assert.ok(app.document.querySelector('[data-msg="id209"]'), 'the manual B reading is intact');
   } finally { await app.close(); }
 });
+
+// Board #432: the search box in the Hub header. A hit opens its message through
+// the SAME jump the bell uses (`openAt`), but it is not a notification: nothing
+// is recorded in the AlertLog, no bell state moves, and what the jump reports
+// goes to the search generation that asked.
+const searchHits = (f: ReturnType<typeof jumpFixture>) => [
+  { ...f.msg(40, 'older talk about the reply'), id: 'older' },
+  { ...f.msg(50, 'the reply you heard'), id: 'target' },
+];
+async function openSearch(app: { document: Document; window: any; flush: () => Promise<void>; advance: (ms: number) => Promise<void> }, query = 'reply') {
+  const button = app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!;
+  button.click();
+  await until(app, () => !!app.document.querySelector('.search-input'));
+  const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+  input.value = query;
+  input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await app.advance(300);                                       // the debounce runs on the harness clock
+  await until(app, () => app.document.querySelectorAll('.sr-row').length > 0 || /No matches|failed/u.test(app.document.querySelector('.sr-status')?.textContent ?? ''));
+}
+
+test('a search hit opens its message through the bell’s jump, records no notification, and closes the box when it lands (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const asked: unknown[][] = [];
+  const app = await mountJump(context, { ...f.rpc, hubSearch: async (...args: unknown[]) => { asked.push(args); return { messages: searchHits(f).map((m) => ({ ...m, room: 'proj:other' })), more: false }; } });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    const centre = centreOf(app);
+    await openSearch(app);
+    assert.deepEqual(JSON.parse(JSON.stringify(asked[0])), ['fixture', ['reply'], { all: true, global: false, limit: 50 }], 'this room, every term, the default page');
+    const rows = [...app.document.querySelectorAll<HTMLButtonElement>('.sr-row')];
+    assert.equal(rows.length, 2);
+    assert.match(rows[0]!.textContent ?? '', /the reply you heard/u, 'newest first');
+    rows[0]!.click();
+    await until(app, () => !!app.document.querySelector('.msg.jump-hit[data-msg="target"]'));
+    assert.ok(app.document.querySelector('.msg.jump-hit[data-msg="target"]'), 'the message is on screen and ringed, in the room it was said');
+    assert.equal(app.document.querySelector('.h1-text')?.textContent, 'other');
+    await until(app, () => !app.document.querySelector('.search-bar'));
+    assert.equal(app.document.querySelector('.search-bar'), null, 'it landed: the box closes');
+    assert.equal(centre.items.length, 0, 'a search hit is not a notification: nothing recorded');
+    assert.equal(centre.unviewed, 0, 'and the bell did not move');
+  } finally { await app.close(); }
+});
+
+test('the box stays open while its own jump changes the room, and says so when the message is gone (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture({ hubLogAround: async () => ({ has_more: true, newer_more: true, oldest_seq: 48, messages: f0().around.filter((m: { id: string }) => m.id !== 'target') }) });
+  function f0() { return jumpFixture(); }
+  const app = await mountJump(context, { ...f.rpc, hubSearch: async () => ({ messages: searchHits(f).map((m) => ({ ...m, room: 'proj:other' })) }) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openSearch(app);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => /no longer in the room/u.test(app.document.querySelector('.sr-notice')?.textContent ?? ''));
+    assert.match(app.document.querySelector('.sr-notice')?.textContent ?? '', /Message no longer in the room/u, 'the failure is said where the user looked');
+    assert.ok(app.document.querySelector('.search-bar'), 'the room changed under the box (its own jump) and it stayed');
+    assert.equal(centreOf(app).items.length, 0, 'a failed search jump is not an alert either');
+  } finally { await app.close(); }
+});
+
+test('choosing another project closes the box, and an answer still in flight lands nowhere (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  let answer: ((v: unknown) => void) | null = null;
+  const app = await mountJump(context, { ...f.rpc, hubSearch: () => new Promise((r) => { answer = r; }) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    const button = app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!;
+    button.click();
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'reply';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.advance(300);
+    await until(app, () => !!answer);
+    app.document.querySelector<HTMLElement>('.proj-row[aria-label^="other"] .proj-pick')!.click();
+    await until(app, () => app.document.querySelector('.h1-text')?.textContent === 'other');
+    assert.equal(app.document.querySelector('.search-bar'), null, 'a room-scoped answer belongs to the room it was asked in');
+    answer!({ messages: searchHits(f).map((m) => ({ ...m, room: 'proj:fixture' })) });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.equal(app.document.querySelector('.sr-row'), null, 'the late answer is dropped');
+    assert.equal(app.document.querySelector('.search-panel'), null);
+  } finally { await app.close(); }
+});
+
+test('the bell’s centre and the search results are one popover at a time (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const app = await mountJump(context, { ...f.rpc, hubSearch: async () => ({ messages: [] }) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    const centre = centreOf(app);
+    const anchor = app.document.querySelector<HTMLElement>('.head-tools button[aria-label="Search messages"]')!;
+    centre.toggle(anchor);                                      // the centre is open
+    assert.ok(centre.anchor);
+    anchor.click();                                             // opening the search closes it
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    assert.equal(centre.anchor, null, 'opening the search dismisses the centre');
+    centre.toggle(anchor);                                      // and the centre opening dismisses the search
+    await until(app, () => !app.document.querySelector('.search-input'));
+    assert.equal(app.document.querySelector('.search-bar'), null);
+  } finally { await app.close(); }
+});
+
+// Board #432, review round 1: a search-owned jump is CANCELLED when its generation goes stale (not
+// merely unreported), a hidden Hub or one that lost its server's focus closes the box, and the
+// agent filter lives in the search button. `ownedJump` is the centre n the box started and nothing else.
+async function mountSearch(context: TestContext, rpc: Record<string, unknown>, props: Record<string, unknown> = {}) {
+  const fixture = await compiledHost();
+  return fixture.mount(context, {
+    props: { visible: true, ...props },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      window.localStorage.setItem('tmux_hub_project', 'fixture');
+      window.localStorage.setItem('tmux_server_current', 's1');
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+    },
+    modules: [rpc as Record<string, (...args: any[]) => unknown>],
+  });
+}
+type SearchApp = Awaited<ReturnType<typeof mountSearch>>;
+/** A mouse double-click on an agent's card, the way the strip receives it. */
+async function doubleClickCard(app: SearchApp, name: string) {
+  const button = app.document.querySelector<HTMLElement>(`.acard[data-agent="${name}"] .agent-select`)!;
+  for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+    button.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+    await app.flush();
+  }
+}
+/** The fixture where a hit lives in ANOTHER room and its `around` page is held until released. */
+function heldAround(extra: Record<string, unknown> = {}, room = 'proj:other') {
+  const f = jumpFixture();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  let arounds = 0;
+  const searched: unknown[][] = [];
+  const rpc = {
+    ...f.rpc,
+    hubSearch: async (...args: unknown[]) => { searched.push(args); return { messages: searchHits(f).map((m) => ({ ...m, room, from: 'alice' })) }; },
+    hubLogAround: async () => { arounds++; await gate; return { has_more: true, newer_more: true, oldest_seq: 48, messages: f.around }; },
+    ...extra,
+  };
+  return { f, rpc, release: () => release(), arounds: () => arounds, searched };
+}
+
+test('closing the box cancels the jump it started: the late answer moves nothing, and the bell’s own jump still lands (#432)', { timeout: 60000 }, async (context) => {
+  const h = heldAround();
+  const app = await mountSearch(context, h.rpc);
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openSearch(app);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => h.arounds() === 1);
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await app.flush();
+    assert.equal(app.document.querySelector('.search-bar'), null, 'Escape closed the box');
+    h.release();
+    for (let i = 0; i < 10; i++) await app.flush();
+    assert.equal(app.document.querySelector('[data-msg="target"]'), null, 'the cancelled jump’s page was never put on screen');
+    assert.notEqual(app.document.querySelector('.to-tail')?.getAttribute('aria-label'), 'Back to latest', 'no history window: the reader is still on the room’s tail');
+    assert.ok(app.document.querySelector('[data-msg="id209"]'), 'the reading is what the person was looking at');
+    const centre = centreOf(app);
+    centre.record(alertFor());
+    centre.requestJump(centre.items[0]);
+    await until(app, () => !!app.document.querySelector('.msg.jump-hit[data-msg="target"]'));
+    assert.ok(app.document.querySelector('.msg.jump-hit[data-msg="target"]'), 'a bell jump after the cancelled one is not swallowed by it');
+  } finally { await app.close(); }
+});
+
+test('typing a new query cancels the jump the box started, too (#432)', { timeout: 60000 }, async (context) => {
+  const h = heldAround();
+  const app = await mountSearch(context, h.rpc);
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openSearch(app);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => h.arounds() === 1);
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'another word';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.flush();
+    h.release();
+    for (let i = 0; i < 10; i++) await app.flush();
+    assert.equal(app.document.querySelector('[data-msg="target"]'), null, 'the old answer did not land');
+    assert.ok(app.document.querySelector('.search-bar'), 'and the box the reader is typing in was not closed by the old jump’s report');
+  } finally { await app.close(); }
+});
+
+test('a hidden Hub, or one whose server lost the focus, closes the box at once; nothing fills it or returns with the page (#432)', { timeout: 60000 }, async (context) => {
+  for (const leave of ['hidden', 'unfocused'] as const) {
+    let answer: ((v: unknown) => void) | null = null;
+    const f = jumpFixture();
+    const app = await mountSearch(context, { ...f.rpc, hubSearch: () => new Promise((r) => { answer = r; }) });
+    try {
+      await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+      app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!.click();
+      await until(app, () => !!app.document.querySelector('.search-input'));
+      const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+      input.value = 'reply';
+      input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+      await app.advance(300);
+      await until(app, () => !!answer);
+      if (leave === 'hidden') { app.window.__setVisible(false); await app.flush(); } else await app.setScope({ eligible: false });
+      assert.equal(app.document.querySelector('.search-bar'), null, `${leave}: closed at once`);
+      answer!({ messages: searchHits(f).map((m) => ({ ...m, room: 'proj:fixture' })) });
+      for (let i = 0; i < 6; i++) await app.flush();
+      assert.equal(app.document.querySelector('.sr-row'), null, `${leave}: the late answer fills nothing`);
+      if (leave === 'hidden') { app.window.__setVisible(true); await app.flush(); } else await app.setScope({ eligible: true });
+      for (let i = 0; i < 4; i++) await app.flush();
+      assert.equal(app.document.querySelector('.search-bar'), null, `${leave}: and nothing comes back with the page`);
+      assert.equal(app.document.querySelector('.sr-row'), null);
+    } finally { await app.close(); }
+  }
+});
+
+test('double-click puts the agent filter on the search button; the funnel is gone; the token and Back take it off (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const searched: unknown[][] = [];
+  let back: () => boolean = () => false;
+  const app = await mountSearch(context, { ...f.rpc, hubSearch: async (...a: unknown[]) => { searched.push(a); return { messages: [] }; } },
+    { onGoBack: (fn: () => boolean) => { back = fn; } });
+  try {
+    await until(app, () => !!app.document.querySelector('.acard[data-agent="bob"]'));
+    const face = () => app.document.querySelector<HTMLElement>('.head-tools .filter-face');
+    assert.equal(face(), null, 'no filter, the plain search icon');
+    await doubleClickCard(app, 'bob');
+    assert.ok(app.document.querySelector('.cards.filtering'), 'the feed is filtered, as before');
+    assert.ok(app.document.querySelector('.acard[data-agent="bob"].filtered'), 'and the card is lit while the others dim, as before');
+    assert.equal(app.document.querySelector('.agent-filter'), null, 'the funnel on the card is gone (owner: 原来的标识不要了)');
+    assert.equal(face()?.textContent?.trim(), 'bob', 'the search button wears the agent');
+    assert.equal(face()!.querySelector('button')!.getAttribute('aria-label'), 'Search · only bob', 'and its accessible name says it is the search, and for whom');
+    face()!.querySelector('button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-token'));
+    assert.equal(app.document.querySelector('.search-token .token-name')?.textContent, 'bob', 'the box shows the filter as its scope');
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'reply';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.advance(300);
+    await until(app, () => searched.length > 0);
+    assert.deepEqual(JSON.parse(JSON.stringify(searched[0])), ['fixture', ['reply'], { all: true, global: false, from: 'bob', limit: 50 }], 'the filter scopes the request by sender');
+
+    // Back: the box first, then the filter.
+    assert.equal(back(), true);
+    await app.flush();
+    assert.equal(app.document.querySelector('.search-bar'), null, 'Back closed the box');
+    assert.ok(app.document.querySelector('.cards.filtering'), 'and left the reading filter');
+    assert.equal(back(), true);
+    await app.flush();
+    assert.equal(app.document.querySelector('.cards.filtering'), null, 'the next Back peels the filter');
+    assert.equal(face(), null);
+
+    // The token’s x and Backspace in an empty field are the same toggle.
+    await doubleClickCard(app, 'bob');
+    face()!.querySelector('button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-token'));
+    app.document.querySelector<HTMLButtonElement>('.search-token button')!.click();
+    await app.flush();
+    assert.equal(app.document.querySelector('.cards.filtering'), null, 'the x unfilters the feed');
+    assert.equal(app.document.querySelector('.search-token'), null);
+    await doubleClickCard(app, 'bob');
+    const field = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    assert.ok(field, 'the box is still open and now shows the new filter');
+    assert.equal(app.document.querySelector('.search-token .token-name')?.textContent, 'bob', 'a filter set while the box is open reaches the box');
+    field.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+    await app.flush();
+    assert.equal(app.document.querySelector('.cards.filtering'), null, 'Backspace in an empty field takes the token, and the filter, off');
+  } finally { await app.close(); }
+});
+
+test('a user’s filter change cancels the jump the box started; the jump’s OWN filter clear does not (#432)', { timeout: 60000 }, async (context) => {
+  // 1) alice is the filter, the box scoped to her; a hit's around page is held; the user double-clicks bob.
+  let h = heldAround();
+  let app = await mountSearch(context, h.rpc);
+  try {
+    await until(app, () => !!app.document.querySelector('.acard[data-agent="bob"]'));
+    await doubleClickCard(app, 'alice');
+    app.document.querySelector<HTMLButtonElement>('.head-tools .filter-face button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'reply';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.advance(300);
+    await until(app, () => app.document.querySelectorAll('.sr-row').length > 0);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => h.arounds() === 1);
+    const asked = h.searched.length;
+    await doubleClickCard(app, 'bob');                       // a NEW intent while the old jump is in flight
+    await until(app, () => h.searched.length > asked);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.searched.at(-1))), ['other', ['reply'], { all: true, global: false, from: 'bob', limit: 50 }],
+      'the user’s change is a new question: asked again at once, for bob, in the room the reader is now in (not merely adopted)');
+    h.release();
+    for (let i = 0; i < 10; i++) await app.flush();
+    assert.equal(app.document.querySelector('[data-msg="target"]'), null, 'the old jump did not land after the user changed the filter');
+    assert.ok(app.document.querySelector('.search-bar'), 'its report did not close the box the user just re-scoped');
+    assert.equal(app.document.querySelector('.search-token .token-name')?.textContent, 'bob', 'the box follows the user’s filter');
+    assert.ok(app.document.querySelector('.cards.filtering'), 'and the user’s filter stands: the old jump did not clear it');
+  } finally { await app.close(); }
+
+  // 2) the jump clears the filter ITSELF (openAt’s visible clear, a hit in the SAME room) and still
+  // completes and reports.
+  h = heldAround({}, 'proj:fixture');
+  app = await mountSearch(context, h.rpc);
+  try {
+    await until(app, () => !!app.document.querySelector('.acard[data-agent="bob"]'));
+    await doubleClickCard(app, 'alice');
+    app.document.querySelector<HTMLButtonElement>('.head-tools .filter-face button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'reply';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.advance(300);
+    await until(app, () => app.document.querySelectorAll('.sr-row').length > 0);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => h.arounds() === 1);
+    h.release();
+    await until(app, () => !!app.document.querySelector('.msg.jump-hit[data-msg="target"]'));
+    assert.ok(app.document.querySelector('.msg.jump-hit[data-msg="target"]'), 'the jump landed although it cleared the filter it was scoped by');
+    await until(app, () => !app.document.querySelector('.search-bar'));
+    assert.equal(app.document.querySelector('.search-bar'), null, 'and reported: the box closed');
+    assert.equal(app.document.querySelector('.cards.filtering'), null, 'the filter was cleared for the jump, visibly');
+    assert.match(app.document.querySelector('.jump-note')?.textContent ?? '', /./u, 'with the note that says so');
+  } finally { await app.close(); }
+});
+
+test('a hit in ANOTHER room still lands while the agent filter is on: the room switch it causes is its own (#432 validator X5)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const app = await mountSearch(context, { ...f.rpc, hubSearch: async () => ({ messages: searchHits(f).map((m) => ({ ...m, room: 'proj:other', from: 'alice' })) }) });
+  try {
+    await until(app, () => !!app.document.querySelector('.acard[data-agent="alice"]'));
+    await doubleClickCard(app, 'alice');
+    app.document.querySelector<HTMLButtonElement>('.head-tools .filter-face button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+    input.value = 'reply';
+    input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+    await app.advance(300);
+    await until(app, () => app.document.querySelectorAll('.sr-row').length > 0);
+    app.document.querySelectorAll<HTMLButtonElement>('.sr-row')[0]!.click();
+    await until(app, () => !!app.document.querySelector('.msg.jump-hit[data-msg="target"]'));
+    assert.ok(app.document.querySelector('.msg.jump-hit[data-msg="target"]'), 'the room switch resets the filter as part of the jump, and the jump is not cancelled by it');
+    assert.equal(app.document.querySelector('.h1-text')?.textContent, 'other');
+    await until(app, () => !app.document.querySelector('.search-bar'));
+    assert.equal(app.document.querySelector('.search-bar'), null, 'and it reported: the box closed');
+  } finally { await app.close(); }
+});
+
+test('destroying the Hub clears the box’s pending request: nothing is asked after it is gone (#432 validator X6)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const asked: unknown[] = [];
+  const app = await mountSearch(context, { ...f.rpc, hubSearch: async (...a: unknown[]) => { asked.push(a); return { messages: [] }; } });
+  await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+  app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!.click();
+  await until(app, () => !!app.document.querySelector('.search-input'));
+  const input = app.document.querySelector<HTMLInputElement>('.search-input')!;
+  input.value = 'reply';
+  input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await app.flush();                                       // typed; the debounce has not fired
+  await app.unmount();
+  await app.advance(1000);
+  assert.deepEqual(asked, [], 'the destroyed Hub’s timer did not fire a request');
+  await app.close();
+});

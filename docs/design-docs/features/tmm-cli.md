@@ -53,7 +53,7 @@ tmm gateway status [--show-token] · restart · uninstall · logs [-f]
 tmm ui [--open]                      the web UI this machine's gateway serves: its URL, or why none
 tmm send … --image <path|url>        attach an image by REFERENCE (repeatable)
 tmm log [--since <ts>] [--limit N] [-f]      read chat; --since exclusive (ms), -f follows
-tmm log --grep <text> [--grep …] [--global]  search FULL history (any-match, body+sender)
+tmm log --grep <text> [--grep …] [--all] [--from <name>] [--global]  search FULL history (any-match, or every term with --all; body+sender; --from keeps one sender, and a --from with no name is a usage error, never a search for everyone; each of --all/--from/--global without --grep is refused, not ignored)
 
 # the task board
 tmm board [list] | show <id>         the kanban; one issue + its note thread

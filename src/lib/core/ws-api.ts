@@ -322,6 +322,17 @@ export function createWsApi(connection: Connection) {
     call<{ messages: TeamMessage[]; has_more?: boolean; newer_more?: boolean; oldest_seq?: number }>(
       'hub_log', { session, limit, around_seq: seq },
     );
+  /** Search the room's FULL history (board #432): substring, ASCII-case-insensitive, over body and
+   * sender. `all` = every term must match (the Hub's search box); the server's default, and `tmm
+   * log --grep`, is any term. `global` = every room of this server; each hit names its `room`.
+   * `from` = only the messages SENT by that name (the Hub's agent filter scopes its search by sender).
+   * The newest `limit` hits come back oldest first, `more` = older hits exist. A server that
+   * cannot read its store answers with an ERROR, which is not "no matches". */
+  const hubSearch = (session: string, grep: string[], opts: { all?: boolean; global?: boolean; from?: string; limit?: number } = {}) =>
+    call<{ messages: TeamMessage[]; more?: boolean }>('hub_search', {
+      session, grep, ...(opts.all ? { all: true } : {}), ...(opts.global ? { global: true } : {}),
+      ...(opts.from ? { from: opts.from } : {}), ...(opts.limit ? { limit: opts.limit } : {}),
+    });
   /** Deleting a message is two steps. `hubMsgArchive` HIDES it — the message stays in
    * the room's store, so a restore costs nothing — and `hubMsgPurge` is the step that
    * forgets it for good. Only the second one destroys anything. */
@@ -540,7 +551,7 @@ export function createWsApi(connection: Connection) {
     fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
     fsUpload, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
-    hubCommand, hubLog, hubLogAround, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
+    hubCommand, hubLog, hubLogAround, hubSearch, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork,
@@ -582,7 +593,7 @@ export const RPC_KIND = {
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',
   projectAutostart: 'write',
-  hubPost: 'write', hubCommand: 'write', hubLog: 'read', hubLogAround: 'read',
+  hubPost: 'write', hubCommand: 'write', hubLog: 'read', hubLogAround: 'read', hubSearch: 'read',
   hubMsgArchive: 'write', hubMsgRestore: 'write', hubMsgPurge: 'write',
   hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
   hubArchive: 'write', hubAgents: 'read',

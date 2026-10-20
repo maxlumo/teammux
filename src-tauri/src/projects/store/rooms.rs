@@ -21,6 +21,14 @@ pub struct HubMsg {
     pub body: String,
 }
 
+/// One page of search hits (board #432): the newest `limit`, oldest first, and
+/// whether OLDER hits exist behind them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchPage {
+    pub hits: Vec<HubMsg>,
+    pub more: bool,
+}
+
 /// One system line whose message id is its identity (board #422 round 4):
 /// the report of one event, written at most once, in the caller's
 /// transaction.
@@ -385,9 +393,15 @@ impl Store {
             .map_err(|e| format!("hub message by seq: {e}"))
     }
 
-    /// The newest `limit` messages matching ANY of `terms` (substring,
-    /// ASCII-case-insensitive, body or sender), oldest first. `room = None`
-    /// searches every room.
+    /// The newest `limit` messages matching `terms` (substring,
+    /// ASCII-case-insensitive, body or sender), oldest first, and whether
+    /// OLDER hits exist. A term list means ANY term unless `all`: then every
+    /// term must match (board #432: a search box narrows as words are added;
+    /// `tmm log --grep` keeps any-match). `room = None` searches every room.
+    /// `from` narrows to the messages SENT by that name (exact; a blank name is
+    /// none): the Hub's agent filter scopes its search by sender (board #432).
+    /// Archived messages are excluded HERE, in the query, so `limit` and
+    /// `more` count only what a reader could see (board #432).
     ///
     /// The match runs in SQL (board #124): the old shape selected every row
     /// of the scope newest-first and filtered with `contains()` in Rust —
@@ -401,8 +415,10 @@ impl Store {
         &self,
         room: Option<&str>,
         terms: &[String],
+        all: bool,
+        from: Option<&str>,
         limit: i64,
-    ) -> Result<Vec<HubMsg>, String> {
+    ) -> Result<SearchPage, String> {
         let limit = limit.clamp(1, 500);
         let terms: Vec<String> = terms
             .iter()
@@ -410,37 +426,46 @@ impl Store {
             .filter(|t| !t.is_empty())
             .collect();
         if terms.is_empty() {
-            return Ok(Vec::new());
+            return Ok(SearchPage { hits: Vec::new(), more: false });
         }
         // One `%term%` pattern per term, LIKE-escaped so a literal `%`/`_` in
         // the query stays literal.
         let escape = |t: &str| t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let patterns: Vec<String> = terms.iter().map(|t| format!("%{}%", escape(t))).collect();
+        let joiner = if all { " AND " } else { " OR " };
         let clause = patterns
             .iter()
             .enumerate()
             .map(|(i, _)| {
                 let p = i + 2; // ?1 is the room
-                format!("lower(body) LIKE ?{p} ESCAPE '\\' OR lower(sender) LIKE ?{p} ESCAPE '\\'")
+                format!("(lower(body) LIKE ?{p} ESCAPE '\\' OR lower(sender) LIKE ?{p} ESCAPE '\\')")
             })
             .collect::<Vec<_>>()
-            .join(" OR ");
+            .join(joiner);
+        // One more than asked: the extra row is only the proof that older hits exist.
+        let from_at = patterns.len() + 2;
         let sql = format!(
             "SELECT seq, id, ts, room, sender, to_json, kind, body FROM hub_msgs
-             WHERE (?1 IS NULL OR room = ?1) AND ({clause})
-             ORDER BY seq DESC LIMIT {limit}"
+             WHERE (?1 IS NULL OR room = ?1) AND ({clause}) AND (?{from_at} IS NULL OR sender = ?{from_at})
+               AND NOT EXISTS (SELECT 1 FROM msg_archive a WHERE a.room = hub_msgs.room AND a.msg_id = hub_msgs.id)
+             ORDER BY seq DESC LIMIT {}",
+            limit + 1
         );
         let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("prepare hub search: {e}"))?;
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(room.map(str::to_string))];
         for p in &patterns {
             args.push(Box::new(p.clone()));
         }
+        args.push(Box::new(from.map(str::trim).filter(|f| !f.is_empty()).map(str::to_string)));
         let rows = stmt
             .query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())), hub_msg_row)
             .map_err(|e| format!("query hub search: {e}"))?;
-        let mut hits: Vec<HubMsg> = rows.filter_map(Result::ok).collect();
+        // A row that cannot be read is an error, not a missing hit (board #432).
+        let mut hits: Vec<HubMsg> = rows.collect::<Result<_, _>>().map_err(|e| format!("read hub search: {e}"))?;
+        let more = hits.len() as i64 > limit;
+        hits.truncate(limit as usize);
         hits.reverse();
-        Ok(hits)
+        Ok(SearchPage { hits, more })
     }
 
     /// Newest message timestamp (ms) per room — what orders the project list.
@@ -570,6 +595,97 @@ mod tests {
         assert_eq!(store.unarchive_msgs("proj:a", &["nope".to_string()]).unwrap(), 0);
     }
 
+    /// Board #432: the Hub's search box narrows as words are added (every term),
+    /// while the RPC's default and `tmm log --grep` stay any-term.
+    #[test]
+    fn hub_search_all_terms_narrow_and_any_terms_widen() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:all", "a1", 10, "human", "[]", "msg", "deploy the staging build").unwrap();
+        store.hub_append("proj:all", "a2", 20, "human", "[]", "msg", "deploy the production build").unwrap();
+        store.hub_append("proj:all", "a3", 30, "kiro", "[]", "msg", "staging only").unwrap();
+        let ids = |terms: &[&str], all: bool| {
+            let t: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+            store.hub_search(Some("proj:all"), &t, all, None, 50).unwrap().hits.into_iter().map(|m| m.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&["deploy", "staging"], false), vec!["a1", "a2", "a3"], "any term");
+        assert_eq!(ids(&["deploy", "staging"], true), vec!["a1"], "every term");
+        assert_eq!(ids(&["KIRO", "staging"], true), vec!["a3"], "a term may match the sender, another the body");
+        assert!(ids(&["deploy", "kiro"], true).is_empty(), "no single message holds both");
+        assert_eq!(ids(&["  deploy ", ""], true), vec!["a1", "a2"], "blank terms are ignored, not matched");
+    }
+
+    /// Board #432: the Hub's agent filter scopes its search by SENDER, exactly: a
+    /// message that merely names the agent, or whose sender is a longer name, is
+    /// not its message. A blank `from` is no filter.
+    #[test]
+    fn hub_search_from_keeps_only_that_senders_messages() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:from", "f1", 10, "kiro", "[]", "msg", "needle by kiro").unwrap();
+        store.hub_append("proj:from", "f2", 20, "kiro-2", "[]", "msg", "needle by kiro-2").unwrap();
+        store.hub_append("proj:from", "f3", 30, "human", "[]", "msg", "needle for @kiro").unwrap();
+        let ids = |from: Option<&str>| store.hub_search(Some("proj:from"), &["needle".to_string()], true, from, 10).unwrap().hits.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(None), vec!["f1", "f2", "f3"]);
+        assert_eq!(ids(Some("kiro")), vec!["f1"], "exact sender, not a prefix and not a mention");
+        assert_eq!(ids(Some("human")), vec!["f3"]);
+        assert_eq!(ids(Some("  ")), vec!["f1", "f2", "f3"], "blank is no filter");
+        assert!(ids(Some("nobody")).is_empty());
+        // `more` counts only that sender's messages.
+        let page = store.hub_search(Some("proj:from"), &["needle".to_string()], true, Some("kiro"), 1).unwrap();
+        assert!(!page.more);
+    }
+
+    /// Board #432: `more` says older hits exist, and an archived message is
+    /// excluded in the query, so it neither appears nor makes `more` lie nor
+    /// uses up a place in the page.
+    #[test]
+    fn hub_search_reports_older_hits_and_counts_only_visible_ones() {
+        let store = Store::open_memory().unwrap();
+        for n in 1..=5 {
+            store.hub_append("proj:more", &format!("m{n}"), n * 10, "human", "[]", "msg", &format!("needle {n}")).unwrap();
+        }
+        let q = vec!["needle".to_string()];
+        let page = store.hub_search(Some("proj:more"), &q, false, None, 3).unwrap();
+        assert_eq!(page.hits.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["m3", "m4", "m5"], "the newest three, oldest first");
+        assert!(page.more, "m1 and m2 are older");
+        let page = store.hub_search(Some("proj:more"), &q, false, None, 5).unwrap();
+        assert_eq!(page.hits.len(), 5);
+        assert!(!page.more, "exactly the limit is not 'more'");
+        // The two oldest are archived: they are not older HITS any more.
+        store.archive_msg("proj:more", "m1", 10, "human", "needle 1", 1).unwrap();
+        store.archive_msg("proj:more", "m2", 20, "human", "needle 2", 1).unwrap();
+        let page = store.hub_search(Some("proj:more"), &q, false, None, 3).unwrap();
+        assert_eq!(page.hits.len(), 3);
+        assert!(!page.more, "archived messages are neither shown nor counted");
+        // Archiving a newer one leaves room for an older one in the page.
+        store.archive_msg("proj:more", "m5", 50, "human", "needle 5", 1).unwrap();
+        let ids: Vec<_> = store.hub_search(Some("proj:more"), &q, false, None, 3).unwrap().hits.into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["m3", "m4"]);
+    }
+
+    /// Board #432: a store that cannot answer is an ERROR. It used to end in
+    /// unwrap_or_default, so a broken database read as "no matches".
+    #[test]
+    fn hub_search_reports_a_broken_store_as_an_error() {
+        let store = Store::open_memory().unwrap();
+        store.conn.execute_batch("DROP TABLE hub_msgs").unwrap();
+        let err = store.hub_search(Some("proj:x"), &["a".to_string()], false, None, 5).unwrap_err();
+        assert!(err.contains("hub search"), "{err}");
+    }
+
+    /// Board #432: a row that cannot be read is an ERROR, not a hit that quietly is not there.
+    #[test]
+    fn hub_search_reports_an_unreadable_row_as_an_error() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:bad", "g1", 10, "human", "[]", "msg", "needle fine").unwrap();
+        // SQLite keeps text that is not a number in an INTEGER column.
+        store.conn.execute(
+            "INSERT INTO hub_msgs (id, ts, room, sender, to_json, kind, body) VALUES ('g2', 'not-a-number', 'proj:bad', 'human', '[]', 'msg', 'needle broken')",
+            [],
+        ).unwrap();
+        let err = store.hub_search(Some("proj:bad"), &["needle".to_string()], false, None, 10).unwrap_err();
+        assert!(err.contains("read hub search"), "{err}");
+    }
+
     /// Board #124: the match moved into SQL `LIKE`, and a literal `%` or `_`
     /// in the query must stay literal — unescaped they are wildcards, and
     /// "50%" would match "50x" while "r_s" matched any "rXs".
@@ -581,7 +697,7 @@ mod tests {
         store.hub_append("proj:esc", "e3", 30, "human", "[]", "msg", "an under_score name").unwrap();
         store.hub_append("proj:esc", "e4", 40, "human", "[]", "msg", "an underXscore name").unwrap();
         let hits = |term: &str| {
-            store.hub_search(Some("proj:esc"), &[term.to_string()], 50).unwrap()
+            store.hub_search(Some("proj:esc"), &[term.to_string()], false, None, 50).unwrap().hits
                 .into_iter().map(|m| m.id).collect::<Vec<_>>()
         };
         assert_eq!(hits("50%"), vec!["e1"], "a literal % is not a wildcard");

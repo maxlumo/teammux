@@ -34,7 +34,9 @@
   import { t } from '../core/i18n.svelte.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
-  import { HUMAN, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
+  import HubSearch from './HubSearch.svelte';
+  import { createHubSearch } from './hub-search.svelte.ts';
+  import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
   import { resolvePathRef } from '../core/path-links.ts';
@@ -68,7 +70,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
@@ -478,6 +480,9 @@
    * markSeen now. */
   async function selectProject(session, claim = 0) {
     if (jumpIntent && jumpIntent !== claim) { const n = jumpIntent; jumpIntent = 0; centre.consume(n); }
+    // A room-scoped answer belongs to the room it was asked in: any room change closes the
+    // search box, except the one made by the jump the box itself owns (board #432).
+    if (search.open && !(claim && claim === ownedJump)) search.close();
     headerCopyLifetime.clear();
     commandFeedbackLifetime.clear();
     selectionGeneration++;
@@ -527,7 +532,7 @@
     // A stored team is NOT judged here: a cold room has no roster yet, and
     // "no members known" is not "no members". loadAgents drops a stale team
     // once the fresh roster answers (#241, validator: a refresh wiped it).
-    filterAgent = ''; // a filter is a reading choice, scoped to its room
+    setFilter('', claim && claim === ownedJump ? { jump: claim } : 'user'); // a filter is a reading choice, scoped to its room
     replyTo = null; // a quote belongs to the room it was taken in
     // The drawer follows the project (board #23, owner: "chat的右侧边栏打开
     // 哪个的状态前端帮我记住，这样我切换不同的 project 回来原来的视图还在"):
@@ -828,7 +833,10 @@
     if (!req || !visible || !alive) return;
     untrack(() => { void openAt(req); });
   });
-  async function openAt({ alert, n }) {
+  async function openAt({ alert, n, report }) {
+    // Where this jump reports to: the bell's AlertLog entry by key, unless the
+    // asker brought its own (a search hit is not a notification, board #432).
+    const done = report ?? { viewed: () => centre.viewed(alert.key), failed: (reason) => centre.failed(alert.key, reason) };
     // The request is CLAIMED before anything awaits, and every exit —
     // including these preflight refusals — consumes the same `n` (finally).
     // After an await the claim is re-checked BEFORE a new generation is
@@ -844,9 +852,9 @@
     const claimed = () => centre.isCurrent(n) && jumpIntent === n && alive && visible && !!row && selected === row.project.session && selectionGeneration === sel;
     const current = () => claimed() && readGen === g;
     try {
-      if (alert.server && alert.server !== serverId()) { centre.failed(alert.key, t('hubJumpOtherServer')); return; }
+      if (alert.server && alert.server !== serverId()) { done.failed(t('hubJumpOtherServer')); return; }
       row = rows.find((r) => r.project.session === alert.session || roomKey(r) === alert.room) ?? null;
-      if (!row) { centre.failed(alert.key, t('hubJumpNoProject')); return; }
+      if (!row) { done.failed(t('hubJumpNoProject')); return; }
       if (selected !== row.project.session) {
         const opening = selectProject(row.project.session, n);
         sel = selectionGeneration; // our own switch's generation, taken before it awaits
@@ -858,14 +866,14 @@
       // A room-scoped reading filter that would hide the target is cleared
       // VISIBLY (the chip changes; Back puts it back). The level is a stored
       // preference and is never touched: the target is revealed instead.
-      if (filterAgent) { filterBefore = filterAgent; filterAgent = ''; filterNote = t('hubJumpFilterCleared'); }
+      if (filterAgent) { filterBefore = filterAgent; setFilter('', { jump: n }); filterNote = t('hubJumpFilterCleared'); }
       revealId = alert.id;
       if (!feed.some((m) => String(m.id) === alert.id)) {
         const res = await hubLogAround(row.project.session, alert.seq, 100).catch(() => null);
         if (!current()) return;
-        if (!res) { centre.failed(alert.key, t('hubJumpLoadFailed')); return; }
+        if (!res) { done.failed(t('hubJumpLoadFailed')); return; }
         const msgs = res.messages ?? [];
-        if (!msgs.some((m) => String(m.id) === alert.id)) { centre.failed(alert.key, t('hubJumpGone')); return; }
+        if (!msgs.some((m) => String(m.id) === alert.id)) { done.failed(t('hubJumpGone')); return; }
         feed = msgs;
         histSeq = res.oldest_seq ?? 0;
         histMore = (res.has_more ?? false) && histSeq > 0;
@@ -880,13 +888,48 @@
       await settled();
       await new Promise((r) => requestAnimationFrame(() => r(null)));
       if (!current()) return;
-      if (feedView?.showMsg(alert.id)) centre.viewed(alert.key);
-      else centre.failed(alert.key, t('hubJumpGone'));
+      if (feedView?.showMsg(alert.id)) done.viewed();
+      else done.failed(t('hubJumpGone'));
     } finally {
       if (jumpIntent === n) jumpIntent = 0;
       centre.consume(n); // one-shot: never replayed, never a newer request's
     }
   }
+  // The search box (board #432). Its lifecycle is `hub-search.svelte.ts`; this
+  // is only what it needs from the Hub: who to ask, and how to open a hit.
+  // `ownedJump` is the centre jump (its n) the box started and nothing else: it
+  // is cancelled when the box's generation goes stale, so a late `hubLogAround`
+  // answer cannot move the room, clear the filter or scroll; a bell jump has
+  // another n and is never touched.
+  let ownedJump = 0;
+  const search = createHubSearch({
+    ask: ({ terms, scope, agent, limit }) => selected
+      ? hubSearch(selected, terms, { all: true, global: scope === 'all', ...(agent ? { from: agent } : {}), limit })
+      : Promise.reject(new Error('no project')),
+    stale: () => { if (ownedJump) { const n = ownedJump; ownedJump = 0; centre.consume(n); } },
+  });
+  // A hit opens through the SAME jump the bell uses (`openAt`), reporting to the
+  // search generation that asked and to nothing else: it is not a notification,
+  // so nothing is recorded in the AlertLog and no bell state moves.
+  function jumpToHit(hit) {
+    const g = search.gen;
+    centre.requestJump(
+      { server: serverId(), room: hit.room, session: '', id: String(hit.id), seq: hit.seq },
+      { viewed: () => { if (search.isCurrent(g)) search.close(); }, failed: (reason) => search.fail(g, reason) },
+    );
+    ownedJump = centre.jump?.n ?? 0;
+  }
+  // The jump is over (landed, failed, superseded or cancelled) when the surface lets go of it.
+  $effect(() => { if (!centre.jump) ownedJump = 0; });
+  // One popover at a time: the bell's centre and the search results dismiss each other.
+  $effect(() => { if (centre.anchor && search.open) untrack(() => search.close()); });
+  // App keeps every server's Hub alive and only toggles it: a hidden Hub, or one
+  // whose server lost the focus, closes and invalidates the box at once (timers
+  // cleared, generation bumped, jump cancelled), and a destroyed Hub the same.
+  // Nothing may answer into a hidden panel or come back with the page.
+  const searchActive = $derived(visible && (scope.eligible ? scope.eligible() : true));
+  $effect(() => { if (!searchActive) untrack(() => search.dispose()); });
+  onDestroy(() => search.dispose());
   // Leaving the Hub page invalidates a pending jump: it may not land on a
   // hidden feed, mark anything viewed, or move the reader on return.
   $effect(() => {
@@ -898,7 +941,7 @@
    * messages, activity bound and cursors are replaced in one step. A failure
    * keeps the window and its control for a retry. */
   function restoreFilter() {
-    filterAgent = filterBefore; filterBefore = ''; filterNote = '';
+    setFilter(filterBefore, 'user'); filterBefore = ''; filterNote = '';
   }
   async function returnToLatest() {
     if (!windowed || !selected) { scrollFeed(true); return; }
@@ -1154,16 +1197,32 @@
 
   // Roster owns card interaction; Hub owns the resulting reading filter.
   let filterAgent = $state('');
-  /** Filtering is a ContextMenu verb, independent of the delivery recipient. */
-  function toggleFilter(name) {
-    filterAgent = filterAgent === name ? '' : name;
+  /** The ONE writer of the reading filter, and it says WHERE a change came from
+   * (board #432, review). The search box scopes its request by this filter, so
+   * a change is also a change of its question: by default it invalidates the box
+   * at once and cancels the jump the box owns, exactly like a typed word. The one
+   * exception is the filter clear that jump's own `openAt` performs (`{ jump: n }`
+   * with the n the box owns): nothing the box asked is wrong, so it only adopts
+   * the new value. Never a global "a jump is pending". */
+  function setFilter(next, source = 'user') {
+    if (filterAgent === next) return;
+    filterAgent = next;
+    if (source !== 'user' && source.jump && source.jump === ownedJump) search.adoptAgent(next);
+    else search.setAgent(next);
   }
+  /** Filtering is a ContextMenu verb, independent of the delivery recipient.
+   * The card's double-click, its menu, the search token's x and Back all end here. */
+  function toggleFilter(name) {
+    setFilter(filterAgent === name ? '' : name, 'user');
+  }
+  /** How the filter's subject is named to the reader: 'you' for the human. */
+  const filterName = (name) => (name === HUMAN ? t('hubSearchYou') : name);
   /* The mode is shown and exited only on its card (#238), so it lasts only
      while the strip draws one: a live or a stopped identity. An agent removed
      from the room takes the filter with it; otherwise the feed stayed filtered
      with no visible mode and no way out (#241, validator). */
   $effect(() => {
-    if (filterAgent && filterAgent !== HUMAN && !managedAgents.some((a) => a.name === filterAgent) && !stopped.includes(filterAgent)) filterAgent = '';
+    if (filterAgent && filterAgent !== HUMAN && !managedAgents.some((a) => a.name === filterAgent) && !stopped.includes(filterAgent)) setFilter('', 'user');
   });
   const filterItem = (name) => ({
     label: filterAgent === name ? t('hubFilterExit') : t('hubFilterItem'),
@@ -2020,7 +2079,8 @@
       backLayers.register('create', () => { if (!createOpen) return false; if (!createEl?.goBack()) createOpen = false; return true; }),
       backLayers.register('rename', () => { if (renaming) { renaming = false; return true; } return false; }),
       backLayers.register('jumpFilter', () => { if (filterBefore) { restoreFilter(); return true; } return false; }),
-      backLayers.register('filter', () => { if (filterAgent) { filterAgent = ''; return true; } return false; }),
+      backLayers.register('search', () => { if (search.open) { search.close(); return true; } return false; }),
+      backLayers.register('filter', () => { if (filterAgent) { setFilter('', 'user'); return true; } return false; }),
       backLayers.register('reply', () => { if (replyTo) { replyTo = null; return true; } return false; }),
       backLayers.register('files', () => { if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true; return false; }),
       backLayers.register('drawer', () => { if (termOpen) { closeDrawer(); return true; } return false; }),
@@ -2390,6 +2450,19 @@
         <!-- The partition toggles sit at the tool gap, not the row gap: three
              icons read as one group (board #228). -->
         <div class="head-tools">
+        <!-- Search (board #432): expands in place into a field that covers this row
+             (HubSearch, below); the results are a popover of the centre's dialect. -->
+        {#if filterAgent}
+          <!-- The reading filter's face (board #432, owner 2026-10-20: the agent filter
+               lives in the search button): the same slot, wearing the agent. -->
+          <span class="filter-face" style:--who-ink={agentHue(filterAgent)}>
+            <CommandButton variant="secondary" icon="search" label={filterName(filterAgent)} title={t('hubSearchOnly').replace('{name}', filterName(filterAgent))} expanded={search.open} disabled={!selected}
+              onclick={() => { centre.close(); search.show(filterAgent); }} />
+          </span>
+        {:else}
+          <CommandButton variant="icon" icon="search" label={t('hubSearch')} expanded={search.open} disabled={!selected}
+            onclick={() => { centre.close(); search.show(); }} />
+        {/if}
         <!-- The phone's door to the notification centre (board #322): the
              desktop's is the rail bell; the Hub tab carries the badge. -->
         {#if mobile || compact}
@@ -2423,6 +2496,7 @@
           controls={mobile || compact || !drawerShown ? undefined : drawerId}
           onclick={() => termOpen && drawerView === 'term' && !compact ? closeDrawer() : (drawerView = 'term', openDrawer())} />
         </div>
+        <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onclearagent={() => setFilter('', 'user')} />
         {#if headerCopyFeedback && headerCopyAnchor}
           <div class="header-copy-feedback pop-layer" use:feedbackPosition={{ trigger: headerCopyAnchor, bounds: headerCopyAnchor.closest('main'), keepClear: headerCopyAnchor.closest('.chat-head') }}>
             <OperationFeedback value={headerCopyFeedback} ondismiss={headerCopyFeedback.kind === 'error' ? headerCopyLifetime.clear : undefined} />
@@ -2724,6 +2798,16 @@
      `.name-line` — is ONE shared atom in app.css, worn by this head and the
      Board's. */
   .head-tools { display: flex; align-items: center; gap: var(--tool-gap); flex: none; }
+  /* The search bar (HubSearch) is an overlay on this row: it covers the row's content without taking a slot in it. */
+  .chat-head { position: relative; }
+  /* The search button wearing the reading filter: the agent's name in its hue, in the
+     same slot the icon holds. Long names ellipsize; the title group yields first. */
+  .filter-face { display: inline-flex; min-width: 0; max-width: 12ch; }
+  /* The cap is on the BUTTON itself (CommandButton's root is flex: none): it fills the face at most,
+     shrinks inside it, keeps its icon, and only the label ellipsizes. A cap on the wrapper alone, or an
+     overflow clip on it, would leave a long name overflowing into the tools after it. */
+  .filter-face :global(.command-button) { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+  .filter-face :global(.command-label) { color: var(--who-ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   /* The title yields width before any native command target does. */
   h1 { display: flex; align-items: center; min-width: 0; }
   .h1-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

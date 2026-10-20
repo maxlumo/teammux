@@ -22,7 +22,7 @@
 //
 // Single shows the current server's list alone, as before: the union is
 // built over the included set, which in Single is the one server.
-import type { Alert, AlertLog, CentreSurface, JumpRequest } from '../hub/notify-centre.svelte.ts';
+import type { Alert, AlertLog, CentreSurface, JumpReport, JumpRequest, JumpTarget } from '../hub/notify-centre.svelte.ts';
 import type { ServerId } from './refs.ts';
 
 export interface CentreSource {
@@ -61,7 +61,7 @@ export interface CentreUnion {
   toggle(trigger: HTMLElement): void;
   close(): void;
   readonly jump: JumpRequest | null;
-  requestJump(alert: Alert): void;
+  requestJump(alert: JumpTarget, report?: JumpReport): void;
   isCurrent(n: number): boolean;
   consume(n: number): void;
 }
@@ -112,7 +112,7 @@ export function createCentreUnion(sources: () => readonly CentreSource[], surfac
     toggle(trigger) { surface.toggle(trigger); },
     close() { surface.close(); },
     get jump() { return surface.jump; },
-    requestJump(alert) { surface.requestJump(alert); },
+    requestJump(alert, report) { surface.requestJump(alert, report); },
     isCurrent(n) { return surface.isCurrent(n); },
     consume(n) { surface.consume(n); },
   };

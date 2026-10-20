@@ -55,6 +55,8 @@ USAGE (agent):
   tmm wake cancel <id>                cancel one you set (the human may cancel any)
   tmm log [--since <ts>] [--limit N] [-f]   read chat; --since is exclusive, -f follows
                     [--grep <text>]   search the FULL history instead (repeatable = any-match)
+                    [--all]           …every --grep term must match (default: any)
+                    [--from <name>]   …only messages SENT by that name
                     [--global]        …across EVERY project's room, hits name their room
   tmm spawn <agent> [--brief <text>]  spawn a registry agent into this project (standalone)
                     [--join <team>]   …into a team of this project instead, live or stopped (its definition is
@@ -475,7 +477,7 @@ async fn main() {
             let session = need_project(&ctx);
             let since = flags.get("since").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             let limit = flags.get("limit").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(100);
-            // `--grep` is repeatable — a term LIST, any-match — and turns the
+            // `--grep` is repeatable — a term LIST, any-match unless `--all` — and turns the
             // read into a search over the room's FULL history (paging cursors
             // don't apply). `--global` widens it to every project's room.
             let terms: Vec<String> = repeated
@@ -489,10 +491,21 @@ async fn main() {
                     fail(EXIT_USAGE, "--grep searches history; it does not combine with -f");
                 }
                 let limit = flags.get("limit").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
-                let r = rpc(&ctx, "hub_search", json!({ "session": session, "grep": terms, "global": global, "limit": limit })).await;
+                // `--all`: every term must match (the Hub's search box does this);
+                // without it any term matches, as always.
+                let params = match log_search_params(&session, &terms, &flags, limit) {
+                    Ok(params) => params,
+                    Err(why) => fail(EXIT_USAGE, &why),
+                };
+                let r = rpc(&ctx, "hub_search", params).await;
                 print_log_with_rooms(&ctx, &r, global);
-            } else if global {
-                fail(EXIT_USAGE, "--global needs --grep: tmm log --grep \"deploy\" --global");
+                // Said on stderr, so a pipe of the hits stays clean: the list is the
+                // newest `limit`, and older matches exist (board #432).
+                if !ctx.json && r["more"].as_bool() == Some(true) {
+                    eprintln!("(older matches exist; narrow the search or raise --limit)");
+                }
+            } else if let Some(flag) = search_flag_without_grep(&flags) {
+                fail(EXIT_USAGE, &format!("--{flag} needs --grep: tmm log --grep \"deploy\" {}", search_flag_example(flag)));
             } else if flags.contains_key("f") || flags.contains_key("follow") {
                 follow_log(&ctx, &session, since, limit).await;
             } else {
@@ -1986,6 +1999,40 @@ fn fork_as_flag(flags: &std::collections::HashMap<String, Option<String>>) -> Re
     }
 }
 
+/// A flag that only narrows a SEARCH, given without `--grep`: `tmm log --from bob` would
+/// print the plain log and say nothing, the worst answer to a narrowing that was asked
+/// for (board #432, validator). `--global` already failed this way; `--all` and
+/// `--from` join it.
+fn search_flag_without_grep(flags: &std::collections::HashMap<String, Option<String>>) -> Option<&'static str> {
+    ["global", "all", "from"].into_iter().find(|f| flags.contains_key(*f))
+}
+
+/// How a narrowing flag is written in an example: `--from` takes a sender name.
+fn search_flag_example(flag: &str) -> String {
+    if flag == "from" { "--from kiro".to_string() } else { format!("--{flag}") }
+}
+
+/// `tmm log --grep … --from <name>`: the sender to narrow to (board #432). `--from` with no
+/// value, an empty one, or one that is really the next flag (`--from --all`) is a usage
+/// error: running the search for EVERYONE would answer a question nobody asked.
+fn log_from(flags: &std::collections::HashMap<String, Option<String>>) -> Result<Option<String>, String> {
+    let Some(value) = flags.get("from") else { return Ok(None) };
+    match value.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() && !name.starts_with("--") => Ok(Some(name.to_string())),
+        _ => Err("--from needs a sender name: tmm log --grep \"deploy\" --from kiro".to_string()),
+    }
+}
+
+/// The `hub_search` request for `tmm log --grep`, built from the parsed flags in ONE place so a
+/// test sees every field that goes on the wire (board #432: `from` was once parsed and never
+/// sent). `--all`: every term must match (default any); `--global`: every project's room;
+/// `--from <name>`: only that sender's messages (the Hub's agent filter).
+fn log_search_params(session: &str, terms: &[String], flags: &std::collections::HashMap<String, Option<String>>, limit: i64) -> Result<serde_json::Value, String> {
+    let mut params = json!({ "session": session, "grep": terms, "global": flags.contains_key("global"), "all": flags.contains_key("all"), "limit": limit });
+    if let Some(from) = log_from(flags)? { params["from"] = json!(from); }
+    Ok(params)
+}
+
 /// Flags known to take a value consume the next arg; boolean flags don't.
 /// The third return is every valued occurrence in order, so a flag that may be
 /// REPEATED (`--image a.png --image b.png`) does not lose all but the last —
@@ -1994,7 +2041,7 @@ fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<Str
     const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as"];
+                          "in", "at", "to", "code", "signal", "re", "as", "from"];
     let mut flags = std::collections::HashMap::new();
     let mut pos = Vec::new();
     let mut repeats: Vec<(String, String)> = Vec::new();
@@ -2854,6 +2901,55 @@ mod tests {
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
         assert_eq!(registry_def("dev", "kiro", &flags)["input_mode"], "steer", "a given mode is sent");
+    }
+
+    /// Board #432: `--from` is a VALUED flag (else its name fell out as a positional and the
+    /// search ran for everyone, exit 0, which is what the validator measured), and a narrowing
+    /// flag without `--grep` fails instead of printing the plain log.
+    #[test]
+    fn log_from_is_valued_and_a_narrowing_without_grep_is_refused() {
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let (flags, pos, repeated) = parse(&["log", "--grep", "kiwi", "--from", "bob", "--all"]);
+        assert_eq!(pos, vec!["log"], "bob is the flag's value, not a positional");
+        assert_eq!(flags.get("from").cloned().flatten().as_deref(), Some("bob"));
+        assert!(flags.contains_key("all"));
+        assert_eq!(repeated.iter().filter(|(k, _)| k == "grep").count(), 1);
+        assert_eq!(search_flag_without_grep(&flags), Some("all"), "the helper names the first narrowing flag it finds");
+        let (flags, _, _) = parse(&["log", "--from", "bob"]);
+        assert_eq!(search_flag_without_grep(&flags), Some("from"));
+        let (flags, _, _) = parse(&["log", "--global"]);
+        assert_eq!(search_flag_without_grep(&flags), Some("global"));
+        let (flags, _, _) = parse(&["log", "--since", "5", "--limit", "9"]);
+        assert_eq!(search_flag_without_grep(&flags), None, "reading flags are not narrowing flags");
+    }
+
+    /// Board #432 (validator V17, reviewer P2): `--from` reaches the request, and a `--from`
+    /// that names nobody is refused instead of searching everyone.
+    #[test]
+    fn log_from_goes_on_the_request_and_an_empty_one_is_refused() {
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let terms = vec!["kiwi".to_string(), "fig".to_string()];
+        let (flags, _, _) = parse(&["log", "--grep", "kiwi", "--grep", "fig", "--from", "bob", "--all", "--global"]);
+        assert_eq!(
+            log_search_params("proj", &terms, &flags, 20),
+            Ok(json!({ "session": "proj", "grep": ["kiwi", "fig"], "global": true, "all": true, "limit": 20, "from": "bob" })),
+        );
+        let (flags, _, _) = parse(&["log", "--grep", "kiwi"]);
+        let params = log_search_params("proj", &terms, &flags, 50).unwrap();
+        assert!(params.get("from").is_none(), "no --from: the key is absent");
+        assert_eq!((params["all"].as_bool(), params["global"].as_bool()), (Some(false), Some(false)));
+        for (label, args) in [
+            ("no value", vec!["log", "--grep", "kiwi", "--from"]),
+            ("an empty value", vec!["log", "--grep", "kiwi", "--from", ""]),
+            ("blanks", vec!["log", "--grep", "kiwi", "--from", "  "]),
+            ("the next flag as the value", vec!["log", "--grep", "kiwi", "--from", "--all"]),
+        ] {
+            let (flags, _, _) = parse(&args);
+            let e = log_search_params("proj", &terms, &flags, 50).unwrap_err();
+            assert!(e.contains("--from needs a sender name") && e.contains("--from kiro"), "{label}: {e}");
+        }
+        assert_eq!(search_flag_example("from"), "--from kiro", "the example names a sender");
+        assert_eq!(search_flag_example("all"), "--all");
     }
 
     /// Board #382: `--join` is a VALUED flag (else its team would fall out as
