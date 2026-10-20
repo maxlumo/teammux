@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown } from './markdown.ts';
+import { pathRef } from './path-links.ts';
 
 test('a single tilde is text, not strikethrough', () => {
   // The bug: a weather reply full of ranges (`26~32℃`) came back with several
@@ -181,4 +182,71 @@ test('a bold code span or formula followed by CJK text renders bold (board 311)'
   }
   // Code content is byte-identical, asterisks inside it included.
   assert.match(renderMarkdown('**`a**。`**后'), /<strong><code>a\*\*。<\/code><\/strong>后/);
+});
+
+// Board #431 (owner 2026-10-20): a bare file path in a message is the same
+// door a `[text](path)` link is. The grammar is core/path-grammar.ts; these are
+// the RENDERER's context rules around it.
+test('a bare path in prose renders the same anchor a markdown path link does (#431)', () => {
+  const html = renderMarkdown('see src/lib/hub/Feed.svelte:118 and /tmp/val422/h2/.');
+  assert.ok(html.includes('<a href="src/lib/hub/Feed.svelte:118">src/lib/hub/Feed.svelte:118</a>'), html);
+  assert.ok(html.includes('<a href="/tmp/val422/h2/">/tmp/val422/h2/</a>.'), `the full stop is prose: ${html}`);
+  assert.ok(renderMarkdown('见src/a.rs第3行').includes('见<a href="src/a.rs">src/a.rs</a>第3行'), 'CJK on both sides');
+  assert.ok(renderMarkdown('**src/a.rs**').includes('<strong><a href="src/a.rs">src/a.rs</a></strong>'), 'inside emphasis');
+});
+
+test('a code span is a path link only when its whole content is a path (#431)', () => {
+  const html = renderMarkdown('run `src/a.rs` and `cargo test src/a.rs`');
+  assert.ok(html.includes('<a href="src/a.rs"><code>src/a.rs</code></a>'), html);
+  assert.ok(html.includes('<code>cargo test src/a.rs</code>') && !html.includes('cargo test <a'), `a command stays plain code: ${html}`);
+  assert.ok(!renderMarkdown('` src/a.rs `').includes('<a '), 'a padded span is not a path as written');
+  assert.ok(!renderMarkdown('``src/a.rs``').includes('<a '), 'a double-backtick span is marked\'s own');
+});
+
+test('a path inside a link, a reference link or an image never becomes a second anchor (#431 review P1-B)', () => {
+  for (const [src, outer] of [
+    ['[`src/a.rs`](https://example.test)', 'https://example.test'],
+    ['[`src/a.rs`][ref]\n\n[ref]: https://example.test', 'https://example.test'],
+    ['[src/a.rs and /tmp/x/y](https://example.test)', 'https://example.test'],
+    ['[see src/a.rs](/x/y.md)', '/x/y.md'],
+  ] as const) {
+    const html = renderMarkdown(src);
+    assert.equal(html.match(/<a /gu)?.length, 1, `one anchor: ${html}`);
+    assert.ok(html.includes(`<a href="${outer}">`), `the outer href is kept: ${html}`);
+  }
+  const img = renderMarkdown('![`src/a.rs`](image.png)');
+  assert.ok(!img.includes('<a '), `an image alt gets no path anchor: ${img}`);
+});
+
+test('fences stay code, a markdown fence is a document, and a URL wins over a path in it (#431)', () => {
+  assert.ok(!renderMarkdown('```\nsrc/a.rs\n```').includes('<a '), 'a code fence is never linked');
+  assert.ok(renderMarkdown('```markdown\nsee src/a.rs\n```').includes('<a href="src/a.rs">'), 'a markdown fence renders as a document, as today');
+  const html = renderMarkdown('https://host/?p=src/a.rs and https://x/a.rs');
+  assert.equal(html.match(/<a /gu)?.length, 2, html);
+  assert.ok(!html.includes('href="src/a.rs"'), `no path inside a URL: ${html}`);
+  assert.ok(renderMarkdown('a & b /tmp/x/y < c').includes('a &amp; b <a href="/tmp/x/y">/tmp/x/y</a> &lt; c'), 'the & and < escape is untouched');
+});
+
+// Validator V2/V2b/V5 on #431: the RENDERERS' own choices, not only the
+// functions they call. A renderer switched to the URL kind of encodeHref, or
+// one that ignored the left neighbour, passed every test above.
+test('the renderers encode a bare path as a PATH: a literal % clicks back to itself (#431, validator V2/V2b)', () => {
+  for (const src of ['/tmp/a%20b.md', '`/tmp/a%20b.md`']) {
+    const href = /<a href="([^"]+)">/u.exec(renderMarkdown(src))?.[1];
+    assert.equal(href, '/tmp/a%2520b.md', `${src}: the % is kept encoded`);
+    assert.equal(pathRef(href), '/tmp/a%20b.md', `${src}: and pathRef gives back the literal name`);
+  }
+});
+
+test('the prose renderer reads the left neighbour: no path starts after a colon or an @ (#431, validator V5)', () => {
+  for (const src of ['host:/a/b', 'x@h:/a/b.md', 'see host:/tmp/x/y', 'user@host:/x/y']) {
+    assert.ok(!renderMarkdown(src).includes('<a '), `${src}: ${renderMarkdown(src)}`);
+  }
+  // Where a TOKEN ends right before the path, the tokenizer must read that
+  // token's last character itself; findPaths cannot see across the boundary.
+  // An escaped colon and a closing emphasis are such boundaries.
+  for (const src of ['x\\:/tmp/a/b', '**b**/tmp/a/b']) {
+    assert.ok(!renderMarkdown(src).includes('href="/tmp/a/b"'), `${src}: ${renderMarkdown(src)}`);
+  }
+  assert.ok(renderMarkdown('see /tmp/x/y').includes('<a href="/tmp/x/y">'), 'the same path after a space is a link');
 });

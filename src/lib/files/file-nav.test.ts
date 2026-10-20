@@ -139,3 +139,30 @@ test('Forward retraces a Back, and a new navigation clears it (board #187)', () 
   assert.equal(nav.canGoBack(), false);
   assert.equal(nav.canGoForward(), false);
 });
+
+test('a directory link is a real Back step that returns to its preview, in order (#431 review P1)', () => {
+  const nav = createFileNavigation<File>();
+  const at = (path: string): FileLocation<File> => ({ cwd: '/a', entries: [], view: 'preview', currentFile: { path }, fromGit: false, scroll: 0, frameScroll: 0 });
+  nav.rememberLink(at('/a/A.md'));
+  assert.equal(nav.canGoBack(), true, 'even a link to the directory already listed is a step');
+  nav.rememberDirectory('/x', '/x/sub');
+  nav.rememberLink(at('/x/sub/B.md'));
+  const steps = [nav.popDirectory('/y'), nav.popDirectory('/x/sub'), nav.popDirectory('/x'), nav.popDirectory('/a')];
+  assert.deepEqual(steps.map((s) => (typeof s === 'string' ? s : s?.location.currentFile?.path)),
+    ['/x/sub/B.md', '/x', '/a/A.md', undefined], 'preview -> dir -> dir -> preview -> dir unwinds in order, each once');
+  assert.equal(nav.canGoForward(), true, 'the directory step left a Forward');
+  assert.equal(nav.forwardDirectory('/a'), '/x/sub', 'and only the directory: a preview is not re-entered by Forward');
+  assert.equal(nav.forwardDirectory('/x/sub'), undefined);
+});
+
+test('a link entry keeps its preview\'s linked-file history through browsing in the listing (#431 review P1 residual)', () => {
+  const nav = createFileNavigation<File>();
+  const at = (path: string): FileLocation<File> => ({ cwd: '/a', entries: [], view: 'preview', currentFile: { path }, fromGit: false, scroll: 0, frameScroll: 0 });
+  nav.rememberFile(at('/a/A.md')); // B was opened as a link from A
+  nav.rememberLink(at('/a/B.md')); // B links a directory
+  nav.resetFiles(); // browsing in that directory: a plain file open or a subdirectory clears the file history
+  const step = nav.popDirectory('/x');
+  assert.equal(typeof step === 'string' ? step : step?.location.currentFile?.path, '/a/B.md');
+  const next = nav.backFromPreview({ cwd: '/a', currentFile: { path: '/a/B.md' }, fromGit: false });
+  assert.equal(next.kind === 'restore' ? next.location.currentFile?.path : next.kind, '/a/A.md', 'B\'s Back reaches A again');
+});

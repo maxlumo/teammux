@@ -584,3 +584,13 @@ test('a held bubble differs from the one in flow by paint only: no rule under .h
   assert.match(source, /\{#if parts\.images\.length && !folded\}\s*<!--[\s\S]*?-->\s*<div class="shots">/u, 'the strip is only there unfolded');
   assert.match(source, /\{#if folded && parts\.images\.length\}[\s\S]*?<div class="m-imgs">\[\{t\('hubImage'\)\}\]\{parts\.images\.length > 1 \? ` ×\$\{parts\.images\.length\}` : ''\}<\/div>/u, 'the folded marker names the picture and how many');
 });
+
+test('a bare path reaches the feed only through renderMarkdown: no second path mechanism (#431)', () => {
+  // The grammar is core/path-grammar.ts and the anchor is markedSafeUrl.ts's,
+  // the SAME <a href> a [text](path) link produces. The feed only renders and
+  // routes that anchor (handlePathLinkClick); a path regex of its own here
+  // would be a second definition of what a path is.
+  assert.doesNotMatch(source, /path-grammar|findPaths|matchPath|firstPathAt/u, 'the feed does not scan for paths itself');
+  assert.match(source, /import \{ renderMarkdown \} from '\.\.\/core\/markdown\.ts';/u);
+  assert.match(source, /handlePathLinkClick\(e, routePathRef\)/u, 'and routes every path anchor through the one decoder');
+});

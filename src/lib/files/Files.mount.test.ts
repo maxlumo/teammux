@@ -1312,3 +1312,217 @@ test('a download on a released server s record sends nothing (board #335 ②b-2-
     assert.equal((app.window as any).__serverState.files.downloads.rows.length, 0, 'and no row');
   } finally { await app.close(); }
 });
+
+// Board #431: a bare directory path in a document or a chat bubble is a link
+// now, and a DIRECTORY link lists the directory. It used to land on the file
+// info card, because a link always opened as a file. Its way back is a REAL
+// history entry (#431 review P1): every sequence below unwinds in order.
+const tree: Record<string, { name: string; path: string; type: string; size: number }[]> = {
+  '/fixture': entries,
+  '/fixture/sub': [
+    { name: 'deep', path: '/fixture/sub/deep', type: 'dir', size: 0 },
+    { name: 'inside.md', path: '/fixture/sub/inside.md', type: 'file', size: 10 },
+  ],
+  '/fixture/sub/deep': [{ name: 'bottom.md', path: '/fixture/sub/deep/bottom.md', type: 'file', size: 10 }],
+  '/fixture/other': [{ name: 'other.md', path: '/fixture/other/other.md', type: 'file', size: 10 }],
+};
+const docs: Record<string, string> = {
+  'AGENTS.md': '# Rules\n\nLogs in /fixture/sub/ and [Next](next.md), here /fixture/',
+  'next.md': '# Next\n\nsee /fixture/sub/',
+  'inside.md': '# Inside\n\nhere /fixture/sub/ and there /fixture/other/',
+};
+const dirOf = (path: string) => path.replace(/\/+$/u, '');
+function dirRpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
+  return rpc({
+    fsList: async (path: string) => ({ path, entries: tree[dirOf(path)] ?? [] }),
+    fsStat: async (path: string) => (tree[dirOf(path)]
+      ? { path, type: 'dir', is_text: false, writable: true, readable: true, size: 0, mime_hint: '' }
+      : { path, type: 'file', is_text: true, writable: true, readable: true, size: 100, mime_hint: 'text/markdown' }),
+    fsRead: async (path: string) => ({ content: docs[path.slice(path.lastIndexOf('/') + 1)] ?? '# Doc' }),
+    ...extra,
+  });
+}
+function link(app: App, href: string) {
+  const a = [...app.document.querySelectorAll<HTMLAnchorElement>('.md-render a')].find((el) => el.getAttribute('href') === href);
+  assert.ok(a, `a link to ${href}`);
+  a.dispatchEvent(new app.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+}
+/** Where the page is: the open preview's name, or the listing's entries. */
+function at(app: App): string {
+  const name = app.document.querySelector('.preview-name')?.textContent;
+  if (name) return `preview ${name}`;
+  return `list ${[...app.document.querySelectorAll('.file-list .file-name')].map((el) => el.textContent?.trim()).join(',')}`;
+}
+function row(app: App, name: string) {
+  const el = [...app.document.querySelectorAll<HTMLButtonElement>('.file-list .file-main')]
+    .find((b) => b.querySelector('.file-name')?.textContent?.trim() === name);
+  assert.ok(el, `row ${name} in ${at(app)}`); el.click();
+}
+async function back(app: App) { button(app, 'Back').click(); await settle(app); }
+const ROOT = 'list AGENTS.md,next.md';
+const SUB = 'list deep,inside.md';
+
+test('a directory link lists the directory, and Back returns to the preview that held the link (#431)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    assert.equal(at(app), SUB, 'no info card: the directory is listed');
+    await back(app); assert.equal(at(app), 'preview AGENTS.md', 'Back returns to the document that held the link');
+    await back(app); assert.equal(at(app), ROOT, 'and then to the list it was opened from');
+  } finally { await app.close(); }
+});
+
+test('a link to the directory already listed is a step of its own, on an empty or a full history (#431 review P1)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    // Empty history: the link is the only step.
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/'); await settle(app);
+    assert.equal(at(app), ROOT);
+    assert.equal(button(app, 'Back').disabled, false, 'Back is offered: the link pushed a step');
+    await back(app); assert.equal(at(app), 'preview AGENTS.md');
+    await back(app); assert.equal(at(app), ROOT);
+    // A full history: AGENTS.md -> /fixture/sub (a link), inside.md, then a
+    // link to /fixture/sub, the directory already listed. Nothing that link
+    // did not push is popped: the earlier link's preview is still reached.
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    row(app, 'inside.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview inside.md');
+    await back(app); assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview AGENTS.md');
+    await back(app); assert.equal(at(app), ROOT);
+  } finally { await app.close(); }
+});
+
+test('preview -> linked preview -> directory unwinds through both previews (#431 review P1)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, 'next.md'); await settle(app);
+    assert.equal(at(app), 'preview next.md');
+    link(app, '/fixture/sub/'); await settle(app);
+    assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview next.md');
+    await back(app); assert.equal(at(app), 'preview AGENTS.md', 'the linked-file history survived the directory link');
+    await back(app); assert.equal(at(app), ROOT);
+  } finally { await app.close(); }
+});
+
+test('preview -> directory -> preview -> directory unwinds each step once (#431 review P1)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    row(app, 'inside.md'); await settle(app);
+    assert.equal(at(app), 'preview inside.md');
+    link(app, '/fixture/other/'); await settle(app);
+    assert.equal(at(app), 'list other.md');
+    await back(app); assert.equal(at(app), 'preview inside.md');
+    await back(app); assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview AGENTS.md', 'the first link\u2019s preview is still reached');
+    await back(app); assert.equal(at(app), ROOT);
+  } finally { await app.close(); }
+});
+
+test('a link, then a directory by hand, then Back twice reaches the preview once (#431 review P1)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    row(app, 'deep'); await settle(app);
+    assert.equal(at(app), 'list bottom.md');
+    await back(app); assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview AGENTS.md');
+    await back(app); assert.equal(at(app), ROOT, 'not the preview a second time');
+  } finally { await app.close(); }
+});
+
+test('a second link while the first listing is open is an ordinary directory step (#431 review P1)', async context => {
+  let update!: (next: Record<string, unknown>) => void;
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture', register: (fn: typeof update) => { update = fn; } },
+    modules: [dirRpc()],
+  });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    update({ navRequest: { file: '/fixture/other/', n: 1 } }); await settle(app);
+    assert.equal(at(app), 'list other.md');
+    await back(app); assert.equal(at(app), SUB);
+    await back(app); assert.equal(at(app), 'preview AGENTS.md');
+  } finally { await app.close(); }
+});
+
+test('a directory answer that arrives after the target changed is dropped (#431)', async context => {
+  const late = deferred<object>();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [dirRpc({ fsStat: (path: string) => (path.startsWith('/fixture/sub')
+      ? late.promise
+      : Promise.resolve({ path, type: 'file', is_text: true, writable: true, readable: true, size: 100, mime_hint: 'text/markdown' })) })],
+  });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await app.flush();
+    link(app, 'next.md'); await settle(app);
+    assert.equal(at(app), 'preview next.md');
+    late.resolve({ path: '/fixture/sub/', type: 'dir', is_text: false, writable: true, readable: true, size: 0, mime_hint: '' });
+    await settle(app);
+    assert.equal(at(app), 'preview next.md', 'the newer target keeps the page');
+  } finally { late.resolve({}); await app.close(); }
+});
+
+test('a listing that answers after Back does not cover the preview Back returned to (#431 review P1)', async context => {
+  const late = deferred<object>();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [dirRpc({ fsList: (path: string) => (dirOf(path) === '/fixture/sub' ? late.promise : Promise.resolve({ path, entries: tree[dirOf(path)] ?? [] })) })],
+  });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    link(app, '/fixture/sub/'); await settle(app);
+    await back(app);
+    assert.equal(at(app), 'preview AGENTS.md');
+    late.resolve({ path: '/fixture/sub/', entries: tree['/fixture/sub'] }); await settle(app);
+    assert.equal(at(app), 'preview AGENTS.md', 'the late listing is dropped');
+  } finally { late.resolve({ path: '/fixture/sub/', entries: [] }); await app.close(); }
+});
+
+// #431 review P1 residual: browsing INSIDE the linked directory (a plain file
+// open, a subdirectory) must not cut the preview the link came from off from
+// its own origin. The link entry carries that preview's linked-file history.
+for (const browse of ['a file', 'a subdirectory'] as const) {
+  test(`preview -> linked preview -> directory -> ${browse} -> Back still reaches the first preview (#431 review P1)`, async context => {
+    const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+    try {
+      await settle(app);
+      row(app, 'AGENTS.md'); await settle(app);
+      link(app, 'next.md'); await settle(app);
+      link(app, '/fixture/sub/'); await settle(app);
+      assert.equal(at(app), SUB);
+      if (browse === 'a file') {
+        row(app, 'inside.md'); await settle(app);
+        assert.equal(at(app), 'preview inside.md');
+      } else {
+        row(app, 'deep'); await settle(app);
+        assert.equal(at(app), 'list bottom.md');
+      }
+      await back(app); assert.equal(at(app), SUB, `${browse}: Back returns to the linked listing`);
+      await back(app); assert.equal(at(app), 'preview next.md');
+      await back(app); assert.equal(at(app), 'preview AGENTS.md', `${browse}: the linked preview still reaches its origin`);
+      await back(app); assert.equal(at(app), ROOT, 'and only then the original list');
+    } finally { await app.close(); }
+  });
+}

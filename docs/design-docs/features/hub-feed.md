@@ -454,6 +454,60 @@ Back handler delegates into the Files drawer before closing it. See
 [file-handling.md](file-handling.md#file-references-stay-in-files-106-2026-09-09)
 for preview/iframe routing and the event-order evidence.
 
+**A bare path is the same door (board #431, 2026-10-20).** The owner asked
+for better recognition of the file paths in chat ("对聊天会话里出现的文件路径
+链接内容做更好的识别 … 现在的文件路径识别还不完善"). Agents write paths as
+plain text far more often than as links: `src/lib/hub/Feed.svelte:118`,
+`/tmp/val422/h2/`, `~/.config/tmux-mobile/config.toml`. `core/path-grammar.ts`
+defines what a path is, and `core/markedSafeUrl.ts` renders one as the SAME
+`<a href="path">` a markdown path link produces. Everything above (the
+decoder, `:line`, the project-relative resolution, the drawer/tab routing and
+the click priority) is unchanged. There is one mechanism, so the feed scans
+for nothing itself (pinned in `Feed.source.test.ts`).
+- **The grammar** has four forms, each with an optional `:line[:col]`:
+  absolute with at least two slashes (`/compact` stays a slash command), `~/…`,
+  `./…` / `../…`, and workspace-relative (at least one slash, a file-like last
+  segment, a first segment that is not a domain). Segments are ASCII; a path
+  stops at a CJK or fullwidth character and never starts after a letter,
+  digit, `/`, `.`, `:` or `@`. Dates, fractions, `and/or`, `github.com/a/b.js`
+  and URL queries are not paths. The rows of `path-grammar.cases.json` are the
+  contract, run by the TS test and by #432's Rust twin.
+- **Where it applies:** prose, and an inline code span whose WHOLE content is
+  one path (`cargo test src/a.rs` stays plain code, so a command stays a
+  command to copy). Fenced blocks are never linked, and neither is anything in
+  a link's or an image's text: the decision is made at the token stage while
+  marked still knows it is inside `[…](…)`, `[…][ref]` or `![…](…)`, so there
+  is never a nested anchor (#431 review P1-B). At a URL the URL wins: the
+  path tokenizer refuses at a scheme, and the URL tokenizer takes the whole
+  URL.
+- **The href** is encoded as a PATH, not a URL: a `%` in a file name stays a
+  literal byte (`encodeHref(raw, 'path')`, no "undo double encoding"), so the
+  click opens exactly the path that matched (#431 review P1-A). A trailing
+  full stop is prose, but `..` and a lone `.` segment are never trimmed into
+  another directory.
+- **Nothing is checked at render time:** the link is a claim, Files is the
+  truth. A missing path keeps the friendly "file missing" line (#99).
+- **A directory link lists the directory** (Files, same issue). A link always
+  opened as a FILE, so a directory landed on the file info card. Now
+  `openEntry`'s linked branch sees the stat's `dir` type and lists it. From a
+  preview, the link pushes a REAL directory-history entry that IS that
+  preview (`fileNav.rememberLink`), even into the directory already listed.
+  The entry also carries that preview's linked-file history, and popping it
+  restores that history, so a file or a subdirectory opened in the linked
+  listing cannot cut the preview off from where it came from (#431 review P1
+  residual). So the
+  toolbar Back, the shared/Android Back and the swipe all go through `popDir`,
+  return to the preview, and continue to wherever that preview came from.
+  From a listing, a link is an ordinary directory step. A depth mark standing
+  in for an entry lost the chain (#431 review P1); `Files.mount.test.ts` pins
+  the sequences: a same-directory link on an empty and a full history,
+  preview -> linked preview -> directory, preview -> directory -> preview ->
+  directory, a link then a directory by hand, a second link while listing,
+  preview -> linked preview -> directory -> a file or a subdirectory -> Back,
+  a late stat, and a late listing after Back.
+- The same anchor appears in every markdown renderer (Files' markdown
+  preview, skill previews), because they share `renderMarkdown`.
+
 ### A `#<id>` in a bubble is a door to that issue (board #340, 2026-10-15)
 
 A `#<id>` a person or an agent writes in a message renders as a link

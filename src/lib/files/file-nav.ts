@@ -19,6 +19,12 @@ interface BackContext<F> {
   fromGit: boolean;
 }
 
+/** One Back step of the directory history: the directory the list was in,
+ * or (board #431) the preview a directory LINK was followed from, together
+ * with that preview's own linked-file history, which browsing the linked
+ * directory would otherwise clear (#431 review P1 residual). */
+export type DirectoryStep<L> = string | { location: L; files: L[] };
+
 export type FileBackStep<L> =
   | { kind: 'restore'; location: L }
   | { kind: 'preview' }
@@ -34,7 +40,7 @@ export function directoryBackFloor(cwd: string, jumped: boolean): string {
 /** Non-reactive history/request state, one instance per Files component.
  * The host owns RPCs, confirmation, animation and applying DOM scroll offsets. */
 export function createFileNavigation<F extends FileReference = FileReference, E = unknown>() {
-  let dirHist: string[] = [];
+  let dirHist: DirectoryStep<FileLocation<F, E>>[] = [];
   // The browser model (board #187): Back pushes where you WERE here; Forward
   // pops it; any fresh navigation throws it away.
   let dirFwd: string[] = [];
@@ -52,11 +58,24 @@ export function createFileNavigation<F extends FileReference = FileReference, E 
     rememberDirectory(cwd: string, path: string): void {
       if (cwd && path !== cwd) { dirHist.push(cwd); dirFwd = []; }
     },
-    /** Back: the previous directory, or undefined at the start. `from` (where
-     * the user is now) becomes the Forward step. */
-    popDirectory(from = ''): string | undefined {
+    /** A directory link followed from a preview (board #431) is a Back step
+     * of its own, even into the directory already listed: Back returns to
+     * that preview. It is a REAL entry, so a chain of preview -> directory ->
+     * preview -> directory unwinds in order, and nothing is popped that the
+     * link did not push (#431 review P1). It holds the preview's linked-file
+     * history too, so opening a file or a directory in the linked listing
+     * cannot cut that preview off from where it came from. */
+    rememberLink(location: FileLocation<F, E>): void { dirHist.push({ location, files: [...fileHist] }); dirFwd = []; },
+    /** Back: the previous directory or link origin, or undefined at the
+     * start. `from` (where the user is now) becomes the Forward step. */
+    popDirectory(from = ''): DirectoryStep<FileLocation<F, E>> | undefined {
       const prev = dirHist.pop();
-      if (prev != null && from) dirFwd.push(from);
+      // Forward re-enters a DIRECTORY; returning to a link's preview leaves
+      // no Forward step, because the preview is not a directory to re-enter.
+      if (typeof prev === 'string' && from) dirFwd.push(from);
+      // Back to a link's preview resumes that preview's own Back chain,
+      // whatever was browsed in the directory in between.
+      if (prev != null && typeof prev !== 'string') fileHist = [...prev.files];
       return prev;
     },
     /** Forward: undoes the last Back; `from` becomes a Back step again. */

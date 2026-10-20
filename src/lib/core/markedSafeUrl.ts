@@ -13,18 +13,29 @@
 // makes text inert; an attribute has its own delimiter, and marked v17 does not
 // sanitize schemes \u2014 `[x](javascript:\u2026)` used to reach the DOM as written.
 //
+// It also turns a bare FILE PATH (board #431, grammar in core/path-grammar.ts)
+// into the same `<a href="path">` a `[text](path)` link produces, in prose and
+// in an inline code span that is one path, never inside a link.
+//
 // `marked` is a singleton, so importing this module once registers it for every
 // renderer (Files preview, Team chat, Chat view).
 import { marked } from 'marked';
+import { STOP, firstPathAt, matchPath } from './path-grammar.ts';
 
-// Fullwidth forms, CJK punctuation, CJK/Kana/Hangul ideographs.
-const STOP = /[\u2E80-\u9FFF\u3000-\u303F\u3040-\u30FF\uAC00-\uD7AF\uFF00-\uFFEF]/;
-
-/** marked's own `cleanUrl`: percent-encode what encodeURI encodes (`"`, `'`,
- * `<`, `>`, space\u2026) and undo double-encoding of `%`. `null` when the URL is not
- * even encodable (a lone surrogate). */
-function encodeHref(href: string): string | null {
-  try { return encodeURI(href).replace(/%25/g, '%'); } catch { return null; }
+/** The ONE href encoder, for two kinds of input (#431 review P1-A).
+ * - `'url'`: marked's own `cleanUrl`. It percent-encodes what encodeURI
+ *   encodes (`"`, `'`, `<`, `>`, space\u2026) and undoes double-encoding of `%`,
+ *   because a URL may arrive already encoded.
+ * - `'path'`: a bare filesystem path is NOT an encoded URL. Its `%` is a
+ *   literal byte (`/tmp/a%20b.md` is a file with `%20` in its name), so it is
+ *   encodeURI with no undo, and `pathRef`'s one decodeURIComponent on click
+ *   gives back exactly the matched path.
+ * `null` when the input is not even encodable (a lone surrogate). */
+export function encodeHref(href: string, kind: 'url' | 'path' = 'url'): string | null {
+  try {
+    const encoded = encodeURI(href);
+    return kind === 'path' ? encoded : encoded.replace(/%25/g, '%');
+  } catch { return null; }
 }
 
 /** Is this target something a reader can follow without running code?
@@ -90,6 +101,64 @@ marked.use({
       // exactly as marked's own autolink does. An unencodable URL is text.
       renderer(token: any) {
         const href = encodeHref(token.href);
+        return href === null ? token.text : `<a href="${href}">${token.text}</a>`;
+      },
+    },
+    // A bare file path (board #431, core/path-grammar.ts) becomes the SAME
+    // `<a href="path">` a `[text](path)` link produces, so path-links.ts, the
+    // Files routing, `:line` handling and the click priority stay one
+    // mechanism. A URL is never re-read as a path, and that does NOT rest on
+    // the registration order (marked tries a later-registered extension
+    // first, #431 review P2). At a URL's start the path tokenizer refuses,
+    // because a scheme run (`https`) holds no slash before its `:`. The URL
+    // tokenizer then consumes the whole URL, query included; the URL rows of
+    // markdown.test.ts pin it. Two token-stage decisions, both refused
+    // while marked lexes a link's or an image's text (`lexer.state.inLink`),
+    // so a path inside `[...](url)`, `[...][ref]` or `![...](img)` never
+    // becomes a second, nested anchor (#431 review P1-B).
+    {
+      // An inline code span whose WHOLE content, as written, is one path.
+      // A span that only contains a path (`cargo test src/a.rs`) is left to
+      // marked's own codespan, so a command stays a command to copy.
+      name: 'pathCode',
+      level: 'inline',
+      start(src: string) {
+        const i = src.indexOf('`');
+        return i < 0 ? undefined : i;
+      },
+      tokenizer(this: any, src: string) {
+        if (this.lexer.state.inLink) return;
+        const m = /^`([^`\n]+)`(?!`)/.exec(src);
+        if (!m) return;
+        const hit = matchPath(m[1]!, '');
+        if (!hit || hit.raw !== m[1]) return;
+        return { type: 'pathCode', raw: m[0], text: hit.raw };
+      },
+      renderer(token: any) {
+        const href = encodeHref(token.text, 'path');
+        return href === null ? `<code>${token.text}</code>` : `<a href="${href}"><code>${token.text}</code></a>`;
+      },
+    },
+    {
+      // A path in prose. The character before it comes from the token just
+      // lexed, since marked hands the tokenizer only what is left.
+      name: 'pathRef',
+      level: 'inline',
+      start(src: string) {
+        const i = firstPathAt(src);
+        return i < 0 ? undefined : i;
+      },
+      tokenizer(this: any, src: string, tokens: any[]) {
+        if (this.lexer.state.inLink) return;
+        const prev = String(tokens.at(-1)?.raw ?? '').slice(-1);
+        const hit = matchPath(src, prev);
+        if (!hit) return;
+        return { type: 'pathRef', raw: hit.raw, text: hit.raw };
+      },
+      // The text is a substring of the (already escaped) source: a path holds
+      // no `&` or `<`, so it goes through unchanged.
+      renderer(token: any) {
+        const href = encodeHref(token.text, 'path');
         return href === null ? token.text : `<a href="${href}">${token.text}</a>`;
       },
     },

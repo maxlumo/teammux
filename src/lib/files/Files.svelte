@@ -737,6 +737,9 @@
     const prev = fileNav.popDirectory(cwd);
     navTick++;
     if (prev == null) return false;
+    // A directory link's step (board #431): back to the preview it was
+    // followed from, with its reading position.
+    if (typeof prev !== 'string') { restoreFileLocation(prev.location); return true; }
     pendingSlide = 'back';
     loadDir(prev);
     return true;
@@ -1070,6 +1073,33 @@
       const stat = await fsStat(entry.path);
       if (!fileNav.isCurrentFile(my)) return;
       const path = stat.path || entry.path; // server expands ~ without resolving symlinks
+      if (linked && stat.type === 'dir') {
+        // A DIRECTORY link lists the directory (board #431): through the
+        // file path it landed on the file info card. It is a real navigation
+        // with a real history entry (#431 review P1). From a preview, the
+        // entry IS that preview (fileNav.rememberLink), so Back returns to it
+        // with its reading position, even for a link to the directory already
+        // listed. The entry also holds that preview's linked-file history,
+        // so its own Back still reaches its origin after any browsing in the
+        // listing. From a listing it is an ordinary directory step.
+        previewLoading = false;
+        pendingViewSlide = '';
+        if (previous && previous.view !== 'list') {
+          navPush();
+          fileNav.rememberLink(previous);
+          navTick++;
+          currentFile = null;
+          view = 'list';
+          pendingSlide = 'fwd';
+          loadDir(path);
+        } else if (path !== cwd) {
+          navPush();
+          navTo(path, 'fwd');
+        } else {
+          loadDir(path, 'refresh');
+        }
+        return;
+      }
       if (linked) {
         const parent = path.slice(0, path.lastIndexOf('/')) || '/';
         // Listing and preview used to race: a late navigate-list response
