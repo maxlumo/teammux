@@ -165,6 +165,30 @@ fn unquote_env(s: &str) -> Option<(String, String)> {
 /// service — `KillMode=` is one line that says the same thing to systemd.
 pub const KILL_MODE: &str = "process";
 
+/// `OOMPolicy=continue` (board #438). `KillMode=process` leaves every tmux server the
+/// gateway forked, and every agent pane's processes, in the gateway unit's cgroup.
+/// systemd's default `OOMPolicy=stop` then reads ANY OOM kill inside that cgroup as the
+/// unit's own failure ("Failed with result 'oom-kill'") and STOPS the unit. Measured
+/// 2026-10-20: a 49 GB python render in a pane was OOM-killed twice (12:00, 12:53) by a
+/// host-wide memory exhaustion, and each time systemd stopped the 22 MB gateway and
+/// restarted it 8 s later; the tmux servers and every agent survived, but clients
+/// dropped and a board post failed. `continue` leaves the kill to the kernel: the
+/// victim dies, the gateway keeps serving. It is the other half of #350's design (a
+/// child in the cgroup must not take the service with it), on the same layer.
+/// launchd has no counterpart: nothing there supervises memory per job.
+pub const OOM_POLICY: &str = "continue";
+
+/// What the manager says its `OOMPolicy` is for a unit (board #438).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OomRead {
+    /// The effective value.
+    Policy(String),
+    /// There is no such property on this manager, on positive evidence (the reason).
+    Unsupported(String),
+    /// The manager did not say (the reason): never evidence of cover.
+    Unknown(String),
+}
+
 pub fn render_systemd(spec: &Spec) -> Result<String, String> {
     for (w, v) in [("executable", &spec.id.exe), ("config root", &spec.id.config_home), ("PATH", &spec.path_env), ("HOME", &spec.home)] {
         no_newline(w, v)?;
@@ -184,6 +208,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
          Restart=on-failure\n\
          RestartSec=3s\n\
          KillMode={}\n\
+         OOMPolicy={}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -192,6 +217,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
         systemd_env("HOME", &spec.home),
         systemd_env("PATH", &spec.path_env),
         KILL_MODE,
+        OOM_POLICY,
     ))
 }
 
@@ -201,7 +227,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
 /// not ours (a stricter reader can only refuse more, never adopt more).
 const UNIT_KEYS: &[(&str, &[&str])] = &[
     ("Unit", &["Description", "After"]),
-    ("Service", &["Type", "ExecStart", "Environment", "Restart", "RestartSec", "KillMode"]),
+    ("Service", &["Type", "ExecStart", "Environment", "Restart", "RestartSec", "KillMode", "OOMPolicy"]),
     ("Install", &["WantedBy"]),
 ];
 /// The environment tmm gives the service; any other variable (LD_PRELOAD,
@@ -271,6 +297,17 @@ pub fn unit_identity(text: &str) -> Result<Identity, String> {
 /// when the key is absent (a unit from before #350), else its value — only
 /// `KILL_MODE` protects; `none` would, but is not what we write.
 pub fn unit_kill_mode(text: &str) -> Option<String> {
+    unit_service_key(text, "KillMode")
+}
+
+/// The unit file's `OOMPolicy=` (board #438): `None` when absent, a unit from before the
+/// fix, which systemd reads as its default, `stop`.
+pub fn unit_oom_policy(text: &str) -> Option<String> {
+    unit_service_key(text, "OOMPolicy")
+}
+
+fn unit_service_key(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
     let mut in_service = false;
     for line in text.split('\n') {
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
@@ -278,7 +315,7 @@ pub fn unit_kill_mode(text: &str) -> Option<String> {
             continue;
         }
         if in_service {
-            if let Some(v) = line.strip_prefix("KillMode=") {
+            if let Some(v) = line.strip_prefix(&prefix) {
                 return Some(v.to_string());
             }
         }
@@ -300,6 +337,22 @@ pub fn kill_mode_warning(name: &str, found: Option<&str>) -> String {
         Some(other) => format!("KillMode={other} in effect, which tmm does not know; treated as unsafe"),
     };
     format!("{name} — {hazard}. Fix: `tmm gateway install` rewrites the unit with KillMode={KILL_MODE} and applies it in place (daemon-reload; no restart, nothing stopped). If a drop-in sets KillMode, remove it (`systemctl --user cat {name}` shows it) and run `systemctl --user daemon-reload`.")
+}
+
+/// The warning `status` prints for a unit of ours whose EFFECTIVE `OOMPolicy` is not
+/// `continue` (board #438). Not a reason to refuse a stop (a restart is unaffected by
+/// it); a reason to say what one OOM kill anywhere in the cgroup would do.
+pub fn oom_policy_warning(name: &str, found: Option<&str>) -> String {
+    let now = match found {
+        None => "no OOMPolicy= in the unit (the manager's DefaultOOMPolicy applies; stop unless changed)".to_string(),
+        Some(v) => format!("OOMPolicy={v} in effect"),
+    };
+    format!("{name} — {now}: an OOM kill of ANY process in this service's cgroup, which holds every tmux server the gateway started and every agent pane's processes (KillMode={KILL_MODE}), stops the gateway as well (measured 2026-10-20, board #438; the default comes from the manager's DefaultOOMPolicy). Fix: `tmm gateway install` rewrites the unit with OOMPolicy={OOM_POLICY} and applies it in place (daemon-reload; no restart, nothing stopped). If a drop-in sets OOMPolicy, remove it (`systemctl --user cat {name}` shows it) and run `systemctl --user daemon-reload`.")
+}
+
+/// `status` when the manager would not say what its `OOMPolicy` is (board #438): not "fine".
+pub fn oom_unknown_warning(name: &str, why: &str) -> String {
+    format!("{name} — OOMPolicy unknown: {why}, so whether an OOM kill of a process in this service's cgroup stops the gateway is NOT known. `tmm gateway install` reloads and reads it back once `systemctl --user show {name} -p OOMPolicy` works.")
 }
 
 // ─── launchd ────────────────────────────────────────────────────────────────
@@ -405,9 +458,9 @@ pub enum Plan {
     Create,
     Keep,
     Update,
-    /// Ours, and the ONLY difference from what we would write now is the
-    /// missing `KillMode=` (board #350) — a unit from before the fix. The
-    /// protection is applied in place (write + daemon-reload); no restart.
+    /// Ours, and the ONLY difference from what we would write now is a missing
+    /// `KillMode=` (board #350) and/or `OOMPolicy=` (board #438) — a unit from before
+    /// the fix. The protection is applied in place (write + daemon-reload); no restart.
     Protect,
     Refuse(String),
 }
@@ -416,18 +469,27 @@ pub fn plan(on_disk: &OnDisk, rendered: &str) -> Plan {
     match on_disk {
         OnDisk::Absent => Plan::Create,
         OnDisk::Ours { bytes } if bytes.as_slice() == rendered.as_bytes() => Plan::Keep,
-        OnDisk::Ours { bytes } if only_kill_mode_differs(bytes, rendered) => Plan::Protect,
+        OnDisk::Ours { bytes } if only_protections_differ(bytes, rendered) => Plan::Protect,
         OnDisk::Ours { .. } => Plan::Update,
         OnDisk::NotOurs(why) => Plan::Refuse(format!("{why}; use --replace to back it up and take over")),
     }
 }
 
-/// Is `rendered` exactly `on_disk` plus our `KillMode=` line? (Only a
-/// systemd unit can differ this way; a plist is never `Protect`.)
-fn only_kill_mode_differs(on_disk: &[u8], rendered: &str) -> bool {
+/// Is `rendered` exactly `on_disk` plus our protection lines it lacks, `KillMode=` (board
+/// #350) and/or `OOMPolicy=` (board #438), and nothing else? (Only a systemd unit can differ
+/// this way; a plist is never `Protect`.) Each is one line the manager applies to a RUNNING
+/// unit on `daemon-reload`, which is what makes the upgrade restart-free.
+fn only_protections_differ(on_disk: &[u8], rendered: &str) -> bool {
     let Ok(text) = std::str::from_utf8(on_disk) else { return false };
-    let line = format!("KillMode={KILL_MODE}\n");
-    rendered.contains(&line) && rendered.replacen(&line, "", 1) == text
+    let mut reduced = rendered.to_string();
+    let mut removed = false;
+    for line in [format!("KillMode={KILL_MODE}\n"), format!("OOMPolicy={OOM_POLICY}\n")] {
+        if !text.contains(&line) && reduced.contains(&line) {
+            reduced = reduced.replacen(&line, "", 1);
+            removed = true;
+        }
+    }
+    removed && reduced == text
 }
 
 // ─── Effects, through an injectable system ──────────────────────────────────
@@ -555,6 +617,46 @@ impl Sys {
         }
         let out = (self.run)("systemctl", &["--user", "show", name, "--property=KillMode"]).ok()?;
         out.lines().find_map(|l| l.trim().strip_prefix("KillMode=")).map(str::to_string).filter(|v| !v.is_empty())
+    }
+
+    /// The `OOMPolicy` the MANAGER applies to `name` now (board #438): what `systemctl --user
+    /// show -p OOMPolicy` says, drop-ins included. Measured on this host (systemd 252,
+    /// 2026-10-20): after a `daemon-reload` the value of a RUNNING unit follows the file with
+    /// the same MainPID, exactly like KillMode, so it is applied without a restart and read
+    /// back. Three answers, because "could not read it" is not "it is covered" (reviewer
+    /// P1), and every one comes from the RUNNING manager's own answer, never from the
+    /// `systemctl` client's version (the client binary can differ from the manager after a
+    /// package upgrade or downgrade): the property with a value is `Policy`; a SUCCESSFUL
+    /// `show` that has no such property is `Unsupported` (the manager does not know it:
+    /// systemd before v243, or launchd); a failed query, or a line with an empty value, is
+    /// `Unknown`.
+    pub fn effective_oom_policy(&self, name: &str) -> OomRead {
+        if self.mac {
+            return OomRead::Unsupported("launchd has no OOM policy".into());
+        }
+        match (self.run)("systemctl", &["--user", "show", name, "--property=OOMPolicy"]) {
+            Ok(out) => match out.lines().find_map(|l| l.trim().strip_prefix("OOMPolicy=")) {
+                Some(v) if !v.is_empty() => OomRead::Policy(v.to_string()),
+                Some(_) => OomRead::Unknown("the manager answered an empty OOMPolicy".into()),
+                None => OomRead::Unsupported("the running manager's answer has no OOMPolicy property (systemd before v243)".into()),
+            },
+            Err(e) => OomRead::Unknown(format!("`systemctl --user show -p OOMPolicy` failed: {e}")),
+        }
+    }
+
+    /// After a reload: is the policy in effect? `Ok(true)` only when the manager READS BACK
+    /// `continue`. A different value (a drop-in) and an unreadable answer are errors that
+    /// stop nothing and say so; the file stays, and the next plain `install` finishes the
+    /// job. `Ok(false)` is a manager that cannot have the property at all (positive
+    /// evidence). Unlike KillMode this gates no stop; it only refuses to call a unit
+    /// protected that is not known to be.
+    fn oom_policy_confirmed(&self, name: &str) -> Result<bool, String> {
+        match self.effective_oom_policy(name) {
+            OomRead::Policy(v) if v == OOM_POLICY => Ok(true),
+            OomRead::Policy(v) => Err(format!("the unit file carries OOMPolicy={OOM_POLICY} but the manager reports OOMPolicy={v} after a reload — look for a drop-in (`systemctl --user cat {name}`); nothing was stopped")),
+            OomRead::Unsupported(_) => Ok(false),
+            OomRead::Unknown(why) => Err(format!("the unit file carries OOMPolicy={OOM_POLICY} but the manager's value could not be read back ({why}), so it is NOT known to be in effect; nothing was stopped — run `tmm gateway install` again once `systemctl --user show {name} -p OOMPolicy` works")),
+        }
     }
 
     /// The ONE question every path that would stop a RUNNING systemd unit of
@@ -694,9 +796,12 @@ pub enum Done {
     AlreadyRunning(u32),
     Started(u32),
     Updated(u32),
-    /// The unit gained `KillMode=` and the manager applied it to the
-    /// running instance (daemon-reload); nothing was restarted.
+    /// The unit gained `KillMode=` and/or `OOMPolicy=` and the manager applied it to
+    /// the running instance (daemon-reload); nothing was restarted.
     Protected(u32),
+    /// As `Protected`, on a manager that has no `OOMPolicy` at all (systemd before v243):
+    /// KillMode is in effect, the OOM protection does not exist there.
+    ProtectedWithoutOom(u32),
     Replaced { pid: u32, backup: PathBuf },
 }
 
@@ -741,10 +846,19 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
         // drop-in may override it. So the file is reloaded and read back —
         // idempotent, stops nothing — and the gate decides (reviewer P1-R2).
         Plan::Keep if ours_running => {
-            if !sys.mac && sys.effective_kill_mode(name).as_deref() != Some(KILL_MODE) {
+            // Anything but a confirmed `continue` or a manager that cannot have the property
+            // reloads and reads back (a failed or empty query is "not known", not "fine").
+            let oom_stale = match sys.effective_oom_policy(name) {
+                OomRead::Policy(v) => v != OOM_POLICY,
+                OomRead::Unsupported(_) => false,
+                OomRead::Unknown(_) => true,
+            };
+            if !sys.mac && (sys.effective_kill_mode(name).as_deref() != Some(KILL_MODE) || oom_stale) {
                 (sys.run)("systemctl", &["--user", "daemon-reload"])?;
                 sys.stop_allowed(name).map_err(|e| format!("{e}; the unit file already carries KillMode={KILL_MODE} but the manager does not report it in effect after a reload — look for a drop-in (`systemctl --user cat {name}`); nothing was stopped"))?;
-                return Ok(Done::Protected(sys.running(name).unwrap_or(0)));
+                let covered = sys.oom_policy_confirmed(name)?;
+                let pid = sys.running(name).unwrap_or(0);
+                return Ok(if covered { Done::Protected(pid) } else { Done::ProtectedWithoutOom(pid) });
             }
             let pid = sys.ready(name)?;
             Ok(Done::AlreadyRunning(pid))
@@ -782,10 +896,12 @@ pub fn install(sys: &Sys, name: &str, replace: bool) -> Result<Done, String> {
                 (sys.run)("systemctl", &["--user", "daemon-reload"]).map_err(|e| format!("{e}; the unit file now carries KillMode={KILL_MODE} but the manager has not loaded it — run `tmm gateway install` again once `systemctl --user daemon-reload` works; nothing was stopped"))?;
             }
             sys.stop_allowed(name).map_err(|e| format!("{e}; the unit file now carries KillMode={KILL_MODE} but the manager does not report it in effect after a reload — look for a drop-in (`systemctl --user cat {name}`); nothing was stopped"))?;
+            let covered = sys.oom_policy_confirmed(name)?;
             if protecting {
                 // Protection applied in place; the running instance is the
                 // right binary already. No restart.
-                return Ok(Done::Protected(sys.running(name).unwrap_or(0)));
+                let pid = sys.running(name).unwrap_or(0);
+                return Ok(if covered { Done::Protected(pid) } else { Done::ProtectedWithoutOom(pid) });
             }
             // Protection in effect: now the stop is safe. A stop that fails
             // leaves the new text loaded — harmless (the running instance is
@@ -911,6 +1027,48 @@ pub fn protection_warning(sys: &Sys, name: &str) -> Option<String> {
         Some(v) if v == KILL_MODE => None,
         found => Some(kill_mode_warning(name, found.as_deref())),
     }
+}
+
+/// What `status` shows for an installed unit of ours on systemd (board #438): the policy as
+/// the MANAGER reports it while the unit runs (the file only declares what the next load
+/// applies), as the file says when it does not run, or "unknown" with the reason; and, when an
+/// OOM kill of a process in the unit's cgroup would stop the gateway or that is not known,
+/// the warning. A manager whose own successful answer has no such property (systemd before v243) is
+/// shown as such and not warned about. `None` on launchd, for a unit that is not ours, or when
+/// the run state itself is unknown (`protection_warning` says that).
+pub struct OomView {
+    pub shown: String,
+    pub warning: Option<String>,
+}
+
+pub fn oom_view(sys: &Sys, name: &str) -> Option<OomView> {
+    if sys.mac {
+        return None;
+    }
+    let file = ours_installed(sys, name).ok()??;
+    let (found, source) = match sys.run_state(name) {
+        RunState::Running(_) => match sys.effective_oom_policy(name) {
+            OomRead::Policy(v) => (Some(v), "manager"),
+            OomRead::Unsupported(why) => return Some(OomView { shown: format!("not available ({why})"), warning: None }),
+            OomRead::Unknown(why) => return Some(OomView { shown: format!("unknown ({why})"), warning: Some(oom_unknown_warning(name, &why)) }),
+        },
+        RunState::Stopped => (std::fs::read_to_string(file).ok().and_then(|t| unit_oom_policy(&t)), "unit file; not running"),
+        RunState::Unknown(_) => return None,
+    };
+    let shown = match &found {
+        Some(v) => format!("OOMPolicy={v} ({source})"),
+        None => format!("no OOMPolicy in the unit ({source})"),
+    };
+    let warning = match found {
+        Some(v) if v == OOM_POLICY => None,
+        found => Some(oom_policy_warning(name, found.as_deref())),
+    };
+    Some(OomView { shown, warning })
+}
+
+/// The warning half of [`oom_view`].
+pub fn oom_warning(sys: &Sys, name: &str) -> Option<String> {
+    oom_view(sys, name)?.warning
 }
 
 /// The command that shows the service's log — for OUR service only.
@@ -1061,6 +1219,13 @@ mod tests {
         /// A drop-in: when set, the manager reports THIS KillMode whatever the
         /// unit file says, reload or not — the way a drop-in overrides.
         drop_in_kill_mode: Rc<RefCell<Option<String>>>,
+        /// What the manager has LOADED for OOMPolicy (follows the file only on daemon-reload), board #438.
+        oom_policy: Rc<RefCell<Option<String>>>,
+        /// A drop-in pinning OOMPolicy whatever the file says.
+        drop_in_oom_policy: Rc<RefCell<Option<String>>>,
+        /// Replaces the OOMPolicy line of the manager's `show` answer: `Some("")` omits it (a
+        /// manager that does not know the property), `Some("OOMPolicy=")` is an empty value.
+        oom_line: Rc<RefCell<Option<String>>>,
     }
 
     fn fake(home: &Path, mac: bool) -> (Sys, Fake) {
@@ -1070,12 +1235,17 @@ mod tests {
             kill_mode: Rc::new(RefCell::new(None)),
             state_answer: Rc::new(RefCell::new(None)),
             drop_in_kill_mode: Rc::new(RefCell::new(None)),
+            oom_policy: Rc::new(RefCell::new(None)),
+            drop_in_oom_policy: Rc::new(RefCell::new(None)),
+            oom_line: Rc::default(),
         };
         let occupant = f.occupant.clone();
         let (calls, fail, pid, verdict, loaded) = (f.calls.clone(), f.fail.clone(), f.pid.clone(), f.verdict.clone(), f.loaded.clone());
         let kill_mode = f.kill_mode.clone();
         let state_answer = f.state_answer.clone();
         let drop_in = f.drop_in_kill_mode.clone();
+        let (oom_policy, drop_in_oom) = (f.oom_policy.clone(), f.drop_in_oom_policy.clone());
+        let oom_line_override = f.oom_line.clone();
         let unit_file = file_for(if mac { LABEL } else { N }, mac, home);
         let (pid2, verdict2) = (f.pid.clone(), f.verdict.clone());
         let sys = Sys {
@@ -1097,6 +1267,7 @@ mod tests {
                     // running unit's KillMode follows the file after a reload.
                     "daemon-reload" => {
                         *kill_mode.borrow_mut() = std::fs::read_to_string(&unit_file).ok().and_then(|t| unit_kill_mode(&t));
+                        *oom_policy.borrow_mut() = std::fs::read_to_string(&unit_file).ok().and_then(|t| unit_oom_policy(&t));
                         Ok(String::new())
                     }
                     "enable" | "bootstrap" | "restart" | "kickstart" => {
@@ -1121,7 +1292,13 @@ mod tests {
                         // The manager's KillMode: a drop-in wins, else what it
                         // loaded, else systemd's default.
                         let km = drop_in.borrow().clone().or_else(|| kill_mode.borrow().clone()).unwrap_or_else(|| "control-group".to_string());
-                        Ok(format!("ActiveState={}\nMainPID={}\nLoadState={}\nUnitFileState={}\nKillMode={km}\n",
+                        let oom = drop_in_oom.borrow().clone().or_else(|| oom_policy.borrow().clone()).unwrap_or_else(|| "stop".to_string());
+                        let oom_line = match oom_line_override.borrow().clone() {
+                            Some(l) if l.is_empty() => String::new(),
+                            Some(l) => format!("{l}\n"),
+                            None => format!("OOMPolicy={oom}\n"),
+                        };
+                        Ok(format!("ActiveState={}\nMainPID={}\nLoadState={}\nUnitFileState={}\nKillMode={km}\n{oom_line}",
                             if p.is_some() { "active" } else { "inactive" }, p.unwrap_or(0),
                             if l { "loaded" } else { "not-found" }, if l { "enabled" } else { "" }))
                     }
@@ -1261,6 +1438,184 @@ mod tests {
         std::fs::write(&file, &old).unwrap();
         assert!(protection_warning(&sys, N).is_some());
         assert!(sys.stop_allowed(N).is_ok(), "nothing runs: nothing to kill");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Board #438: a child's OOM kill inside the unit's cgroup must not stop the
+    /// gateway. Pinned on the rendered text (the cgroup kill itself cannot be
+    /// staged in a test), and the key stays in tmm's strict grammar.
+    #[test]
+    fn the_rendered_unit_survives_a_child_oom_kill() {
+        let text = render_systemd(&spec_with("/t/tmm", "/h/.config")).unwrap();
+        let service = text.split("[Service]").nth(1).unwrap().split("[Install]").next().unwrap();
+        assert!(service.contains("\nOOMPolicy=continue\n"), "OOMPolicy=continue, in [Service]:\n{text}");
+        assert_eq!(service.matches("OOMPolicy=").count(), 1);
+        assert_eq!(unit_oom_policy(&text).as_deref(), Some(OOM_POLICY));
+        assert!(service.contains("\nKillMode=process\n"), "and the #350 line it completes stays");
+        assert_eq!(unit_identity(&text).unwrap(), Identity { exe: "/t/tmm".into(), config_home: "/h/.config".into() }, "still ours by the strict grammar");
+        // A launchd job has no such key: nothing supervises memory per job there.
+        assert!(!render_plist(&spec_with("/t/tmm", "/h/.config")).unwrap().contains("OOMPolicy"));
+        let w = oom_policy_warning(N, None);
+        assert!(w.contains("stop") && w.contains("tmm gateway install") && w.contains("daemon-reload"), "{w}");
+        assert!(oom_policy_warning(N, Some("kill")).contains("OOMPolicy=kill in effect"));
+    }
+
+    /// Board #438 (the incident: the unit on this host had KillMode but no
+    /// OOMPolicy): a unit of ours that lacks the line is ours, `status` warns from
+    /// the MANAGER's value, and `install` adds it IN PLACE (write, daemon-reload,
+    /// read back) with no stop and no restart. A unit from before #350 gains both.
+    #[test]
+    fn a_unit_without_oompolicy_gains_it_in_place_without_a_restart() {
+        let home = scratch("oom");
+        let (sys, f) = fake(&home, false);
+        assert_eq!(install(&sys, N, false), Ok(Done::Installed(100)));
+        assert_eq!(oom_warning(&sys, N), None, "a fresh unit is covered");
+        assert_eq!(sys.effective_oom_policy(N), OomRead::Policy("continue".into()));
+        let file = sys.file(N);
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (label, old) in [
+            ("a #350 unit (KillMode, no OOMPolicy)", text.replace(&format!("OOMPolicy={OOM_POLICY}\n"), "")),
+            ("a pre-#350 unit (neither)", text.replace(&format!("OOMPolicy={OOM_POLICY}\n"), "").replace(&format!("KillMode={KILL_MODE}\n"), "")),
+        ] {
+            std::fs::write(&file, &old).unwrap();
+            *f.oom_policy.borrow_mut() = None;
+            *f.kill_mode.borrow_mut() = if old.contains("KillMode=") { Some("process".into()) } else { None };
+            assert!(matches!(read_on_disk(&file, N, &sys.me, false), OnDisk::Ours { .. }), "{label}: still ours");
+            assert_eq!(plan(&read_on_disk(&file, N, &sys.me, false), &render_systemd(&sys.spec(N)).unwrap()), Plan::Protect, "{label}");
+            let w = oom_warning(&sys, N).unwrap_or_else(|| panic!("{label}: status warns"));
+            assert!(w.contains("no OOMPolicy") || w.contains("OOMPolicy=stop"), "{label}: {w}");
+            // The restart gate is KillMode's alone; OOMPolicy does not block a stop.
+            assert_eq!(restart(&sys, N).is_ok(), old.contains("KillMode="), "{label}: restart follows KillMode only");
+            *f.calls.borrow_mut() = Vec::new();
+            assert_eq!(install(&sys, N, false), Ok(Done::Protected(f.pid.borrow().unwrap())), "{label}: same pid, nothing restarted");
+            let calls = f.calls.borrow().clone();
+            assert!(calls.iter().any(|c| c.contains("daemon-reload")), "{label}: {calls:?}");
+            assert!(!calls.iter().any(|c| c.contains("disable") || c.contains("enable") || c.contains("restart")), "{label}: no stop, no start: {calls:?}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "{label}: the covered text is on disk");
+            assert_eq!(sys.effective_oom_policy(N), OomRead::Policy("continue".into()), "{label}: and in effect");
+            assert_eq!(oom_warning(&sys, N), None);
+            assert!(matches!(install(&sys, N, false), Ok(Done::AlreadyRunning(_))), "{label}: then a no-op");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Board #438: the in-place upgrade of an OLD unit is judged by the manager too. A
+    /// drop-in that pins `stop` makes the upgrade an error that names it, with nothing
+    /// stopped (and the new text left for the next install); a manager that is silent
+    /// about the property is let through. `Plan::Protect` is never the answer to a unit
+    /// that already equals the rendered text.
+    #[test]
+    fn upgrading_an_old_unit_reads_the_policy_back() {
+        let home = scratch("oomold");
+        let (sys, f) = fake(&home, false);
+        install(&sys, N, false).unwrap();
+        let file = sys.file(N);
+        let rendered = render_systemd(&sys.spec(N)).unwrap();
+        assert!(!only_protections_differ(rendered.as_bytes(), &rendered), "equal bytes are a Keep, not a Protect");
+        let old = rendered.replace(&format!("OOMPolicy={OOM_POLICY}\n"), "");
+        assert!(only_protections_differ(old.as_bytes(), &rendered));
+        let no_stop = |f: &Fake| !f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart"));
+        // (a) a drop-in pins stop: the reload cannot change it.
+        std::fs::write(&file, &old).unwrap();
+        *f.oom_policy.borrow_mut() = None;
+        *f.drop_in_oom_policy.borrow_mut() = Some("stop".into());
+        f.calls.borrow_mut().clear();
+        let e = install(&sys, N, false).unwrap_err();
+        assert!(e.contains("drop-in") && e.contains("nothing was stopped"), "{e}");
+        assert!(no_stop(&f), "{:?}", f.calls.borrow());
+        assert_eq!(*f.pid.borrow(), Some(100));
+        // (b) a modern manager that cannot be read back: the new text stays, nothing is
+        // stopped, and the install does NOT claim protection.
+        *f.drop_in_oom_policy.borrow_mut() = None;
+        std::fs::write(&file, &old).unwrap();
+        f.fail.borrow_mut().push("--property=OOMPolicy");
+        f.calls.borrow_mut().clear();
+        let e = install(&sys, N, false).unwrap_err();
+        assert!(e.contains("NOT known to be in effect") && e.contains("nothing was stopped"), "{e}");
+        assert!(no_stop(&f), "{:?}", f.calls.borrow());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rendered, "the file is complete, so a retry finishes");
+        // ... and the retry, once it can be read, finishes with the claim.
+        f.fail.borrow_mut().clear();
+        *f.oom_policy.borrow_mut() = None;
+        assert_eq!(install(&sys, N, false), Ok(Done::Protected(100)));
+        // (c) a manager whose own successful answer has no such property (it predates it):
+        // KillMode is protected, the result says there is no OOM protection to claim.
+        std::fs::write(&file, &old).unwrap();
+        *f.oom_line.borrow_mut() = Some(String::new());
+        f.calls.borrow_mut().clear();
+        assert_eq!(install(&sys, N, false), Ok(Done::ProtectedWithoutOom(100)));
+        assert!(no_stop(&f), "{:?}", f.calls.borrow());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rendered);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Board #438: like KillMode, the policy is a fact about the MANAGER. A file that
+    /// says `continue` while the manager still runs `stop` (not yet reloaded, or a
+    /// drop-in) is reported; install reloads, and a drop-in that still wins is an
+    /// ERROR that names it, with nothing stopped. A stopped unit is judged by its file.
+    #[test]
+    fn oompolicy_is_judged_by_the_manager_and_a_drop_in_is_named() {
+        let home = scratch("oomeff");
+        let (sys, f) = fake(&home, false);
+        install(&sys, N, false).unwrap();
+        // (a) the file is right, the manager has not loaded it: not covered, and install finishes the job.
+        *f.oom_policy.borrow_mut() = Some("stop".into());
+        assert!(oom_warning(&sys, N).is_some(), "the file is not evidence; the manager is");
+        assert_eq!(install(&sys, N, false), Ok(Done::Protected(100)), "a reload, no restart");
+        assert_eq!(oom_warning(&sys, N), None);
+        // `status` shows the policy as the manager reports it, not only a warning when it is wrong.
+        assert_eq!(oom_view(&sys, N).unwrap().shown, "OOMPolicy=continue (manager)");
+        // (b) a drop-in pins stop: the reload cannot change it, so install says where to look and stops nothing.
+        *f.drop_in_oom_policy.borrow_mut() = Some("stop".into());
+        assert!(oom_warning(&sys, N).unwrap().contains("OOMPolicy=stop in effect"));
+        *f.calls.borrow_mut() = Vec::new();
+        let e = install(&sys, N, false).unwrap_err();
+        assert!(e.contains("drop-in") && e.contains("nothing was stopped"), "{e}");
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")), "{:?}", f.calls.borrow());
+        assert_eq!(*f.pid.borrow(), Some(100));
+        // (c) a MODERN manager (252) that cannot be read — a failed query, or no value in its
+        // answer — is UNKNOWN, never "covered": status says so, a plain install reloads, finds
+        // it still unreadable and refuses to call the unit protected (nothing stopped).
+        *f.drop_in_oom_policy.borrow_mut() = None;
+        for (label, how) in [("a failed query", 0), ("an empty value", 1)] {
+            if how == 0 { f.fail.borrow_mut().push("--property=OOMPolicy"); } else { *f.oom_line.borrow_mut() = Some("OOMPolicy=".into()); }
+            assert!(matches!(sys.effective_oom_policy(N), OomRead::Unknown(_)), "{label}: {:?}", sys.effective_oom_policy(N));
+            let w = oom_warning(&sys, N).unwrap_or_else(|| panic!("{label}: status says it does not know"));
+            assert!(w.contains("unknown") && w.contains("NOT known"), "{label}: {w}");
+            assert!(oom_view(&sys, N).unwrap().shown.starts_with("unknown ("), "{label}: status says unknown, with the reason");
+            *f.calls.borrow_mut() = Vec::new();
+            let e = install(&sys, N, false).unwrap_err();
+            assert!(e.contains("NOT known to be in effect") && e.contains("nothing was stopped"), "{label}: {e}");
+            assert!(f.calls.borrow().iter().any(|c| c.contains("daemon-reload")), "{label}: it reloaded first");
+            assert!(!f.calls.borrow().iter().any(|c| c.contains("disable") || c.contains("restart")), "{label}: {:?}", f.calls.borrow());
+            f.fail.borrow_mut().clear();
+            *f.oom_line.borrow_mut() = None;
+        }
+        // (c2) a manager whose own SUCCESSFUL answer has no such property is Unsupported: not
+        // warned about, not refused; the install is a no-op, and the upgrade says what it lacks.
+        // (The `systemctl` client's version proves nothing about the running manager.)
+        *f.oom_line.borrow_mut() = Some(String::new());
+        assert!(matches!(sys.effective_oom_policy(N), OomRead::Unsupported(_)));
+        assert_eq!(oom_warning(&sys, N), None);
+        assert!(oom_view(&sys, N).unwrap().shown.starts_with("not available (the running manager's answer has no OOMPolicy"));
+        assert!(matches!(install(&sys, N, false), Ok(Done::AlreadyRunning(_))));
+        // ... and when KillMode is the part that needed the reload, the claim stays honest.
+        *f.kill_mode.borrow_mut() = Some("control-group".into());
+        assert_eq!(install(&sys, N, false), Ok(Done::ProtectedWithoutOom(100)));
+        // The client's version is never asked: the same silence with a failing `--version` is the same answer.
+        f.fail.borrow_mut().push("--version");
+        assert!(matches!(sys.effective_oom_policy(N), OomRead::Unsupported(_)));
+        assert!(!f.calls.borrow().iter().any(|c| c.contains("--version")), "no version query");
+        f.fail.borrow_mut().clear();
+        *f.oom_line.borrow_mut() = None;
+        // (d) not running: the file is what will be loaded, so the file is read.
+        *f.pid.borrow_mut() = None; *f.loaded.borrow_mut() = false; *f.verdict.borrow_mut() = Verdict::None;
+        assert_eq!(oom_warning(&sys, N), None, "a stopped unit with the line will start covered");
+        assert_eq!(oom_view(&sys, N).unwrap().shown, "OOMPolicy=continue (unit file; not running)");
+        let file = sys.file(N);
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, text.replace(&format!("OOMPolicy={OOM_POLICY}\n"), "")).unwrap();
+        assert!(oom_warning(&sys, N).is_some());
         std::fs::remove_dir_all(&home).ok();
     }
 

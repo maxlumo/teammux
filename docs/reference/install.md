@@ -186,6 +186,27 @@ hide that.
    gateway — `gateway restart`, so `gateway:update` too, and `uninstall` —
    refuses and names this step.
 
+   The unit also carries `OOMPolicy=continue` (board #438). The tmux servers
+   the gateway forks, and every agent pane under them, inherit its cgroup by
+   ordinary process inheritance (`KillMode=process` only keeps a stop of the
+   gateway from signalling them), so `systemctl status` shows every pane's
+   memory under the gateway, not the gateway's own. When the kernel's OOM
+   killer picks a process in that cgroup (2026-10-20: a 49 GB python render in
+   a pane, twice), a unit with `OOMPolicy=stop` is stopped for it. The default
+   comes from the manager's `DefaultOOMPolicy`; on this host it was `stop`.
+   With `continue` the gateway keeps running and only the killed process is
+   lost. It does not make the gateway itself immune to being the OOM victim.
+   A unit from before #438 gains the line the way `KillMode` was added: a
+   plain `tmm gateway install` writes it, runs `daemon-reload` and reads the
+   manager's value back, with nothing restarted. The running manager's value
+   is the authority; the file only declares what the next load applies. Only a
+   read-back of `continue` is reported as in effect. A different value (a
+   drop-in) or an answer that cannot be read is an install error that stops
+   nothing and is finished by running `install` again; `status` shows the
+   policy on an `oom` line and warns in both cases. A running manager whose own answer has no such property (systemd before
+   v243) is told so by the install; the `systemctl` client's version is never
+   used for that. launchd has no equivalent, so the macOS agent is unchanged.
+
 6. **Start the frontend again.** The dev unit needs no edit — `dev-stack.mjs`
    is vite alone by default since #343:
 

@@ -128,7 +128,10 @@ The two units, after the switch:
 - **the backend** is the gateway, `tmux-mobile-gateway.service`, installed by
   `tmm gateway install` and running `<repo>/src-tauri/target/release/tmm
   gateway start --service` (board #323). It reads `config.toml` ALONE, so the
-  port and the listen address live there and nowhere else. It is rebuilt and
+  port and the listen address live there and nowhere else. Its unit carries
+  `KillMode=process` and `OOMPolicy=continue` (#350, #438): a kernel OOM kill of
+  a pane's process ends that process, not the gateway; the unit's cgroup holds
+  every pane (by process inheritance), so its memory figure is theirs. It is rebuilt and
   restarted by `npm run gateway:update`, never by a file watcher.
 - **the frontend** is the systemd user unit `tmux-mobile-dev.service`
   (`Restart=always`) → `scripts/dev-stack.mjs` (`npm run dev:all`) → vite on

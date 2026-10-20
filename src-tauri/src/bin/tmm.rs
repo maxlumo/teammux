@@ -99,8 +99,9 @@ USAGE (human or agent — self-management):
   tmm gateway start                   run the gateway in the foreground (what the service runs)
   tmm gateway install [--replace]     install the user service for THIS tmm + config root;
                                       a same-name service that is not ours is refused;
-                                      a unit from before board #350 gains KillMode=process
-                                      in place (daemon-reload), nothing restarted
+                                      a unit from before board #350 / #438 gains KillMode=process
+                                      and OOMPolicy=continue in place (daemon-reload), nothing
+                                      restarted
   tmm gateway status [--show-token]   service state, the local probe's verdict, address
   tmm gateway restart|uninstall       restart / remove our service (only ours)
   tmm gateway logs [-f]               the service's log
@@ -1923,7 +1924,8 @@ fn done_words(done: &tmux_mobile::gateway::service::Done) -> String {
         Done::AlreadyRunning(pid) => format!("already installed and answering (pid {pid})"),
         Done::Started(pid) => format!("installed; started and answering (pid {pid})"),
         Done::Updated(pid) => format!("updated, restarted and answering (pid {pid})"),
-        Done::Protected(pid) => format!("now KillMode={} in effect, applied in place — nothing was restarted (pid {pid})", tmux_mobile::gateway::service::KILL_MODE),
+        Done::Protected(pid) => format!("now KillMode={} and OOMPolicy={} in effect, applied in place — nothing was restarted (pid {pid})", tmux_mobile::gateway::service::KILL_MODE, tmux_mobile::gateway::service::OOM_POLICY),
+        Done::ProtectedWithoutOom(pid) => format!("now KillMode={} in effect, applied in place — nothing was restarted (pid {pid}); the running systemd does not report OOMPolicy (before v243), so an OOM kill inside the service's cgroup still stops the gateway", tmux_mobile::gateway::service::KILL_MODE),
         Done::Replaced { pid, backup } => format!("replaced and answering (pid {pid}); the previous file is kept at {}", backup.display()),
     }
 }
@@ -1949,6 +1951,12 @@ fn print_status(sys: &tmux_mobile::gateway::service::Sys, name: &str, show_token
     println!("service   {name}: {svc}");
     if let Some(w) = service::protection_warning(sys, name) {
         eprintln!("warning   {w}");
+    }
+    if let Some(v) = service::oom_view(sys, name) {
+        println!("oom       {}", v.shown);
+        if let Some(w) = v.warning {
+            eprintln!("warning   {w}");
+        }
     }
     println!("gateway   {answer}");
     if let probe::Verdict::Ours { build, .. } = &verdict {
@@ -2590,6 +2598,18 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Board #438: what `gateway install` says it did is only what was confirmed. An in-place
+    /// upgrade claims OOMPolicy only when the manager read it back; on a systemd that has no
+    /// such property it says the protection does not exist there.
+    #[test]
+    fn install_claims_the_oom_policy_only_when_it_was_read_back() {
+        use tmux_mobile::gateway::service::Done;
+        let said = done_words(&Done::Protected(7));
+        assert!(said.contains("OOMPolicy=continue in effect") && said.contains("KillMode=process"), "{said}");
+        let without = done_words(&Done::ProtectedWithoutOom(7));
+        assert!(!without.contains("OOMPolicy=continue") && without.contains("does not report OOMPolicy"), "{without}");
+    }
+
     /// Board #422 round 4: `tmm project restore`'s text — a show names the
     /// switch, the boot, and each project and window with its reason; a run
     /// says it was accepted and runs in the background; an abandon says no
