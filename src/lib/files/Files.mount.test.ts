@@ -1362,6 +1362,25 @@ async function back(app: App) { button(app, 'Back').click(); await settle(app); 
 const ROOT = 'list AGENTS.md,next.md';
 const SUB = 'list deep,inside.md';
 
+test('a directory link is a browser-history entry like any directory: one pushState per link (#431 validator P2)', async context => {
+  // The App's popstate is what the phone's Back and the browser's Back
+  // consume; a link step that pushed no history entry would let one hardware
+  // Back skip it (or leave the page). The link branch must push exactly one,
+  // as entering a directory by hand does.
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  try {
+    await settle(app);
+    row(app, 'AGENTS.md'); await settle(app);
+    const before = app.window.history.length;
+    link(app, '/fixture/sub/'); await settle(app);
+    assert.equal(at(app), SUB);
+    assert.equal(app.window.history.length, before + 1, 'the preview -> directory link pushed one history entry');
+    const listed = app.window.history.length;
+    row(app, 'deep'); await settle(app);
+    assert.equal(app.window.history.length, listed + 1, 'the same as a directory entered by hand');
+  } finally { await app.close(); }
+});
+
 test('a directory link lists the directory, and Back returns to the preview that held the link (#431)', async context => {
   const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
