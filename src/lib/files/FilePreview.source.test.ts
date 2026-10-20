@@ -7,7 +7,9 @@ const source = await readFile(new URL('./FilePreview.svelte', import.meta.url), 
 test('the preview body uses the one safe markdown renderer and the shared host path handlers', () => {
   assert.match(source, /import \{ renderMarkdown \} from '\.\.\/core\/markdown\.ts';/u);
   assert.doesNotMatch(source, /marked\.parse\(|from 'marked'|from 'katex'/u);
-  assert.match(source, /\{@html renderMarkdown\(currentFile\.content!\)\}/u);
+  // #434: the SAME renderer in its span mode (data-src on each top-level
+  // block), which the review mapper reads; chat never asks for it.
+  assert.match(source, /\{@html renderMarkdown\(currentFile\.content!, \{ spans: true \}\)\}/u);
   assert.match(source, /onclick=\{previewLinkClick\} onauxclick=\{previewLinkClick\}/u);
   assert.match(source, /sandbox="allow-same-origin"/u);
   assert.doesNotMatch(source, /allow-scripts/u);

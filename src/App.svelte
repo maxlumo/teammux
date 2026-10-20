@@ -4164,6 +4164,7 @@
     {/if}
     <div class="page-layer" class:hidden={!shown || page !== 'files'}>
       <Files session={v.filesSession} guardPage="files" visible={shown && page === 'files'} {fontSize} onGoBack={(fn) => v.filesGoBack = fn} onimmersive={(on) => v.filesImmersive = on} navRequest={landingFor(v.filesNavReq, runtime)} jumped={!!v.jumpedFrom}
+        onfeedback={v.hubState.available ? (s) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); } : undefined}
         serverShort={shortServerTag(tagScope, runtime.id)} onServers={toggleServerMenu} serversOpen={serverMenuOpen} serversControls={serverPickerId} />
     </div>
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
@@ -4503,10 +4504,16 @@
      are the three primary sidebar shells used by Chat/Board/Agents/Settings,
      Terminal/Sessions and Files respectively. Padding shrinks their own
      content box (global border-box), so no last row is hidden; the main
-     content column receives neither padding nor a footer track. */
+     content column receives neither padding nor a footer track. The Files
+     PAGE joins them when no list column is under the strip (`strip-over`:
+     its single-pane chain, or the split with the list hidden below 900px),
+     because its content then fills the strip's corner (#434: the review
+     fold's controls took 0 clicks there). The drawer's Files is never under
+     the strip, so only the page layer's own Files matches. */
   .with-rail :global(.sidebar),
   .with-rail .term-side,
-  .with-rail :global(.files-left) {
+  .with-rail :global(.files-left),
+  .with-rail .page-layer > :global(.files.strip-over) {
     padding-bottom: var(--sys-sidebar-h);
   }
   .sys-sidebar {

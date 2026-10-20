@@ -88,7 +88,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div class="preview-body" bind:this={previewBodyEl} onclick={previewLinkClick} onauxclick={previewLinkClick} style="--file-font-size:{fontSize}px">
   {#if mimeCategory(currentFile.stat?.mime_hint) === 'markdown'}
-    <div class="md-render" bind:this={previewEl}>{@html renderMarkdown(currentFile.content!)}</div>
+    <div class="md-render" bind:this={previewEl}>{@html renderMarkdown(currentFile.content!, { spans: true })}</div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'csv'}
     <div class="csv-render">{@html renderCsv(currentFile.content)}</div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'html'}
@@ -131,7 +131,9 @@
   {:else if currentFile.convertedHtml}
     <div class="md-render">{@html currentFile.convertedHtml}</div>
   {:else}
-    <!-- 'code' and every other text: one lined view, capped (see shownLines) -->
+    <!-- 'code' and every other text: one lined view, capped (see shownLines).
+         Review comments (#434) map a selection by these rows: `.cl-row`
+         order IS the line number, `.cl-code` the line's text. -->
     <div class="code-lined" class:wrap={wrapLines}>
       {#each shownLines as line, i}
         <div class="cl-row"><span class="cl-num">{i + 1}</span><code class="cl-code">{@html highlightLine(line, currentFile.stat?.mime_hint, hljs) || '\u200b'}</code></div>

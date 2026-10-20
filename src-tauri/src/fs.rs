@@ -371,6 +371,12 @@ pub fn stat_file(path: &str) -> Result<FileStat, String> {
 }
 
 pub fn read_file(path: &str) -> Result<String, String> {
+    read_file_with_revision(path).map(|(content, _)| content)
+}
+
+/// `read_file` plus the revision of the bytes it decoded (board #434): the
+/// sha256 hex of exactly those bytes, so a review anchors to what was shown.
+pub fn read_file_with_revision(path: &str) -> Result<(String, String), String> {
     let p = resolve_path(path);
     let meta = fs::metadata(&p).map_err(|e| format!("read error: {}", e))?;
     if meta.len() > MAX_PREVIEW_SIZE {
@@ -380,7 +386,11 @@ pub fn read_file(path: &str) -> Result<String, String> {
             MAX_PREVIEW_SIZE
         ));
     }
-    fs::read_to_string(&p).map_err(|e| format!("read error: {}", e))
+    let bytes = fs::read(&p).map_err(|e| format!("read error: {}", e))?;
+    use sha2::{Digest, Sha256};
+    let revision = hex::encode(Sha256::digest(&bytes));
+    let content = String::from_utf8(bytes).map_err(|e| format!("read error: stream did not contain valid UTF-8 ({e})"))?;
+    Ok((content, revision))
 }
 
 pub fn write_file(path: &str, content: &str) -> Result<(), String> {

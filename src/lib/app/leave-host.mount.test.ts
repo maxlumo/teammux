@@ -15,6 +15,8 @@ function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
     fsList: async () => ({ path: '/fixture', entries: [{ name: 'notes.md', path: '/fixture/notes.md', type: 'file', size: 10 }] }),
     fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 10, mime_hint: 'text/markdown' }),
     fsRead: async () => ({ content: '# Notes' }),
+    // A text preview asks which project holds it (review comments, #434): none here.
+    projectList: async () => ({ projects: [] }),
     getBookmarks: async () => ({ bookmarks: [] }), getPrefs: async () => ({}),
     saveBookmarks: async () => ({}), setPref: async () => ({}),
     gitCmd: async () => ({ code: 0, stdout: '.git' }),

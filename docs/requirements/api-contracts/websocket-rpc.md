@@ -95,7 +95,7 @@ with nothing saved); a login that has not answered yet is a wait, never a yes ra
 | `fs_cwd` | `session` | `{path}` |
 | `fs_list` | `path`, `show_hidden?` | `{entries, path}` |
 | `fs_stat` | `path` | FileStat object |
-| `fs_read` | `path` | `{content}` (≤512KB) |
+| `fs_read` | `path` | `{content, revision}` (≤512KB). `revision` (board #434) is the sha256 hex of exactly the bytes `content` was decoded from: what a review comment anchors to |
 | `fs_write` | `path`, `content` | OK |
 | `fs_mkdir` | `path` | OK |
 | `fs_delete` | `path` | OK |
@@ -147,6 +147,11 @@ Projects section hides itself when these return -32601. See
 | `project_up` | `id` | `{session, created_session, slots: [{window_name, status, error?}]}` |
 | `project_down` | `id` | `{session, live: false}` — kills the session, keeps the declaration |
 | `project_restore` | `action`: `show` (default) \| `run` \| `abandon` | show: `{socket, restore_on_start, boot_id, source: open\|last\|plan\|none, batch?\|plan?\|reason?}`, reads only; run: `{accepted, mode: continue\|retry\|new, batch, attempt, items}` once admitted under the restore lock (execution continues in the background); abandon: `{abandoned, batch?\|reason?}`. Refused: a held lock, an unknown boot (run), an unknown action (board #422 round 4) |
+| `review_list` | `project_id` (or `session`), `path` (absolute) | `{project_id, path, revision, annotations: [{id, line, col, end_line, end_col, quote, pre, suf, note, status, revision, created, updated, by, at: {state: located\|missing\|ambiguous, range?}}]}` (board #434). `revision` is the CURRENT file's; `at` is where each comment is in it. A path outside the project, a symlink out, a relative path or a non-UTF-8 file is refused. Desktop only (MethodNotFound on a phone-hosted server) |
+| `review_add` | `project_id` (or `session`), `path`, `note`, `revision?`, `by?`, and ONE selection: `range: {line, col, end_line, end_col}` (1-based, columns in Unicode scalars, end exclusive), or `lines: [A, B]` with optional `cols: [C, D]` (inclusive; `tmm review add`), which the SERVER expands in the same read the quote is cut from (whole lines end at line B's end in the LINE model) | the stored annotation, or `{stale: true, revision}` when `revision` is not the file's (nothing stored). `revision` absent: the file as it is now (`tmm review add`). A whitespace-only, empty or out-of-bounds selection, both forms at once, or `cols` without `lines` is refused |
+| `review_update` | `project_id` (or `session`), `path`, `id`, `note?`, `status?` (`open`\|`resolved`) | the updated annotation; later write wins, field by field |
+| `review_delete` | `project_id` (or `session`), `path`, `id` | `{ok}` |
+| `review_feedback` | `project_id` (or `session`), `path` | `{project_id, path, revision, text, count}`: the `[Document feedback on …]` block of the open comments, every `@` in it as `＠` |
 | `project_archive` | `id`, `archived?` | Hides/unhides without deleting |
 | `project_rename` | `id`, `name` | `{id, name, session, session_renamed}` — renames the tmux session to `slug(name)` too. The chat room is recorded on the project so it does NOT move, the Board rows move transactionally to the new session key, and the previous session name stays reserved/resolving for agents already running with `TMM_PROJECT` (another project cannot reuse the alias) |
 | `project_autostart` | `id`, `autostart?` | Flag only; no boot integration yet |

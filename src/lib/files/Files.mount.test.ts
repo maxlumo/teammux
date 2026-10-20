@@ -13,6 +13,8 @@ function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
     fsList: async () => ({ path: '/fixture', entries }),
     fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 100, mime_hint: 'text/markdown' }),
     fsRead: async (path: string) => ({ content: path.endsWith('AGENTS.md') ? '# Rules\n\n[Next](next.md)' : '# Next' }),
+    // A text preview asks which project holds it (review comments, #434): none here.
+    projectList: async () => ({ projects: [] }),
     getBookmarks: async () => ({ bookmarks: [] }), getPrefs: async () => ({}),
     saveBookmarks: async () => ({}), setPref: async () => ({}),
     gitCmd: async () => ({ code: 0, stdout: '.git' }),

@@ -100,7 +100,12 @@ border, or empty reservation extends under the terminal/content column.
 Fixed is safe here because space is reserved, not hand-waved: the three
 shared primary-sidebar shells (`.sidebar`, `.term-side`, `.files-left`) get
 bottom padding of that exact named height while the desktop rail layout is
-active. Global `border-box` makes their content area end above the strip, so
+active. The Files PAGE takes the same padding (`.files.strip-over`) whenever
+no list column is under the strip: its single-pane chain, or the split with
+its list hidden below 900px. Its content then fills the strip's corner, and
+the review fold's "Comments (N)" and "Send as feedback" took 0 clicks under
+the strip at 700 and 390 px (#434, validator on 4500d422). The Hub drawer's
+Files never sits under the strip and never matches. Global `border-box` makes their content area end above the strip, so
 their last row remains visible and scrollable. The strip is singleton rather
 than copied into every page, preserving one poll timer and one CPU sampling
 window. Its z-index sits below the icon rail and popovers.
@@ -173,7 +178,7 @@ Each entry is a decision with the reason it was made; treat them as normative. T
 
 ### Server vitals occupy reserved sidebar space; they never enter the main column
 
-(board #56, refined by #85): desktop `system_status` samples CPU/MEM/root disk in-process through exact-pinned, desktop-gated `sysinfo`; the 20s client poll is the CPU delta window and first CPU is null. `SystemStatus` keeps the last good reading. App mounts one connected-client sampler: desktop places it at the primary sidebar's exact x/width and `.sidebar`, `.term-side`, `.files-left` reserve its named height; touch reveals that same instance only under the current visible page's open shared side drawer, whose bottom reservation includes the safe area. Metrics are natural-width and left-aligned. The main page remains full-height and receives no footer row. A fixed strip without matching sidebar reservation, duplicate per-page samplers, a full-width footer, pointer-through claims, and layer-only insets are forbidden.
+(board #56, refined by #85): desktop `system_status` samples CPU/MEM/root disk in-process through exact-pinned, desktop-gated `sysinfo`; the 20s client poll is the CPU delta window and first CPU is null. `SystemStatus` keeps the last good reading. App mounts one connected-client sampler: desktop places it at the primary sidebar's exact x/width and `.sidebar`, `.term-side`, `.files-left` reserve its named height, and so does the Files page when no list column is under the strip (`.files.strip-over`, #434); touch reveals that same instance only under the current visible page's open shared side drawer, whose bottom reservation includes the safe area. Metrics are natural-width and left-aligned. The main page remains full-height and receives no footer row. A fixed strip without matching sidebar reservation, duplicate per-page samplers, a full-width footer, pointer-through claims, and layer-only insets are forbidden.
 
 ### The strip shows one server's reading, the focus's, named beside it, never a sum (#335 ③c-5; P1-C2)
 

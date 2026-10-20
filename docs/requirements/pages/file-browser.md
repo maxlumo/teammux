@@ -57,6 +57,14 @@ directory, or the server's home directory when no session is open yet.
 - Tap the server door → App's server popover (rail / Settings dialect); pick a server → focus moves there, Files shows that server's tree
 - Tap directory → navigate into it
 - Tap file → preview (or info page if not previewable, or if file size > 5 MB and the kind is not streamed — video and audio stream at any size)
+- Review comments (board #434, `design-docs/pages/files-review.md`): in a code
+  or markdown preview of a file inside a project, selecting text offers
+  "＋ Comment"; the comment is a card beside the preview (or folded under it
+  when the preview is narrow), with its text highlighted. Cards can be edited,
+  resolved, reopened and deleted (with a confirm). "Send as feedback" puts the
+  open comments into that project's Hub composer as one document-feedback
+  block; nothing is sent until the person presses Send. Agents use
+  `tmm review`. Comments are stored in `<project>/.tmm/reviews/`.
 - On the phone, a text preview (markdown, code, csv, html, pdf, converted
   documents) offers **Reading mode** (maximize in the header): the preview
   header and the app's tab bar hide, the content takes the whole screen, and

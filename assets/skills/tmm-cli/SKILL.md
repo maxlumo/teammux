@@ -126,6 +126,23 @@ reporter is notified) → whoever accepts the work (the reporter by default,
 or the lead the team names) accepts with `move done`, or `note`s fixes and
 moves it back to `doing`.
 
+## Review comments on a project file
+
+The Files preview's review comments (board #434) are the same store from the
+shell. A path is a file inside this project; the server refuses anything else.
+
+```bash
+tmm review list <path> [--all]                    # open comments (--all: resolved too), with where each is now
+tmm review add <path> --lines 12-14 --note "…"     # whole lines; --cols 5-9 narrows to columns (inclusive)
+tmm review resolve|reopen|delete <path> <id>
+tmm review feedback <path>                        # the "[Document feedback on …]" block of the open comments
+```
+
+A comment is anchored to the text it quotes: after an edit it is `located`
+again, `missing` when the text is gone, or `ambiguous` when it could be at
+more than one place (then it has no position). The feedback block types `＠`
+for every `@` in it, so pasting it into a message addresses nobody new.
+
 ## Background tasks — LOCAL tmux, no server needed
 
 **The foreground is the default.** A command that finishes within your turn

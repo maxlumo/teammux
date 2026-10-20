@@ -73,6 +73,11 @@ USAGE (agent):
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
   tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
+  tmm review list <path> [--all]      a project file's review comments (open; --all: resolved too)
+  tmm review add <path> --lines A[-B] [--cols C-D] --note <text>
+                                      comment on lines A..B (columns C..D, inclusive)
+  tmm review resolve|reopen|delete <path> <id>
+  tmm review feedback <path>          the document-feedback block of its open comments
 
 USAGE (local helpers — no server/config access):
   tmm claude-statusline                render Claude Code official statusLine JSON from stdin
@@ -640,6 +645,103 @@ async fn main() {
                     if ctx.json { println!("{r}") } else { println!("✓ cancelled wake #{id}") }
                 }
                 other => fail(EXIT_USAGE, &format!("unknown wake verb '{other}': list | cancel <id>")),
+            }
+        }
+        ("review", rest) => {
+            // Board #434: CLI parity with the Files preview's review comments.
+            let session = need_project(&ctx);
+            let who = ctx.agent.clone().unwrap_or_else(|| "human".into());
+            let sub = rest.first().map(String::as_str).unwrap_or("");
+            let Some(file) = rest.get(1) else {
+                fail(EXIT_USAGE, "review needs a file: tmm review list <path>");
+            };
+            // The TARGET gateway owns the path, the content and the revision
+            // (#434 P1-D): a relative path is made absolute against this
+            // shell's cwd, lexically, and nothing here opens, resolves or
+            // measures the file. The server canonicalizes it inside the
+            // project and reads it once.
+            let path = match std::path::absolute(file) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(e) => fail(EXIT_USAGE, &format!("{file}: {e}")),
+            };
+            let base = json!({ "session": session, "path": path });
+            let with = |extra: Value| {
+                let mut v = base.clone();
+                for (k, x) in extra.as_object().into_iter().flatten() {
+                    v[k] = x.clone();
+                }
+                v
+            };
+            match sub {
+                "list" => {
+                    let r = rpc(&ctx, "review_list", base.clone()).await;
+                    if ctx.json { println!("{r}"); return; }
+                    let all = flags.contains_key("all");
+                    let empty = Vec::new();
+                    let rows: Vec<&Value> = r.get("annotations").and_then(|v| v.as_array()).unwrap_or(&empty)
+                        .iter().filter(|a| all || a.get("status").and_then(|v| v.as_str()) == Some("open")).collect();
+                    if rows.is_empty() {
+                        println!("no {}review comments on {path}", if all { "" } else { "open " });
+                        return;
+                    }
+                    for a in rows {
+                        let g = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                        let at = &a["at"];
+                        let place = match at["state"].as_str() {
+                            Some("located") => {
+                                let rg = &at["range"];
+                                format!("{}:{}-{}:{}", rg["line"], rg["col"], rg["end_line"], rg["end_col"])
+                            }
+                            Some(s) => s.to_string(),
+                            None => "?".into(),
+                        };
+                        println!("  {} [{}] {place} \"{}\" — {}", g("id"), g("status"), one_line(g("quote")), one_line(g("note")));
+                    }
+                }
+                "add" => {
+                    let Some(Some(lines)) = flags.get("lines") else {
+                        fail(EXIT_USAGE, "review add needs --lines A[-B]: tmm review add f.rs --lines 12 --note \"…\"");
+                    };
+                    let Some(Some(note)) = flags.get("note") else {
+                        fail(EXIT_USAGE, "review add needs --note <text>");
+                    };
+                    let cols = flags.get("cols").cloned().flatten();
+                    let sel = match review_lines(lines, cols.as_deref()) {
+                        Ok(r) => r,
+                        Err(e) => fail(EXIT_USAGE, &e),
+                    };
+                    let mut params = with(json!({ "note": note, "by": who }));
+                    for (k, v) in sel.as_object().into_iter().flatten() {
+                        params[k] = v.clone();
+                    }
+                    let r = rpc(&ctx, "review_add", params).await;
+                    // No revision is sent, so the server anchors against its
+                    // own read; a stale answer is still reported, never
+                    // printed as a success.
+                    if r.get("stale").and_then(|v| v.as_bool()) == Some(true) {
+                        fail(EXIT_ERR, &format!("{path} changed while the comment was added; nothing was stored"));
+                    }
+                    if ctx.json { println!("{r}"); return; }
+                    println!("✓ review comment {} on \"{}\"", r["id"].as_str().unwrap_or(""), one_line(r["quote"].as_str().unwrap_or("")));
+                }
+                "resolve" | "reopen" | "delete" => {
+                    let Some(id) = rest.get(2) else {
+                        fail(EXIT_USAGE, &format!("review {sub} needs an id: tmm review {sub} <path> <id> (ids: tmm review list <path> --all)"));
+                    };
+                    let r = if sub == "delete" {
+                        rpc(&ctx, "review_delete", with(json!({ "id": id }))).await
+                    } else {
+                        rpc(&ctx, "review_update", with(json!({ "id": id, "status": if sub == "resolve" { "resolved" } else { "open" } }))).await
+                    };
+                    if ctx.json { println!("{r}"); return; }
+                    println!("✓ {sub} {id}");
+                }
+                "feedback" => {
+                    let r = rpc(&ctx, "review_feedback", base.clone()).await;
+                    if ctx.json { println!("{r}"); return; }
+                    println!("{}", r["text"].as_str().unwrap_or(""));
+                }
+                other => fail(EXIT_USAGE, &format!("unknown review verb '{other}': list | add | resolve | reopen | delete | feedback")),
             }
         }
         ("board", rest) => {
@@ -2052,6 +2154,33 @@ fn build_line(gateway: Option<&tmux_mobile::build_info::Build>, ours: &tmux_mobi
     }
 }
 
+/// `tmm review add`'s selection (board #434 P1-D): `--lines A` or `A-B`,
+/// and `--cols C-D` as INCLUSIVE columns (C on line A, D on line B), sent as
+/// `lines` / `cols`. Only the numbers are checked here; the server expands
+/// whole lines and checks the bounds in the same read it anchors against,
+/// so a file that exists only on the target, or differs from this
+/// machine's copy, is measured where it is.
+fn review_lines(lines: &str, cols: Option<&str>) -> Result<Value, String> {
+    let pair = |s: &str, what: &str| -> Result<(u32, u32), String> {
+        let (a, b) = s.split_once('-').unwrap_or((s, s));
+        let n = |t: &str| t.trim().parse::<u32>().ok().filter(|n| *n > 0).ok_or_else(|| format!("--{what} {s}: expected N or N-M, from 1"));
+        Ok((n(a)?, n(b)?))
+    };
+    let (line, end_line) = pair(lines, "lines")?;
+    if end_line < line {
+        return Err(format!("--lines {lines}: the end is before the start"));
+    }
+    let mut v = json!({ "lines": [line, end_line] });
+    if let Some(c) = cols {
+        let (c, d) = pair(c, "cols")?;
+        if end_line == line && d < c {
+            return Err("--cols: the end is before the start".into());
+        }
+        v["cols"] = json!([c, d]);
+    }
+    Ok(v)
+}
+
 fn need_project(ctx: &Ctx) -> String {
     ctx.project.clone().unwrap_or_else(|| {
         fail(EXIT_USAGE, "no project: set $TMM_PROJECT or pass --project <session>")
@@ -2182,7 +2311,7 @@ fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<Str
     const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as", "from", "before"];
+                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note"];
     let mut flags = std::collections::HashMap::new();
     let mut pos = Vec::new();
     let mut repeats: Vec<(String, String)> = Vec::new();
@@ -3082,6 +3211,22 @@ mod tests {
         assert_eq!(own_endpoint(9899, std::path::Path::new("/no/such/dir")), json!({ "port": 9899, "config": "/no/such/dir" }));
     }
 
+    /// Board #434 P1-D: `tmm review add` sends the NUMBERS it was given
+    /// (`lines`, inclusive `cols`) and never measures a file; bad input is
+    /// refused before any request.
+    #[test]
+    fn review_add_sends_lines_and_cols_not_a_measured_range() {
+        assert_eq!(review_lines("2", None).unwrap(), json!({ "lines": [2, 2] }));
+        assert_eq!(review_lines("1-3", None).unwrap(), json!({ "lines": [1, 3] }));
+        assert_eq!(review_lines("2", Some("1-6")).unwrap(), json!({ "lines": [2, 2], "cols": [1, 6] }));
+        assert!(review_lines("3-2", None).is_err());
+        assert!(review_lines("0", None).is_err());
+        assert!(review_lines("2", Some("6-1")).is_err());
+        let (flags, pos, _) = split_flags(&["review".into(), "add".into(), "f.rs".into(), "--lines".into(), "2-3".into(), "--cols".into(), "1-4".into(), "--note".into(), "why".into()]);
+        assert_eq!(pos, ["review", "add", "f.rs"]);
+        assert_eq!((flags["lines"].as_deref(), flags["cols"].as_deref(), flags["note"].as_deref()), (Some("2-3"), Some("1-4"), Some("why")));
+    }
+
     /// Board #277: the built-in tmm-cli skill is how an agent learns tmm, so
     /// every verb and flag `tmm --help` teaches for these capabilities must
     /// appear there too — else agents keep sleeping instead of waking.
@@ -3091,7 +3236,7 @@ mod tests {
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load"] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load", "tmm review list", "tmm review add", "tmm review feedback"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }

@@ -333,6 +333,12 @@ button { font-family: var(--font-display); }
 .preview-body, .md-render, .code-preview, .git-diff-body, .info-body, .bubble { user-select: text; -webkit-user-select: text; }
 
 ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+/* Review comments' highlights (board #434, files-review.md): the Custom
+   Highlight API paints them, so the preview's DOM is never touched. At rest
+   the accent wash; while a card is hovered or focused, the selection's own
+   strength. Each Files instance adds and removes only its own ranges. */
+::highlight(review) { background-color: var(--accent-bg); }
+::highlight(review-hot) { background-color: color-mix(in srgb, var(--accent) 26%, transparent); }
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {

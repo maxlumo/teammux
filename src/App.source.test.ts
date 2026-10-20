@@ -1150,8 +1150,8 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   assert.doesNotMatch(source.slice(source.indexOf('.sys-scratch {'), source.indexOf('.sys-scratch:hover')),
     /border-radius: (?:var\(--control-radius\)|var\(--ui-radius-control\)|\d+px|50%)/u,
     'and no field corner, literal or circle');
-  assert.match(source, /\.with-rail :global\(\.sidebar\),\s*\.with-rail \.term-side,\s*\.with-rail :global\(\.files-left\) \{[^}]*padding-bottom: var\(--sys-sidebar-h\)/u,
-    'every desktop primary sidebar reserves the exact strip height');
+  assert.match(source, /\.with-rail :global\(\.sidebar\),\s*\.with-rail \.term-side,\s*\.with-rail :global\(\.files-left\),\s*\.with-rail \.page-layer > :global\(\.files\.strip-over\) \{[^}]*padding-bottom: var\(--sys-sidebar-h\)/u,
+    'every desktop primary sidebar reserves the exact strip height, and so does the Files page when its content fills the strip\u2019s corner (#434)');
   // Touch: hidden at rest, shown only with the shared drawer's real OPEN
   // class, identical width/z-layer, and the open drawer reserves safe-area
   // inclusive bottom space so its final row stays reachable.

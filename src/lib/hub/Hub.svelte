@@ -20,6 +20,8 @@
   import Composer from './Composer.svelte';
   import Feed from './Feed.svelte';
   import Drawer from './Drawer.svelte';
+  import { bumpRecipientIntent, registerComposer } from '../files/review-state.ts';
+  import { appendDraft } from '../files/review-ui.ts';
   import { copyText } from '../core/clipboard.ts';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
@@ -1225,6 +1227,23 @@
   // loses the last few characters exactly when the tab goes away.
   $effect(() => { hubPrefs.setDraft(selected, composerText); });
 
+  // A review feedback block (board #434, files-review.md) lands in the LIVE
+  // composer while this Hub shows its room — the text being edited, never
+  // the stored copy the effect above has not written yet — and the person's
+  // typing stays ahead of it. The automatic recipient is applied only if
+  // nobody chose one since the block was asked for (`auto`, by generation),
+  // and only when the current one is not an agent: the last agent that
+  // posted in the room, else unchanged. Nothing is sent.
+  $effect(() => registerComposer(scope.state.review, {
+    session: () => selected,
+    append(block, auto) {
+      composerText = appendDraft(composerText, block);
+      if (!auto || managedNames.includes(recipient)) return;
+      const last = [...feed].reverse().find((m) => m.from && managedNames.includes(m.from));
+      if (last) recipient = last.from;
+    },
+  }));
+
   /** The message the next send replies to (board #290): its id, sender and
    * a preview line for the chip. The quote itself is built by the server
    * from its own row (`hub_post` `re`). One per send; the room switch, ×,
@@ -1280,6 +1299,10 @@
    * the user had just dismissed (review C, 2026-09-03). */
   function setRecipient(name) {
     if (recipient !== name) commandFeedbackLifetime.clear();
+    // Every explicit choice counts, the same value again and the empty
+    // record-only one included: a late automatic pick asks whether one
+    // happened, never what it was (#434, A→B→A).
+    bumpRecipientIntent(scope.state.review, selectedRow?.project.id);
     recipient = name;
     if (selected) hubPrefs.setLead(selected, name);
     // An OPEN terminal partition follows the selection (board #91): choosing

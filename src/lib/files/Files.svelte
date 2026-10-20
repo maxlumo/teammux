@@ -19,6 +19,7 @@
 
 <script>
   import FilePreview from './FilePreview.svelte';
+  import FileReview from './FileReview.svelte';
   import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
   import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
@@ -112,7 +113,10 @@
     // own parked cwd. Since #366 it is a small pill at the head of the path
     // line (and of each other view's header on one pane), `serverShort` its
     // label (`shortServerTag`), the full name in its tooltip and label.
-    onServers = null, serversOpen = false, serversControls = undefined, serverShort = null } = $props();
+    onServers = null, serversOpen = false, serversControls = undefined, serverShort = null,
+    // Review feedback has landed in that room's composer or draft (#434): the
+    // page's host may take the person there; the Hub's drawer needs nothing.
+    onfeedback = undefined } = $props();
   const panelId = $props.id();
   const LIST_WIDTH = { min: 320, max: 520, default: 400 };
   $effect(() => {
@@ -208,6 +212,14 @@
    * condition for whether a view's own header carries the server door: the
    * list's path row carries it whenever the list is visible. */
   const listShown = $derived(splitEligible && wideEnough);
+  /** The fixed system-status strip (App's `.sys-sidebar`, bottom-left over
+   * the sidebar width) is over THIS page's content, not over the list
+   * column that reserves its height (#434 validator on 4500d422): the
+   * single-pane chain, or the split with its list hidden below 900px. App's
+   * one reserve rule then gives the page the same `--sys-sidebar-h` bottom
+   * the sidebars take, so a bottom control (the review fold, Show all lines)
+   * is never under the strip. */
+  const stripOverContent = $derived(!splitEligible || (view !== 'list' && !wideEnough));
 
   $effect(() => {
     const onResize = () => { wideEnough = window.innerWidth >= SPLIT_MIN_WIDTH; };
@@ -971,6 +983,8 @@
   const PREVIEW_SIZE_LIMIT = 5 * 1024 * 1024;
   /** Bumped by a refresh: an HTML preview mints a new base on it (#433). */
   let previewRenew = $state(0);
+  /** Bumped by every re-read of the preview (Reload, a return): review cards follow (#434). */
+  let reviewRefresh = $state(0);
   /** The picture open in the one fullscreen viewer (ui/Lightbox), board #188. */
   let imageView = $state('');
 
@@ -1013,7 +1027,10 @@
         if (!fileNav.isCurrentFile(my)) return false;
         if (mimeCategory(stat.mime_hint || '') !== 'markdown') loadHljs(); // lined view: highlight when it lands
         showAllLines = false; // the cap is per file
-        currentFile = { ...file, content: r.content };
+        // `revision` is the server's hash of exactly these bytes (#434): a
+        // review comment is made against it, and highlights are painted only
+        // while the listing's revision is this one.
+        currentFile = { ...file, content: r.content, revision: r.revision };
         wrapLines = defaultWrapForMime(stat.mime_hint || '');
         enterView('preview');
       } else if (/\.pptx$/i.test(name)) {
@@ -1146,7 +1163,9 @@
         const r = await fsRead(file.path);
         if (currentFile !== file) return;
         currentFile.content = r.content;
+        currentFile.revision = r.revision;
         currentFile = currentFile; // trigger reactivity
+        reviewRefresh++; // the review cards are read again (#434): no live sync
         // The Refresh button renews an HTML preview's base even when the text
         // is unchanged: an expired or refused one is minted again (#433). A
         // counter, not a new file object: the tab-return effect calling us
@@ -1234,6 +1253,9 @@
       await fsWrite(currentFile.path, editContent);
       editOriginal = editContent;
       currentFile.content = editContent;
+      // The text on screen is no longer the one the server hashed: until the
+      // next read there is no revision, so nothing is painted or added (#434).
+      currentFile.revision = undefined;
       undoStack = [];
     } catch (e) {
       error = e.message;
@@ -1990,10 +2012,12 @@
         {/if}
       </div>
     </div>
-    <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
-      bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
-      {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible}
-      previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }} />
+    <FileReview file={currentFile} body={previewBodyEl} {session} refresh={reviewRefresh} compact={narrowViewport} {onfeedback} context={feedbackContext}>
+      <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
+        bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
+        {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible}
+        previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }} />
+    </FileReview>
     {#if reading}
       <!-- The one way back that is not a gesture: a floating control above the
            safe area, where the thumb is. -->
@@ -2161,7 +2185,7 @@
 
 <!-- Touch handlers implement the edge-swipe back gesture; not an interactive element. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="files" bind:this={filesEl} class:reading
+<div class="files" bind:this={filesEl} class:reading class:strip-over={stripOverContent}
   class:snap={swipeSnap} class:drill-fwd={navAnimClass === 'fwd'} class:drill-back={navAnimClass === 'back'}
   style:transform={swipeDX > 0 ? `translateX(${swipeDX}px)` : ''}
   style:--files-list-default={`${LIST_WIDTH.default}px`}

@@ -20,7 +20,7 @@ test('the extracted preview renders every existing branch and preserves the code
 
   const markdown = renderFile({ stat: { mime_hint: 'text/markdown' }, content: '# Title\n\n[next](next.md)\n\n<script>inert</script>' });
   assert.match(markdown, /class="preview-body/u);
-  assert.match(markdown, /<h1>Title<\/h1>/u);
+  assert.match(markdown, /<h1 data-src="1-1">Title<\/h1>/u, 'the span render stamps each top-level block with its source lines (#434)');
   assert.match(markdown, /href="next\.md"/u);
   assert.ok(!markdown.includes('<script>'), 'raw Markdown HTML remains inert');
   assert.ok(!markdown.includes('preview-header'), 'no duplicate header in the extracted body');

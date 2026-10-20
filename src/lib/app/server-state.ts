@@ -30,6 +30,7 @@ import { createFilesMemory, type FilesMemory } from '../files/files-memory.ts';
 import { createDownloads, type DownloadStore } from '../files/downloads.svelte.ts';
 import { SUSPEND } from '../files/download.ts';
 import { createBackendCatalog, type BackendCatalog } from '../core/agents.ts';
+import { createReviewState, type ReviewState } from '../files/review-state.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -50,6 +51,9 @@ export interface ServerState {
   /** The backends THIS server can spawn (②b-3): its `backends_list` answer,
    * set when its probe lands. Memory only; a new runtime starts unanswered. */
   backends: BackendCatalog;
+  /** Review comments' memory (board #434): unsaved notes, the recipient
+   * choice generations, and the live Hub composers feedback lands in. */
+  review: ReviewState;
 }
 
 /** Re-read what a server's state keeps of its slots (board #335 ③b): an
@@ -67,6 +71,7 @@ export function createServerState(storage: Store): ServerState {
     centre: createCentre(createAlertLog(storage)),
     files: { memory: createFilesMemory(), downloads: createDownloads() },
     backends: createBackendCatalog(),
+    review: createReviewState(),
   };
 }
 

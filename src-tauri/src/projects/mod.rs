@@ -34,6 +34,7 @@ pub mod registry;
 pub mod restore;
 pub mod restore_hold;
 pub mod restore_run;
+pub mod review;
 pub mod rooms;
 pub mod scratch;
 pub(crate) mod skills;

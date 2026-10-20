@@ -39,9 +39,11 @@ const IN_RUNTIME: Record<string, { file: string; built: string; instance: string
   // fallback lists stay module-level because they describe what this BUILD
   // ships, not what a server serves.
   backends: { file: 'core/agents.ts', built: 'createBackendCatalog\\(\\)', instance: 'createBackendCatalog\\(' },
+  // Review comments' notes, recipient generations and live composers (#434).
+  review: { file: 'files/review-state.ts', built: 'createReviewState\\(\\)', instance: 'createReviewState\\(' },
 };
 const GLOBAL: Record<string, Record<string, string>> = {
-  'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself' },
+  'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself', spanCache: 'the review span render, keyed by the file text itself (#434)' },
   'hub/hub.ts': { squashed: 'a WeakMap on message objects; the tree that holds them is gone' },
   'hub/reveal.ts': { inFlight: 'a WeakMap on DOM nodes' },
   'app/leave-guards.ts': { guards: 'instances unregister on unmount' },

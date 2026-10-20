@@ -344,6 +344,15 @@ on desktop), `Files.source` (the cut, the fixed node, the eligibility and
 reset effects, the Back order), `App.source` (the prop, the page gate, the
 rule beside the keyboard one).
 
+### Review comments are the project's, not the preview's (board #434)
+
+A text preview inside a project carries review comments: stored in
+`<project root>/.tmm/reviews/`, anchored to the source in the LINE model,
+written only through the server's verified root handle, and handed to the
+Hub as a feedback block. `fs_read` returns the `revision` (sha256 of the
+bytes it decoded) that a comment is made against. The whole design, its
+rules and its limits are in [files-review.md](../pages/files-review.md).
+
 ### Two Download Paths
 | Path | Used for | Size limit | Transport |
 |------|----------|-----------|-----------|

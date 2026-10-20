@@ -64,6 +64,12 @@ tmm board assign <id> <name|->        hand it to someone else; `-` clears it (#3
 tmm board move <id> <todo|doing|review|done>
 tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue (an image alone is a note)
 
+# review comments on a project file (board #434; the Files preview's store)
+tmm review list <path> [--all]       open comments with where each is now (located|missing|ambiguous)
+tmm review add <path> --lines A[-B] [--cols C-D] --note <text>   the gateway measures the lines
+tmm review resolve|reopen|delete <path> <id>
+tmm review feedback <path>           the [Document feedback on …] block, every @ as ＠
+
 # teammates and projects
 tmm agent list                       windows + agent detection + derived state
 tmm agent interrupt|stop|restart|remove <name>

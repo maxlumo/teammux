@@ -596,6 +596,18 @@ export function createWsApi(connection: Connection) {
     });
   }
 
+  /** Review annotations on a project's file (board #434). The server alone
+   * resolves the project (by its stable `project_id`, or a `session`), the
+   * verified root and the canonical relpath; `path` is absolute. */
+  const reviewList = (target: ReviewTarget) => call<ReviewListing>('review_list', target);
+  const reviewAdd = (target: ReviewTarget, range: ReviewRange, note: string, revision: string) =>
+    call<ReviewAnnotation | { stale: true; revision: string }>('review_add', { ...target, range, note, revision });
+  const reviewUpdate = (target: ReviewTarget, id: string, patch: { note?: string; status?: 'open' | 'resolved' }) =>
+    call<ReviewAnnotation>('review_update', { ...target, id, ...patch });
+  const reviewDelete = (target: ReviewTarget, id: string) => call<{ ok: boolean }>('review_delete', { ...target, id });
+  const reviewFeedback = (target: ReviewTarget) =>
+    call<{ project_id: string; path: string; revision: string; text: string; count: number }>('review_feedback', target);
+
   /** An HTML preview's base (board #433): a directory-scoped, signed /dl/s/
    * URL the server roots where IT decides, so the preview's relative
    * stylesheets, pictures and fonts load from the server they live on. Bound
@@ -612,6 +624,7 @@ export function createWsApi(connection: Connection) {
   }
 
   return {
+    reviewList, reviewAdd, reviewUpdate, reviewDelete, reviewFeedback,
     listSessions, listPanes, listSessionsWithPanes, capturePane, sendKeys, pasteText,
     scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
     resizePane, setSocket, getBookmarks, saveBookmarks, getPrefs, setPref, fsCwd, fsList,
@@ -632,6 +645,16 @@ export function createWsApi(connection: Connection) {
 /** The bound RPC surface of one connection. */
 export type WsApi = ReturnType<typeof createWsApi>;
 
+/** Board #434: a review request's target, and what the server answers. */
+export type ReviewTarget = { project_id?: string; session?: string; path: string };
+export type ReviewRange = { line: number; col: number; end_line: number; end_col: number };
+export type ReviewAt = { state: 'located'; range: ReviewRange } | { state: 'missing' } | { state: 'ambiguous' };
+export type ReviewAnnotation = ReviewRange & {
+  id: string; quote: string; pre: string; suf: string; note: string; status: 'open' | 'resolved';
+  revision: string; created: number; updated: number; by: string; at?: ReviewAt;
+};
+export type ReviewListing = { project_id: string; path: string; revision: string; annotations: ReviewAnnotation[] };
+
 /**
  * What each wrapper does to its server: `read` asks, `write` changes it —
  * tmux (keys, panes, sessions), files, projects, the bus (posts, read marks,
@@ -647,6 +670,7 @@ export type WsApi = ReturnType<typeof createWsApi>;
  * without saying which it is, and there is no default.
  */
 export const RPC_KIND = {
+  reviewList: 'read', reviewFeedback: 'read', reviewAdd: 'write', reviewUpdate: 'write', reviewDelete: 'write',
   listSessions: 'read', listPanes: 'read', listSessionsWithPanes: 'read', capturePane: 'read',
   sendKeys: 'write', pasteText: 'write',
   scratchSession: 'write', scratchKill: 'write', scratchRelease: 'write',

@@ -3129,6 +3129,8 @@ test('Files opened from a project Chat starts at the DECLARED project path, not 
       fsList: async (path: string) => { listed.push(path); return { path, entries: path === '/declared' ? [{ name: 'docs', path: '/declared/docs', type: 'dir', size: 0 }] : [] }; },
       fsStat: async (path: string) => { stated.push(path); return { path, is_text: true, readable: true, writable: false, size: 1, mime_hint: 'text/markdown' }; },
       fsRead: async () => ({ content: '# plan' }),
+      // The preview is in the project, so its review cards are read (#434).
+      reviewList: async () => ({ project_id: 'fixture', path: '/declared/docs/plan.md', revision: '', annotations: [] }),
       getPrefs: async () => ({}), setPref: async () => ({}), getBookmarks: async () => ({ bookmarks: [] }), gitCmd: async () => ({ code: 1 }),
     }],
   });
@@ -4988,5 +4990,54 @@ test('two projects with the same relative path each open their own file, from th
       await until(app, () => routes.length > n);
     }
     assert.deepEqual(JSON.parse(JSON.stringify(routes)), [['fixture', '', '/fixture/README.md'], ['other', '', '/other/README.md']]);
+  } finally { await app.close(); }
+});
+
+test('a review feedback block lands in the LIVE composer after the typed text; a late automatic recipient only when nobody chose (#434)', { timeout: 60000 }, async (context) => {
+  const app = await composerFixture(context, {
+    hubLog: async () => ({ messages: [
+      { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'first' },
+      { id: 'm2', seq: 2, ts: 200, from: 'bob', body: 'last agent to post' },
+      { id: 'm3', seq: 3, ts: 300, from: 'human', body: 'me' },
+    ], has_more: false }),
+  });
+  try {
+    const state = (app.window as any).__serverState;
+    const gen = () => state.review.intents.get('fixture') ?? 0;
+    const composer = () => [...state.review.composers].find((c: any) => c.session() === 'fixture') as { append: (b: string, auto: boolean) => void };
+    // What `landFeedback` does with the generation captured at the ask.
+    const land = async (intent: number, block: string) => { composer().append(block, gen() === intent); await app.flush(); };
+    assert.ok(composer(), 'the Hub showing the room registered its composer');
+
+    // The current recipient is an agent: it is kept, and the block goes after
+    // what the person had typed.
+    await app.text('typed first');
+    await land(gen(), '[Document feedback on /f — 1 comment]');
+    assert.equal(app.input.value, 'typed first\n\n[Document feedback on /f — 1 comment]');
+    assert.equal(selectedCard(app.document), 'alice');
+
+    // Record only, chosen BEFORE the ask, and nobody chose since: the last
+    // agent that posted is preselected. Nothing is sent.
+    await app.to('note');
+    await app.text('');
+    await land(gen(), 'B1');
+    assert.equal(selectedCard(app.document), 'bob');
+    assert.equal(app.input.value, 'B1');
+
+    // empty → alice → empty while the block was in flight: the person's last
+    // choice stands (ABA, by generation, never by value).
+    await app.to('note');
+    let asked = gen();
+    await app.to('alice'); await app.to('note');
+    await land(asked, 'B2');
+    assert.equal(selectedCard(app.document), '', 'record-only, chosen again meanwhile, is kept');
+
+    // alice → bob → alice: the same.
+    await app.to('alice');
+    asked = gen();
+    await app.to('bob'); await app.to('alice');
+    await land(asked, 'B3');
+    assert.equal(selectedCard(app.document), 'alice');
+    assert.equal(app.input.value, 'B1\n\nB2\n\nB3', 'each block landed once, in order');
   } finally { await app.close(); }
 });

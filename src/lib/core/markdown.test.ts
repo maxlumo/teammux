@@ -256,3 +256,55 @@ test('the prose renderer reads the left neighbour: no path starts after a colon 
   }
   assert.ok(renderMarkdown('see /tmp/x/y').includes('<a href="/tmp/x/y">'), 'the same path after a space is a link');
 });
+
+// ---- board #434: the review span mode ------------------------------------
+
+const spansOf = (body: string) => [...renderMarkdown(body, { spans: true }).matchAll(/<(\w+) data-src="(\d+-\d+)"/gu)].map((m) => `${m[1]}:${m[2]}`);
+const unspanned = (body: string) => renderMarkdown(body, { spans: true }).replace(/ data-src="\d+-\d+"/gu, '');
+
+test('the span render is the plain render plus data-src, on a corpus (#434)', () => {
+  const corpus = [
+    '# Title\n\npara one\n\npara two', '- a\n- b\n\n1. x\n2. y', '> quote\n> more', '| a | b |\n|---|---|\n| 1 | 2 |',
+    '```js\nconst a = 1;\n```', 'inline `code` and $x^2$ and \\(y\\)', '$$\na\n+b\n$$', '**粗体。**后面', '~~gone~~ kept',
+    'intro\n```md\nwrapped *md*\n```\nafter', '[x]: http://e.com\n\nuse [x]', '---', 'a  \nb', '<script>alert(1)</script>',
+    'a\r\nb\r\n\r\nc', 'lone\rcr', '',
+    // The `marked.use` extensions reach the span render too: bare paths,
+    // safe URLs, refused link targets.
+    'Logs in /fixture/sub/ and [Next](next.md), here /fixture/', 'see https://e.com/a. ok', '[bad](javascript:alert(1)) ![i](data:x)',
+  ];
+  for (const body of corpus) assert.equal(unspanned(body), renderMarkdown(body), JSON.stringify(body));
+});
+
+test('data-src carries 1-based LINE-model source lines through the preprocessing (#434)', () => {
+  // The transparent ```md wrapper's fence lines are deleted before marked:
+  // the second of two identical paragraphs is still at its own lines.
+  assert.deepEqual(spansOf('intro\n```md\nsame para\n\nsame para\n```\nafter'), ['p:1-3', 'p:5-7']);
+  // A 4-line formula folds into one placeholder; the paragraph after it is
+  // at its real lines.
+  assert.deepEqual(spansOf('$$\na\n+b\n$$\n\nafter the math'), ['p:1-4', 'p:6-6']);
+  // Reference-link definitions render nothing and still count their lines.
+  assert.deepEqual(spansOf('[x]: http://e.com\n[y]: http://f.com\n\nuse [x] here'), ['p:4-4']);
+  // A nested list inside a blockquote: the top-level block's span.
+  assert.deepEqual(spansOf('> - item one\n>   - nested word\n> - item two\n\nnext'), ['blockquote:1-3', 'p:5-5']);
+  // Fenced code, then multi-line math, then a paragraph (review reminder).
+  assert.deepEqual(spansOf('```js\nconst a = 1;\nconst b = 2;\n```\n\n$$\nx\ny\n$$\n\nfinal para'), ['pre:1-4', 'p:6-9', 'p:11-11']);
+  // CRLF counts as one line break.
+  assert.deepEqual(spansOf('a\r\nb\r\n\r\nc'), ['p:1-2', 'p:4-4']);
+  // A lone CR cannot be mapped (marked reads it as a break, the LINE model
+  // as a character): no spans at all, so a selection is refused, never guessed.
+  assert.deepEqual(spansOf('lone\rcr\n\nmore'), []);
+});
+
+test('the span render has its own cache, in either call order (#434)', () => {
+  const a = 'cache order one\n\nsecond';
+  assert.ok(!renderMarkdown(a).includes('data-src'));
+  assert.ok(renderMarkdown(a, { spans: true }).includes('data-src="1-1"'));
+  assert.ok(!renderMarkdown(a).includes('data-src'), 'the chat render never carries spans');
+  const b = 'cache order two\n\nsecond';
+  assert.ok(renderMarkdown(b, { spans: true }).includes('data-src="3-3"'));
+  assert.ok(!renderMarkdown(b).includes('data-src'));
+  // A body that spells the other mode's key is still its own entry.
+  const c = 'spans:cache order three';
+  assert.ok(!renderMarkdown(c).includes('data-src'));
+  assert.ok(renderMarkdown(c, { spans: true }).includes('data-src="1-1"'));
+});

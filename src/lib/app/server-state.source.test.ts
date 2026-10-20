@@ -143,6 +143,8 @@ test('the identity modules have exactly the production consumers this commit giv
       'src/lib/hub/Board.svelte', 'src/lib/hub/AgentsPage.svelte',
       'src/lib/terminal/Terminal.svelte', 'src/lib/sessions/Sessions.svelte', 'src/lib/sessions/PanePicker.svelte',
       'src/lib/app/ScratchPanel.svelte', 'src/lib/files/GitPanel.svelte', 'src/lib/files/DirPicker.svelte',
+      // #434: the review cards of a Files preview speak through the Files scope.
+      'src/lib/files/FileReview.svelte',
       'src/lib/hub/ChatImage.svelte', 'src/lib/projects/Projects.svelte', 'src/lib/projects/CreateProjectDialog.svelte',
       // ②b-3: the Hub's sidebar and roster wear THIS server's backend faces.
       'src/lib/hub/Roster.svelte', 'src/lib/hub/Sidebar.svelte'],

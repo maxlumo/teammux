@@ -114,7 +114,7 @@ Each links to the doc that holds the reason and the details.
 
 ### Design — shell, platform, visual language
 - [**Design language** (normative)](docs/design-docs/features/design-language.md) · [Motion (principles + vocabulary)](docs/design-docs/features/motion.md) · [Fonts](docs/design-docs/features/fonts.md) · [UI unification](docs/design-docs/features/ui-unification.md) · [App shell (rail, bottom bar, back gesture, restore)](docs/design-docs/features/app-shell.md) · [Desktop split-screen](docs/design-docs/features/split-screen.md) · [Sessions density](docs/design-docs/pages/sessions-density.md)
-- [Android platform](docs/design-docs/features/android-platform.md) · [PWA install](docs/design-docs/features/pwa-install.md) · [File handling & security](docs/design-docs/features/file-handling.md) · [Message notifications](docs/design-docs/features/notifications.md) · [System status](docs/design-docs/features/system-status.md)
+- [Android platform](docs/design-docs/features/android-platform.md) · [PWA install](docs/design-docs/features/pwa-install.md) · [File handling & security](docs/design-docs/features/file-handling.md) · [Files review comments](docs/design-docs/pages/files-review.md) · [Message notifications](docs/design-docs/features/notifications.md) · [System status](docs/design-docs/features/system-status.md)
 - [WebSocket client robustness + server registry](docs/design-docs/features/websocket-client.md) · [Concurrent WS RPC](docs/design-docs/features/concurrent-ws-rpc.md) · [Disconnect grace](docs/design-docs/features/disconnect-grace.md)
 
 ### Design — terminal
