@@ -4036,6 +4036,40 @@ test('a centre jump opens the room, windows the page around the message, rings i
   } finally { await app.close(); }
 });
 
+// Board #439 (validator on the #432 rig, 1280 px): a centre jump landed the
+// message ~34 px above the feed's visible top, under the header. jsdom lays
+// nothing out, so the real chain is given: the bubble's offsetParent is the
+// positioned .feed-wrap (the .feed is static), and .feed-wrap sits below a
+// 42 px header in its own offsetParent, the body. The message is 2000 px into
+// the feed's content; it must land at feed top + 8 px, i.e. scrollTop 1992.
+test('a centre jump lands the message 8 px below the feed top with a header above the feed (#439)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const app = await mountJump(context, f.rpc, (window) => {
+    const proto = window.HTMLElement.prototype;
+    const wrapOf = (el: HTMLElement) => el.closest('.feed-wrap');
+    Object.defineProperty(proto, 'offsetParent', { configurable: true, get(this: HTMLElement) {
+      if (this.matches('.feed-wrap')) return this.ownerDocument.body;
+      if (this === this.ownerDocument.body) return null;
+      return wrapOf(this) ?? null;
+    } });
+    Object.defineProperty(proto, 'offsetTop', { configurable: true, get(this: HTMLElement) {
+      if (this.matches('.feed-wrap')) return 42;
+      if (this.matches('[data-msg="target"]')) return 2000;
+      return 0;
+    } });
+  });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    const centre = centreOf(app);
+    centre.record(alertFor());
+    centre.requestJump(centre.items[0]);
+    await until(app, () => !!app.document.querySelector('.msg.jump-hit[data-msg="target"]'));
+    const feed = app.document.querySelector<HTMLElement>('.feed')!;
+    assert.equal(feed.offsetParent, feed.closest('.feed-wrap'), 'the modelled chain: the static feed is not an offset parent');
+    assert.equal(feed.scrollTop, 1992, `the message lands 8 px below the feed top, not under the header (scrollTop ${feed.scrollTop})`);
+  } finally { await app.close(); }
+});
+
 test('Back to latest keeps the window until the tail answers; a push meanwhile is not merged; a failure keeps it for a retry (#322)', { timeout: 60000 }, async (context) => {
   let answer: ((v: unknown) => void) | null = null;
   let fail = false;

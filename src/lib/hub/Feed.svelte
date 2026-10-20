@@ -363,7 +363,7 @@
     const el = feedEl.querySelector(`[data-ask="${CSS.escape(key)}"]`);
     if (!(el instanceof HTMLElement)) return;
     el.style.position = 'static';
-    const at = el.offsetTop;
+    const at = rowTop(el);
     el.style.removeProperty('position');
     const top = feedEl.scrollTop;
     if (at >= top && at < top + feedEl.clientHeight - 60) {
@@ -388,9 +388,12 @@
     if (!feedEl || !id) return false;
     const el = feedEl.querySelector(`[data-msg="${CSS.escape(String(id))}"]`);
     if (!(el instanceof HTMLElement)) return false;
+    // Its place in the FEED's scroll content: rowTop, as every other reader
+    // here. Summing offsetTop up the offsetParent chain never met the static
+    // .feed, ran on to the body and added the header above .feed-wrap, so a
+    // jump overshot by its height (board #439).
     el.style.position = 'static';
-    let at = 0;
-    for (let n = el; n && n !== feedEl; n = n.offsetParent) at += n.offsetTop;
+    const at = rowTop(el);
     el.style.removeProperty('position');
     following = false;
     feedEl.scrollTop = Math.max(0, at - 8);
