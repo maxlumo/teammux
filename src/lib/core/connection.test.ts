@@ -354,6 +354,20 @@ test('a signed download URL is resolved against the origin of the connection tha
   assert.notEqual(new URL(a.url).host, new URL(b.url).host);
 }));
 
+test('a preview scope carries its URL and the door prefix of the connection that asked (#433)', (t) => withWebCrypto(async () => {
+  const w = await pair(t);
+  const fromA = w.apiA.fsPreviewBase('/p/site/index.html');
+  const reqA = await w.serverA.next(w.socketA);
+  assert.equal(reqA.method, 'fs_preview_base');
+  assert.deepEqual(reqA.params, { path: '/p/site/index.html' });
+  w.socketA.binary(await w.serverA.seal(JSON.stringify({ id: reqA.id, result: { base: '/dl/s/9/1.2/sig/L3A/site/' } })));
+  assert.deepEqual(await fromA, { url: 'http://a.test/dl/s/9/1.2/sig/L3A/site/', prefix: 'http://a.test/dl/s/' });
+  const bad = w.apiA.fsPreviewBase('/p/x.html');
+  const reqBad = await w.serverA.next(w.socketA);
+  w.socketA.binary(await w.serverA.seal(JSON.stringify({ id: reqBad.id, result: { base: '/dl?path=%2Fx' } })));
+  await assert.rejects(bad, /not a scope path/u);
+}));
+
 // ─── Lifetime: disconnect keeps the room, dispose empties it ─────────────
 // The plain-token path, because what is under test is bookkeeping, not crypto.
 

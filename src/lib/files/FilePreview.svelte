@@ -2,7 +2,7 @@
   import type { HLJSApi } from 'highlight.js';
   import { renderMarkdown } from '../core/markdown.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { highlightLine, mimeCategory, renderCsv, type PreviewFile } from './file-preview.ts';
+  import { basedPreviewDoc, highlightLine, mimeCategory, renderCsv, type PreviewFile, type PreviewScope } from './file-preview.ts';
 
   interface Props {
     currentFile: PreviewFile;
@@ -22,9 +22,16 @@
      * and hidden on a tab or server switch, so a playing track or film would
      * go on with no controls in sight (board #416 review). */
     visible?: boolean;
+    /** Mint an HTML preview's signed scope URL on this file's server (board #433). */
+    previewBase?: (path: string) => Promise<PreviewScope>;
+    /** A base that could not be minted: the frame is not shown without one. */
+    onpreviewerror?: (message: string) => void;
+    /** A change asks the HTML preview for a fresh base (the Refresh button). */
+    renew?: number;
   }
   let {
     currentFile, fontSize, wrapLines, hljs, onview = () => {}, visible = true,
+    previewBase = () => Promise.reject(new Error('no preview base')), onpreviewerror = () => {}, renew = 0,
     showAllLines = $bindable(false),
     previewLinkClick, attachHtmlPreviewLinks,
     previewBodyEl = $bindable(null), previewEl = $bindable(null),
@@ -45,6 +52,31 @@
   // URL and its position stay, and showing the page again never plays.
   $effect(() => { if (!visible) mediaEl?.pause(); });
 
+  // An HTML preview loads its relative resources through a signed directory
+  // cap (board #433). Every showing mints its own (a Back, a Refresh): the
+  // base is never kept on the file. The frame shows only what THIS run of the
+  // effect prepared — any change of file or content ends the run, clears the
+  // frame and drops that run's late answer. A refused or failed mint reports
+  // its error and still shows the page, under a CSP that loads nothing —
+  // never an unbased document fetching from the app's origin.
+  let htmlSrcdoc = $state<string | null>(null);
+  $effect(() => {
+    const file = currentFile;
+    const content = file.content;
+    void renew;
+    if (mimeCategory(file.stat?.mime_hint) !== 'html' || content == null) return;
+    let live = true;
+    previewBase(file.path).then((scope) => {
+      if (live) htmlSrcdoc = basedPreviewDoc(content, scope);
+    }).catch((e) => {
+      if (!live) return;
+      // The SAME preparation without a scope; if even that fails, no frame.
+      try { htmlSrcdoc = basedPreviewDoc(content, null); } catch {}
+      onpreviewerror(`${t('previewResourcesNotLoaded')}: ${e?.message ?? String(e)}`);
+    });
+    return () => { live = false; htmlSrcdoc = null; };
+  });
+
   // Keep the cap state in Files so an editor round-trip does not reset it.
   const CODE_PREVIEW_MAX_LINES = 3000;
   let previewLines = $derived((currentFile?.content ?? '').split('\n'));
@@ -60,14 +92,16 @@
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'csv'}
     <div class="csv-render">{@html renderCsv(currentFile.content)}</div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'html'}
-    <iframe
-      class="html-preview"
-      bind:this={htmlPreviewEl}
-      srcdoc={currentFile.content!}
-      sandbox="allow-same-origin"
-      title="HTML Preview"
-      onload={attachHtmlPreviewLinks}
-    ></iframe>
+    {#if htmlSrcdoc != null}
+      <iframe
+        class="html-preview"
+        bind:this={htmlPreviewEl}
+        srcdoc={htmlSrcdoc}
+        sandbox="allow-same-origin"
+        title="HTML Preview"
+        onload={attachHtmlPreviewLinks}
+      ></iframe>
+    {/if}
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'pdf'}
     <div class="pdf-container" bind:this={pdfContainer} style="margin: -12px; padding: 0;"></div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'image'}

@@ -480,6 +480,134 @@ signed URL, same position), and showing the page again never plays. Leaving
 the preview removes the element, which pauses it. Not in scope: waveform, playlist, background
 playback, metadata or cover art. Device playback stays with the owner.
 
+### An HTML preview loads its relative resources through a signed directory cap (board #433, 2026-10-20)
+
+Owner: "文件预览的时候，比如我打开了一个 html，这里的 html 引用了目标服务器上的资源，这时应该正确解析，避免无法加载的情况". Root cause: the preview is a `srcdoc` iframe, whose
+base URL is the APP's (`about:srcdoc` inherits the parent's), so `style.css`
+resolved against the Tauri/Vite origin, never the server holding the file.
+The layer is the base URL. The HTML stays a `srcdoc` (the app keeps
+`contentDocument` and its link handlers; `/dl` never serves a document) and is
+given a `<base href>` on the file's server: a PATH-style signed URL, because a
+relative reference drops a base's query, so `/dl?path=…` cannot be one.
+
+**The door.** `/dl/s/{exp}/{dev}.{ino}/{sig}/{b64url(root)}/{dir…}/{target}`
+(`download.rs` scope mode; `dispatch.rs` routes it as a download).
+`fs_preview_base(path)` mints the base for the HTML's directory; the client
+sends only the HTML path.
+
+- **The root is the server's.** `rpc::preview_scope` canonicalizes the HTML
+  and takes the longest declared project path that contains it (archived
+  included), else the HTML's own directory. `/` and the canonical `$HOME` are
+  never a root: a project there falls back to the directory, and a directory
+  that is one of them gets no cap (the mint fails). Only a regular
+  `.html`/`.htm` file gets one.
+- **The signature is its own.** `HMAC(K, "v1"\0exp\0dev\0ino\0root)` with
+  `K = HMAC(token, "tmm-dl-scope-v1")`. The derived key is the domain
+  separation: a download/stream tag is an HMAC under the token itself, so no
+  path or root makes one verify as the other (a legacy path may itself begin
+  with `scope:`, which ruled out a text prefix). `exp` is `now + 4 h`
+  (`DL_STREAM_TTL_SECS`, the stream ceiling), checked at verify.
+- **The root is pinned by identity.** `(dev, ino)` of the root directory is
+  signed. Serving opens the root `O_DIRECTORY|O_NOFOLLOW`, `fstat`s it against
+  the signed pair, then walks each decoded segment with `openat(…,
+  O_NOFOLLOW)` and serves the final regular file from that fd. A renamed or
+  swapped root, any symlink inside the scope, `..`, `.`, an empty or
+  NUL/slash-bearing segment all 403/404; the path is never re-resolved by
+  name.
+- **Only subresources leave.** css, png/jpg/gif/webp/bmp/svg/ico/avif,
+  woff2/woff/ttf/otf and the streamed media types, decided on the last
+  segment's extension. html, js, json and everything else 403.
+- **A document made from the cap is inert.** Every scope answer carries
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Content-Security-Policy: sandbox; default-src 'none'; style-src
+  'unsafe-inline'` and `Content-Disposition: attachment`, so an SVG opened at
+  top level, in an `<iframe>` or an `<object>` runs no script on the gateway
+  origin (an `<img>`/`<link>` subresource ignores the header).
+- **No name enters a header** (review P1-B, orchestrator ruling). The scope's
+  disposition is the FIXED `attachment`, with no filename: a decoded segment
+  may hold `"`, CR or LF (legal POSIX names), and spliced into the header it
+  would end the block before the security headers. The legacy `/dl` keeps its
+  name, through `download::attachment`: a printable-ASCII `filename=` (any
+  other character, `"` and `\` become `_`) plus the exact name as RFC 8187
+  `filename*=UTF-8''…`, so no control byte reaches the header block; a file
+  with such a name still downloads. `names_with_quotes_and_line_breaks_cannot_move_the_header_block`
+  serves real files named with `"`, CR, LF and CRLFCRLF through the one HTTP
+  entry, scope and legacy, 200 and 206.
+
+**The client.** `ws-api.fsPreviewBase` prepends this connection's
+`httpOriginForWs` (scheme, host and any reverse-proxy prefix) to the minted
+path, and returns that same string plus `/dl/s/` as the door's PREFIX; the
+URL must begin with it. Nothing searches the URL for `/dl/s/`, so a proxy
+prefix that itself holds that segment neither widens the policy nor loses
+the door (review P2); the server likewise routes the first `/dl/s/` whose tail has the signed shape, and a request with none is an ordinary `/dl` one, so such a prefix in front of a download still downloads (validator P2). `file-preview.basedPreviewDoc` parses the HTML with `DOMParser` (an inert
+document: no script, no fetch), removes every author `<base>`, `<meta
+http-equiv=refresh>` and referrer policy (a `<meta name=referrer>` or a
+`referrerpolicy` attribute: a referrer policy does not intersect like a CSP,
+so either would override ours), and puts three elements first in `<head>`:
+
+1. `<meta http-equiv="Content-Security-Policy">` — `default-src 'none';
+   img-src P data:; style-src P 'unsafe-inline'; font-src P data:;
+   media-src P; form-action 'none'; base-uri P`, where `P` is that prefix
+   (so the proxy prefix stays; `;` and `,` are percent-encoded so the URL
+   cannot split the policy);
+2. `<meta name="referrer" content="no-referrer">`;
+3. `<base href={scope URL}>`.
+
+The output is SERIALIZED, never reassembled (orchestrator ruling
+2026-10-20): a fixed `<!DOCTYPE html>` and then the prepared `<html>`
+element's `outerHTML`. This is a structural guarantee, not the fix for a
+demonstrated injection. The first version quoted the author doctype's
+public/system identifiers back by hand; the review suspected that a quoted
+identifier could close the doctype and open an element before the policy, but
+measured on parse5 (the vectors are in `file-preview.test.ts`) the tokenizer
+ends a doctype at any `>`, even inside quotes, and a rebuilt `""<img…"` falls
+into its bogus-doctype state, so nothing ever preceded the policy (the review
+withdrew the claim). The rule stands anyway: nothing parsed is re-quoted by
+hand, and the identifiers mean nothing in a sandboxed preview. A quirks-mode
+page therefore renders in standards mode. The output is parsed once more and
+refused (no frame, the error line) unless the policy is `<head>`'s first
+element with nothing before it.
+
+`FilePreview.svelte` mints on every showing (open, Back, an editor round-trip,
+the Refresh button — `renew`, a counter, so it mints even when the text is
+unchanged) and never keeps the base on `currentFile` or a `FileLocation`, so a
+4 h cap is renewed by Refresh. A tab return re-reads the text but keeps the
+frame and its base. The frame mounts only when the mint answered
+for THIS file and THIS content; an answer for a file no longer shown is
+dropped (the effect's cleanup). A refused or failed mint (no project and a
+directory of `$HOME` or `/`, an offline server) reports through the page's
+error bar and still shows the page, through `basedPreviewDoc(content, null)`:
+no `<base>` (the author's removed too) and a no-resource CSP, `default-src
+'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; base-uri
+'none'; form-action 'none'`, so it reads but fetches nothing — never an
+unbased document fetching from the app's origin (orchestrator ruling,
+2026-10-20 10:30). Links in the frame:
+a bare `#fragment` scrolls in the document (decoded once, by `id`, then
+`name`; `#` alone to the top; a middle or modified click on it is prevented
+and does nothing) — under the base the browser would navigate the frame to
+the cap; a relative path opens in Files; an HTTP(S) URL leaves through
+the external handler; every other link activation (`mailto:`, `<area>`, …) is
+prevented.
+
+**Limits (v1).** An absolute-path reference (`/assets/x.png`) is not
+rewritten and resolves against the gateway origin, outside the door, so it
+does not load. A remote host (a CDN stylesheet or web font) is blocked by the
+meta CSP. A symlink inside the scope is refused. An HTML file that is itself a symlink gets no cap (review P2): its resources would come from the target's directory while Files opens its links from the link's, so it renders under the no-resource policy with the error line. A directory symlink on the way is fine, since both resolve to the same physical directory; only a clicked link's `..` (resolved lexically by Files) can then differ from a resource's (resolved physically, and refused above the root). A lazy load more than 4 h
+after the mint fails; Refresh mints a new cap. Scripts never run (the sandbox
+has no `allow-scripts`). Guards: `download.rs` scope tests (signature fields,
+domain separation, the derived key by a known answer computed outside the code, segment decoding, the type list and a nested path typed by its last segment, `open_in_scope` under a
+pinned root, the headers and ranges over a duplex), `rpc.rs`
+`a_preview_scope_is_the_longest_declared_project_else_the_files_directory`,
+`file-preview.test.ts` (head order, the quoted-identifier doctype vectors and the reparse refusal, base/refresh removal with inert template
+and comment text, the proxy prefix, the inert parse with a fetch control,
+fragments, link routing, the no-scope CSP), `FilePreview.mount.test.ts` (no frame before the
+base, a late answer dropped in either order, a failed mint rendering under the no-resource CSP, a fresh mint per showing)
+and `Files.mount.test.ts` (a refused mint reads with the "resources not loaded"
+line, a tab return does not mint, Refresh mints again and clears the line).
+The zero-request claim for the no-resource state and the loads under the
+scope are measured in a real browser against a real gateway (board #433
+notes), since jsdom enforces no CSP.
+
 ### Upload feedback is the third slot of the same stack, and it never invents a percentage (board #214, 2026-09-20)
 
 Owner: "文件上传要有个进度或者提示，让我知道传上去了没有". A successful upload was a
@@ -525,6 +653,8 @@ chunked or HTTP upload path; that is a separate issue, not this one.
 
 ### iframe Sandbox
 Never combine `allow-scripts` + `allow-same-origin` — negates sandbox entirely. Use `allow-same-origin` only for HTML preview.
+The HTML preview's `srcdoc` is the based document of board #433 (its own
+CSP, no referrer, the scope `<base>` or, without a scope, none), never the raw file.
 
 HTTP(S) links from previews must not navigate the embedded WebView. App-level
 links, Markdown, and converted HTML use the shared delegated handler in
@@ -582,7 +712,9 @@ still follows normally. Previously the concurrent follow could send the
 newly opened preview back to the session directory.
 
 True HTTP(S) URLs retain the external opener in both browser and Tauri;
-mailto and document fragments retain their native behavior. The app-wide
+mailto and document fragments retain their native behavior (in the HTML
+preview frame, since #433, a fragment scrolls through its own handler and any
+other link is prevented — see above). The app-wide
 path net remains only for otherwise unrouted surfaces, not as the fix for
 an incorrect external classification. Unit tests reproduce the capture/router
 ordering and source contracts pin the primary, auxiliary and iframe wiring.
@@ -596,9 +728,11 @@ and `withGlobalTauri` exposes IPC on `window`. Escaping is the first line of
 defence (`core/markdown.ts`); the CSP is the second: an escaping bug becomes a
 broken image, not a script with IPC access. Inline STYLES stay allowed because
 xterm, KaTeX and mermaid all emit them, and stylesheets and fonts may come from
-any http(s) host: the HTML preview is a `srcdoc` iframe, which INHERITS this
-policy, and a previewed report that links a CDN stylesheet or web font must
-still look like itself. Scripts in that iframe were never run (the sandbox has
+any http(s) host. The HTML preview's `srcdoc` iframe inherits this policy and,
+since board #433, adds its own meta CSP on top (policies intersect): its
+subresources come from the gateway's `/dl/s/` door and `data:` only, so a
+CDN stylesheet or web font in a previewed report no longer loads (a stated
+v1 limit, above). Scripts in that iframe were never run (the sandbox has
 no `allow-scripts`), so the policy that matters — `script-src 'self'` — costs
 the preview nothing. `connect-src` allows any `ws:`/`wss:`/
 `http:`/`https:` host because the server address is user-entered, plus

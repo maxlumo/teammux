@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::fs as rfs;
 use crate::tmux;
 
-use super::download::{download_expiry, sign_download, streams};
+use super::download::{download_expiry, scope_base, sign_download, streams};
 
 // JSON-RPC style request/response
 
@@ -481,6 +481,15 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "url": qs, "name": name }))
         }
 
+        "fs_preview_base" => {
+            // An HTML preview's directory cap (board #433). The client sends
+            // ONLY the HTML path; the root is derived and canonicalized here.
+            let path = param(p, "path")?;
+            let (root, dir) = preview_scope(path, &declared_project_paths()).map_err(RpcError::InvalidParams)?;
+            let base = scope_base(token, &root, &dir).map_err(RpcError::Internal)?;
+            Ok(serde_json::json!({ "base": base }))
+        }
+
         "fs_upload" => {
             let path = param(p, "path")?;
             let data = param(p, "data")?;
@@ -563,6 +572,59 @@ pub(super) fn handle_request(req: &Request, token: &str) -> Response {
     Response::from_outcome(req.id, dispatch(req, token))
 }
 
+
+/// Where an HTML preview's cap is rooted (board #433), and the HTML's
+/// directory below that root, both CANONICAL: the longest declared project
+/// path that contains the file, else the file's own directory. A root of `/`
+/// or of the home directory would be a whole-machine or whole-home cap, so it
+/// falls back to the file's directory, and if that is one of them too, no cap
+/// is minted. Only .html/.htm regular files get one, and not through a
+/// symlink of their own (review P2): its resources would come from the
+/// target's directory while Files opens its links from the link's, so v1
+/// previews it without resources. A directory symlink on the way is fine:
+/// both resolve to the same physical directory.
+fn preview_scope(path: &str, projects: &[String]) -> Result<(String, Vec<String>), String> {
+    let spelled = rfs::expand_path(path);
+    if std::fs::symlink_metadata(&spelled).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{path}: a symlinked HTML file is previewed without its resources"));
+    }
+    let html = std::fs::canonicalize(&spelled).map_err(|e| format!("{path}: {e}"))?;
+    let meta = std::fs::metadata(&html).map_err(|e| format!("{path}: {e}"))?;
+    let ext = html.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !meta.is_file() || !(ext == "html" || ext == "htm") {
+        return Err(format!("{path}: not an HTML file"));
+    }
+    let parent = html.parent().ok_or_else(|| format!("{path}: no directory"))?.to_path_buf();
+    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+    let too_wide = |p: &std::path::Path| p == std::path::Path::new("/") || home.as_deref() == Some(p);
+    let declared = projects.iter()
+        .filter_map(|p| std::fs::canonicalize(rfs::expand_path(p)).ok())
+        .filter(|p| parent.starts_with(p) && !too_wide(p))
+        .max_by_key(|p| p.components().count());
+    let root = match declared {
+        Some(root) => root,
+        None if !too_wide(&parent) => parent.clone(),
+        None => return Err(format!("{path}: its directory is too wide to share as a preview scope")),
+    };
+    let dir = parent.strip_prefix(&root).map_err(|_| format!("{path}: outside its scope"))?
+        .components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    Ok((root.to_string_lossy().into_owned(), dir))
+}
+
+/// Every declared project's path, archived included: the candidates for a
+/// preview's scope root. The mobile server declares none.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn declared_project_paths() -> Vec<String> {
+    let Ok(listed) = crate::projects::list(true) else { return Vec::new() };
+    listed["projects"].as_array().map(|rows| rows.iter()
+        .filter_map(|r| r["project"]["path"].as_str().map(str::to_string))
+        .collect()).unwrap_or_default()
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn declared_project_paths() -> Vec<String> {
+    Vec::new()
+}
 
 /// The `project_*` methods. One function so the platform gate lives in exactly
 /// one place: on mobile every method reports method-not-found and the client
@@ -834,5 +896,44 @@ mod tests {
         let err = convert("/tmp/notes.txt").error.expect("error");
         assert_eq!(err.code, ERR_INVALID_PARAMS);
         assert!(err.message.contains("unsupported file type: .txt"), "{}", err.message);
+    }
+
+    /// Board #433: the preview cap's root is derived HERE, canonical, from
+    /// the declared projects and the file's real location; the client only
+    /// names the file.
+    #[test]
+    fn a_preview_scope_is_the_longest_declared_project_else_the_files_directory() {
+        let base = std::env::temp_dir().join(format!("tmm-433-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("proj/site/pages")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let html = base.join("proj/site/pages/index.html");
+        std::fs::write(&html, "<p>x</p>").unwrap();
+        std::fs::write(base.join("proj/site/notes.txt"), "x").unwrap();
+        let s = |p: &std::path::Path| p.to_string_lossy().to_string();
+        let proj = s(&base.join("proj"));
+        let site = s(&base.join("proj/site"));
+        // The longest declared project that contains the file wins.
+        let (root, dir) = preview_scope(&s(&html), &[proj.clone(), site.clone(), "/elsewhere".into()]).unwrap();
+        assert_eq!((root.as_str(), dir), (site.as_str(), vec!["pages".to_string()]));
+        // No declaration: the file's own directory, nothing below it.
+        let (root, dir) = preview_scope(&s(&html), &[]).unwrap();
+        assert_eq!((root, dir), (s(&base.join("proj/site/pages")), Vec::<String>::new()));
+        // A project at '/' is a whole-machine cap: the file's directory instead.
+        let (root, _) = preview_scope(&s(&html), &["/".into()]).unwrap();
+        assert_eq!(root, s(&base.join("proj/site/pages")));
+        // A spelling through a symlink resolves to the same canonical root.
+        std::os::unix::fs::symlink(base.join("proj"), base.join("alias")).unwrap();
+        let (root, _) = preview_scope(&s(&base.join("alias/site/pages/index.html")), &[s(&base.join("alias"))]).unwrap();
+        assert_eq!(root, proj, "canonical, never the symlink's spelling");
+        // The HTML file itself as a symlink: refused, so its resources and
+        // its clicked links can never come from two directories.
+        std::os::unix::fs::symlink(&html, base.join("proj/link.html")).unwrap();
+        let refused = preview_scope(&s(&base.join("proj/link.html")), &[]).unwrap_err();
+        assert!(refused.contains("symlinked"), "{refused}");
+        // Only an HTML file gets a cap.
+        assert!(preview_scope(&s(&base.join("proj/site/notes.txt")), &[]).is_err());
+        assert!(preview_scope(&s(&base.join("proj/site")), &[]).is_err(), "a directory");
+        assert!(preview_scope(&s(&base.join("proj/missing.html")), &[]).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

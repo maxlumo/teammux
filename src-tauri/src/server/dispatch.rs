@@ -97,7 +97,10 @@ pub fn classify(head: &[u8]) -> Route {
     }
     // The PATH (not the query) ends in …/dl — a reverse-proxy prefix is fine.
     let path = target.split('?').next().unwrap_or("");
-    let is_dl = target.contains('?') && (path == "/dl" || path.ends_with("/dl"));
+    // The scope door of a preview's cap (board #433) is path-style:
+    // `…/dl/s/{exp}/…`, a reverse-proxy prefix allowed the same way.
+    let is_dl = (target.contains('?') && (path == "/dl" || path.ends_with("/dl")))
+        || path.starts_with("/dl/s/") || path.contains("/dl/s/");
     match method {
         "GET" | "OPTIONS" if is_dl => Route::Download,
         "GET" if upgrade_ws => Route::WebSocket,
@@ -153,6 +156,9 @@ mod tests {
         assert_eq!(route("GET /dl?path=x&sig=y HTTP/1.1\r\nHost: h\r\n\r\n"), Route::Download);
         assert_eq!(route("OPTIONS /dl?path=x HTTP/1.1\r\n\r\n"), Route::Download);
         assert_eq!(route("GET /tmux/dl?path=x HTTP/1.1\r\n\r\n"), Route::Download, "a proxy prefix");
+        assert_eq!(route("GET /dl/s/9/1.2/ab/L3I/a.css HTTP/1.1\r\n\r\n"), Route::Download, "the scope door (#433)");
+        assert_eq!(route("GET /tmux/dl/s/9/1.2/ab/L3I/a.css HTTP/1.1\r\n\r\n"), Route::Download, "the scope door behind a proxy prefix");
+        assert_ne!(route("GET /dls/x HTTP/1.1\r\n\r\n"), Route::Download, "not a lookalike");
         assert_eq!(route("GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUPGRADE: WebSocket\r\n\r\n"), Route::WebSocket, "case-insensitive");
         assert_eq!(route("GET / HTTP/1.1\r\nUpgrade: h2c, websocket\r\n\r\n"), Route::WebSocket, "a token list");
         assert!(matches!(route("GET /?x=/dl?y HTTP/1.1\r\n\r\n"), Route::Static { .. }), "/dl? in the QUERY is not a download");

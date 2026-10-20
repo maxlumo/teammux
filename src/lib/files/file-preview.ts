@@ -116,6 +116,130 @@ export function renderCsv(text: string | null | undefined): string {
   return html + '</tbody></table>';
 }
 
+/** A minted HTML preview scope: the base URL, and the door's prefix on this
+ * connection (`<http origin><proxy prefix>/dl/s/`) that the URL begins with. */
+export interface PreviewScope { url: string; prefix: string }
+
+/** An HTML preview's document, rebased onto its signed scope (board #433).
+ *
+ * The srcdoc is parsed INERT (a DOMParser document runs no script and fetches
+ * nothing), every author `<base>` and `<meta http-equiv=refresh>` is removed,
+ * and three elements lead `<head>`: a CSP that lets subresources come from
+ * the scope door and `data:` only (no remote host, no script, no form, no
+ * other base), a no-referrer policy, and the base itself. The CSP's sources
+ * are the scope's `prefix` — this connection's http(s) origin and proxy
+ * prefix plus `/dl/s/`, which the URL must begin with — so they are never cut
+ * out of the URL by searching it. With no scope (`null`: a refused or failed
+ * mint) there is no base and the CSP admits `data:` and inline styles only. */
+export function basedPreviewDoc(content: string, scope: PreviewScope | null, parser: DOMParser = new DOMParser()): string {
+  let prefix: string | null = null;
+  const scopeUrl = scope?.url ?? null;
+  if (scope != null) {
+    if (!scope.prefix.endsWith('/dl/s/') || !scope.url.startsWith(scope.prefix)) throw new Error('not a scope URL');
+    // `;` and `,` end a CSP directive and a source list; percent-encoded they
+    // match the same path (CSP compares paths decoded).
+    prefix = scope.prefix.replace(/;/gu, '%3B').replace(/,/gu, '%2C');
+  }
+  const doc = parser.parseFromString(content, 'text/html');
+  for (const el of doc.querySelectorAll('base')) el.remove();
+  for (const el of doc.querySelectorAll('meta[http-equiv]')) {
+    if (el.getAttribute('http-equiv')?.trim().toLowerCase() === 'refresh') el.remove();
+  }
+  // A referrer policy is not an intersection like a CSP: the author's meta or
+  // a per-element attribute would override ours (review P2), so both go.
+  for (const el of doc.querySelectorAll('meta[name]')) {
+    if (el.getAttribute('name')?.trim().toLowerCase() === 'referrer') el.remove();
+  }
+  for (const el of doc.querySelectorAll('[referrerpolicy]')) el.removeAttribute('referrerpolicy');
+  const csp = doc.createElement('meta');
+  csp.setAttribute('http-equiv', 'Content-Security-Policy');
+  // No scope (a refused or failed mint): the page still reads, but loads
+  // nothing; without a base a relative URL would reach the APP's origin.
+  csp.setAttribute('content', (prefix == null ? [
+    "default-src 'none'", 'img-src data:', "style-src 'unsafe-inline'", 'font-src data:',
+    "base-uri 'none'", "form-action 'none'",
+  ] : [
+    "default-src 'none'", `img-src ${prefix} data:`, `style-src ${prefix} 'unsafe-inline'`,
+    `font-src ${prefix} data:`, `media-src ${prefix}`, "form-action 'none'", `base-uri ${prefix}`,
+  ]).join('; '));
+  const referrer = doc.createElement('meta');
+  referrer.setAttribute('name', 'referrer');
+  referrer.setAttribute('content', 'no-referrer');
+  if (scopeUrl == null) doc.head.prepend(csp, referrer);
+  else {
+    const base = doc.createElement('base');
+    base.setAttribute('href', scopeUrl);
+    doc.head.prepend(csp, referrer, base);
+  }
+  // SERIALIZED, never reassembled (#433 review, orchestrator ruling): a fixed
+  // doctype, then the serializer's own output of the prepared element. This
+  // is a structural guarantee, not the fix for a shown injection: quoting the
+  // author's doctype identifiers back by hand was measured to put nothing
+  // before the policy (the tokenizer ends a doctype at any `>`), but nothing
+  // parsed should be re-quoted by hand, and the identifiers mean nothing in a
+  // sandboxed preview.
+  const out = '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+  // The invariant the policy rests on, checked on the output itself: parsed
+  // again, the policy is <head>'s first element and no element precedes it.
+  const again = parser.parseFromString(out, 'text/html');
+  const first = again.head.firstElementChild;
+  if (again.head.previousElementSibling || !first || first.tagName !== 'META'
+    || first.getAttribute('http-equiv') !== 'Content-Security-Policy'
+    || first.getAttribute('content') !== csp.getAttribute('content')) {
+    throw new Error('the prepared preview does not lead with its policy');
+  }
+  return out;
+}
+
+/** A bare `#fragment` link scrolls the preview's own document. Under the
+ * scope base the browser would resolve it against the /dl/s/ URL and
+ * navigate the frame there (board #433). `#` alone goes to the top. */
+export function scrollToFragment(doc: Document, href: string): void {
+  const raw = href.trim().slice(1);
+  if (!raw) { doc.defaultView?.scrollTo(0, 0); return; }
+  let id = raw;
+  try { id = decodeURIComponent(raw); } catch {}
+  const target = doc.getElementById(id) ?? doc.getElementsByName(id)[0] ?? null;
+  target?.scrollIntoView();
+}
+
+/** The preview frame's links: a fragment scrolls in the document, a path
+ * opens in Files, an external URL leaves through its handler, and any other
+ * activation is prevented — a frame under the scope base never navigates. */
+function installHtmlPreviewLinks(doc: Document | null, openPath: (path: string) => void): () => void {
+  if (!doc) return () => {};
+  const fragment = (event: Event) => {
+    const mouse = event as MouseEvent;
+    if (mouse.defaultPrevented) return;
+    const anchor = (mouse.target as Element | null)?.closest?.('a[href]');
+    const href = anchor?.getAttribute('href')?.trim() ?? '';
+    if (!href.startsWith('#')) return;
+    mouse.preventDefault();
+    // Only a plain primary click scrolls; a middle or modified click (a
+    // "new tab" gesture) is prevented and does nothing (review P2).
+    const plain = mouse.type === 'click' && mouse.button === 0
+      && !mouse.ctrlKey && !mouse.metaKey && !mouse.shiftKey && !mouse.altKey;
+    if (plain) scrollToFragment(doc, href);
+  };
+  const rest = (event: Event) => {
+    if ((event.target as Element | null)?.closest?.('a[href], area[href]')) event.preventDefault();
+  };
+  doc.addEventListener('click', fragment, true);
+  doc.addEventListener('auxclick', fragment, true);
+  const removePaths = installPathLinkHandler(doc, openPath);
+  const removeExternal = installExternalLinkHandler(doc);
+  doc.addEventListener('click', rest, true);
+  doc.addEventListener('auxclick', rest, true);
+  return () => {
+    doc.removeEventListener('click', fragment, true);
+    doc.removeEventListener('auxclick', fragment, true);
+    removePaths();
+    removeExternal();
+    doc.removeEventListener('click', rest, true);
+    doc.removeEventListener('auxclick', rest, true);
+  };
+}
+
 /** Preserve Files' loader lifetime and live DOM/file reads during extraction.
  * The host supplies getters; opening/closing a preview does not recreate caches. */
 export function createPreviewRenderers(context: PreviewRenderContext) {
@@ -235,9 +359,7 @@ export function createPreviewRenderers(context: PreviewRenderContext) {
   function attachHtmlPreviewLinks() {
     removeHtmlPreviewLinks();
     const doc = context.htmlPreviewEl?.contentDocument ?? null;
-    const removePaths = installPathLinkHandler(doc, context.openPath);
-    const removeExternal = installExternalLinkHandler(doc);
-    removeHtmlPreviewLinks = () => { removePaths(); removeExternal(); };
+    removeHtmlPreviewLinks = installHtmlPreviewLinks(doc, context.openPath);
   }
 
   async function resolveImages(container: HTMLElement | null) {

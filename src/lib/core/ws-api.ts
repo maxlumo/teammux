@@ -544,6 +544,21 @@ export function createWsApi(connection: Connection) {
     });
   }
 
+  /** An HTML preview's base (board #433): a directory-scoped, signed /dl/s/
+   * URL the server roots where IT decides, so the preview's relative
+   * stylesheets, pictures and fonts load from the server they live on. Bound
+   * to this connection's origin and proxy prefix, as a download is; the
+   * door's prefix on this connection comes with it, so a proxy prefix that
+   * itself holds `/dl/s/` is never mistaken for the door. */
+  function fsPreviewBase(path: string) {
+    const origin = connection.url();
+    return call<{ base: string }>('fs_preview_base', { path }).then(({ base }) => {
+      if (!base.startsWith('/dl/s/')) throw new Error('fs_preview_base: not a scope path');
+      const http = httpOriginForWs(origin!);
+      return { url: http + base, prefix: http + '/dl/s/' };
+    });
+  }
+
   return {
     listSessions, listPanes, listSessionsWithPanes, capturePane, sendKeys, pasteText,
     scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
@@ -558,7 +573,7 @@ export function createWsApi(connection: Connection) {
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
-    skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp,
+    skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase,
   };
 }
 
@@ -588,7 +603,7 @@ export const RPC_KIND = {
   getBookmarks: 'read', saveBookmarks: 'write', getPrefs: 'read', setPref: 'write',
   fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
   fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
-  fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read',
+  fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read',
   fsUpload: 'write', fsConvert: 'read', gitCmd: 'write',
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',

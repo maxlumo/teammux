@@ -61,7 +61,7 @@
   const { files } = scope.state;
   const memory = files.memory;
   const store = files.downloads;
-  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
+  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
   const { getMachineId } = scope.runtime.connection;
 
   // Tauri plugin imports (tree-shaken in browser builds). The platform flags
@@ -969,6 +969,8 @@
   }
 
   const PREVIEW_SIZE_LIMIT = 5 * 1024 * 1024;
+  /** Bumped by a refresh: an HTML preview mints a new base on it (#433). */
+  let previewRenew = $state(0);
   /** The picture open in the one fullscreen viewer (ui/Lightbox), board #188. */
   let imageView = $state('');
 
@@ -1136,7 +1138,7 @@
     }
   }
 
-  async function reloadPreview() {
+  async function reloadPreview(renew = false) {
     const file = currentFile;
     if (!file?.path) return;
     try {
@@ -1145,6 +1147,11 @@
         if (currentFile !== file) return;
         currentFile.content = r.content;
         currentFile = currentFile; // trigger reactivity
+        // The Refresh button renews an HTML preview's base even when the text
+        // is unchanged: an expired or refused one is minted again (#433). A
+        // counter, not a new file object: the tab-return effect calling us
+        // reads currentFile, and a new object would re-run it for ever.
+        if (renew && mimeCategory(file.stat.mime_hint) === 'html') { error = ''; previewRenew++; }
       } else if (file.stat?.mime_hint?.startsWith('image/')) {
         const r = await fsDownload(file.path);
         if (currentFile !== file) return;
@@ -1976,7 +1983,7 @@
           <CommandButton variant="icon" icon="edit" label={t('edit')} onclick={startEdit} />
         {/if}
         <CommandButton variant="icon" icon="download" label={t('filesDownload')} onclick={() => handleDownload(currentFile.path)} />
-        <CommandButton variant="icon" icon="refresh" label={t('filesRefresh')} onclick={reloadPreview} />
+        <CommandButton variant="icon" icon="refresh" label={t('filesRefresh')} onclick={() => reloadPreview(true)} />
         <CommandButton variant="icon" icon="info" label={t('filesInfo')} onclick={() => { view = 'info'; navPush(); }} />
         {#if readingEligible}
           <CommandButton variant="icon" icon="maximize" label={t('filesReading')} onclick={() => { reading = true; navPush(); }} />
@@ -1985,7 +1992,8 @@
     </div>
     <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
       bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
-      {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible} />
+      {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible}
+      previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }} />
     {#if reading}
       <!-- The one way back that is not a gesture: a floating control above the
            safe area, where the thumb is. -->

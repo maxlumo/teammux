@@ -31,9 +31,10 @@ test('the extracted preview renders every existing branch and preserves the code
   assert.ok(!csv.includes('<iframe'));
 
   const html = renderFile({ stat: { mime_hint: 'text/html' }, content: '<h1>HTML</h1>' });
-  assert.ok(html.includes('<iframe '));
-  assert.ok(html.includes('sandbox="allow-same-origin"'));
-  assert.ok(!html.includes('allow-scripts'));
+  // Board #433: the frame waits for its signed base (minted in the client),
+  // so the server render never holds an unbased HTML document.
+  assert.ok(!html.includes('<iframe'));
+  assert.ok(!html.includes('<h1>HTML</h1>'));
   const pdf = renderFile({ stat: { mime_hint: 'application/pdf' }, pdfData: 'bytes' });
   assert.match(pdf, /class="pdf-container/u);
   assert.ok(!pdf.includes('<iframe'));

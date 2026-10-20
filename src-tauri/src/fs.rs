@@ -60,7 +60,7 @@ pub fn resolve(p: &str) -> String {
 /// keeps you under the symlink path instead of jumping to the canonical
 /// target. (`fs::read_dir` and `fs::metadata` follow symlinks at the
 /// filesystem layer, so the contents/stat still reflect the real target.)
-fn expand_path(p: &str) -> PathBuf {
+pub(crate) fn expand_path(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix('~') {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest.trim_start_matches('/'));

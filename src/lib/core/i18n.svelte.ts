@@ -40,6 +40,7 @@ const msgs: Record<string, Record<string, string>> = {
     editorWrap: 'Wrap lines',
     editorNoWrap: 'No wrap',
     previewShowAllLines: 'Show all {n} lines',
+    previewResourcesNotLoaded: 'Resources not loaded; Reload to retry',
     groupSessions: 'Sessions',
     groupOtherServers: 'Other servers',
     // Projects: a workspace declaration you can close and reopen.
@@ -878,6 +879,7 @@ const msgs: Record<string, Record<string, string>> = {
     editorWrap: '自动换行',
     editorNoWrap: '不换行',
     previewShowAllLines: '显示全部 {n} 行',
+    previewResourcesNotLoaded: '资源未加载，可点刷新重试',
     groupSessions: '会话',
     groupOtherServers: '其他服务端',
     projects: '项目',

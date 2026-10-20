@@ -1545,3 +1545,42 @@ for (const browse of ['a file', 'a subdirectory'] as const) {
     } finally { await app.close(); }
   });
 }
+
+test('an HTML preview whose base is refused still reads, says so, and Refresh mints again (board #433)', async context => {
+  const minted: string[] = [];
+  const answers = [
+    () => Promise.reject(new Error('its directory is too wide to share as a preview scope')),
+    () => Promise.resolve({ url: 'https://gw.example/dl/s/9/1.2/sig/L3A/site/', prefix: 'https://gw.example/dl/s/' }),
+  ];
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, pendingImports: ['highlight.js'], modules: [rpc({
+    fsList: async () => ({ path: '/fixture', entries: [{ name: 'index.html', path: '/fixture/index.html', type: 'file', size: 40 }] }),
+    fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 40, mime_hint: 'text/html' }),
+    fsRead: async () => ({ content: '<link rel="stylesheet" href="s.css"><p>Report</p>' }),
+    fsPreviewBase: (path: string) => {
+      minted.push(path);
+      const answer = answers[minted.length - 1];
+      return answer ? answer() : Promise.reject(new Error(`unexpected mint #${minted.length}`));
+    },
+  })] });
+  try {
+    await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.file-row .file-main')!.click();
+    await settle(app);
+    assert.deepEqual(minted, ['/fixture/index.html'], 'one mint per showing');
+    const refused = app.document.querySelector('iframe.html-preview')!.getAttribute('srcdoc')!;
+    assert.ok(refused.includes('<p>Report</p>'), 'the page still reads');
+    assert.ok(refused.includes("base-uri 'none'") && !refused.includes('<base'), 'under the no-resource CSP, with no base');
+    assert.match(app.document.querySelector('.error')?.textContent ?? '', /^Resources not loaded; Reload to retry: .*too wide/u);
+    // A tab return re-reads the text but does not mint (the frame stays).
+    await app.setProps({ visible: false });
+    await app.setProps({ visible: true });
+    await settle(app);
+    assert.equal(minted.length, 1);
+    button(app, 'Refresh').click();
+    await settle(app);
+    assert.deepEqual(minted, ['/fixture/index.html', '/fixture/index.html'], 'the same text, a fresh mint');
+    const based = app.document.querySelector('iframe.html-preview')!.getAttribute('srcdoc')!;
+    assert.ok(based.includes('<base href="https://gw.example/dl/s/9/1.2/sig/L3A/site/">'));
+    assert.equal(app.document.querySelector('.error'), null, 'the line goes once the resources can load');
+  } finally { await app.close(); }
+});

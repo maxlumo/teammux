@@ -186,7 +186,7 @@ pub(super) async fn handle_http_download<S>(mut stream: S, addr: SocketAddr, tok
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Read until the full header block has arrived. Reverse proxies often
     // deliver the request line and headers across multiple TCP segments;
@@ -221,6 +221,18 @@ where
     // "/dl?" segment instead of assuming it starts the path, so a proxy
     // prefix doesn't break query extraction.
     let url_part = first_line.split_whitespace().nth(1).unwrap_or("");
+    // The scope door (board #433): path-style, `…/dl/s/…`, its own verifier.
+    // A proxy prefix may itself hold `/dl/s/` (review P2): the door is the
+    // first occurrence whose tail has the signed shape. With none it is not a
+    // scope request at all, and the ordinary `/dl?` below answers it — a
+    // prefix like `/dl/s/proxy/` must not turn every download into a 403
+    // (validator P2); a malformed scope tail is refused there (no `path`).
+    let scope_at = url_part.match_indices("/dl/s/").map(|(i, _)| i + "/dl/s/".len())
+        .find(|&at| parse_scope(&url_part[at..]).is_some());
+    if let Some(at) = scope_at {
+        serve_scope(&mut stream, addr, &token, &url_part[at..], &req).await;
+        return;
+    }
     let query = match url_part.find("/dl?") {
         Some(i) => &url_part[i + 4..],
         None => "",
@@ -254,7 +266,47 @@ where
             return;
         }
     };
-    let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+    let Ok(file) = tokio::fs::File::open(&path).await else { return };
+    // Images and videos declare their REAL type: a chat `<img>` and a Files
+    // `<video>` stream through /dl, and SVG never renders from
+    // `application/octet-stream` (browsers do not sniff SVG — the dashed
+    // fallback frame in every bubble, 2026-09-08). `Content-Disposition:
+    // attachment` stays on everything, so a top-level navigation still
+    // downloads instead of rendering — an SVG's scripts never execute from an
+    // <img> context, and never get a document here. Everything else keeps
+    // octet-stream: downloads, not documents.
+    send_file(&mut stream, &req, file, &metadata, &attachment(&name), media_content_type(&name), "").await;
+}
+
+/// A download's `Content-Disposition` (#433 review P1-B). The name never
+/// enters the header raw: `filename=` is a printable-ASCII fallback (any
+/// other character, `"` and `\` become `_`), `filename*=` the exact name,
+/// UTF-8 percent-encoded (RFC 6266 / RFC 8187). No CR, LF or other control
+/// byte can reach the header block.
+fn attachment(name: &str) -> String {
+    let fallback: String = name.chars()
+        .map(|c| if (' '..='~').contains(&c) && c != '"' && c != '\\' { c } else { '_' })
+        .collect();
+    let mut exact = String::new();
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) { exact.push(b as char); }
+        else { exact.push_str(&format!("%{b:02X}")); }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{exact}")
+}
+
+/// Answer a GET for an already OPENED file: validators, Range (resume and a
+/// media element's bounded ranges), the headers, then the bytes, all from
+/// that one handle. Shared by /dl and the scope door (#433), so neither can
+/// drift from the other's Range/ETag handling. `disposition` is the whole
+/// Content-Disposition value (`attachment(name)` or a fixed `attachment`);
+/// `extra` is whole header lines.
+async fn send_file<S>(stream: &mut S, req: &str, file: tokio::fs::File, metadata: &std::fs::Metadata, disposition: &str, ctype: &str, extra: &str)
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
     let size = metadata.len();
     let modified = metadata.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -274,41 +326,28 @@ where
     // closed) backend connection, surfacing as intermittent 502s on the
     // next download.
     // If-Range names an older version: ignore Range, send the new file.
-    let range = if !if_range_allows(&req, &etag, &last_modified) { Ok(None) } else { parse_range(&req, size) };
+    let range = if !if_range_allows(req, &etag, &last_modified) { Ok(None) } else { parse_range(req, size) };
     let range = match range {
         Ok(r) => r,
         Err(()) => {
-            let _ = stream.write_all(format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Range\r\nConnection: close\r\n\r\n", size).as_bytes()).await;
+            let _ = stream.write_all(format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Range\r\n{extra}Connection: close\r\n\r\n", size).as_bytes()).await;
             let _ = stream.flush().await;
             return;
         }
     };
-    // Images and videos declare their REAL type: a chat `<img>` and a Files
-    // `<video>` stream through /dl, and SVG never renders from
-    // `application/octet-stream` (browsers do not sniff SVG — the dashed
-    // fallback frame in every bubble, 2026-09-08). `Content-Disposition:
-    // attachment` stays on everything, so a top-level navigation still
-    // downloads instead of rendering — an SVG's scripts never execute from an
-    // <img> context, and never get a document here. Everything else keeps
-    // octet-stream: downloads, not documents.
-    let ctype = media_content_type(&name);
     let header = match range {
         Some((start, end)) => format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\n{}Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified\r\nConnection: close\r\n\r\n",
-            ctype, name, end - start + 1, start, end, size, validators
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Disposition: {}\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\n{}{}Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified\r\nConnection: close\r\n\r\n",
+            ctype, disposition, end - start + 1, start, end, size, validators, extra
         ),
         None => format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{}Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified\r\nConnection: close\r\n\r\n",
-            ctype, name, size, validators
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Disposition: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{}{}Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified\r\nConnection: close\r\n\r\n",
+            ctype, disposition, size, validators, extra
         ),
     };
     if stream.write_all(header.as_bytes()).await.is_err() { return; }
 
-    // Stream file in chunks
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(_) => return,
-    };
+    let mut file = file;
     let mut remaining = size;
     if let Some((start, end)) = range {
         if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
@@ -329,6 +368,221 @@ where
     // Flush any data still sitting in BufStream's write buffer — on drop
     // that buffer is discarded and the tail of the file would be lost.
     let _ = stream.flush().await;
+}
+
+// ── The scope mode: a preview's directory cap (board #433) ──────────────
+//
+// An HTML preview is a srcdoc iframe; its relative `<link>`, `<img>`, CSS
+// `url()` and media resolve against an injected `<base href>` that points
+// HERE: `…/dl/s/{exp}/{dev}.{ino}/{sig}/{b64url(root)}/{dir…}/`. Path-style,
+// because a relative reference drops a base's query. The cap is signed at mint
+// for ONE canonical root, pinned by its (dev, ino), for at most
+// DL_STREAM_TTL_SECS. A request is verified before the filesystem is touched,
+// opened from the root's directory handle segment by segment with no symlink
+// followed, and served from that one verified handle. Only subresource types
+// are served, never a document or a script.
+//
+// Domain separation: the scope MAC is keyed by HMAC(token, SCOPE_LABEL), not by
+// the token. A scope tag and a download/stream tag are HMACs under different
+// keys, so no choice of path or root makes one verify as the other (a legacy
+// path may itself begin with "scope:"). The legacy inputs are unchanged.
+const SCOPE_LABEL: &[u8] = b"tmm-dl-scope-v1";
+
+/// What a scope response adds to the shared headers: no sniffing, no
+/// Referer carrying the cap, and a sandboxing CSP, so a DOCUMENT made from a
+/// scope response (a top-level visit, an <iframe>, an <object> holding the
+/// cap; an SVG is the case) runs no script on the gateway origin. An <img> or
+/// <link> subresource ignores the CSP header.
+const SCOPE_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'\r\n";
+
+fn scope_mac(token: &str, exp: u64, dev: u64, ino: u64, root: &str) -> Hmac<Sha256> {
+    let mut key = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes()).unwrap();
+    key.update(SCOPE_LABEL);
+    let key = key.finalize().into_bytes();
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
+    // NUL-separated: exp, dev and ino are decimal digits, and a root holds no
+    // NUL (refused at mint and at verify), so no field runs into another.
+    mac.update(b"v1\0");
+    mac.update(exp.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(dev.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(ino.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(root.as_bytes());
+    mac
+}
+
+pub(super) fn sign_scope(token: &str, exp: u64, dev: u64, ino: u64, root: &str) -> String {
+    hex::encode(scope_mac(token, exp, dev, ino, root).finalize().into_bytes())
+}
+
+fn verify_scope(token: &str, exp: u64, dev: u64, ino: u64, root: &str, sig: &str) -> bool {
+    let now = unix_now();
+    if exp < now || exp > now + DL_STREAM_TTL_SECS { return false; }
+    if !root.starts_with('/') || root.contains('\0') { return false; }
+    let Ok(sig_bytes) = hex::decode(sig) else { return false };
+    scope_mac(token, exp, dev, ino, root).verify_slice(&sig_bytes).is_ok()
+}
+
+/// Mint a scope base for `root` (already derived and canonicalized by the
+/// caller) at `dir` (segments of the HTML's directory below the root). The
+/// root is pinned by the (dev, ino) of the directory itself, not following a
+/// symlink.
+pub(super) fn scope_base(token: &str, root: &str, dir: &[String]) -> Result<String, String> {
+    use base64::Engine;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    if !root.starts_with('/') || root.contains('\0') { return Err("a scope root is an absolute path".into()); }
+    let meta = std::fs::symlink_metadata(root).map_err(|e| format!("scope root {root}: {e}"))?;
+    if !meta.is_dir() { return Err(format!("scope root {root} is not a directory")); }
+    #[cfg(unix)]
+    let (dev, ino) = (meta.dev(), meta.ino());
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
+    let exp = unix_now() + DL_STREAM_TTL_SECS;
+    let sig = sign_scope(token, exp, dev, ino, root);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(root.as_bytes());
+    let mut out = format!("/dl/s/{exp}/{dev}.{ino}/{sig}/{b64}/");
+    for seg in dir {
+        out.push_str(&urlencoding::encode(seg));
+        out.push('/');
+    }
+    Ok(out)
+}
+
+/// A parsed scope request: the signed fields and the target's segments.
+#[derive(Debug, PartialEq)]
+pub(super) struct ScopeRequest {
+    exp: u64,
+    dev: u64,
+    ino: u64,
+    sig: String,
+    root: String,
+    segs: Vec<String>,
+}
+
+/// Parse what follows `/dl/s/` in a request target. A query (a stylesheet's
+/// `?v=2`) is ignored. Each target segment is percent-decoded EXACTLY once;
+/// an empty segment, `.`, `..`, or a decoded segment holding `/`, `\` or NUL
+/// refuses the whole request, so `%2e%2e` (decodes to `..`) is refused and
+/// `%252e` is the literal name `%2e`.
+pub(super) fn parse_scope(after: &str) -> Option<ScopeRequest> {
+    use base64::Engine;
+    let path = after.split(['?', '#']).next().unwrap_or("");
+    let mut parts = path.split('/');
+    let exp = parts.next()?.parse().ok()?;
+    let (dev, ino) = parts.next()?.split_once('.')?;
+    let (dev, ino) = (dev.parse().ok()?, ino.parse().ok()?);
+    let sig = parts.next()?.to_string();
+    let root = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts.next()?).ok()?;
+    let root = String::from_utf8(root).ok()?;
+    let mut segs = Vec::new();
+    for raw in parts {
+        let seg = urlencoding::decode(raw).ok()?.into_owned();
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains(['/', '\\', '\0']) { return None; }
+        segs.push(seg);
+    }
+    if segs.is_empty() { return None; }
+    Some(ScopeRequest { exp, dev, ino, sig, root, segs })
+}
+
+/// The types a preview's subresources may be served as: stylesheets, images,
+/// fonts, and the existing video/audio types. Everything else (html, js,
+/// json, …) is refused: no document or script ever leaves the scope door.
+fn scope_content_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "css" => "text/css",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        other => return crate::fs::streamed_media_type(other),
+    })
+}
+
+/// Open the target UNDER the signed root, from a directory handle, never by
+/// path: the root opens with O_NOFOLLOW and must be the signed (dev, ino);
+/// each segment opens from the one before with O_NOFOLLOW, so a symlink at
+/// ANY step is refused (ELOOP/ENOTDIR), in-scope ones included (v1); the last
+/// must be a regular file. The file returned is the object checked. `Err` is
+/// the HTTP status to answer: 404 for a missing segment, 403 otherwise.
+#[cfg(unix)]
+fn open_in_scope(root: &str, dev: u64, ino: u64, segs: &[String]) -> Result<std::fs::File, u16> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+    struct Fd(libc::c_int);
+    impl Drop for Fd {
+        fn drop(&mut self) { if self.0 >= 0 { unsafe { libc::close(self.0) }; } }
+    }
+    let status = |errno: i32| if errno == libc::ENOENT { 404 } else { 403 };
+    let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let c = |s: &str| CString::new(s).map_err(|_| 403u16);
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut fd = Fd(unsafe { libc::open(c(root)?.as_ptr(), dir_flags) });
+    if fd.0 < 0 { return Err(403); }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.0, &mut st) } != 0 { return Err(403); }
+    if st.st_dev as u64 != dev || st.st_ino as u64 != ino { return Err(403); }
+    let (last, dirs) = segs.split_last().ok_or(403u16)?;
+    for seg in dirs {
+        let next = Fd(unsafe { libc::openat(fd.0, c(seg)?.as_ptr(), dir_flags) });
+        if next.0 < 0 { return Err(status(errno())); }
+        fd = next;
+    }
+    let file_flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+    let target = unsafe { libc::openat(fd.0, c(last)?.as_ptr(), file_flags) };
+    if target < 0 { return Err(status(errno())); }
+    let file = unsafe { std::fs::File::from_raw_fd(target) };
+    match file.metadata() {
+        Ok(m) if m.is_file() => Ok(file),
+        _ => Err(403),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_in_scope(_root: &str, _dev: u64, _ino: u64, _segs: &[String]) -> Result<std::fs::File, u16> {
+    Err(403)
+}
+
+/// Serve one scope request. Nothing here logs the request target: a cap URL
+/// is a bearer, and only the peer address appears in the reject line.
+async fn serve_scope<S>(stream: &mut S, addr: SocketAddr, token: &str, after: &str, req: &str)
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    async fn status<S: tokio::io::AsyncWrite + Unpin>(stream: &mut S, code: u16) {
+        let line = if code == 404 { "404 Not Found" } else { "403 Forbidden" };
+        let _ = stream.write_all(format!("HTTP/1.1 {line}\r\nContent-Length: 0\r\n{SCOPE_HEADERS}Connection: close\r\n\r\n").as_bytes()).await;
+        let _ = stream.flush().await;
+    }
+    let Some(r) = parse_scope(after) else { return status(stream, 403).await };
+    if !verify_scope(token, r.exp, r.dev, r.ino, &r.root, &r.sig) {
+        eprintln!("🚫 scope request rejected for {} (invalid sig)", addr);
+        return status(stream, 403).await;
+    }
+    let file = match open_in_scope(&r.root, r.dev, r.ino, &r.segs) {
+        Ok(f) => f,
+        Err(code) => return status(stream, code).await,
+    };
+    // The type is the OPENED object's: with no symlink followed, its name is
+    // the last segment itself.
+    let name = r.segs.last().map(String::as_str).unwrap_or("file");
+    let Some(ctype) = scope_content_type(name) else { return status(stream, 403).await };
+    let Ok(metadata) = file.metadata() else { return status(stream, 403).await };
+    // A FIXED disposition: a resource name never enters the header (#433
+    // review P1-B), so no decoded CR, LF or quote can move the header block.
+    send_file(stream, req, tokio::fs::File::from_std(file), &metadata, "attachment", ctype, SCOPE_HEADERS).await;
 }
 
 /// The Content-Type for /dl: image and video extensions get their real type
@@ -540,5 +794,305 @@ mod tests {
         // Even a correctly signed expiry beyond the ceiling is refused.
         let far = now + DL_STREAM_TTL_SECS + 60;
         assert!(!verify_download("tok", true, "/v.mp4", far, &sign_download("tok", true, "/v.mp4", far)));
+    }
+
+    // ── The scope mode (board #433) ─────────────────────────────────────
+
+    fn scope_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tmm-433-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+    #[cfg(unix)]
+    fn pin(p: &std::path::Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(p).unwrap();
+        (m.dev(), m.ino())
+    }
+
+    #[test]
+    fn a_scope_signature_verifies_for_its_own_fields_only() {
+        let exp = unix_now() + 60;
+        let sig = sign_scope("tok", exp, 7, 9, "/tmp/r:1700000000");
+        assert!(verify_scope("tok", exp, 7, 9, "/tmp/r:1700000000", &sig), "a root with colons is just a root");
+        assert!(!verify_scope("tok", exp + 1, 7, 9, "/tmp/r:1700000000", &sig), "exp");
+        assert!(!verify_scope("tok", exp, 8, 9, "/tmp/r:1700000000", &sig), "dev");
+        assert!(!verify_scope("tok", exp, 7, 10, "/tmp/r:1700000000", &sig), "ino");
+        assert!(!verify_scope("tok", exp, 7, 9, "/tmp/r", &sig), "root");
+        assert!(!verify_scope("other", exp, 7, 9, "/tmp/r:1700000000", &sig), "token");
+        assert!(!verify_scope("tok", exp, 7, 9, "/tmp/r:1700000000", ""), "no signature");
+        assert!(!verify_scope("tok", exp, 7, 9, "relative", &sign_scope("tok", exp, 7, 9, "relative")), "a relative root");
+        let past = unix_now() - 1;
+        assert!(!verify_scope("tok", past, 7, 9, "/r", &sign_scope("tok", past, 7, 9, "/r")), "expired");
+        let far = unix_now() + DL_STREAM_TTL_SECS + 60;
+        assert!(!verify_scope("tok", far, 7, 9, "/r", &sign_scope("tok", far, 7, 9, "/r")), "past the ceiling");
+    }
+
+    /// #433 review: a legacy download path may itself begin with "scope:".
+    /// With a derived key no such path, and no root, makes one mode's tag
+    /// verify as another's, in any direction.
+    #[test]
+    fn the_scope_tag_is_an_hmac_under_the_derived_key() {
+        // Known answer, computed outside this code (Python hmac/hashlib):
+        // K = HMAC-SHA256("tok", "tmm-dl-scope-v1"),
+        // tag = HMAC-SHA256(K, "v1\0" 1700000000 "\0" 7 "\0" 9 "\0" "/tmp/r").
+        // The token itself never keys a scope tag (#433 review P1).
+        assert_eq!(sign_scope("tok", 1_700_000_000, 7, 9, "/tmp/r"),
+            "d43b1121ba82ccbbe999bb4a3733a43cff1409e27034173fdb1ff2d4cf7cb7dd");
+    }
+
+    #[test]
+    fn scope_download_and_stream_signatures_never_stand_in_for_each_other() {
+        let (e, d, i) = (unix_now() + 50, 11u64, 22u64);
+        // The review's counterexample to a text-prefixed design: the legacy
+        // download input for path "scope:E:D:I:/tmp/r" is
+        // "dl:scope:E:D:I:/tmp/r:E", exactly what "dl:scope:E:D:I:<root>"
+        // would have been for the root "/tmp/r:E". Under the derived key the
+        // two never verify as each other.
+        let crafted = format!("scope:{e}:{d}:{i}:/tmp/r");
+        let root = format!("/tmp/r:{e}");
+        assert_eq!(mac_input(false, &crafted, e), format!("dl:scope:{e}:{d}:{i}:{root}"), "the counterexample's two inputs are the same text");
+        let download = sign_download("tok", false, &crafted, e);
+        assert!(!verify_scope("tok", e, d, i, &root, &download), "a crafted download tag is no scope tag");
+        let scope = sign_scope("tok", e, d, i, &root);
+        assert!(!verify_download("tok", false, &crafted, e, &scope), "a scope tag is no download tag");
+        assert!(!verify_download("tok", true, "/tmp/r/v.mp4", e, &scope), "nor a stream tag");
+        let stream = sign_download("tok", true, "/tmp/r/v.mp4", e);
+        assert!(!verify_scope("tok", e, d, i, "/tmp/r/v.mp4", &stream), "a stream tag is no scope tag");
+        assert!(!verify_scope("tok", e, d, i, "/tmp/r", &sign_download("tok", false, "/tmp/r", e)), "nor a plain download tag");
+    }
+
+    #[test]
+    fn scope_segments_are_decoded_once_and_refused_when_they_could_climb() {
+        let at = |rest: &str| parse_scope(&format!("9/1.2/ab/{}/{rest}", "L3RtcA")).map(|r| r.segs);
+        assert_eq!(at("a.css"), Some(vec!["a.css".into()]));
+        assert_eq!(at("css/a.css?v=2"), Some(vec!["css".into(), "a.css".into()]), "a query is ignored");
+        assert_eq!(at("a%20b/%E4%B8%AD.png"), Some(vec!["a b".into(), "中.png".into()]), "space and Chinese");
+        assert_eq!(at("100%25.css"), Some(vec!["100%.css".into()]), "a literal %");
+        assert_eq!(at("%252e"), Some(vec!["%2e".into()]), "decoded once: the literal name %2e");
+        assert_eq!(at("%2e%2e/x.css"), None, "%2e%2e is .. after one decode");
+        assert_eq!(at("%2E%2E/x.css"), None, "upper-case hex too");
+        for bad in ["", "x//a.css", "./a.css", "../a.css", "a/../b.css", "a%2Fb.css", "a%2fb.css", "a%5Cb.css", "a%00.css", "dir/"] {
+            assert_eq!(at(bad), None, "{bad:?}");
+        }
+        let r = parse_scope("1700000000/66.77/cafe/L3Rtcg/x.css").unwrap();
+        assert_eq!((r.exp, r.dev, r.ino, r.sig.as_str(), r.root.as_str()), (1700000000, 66, 77, "cafe", "/tmr"));
+        assert_eq!(parse_scope("nope/1.2/ab/L3Rtcg/x.css"), None, "exp is digits");
+        assert_eq!(parse_scope("9/12/ab/L3Rtcg/x.css"), None, "dev.ino");
+        assert_eq!(parse_scope("9/1.2/ab/!!/x.css"), None, "the root is base64url");
+    }
+
+    #[test]
+    fn only_subresource_types_leave_the_scope_door() {
+        for (name, ctype) in [("a.css", "text/css"), ("A.PNG", "image/png"), ("i.svg", "image/svg+xml"), ("f.woff2", "font/woff2"), ("f.ttf", "font/ttf"), ("v.mp4", "video/mp4"), ("s.mp3", "audio/mpeg")] {
+            assert_eq!(scope_content_type(name), Some(ctype), "{name}");
+        }
+        for name in ["index.html", "x.htm", "app.js", "m.mjs", "d.json", ".env", "noext", "x.xhtml"] {
+            assert_eq!(scope_content_type(name), None, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scope_opens_only_what_lies_under_its_pinned_root_without_a_symlink() {
+        let root = scope_dir("root");
+        let outside = scope_dir("outside");
+        std::fs::create_dir_all(root.join("css/deep")).unwrap();
+        std::fs::write(root.join("a.css"), "a{}").unwrap();
+        std::fs::write(root.join("css/deep/b.css"), "b{}").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(outside.join("x.css"), "x{}").unwrap();
+        std::os::unix::fs::symlink(outside.join("x.css"), root.join("escape.css")).unwrap();
+        std::os::unix::fs::symlink(root.join("a.css"), root.join("inner.css")).unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("alias.css")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        let r = root.to_string_lossy().to_string();
+        let (d, i) = pin(&root);
+        let open = |segs: &[&str]| open_in_scope(&r, d, i, &segs.iter().map(|s| s.to_string()).collect::<Vec<_>>()).map(|_| ());
+        assert_eq!(open(&["a.css"]), Ok(()), "a sibling");
+        assert_eq!(open(&["css", "deep", "b.css"]), Ok(()), "a nested file");
+        assert_eq!(open(&["missing.css"]), Err(404));
+        assert_eq!(open(&["css", "nope", "b.css"]), Err(404));
+        assert_eq!(open(&["css"]), Err(403), "a directory is never streamed");
+        assert_eq!(open(&["escape.css"]), Err(403), "a static symlink out of the scope");
+        assert_eq!(open(&["inner.css"]), Err(403), "an in-scope symlink, refused in v1");
+        assert_eq!(open(&["alias.css"]), Err(403), "alias.css -> .env");
+        assert_eq!(open(&["out", "x.css"]), Err(403), "a symlinked directory out of the scope");
+        // The target swapped for a symlink after the cap was minted.
+        std::fs::remove_file(root.join("a.css")).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.css"), root.join("a.css")).unwrap();
+        assert_eq!(open(&["a.css"]), Err(403), "a swapped target");
+        // The root re-pointed after mint: renamed away, and its name now a
+        // symlink to another directory, then a fresh directory of that name.
+        let moved = root.with_extension("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+        assert_eq!(open(&["x.css"]), Err(403), "the root's name is a symlink now");
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("x.css"), "x{}").unwrap();
+        assert_eq!(open(&["x.css"]), Err(403), "another directory under the same name has another inode");
+        for d in [&root, &moved, &outside] { let _ = std::fs::remove_dir_all(d); }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_scope_answer_carries_its_isolation_headers_and_ranges() {
+        use tokio::io::AsyncReadExt;
+        let root = scope_dir("serve");
+        std::fs::write(root.join("a.css"), "body{color:red}").unwrap();
+        std::fs::write(root.join("p.html"), "<script>x</script>").unwrap();
+        let r = root.to_string_lossy().to_string();
+        let base = scope_base("tok", &r, &[]).unwrap();
+        let after = |name: &str| format!("{}{name}", base.strip_prefix("/dl/s/").unwrap());
+        let ask = |after: String, extra: &'static str| async move {
+            let (mut client, mut server) = tokio::io::duplex(1 << 16);
+            let req = format!("GET /dl/s/{after} HTTP/1.1\r\nHost: h\r\n{extra}\r\n");
+            serve_scope(&mut server, "127.0.0.1:1".parse().unwrap(), "tok", &after, &req).await;
+            drop(server);
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        };
+        let css = ask(after("a.css"), "").await;
+        assert!(css.starts_with("HTTP/1.1 200 OK\r\n"), "{css}");
+        for h in ["Content-Type: text/css\r\n", "Content-Disposition: attachment", "X-Content-Type-Options: nosniff\r\n", "Referrer-Policy: no-referrer\r\n", "Content-Security-Policy: sandbox; default-src 'none'"] {
+            assert!(css.contains(h), "{h}: {css}");
+        }
+        assert!(css.ends_with("body{color:red}"), "{css}");
+        let part = ask(after("a.css"), "Range: bytes=5-9\r\n").await;
+        assert!(part.starts_with("HTTP/1.1 206 ") && part.ends_with("color"), "{part}");
+        assert!(ask(after("p.html"), "").await.starts_with("HTTP/1.1 403 "), "a document is refused");
+        assert!(ask(after("none.css"), "").await.starts_with("HTTP/1.1 404 "));
+        let forged = format!("{}/1.2/{}/{}/a.css", unix_now() + 60, "00", base.split('/').nth(6).unwrap());
+        assert!(ask(forged, "").await.starts_with("HTTP/1.1 403 "), "a bad signature, before any file is read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_download_name_never_enters_its_header_raw() {
+        assert_eq!(attachment("plain.txt"), "attachment; filename=\"plain.txt\"; filename*=UTF-8''plain.txt");
+        let d = attachment("a\"b\r\nX-Evil: 1\r\n\r\n中.css");
+        assert!(!d.contains(['\r', '\n']), "{d}");
+        assert_eq!(d, "attachment; filename=\"a_b__X-Evil: 1_____.css\"; filename*=UTF-8''a%22b%0D%0AX-Evil%3A%201%0D%0A%0D%0A%E4%B8%AD.css");
+        assert_eq!(attachment("back\\slash"), "attachment; filename=\"back_slash\"; filename*=UTF-8''back%5Cslash");
+    }
+
+    /// Real HTTP through the one entry, for a scope cap and a legacy /dl
+    /// URL, over files whose NAMES hold a quote, CR, LF and a blank line
+    /// (#433 review P1-B): the header block ends once, at the real end; the
+    /// body is the file's bytes exactly; no injected line becomes a header,
+    /// and the scope's security headers are all in the block, on 200 and 206.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn names_with_quotes_and_line_breaks_cannot_move_the_header_block() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = scope_dir("crlf");
+        let r = root.to_string_lossy().to_string();
+        let base = scope_base("tok", &r, &[]).unwrap();
+        async fn ask(target: String, extra: &str) -> (String, String) {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            let req = format!("GET {target} HTTP/1.1\r\nHost: h\r\n{extra}\r\n");
+            client.write_all(req.as_bytes()).await.unwrap();
+            handle_http_download(server, "127.0.0.1:1".parse().unwrap(), Arc::new("tok".into())).await;
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+            (head.to_string(), body.to_string())
+        }
+        for name in ["q\"uote.css", "cr\r.css", "lf\n.css", "crlf\r\n\r\nX-Evil: 1.css", "x\r\nX-Evil: 1\r\n.css"] {
+            std::fs::write(root.join(name), "body{color:red}").unwrap();
+            let scope = format!("{base}{}", urlencoding::encode(name));
+            let path = root.join(name).to_string_lossy().to_string();
+            let exp = unix_now() + 50;
+            let legacy = format!("/dl?path={}&exp={exp}&sig={}", urlencoding::encode(&path), sign_download("tok", false, &path, exp));
+            for (target, is_scope) in [(scope, true), (legacy, false)] {
+                for (range, status, body) in [("", "200 OK", "body{color:red}"), ("Range: bytes=5-9\r\n", "206 Partial Content", "color")] {
+                    let (head, got) = ask(target.clone(), range).await;
+                    let what = format!("{name:?} scope={is_scope} {status}");
+                    assert!(head.starts_with(&format!("HTTP/1.1 {status}\r\n")), "{what}: {head}");
+                    assert_eq!(got, body, "{what}: the body is the file, so the block ended at its real end");
+                    assert!(!head.lines().any(|l| l.starts_with("X-Evil")), "{what}: {head}");
+                    let dispositions: Vec<&str> = head.lines().filter(|l| l.starts_with("Content-Disposition:")).collect();
+                    if is_scope {
+                        assert_eq!(dispositions, ["Content-Disposition: attachment"], "{what}");
+                        for h in ["X-Content-Type-Options: nosniff", "Referrer-Policy: no-referrer", "Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'"] {
+                            assert!(head.lines().any(|l| l == h), "{what}: {h} in {head}");
+                        }
+                    } else {
+                        assert_eq!(dispositions, [format!("Content-Disposition: {}", attachment(name)).as_str()], "{what}");
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The type is the LAST segment's, the object actually opened (validator
+    /// V5): a directory's name never lends a file its type.
+    #[tokio::test]
+    async fn a_nested_path_takes_its_type_from_the_file_it_opens() {
+        use tokio::io::AsyncReadExt;
+        let root = scope_dir("nested-type");
+        for d in ["css", "d.png", "x.css"] { std::fs::create_dir_all(root.join(d)).unwrap(); }
+        std::fs::write(root.join("css/a.css"), "body{}").unwrap();
+        std::fs::write(root.join("d.png/x.html"), "<script>x</script>").unwrap();
+        std::fs::write(root.join("x.css/p.png"), "png").unwrap();
+        let base = scope_base("tok", &root.to_string_lossy(), &[]).unwrap();
+        let ask = |rest: &str| {
+            let after = format!("{}{rest}", base.strip_prefix("/dl/s/").unwrap());
+            async move {
+                let (mut client, mut server) = tokio::io::duplex(1 << 16);
+                let req = format!("GET /dl/s/{after} HTTP/1.1\r\nHost: h\r\n\r\n");
+                serve_scope(&mut server, "127.0.0.1:1".parse().unwrap(), "tok", &after, &req).await;
+                drop(server);
+                let mut out = String::new();
+                client.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        let css = ask("css/a.css").await;
+        assert!(css.starts_with("HTTP/1.1 200 OK\r\n") && css.contains("Content-Type: text/css\r\n"), "{css}");
+        let html = ask("d.png/x.html").await;
+        assert!(html.starts_with("HTTP/1.1 403 ") && !html.contains("<script>"), "a .png directory lends no type: {html}");
+        let png = ask("x.css/p.png").await;
+        assert!(png.starts_with("HTTP/1.1 200 OK\r\n") && png.contains("Content-Type: image/png\r\n"), "{png}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A proxy prefix that itself holds `/dl/s/` (review P2) still reaches
+    /// the door: the first occurrence with the signed shape is it.
+    #[tokio::test]
+    async fn a_proxy_prefix_holding_the_door_segment_still_reaches_the_door() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = scope_dir("nested");
+        std::fs::write(root.join("a.css"), "body{}").unwrap();
+        let base = scope_base("tok", &root.to_string_lossy(), &[]).unwrap();
+        async fn get(target: &str) -> String {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            client.write_all(format!("GET {target} HTTP/1.1\r\nHost: h\r\n\r\n").as_bytes()).await.unwrap();
+            handle_http_download(server, "127.0.0.1:1".parse().unwrap(), Arc::new("tok".into())).await;
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        }
+        for target in [format!("{base}a.css"), format!("/dl/s/proxy{base}a.css"), format!("/x/dl/s/1/dl/s/proxy{base}a.css")] {
+            let out = get(&target).await;
+            assert!(out.starts_with("HTTP/1.1 200 OK\r\n") && out.ends_with("body{}"), "{target}: {out}");
+        }
+        // The same prefix in front of an ORDINARY download (validator P2): the
+        // legacy /dl answers it; the prefix's /dl/s/ is not a scope request.
+        let path = root.join("a.css").to_string_lossy().to_string();
+        let exp = unix_now() + 50;
+        let legacy = format!("/dl?path={}&exp={exp}&sig={}", urlencoding::encode(&path), sign_download("tok", false, &path, exp));
+        for prefix in ["", "/dl/s/proxy", "/x/dl/s/1/dl/s/proxy"] {
+            let out = get(&format!("{prefix}{legacy}")).await;
+            assert!(out.starts_with("HTTP/1.1 200 OK\r\n") && out.ends_with("body{}"), "{prefix}: {out}");
+        }
+        // No signed shape anywhere and no /dl? either: refused, never served.
+        let out = get("/dl/s/proxy/dl/s/nope/a.css").await;
+        assert!(out.starts_with("HTTP/1.1 4"), "refused: {out}");
+        assert!(!out.contains("body{}"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

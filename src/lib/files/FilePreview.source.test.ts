@@ -12,6 +12,9 @@ test('the preview body uses the one safe markdown renderer and the shared host p
   assert.match(source, /sandbox="allow-same-origin"/u);
   assert.doesNotMatch(source, /allow-scripts/u);
   assert.match(source, /onload=\{attachHtmlPreviewLinks\}/u);
+  // Board #433: the frame shows only the based document, never raw content.
+  assert.match(source, /\{#if htmlSrcdoc != null\}\s*<iframe[\s\S]*?srcdoc=\{htmlSrcdoc\}/u);
+  assert.doesNotMatch(source, /srcdoc=\{currentFile/u);
   assert.doesNotMatch(source, /createPreviewRenderers/u, 'loader caches remain owned by the Files lifetime');
 });
 
