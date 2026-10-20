@@ -22,7 +22,8 @@
 //!    both tests assert files is a subset of feed and that every difference
 //!    names a gap from a closed list.
 //!
-//! Listed: prose paths, a code span that is exactly one path, the target of an
+//! Listed: prose paths, a code span that is exactly one path or a workspace
+//! directory (`code_span_path`, #443), the target of an
 //! inline `[text](target)` link. Skipped: fenced blocks (except the transparent
 //! outer `markdown`/`md` fence the renderer unwraps), other code spans, math,
 //! URLs (masked whole), link text, images, reference-style links and their
@@ -106,11 +107,13 @@ fn is_path(p: &str) -> bool {
         return false;
     }
     let segs: Vec<&str> = p.split('/').collect();
-    let first = segs[0];
-    if first.is_empty() || first.starts_with('~') || (first.contains('.') && !first.starts_with('.')) {
-        return false;
-    }
-    file_like(segs[segs.len() - 1])
+    workspace_first(segs[0]) && file_like(segs[segs.len() - 1])
+}
+
+/// May `first` open a form-W path? Not empty, not `~user`, and no dot unless it
+/// starts with one (`.github` yes, `github.com` and `v1.2` no).
+fn workspace_first(first: &str) -> bool {
+    !first.is_empty() && !first.starts_with('~') && !(first.contains('.') && !first.starts_with('.'))
 }
 
 /// Trailing dots are sentence punctuation unless they ARE a path segment that
@@ -169,6 +172,26 @@ pub fn match_path(src: &[char], prev: Option<char>) -> Option<PathMatch> {
     }
     let suffix: String = src[n..n + used].iter().collect();
     Some(PathMatch { raw: format!("{path}{suffix}"), path, line, col })
+}
+
+/// The path an inline code span's WHOLE content is (`codeSpanPath` in
+/// path-grammar.ts, board #443): one path as `match_path` reads it, or a
+/// workspace DIRECTORY, two or more non-empty segments and a trailing slash
+/// (`lab/out/x_audition/`), first segment as in form W. Prose `foo/bar/` stays
+/// unlisted; a row's `code` field in the shared table is this function's answer.
+pub fn code_span_path(content: &[char]) -> Option<PathMatch> {
+    if let Some(m) = match_path(content, None) {
+        return (m.raw.chars().count() == content.len()).then_some(m);
+    }
+    let body: String = content.iter().collect();
+    if !body.ends_with('/') || !content.iter().all(|c| is_run(*c)) {
+        return None;
+    }
+    let segs: Vec<&str> = body[..body.len() - 1].split('/').collect();
+    if segs.len() < 2 || segs.iter().any(|s| s.is_empty()) || !workspace_first(segs[0]) {
+        return None;
+    }
+    Some(PathMatch { raw: body.clone(), path: body, line: None, col: None })
 }
 
 /// Which characters of `text` belong to a URL (`scheme://` up to whitespace or
@@ -349,8 +372,9 @@ fn unwrap_markdown_fences(src: &str) -> String {
 
 /// Fenced blocks (a run of three or more backticks or tildes, up to the same
 /// run or the end) and single-backtick code spans are holes. A span that is
-/// exactly one path is a mention, as the renderer's `pathCode` makes it a link:
-/// not padded, not part of a longer backtick run, not escaped.
+/// exactly one path (`code_span_path`, a workspace directory included) is a
+/// mention, as the renderer's `pathCode` makes it a link: not padded, not part
+/// of a longer backtick run, not escaped.
 fn hole_code(src: &str) -> (Vec<char>, Holes) {
     let chars: Vec<char> = src.chars().collect();
     let mut fenced: Vec<char> = Vec::with_capacity(chars.len());
@@ -399,7 +423,7 @@ fn hole_code(src: &str) -> (Vec<char>, Holes) {
                 let alone = fenced.get(k + 1) != Some(&'`');
                 let escaped = i > 0 && fenced[i - 1] == '\\';
                 let mention = if alone && !escaped {
-                    match_path(content, None).filter(|m| m.raw.chars().count() == content.len()).map(|m| PathMention { path: m.path, line: m.line, col: m.col })
+                    code_span_path(content).map(|m| PathMention { path: m.path, line: m.line, col: m.col })
                 } else {
                     None
                 };
@@ -801,6 +825,7 @@ mod tests {
     fn every_row_of_the_shared_path_grammar_table() {
         let rows: Vec<Value> = serde_json::from_str(include_str!("../../../src/lib/core/path-grammar.cases.json")).unwrap();
         assert!(rows.len() >= 50, "the table was read: {} rows", rows.len());
+        let (mut coded, mut nulls) = (0usize, 0usize);
         for row in rows {
             let input = row["input"].as_str().unwrap();
             let want: Vec<(String, String, Option<u64>, Option<u64>)> = row["paths"].as_array().unwrap().iter()
@@ -808,7 +833,17 @@ mod tests {
                 .collect();
             let got: Vec<_> = find_paths(&chars(input)).into_iter().map(|(_, m)| (m.raw, m.path, m.line, m.col)).collect();
             assert_eq!(got, want, "{input:?}");
+            // The code-span reading (#443): a row that has `code` says what a span
+            // holding exactly the input links, `null` included.
+            if let Some(code) = row.get("code") {
+                let want = (!code.is_null()).then(|| (code["raw"].as_str().unwrap().to_string(), code["path"].as_str().unwrap().to_string(), code["line"].as_u64(), code["col"].as_u64()));
+                let got = code_span_path(&chars(input)).map(|m| (m.raw, m.path, m.line, m.col));
+                assert_eq!(got, want, "code span {input:?}");
+                coded += 1;
+                nulls += usize::from(code.is_null());
+            }
         }
+        assert!(coded > nulls && nulls > 0, "both kinds of code row were read: {coded} rows, {nulls} null");
     }
 
     #[test]

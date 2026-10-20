@@ -20,7 +20,7 @@
 // `marked` is a singleton, so importing this module once registers it for every
 // renderer (Files preview, Team chat, Chat view).
 import { marked } from 'marked';
-import { STOP, firstPathAt, matchPath } from './path-grammar.ts';
+import { STOP, codeSpanPath, firstPathAt, matchPath } from './path-grammar.ts';
 
 /** The ONE href encoder, for two kinds of input (#431 review P1-A).
  * - `'url'`: marked's own `cleanUrl`. It percent-encodes what encodeURI
@@ -117,8 +117,9 @@ marked.use({
     // so a path inside `[...](url)`, `[...][ref]` or `![...](img)` never
     // becomes a second, nested anchor (#431 review P1-B).
     {
-      // An inline code span whose WHOLE content, as written, is one path.
-      // A span that only contains a path (`cargo test src/a.rs`) is left to
+      // An inline code span whose WHOLE content, as written, is one path
+      // (`codeSpanPath`, which also takes a workspace directory, #443). A
+      // span that only contains a path (`cargo test src/a.rs`) is left to
       // marked's own codespan, so a command stays a command to copy.
       name: 'pathCode',
       level: 'inline',
@@ -130,8 +131,8 @@ marked.use({
         if (this.lexer.state.inLink) return;
         const m = /^`([^`\n]+)`(?!`)/.exec(src);
         if (!m) return;
-        const hit = matchPath(m[1]!, '');
-        if (!hit || hit.raw !== m[1]) return;
+        const hit = codeSpanPath(m[1]!);
+        if (!hit) return;
         return { type: 'pathCode', raw: m[0], text: hit.raw };
       },
       renderer(token: any) {

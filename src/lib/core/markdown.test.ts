@@ -203,6 +203,12 @@ test('a code span is a path link only when its whole content is a path (#431)', 
   assert.ok(!renderMarkdown('``src/a.rs``').includes('<a '), 'a double-backtick span is marked\'s own');
 });
 
+test('a code span holding a workspace directory links it; the same words in prose do not (#443)', () => {
+  const html = renderMarkdown('海选：`lab/out/through_the_floorboards_audition/` 下有 11 个候选; foo/bar/ stays prose');
+  assert.ok(html.includes('<a href="lab/out/through_the_floorboards_audition/"><code>lab/out/through_the_floorboards_audition/</code></a>'), html);
+  assert.ok(html.includes(' foo/bar/ stays prose'), `prose directory stays text: ${html}`);
+});
+
 test('a path inside a link, a reference link or an image never becomes a second anchor (#431 review P1-B)', () => {
   for (const [src, outer] of [
     ['[`src/a.rs`](https://example.test)', 'https://example.test'],

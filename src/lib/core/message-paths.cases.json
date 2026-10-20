@@ -68,5 +68,13 @@
   {"body": "$$\nhttps://h.dev/a src/file.rs\n$$\nthen docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
   {"body": "$https://h.dev/a src/file.rs$ then docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
   {"body": "$$https://h.dev/a src/file.rs$$ then docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
-  {"body": "```\nhttps://h.dev/a src/file.rs\n```\nthen docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]}
+  {"body": "```\nhttps://h.dev/a src/file.rs\n```\nthen docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
+  {"body": "- **成品**：`lab/out/through_the_floorboards/through_the_floorboards.mp3` 和 `.wav`\n- **海选**：`lab/out/through_the_floorboards_audition/` 下有 11 个副歌 hook 候选", "feed": ["lab/out/through_the_floorboards/through_the_floorboards.mp3", "lab/out/through_the_floorboards_audition/"], "files": ["lab/out/through_the_floorboards/through_the_floorboards.mp3", "lab/out/through_the_floorboards_audition/"]},
+  {"body": "see lab/out/x/ and `lab/out/y/`", "feed": ["lab/out/y/"], "files": ["lab/out/y/"]},
+  {"body": "` lab/out/x/ `", "feed": [], "files": []},
+  {"body": "`lab/`", "feed": [], "files": []},
+  {"body": "```\n`lab/out/x/`\n```", "feed": [], "files": []},
+  {"body": "[`lab/out/x/`](https://x.dev)", "feed": [], "files": []},
+  {"body": "[see `lab/out/x/`][1]\n\n[1]: https://x.dev/", "feed": [], "files": []},
+  {"body": "https://h.dev/?q=`lab/out/x/`", "feed": [], "files": []}
 ]

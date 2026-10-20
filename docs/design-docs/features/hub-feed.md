@@ -474,7 +474,15 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   contract, run by the TS test and by #432's Rust twin.
 - **Where it applies:** prose, and an inline code span whose WHOLE content is
   one path (`cargo test src/a.rs` stays plain code, so a command stays a
-  command to copy). Fenced blocks are never linked, and neither is anything in
+  command to copy). A code span also takes a workspace DIRECTORY, two or more
+  segments and a trailing slash (`lab/out/x_audition/`, board #443, owner
+  2026-10-20 screenshot): backticks are the writer marking a name, while prose
+  `foo/bar/` stays text because it is too often prose. `codeSpanPath` is that
+  rule; a corpus row's optional `code` field pins it, and Rust's
+  `code_span_path` reads the same rows, so Files mode lists the directory the
+  bubble links (`message-paths.cases.json`). A linked
+  code span already wears the link colour and underline (`.md a`, measured
+  in the running Hub, #443). Fenced blocks are never linked, and neither is anything in
   a link's or an image's text: the decision is made at the token stage while
   marked still knows it is inside `[…](…)`, `[…][ref]` or `![…](…)`, so there
   is never a nested anchor (#431 review P1-B). At a URL the URL wins: the

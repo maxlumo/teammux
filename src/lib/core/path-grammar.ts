@@ -3,7 +3,7 @@
 // than as `[text](path)` links: `src/lib/hub/Feed.svelte:118`, `/tmp/x/`,
 // `~/.config/tmux-mobile/config.toml`. This module says what counts as one.
 //
-// Two layers, kept apart (#431 review P2):
+// Two layers, kept apart (#431 review P2), plus the code-span rule below:
 // - the LEXICON, `matchPath(src, prev)`: is there a path at the start of
 //   `src`, given the character before it?
 // - the SCANNABLE REGIONS, `findPaths(text)`: where in PLAIN text to look.
@@ -32,7 +32,11 @@
 // boundary, never part of a path (`--manifest-path=src-tauri/Cargo.toml`
 // links `src-tauri/Cargo.toml`). Not supported,
 // on purpose: spaces, non-ASCII segments, `#L12` fragments, and relative
-// directories without `./` (`foo/bar/` is too often prose).
+// directories without `./` in prose (`foo/bar/` is too often prose).
+//
+// A code span is a third context, `codeSpanPath(body)`: its whole content is
+// one of the forms above, or a workspace directory (`lab/out/x/`, #443). A
+// table row's optional `code` field is what `codeSpanPath(input)` returns.
 
 /** Where a bare URL or path ends: CJK and fullwidth characters. Code points
  * U+2E80-U+9FFF (CJK radicals through unified ideographs), U+3000-U+303F (CJK
@@ -87,6 +91,12 @@ function stripDots(p: string): string {
   return p.replace(/\.+$/u, '');
 }
 
+/** May `first` open a form-W path? Not empty, not `~user`, and no dot unless
+ * it starts with one (`.github` yes, `github.com` and `v1.2` no). */
+function workspaceFirst(first: string): boolean {
+  return first !== '' && !first.startsWith('~') && !(first.includes('.') && !first.startsWith('.'));
+}
+
 function isPath(p: string): boolean {
   if (p.startsWith('//')) return false;
   if (p.startsWith('/')) return (p.match(/\//gu)?.length ?? 0) >= 2;
@@ -95,9 +105,7 @@ function isPath(p: string): boolean {
   if (p.startsWith('../')) return p.length > 3;
   if (!p.includes('/')) return false;
   const segs = p.split('/');
-  const first = segs[0]!;
-  if (first === '' || first.startsWith('~') || (first.includes('.') && !first.startsWith('.'))) return false;
-  return FILE_LIKE.test(segs.at(-1)!);
+  return workspaceFirst(segs[0]!) && FILE_LIKE.test(segs.at(-1)!);
 }
 
 /** The path at the start of `src`, or null. `prev` is the character before
@@ -113,6 +121,20 @@ export function matchPath(src: string, prev: string): PathMatch | null {
   const out: PathMatch = { raw: path + suffix[0], path, line: Number(suffix[1]) };
   if (suffix[2] !== undefined) out.col = Number(suffix[2]);
   return out;
+}
+
+/** The path an inline code span's WHOLE content is, or null (a span that only
+ * contains one, `cargo test src/a.rs`, stays a command to copy). One more form
+ * than prose (#443, owner 2026-10-20): a workspace DIRECTORY, two or more
+ * segments and a trailing slash (`lab/out/x_audition/`), first segment as in
+ * form W. Prose `foo/bar/` stays unlinked; a span is the writer marking a name. */
+export function codeSpanPath(body: string): PathMatch | null {
+  const hit = matchPath(body, '');
+  if (hit) return hit.raw === body ? hit : null;
+  if (!body.endsWith('/') || RUN.exec(body)?.[0] !== body) return null;
+  const segs = body.slice(0, -1).split('/');
+  if (segs.length < 2 || segs.includes('') || !workspaceFirst(segs[0]!)) return null;
+  return { raw: body, path: body };
 }
 
 const URL_REGION = /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S*/gu;

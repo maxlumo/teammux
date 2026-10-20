@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { findPaths, firstPathAt, matchPath, STOP, type PathMatch } from './path-grammar.ts';
+import { codeSpanPath, findPaths, firstPathAt, matchPath, STOP, type PathMatch } from './path-grammar.ts';
 
 // The shared case table (board #431): this test and the Rust twin (#432) run
 // the same rows, so the two implementations cannot drift. No case lives only
 // here; a new grammar case is a new row.
-type Row = { input: string; paths: PathMatch[] };
+type Row = { input: string; paths: PathMatch[]; code?: PathMatch | null };
 const rows: Row[] = JSON.parse(readFileSync(new URL('./path-grammar.cases.json', import.meta.url), 'utf8'));
 
 test('every row of the shared case table: the paths, in order (#431)', () => {
@@ -20,6 +20,12 @@ test('every row of the shared case table: the paths, in order (#431)', () => {
     });
     assert.deepEqual(got, paths, input);
   }
+});
+
+test('a row\'s code field is what a code span holding exactly the input links (#443)', () => {
+  const coded = rows.filter((r) => 'code' in r);
+  assert.ok(coded.some((r) => r.code === null) && coded.some((r) => r.code && r.paths.length === 0), 'both kinds of row are present');
+  for (const { input, code } of coded) assert.deepEqual(codeSpanPath(input), code, input);
 });
 
 test('the offsets name the matched text, and firstPathAt agrees with findPaths', () => {
