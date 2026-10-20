@@ -47,12 +47,12 @@ the package version, the source commit (`git --short=8`: AT LEAST 8 hex characte
 (`unknown` when the clock was). It rides the login answer, not a new RPC, in both paths. A server older than #368 sends
 none; a client reads that as "unknown", never as a mismatch.
 
-`caps` (board #377) lists what the server can do that a client must know BEFORE it writes. Today three: `board_dispatch` —
+`caps` (board #377) lists what the server can do that a client must know BEFORE it asks (a write, or a read an older server answers wrongly). Today four: `board_dispatch` —
 `hub_board_save` with `dispatch: true` hands the issue to its assignee; `spawn_join` (board #382) — `hub_spawn` with `join`
 puts the agent in that team, one present in this project (a member home here, live or stopped) (an older server ignores the key and spawns it standalone, so the page and `tmm spawn
---join` refuse a join unsent without it; a standalone spawn is not gated); `agent_team` (board #384) — `hub_agent_set_team` `hub_files` (board #432) — `hub_search` with `files: true` lists the files the messages mention. An older server REFUSES an empty `grep` (the default way into Files) as a bad request before it looks at `files`, and answers a worded one with messages; so a client asks for the cap first (the Hub's Files mode and `tmm log --files` refuse an older server before sending, saying "cannot list files"), and still checks the shape of the answer.
+--join` refuse a join unsent without it; a standalone spawn is not gated); `agent_team` (board #384) — `hub_agent_set_team`
 exists (an older server answers method-not-found after the card was dropped, so the page disables the drag and the Move items and
-`tmm agent team` exits with nothing changed). A server that lacks them sends no `caps` at all, and a
+`tmm agent team` exits with nothing changed); `hub_files` (board #432) — `hub_search` with `files: true` lists the files the messages mention. An older server REFUSES an empty `grep` (the default way into Files) as a bad request before it looks at `files`, and answers a worded one with messages, so neither reads as "cannot" from the answer alone: the Hub's Files mode and `tmm log --files` check the cap first and refuse an older server before sending anything ("cannot list files"), and still check the shape of the answer. A server that lacks them sends no `caps` at all, and a
 client that needs one refuses the write (the page's write path refuses it unsent and disables the picker, `tmm board assign` / `add --assignee` exit
 with nothing saved); a login that has not answered yet is a wait, never a yes rather than store a label no agent is ever told about. Like `build`, it rides the login answer, in both paths.
 

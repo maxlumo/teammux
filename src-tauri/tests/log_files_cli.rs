@@ -9,6 +9,7 @@
 #![cfg(target_os = "linux")]
 
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -16,6 +17,30 @@ use tokio_tungstenite::tungstenite::Message;
 struct Fake {
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     addr: String,
+    /// Set on drop: the accept loop ends and the thread is joined, so a test that is done leaves no
+    /// listener and no thread behind (a fake that outlives its test is reclaimed by nobody).
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The thread says it ended; `drop` waits for it with a limit, so a thread that does not stop
+    /// is a failed test and not a hung one.
+    ended: std::sync::mpsc::Receiver<()>,
+}
+
+impl Drop for Fake {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // `accept` is blocking: one connection wakes it, and it sees the flag.
+        let _ = std::net::TcpStream::connect(self.addr.trim_start_matches("ws://"));
+        let ended = self.ended.recv_timeout(std::time::Duration::from_secs(5));
+        if let Some(t) = self.thread.take() {
+            if ended.is_ok() {
+                let _ = t.join();
+            }
+        }
+        if ended.is_err() && !std::thread::panicking() {
+            panic!("the fake gateway's thread did not stop within 5 s of being dropped");
+        }
+    }
 }
 
 fn row(path: &str, count: u64) -> serde_json::Value {
@@ -36,13 +61,20 @@ fn fake_caps(pages: Vec<serde_json::Value>, caps: Option<&'static [&'static str]
     let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
+    let (ended_tx, ended) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
         rt.block_on(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(listener.local_addr().unwrap().to_string()).unwrap();
             loop {
                 let Ok((stream, _)) = listener.accept().await else { return };
+                if stopped.load(Ordering::SeqCst) {
+                    return;
+                }
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
                 let Some(Ok(Message::Text(_))) = ws.next().await else { continue };
                 let login = match caps {
@@ -67,8 +99,10 @@ fn fake_caps(pages: Vec<serde_json::Value>, caps: Option<&'static [&'static str]
                 let _ = ws.close(None).await;
             }
         });
+        }));
+        let _ = ended_tx.send(());
     });
-    Fake { calls, addr: format!("ws://{}", rx.recv().unwrap()) }
+    Fake { calls, addr: format!("ws://{}", rx.recv().unwrap()), stop, thread: Some(thread), ended }
 }
 
 impl Fake {
@@ -188,4 +222,15 @@ fn the_plain_log_refuses_a_before_it_would_ignore() {
         assert!(err.contains("--before continues a --files list"), "{args:?}: {err}");
     }
     assert!(gw.calls.lock().unwrap().is_empty(), "refused before any call");
+}
+
+#[test]
+fn a_fake_gateway_that_is_dropped_stops_listening_and_its_thread_is_joined() {
+    let addr = {
+        let gw = fake(vec![]);
+        gw.addr.trim_start_matches("ws://").to_string()
+    };
+    // Dropped: the port no longer accepts. (The listener closes when the thread's runtime ends, which
+    // `drop` waited for.)
+    assert!(std::net::TcpStream::connect(&addr).is_err(), "nothing is listening on {addr} after the fake is gone");
 }
