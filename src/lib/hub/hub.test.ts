@@ -1057,6 +1057,11 @@ test('a lifecycle verb speaks the one status colour language', () => {
   // already keeps for "paused on a human", never red (#347).
   assert.equal(sysVerbColor('offline'), sysVerbColor('interrupted'));
   assert.equal(sysVerbColor('offline'), 'var(--status-warn)');
+  // Board #437: the server's unconfirmed report speaks the same grammar and
+  // the same amber (somebody has to look; nothing is proved broken).
+  assert.deepEqual(sysParts("unconfirmed dev — no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone."),
+    { verb: 'unconfirmed', who: 'dev', text: "no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", cmd: false });
+  assert.equal(sysVerbColor('unconfirmed'), sysVerbColor('offline'));
   // Never a literal colour: both themes read the same tokens.
   for (const v of ['spawned', 'stopped', 'removed', 'done', 'interrupted', 'assigned', 'unassigned', 'moved', 'left', 'wat', '']) {
     assert.match(sysVerbColor(v), /^var\(--|^color-mix\(/u, `${v} must resolve through a token`);

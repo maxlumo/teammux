@@ -304,6 +304,112 @@ pub fn offline_line(name: &str, why: &str, from: &str) -> String {
 /// The sender a server-authored notice wears in a pane.
 pub const NOTICE_SENDER: &str = "tmm";
 
+/// Report this session's overdue typed lines (board #437): the ONE report
+/// step both triggers call — the capture tick (`capture_loop`, for every
+/// session `telemetry::unreported_sessions` names) and a client's live feed
+/// read. Each overdue row is said once (`telemetry::sweep_deliveries`, one
+/// transaction per row): the feed's warn, and the room line when the row
+/// names a message whose sender the room still holds. Nothing is typed back
+/// into the target pane, nothing is retyped, no key is sent.
+pub fn report_unconfirmed(session: &str) -> Vec<telemetry::Report> {
+    // The room, read so that a failed read is told from "no project" (review
+    // P1 on b92c3d88): unknown is never treated as the legacy fallback, and
+    // a session whose room cannot be read is not swept at all this time.
+    let room = match super::rooms::session_room_checked(session) {
+        Ok(room) => room,
+        Err(e) => {
+            eprintln!("⚠️  could not read the room of {session} ({e}); its unconfirmed lines wait for the next sweep");
+            return Vec::new();
+        }
+    };
+    let reports = telemetry::sweep_deliveries(session, &|row| unconfirmed_report(&room, row));
+    // The sending AGENT is told once per sweep, best effort, after every
+    // lock is released (review P1-B: its pane cannot commit with the store;
+    // the room line and its unread are the guarantee). Not a self-wake
+    // (its pane is the stuck one), not a human or UI sender (no pane: the
+    // room is where they read), and only a live managed agent's pane
+    // (`deliver_chat_line` is quiet otherwise). One attempt, no retry, so
+    // it is never typed twice.
+    let mut by_sender: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = Default::default();
+    for r in &reports {
+        if r.sender != r.recipient && r.sender != "human" && !r.sender.is_empty() {
+            by_sender.entry(&r.sender).or_default().push((&r.recipient, &r.when));
+        }
+    }
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    for (sender, items) in by_sender {
+        let _ = super::deliver_chat_line(session, sender, &unconfirmed_notice(&items, &stamp));
+    }
+    reports
+}
+
+/// The ONE line a sending agent's pane gets for its unconfirmed messages
+/// (board #437), in the stamped RESULT shape that asks nothing of the reply
+/// edge (`address::requesters`, as #347's offline notice). The same facts as
+/// the room line, and no remedy that could do harm: no resend on its own,
+/// and a person is the one who looks at the pane.
+pub fn unconfirmed_notice(items: &[(&str, &str)], stamp: &str) -> String {
+    let what: Vec<String> = items.iter().map(|(to, when)| format!("{when} to @{to}")).collect();
+    let (msgs, they, it) = if items.len() == 1 { ("message", "it may be waiting in its composer", "it") } else { ("messages", "they may be waiting in their composers", "them") };
+    format!(
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] unconfirmed — no confirmation was seen for your {msgs} of {}; {they}, or the confirmation is late. Do not resend {it} because of this alone; if it matters, ask @human to look.",
+        what.join(", "),
+    )
+}
+
+/// The capture tick's half (board #437): every session holding a typed chat
+/// line not yet reported, swept by `report_unconfirmed`. A clock, not a
+/// reader: a line nobody is looking at is reported all the same.
+pub fn report_all_unconfirmed() {
+    for session in telemetry::unreported_sessions() {
+        report_unconfirmed(&session);
+    }
+}
+
+/// The room line of one unconfirmed row. `Ok(None)` when there is, as a
+/// fact, no sender to name (review: never guessed): a row with no message id
+/// (the #355 nudge, a board notice) or whose message the room is READ not to
+/// hold. A failed read is `Err` (review P1 on b92c3d88): the sweep then
+/// reports nothing for that row and consumes nothing, and the next sweep
+/// reads again.
+fn unconfirmed_report(room: &str, row: &super::store::DeliveryRow) -> Result<Option<telemetry::Report>, String> {
+    if row.msg_id.is_empty() {
+        return Ok(None);
+    }
+    let Some(msg) = super::with_store(|s| s.hub_message_by_id(room, &row.msg_id))? else { return Ok(None) };
+    let when = short_when(msg.ts, chrono::Local::now());
+    Ok(Some(telemetry::Report {
+        line: super::store::OnceLine {
+            room: room.to_string(),
+            id: format!("unconfirmed:{}", row.id),
+            sender: NOTICE_SENDER.to_string(),
+            body: unconfirmed_line(&row.window, &msg.sender, &when),
+        },
+        sender: msg.sender,
+        recipient: row.window.clone(),
+        when,
+    }))
+}
+
+/// The room's record of an unconfirmed row (board #437, review P1-A): only
+/// what is known — no echo of it was seen — and the remedy that does no harm
+/// first. It never says the CLI refused the line, and it does not suggest a
+/// resend, an Enter or an interrupt.
+pub fn unconfirmed_line(recipient: &str, sender: &str, when: &str) -> String {
+    format!(
+        "[tmm] unconfirmed {recipient} — no confirmation was seen for {sender}'s message of {when}; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone."
+    )
+}
+
+/// `HH:MM` for a message from today, `YYYY-MM-DD HH:MM` otherwise: how a
+/// line names a message's time (the quote token's rule, board #290). Pure.
+pub(crate) fn short_when(ts_ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    let Some(at) = chrono::DateTime::from_timestamp_millis(ts_ms).map(|t| t.with_timezone(&chrono::Local)) else {
+        return String::new();
+    };
+    if at.date_naive() == now.date_naive() { at.format("%H:%M").to_string() } else { at.format("%Y-%m-%d %H:%M").to_string() }
+}
+
 /// The ONE line the sender's own pane gets when its message reached nobody
 /// (board #347 review P1-A). The room line is the record for the feed and
 /// the log; this is what actually reaches an AGENT sender, because the team
@@ -1265,7 +1371,7 @@ mod tests {
         // The sweep reports only pending rows, so no row = no `unconfirmed`,
         // ever (the live check waits out the 45 s ack window for real).
         end(&s, "dev");
-        telemetry::sweep_deliveries(&s);
+        telemetry::sweep_deliveries(&s, &|_| Ok(None));
         assert!(warns(&s).is_empty(), "{:?}", warns(&s));
         assert!(!telemetry::turn_busy(&s, "dev"), "a steered event is not a turn fact");
 
@@ -1320,7 +1426,7 @@ mod tests {
         assert!(record_prompt(&s, "dev", first), "the one echo settles the first");
         assert_eq!(pending(&s, "dev"), 0);
         end(&s, "dev");
-        telemetry::sweep_deliveries(&s);
+        telemetry::sweep_deliveries(&s, &|_| Ok(None));
         assert!(warns(&s).is_empty(), "{:?}", warns(&s));
 
         // Queue control: the second line owes too (it will be its own turn).
@@ -1377,7 +1483,7 @@ mod tests {
         assert_eq!(pending(&s, "dev"), 0, "waited for the edge, then steered: no row");
         assert!(telemetry::recent_events(&s, 0).iter().any(|e| e.kind == "steered" && e.deliveries.iter().any(|d| d.msg == "m2")));
         end(&s, "dev");
-        telemetry::sweep_deliveries(&s);
+        telemetry::sweep_deliveries(&s, &|_| Ok(None));
         assert!(warns(&s).is_empty(), "{:?}", warns(&s));
     }
 
@@ -1636,7 +1742,7 @@ mod tests {
         assert_eq!(held(&a, "idle"), 1, "unknown: held, however old");
         // A line this process typed into A's open window, never echoed.
         crate::projects::with_store(|st| st.insert_delivery(&a, "dev", "[tmm chat 03:00] lead: @dev typed", 0, old, "")).unwrap();
-        telemetry::sweep_deliveries(&a);
+        telemetry::sweep_deliveries(&a, &|_| Ok(None));
         assert!(warns(&a).is_empty(), "the sweep reports nothing for an unknown window: {:?}", warns(&a));
         // A live end on aux is aux's own fact: aux is known, and at rest.
         record_notification(&a, "aux", "completed");
@@ -1651,7 +1757,7 @@ mod tests {
         assert_eq!(telemetry::derive(&a, "aux", 0).state, "idle", "the live end is not overwritten by the older log's open prompt");
         flush_at(&a, "idle", "t");
         assert_eq!(typed(), vec![line_b.to_string(), line_a.to_string()], "known and ended: the held line goes out");
-        telemetry::sweep_deliveries(&a);
+        telemetry::sweep_deliveries(&a, &|_| Ok(None));
         assert!(warns(&a).is_empty(), "dev's turn is open: its line is still owed, not reported");
     }
 
@@ -1947,7 +2053,7 @@ mod tests {
         assert_eq!(w.len(), 1, "a line that did not land is SAID once (#250): {w:?}");
         assert!(w[0].starts_with("undelivered (server gone): "), "{w:?}");
         end(&s, "dev");
-        telemetry::sweep_deliveries(&s);
+        telemetry::sweep_deliveries(&s, &|_| Ok(None));
         assert_eq!(warns(&s).len(), 1, "and never an `unconfirmed` on top");
 
         // Typed: one steered event names both messages.

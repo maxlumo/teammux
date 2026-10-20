@@ -1600,6 +1600,13 @@ pub fn held_windows(session: &str) -> Vec<String> {
     queue(|s| s.held_windows(session)).unwrap_or_default()
 }
 
+/// Test seam (board #437): every outstanding row of `session` typed `secs`
+/// ago, for tests in other module trees that cannot reach the store.
+#[cfg(test)]
+pub(crate) fn backdate_deliveries_for_test(session: &str, secs: u64) {
+    queue(|s| s.backdate_deliveries(session, now().saturating_sub(secs))).unwrap();
+}
+
 /// The rows are about to be typed: they become ordinary pending deliveries
 /// whose ack clock starts now. Called BEFORE the typing, like
 /// `record_delivery` is the record of a promise — an echo racing the end
@@ -2042,51 +2049,126 @@ fn overdue_rows(rec: &Rec, rows: &[super::store::DeliveryRow], mark: (i64, u64),
         .collect()
 }
 
-/// Report deliveries that never came back as a prompt. Called before a client
-/// reads the feed, which is exactly when the answer is wanted. A report does
-/// NOT settle the row (board #249): the line may still be in the CLI's queue,
-/// and a late real echo must still find it and settle it as ours, retracting
-/// the warn by its row id. The persisted `warned` mark makes the report
-/// happen once per row, across sweeps and restarts; the 24 h prune bounds the
-/// rows that never echo. A window whose turn is unknown (board #394) reports
-/// nothing: an unread log is not an idle window.
-pub fn sweep_deliveries(session: &str) {
+/// Report deliveries that never came back as a prompt. Two triggers ask this
+/// through `delivery::report_unconfirmed` (board #437): the capture tick, so
+/// a line nobody is reading about is still reported (a clock, not a reader),
+/// and a client's live feed read, so a reader gets the answer at once. A
+/// report does NOT settle the row (board #249): the line may still be in the
+/// CLI's queue, and a late real echo must still find it and settle it as
+/// ours, retracting the warn by its row id. The persisted `warned` mark,
+/// written in the SAME transaction as the warn and the room line
+/// (`Store::report_unconfirmed`), makes the report happen once per row,
+/// across sweeps, triggers and restarts; a failed write consumes nothing.
+/// The 24 h prune bounds the rows that never echo. A window whose turn is
+/// unknown (board #394) reports nothing: an unread log is not an idle window.
+/// `report_for` builds a row's room line and names its sender (`Ok(None)`:
+/// no message to name, as a fact, so the feed warn alone; `Err`: the read
+/// failed, so that row is left unreported for the next sweep); the rows it
+/// built and that were committed are returned, for the caller's one notice
+/// per sender. Only rows still to report are loaded (`unreported_deliveries`).
+pub fn sweep_deliveries(session: &str, report_for: &dyn Fn(&super::store::DeliveryRow) -> Result<Option<Report>, String>) -> Vec<Report> {
     let (mark, replayed) = recover(session);
-    let rows = queue(|s| s.pending_deliveries(session, None)).unwrap_or_default();
+    let rows = queue(|s| s.unreported_deliveries(session)).unwrap_or_default();
     if rows.is_empty() {
-        return;
+        return Vec::new();
     }
-    let now = now();
     let mut by_window: std::collections::BTreeMap<String, Vec<super::store::DeliveryRow>> = Default::default();
     for row in rows {
         by_window.entry(row.window.clone()).or_default().push(row);
     }
-    for (window, rows) in by_window {
-        let rec = store()
-            .lock()
-            .unwrap()
-            .get(&(session.to_string(), window.clone()))
-            .cloned()
-            .unwrap_or_default();
-        if !replayed && !observed(&rec) {
-            continue;
-        }
-        for id in overdue_rows(&rec, &rows, mark, now) {
-            if !queue(|s| s.mark_delivery_warned(id)).unwrap_or(false) {
-                continue; // settled, or reported by another sweep, meanwhile
+    // The decision (is the turn closed, has the clock run out) and the
+    // report's transaction are ONE step against the prompt edge (board #437
+    // review P1-B): `record_prompt` settles rows and opens a turn under this
+    // same lock, so neither can fall between the read and the commit. No
+    // window lock and no typing happen while it is held.
+    let mut reported = Vec::new();
+    let mut pushed = Vec::new();
+    {
+        let _order = delivery_decision();
+        let now = now();
+        for (window, rows) in by_window {
+            let rec = store()
+                .lock()
+                .unwrap()
+                .get(&(session.to_string(), window.clone()))
+                .cloned()
+                .unwrap_or_default();
+            if !replayed && !observed(&rec) {
+                continue;
             }
-            let Some(row) = rows.iter().find(|r| r.id == id) else { continue };
-            push_full(
-                session,
-                &window,
-                "warn",
-                format!("unconfirmed: {}", truncate_chars(&row.shown(), 160)),
-                String::new(),
-                String::new(),
-                vec![DeliveryRef::of(row)],
-            );
+            for id in overdue_rows(&rec, &rows, mark, now) {
+                let Some(row) = rows.iter().find(|r| r.id == id) else { continue };
+                // A failed source read consumes nothing (review P1 on
+                // b92c3d88): the row stays unwarned for the next sweep.
+                let report = match report_for(row) {
+                    Ok(report) => report,
+                    Err(e) => {
+                        eprintln!("⚠️  could not read the message of delivery {} of {session}:{window} ({e}); kept for the next sweep", row.id);
+                        continue;
+                    }
+                };
+                let warn = format!("unconfirmed: {}", truncate_chars(&row.shown(), 160));
+                let refs = vec![DeliveryRef::of(row)];
+                let refs_json = serde_json::to_string(&refs).unwrap_or_default();
+                let wrote = queue(|s| s.report_unconfirmed(row.id, session, &window, &warn, &refs_json, report.as_ref().map(|r| &r.line)));
+                let Ok(Some(done)) = wrote else {
+                    // Settled or reported meanwhile (`Ok(None)`), or the
+                    // write failed: nothing was consumed, the next sweep asks
+                    // again.
+                    if let Err(e) = wrote {
+                        eprintln!("⚠️  could not report delivery {} of {session}:{window} unconfirmed ({e}); kept for the next sweep", row.id);
+                    }
+                    continue;
+                };
+                pushed.push((
+                    ActivityEvent {
+                        id: done.activity_id,
+                        ts: done.ts,
+                        window: window.clone(),
+                        kind: "warn".into(),
+                        text: warn,
+                        tool: String::new(),
+                        via: String::new(),
+                        state: String::new(),
+                        deliveries: refs,
+                        requesters: None,
+                    },
+                    done.message,
+                ));
+                if let Some(r) = report {
+                    reported.push(r);
+                }
+            }
         }
     }
+    // After the commit and with every lock released: the feed and the room.
+    for (ev, message) in pushed {
+        ring_push(session, ev);
+        if let Some(m) = message {
+            super::rooms::push_stored(&[m]);
+        }
+    }
+    reported
+}
+
+/// What the room and the sender are told about one unconfirmed row (board
+/// #437), built by `delivery::report_unconfirmed` before the transaction.
+#[derive(Debug, Clone)]
+pub struct Report {
+    /// The room line, written in the same transaction as the mark.
+    pub line: super::store::OnceLine,
+    /// Who sent the message, and to which window it was typed.
+    pub sender: String,
+    pub recipient: String,
+    /// The message's time as the line says it (`HH:MM`).
+    pub when: String,
+}
+
+/// The sessions the capture tick sweeps (board #437): those holding a typed
+/// chat line not yet reported. One indexed query; a failed read sweeps
+/// nothing this tick, and the next one asks again.
+pub fn unreported_sessions() -> Vec<String> {
+    queue(|s| s.sessions_with_unreported_deliveries()).unwrap_or_default()
 }
 
 fn truncate_chars(input: &str, max: usize) -> String {
@@ -3130,7 +3212,7 @@ mod tests {
         assert_eq!(evs.last().unwrap().kind, "prompt");
         assert_eq!(evs.last().unwrap().via, "app", "an acked prompt came from this app");
         // Nothing pending any more, so the sweep stays silent.
-        sweep_deliveries("ack-test");
+        sweep_deliveries("ack-test", &|_| Ok(None));
         assert_eq!(recent_events("ack-test", 0).len(), 1, "no warning for a delivered line");
     }
 
@@ -3213,7 +3295,7 @@ mod tests {
         // Settled for good: another restart finds nothing to recover, so the
         // sweep cannot warn about a message that WAS delivered.
         simulate_restart(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(
             recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(),
             0,
@@ -3240,7 +3322,7 @@ mod tests {
         // (a client reading the feed). It recovers the queue and warns about
         // NOTHING: nobody was listening for these echoes while we were down, so
         // the ack clock starts here.
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(
             recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(),
             0,
@@ -3263,13 +3345,13 @@ mod tests {
         record_delivery(&session, "w3", "@dev hello", "");
         // Past the ack window: the sweep reports it once and settles it.
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 1);
 
         // A restart must not report it again: the row stays outstanding for a
         // late echo (board #249), but its warned mark is persisted.
         simulate_restart(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(
             recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(),
             1,
@@ -3368,7 +3450,7 @@ mod tests {
         // Backdate the pending line past the ack window.
         record_delivery("sweep-test", "w2", "[tmm chat] human: @dev hello", "");
         backdate("sweep-test");
-        sweep_deliveries("sweep-test");
+        sweep_deliveries("sweep-test", &|_| Ok(None));
         let warns: Vec<String> = recent_events("sweep-test", 0)
             .iter()
             .filter(|e| e.kind == "warn")
@@ -3376,7 +3458,7 @@ mod tests {
             .collect();
         assert_eq!(warns.len(), 1, "one report per unacked line");
         assert!(warns[0].contains("hello"), "the report names the line, got {:?}", warns[0]);
-        sweep_deliveries("sweep-test");
+        sweep_deliveries("sweep-test", &|_| Ok(None));
         assert_eq!(
             recent_events("sweep-test", 0).iter().filter(|e| e.kind == "warn").count(),
             1,
@@ -3514,7 +3596,7 @@ mod tests {
         recovery_mark(&session);
         backdate(&session);
         recovery_marks().lock().unwrap().insert(session.clone(), (i64::MAX, now() - DELIVERY_ACK_SECS - 1));
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(derive(&session, "w1", 0).state, "running", "the open turn came back from the log");
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 0, "held lines are not swept");
         for l in &lines {
@@ -3569,7 +3651,7 @@ mod tests {
         assert_eq!(derive(&session, "w1", 0).state, "running", "the later arrival wins the tie");
         record_delivery(&session, "w1", "@builder still queued", "");
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 0, "a running turn is not swept");
         // And the reverse order in one second is a finished turn.
         record_notification(&session, "w1", "completed");
@@ -3608,7 +3690,7 @@ mod tests {
             record_delivery(&session, "w1", l, "");
         }
         simulate_restart(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 0, "the recovery grace holds");
         assert_eq!(held(&session, "w1"), lines, "typed order, all thirty");
         for l in &lines {
@@ -3632,7 +3714,7 @@ mod tests {
         // That echo opened a turn, and a running agent is still holding the
         // other two; the sweep only speaks once the turn has ended.
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 0, "queued, not lost");
         // The turn ended long enough ago for the clock: the stop arrived after
         // the prompt that opened it, both past the ack window.
@@ -3643,12 +3725,12 @@ mod tests {
             r.end = Some(("completed".into(), ended));
             r.end_seq = arrival();
         });
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 2, "each owed promise reported once");
         assert_eq!(held(&session, "dev").len(), 2, "reported, still outstanding for a late echo");
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         simulate_restart(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 2, "twice more, across a restart: still once each");
     }
 
@@ -3726,7 +3808,7 @@ mod tests {
         record_delivery(&session, "w1", notice, "");
         record_delivery(&session, "w1", notice, "");
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         let warns: Vec<i64> = recent_events(&session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.deliveries[0].id).collect();
         assert_eq!(warns.len(), 2);
         assert_ne!(warns[0], warns[1], "each warn names its own row");
@@ -3762,7 +3844,7 @@ mod tests {
         recovery_mark(&session);
         assert_eq!(derive(&session, "w1", 0).state, "idle", "the cancelled turn is not recovered as running");
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 1, "the held line's clock ran");
         assert_eq!(for_each_turn_input(&session, "w1", None, |_: &[String]| {}), 0, "no reply edge recovered for a cancelled turn");
     }
@@ -4549,7 +4631,7 @@ mod tests {
             simulate_restart(&session);
             recovery_mark(&session);
             backdate(&session);
-            sweep_deliveries(&session);
+            sweep_deliveries(&session, &|_| Ok(None));
             assert_eq!(derive(&session, "w1", 0).state, want, "{label}");
             assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), warns, "{label}: held line swept only when the turn ended");
         }
@@ -4614,7 +4696,7 @@ mod tests {
         record_delivery(&session, "w1", notice, "");
         backdate(&session); // only this row is past the window
         record_delivery(&session, "w1", notice, "");
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         let warns: Vec<i64> = recent_events(&session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.deliveries[0].id).collect();
         let rows: Vec<i64> = crate::projects::with_store(|s| s.pending_deliveries(&session, Some("w1"))).unwrap().iter().map(|r| r.id).collect();
         assert_eq!(warns, vec![rows[0]], "only the first is reported");
@@ -4951,7 +5033,201 @@ mod tests {
         record_command_delivery(&session, "kiro", "goal x", "m-cmd").unwrap();
         assert_eq!(held(&session, "kiro"), vec!["[tmm chat] human: @kiro hello", "goal x"]);
         backdate(&session);
-        sweep_deliveries(&session);
+        sweep_deliveries(&session, &|_| Ok(None));
         assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 1, "the chat line is still swept");
+    }
+
+    // ---- board #437: the report on the tick, in one transaction ----------
+
+    /// A message in the session's room and its typed row, backdated past the
+    /// ack clock: what the owner's row 13432 was at 08:41.
+    fn overdue_message(session: &str, from: &str, to: &str, text: &str) -> (String, i64) {
+        overdue_message_at(session, from, to, text).0
+    }
+
+    /// `overdue_message`, plus the message's time as a line names it.
+    fn overdue_message_at(session: &str, from: &str, to: &str, text: &str) -> ((String, i64), String) {
+        let room = crate::projects::rooms::session_room(session);
+        let id = uuid::Uuid::new_v4().to_string();
+        let msg = crate::projects::rooms::post_routed_as(&room, &id, from, &format!("@{to} {text}"), &[to.to_string()]).unwrap();
+        record_delivery(session, to, &format!("[tmm chat 2026-10-20 08:40] {from}: @{to} {text}"), &id);
+        backdate(session);
+        let row = queue(|s| s.pending_deliveries(session, Some(to))).unwrap().last().unwrap().id;
+        let when = crate::projects::delivery::short_when(msg["ts"].as_i64().unwrap(), chrono::Local::now());
+        ((room, row), when)
+    }
+
+    fn room_lines(room: &str) -> Vec<(String, String, String)> {
+        crate::projects::rooms::history_page(room, None, 100)["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["id"].as_str().unwrap().to_string(), m["from"].as_str().unwrap_or_default().to_string(), m["body"].as_str().unwrap().to_string()))
+            .filter(|(_, _, b)| b.starts_with("[tmm] unconfirmed"))
+            .collect()
+    }
+
+    fn durable_warns(session: &str) -> usize {
+        crate::projects::with_store(|s| s.activity_since(session, 0, 1000)).unwrap().iter().filter(|r| r.kind == "warn").count()
+    }
+
+    /// Board #437: an overdue typed line is reported WITHOUT a feed read —
+    /// the tick's own selection names its session — once: the warn and the
+    /// room line under `tmm`, with the row's stable id, written together.
+    /// A second tick and a later feed read add nothing, and the session
+    /// leaves the tick's selection. A late echo still settles the row; the
+    /// room line stays, a dated fact.
+    #[test]
+    fn an_overdue_line_is_reported_on_the_tick_once_with_its_room_line() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tick437-{}", uuid::Uuid::new_v4());
+        let ((room, row), when) = overdue_message_at(&session, "lead", "dev", "please look");
+        assert!(unreported_sessions().contains(&session), "the tick's selection names it");
+        crate::projects::delivery::report_all_unconfirmed();
+        let lines = room_lines(&room);
+        assert_eq!(lines.len(), 1, "the tick reported it with no feed read: {lines:?}");
+        assert_eq!(lines[0].0, format!("unconfirmed:{row}"), "the row's stable id");
+        assert_eq!(lines[0].1, "tmm", "posted under tmm, not the human's or the sender's name");
+        assert_eq!(lines[0].2, crate::projects::delivery::unconfirmed_line("dev", "lead", &when));
+        assert!(lines[0].2.contains("no confirmation was seen") && lines[0].2.contains("Look at its pane first"), "{}", lines[0].2);
+        assert!(!lines[0].2.contains("never took") && !lines[0].2.contains("interrupt"), "{}", lines[0].2);
+        assert_eq!(durable_warns(&session), 1, "the feed warn is durable too");
+        assert_eq!(recent_events(&session, 0).iter().filter(|e| e.kind == "warn").count(), 1);
+        assert!(!unreported_sessions().contains(&session), "a reported row leaves the selection");
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "a second tick says nothing");
+        sweep_deliveries(&session, &|_| Ok(None));
+        assert_eq!((room_lines(&room).len(), durable_warns(&session)), (1, 1), "nor does a feed read");
+        // A late echo is still ours.
+        assert!(record_prompt(&session, "dev", "[tmm chat 2026-10-20 08:40] lead: @dev please look"), "a late echo settles the row");
+        assert!(queue(|s| s.pending_deliveries(&session, Some("dev"))).unwrap().is_empty());
+        assert_eq!(room_lines(&room).len(), 1, "the report stays: it said only what was known then");
+    }
+
+    /// Board #437 review P1-B: the mark and the report are ONE transaction.
+    /// The room INSERT fails: no mark, no warn, no line, and the row keeps
+    /// its right to be reported; the next tick reports it once.
+    #[test]
+    fn a_failed_room_write_consumes_nothing_and_the_next_tick_reports() {
+        crate::projects::tests::use_test_store();
+        let session = format!("fail437-{}", uuid::Uuid::new_v4());
+        let (room, row) = overdue_message(&session, "lead", "dev", "into a full disk");
+        crate::projects::with_store(|s| s.exec_test_sql(&format!(
+            "CREATE TEMP TRIGGER fail437 BEFORE INSERT ON hub_msgs WHEN NEW.id = 'unconfirmed:{row}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ))).unwrap();
+        let first = crate::projects::delivery::report_unconfirmed(&session);
+        crate::projects::with_store(|s| s.exec_test_sql("DROP TRIGGER fail437")).unwrap();
+        assert!(first.is_empty(), "nothing committed, nothing to tell");
+        assert!(room_lines(&room).is_empty());
+        assert_eq!(durable_warns(&session), 0, "the warn rolled back with it");
+        assert!(!queue(|s| s.pending_deliveries(&session, Some("dev"))).unwrap()[0].warned, "the mark rolled back");
+        assert!(unreported_sessions().contains(&session), "still selected");
+        let second = crate::projects::delivery::report_unconfirmed(&session);
+        assert_eq!((second.len(), room_lines(&room).len(), durable_warns(&session)), (1, 1, 1));
+    }
+
+    /// Board #437 review P1-B: the decision and the commit run under the
+    /// turn-fact lock. A prompt holds it first (barrier: the report is seen
+    /// WAITING for it) and settles the row; the report then finds nothing.
+    #[test]
+    fn a_prompt_holding_the_turn_lock_settles_the_row_before_the_report() {
+        crate::projects::tests::use_test_store();
+        let session = format!("race437-{}", uuid::Uuid::new_v4());
+        let (room, _) = overdue_message(&session, "lead", "dev", "racing an echo");
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        // Inside the prompt's critical section, BEFORE it reads and settles
+        // its rows: the turn lock is held and the row is still pending.
+        *IN_PROMPT_HOOK.lock().unwrap() = Some(Box::new(move || {
+            inside_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        }));
+        let s1 = session.clone();
+        let prompt = std::thread::spawn(move || record_prompt(&s1, "dev", "[tmm chat 2026-10-20 08:40] lead: @dev racing an echo"));
+        inside_rx.recv().unwrap();
+        let waiting_before = TURN_WAITING.load(std::sync::atomic::Ordering::SeqCst);
+        let s2 = session.clone();
+        let report = std::thread::spawn(move || crate::projects::delivery::report_unconfirmed(&s2));
+        while TURN_WAITING.load(std::sync::atomic::Ordering::SeqCst) <= waiting_before {
+            assert!(!report.is_finished(), "the report must wait for the prompt, not run past it");
+            std::thread::yield_now();
+        }
+        go_tx.send(()).unwrap();
+        assert!(prompt.join().unwrap(), "the echo settled the row");
+        assert!(report.join().unwrap().is_empty(), "the report came after it and found nothing");
+        assert!(room_lines(&room).is_empty());
+        assert_eq!(durable_warns(&session), 0);
+    }
+
+    /// Board #437 review P1 on b92c3d88: a failed READ is not an absent
+    /// source. The message's row cannot be decoded, then the project row
+    /// cannot: each time nothing is marked, warned or posted, and the row
+    /// stays selected. Once the read succeeds it is reported exactly once,
+    /// with its room line.
+    #[test]
+    fn a_failed_source_or_room_read_consumes_nothing_and_reports_once_it_reads() {
+        crate::projects::tests::use_test_store();
+        let session = format!("read437-{}", uuid::Uuid::new_v4());
+        let (room, row) = overdue_message(&session, "lead", "dev", "unreadable for a while");
+        let msg_id = queue(|s| s.unreported_deliveries(&session)).unwrap()[0].msg_id.clone();
+        let sql = |q: &str| crate::projects::with_store(|s| s.exec_test_sql(q)).unwrap();
+        let untouched = |why: &str| {
+            assert!(room_lines(&room).is_empty(), "{why}: no room line");
+            assert_eq!(durable_warns(&session), 0, "{why}: no warn");
+            assert!(!queue(|s| s.pending_deliveries(&session, Some("dev"))).unwrap()[0].warned, "{why}: not marked");
+            assert!(unreported_sessions().contains(&session), "{why}: still selected");
+        };
+        // The source message's row cannot be decoded.
+        sql(&format!("UPDATE hub_msgs SET ts = 'unreadable' WHERE id = '{msg_id}'"));
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty());
+        untouched("source read failed");
+        sql(&format!("UPDATE hub_msgs SET ts = 1000 WHERE id = '{msg_id}'"));
+        // The session's project row cannot be decoded: its room is unknown.
+        crate::projects::with_store(|s| s.insert_project(&crate::projects::Project {
+            id: session.clone(), name: session.clone(), path: "/tmp".into(), icon: None,
+            session: session.clone(), adopted: false, autostart: false, created_at: 1,
+            last_up_at: None, last_seen_at: None, archived: false, room: room.clone(),
+        })).unwrap();
+        sql(&format!("UPDATE projects SET created_at = 'unreadable' WHERE id = '{session}'"));
+        assert!(crate::projects::rooms::session_room_checked(&session).is_err(), "the fixture makes the room unreadable");
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty());
+        untouched("room read failed");
+        sql(&format!("UPDATE projects SET created_at = 1 WHERE id = '{session}'"));
+        // Both reads work again: one report, with its room line.
+        let reports = crate::projects::delivery::report_unconfirmed(&session);
+        assert_eq!(reports.len(), 1);
+        let lines = room_lines(&room);
+        assert_eq!((lines.len(), lines[0].0.as_str(), durable_warns(&session)), (1, format!("unconfirmed:{row}").as_str(), 1));
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "and only once");
+    }
+
+    /// Board #437: the tick and a feed read racing each other report once.
+    #[test]
+    fn the_tick_and_a_feed_read_racing_report_once() {
+        crate::projects::tests::use_test_store();
+        let session = format!("both437-{}", uuid::Uuid::new_v4());
+        let (room, _) = overdue_message(&session, "lead", "dev", "twice?");
+        let runs: Vec<_> = (0..4)
+            .map(|_| {
+                let s = session.clone();
+                std::thread::spawn(move || crate::projects::delivery::report_unconfirmed(&s).len())
+            })
+            .collect();
+        let total: usize = runs.into_iter().map(|t| t.join().unwrap()).sum();
+        assert_eq!((total, room_lines(&room).len(), durable_warns(&session)), (1, 1, 1));
+    }
+
+    /// Board #437: no sender is guessed. A row with no message id, and a row
+    /// whose message the room no longer holds, get the feed warn alone.
+    #[test]
+    fn a_row_without_a_known_sender_gets_the_feed_warn_alone() {
+        crate::projects::tests::use_test_store();
+        let session = format!("anon437-{}", uuid::Uuid::new_v4());
+        let room = crate::projects::rooms::session_room(&session);
+        record_delivery(&session, "dev", "[tmm chat 2026-10-20 08:40] tmm: [reply] a board notice", "");
+        record_delivery(&session, "qa", "[tmm chat 2026-10-20 08:40] lead: @qa gone", &uuid::Uuid::new_v4().to_string());
+        backdate(&session);
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "no sender to name");
+        assert!(room_lines(&room).is_empty(), "and no room line");
+        assert_eq!(durable_warns(&session), 2, "each still has its warn");
     }
 }

@@ -454,6 +454,10 @@ pub async fn capture_loop() {
                 // noticed within one tick, and the backoff ladder is measured in
                 // tens of seconds, so 20s granularity costs nothing.
                 recovery::check_once();
+                // Board #437: an unconfirmed typed line is reported on this
+                // tick too, so it is found without a reader. Report only:
+                // nothing is typed into the target pane or retyped.
+                super::delivery::report_all_unconfirmed();
             })
         })
         .await;
@@ -466,6 +470,19 @@ pub async fn capture_loop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #437: the capture tick reports unconfirmed typed lines — a
+    /// clock, not a reader — through the one report step. Its behaviour is
+    /// pinned in telemetry's tests (`report_all_unconfirmed`); this pins that
+    /// the tick calls it, inside the blocking tick.
+    #[test]
+    fn the_capture_tick_reports_unconfirmed_lines() {
+        let src = include_str!("capture.rs");
+        let body = &src[src.find("pub async fn capture_loop()").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let tick = &body[body.find("spawn_blocking").unwrap()..];
+        assert!(tick.contains("super::delivery::report_all_unconfirmed();"), "{tick}");
+    }
 
     /// Board #422 (validator P5/P6): the capture tick's OWN completeness
     /// wiring, on a real private server. A live project whose session

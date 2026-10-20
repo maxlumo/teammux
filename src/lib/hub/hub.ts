@@ -378,19 +378,31 @@ export function agoShort(ts: number, now: number): string {
  * unread summary (`rooms::news_kind`, whose case table hub.test.ts runs here,
  * board #322). Own words and app narration are none, except a board move to
  * review/done; that and a `done` status note are `finished` (rings at every
- * level); other status notes are `status` (progress, `all` only); anything
- * else an agent says is a `reply`. */
-export type NewsKind = 'none' | 'reply' | 'status' | 'finished';
+ * level); other status notes are `status` (progress, `all` only); the server's
+ * own unconfirmed report is `alert` (board #437: rings at every level, since
+ * for a self-wake nobody else is told); anything else an agent says is a
+ * `reply`. */
+export type NewsKind = 'none' | 'reply' | 'status' | 'finished' | 'alert';
 export function newsKind(m: { from?: string; body?: string }): NewsKind {
   const from = m.from ?? '';
   if (!from || from === 'human') return 'none';
-  if (systemLine(m.body) !== null) {
-    const b = boardLine(systemLine(m.body));
+  const line = systemLine(m.body);
+  if (line !== null) {
+    if (from === 'tmm' && unconfirmedReport(line)) return 'alert';
+    const b = boardLine(line);
     return b && (b.to === 'review' || b.to === 'done') ? 'finished' : 'none';
   }
   const note = statusNote(m.body);
   if (note) return note.state === 'done' ? 'finished' : 'status';
   return 'reply';
+}
+
+/** `unconfirmed <name> — no confirmation was seen for …`: the exact head of
+ * the server's own report (Rust `delivery::unconfirmed_line`, read by
+ * `rooms::unconfirmed_report` with the same name class as `mentionTokens`),
+ * never a line that merely mentions the word (board #437). */
+export function unconfirmedReport(line: string): boolean {
+  return /^unconfirmed [\p{Alphabetic}\p{N}_-]+ — no confirmation was seen for /u.test(line);
 }
 
 /** The read watermark of a room: the last read message's seq, and its ts (a
@@ -1453,7 +1465,7 @@ export function systemLine(body: string | null | undefined): string | null {
 /** The lifecycle verbs the server narrates (`hub_rpc.rs`). A line that does not
  * start with one of them is left whole — an unknown shape must render as its own
  * text, never as a guessed verb plus a truncated remainder. */
-const SYS_VERBS = new Set(['spawned', 'forked', 'started', 'stopped', 'restarted', 'kept', 'moved', 'left', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'done']);
+const SYS_VERBS = new Set(['spawned', 'forked', 'started', 'stopped', 'restarted', 'kept', 'moved', 'left', 'removed', 'interrupted', 'switched', 'assigned', 'unassigned', 'offline', 'unconfirmed', 'done']);
 
 /**
  * ONE structure for every line the app narrates: WHO it is about, WHAT
@@ -1598,8 +1610,11 @@ export function sysVerbColor(verb: string): string {
     case 'done': return 'var(--status-ok)';
     // A message that reached nobody needs a person to notice (#347): the
     // amber the language already keeps for "paused on a human", not red —
-    // nothing broke, somebody is simply not there.
+    // nothing broke, somebody is simply not there. A line whose confirmation
+    // was not seen (#437) is the same: somebody has to look, nothing is
+    // proved broken.
     case 'offline':
+    case 'unconfirmed':
     case 'interrupted': return 'var(--status-warn)';
     case 'removed': return 'var(--status-danger)';
     case 'stopped': return 'var(--text3)';

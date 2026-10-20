@@ -89,3 +89,10 @@ test('tmux_hub_alerts is resident per server (#315, #335 ②b-4)', async () => {
   const { RESIDENT_KEYS } = await import('../app/servers.ts');
   assert.ok((RESIDENT_KEYS as readonly string[]).includes(ALERTS_KEY));
 });
+
+test('a stored alert entry survives a reload: the unconfirmed report is a bell entry with no recipient (#437)', async () => {
+  const { bellEntry } = await import('./notify-centre.svelte.ts');
+  assert.equal(bellEntry({ kind: 'alert', toHuman: false }), true);
+  assert.equal(bellEntry({ kind: 'finished', toHuman: false }), true);
+  assert.equal(bellEntry({ kind: 'reply', toHuman: false }), false, 'agent↔agent talk is still room unread only');
+});

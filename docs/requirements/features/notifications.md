@@ -20,7 +20,7 @@ Settings → Notifications carries a level, persisted to `tmux_notify_level`, th
 - **To me** (`replies`): Finished plus every reply addressed to you.
 - **To me + progress** (`all`): To me plus `[tmm status …]` notes addressed to you.
 
-Only a finished task, or a reply / status note addressed to you, can ever ring or reach the bell; agents talking to each other count as room unread only. App narration and the human's own messages are never news at any level. Every legal stored value is kept when the default changes (a stored `replies` stays `replies`); only an absent or unknown value reads as the default.
+Only a finished task, a reply / status note addressed to you, or the app's report that a typed message was never confirmed (board #437; it rings at every level), can ever ring or reach the bell; agents talking to each other count as room unread only. App narration and the human's own messages are never news at any level. Every legal stored value is kept when the default changes (a stored `replies` stays `replies`); only an absent or unknown value reads as the default.
 
 ## What counts as news
 

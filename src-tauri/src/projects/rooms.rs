@@ -103,6 +103,23 @@ pub fn push_stored(msgs: &[HubMsg]) {
     }
 }
 
+/// The room a session's chat lives in: the project's recorded room, or
+/// `proj:<session>` for a room from before v8 and an untracked session. The
+/// one reading, also behind `hub_rpc::project_room`.
+pub fn session_room(session: &str) -> String {
+    session_room_checked(session).unwrap_or_else(|_| format!("proj:{session}"))
+}
+
+/// `session_room`, with a failed project read kept apart from "no project"
+/// (board #437 review P1): `Err` when the store could not be asked, so a
+/// caller that must not guess (the unconfirmed report) can wait instead.
+pub fn session_room_checked(session: &str) -> Result<String, String> {
+    Ok(crate::projects::project_for_session(session)?
+        .map(|p| p.room)
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| format!("proj:{session}")))
+}
+
 /// One PAGE of `room`'s messages, oldest first, walking backwards:
 /// `{ messages, has_more, head_seq }`. `before_seq` is exclusive; `None` is
 /// the newest page.
@@ -176,13 +193,17 @@ pub fn room_latest() -> serde_json::Value {
 /// EXCEPT a board move to review/done; that and a `done` status note
 /// (`[tmm done]`) are "a task finished", which rings at every level; any
 /// other status note is progress (`all` only); everything else an agent
-/// says is a reply (notifications.md's levels, unchanged).
+/// says is a reply (notifications.md's levels, unchanged). The server's own
+/// unconfirmed report (board #437) is an `Alert`: the one system line a
+/// person must hear about, because for a self-wake nobody else is told; it
+/// rings at every level, like a finished task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewsKind {
     None,
     Reply,
     Status,
     Finished,
+    Alert,
 }
 
 impl NewsKind {
@@ -192,6 +213,7 @@ impl NewsKind {
             NewsKind::Reply => "reply",
             NewsKind::Status => "status",
             NewsKind::Finished => "finished",
+            NewsKind::Alert => "alert",
         }
     }
 }
@@ -204,6 +226,9 @@ pub fn news_kind(sender: &str, body: &str) -> NewsKind {
         return NewsKind::None;
     }
     if let Some(line) = SYS_MARKERS.iter().find_map(|m| body.strip_prefix(m)) {
+        if sender == crate::projects::delivery::NOTICE_SENDER && unconfirmed_report(line) {
+            return NewsKind::Alert;
+        }
         return if board_finished(line.trim()) { NewsKind::Finished } else { NewsKind::None };
     }
     match status_note(body) {
@@ -211,6 +236,15 @@ pub fn news_kind(sender: &str, body: &str) -> NewsKind {
         Some(_) => NewsKind::Status,
         None => NewsKind::Reply,
     }
+}
+
+/// `unconfirmed <name> — no confirmation was seen for …`: the exact head of
+/// the server's own report (`delivery::unconfirmed_line`, board #437), never
+/// a line that merely mentions the word (TS `unconfirmedReport`).
+fn unconfirmed_report(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("unconfirmed ") else { return false };
+    let name = rest.chars().take_while(|c| crate::address::name_char(*c)).count();
+    name > 0 && rest.chars().skip(name).collect::<String>().starts_with(" \u{2014} no confirmation was seen for ")
 }
 
 /// `board #N <from> → review|done[ — title]` (TS `boardLine` + `taskFinished`).
@@ -406,6 +440,12 @@ mod tests {
             ("lead", "[tmm status running]   ", "reply"),
             ("lead", "[tmm done]", "reply"),
             ("lead", "[tmm]no space", "reply"),
+            ("tmm", "[tmm] unconfirmed dev — no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
+            ("tmm", "[tmm] unconfirmed 工程师 — no confirmation was seen for engineer's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
+            ("lead", "[tmm] unconfirmed dev — no confirmation was seen for a quote", "none"),
+            ("tmm", "[tmm] unconfirmed — no confirmation was seen for nobody", "none"),
+            ("tmm", "[tmm] unconfirmed dev, I think", "none"),
+            ("tmm", "[tmm] restored after a host reboot", "none"),
         ];
         for (sender, body, want) in cases {
             assert_eq!(news_kind(sender, body).as_str(), *want, "{sender}: {body:?}");

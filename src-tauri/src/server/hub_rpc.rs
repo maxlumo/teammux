@@ -22,12 +22,7 @@ use super::rpc::ERR_METHOD_NOT_FOUND;
 /// before v8 is called, and what an untracked session gets.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) fn project_room(session: &str) -> String {
-    crate::projects::project_for_session(session)
-        .ok()
-        .flatten()
-        .map(|p| p.room)
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| format!("proj:{session}"))
+    crate::projects::rooms::session_room(session)
 }
 
 /// The hub dispatcher proper (board #146): every arm is a `Result`, so a
@@ -613,7 +608,8 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // Only on the LIVE page: a walk back through history must not make
             // the app warn about deliveries again.
             if before.is_none() {
-                telemetry::sweep_deliveries(session);
+                // Board #437: the same report step the capture tick runs.
+                crate::projects::delivery::report_unconfirmed(session);
                 // The third flush trigger (board #257): held lines for an
                 // agent that is idle now — a stop that raced the hold, or
                 // lines a restart left held — are typed here.
@@ -4348,6 +4344,81 @@ while True:
         assert!(wait("SUBMIT:/context add @docs/notes.md", 1), "the verbatim command submits with its @: {:?}", screen());
         assert_eq!(count("PICKER-CLOSED"), 1, "closed by the guard's Escape: {:?}", screen());
         assert_eq!(count("PICKED-FILE"), 1, "still only the control was picked: {:?}", screen());
+    }
+
+    /// Board #437: the sending AGENT is told about its unconfirmed messages,
+    /// once per sweep and in one line, in the stamped result shape that asks
+    /// nothing; a self-wake (its own pane is the stuck one) and a human
+    /// sender get no pane notice. The room gets one line per row either way.
+    /// Real panes: the notice goes through the one delivery path, so it is a
+    /// typed row on the sender's window; nothing is ever typed back into the
+    /// target pane.
+    #[test]
+    fn the_sending_agent_is_told_once_but_not_a_self_wake_or_a_human() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-unconf-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-unconf-ws-{}", uuid::Uuid::new_v4()));
+        for name in ["lead", "dev", "qa", "engineer"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": format!("kiro-cli chat --agent {name}"), "team": "" }).to_string()).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        for name in ["dev", "qa", "engineer"] {
+            std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), "cat"]).status().unwrap();
+        }
+        crate::projects::adopt(&session, Some("unconf-test")).expect("adopt project");
+        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
+        let post = |from: &str, body: &str| assert!(call("hub_post", serde_json::json!({ "session": session, "from": from, "body": body })).error.is_none());
+        post("lead", "@dev first check");
+        post("lead", "@qa second check");
+        post("human", "@dev from the person");
+        let now = crate::projects::now() as i64;
+        let w = call("hub_wake_add", serde_json::json!({ "session": session, "from": "engineer", "body": "@engineer task done", "due": now + 3600 }));
+        let w: crate::projects::store::Wake = serde_json::from_value(w.result.expect("scheduled")).unwrap();
+        fire_wake(w.id);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let owed = |win: &str| crate::projects::telemetry::owed_rows(&session, win);
+        assert_eq!((owed("dev").len(), owed("qa").len(), owed("engineer").len()), (2, 1, 1), "four lines typed and owed");
+        crate::projects::telemetry::backdate_deliveries_for_test(&session, 46);
+
+        let reports = crate::projects::delivery::report_unconfirmed(&session);
+        assert_eq!(reports.len(), 4, "every row is reported: {reports:?}");
+        let room = project_room(&session);
+        let lines: Vec<String> = rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
+            .filter(|m| m["from"] == "tmm" && m["body"].as_str().unwrap_or("").starts_with("[tmm] unconfirmed "))
+            .map(|m| m["body"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(lines.len(), 4, "one room line per row: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("[tmm] unconfirmed engineer — no confirmation was seen for engineer's message")), "the self-wake is in the room: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("for human's message")), "and the human's: {lines:?}");
+        // One notice, to lead only, naming both of its messages.
+        let notices = |win: &str| owed(win).into_iter().filter(|r| r.line.contains("tmm: [reply] unconfirmed")).map(|r| r.line).collect::<Vec<_>>();
+        let lead = notices("lead");
+        assert_eq!(lead.len(), 1, "one line for both rows: {lead:?}");
+        assert!(lead[0].contains("for your messages of ") && lead[0].contains(" to @dev, ") && lead[0].contains(" to @qa;"), "{}", lead[0]);
+        assert!(lead[0].contains("Do not resend them because of this alone"), "{}", lead[0]);
+        assert!(crate::address::requesters(&lead[0]).is_empty(), "the notice asks nothing of the reply edge: {}", lead[0]);
+        assert!(notices("engineer").is_empty(), "a self-wake's own pane is not typed into");
+        assert!(notices("dev").is_empty() && notices("qa").is_empty(), "nothing is typed into a target pane");
+        // A second sweep, and the notice's own row going overdue later, add
+        // no second notice: the notice carries no message id.
+        crate::projects::telemetry::backdate_deliveries_for_test(&session, 46);
+        crate::projects::delivery::report_unconfirmed(&session);
+        assert_eq!(notices("lead").len(), 1, "never typed twice");
+        let after: usize = rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
+            .filter(|m| m["from"] == "tmm" && m["body"].as_str().unwrap_or("").starts_with("[tmm] unconfirmed ")).count();
+        assert_eq!(after, 4, "and no room line for the notice itself");
     }
 
     /// Board #250 (orchestrator 17:00/17:21), through hub_post: a message to

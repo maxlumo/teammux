@@ -70,6 +70,15 @@ pub struct DeliveryRow {
     pub ask_at: usize,
 }
 
+/// What one unconfirmed report wrote (`Store::report_unconfirmed`, board
+/// #437): the feed's warn row and, when it had one to write, the room line.
+#[derive(Debug, Clone)]
+pub struct Unconfirmed {
+    pub activity_id: i64,
+    pub ts: u64,
+    pub message: Option<HubMsg>,
+}
+
 /// The activity row of a settled prompt (`Store::settle_prompt`); its `ts`
 /// is the store's stamp, handed to the builder.
 pub struct PromptRow {
@@ -761,6 +770,22 @@ impl Store {
                 vec![Box::new(session.to_string())],
             ),
         };
+        self.delivery_rows(sql, args)
+    }
+
+    /// The rows of `session` the unconfirmed sweep may still report (board
+    /// #437 review P2): typed chat lines not yet warned — what the partial
+    /// index `deliveries_unreported` holds — so a sweep never loads the
+    /// warned or command rows again.
+    pub fn unreported_deliveries(&self, session: &str) -> Result<Vec<DeliveryRow>, String> {
+        self.delivery_rows(
+            "SELECT id, win, line, ts, msg_id, warned, command, ask_at FROM deliveries
+             WHERE session = ?1 AND warned = 0 AND held = 0 AND command = 0 ORDER BY id",
+            vec![Box::new(session.to_string())],
+        )
+    }
+
+    fn delivery_rows(&self, sql: &str, args: Vec<Box<dyn rusqlite::ToSql>>) -> Result<Vec<DeliveryRow>, String> {
         let mut stmt = self
             .conn
             .prepare(sql)
@@ -790,6 +815,68 @@ impl Store {
             .execute("UPDATE deliveries SET warned = 1 WHERE id = ?1 AND warned = 0", rusqlite::params![id])
             .map(|n| n > 0)
             .map_err(|e| format!("mark delivery warned: {e}"))
+    }
+
+    /// The sessions holding a typed chat line not yet reported (board #437):
+    /// what the capture tick sweeps. Warned, held and command rows are never
+    /// asked about again.
+    pub fn sessions_with_unreported_deliveries(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT session FROM deliveries WHERE warned = 0 AND held = 0 AND command = 0")
+            .map_err(|e| format!("prepare unreported sessions: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("query unreported sessions: {e}"))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Report ONE delivery row unconfirmed (board #437), as one IMMEDIATE
+    /// transaction: the row is re-checked as still pending (it exists, not
+    /// held, not a command, not warned) and marked warned, the feed's `warn`
+    /// activity row and — when its sender is known — the room line are
+    /// inserted, the line once by its stable id. A row settled or reported
+    /// meanwhile reports nothing (`Ok(None)`); any failure rolls everything
+    /// back, so the row keeps its right to be reported and the next sweep
+    /// tries again (review P1-B: a mark without its report was a permanent
+    /// miss). The caller pushes the returned rows after the commit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_unconfirmed(
+        &mut self,
+        id: i64,
+        session: &str,
+        window: &str,
+        warn: &str,
+        deliveries: &str,
+        line: Option<&super::OnceLine>,
+    ) -> Result<Option<Unconfirmed>, String> {
+        let ts = self.stamp_activity();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("report transaction: {e}"))?;
+        let marked = tx
+            .execute(
+                "UPDATE deliveries SET warned = 1 WHERE id = ?1 AND warned = 0 AND held = 0 AND command = 0",
+                rusqlite::params![id],
+            )
+            .map_err(|e| format!("mark delivery warned: {e}"))?;
+        if marked == 0 {
+            return Ok(None); // the transaction rolls back on drop
+        }
+        tx.execute(
+            "INSERT INTO activity (session, window, win, ts, kind, text, tool, via, state, deliveries, requesters)
+             VALUES (?1, 0, ?2, ?3, 'warn', ?4, '', '', '', ?5, NULL)",
+            rusqlite::params![session, window, ts as i64, warn, deliveries],
+        )
+        .map_err(|e| format!("insert activity: {e}"))?;
+        let activity_id = tx.last_insert_rowid();
+        let message = match line {
+            Some(l) => super::rooms::hub_append_once_in(&tx, l, ts as i64)?,
+            None => None,
+        };
+        tx.commit().map_err(|e| format!("commit report: {e}"))?;
+        Ok(Some(Unconfirmed { activity_id, ts, message }))
     }
 
     /// The newest activity row id, 0 for none. Row ids only grow, so turn

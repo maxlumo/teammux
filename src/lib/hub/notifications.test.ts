@@ -367,6 +367,19 @@ test('newsKind is the server\'s one rule: rooms.rs news_kind_is_one_rule, read h
   }
 });
 
+test('the server\'s unconfirmed report is an alert: unread, a bell entry, rings at every level, and only its own shape (#437)', () => {
+  const report = { from: 'tmm', body: "[tmm] unconfirmed engineer — no confirmation was seen for engineer's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone." };
+  assert.equal(newsKind(report), 'alert', 'room unread counts it');
+  assert.equal(bellKind(report), 'alert', 'a bell entry with no recipient: the person is who it is for');
+  for (const level of NOTIFY_LEVELS) assert.deepEqual(notifiable([report], { ...away, level }).map((m) => m.body), [report.body], `rings at ${level}`);
+  assert.deepEqual(notifiable([report], { first: false, away: false }), [], 'not while the reader is looking');
+  assert.deepEqual(notifiable([report], { first: true, away: true }), [], 'a first page is history, never news');
+  // Only the server's own report: an agent quoting it, or another shape, is not.
+  assert.equal(newsKind({ from: 'lead', body: report.body }), 'none');
+  assert.equal(newsKind({ from: 'tmm', body: '[tmm] unconfirmed dev, I think' }), 'none');
+  assert.equal(newsKind({ from: 'lead', body: 'unconfirmed dev — no confirmation was seen for x' }), 'reply');
+});
+
 test('levels ring what they rang before #322: a legacy [tmm done] rings at done, replies and all', () => {
   const msgs = [
     { from: 'lead', body: '[tmm done] shipped' },

@@ -152,13 +152,14 @@ export function toHuman(m: { to?: unknown }): boolean {
  * entries (HubMsg has no turn identity). Room unread is `newsKind`, wider. */
 export function bellKind(m: FeedMsg): NewsKind {
   const kind = newsKind(m);
-  return kind === 'finished' || (kind !== 'none' && toHuman(m)) ? kind : 'none';
+  return kind === 'finished' || kind === 'alert' || (kind !== 'none' && toHuman(m)) ? kind : 'none';
 }
 
 /** The kinds that RING at a level (notifications.md: done = finished only;
- * replies adds replies; all adds progress notes). */
+ * replies adds replies; all adds progress notes). An `alert` (board #437:
+ * the server's unconfirmed report) rings at every level, like `finished`. */
 export function levelKinds(level: NotifyLevel): ReadonlySet<NewsKind> {
-  return new Set<NewsKind>(level === 'done' ? ['finished'] : level === 'replies' ? ['finished', 'reply'] : ['finished', 'reply', 'status']);
+  return new Set<NewsKind>(level === 'done' ? ['finished', 'alert'] : level === 'replies' ? ['finished', 'alert', 'reply'] : ['finished', 'alert', 'reply', 'status']);
 }
 
 /** Which of a batch's NEVER-SEEN messages ring. `first` marks a room's

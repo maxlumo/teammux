@@ -953,7 +953,8 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             store.conn.execute_batch(
-                "ALTER TABLE deliveries DROP COLUMN msg_id;
+                "DROP INDEX deliveries_unreported;
+                 ALTER TABLE deliveries DROP COLUMN msg_id;
                  ALTER TABLE deliveries DROP COLUMN warned;
                  ALTER TABLE activity DROP COLUMN deliveries;
                  INSERT INTO deliveries (session, win, line, ts) VALUES ('s', 'w1', 'old line', 100);
