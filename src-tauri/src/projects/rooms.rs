@@ -174,6 +174,25 @@ pub fn search_messages(room: Option<&str>, terms: &[String], all: bool, from: Op
     Ok(serde_json::json!({ "messages": page.hits.iter().map(message_json).collect::<Vec<_>>(), "more": page.more }))
 }
 
+/// The files the room's messages mention, newest first (board #432, Files mode):
+/// `{ files: [{ path, line, col, room, id, seq, ts, from, count }], next, scanned }`. `terms` match
+/// the PATH (none: every file), `from` keeps one sender's messages. `next` is the
+/// `before_seq` of the following page, null at the end; `scanned` counts the messages this
+/// page read, so a `count` is "in the scanned range", never "ever". A store that cannot
+/// be read is an error.
+pub fn search_files(room: Option<&str>, terms: &[String], all: bool, from: Option<&str>, before_seq: Option<i64>, limit: i64) -> Result<serde_json::Value, String> {
+    let page = with_store(|s| s.hub_files(room, terms, all, from, before_seq, limit))?;
+    let files: Vec<serde_json::Value> = page
+        .files
+        .iter()
+        .map(|f| serde_json::json!({
+            "path": f.path, "line": f.line, "col": f.col, "room": f.room, "id": f.id,
+            "seq": f.seq, "ts": f.ts, "from": f.from, "count": f.count,
+        }))
+        .collect();
+    Ok(serde_json::json!({ "files": files, "next": page.next, "scanned": page.scanned }))
+}
+
 /// Newest message timestamp (ms) per room: `{ "<room>": ts }` — orders the
 /// project list, so it covers every room that ever spoke.
 pub fn room_latest() -> serde_json::Value {

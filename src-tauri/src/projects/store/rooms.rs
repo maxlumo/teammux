@@ -29,6 +29,37 @@ pub struct SearchPage {
     pub more: bool,
 }
 
+/// One file a room's messages mention (board #432, Files mode): the NEWEST mention
+/// names the row, the rest only add to `count`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    /// As the feed's click opens it (relative paths lose a leading `./`).
+    pub path: String,
+    pub line: Option<u64>,
+    pub col: Option<u64>,
+    /// The room of the newest mention: a relative path is that room's project's.
+    pub room: String,
+    /// The newest mentioning message, to jump to it.
+    pub id: String,
+    pub seq: i64,
+    pub ts: i64,
+    pub from: String,
+    /// Mentions in the scanned range, duplicates inside one message included.
+    pub count: u64,
+}
+
+/// One page of the Files scan. `next` is the `before_seq` of the following page, or
+/// `None` when nothing older is left. `scanned` counts the messages this page read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesPage {
+    pub files: Vec<FileRow>,
+    pub next: Option<i64>,
+    pub scanned: i64,
+}
+
+/// The most candidate messages one Files page reads before it stops and hands back a cursor.
+pub const FILES_SCAN_CAP: i64 = 5000;
+
 /// One system line whose message id is its identity (board #422 round 4):
 /// the report of one event, written at most once, in the caller's
 /// transaction.
@@ -468,6 +499,109 @@ impl Store {
         Ok(SearchPage { hits, more })
     }
 
+    /// The files the messages mention, newest first (board #432, Files mode). Rust is the
+    /// only implementation of "what a message mentions" (`message_paths`); the list is a
+    /// NAMED SUBSET of what the feed links, never the exact set.
+    ///
+    /// Scans candidate messages newest to oldest (`seq < before_seq`): not archived, `from`
+    /// when given, and `body` holding a `/` or a `](` (a superset of every mention, pinned
+    /// by the shared corpus). A mention is kept when every term (`all`) or any term is in
+    /// its PATH, ASCII-case-insensitively; no terms keep every mention. Rows are
+    /// de-duplicated: an absolute or `~` path by the path, a relative one by (room, path)
+    /// with a leading `./` removed.
+    ///
+    /// A page ends AFTER the message that brings it to `limit` distinct files, or after
+    /// `FILES_SCAN_CAP` messages, never in the middle of one, so the cursor `next` (that
+    /// message's seq) neither repeats nor skips a mention. `room = None` scans every room.
+    pub fn hub_files(
+        &self,
+        room: Option<&str>,
+        terms: &[String],
+        all: bool,
+        from: Option<&str>,
+        before_seq: Option<i64>,
+        limit: i64,
+    ) -> Result<FilesPage, String> {
+        self.hub_files_capped(room, terms, all, from, before_seq, limit, FILES_SCAN_CAP)
+    }
+
+    fn hub_files_capped(
+        &self,
+        room: Option<&str>,
+        terms: &[String],
+        all: bool,
+        from: Option<&str>,
+        before_seq: Option<i64>,
+        limit: i64,
+        scan_cap: i64,
+    ) -> Result<FilesPage, String> {
+        use super::super::message_paths::{paths_in_body, CANDIDATE_LIKE};
+        let limit = limit.clamp(1, 500) as usize;
+        let terms: Vec<String> = terms.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
+        let kept = |path: &str| {
+            if terms.is_empty() {
+                return true;
+            }
+            let hay = path.to_ascii_lowercase();
+            if all { terms.iter().all(|t| hay.contains(t.as_str())) } else { terms.iter().any(|t| hay.contains(t.as_str())) }
+        };
+        let sql = format!(
+            "SELECT seq, id, ts, room, sender, to_json, kind, body FROM hub_msgs
+             WHERE (?1 IS NULL OR room = ?1) AND (?2 IS NULL OR seq < ?2) AND (?3 IS NULL OR sender = ?3)
+               AND (body LIKE '{}' OR body LIKE '{}')
+               AND NOT EXISTS (SELECT 1 FROM msg_archive a WHERE a.room = hub_msgs.room AND a.msg_id = hub_msgs.id)
+             ORDER BY seq DESC",
+            CANDIDATE_LIKE[0], CANDIDATE_LIKE[1]
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("prepare hub files: {e}"))?;
+        let from = from.map(str::trim).filter(|f| !f.is_empty()).map(str::to_string);
+        let mut rows = stmt
+            .query_map(rusqlite::params![room, before_seq, from], hub_msg_row)
+            .map_err(|e| format!("query hub files: {e}"))?;
+        let mut order: Vec<String> = Vec::new();
+        let mut by_key: std::collections::HashMap<String, FileRow> = std::collections::HashMap::new();
+        let (mut scanned, mut last_seq, mut next) = (0i64, None::<i64>, None::<i64>);
+        while let Some(row) = rows.next() {
+            // A row that cannot be read is an error, not a message that mentioned nothing.
+            let m = row.map_err(|e| format!("read hub files: {e}"))?;
+            if scanned >= scan_cap {
+                // A row exists beyond the cap: hand back the cursor after the last one read.
+                next = last_seq;
+                break;
+            }
+            scanned += 1;
+            last_seq = Some(m.seq);
+            for mention in paths_in_body(&m.body) {
+                if !kept(&mention.path) {
+                    continue;
+                }
+                let relative = !(mention.path.starts_with('/') || mention.path.starts_with('~'));
+                let path = if relative { mention.path.strip_prefix("./").unwrap_or(&mention.path).to_string() } else { mention.path.clone() };
+                let key = if relative { format!("{}\0{path}", m.room) } else { path.clone() };
+                match by_key.get_mut(&key) {
+                    Some(row) => row.count += 1,
+                    None => {
+                        order.push(key.clone());
+                        by_key.insert(key, FileRow {
+                            path, line: mention.line, col: mention.col, room: m.room.clone(), id: m.id.clone(),
+                            seq: m.seq, ts: m.ts, from: m.sender.clone(), count: 1,
+                        });
+                    }
+                }
+            }
+            if order.len() >= limit {
+                // This message is whole. If anything older is left, the next page starts below it.
+                if let Some(peek) = rows.next() {
+                    peek.map_err(|e| format!("read hub files: {e}"))?;
+                    next = last_seq;
+                }
+                break;
+            }
+        }
+        let files = order.into_iter().filter_map(|k| by_key.remove(&k)).collect();
+        Ok(FilesPage { files, next, scanned })
+    }
+
     /// Newest message timestamp (ms) per room — what orders the project list.
     pub fn hub_room_latest(&self) -> Result<Vec<(String, i64)>, String> {
         let mut stmt = self
@@ -662,6 +796,123 @@ mod tests {
         assert_eq!(ids, vec!["m3", "m4"]);
     }
 
+    /// Board #432 Files mode: the rows are the files the messages mention, newest first;
+    /// an absolute path is one row across rooms, a relative one is one row per room, a
+    /// leading `./` is not a second file, and `count` adds every mention.
+    #[test]
+    fn hub_files_dedups_by_path_and_by_room_for_relative_paths() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:a", "a1", 10, "kiro", "[]", "msg", "wrote /srv/out/report.md and ./src/x.rs:12").unwrap();
+        store.hub_append("proj:a", "a2", 20, "kiro", "[]", "msg", "again src/x.rs, and /srv/out/report.md").unwrap();
+        store.hub_append("proj:b", "b1", 30, "kiro", "[]", "msg", "in b: src/x.rs and /srv/out/report.md").unwrap();
+        let page = store.hub_files(None, &[], false, None, None, 50).unwrap();
+        let rows: Vec<(String, String, u64)> = page.files.iter().map(|f| (f.path.clone(), f.room.clone(), f.count)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("src/x.rs".to_string(), "proj:b".to_string(), 1),
+                ("/srv/out/report.md".to_string(), "proj:b".to_string(), 3),
+                ("src/x.rs".to_string(), "proj:a".to_string(), 2),
+            ],
+            "newest mention first; the absolute path is ONE row, the relative one is per room, ./ is dropped"
+        );
+        let x_a = page.files.iter().find(|f| f.room == "proj:a" && f.path == "src/x.rs").unwrap();
+        assert_eq!((x_a.id.as_str(), x_a.seq > 0, x_a.ts, x_a.from.as_str()), ("a2", true, 20, "kiro"), "the newest mentioning message");
+        assert_eq!(page.next, None);
+        assert_eq!(page.scanned, 3);
+        // The line of a mention is the newest mention's.
+        let one = store.hub_files(Some("proj:a"), &["x.rs".to_string()], false, None, None, 50).unwrap();
+        assert_eq!(one.files.len(), 1);
+        assert_eq!((one.files[0].line, one.files[0].count), (None, 2), "the newest mention has no line; the older one's :12 is not borrowed");
+    }
+
+    /// Board #432: archived messages mention nothing; `from` is the exact sender; terms
+    /// match the PATH (AND with `all`, any otherwise, ASCII-case-insensitive), not the prose.
+    #[test]
+    fn hub_files_scopes_by_archive_sender_and_path_terms() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:f", "f1", 10, "kiro", "[]", "msg", "/a/Report.md").unwrap();
+        store.hub_append("proj:f", "f2", 20, "kiro-2", "[]", "msg", "/a/other.md").unwrap();
+        store.hub_append("proj:f", "f3", 30, "human", "[]", "msg", "report for /a/chart.png please").unwrap();
+        store.hub_append("proj:f", "f4", 40, "kiro", "[]", "msg", "/b/gone.md").unwrap();
+        store.archive_msg("proj:f", "f4", 40, "kiro", "/b/gone.md", 1).unwrap();
+        let paths = |terms: &[&str], all: bool, from: Option<&str>| {
+            let t: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+            store.hub_files(Some("proj:f"), &t, all, from, None, 50).unwrap().files.into_iter().map(|f| f.path).collect::<Vec<_>>()
+        };
+        assert_eq!(paths(&[], false, None), vec!["/a/chart.png", "/a/other.md", "/a/Report.md"], "the archived message mentions nothing");
+        assert_eq!(paths(&[], false, Some("kiro")), vec!["/a/Report.md"], "exact sender, not kiro-2");
+        assert_eq!(paths(&["REPORT"], false, None), vec!["/a/Report.md"], "a term matches the path, and the prose 'report' of f3 is not a path");
+        assert_eq!(paths(&["a", "md"], true, None), vec!["/a/other.md", "/a/Report.md"], "every term in the path");
+        assert_eq!(paths(&["png", "md"], false, None), vec!["/a/chart.png", "/a/other.md", "/a/Report.md"], "any term");
+        assert!(paths(&["png", "md"], true, None).is_empty());
+        assert_eq!(paths(&[" "], false, Some("  ")), vec!["/a/chart.png", "/a/other.md", "/a/Report.md"], "blanks are no filter");
+    }
+
+    /// Board #432: a page never ends inside a message. The soft limit stops AFTER the
+    /// message that reaches it, `next` is that message's seq, and following the cursor
+    /// reads every other mention exactly once.
+    #[test]
+    fn hub_files_pages_never_split_a_message_and_the_cursor_neither_repeats_nor_skips() {
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:p", "p1", 10, "kiro", "[]", "msg", "/f/one.md").unwrap();
+        store.hub_append("proj:p", "p2", 20, "kiro", "[]", "msg", "/f/two.md /f/three.md /f/four.md").unwrap();
+        store.hub_append("proj:p", "p3", 30, "kiro", "[]", "msg", "chatter without a path").unwrap();
+        store.hub_append("proj:p", "p4", 40, "kiro", "[]", "msg", "/f/five.md and /f/one.md").unwrap();
+        let first = store.hub_files(Some("proj:p"), &[], false, None, None, 1).unwrap();
+        assert_eq!(first.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["/f/five.md", "/f/one.md"], "p4 is whole: both of its files, over the limit of 1");
+        let seq4 = first.files[0].seq;
+        assert_eq!(first.next, Some(seq4), "the cursor is the last message read");
+        let second = store.hub_files(Some("proj:p"), &[], false, None, first.next, 1).unwrap();
+        assert_eq!(second.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["/f/two.md", "/f/three.md", "/f/four.md"], "p2 is whole too; p3 had no candidate and was never read");
+        assert!(second.next.is_some(), "p1 is older still");
+        let third = store.hub_files(Some("proj:p"), &[], false, None, second.next, 50).unwrap();
+        assert_eq!(third.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["/f/one.md"]);
+        assert_eq!(third.next, None, "nothing older: the cursor ends");
+        // The limit reached with an older candidate left (p1, which may mention anything) keeps a cursor;
+        // a limit the table cannot reach reads it all and ends.
+        let at_limit = store.hub_files(Some("proj:p"), &[], false, None, None, 5).unwrap();
+        assert_eq!((at_limit.files.len(), at_limit.next.is_some()), (5, true), "p1 is still unread");
+        let all = store.hub_files(Some("proj:p"), &[], false, None, None, 6).unwrap();
+        assert_eq!((all.files.len(), all.next), (5, None), "everything read: no cursor");
+        // The limit reached ON the oldest candidate is not 'more'.
+        let oldest = store.hub_files(Some("proj:p"), &[], false, None, second.next, 1).unwrap();
+        assert_eq!((oldest.files.len(), oldest.next), (1, None));
+    }
+
+    /// Board #432: the scan cap stops after N candidate messages with a cursor, and a row
+    /// that exists beyond it is what makes the cursor; exactly N messages is no cursor.
+    #[test]
+    fn hub_files_stops_at_the_scan_cap_with_a_cursor() {
+        let store = Store::open_memory().unwrap();
+        for n in 1..=5 {
+            store.hub_append("proj:c", &format!("c{n}"), n * 10, "kiro", "[]", "msg", &format!("see /c/{n}.md")).unwrap();
+        }
+        let page = store.hub_files_capped(Some("proj:c"), &["zzz".to_string()], false, None, None, 50, 3).unwrap();
+        assert!(page.files.is_empty(), "nothing matched in the first three");
+        assert_eq!(page.scanned, 3);
+        let at = page.next.expect("two older candidates exist");
+        let rest = store.hub_files_capped(Some("proj:c"), &["zzz".to_string()], false, None, Some(at), 50, 3).unwrap();
+        assert_eq!((rest.scanned, rest.next), (2, None), "the cursor continues exactly where the cap stopped");
+        let exact = store.hub_files_capped(Some("proj:c"), &[], false, None, None, 500, 5).unwrap();
+        assert_eq!((exact.scanned, exact.next), (5, None), "exactly the cap is not 'more'");
+    }
+
+    /// Board #432: only the shapes `paths_in_body` knows are mentions: prose in a code
+    /// fence, a URL or a link TEXT is not a file, and a link with no slash anywhere is
+    /// still found through the `](` half of the candidate filter.
+    #[test]
+    fn hub_files_reads_links_and_skips_what_is_not_a_mention() {
+        let store = Store::open_memory().unwrap();
+        // l1 holds no `/` at all: only the `](` half of the candidate filter can find it.
+        store.hub_append("proj:l", "l1", 10, "kiro", "[]", "msg", "see [README](README.md)").unwrap();
+        store.hub_append("proj:l", "l2", 20, "kiro", "[]", "msg", "```\n/in/a/fence.md\n```\nand https://example.com/not/a/file.md").unwrap();
+        store.hub_append("proj:l", "l3", 30, "kiro", "[]", "msg", "and [spec](docs/spec%20v2.md)").unwrap();
+        let page = store.hub_files(Some("proj:l"), &[], false, None, None, 50).unwrap();
+        assert_eq!(page.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["docs/spec v2.md", "README.md"]);
+        assert_eq!(page.scanned, 3, "all three are candidates; the fence message simply mentions nothing");
+    }
+
     /// Board #432: a store that cannot answer is an ERROR. It used to end in
     /// unwrap_or_default, so a broken database read as "no matches".
     #[test]
@@ -684,6 +935,24 @@ mod tests {
         ).unwrap();
         let err = store.hub_search(Some("proj:bad"), &["needle".to_string()], false, None, 10).unwrap_err();
         assert!(err.contains("read hub search"), "{err}");
+    }
+
+    /// Board #432, Files mode: a store or a row that cannot be read is an ERROR, not a list
+    /// of the files that happened to be readable; and the scan cap is the documented 5000.
+    #[test]
+    fn hub_files_reports_a_broken_store_and_an_unreadable_row_as_errors() {
+        assert_eq!(FILES_SCAN_CAP, 5000, "the cap the docs and the wire contract name");
+        let store = Store::open_memory().unwrap();
+        store.hub_append("proj:bad", "g1", 10, "human", "[]", "msg", "see /ok/file.md").unwrap();
+        store.conn.execute(
+            "INSERT INTO hub_msgs (id, ts, room, sender, to_json, kind, body) VALUES ('g2', 'not-a-number', 'proj:bad', 'human', '[]', 'msg', 'and /broken/file.md')",
+            [],
+        ).unwrap();
+        let err = store.hub_files(Some("proj:bad"), &[], false, None, None, 10).unwrap_err();
+        assert!(err.contains("read hub files"), "{err}");
+        store.conn.execute_batch("DROP TABLE hub_msgs").unwrap();
+        let err = store.hub_files(Some("proj:bad"), &[], false, None, None, 10).unwrap_err();
+        assert!(err.contains("hub files"), "{err}");
     }
 
     /// Board #124: the match moved into SQL `LIKE`, and a literal `%` or `_`

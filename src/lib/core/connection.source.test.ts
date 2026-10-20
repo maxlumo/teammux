@@ -50,8 +50,8 @@ test('ws-api.ts declares each RPC once, against the connection it was handed', a
   assert.match(src, /const \{ call \} = connection;/u);
   assert.equal((src.match(/new WebSocket\(/gu) ?? []).length, 0, 'the API never opens a socket');
   const methods = [...src.matchAll(/\bcall<?[^>]*>?\(\s*'(\w+)'/gu)].map(m => m[1]);
-  const duplicates = methods.filter((m, i) => methods.indexOf(m) !== i && m !== 'hub_log');
-  assert.deepEqual(duplicates, [], 'one declaration per RPC (hub_log is read two ways on purpose)');
+  const duplicates = methods.filter((m, i) => methods.indexOf(m) !== i && m !== 'hub_log' && m !== 'hub_search');
+  assert.deepEqual(duplicates, [], 'one declaration per RPC (hub_log and hub_search are each read two ways on purpose: a page or a window; messages or files)');
 });
 
 test('the registry owns lifetime only: it never dials and never guesses identity', async () => {

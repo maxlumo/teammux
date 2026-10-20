@@ -54,6 +54,7 @@ tmm ui [--open]                      the web UI this machine's gateway serves: i
 tmm send … --image <path|url>        attach an image by REFERENCE (repeatable)
 tmm log [--since <ts>] [--limit N] [-f]      read chat; --since exclusive (ms), -f follows
 tmm log --grep <text> [--grep …] [--all] [--from <name>] [--global]  search FULL history (any-match, or every term with --all; body+sender; --from keeps one sender, and a --from with no name is a usage error, never a search for everyone; each of --all/--from/--global without --grep is refused, not ignored)
+tmm log --files [--grep <word>…] [--from <name>] [--global] [--limit N] [--before N]  the FILES the room's messages mention, newest first, with their count in the messages read (words narrow the PATHS and are optional; follows the server's page cursor up to --limit files or 20 pages, and a run that stopped early prints the --before N to continue with (--json: next); refuses a gateway whose login lacks the `hub_files` cap before sending anything (an older one refuses the empty search outright), and one that answers without a file page; a named subset of what the feed links)
 
 # the task board
 tmm board [list] | show <id>         the kanban; one issue + its note thread

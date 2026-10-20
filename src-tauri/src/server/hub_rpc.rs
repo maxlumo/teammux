@@ -422,14 +422,20 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // name SENT (the Hub's agent filter scopes its search by sender). Archived messages never match
         // (excluded in the query, so `limit` and `more` count what a reader can
         // see) — same one-way mirror as `hub_log`. A store that cannot be read
-        // is an error, not an empty answer.
+        // is an error, not an empty answer. `files: true` answers with the FILES
+        // those messages mention instead (`rooms::search_files`): `grep` then narrows
+        // the paths and may be empty, `limit` is a soft count of distinct files, and
+        // `before_seq` is the cursor the previous page returned as `next`.
         "hub_search" => {
             let terms: Vec<String> = p
                 .get("grep")
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
-            if terms.iter().all(|t| t.trim().is_empty()) {
+            // Files mode (board #432) lists a room's mentioned files: words are optional there (they
+            // narrow the PATHS), and `before_seq` pages through the scan.
+            let files = p.get("files").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !files && terms.iter().all(|t| t.trim().is_empty()) {
                 return Err(RpcError::InvalidParams("grep must be a non-empty array of search terms".into()));
             }
             // One LIKE pair per term: an authenticated client must not be able to make one query of
@@ -442,6 +448,10 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let from = p.get("from").and_then(|v| v.as_str());
             let limit = p.get("limit").and_then(|v| v.as_i64()).unwrap_or(50).clamp(1, 500);
             let scope = if global { None } else { Some(room.as_str()) };
+            if files {
+                let before_seq = p.get("before_seq").and_then(|v| v.as_i64());
+                return Ok(rooms::search_files(scope, &terms, all, from, before_seq, limit).map_err(RpcError::Internal)?);
+            }
             Ok(rooms::search_messages(scope, &terms, all, from, limit).map_err(RpcError::Internal)?)
         }
 
@@ -3666,6 +3676,54 @@ mod tests {
         let msgs = search(serde_json::json!(["old", "new"]));
         assert_eq!(msgs.len(), 1, "the archived hit is filtered: {msgs:?}");
         assert_eq!(msgs[0]["body"], "old");
+    }
+
+    /// Board #432, Files mode through the real door: `files: true` lists the files a room's
+    /// messages mention (link targets with no slash and percent-encoded ones included),
+    /// `grep` is optional and narrows the paths, `from` keeps one sender, a page ends whole
+    /// messages and `next` is the cursor, and a project's relative path stays that project's.
+    #[test]
+    fn hub_search_files_lists_mentioned_files_pages_them_and_keeps_rooms_apart() {
+        crate::projects::tests::use_test_store();
+        let (session, room) = unique("srch-files");
+        let (other_session, other_room) = unique("srch-files-b");
+        rooms::seed_msg(&room, &format!("{room}-1"), 100, "kiro", &[], "wrote [README](README.md) and [spec](docs/spec%20v2.md)");
+        rooms::seed_msg(&room, &format!("{room}-2"), 200, "human", &[], "please read /srv/out/report.md:7:3");
+        rooms::seed_msg(&room, &format!("{room}-3"), 300, "kiro", &[], "chatter, no file at all");
+        rooms::seed_msg(&other_room, &format!("{other_room}-1"), 400, "kiro", &[], "also [README](README.md) and /srv/out/report.md");
+        let ask = |s: &str, extra: serde_json::Value| {
+            let mut p = serde_json::json!({ "session": s, "files": true });
+            for (k, v) in extra.as_object().unwrap() { p[k] = v.clone(); }
+            handle_hub_request(&req("hub_search", p), None).result.expect("result")
+        };
+        let paths = |r: &serde_json::Value| r["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let r = ask(&session, serde_json::json!({}));
+        assert_eq!(paths(&r), vec!["/srv/out/report.md", "README.md", "docs/spec v2.md"], "newest first; a link with no slash and a %20 target are found");
+        assert_eq!(r["next"], serde_json::Value::Null);
+        assert_eq!(r["scanned"], 2, "the chatter line is not a candidate");
+        let report = &r["files"][0];
+        assert_eq!((report["line"].as_u64(), report["col"].as_u64(), report["from"].as_str(), report["room"].as_str()), (Some(7), Some(3), Some("human"), Some(room.as_str())));
+        assert_eq!(report["id"].as_str(), Some(format!("{room}-2").as_str()), "the newest mentioning message, for the jump");
+        // Words narrow the PATHS, not the prose; `all` and `from` apply.
+        assert_eq!(paths(&ask(&session, serde_json::json!({ "grep": ["SPEC"] }))), vec!["docs/spec v2.md"]);
+        assert!(paths(&ask(&session, serde_json::json!({ "grep": ["please"] }))).is_empty(), "'please' is prose, not a path");
+        assert_eq!(paths(&ask(&session, serde_json::json!({ "from": "kiro" }))), vec!["README.md", "docs/spec v2.md"]);
+        // The soft limit ends after a whole message, with the cursor.
+        let first = ask(&session, serde_json::json!({ "limit": 1 }));
+        assert_eq!(paths(&first), vec!["/srv/out/report.md"]);
+        let next = first["next"].as_i64().expect("an older candidate is left");
+        let second = ask(&session, serde_json::json!({ "limit": 1, "before_seq": next }));
+        assert_eq!(paths(&second), vec!["README.md", "docs/spec v2.md"], "message 1 is whole: both of its files");
+        assert_eq!(second["next"], serde_json::Value::Null);
+        // Another project: its README.md is its own row, and `global` sees both.
+        assert_eq!(paths(&ask(&other_session, serde_json::json!({}))), vec!["README.md", "/srv/out/report.md"]);
+        let global = ask(&session, serde_json::json!({ "global": true, "grep": ["readme"] }));
+        let rows: Vec<(String, String)> = global["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap().into(), f["room"].as_str().unwrap().into())).collect();
+        assert_eq!(rows, vec![("README.md".to_string(), other_room.clone()), ("README.md".to_string(), room.clone())], "one row per room for a relative path");
+        // Without files, words are still required, and the caps still apply.
+        assert!(handle_hub_request(&req("hub_search", serde_json::json!({ "session": session })), None).error.is_some());
+        let many: Vec<String> = (0..=MAX_SEARCH_TERMS).map(|n| format!("t{n}")).collect();
+        assert!(handle_hub_request(&req("hub_search", serde_json::json!({ "session": session, "files": true, "grep": many })), None).error.is_some());
     }
 
     /// Board #432: `all` makes every term required (the Hub's search box), the

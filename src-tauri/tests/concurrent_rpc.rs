@@ -201,7 +201,7 @@ impl Client {
         // Board #368: the login answer says which build this server is, in the
         // encrypted answer too, and a client parses it back whole.
         assert_eq!(resp["result"]["build"], tmux_mobile::build_info::json(), "the sealed login answer carries the build");
-        assert_eq!(resp["result"]["caps"], serde_json::json!(["board_dispatch", "spawn_join", "agent_team"]), "the sealed login answer announces what the server can do (board #377; spawn_join #382; agent_team #384)");
+        assert_eq!(resp["result"]["caps"], serde_json::json!(["board_dispatch", "spawn_join", "agent_team", "hub_files"]), "the sealed login answer announces what the server can do (board #377; spawn_join #382; agent_team #384; hub_files #432)");
         assert_eq!(tmux_mobile::build_info::parse(&resp["result"]), Some(tmux_mobile::build_info::Build::ours()));
 
         Self {
@@ -668,7 +668,7 @@ impl PlainClient {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["result"]["authenticated"].as_bool(), Some(true), "plain auth failed: {}", text);
         assert_eq!(v["result"]["build"], tmux_mobile::build_info::json(), "the plain login answer carries the build");
-        assert_eq!(v["result"]["caps"], serde_json::json!(["board_dispatch", "spawn_join", "agent_team"]), "the plain login answer announces what the server can do (board #377; spawn_join #382; agent_team #384)");
+        assert_eq!(v["result"]["caps"], serde_json::json!(["board_dispatch", "spawn_join", "agent_team", "hub_files"]), "the plain login answer announces what the server can do (board #377; spawn_join #382; agent_team #384; hub_files #432)");
 
         Self { ws }
     }

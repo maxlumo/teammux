@@ -58,6 +58,10 @@ USAGE (agent):
                     [--all]           …every --grep term must match (default: any)
                     [--from <name>]   …only messages SENT by that name
                     [--global]        …across EVERY project's room, hits name their room
+  tmm log --files [--grep <word>…] [--from <name>] [--global] [--limit N] [--before N]
+                                      the FILES the room's messages mention, newest first, with how
+                                      often (in the messages read); words narrow the paths; a run that
+                                      stopped early prints the --before to continue with
   tmm spawn <agent> [--brief <text>]  spawn a registry agent into this project (standalone)
                     [--join <team>]   …into a team of this project instead, live or stopped (its definition is
                                       not changed: a team stop stops it, a team restart keeps it)
@@ -497,7 +501,56 @@ async fn main() {
                 .map(|(_, v)| v.clone())
                 .collect();
             let global = flags.contains_key("global");
-            if !terms.is_empty() {
+            if flags.contains_key("files") {
+                // `--files`: the files the room's messages mention, newest first (board #432). The
+                // words narrow the PATHS and are optional; the server pages whole messages and the
+                // loop follows its cursor until `--limit` files or the history is read.
+                if flags.contains_key("f") || flags.contains_key("follow") {
+                    fail(EXIT_USAGE, "--files lists history; it does not combine with -f");
+                }
+                let limit = flags.get("limit").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
+                let params = match log_search_params(&session, &terms, &flags, limit) {
+                    Ok(params) => params,
+                    Err(why) => fail(EXIT_USAGE, &why),
+                };
+                let mut rows: Vec<Value> = Vec::new();
+                // `--before N` continues where an earlier run stopped (its `next`).
+                let mut cursor = params.get("before_seq").and_then(|v| v.as_i64());
+                for _ in 0..FILES_MAX_PAGES {
+                    let mut page = params.clone();
+                    if let Some(at) = cursor { page["before_seq"] = json!(at); }
+                    // The gateway must SAY it can (`hub_files`) on this very connection; an older one
+                    // refuses the empty search outright or answers with messages.
+                    let r = rpc_needing(&ctx, "hub_files", "hub_search", page).await;
+                    // (A gateway that says it can and still answers without a file page is not trusted either.)
+                    let files = match files_page(&r) {
+                        Ok(files) => files,
+                        Err(why) => fail(EXIT_ERR, &why),
+                    };
+                    merge_file_pages(&mut rows, files);
+                    let next = r["next"].as_i64();
+                    // A cursor that does not move back would read the same page for ever.
+                    if let (Some(n), Some(at)) = (next, cursor) {
+                        if n >= at {
+                            fail(EXIT_ERR, "this gateway's cursor did not move back: update the gateway");
+                        }
+                    }
+                    cursor = next;
+                    if cursor.is_none() || rows.len() as i64 >= limit {
+                        break;
+                    }
+                }
+                if ctx.json {
+                    println!("{}", json!({ "files": rows, "next": cursor }));
+                } else {
+                    for f in &rows {
+                        println!("{}", file_line(f, global));
+                    }
+                    if let Some(at) = cursor {
+                        eprintln!("(older messages exist and were not read: continue with --before {at}, or narrow the words; each run counts only the messages it read)");
+                    }
+                }
+            } else if !terms.is_empty() {
                 if flags.contains_key("f") || flags.contains_key("follow") {
                     fail(EXIT_USAGE, "--grep searches history; it does not combine with -f");
                 }
@@ -515,6 +568,8 @@ async fn main() {
                 if !ctx.json && r["more"].as_bool() == Some(true) {
                     eprintln!("(older matches exist; narrow the search or raise --limit)");
                 }
+            } else if let Err(why) = log_before(&flags) {
+                fail(EXIT_USAGE, &why);
             } else if let Some(flag) = search_flag_without_grep(&flags) {
                 fail(EXIT_USAGE, &format!("--{flag} needs --grep: tmm log --grep \"deploy\" {}", search_flag_example(flag)));
             } else if flags.contains_key("f") || flags.contains_key("follow") {
@@ -2053,7 +2108,70 @@ fn log_from(flags: &std::collections::HashMap<String, Option<String>>) -> Result
 fn log_search_params(session: &str, terms: &[String], flags: &std::collections::HashMap<String, Option<String>>, limit: i64) -> Result<serde_json::Value, String> {
     let mut params = json!({ "session": session, "grep": terms, "global": flags.contains_key("global"), "all": flags.contains_key("all"), "limit": limit });
     if let Some(from) = log_from(flags)? { params["from"] = json!(from); }
+    if flags.contains_key("files") { params["files"] = json!(true); }
+    if let Some(before) = log_before(flags)? { params["before_seq"] = json!(before); }
     Ok(params)
+}
+
+/// `--before N`: the cursor an earlier `--files` run printed, so a list longer than one run's page
+/// budget can be read on (board #432 review). It means nothing without `--files`, which is a
+/// usage error whether or not `--grep` is there, never a flag the plain log quietly ignores.
+fn log_before(flags: &std::collections::HashMap<String, Option<String>>) -> Result<Option<i64>, String> {
+    let Some(before) = flags.get("before") else { return Ok(None) };
+    if !flags.contains_key("files") {
+        return Err("--before continues a --files list: tmm log --files --before 1234".to_string());
+    }
+    match before.as_deref().and_then(|b| b.parse::<i64>().ok()).filter(|b| *b > 0) {
+        Some(b) => Ok(Some(b)),
+        None => Err("--before needs the number a --files run printed: tmm log --files --before 1234".to_string()),
+    }
+}
+
+/// The file rows of a `hub_search` answer made with `files`. A gateway that predates Files mode
+/// ignores the parameter and answers with `messages`; that is "this gateway cannot", never an
+/// empty list (board #432 review).
+fn files_page(r: &Value) -> Result<&[Value], String> {
+    let row = |f: &Value| f["path"].as_str().is_some_and(|p| !p.is_empty()) && f["room"].is_string() && f["seq"].is_i64() && f["count"].as_u64().is_some_and(|c| c >= 1);
+    match (r.get("files").and_then(Value::as_array), r.get("next"), r.get("scanned")) {
+        (Some(files), Some(next), Some(scanned))
+            if files.iter().all(row)
+                && (next.is_null() || next.as_i64().is_some_and(|n| n > 0))
+                && scanned.as_i64().is_some_and(|n| n >= 0) => Ok(files.as_slice()),
+        _ => Err("this gateway does not list files (its hub_search answered without a file page): update the gateway".to_string()),
+    }
+}
+
+/// `tmm log --files` reads at most this many pages of the server's scan.
+const FILES_MAX_PAGES: usize = 20;
+
+/// One file row's identity, the way the Hub dedups them: an absolute or `~` path by the path,
+/// a relative one by (room, path).
+fn file_key(f: &Value) -> String {
+    let path = f["path"].as_str().unwrap_or("");
+    if path.starts_with('/') || path.starts_with('~') { path.to_string() } else { format!("{}\0{path}", f["room"].as_str().unwrap_or("")) }
+}
+
+/// Fold a later (older) page into the rows so far: a key already listed only gains its count,
+/// because the first sighting is the newest mention.
+fn merge_file_pages(rows: &mut Vec<Value>, page: &[Value]) {
+    for f in page {
+        let key = file_key(f);
+        match rows.iter_mut().find(|r| file_key(r) == key) {
+            Some(r) => r["count"] = json!(r["count"].as_u64().unwrap_or(1) + f["count"].as_u64().unwrap_or(1)),
+            None => rows.push(f.clone()),
+        }
+    }
+}
+
+/// `2026-08-17 16:31  path:12:3  x3  kiro`, with the room first for `--global`.
+fn file_line(f: &Value, with_room: bool) -> String {
+    let mut path = f["path"].as_str().unwrap_or("").to_string();
+    if let Some(line) = f["line"].as_u64() {
+        path.push_str(&format!(":{line}"));
+        if let Some(col) = f["col"].as_u64() { path.push_str(&format!(":{col}")); }
+    }
+    let room = if with_room { format!("[{}] ", f["room"].as_str().unwrap_or("?")) } else { String::new() };
+    format!("{}  {room}{path}  x{}  {}", local_stamp(f["ts"].as_i64().unwrap_or(0)), f["count"].as_u64().unwrap_or(1), f["from"].as_str().unwrap_or("?"))
 }
 
 /// Flags known to take a value consume the next arg; boolean flags don't.
@@ -2064,7 +2182,7 @@ fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<Str
     const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as", "from"];
+                          "in", "at", "to", "code", "signal", "re", "as", "from", "before"];
     let mut flags = std::collections::HashMap::new();
     let mut pos = Vec::new();
     let mut repeats: Vec<(String, String)> = Vec::new();
@@ -2155,6 +2273,9 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// nothing was written.
 fn cap_refusal(need: &str) -> String {
     match need {
+        "hub_files" => format!(
+            "this gateway does not list files (its login answer lacks `{need}`; an older gateway refuses an empty search or answers with messages) — update the gateway. Nothing was read."
+        ),
         "agent_team" => format!(
             "this server cannot move an agent between teams (its login answer lacks `{need}`) — update the server. Nothing was changed."
         ),
@@ -3129,6 +3250,64 @@ mod tests {
         }
         assert_eq!(search_flag_example("from"), "--from kiro", "the example names a sender");
         assert_eq!(search_flag_example("all"), "--all");
+    }
+
+    /// Board #432, Files mode: `--files` goes on the request (the words are optional there),
+    /// later pages only add to a file's count (the first sighting is the newest), an absolute
+    /// path is one file across rooms and a relative one is per room, and a row reads as one line.
+    #[test]
+    fn log_files_requests_merges_pages_and_prints_one_line_per_file() {
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let (flags, _, _) = parse(&["log", "--files", "--from", "kiro", "--global"]);
+        let params = log_search_params("proj", &[], &flags, 50).unwrap();
+        assert_eq!(params["files"], json!(true));
+        assert_eq!((params["from"].as_str(), params["global"].as_bool(), params["grep"].as_array().map(Vec::len)), (Some("kiro"), Some(true), Some(0)));
+        let (flags, _, _) = parse(&["log", "--grep", "x"]);
+        assert!(log_search_params("proj", &["x".to_string()], &flags, 50).unwrap().get("files").is_none(), "no --files: the key is absent");
+        let row = |path: &str, room: &str, count: u64| json!({ "path": path, "room": room, "count": count, "ts": 0, "from": "kiro" });
+        let mut rows = vec![row("/a/b.md", "r1", 2), row("src/x.rs", "r1", 1)];
+        merge_file_pages(&mut rows, &[row("/a/b.md", "r2", 3), row("src/x.rs", "r2", 1), row("src/x.rs", "r1", 4)]);
+        let got: Vec<(String, String, u64)> = rows.iter().map(|r| (r["path"].as_str().unwrap().into(), r["room"].as_str().unwrap().into(), r["count"].as_u64().unwrap())).collect();
+        assert_eq!(got, vec![
+            ("/a/b.md".to_string(), "r1".to_string(), 5),
+            ("src/x.rs".to_string(), "r1".to_string(), 5),
+            ("src/x.rs".to_string(), "r2".to_string(), 1),
+        ], "the absolute path is one file; the relative one is per room; the first sighting names the row");
+        let line = file_line(&json!({ "path": "docs/a.md", "line": 12, "col": 3, "room": "proj:p", "count": 4, "ts": 0, "from": "kiro" }), true);
+        assert!(line.contains("[proj:p] docs/a.md:12:3  x4  kiro"), "{line}");
+        assert!(file_line(&json!({ "path": "/a.md", "room": "r", "count": 1, "ts": 0, "from": "h" }), false).contains("/a.md  x1  h"));
+    }
+
+    /// Board #432 review: an older gateway ignores `files` and answers with messages, which is
+    /// not "no files"; and a run that stopped early hands out the cursor to continue from.
+    #[test]
+    fn log_files_refuses_a_gateway_that_answers_with_messages_and_continues_with_before() {
+        let page = json!({ "files": [], "next": null, "scanned": 0 });
+        assert_eq!(files_page(&page).map(|f| f.len()), Ok(0), "a real empty page is fine");
+        assert!(files_page(&json!({ "files": [], "next": 12, "scanned": 5000 })).is_ok());
+        let good = json!({ "path": "a.md", "room": "r", "seq": 3, "count": 1 });
+        assert_eq!(files_page(&json!({ "files": [good], "next": null, "scanned": 1 })).map(|f| f.len()), Ok(1));
+        let bad_row = |patch: Value| { let mut r = good.clone(); for (k, v) in patch.as_object().unwrap() { r[k] = v.clone(); } json!({ "files": [r], "next": null, "scanned": 1 }) };
+        for old in [json!({ "messages": [], "more": false }), json!({ "files": [] }), json!({ "files": [], "next": "x", "scanned": 1 }), json!({ "files": {}, "next": null, "scanned": 1 }), json!(null),
+            json!({ "files": [], "next": -4, "scanned": 1 }), json!({ "files": [], "next": 0, "scanned": 1 }), json!({ "files": [], "next": null, "scanned": -1 }),
+            bad_row(json!({ "path": "" })), bad_row(json!({ "path": 7 })), bad_row(json!({ "room": null })), bad_row(json!({ "count": 0 })), bad_row(json!({ "seq": "x" }))] {
+            let e = files_page(&old).unwrap_err();
+            assert!(e.contains("does not list files") && e.contains("update the gateway"), "{old}: {e}");
+        }
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let (flags, pos, _) = parse(&["log", "--files", "--before", "4711", "--limit", "5"]);
+        assert_eq!(pos, vec!["log"], "4711 is the flag's value, not a positional");
+        assert_eq!(log_search_params("p", &[], &flags, 5).unwrap()["before_seq"], json!(4711));
+        let (flags, _, _) = parse(&["log", "--files"]);
+        assert!(log_search_params("p", &[], &flags, 5).unwrap().get("before_seq").is_none());
+        for (label, args) in [("no value", vec!["log", "--files", "--before"]), ("not a number", vec!["log", "--files", "--before", "x"]), ("zero", vec!["log", "--files", "--before", "0"]), ("without --files", vec!["log", "--grep", "a", "--before", "9"]), ("without --files or --grep", vec!["log", "--before", "9"])] {
+            let (flags, _, _) = parse(&args);
+            let e = log_search_params("p", &["a".to_string()], &flags, 5).unwrap_err();
+            assert!(e.contains("--before"), "{label}: {e}");
+            assert!(log_before(&flags).is_err(), "{label}: the plain log refuses it too, instead of ignoring it");
+        }
+        let (flags, _, _) = parse(&["log", "--since", "5"]);
+        assert_eq!(log_before(&flags), Ok(None));
     }
 
     /// Board #382: `--join` is a VALUED flag (else its team would fall out as

@@ -14,9 +14,41 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { AGENT_TEAM, BOARD_DISPATCH, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
+import { AGENT_TEAM, BOARD_DISPATCH, CapError, HUB_FILES, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
+
+/** A Files answer, checked at the door (board #432 review). A server that predates Files mode
+ * ignores `files: true` and answers `{ messages }`; that must reach the caller as "this server
+ * cannot list files", never as an empty list. The error carries `code: 'files-unsupported'`. */
+export function filesAnswer(raw: unknown): { files: FileMention[]; next: number | null; scanned: number } {
+  const r = raw as { files?: unknown; next?: unknown; scanned?: unknown } | null;
+  const row = (f: unknown) => !!f && typeof f === 'object'
+    && typeof (f as FileMention).path === 'string' && (f as FileMention).path !== '' && typeof (f as FileMention).room === 'string'
+    && typeof (f as FileMention).id === 'string' && Number.isInteger((f as FileMention).seq)
+    && Number.isInteger((f as FileMention).count) && (f as FileMention).count >= 1;
+  if (!r || typeof r !== 'object' || !Array.isArray(r.files) || !r.files.every(row)
+    || (r.next !== null && !(Number.isInteger(r.next) && (r.next as number) > 0))
+    || !(Number.isInteger(r.scanned) && (r.scanned as number) >= 0)) {
+    throw Object.assign(new Error('this server does not list files: its hub_search answered without a file page'), { code: 'files-unsupported' });
+  }
+  return r as { files: FileMention[]; next: number | null; scanned: number };
+}
+
+/** One file a room's messages mention (board #432, Files mode), as `hub_search` with `files`
+ * answers: the NEWEST mention names the row (`id`/`seq`/`ts`/`from`/`room`, to jump to it);
+ * `count` is its mentions in the scanned range only. */
+export interface FileMention {
+  path: string;
+  line: number | null;
+  col: number | null;
+  room: string;
+  id: string;
+  seq: number;
+  ts: number;
+  from: string;
+  count: number;
+}
 
 export interface TmuxSession {
   name: string;
@@ -333,6 +365,26 @@ export function createWsApi(connection: Connection) {
       session, grep, ...(opts.all ? { all: true } : {}), ...(opts.global ? { global: true } : {}),
       ...(opts.from ? { from: opts.from } : {}), ...(opts.limit ? { limit: opts.limit } : {}),
     });
+  /** The files the room's messages mention, newest first (board #432, Files mode): the same
+   * `hub_search` door with `files`. `grep` narrows the PATHS and may be empty; `before` is the
+   * cursor a previous page returned as `next` (null = nothing older). `limit` is a SOFT count of
+   * distinct files: a page ends after the message that reaches it. Each row is the file's newest
+   * mention; `count` is its mentions in the scanned range only. */
+  const hubFiles = async (session: string, grep: string[], opts: { all?: boolean; global?: boolean; from?: string; limit?: number; before?: number } = {}) => {
+    // The server must SAY it can (`hub_files`) before anything is sent: an older one refuses the
+    // EMPTY query (the default way into Files) as a bad request and answers a worded one with
+    // messages, and neither reads as "cannot list files" from the answer alone.
+    await holdForLogin(connection);
+    try { requireCap(connection, HUB_FILES); } catch (e) {
+      if (e instanceof CapError && e.code === 'server_too_old') throw Object.assign(new Error('this server does not list files: its login answer lacks `hub_files`'), { code: 'files-unsupported' });
+      throw e;
+    }
+    return filesAnswer(await call<unknown>('hub_search', {
+      session, grep, files: true, ...(opts.all ? { all: true } : {}), ...(opts.global ? { global: true } : {}),
+      ...(opts.from ? { from: opts.from } : {}), ...(opts.limit ? { limit: opts.limit } : {}),
+      ...(opts.before ? { before_seq: opts.before } : {}),
+    }));
+  };
   /** Deleting a message is two steps. `hubMsgArchive` HIDES it — the message stays in
    * the room's store, so a restore costs nothing — and `hubMsgPurge` is the step that
    * forgets it for good. Only the second one destroys anything. */
@@ -566,7 +618,7 @@ export function createWsApi(connection: Connection) {
     fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
     fsUpload, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
-    hubCommand, hubLog, hubLogAround, hubSearch, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
+    hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork,
@@ -608,7 +660,7 @@ export const RPC_KIND = {
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',
   projectAutostart: 'write',
-  hubPost: 'write', hubCommand: 'write', hubLog: 'read', hubLogAround: 'read', hubSearch: 'read',
+  hubPost: 'write', hubCommand: 'write', hubLog: 'read', hubLogAround: 'read', hubSearch: 'read', hubFiles: 'read',
   hubMsgArchive: 'write', hubMsgRestore: 'write', hubMsgPurge: 'write',
   hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
   hubArchive: 'write', hubAgents: 'read',

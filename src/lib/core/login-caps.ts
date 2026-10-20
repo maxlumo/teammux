@@ -16,11 +16,17 @@ export const SPAWN_JOIN = 'spawn_join';
  * Hub offers no move (drag targets and menu items disabled, with why). */
 export const AGENT_TEAM = 'agent_team';
 
+/** `hub_search` with `files: true` lists the files the messages mention (board #432). An older
+ * server refuses an empty `grep` before it looks at `files` and answers a worded one with
+ * messages, so the Files mode asks for this BEFORE it sends, not after reading an answer. */
+export const HUB_FILES = 'hub_files';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
   [SPAWN_JOIN]: 'This server is older than the app. Update the server to start an agent inside a team.',
   [AGENT_TEAM]: 'This server is older than the app. Update the server to move an agent between teams.',
+  [HUB_FILES]: 'This server is older than the app. Update the server to list files.',
 };
 
 /** A login answer's `caps`: the plain, non-empty strings in it, or `[]` for an

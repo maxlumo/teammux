@@ -4758,3 +4758,235 @@ test('destroying the Hub clears the box’s pending request: nothing is asked af
   assert.deepEqual(asked, [], 'the destroyed Hub’s timer did not fire a request');
   await app.close();
 });
+
+// Board #432, Files mode. A file row opens the file against the project that NAMED it (its
+// room), never the selected one: "all rooms" lists files from other projects, and a relative
+// path means the project it was said in. Everything after an await is checked against the
+// search generation that asked.
+const fileRow = (path: string, room = 'proj:fixture', over: Record<string, unknown> = {}) => ({ path, line: null, col: null, room, id: 'i1', seq: 5, ts: 1_050, from: 'alice', count: 1, ...over });
+async function openFilesMode(app: SearchApp) {
+  app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!.click();
+  await until(app, () => !!app.document.querySelector('.search-input'));
+  const files = [...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'Files')!;
+  files.click();
+  await until(app, () => app.document.querySelectorAll('.sr-file').length > 0);
+}
+
+test('a file opens against the project that named it: its folder resolves a relative path, the selected project’s tab opens by its own session, and ~ and absolute paths pass through (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const routes: unknown[][] = [];
+  const asked: unknown[][] = [];
+  const rows = [
+    fileRow('src/own.md'), fileRow('src/theirs.md', 'proj:other'), fileRow('/srv/abs.pdf', 'proj:other'), fileRow('~/notes.md'), fileRow('./lead.md', 'proj:other'),
+  ];
+  const app = await mountSearch(context, { ...f.rpc, hubFiles: async (...a: unknown[]) => { asked.push(a); return { files: rows, next: null, scanned: 4 }; } }, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    assert.deepEqual(JSON.parse(JSON.stringify(asked[0])), ['fixture', [], { all: true, global: false, limit: 50 }], 'this room, no word needed');
+    const open = async (n: number) => {
+      app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row')[n]!.click();
+      await until(app, () => routes.length > 0 && !app.document.querySelector('.search-bar'));
+      const got = routes.splice(0).map((r) => JSON.parse(JSON.stringify(r)));
+      return got[0];
+    };
+    assert.deepEqual(await open(0), ['fixture', '', '/fixture/src/own.md'], 'the selected project: its own folder');
+    assert.equal(app.document.querySelector('.search-bar'), null, 'opening closes the box');
+    for (const [n, want] of [[1, ['other', '', '/other/src/theirs.md']], [2, ['other', '', '/srv/abs.pdf']], [3, ['fixture', '', '~/notes.md']], [4, ['other', '', '/other/lead.md']]] as const) {
+      await openFilesMode(app);
+      assert.deepEqual(await open(n), want, `row ${n}`);
+    }
+  } finally { await app.close(); }
+});
+
+test('a project with no declared folder asks where it is, and says so when it cannot be found; a row whose project is gone opens nothing (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const routes: unknown[][] = [];
+  const cwds: string[] = [];
+  const rpc = {
+    ...f.rpc,
+    projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({ project: { id: session, name: session, session, path: '' }, live: true, slots: [] })) }),
+    fsCwd: async (session: string) => { cwds.push(session); return session === 'other' ? { path: '/where/other' } : { path: '' }; },
+    hubFiles: async () => ({ files: [fileRow('a.md', 'proj:other'), fileRow('b.md', 'proj:fixture'), fileRow('c.md', 'proj:vanished')], next: null, scanned: 3 }),
+  };
+  const app = await mountSearch(context, rpc, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    const rowsEl = () => app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row');
+    rowsEl()[0]!.click();
+    await until(app, () => routes.length > 0);
+    assert.deepEqual(JSON.parse(JSON.stringify(routes[0])), ['other', '', '/where/other/a.md'], 'the row’s own project was asked, not the selected one');
+    assert.deepEqual(cwds, ['other']);
+    routes.length = 0;
+    await openFilesMode(app);
+    rowsEl()[1]!.click();
+    await until(app, () => /project folder is unknown/u.test(app.document.querySelector('.sr-notice')?.textContent ?? ''));
+    assert.match(app.document.querySelector('.sr-notice')?.textContent ?? '', /project folder is unknown/u);
+    assert.deepEqual(routes, [], 'nothing opened');
+    assert.ok(app.document.querySelector('.search-bar'), 'and the box stays, saying why');
+    rowsEl()[2]!.click();
+    await until(app, () => /no longer|not found|no project/iu.test(app.document.querySelector('.sr-notice')?.textContent ?? '') && !/project folder is unknown/u.test(app.document.querySelector('.sr-notice')?.textContent ?? ''));
+    assert.deepEqual(routes, [], 'a row of a project that is gone opens nothing');
+  } finally { await app.close(); }
+});
+
+test('a file that was being resolved when the box closed is not opened afterwards (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const routes: unknown[][] = [];
+  let release: (v: { path: string }) => void = () => {};
+  const rpc = {
+    ...f.rpc,
+    projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({ project: { id: session, name: session, session, path: '' }, live: true, slots: [] })) }),
+    fsCwd: () => new Promise<{ path: string }>((r) => { release = r; }),
+    hubFiles: async () => ({ files: [fileRow('a.md', 'proj:other')], next: null, scanned: 1 }),
+  };
+  const app = await mountSearch(context, rpc, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    app.document.querySelector<HTMLButtonElement>('.sr-file .sr-row')!.click();
+    await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.search-bar button[aria-label="Close search"]')!.click();
+    await until(app, () => !app.document.querySelector('.search-bar'));
+    release({ path: '/late' });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(routes, [], 'the answer arrived for a box that is gone');
+  } finally { await app.close(); }
+});
+
+test('the Files request carries the scope, the agent filter as the sender and the page cursor, exactly as Messages does (#432)', { timeout: 60000 }, async (context) => {
+  const f = jumpFixture();
+  const asked: unknown[][] = [];
+  const app = await mountSearch(context, {
+    ...f.rpc,
+    hubFiles: async (...a: unknown[]) => { asked.push(JSON.parse(JSON.stringify(a))); return { files: [fileRow('a.md', 'proj:fixture', { from: 'alice' })], next: asked.length < 3 ? 42 : null, scanned: 10 }; },
+  });
+  try {
+    await until(app, () => !!app.document.querySelector('.acard[data-agent="alice"]'));
+    await doubleClickCard(app, 'alice');                                   // the agent filter: the chip wears alice
+    app.document.querySelector<HTMLButtonElement>('.head-tools .filter-face button')!.click();
+    await until(app, () => !!app.document.querySelector('.search-input'));
+    [...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'Files')!.click();
+    await until(app, () => asked.length > 0);
+    assert.deepEqual(asked[0], ['fixture', [], { all: true, global: false, from: 'alice', limit: 50 }], 'this room, no word, only alice’s messages');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'All rooms')!.click();
+    await until(app, () => asked.length > 1);
+    assert.deepEqual(asked[1], ['fixture', [], { all: true, global: true, from: 'alice', limit: 50 }], 'every room, same sender');
+    await until(app, () => !![...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'Read older messages'));
+    [...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'Read older messages')!.click();
+    await until(app, () => asked.length > 2);
+    assert.deepEqual(asked[2], ['fixture', [], { all: true, global: true, from: 'alice', limit: 50, before: 42 }], 'the cursor of the page before, nothing else changed');
+  } finally { await app.close(); }
+});
+
+// Board #432 review P1-B: a file row is stamped with the project that named it (id, session,
+// declared folder) when the answer lands, and opening checks it is still THAT project, both
+// at the click and again after any lookup. The Hub refreshes its project list every 20 s,
+// which does not touch the search, so a list can outlive the project it came from.
+function movableProjects() {
+  const state = { projects: ['fixture', 'other'].map((session) => ({ id: session, name: session, session, path: `/${session}` } as Record<string, unknown>)) };
+  const f = jumpFixture();
+  const rpc = {
+    ...f.rpc,
+    projectList: async () => ({ projects: state.projects.map((project) => ({ project, live: true, slots: [] })) }),
+  };
+  return { state, rpc };
+}
+async function reloadProjects(app: SearchApp, until_: () => boolean = () => true) {
+  await app.advance(20000);
+  await until(app, until_);
+}
+const noticeOf = (app: SearchApp) => app.document.querySelector('.sr-notice')?.textContent ?? '';
+
+test('a project that changed after the list was made opens nothing: a new folder, a recreated project, another room (#432 review P1-B)', { timeout: 120000 }, async (context) => {
+  for (const [label, change] of [
+    ['a new declared folder', (s: ReturnType<typeof movableProjects>['state']) => { s.projects[1]!.path = '/moved'; }],
+    ['deleted and recreated under the same name', (s: ReturnType<typeof movableProjects>['state']) => { s.projects[1] = { id: 'other-2', name: 'other', session: 'other', path: '/other' }; }],
+    ['its room mapping changed', (s: ReturnType<typeof movableProjects>['state']) => { s.projects[1]!.room = 'proj:elsewhere'; }],
+  ] as const) {
+    const { state, rpc } = movableProjects();
+    const routes: unknown[][] = [];
+    const app = await mountSearch(context, { ...rpc, hubFiles: async () => ({ files: [fileRow('a.md', 'proj:other')], next: null, scanned: 1 }) }, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+    try {
+      await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+      await openFilesMode(app);
+      change(state);
+      await reloadProjects(app);
+      app.document.querySelector<HTMLButtonElement>('.sr-file .sr-row')!.click();
+      await until(app, () => /has changed since/u.test(noticeOf(app)));
+      assert.match(noticeOf(app), /That project has changed since this list was made/u, label);
+      assert.deepEqual(routes, [], `${label}: nothing opened`);
+      assert.ok(app.document.querySelector('.search-bar'), `${label}: and the box stays, saying why`);
+    } finally { await app.close(); }
+  }
+});
+
+test('a changed project is said for an absolute path too, and before its folder is asked at all (#432 review P1-B)', { timeout: 120000 }, async (context) => {
+  const { state, rpc } = movableProjects();
+  state.projects[1]!.path = '';
+  const routes: unknown[][] = [];
+  const cwds: string[] = [];
+  const app = await mountSearch(context, {
+    ...rpc,
+    fsCwd: async (session: string) => { cwds.push(session); return { path: '/asked' }; },
+    hubFiles: async () => ({ files: [fileRow('/srv/abs.md', 'proj:other'), fileRow('rel.md', 'proj:other')], next: null, scanned: 1 }),
+  }, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    state.projects[1] = { id: 'other-2', name: 'other', session: 'other', path: '' };
+    await reloadProjects(app);
+    const rowsEl = () => app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row');
+    rowsEl()[0]!.click();                                              // absolute: no lookup, still checked
+    await until(app, () => /has changed since/u.test(noticeOf(app)));
+    assert.match(noticeOf(app), /has changed since/u);
+    app.document.querySelector<HTMLButtonElement>('.sr-notice')?.remove();
+    rowsEl()[1]!.click();                                              // relative with no declared folder: refused before fsCwd
+    await app.flush();
+    assert.deepEqual([routes, cwds], [[], []], 'nothing opened, and no folder was asked for a project that is not the one');
+  } finally { await app.close(); }
+});
+
+test('a project that changes while its folder is being asked is not opened against the answer (#432 review P1-B)', { timeout: 120000 }, async (context) => {
+  const { state, rpc } = movableProjects();
+  state.projects[1]!.path = '';
+  const routes: unknown[][] = [];
+  let release: (v: { path: string }) => void = () => {};
+  const app = await mountSearch(context, {
+    ...rpc,
+    fsCwd: () => new Promise<{ path: string }>((r) => { release = r; }),
+    hubFiles: async () => ({ files: [fileRow('a.md', 'proj:other')], next: null, scanned: 1 }),
+  }, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    app.document.querySelector<HTMLButtonElement>('.sr-file .sr-row')!.click();
+    await app.flush();
+    state.projects[1] = { id: 'other-2', name: 'other', session: 'other', path: '' };   // recreated while asking
+    await reloadProjects(app);
+    release({ path: '/where/the/old/one/was' });
+    await until(app, () => /has changed since/u.test(noticeOf(app)));
+    assert.match(noticeOf(app), /has changed since/u);
+    assert.deepEqual(routes, [], 'the folder of the old project was not used for the new one');
+  } finally { await app.close(); }
+});
+
+test('two projects with the same relative path each open their own file, from the same list (#432 review P1-B)', { timeout: 120000 }, async (context) => {
+  const { rpc } = movableProjects();
+  const routes: unknown[][] = [];
+  const app = await mountSearch(context, {
+    ...rpc,
+    hubFiles: async () => ({ files: [fileRow('README.md', 'proj:fixture'), fileRow('README.md', 'proj:other')], next: null, scanned: 2 }),
+  }, { mobile: true, openFilesTab: (...a: unknown[]) => routes.push(a) });
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    await openFilesMode(app);
+    for (const n of [0, 1]) {
+      if (n) await openFilesMode(app);
+      app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row')[n]!.click();
+      await until(app, () => routes.length > n);
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(routes)), [['fixture', '', '/fixture/README.md'], ['other', '', '/other/README.md']]);
+  } finally { await app.close(); }
+});

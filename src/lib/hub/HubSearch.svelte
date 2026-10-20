@@ -19,19 +19,23 @@
   import { untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
+  import Segmented from '../ui/Segmented.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { agentHue, listWhen } from './hub.ts';
   import { anchorOf, menuPlacement, popOrigin, viewBox, POPOVER_EDGE, POPOVER_GAP } from '../ui/placement.ts';
-  import { excerptOf, highlight, SEARCH_MAX_TERMS, searchTerms, type SearchHit } from './hub-search.ts';
+  import { excerptOf, highlight, lineSuffix, pathParts, SEARCH_MAX_TERMS, searchTerms, type FileHit, type SearchHit } from './hub-search.ts';
   import type { HubSearch } from './hub-search.svelte.ts';
 
-  let { search, projectName = (room: string) => room, agentName = (name: string) => name, onjump = (_hit: SearchHit) => {}, onclearagent = () => {} }: {
+  let { search, projectName = (room: string) => room, agentName = (name: string) => name, onjump = (_hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => {}, onopenfile = (_file: FileHit) => {}, onclearagent = () => {} }: {
     search: HubSearch;
     /** The project a room belongs to, for a hit found in ALL rooms. */
     projectName?: (room: string) => string;
     /** How a filter's agent is named to the reader ('you' for the human). */
     agentName?: (name: string) => string;
-    onjump?: (hit: SearchHit) => void;
+    /** A message result, or a file row's "show the message" button. */
+    onjump?: (hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => void;
+    /** A file row: open the file (the Hub resolves it against the row's OWN project). */
+    onopenfile?: (file: FileHit) => void;
     /** The token's x, or Backspace in an empty field: the reading filter is
      * the Hub's, so removing it is the Hub's act (the same toggle the card's
      * menu and its double-click use). */
@@ -136,9 +140,16 @@
 
   const scopeName = (s: 'room' | 'all') => (s === 'all' ? t('hubSearchScopeAll') : t('hubSearchScopeRoom'));
   const fromName = (agent: string) => t('hubSearchFrom').replace('{name}', agentName(agent));
-  const forLabel = $derived(search.stale
-    ? t('hubSearchFor').replace('{query}', search.stale.query).replace('{scope}', scopeName(search.stale.scope)) + (search.stale.agent ? ` · ${fromName(search.stale.agent)}` : '')
-    : '');
+  const forLabel = $derived.by(() => {
+    const l = search.stale;
+    if (!l) return '';
+    const key = l.mode === 'files' ? (l.query ? 'hubSearchFilesFor' : 'hubSearchFilesForAll') : 'hubSearchFor';
+    return t(key).replace('{query}', l.query).replace('{scope}', scopeName(l.scope)) + (l.agent ? ` · ${fromName(l.agent)}` : '');
+  });
+  const hint = $derived(search.mode === 'files'
+    ? (search.agent ? t('hubSearchHintFilesFrom').replace('{name}', agentName(search.agent)) : t('hubSearchHintFiles'))
+    : (search.agent ? t('hubSearchHintFrom').replace('{name}', agentName(search.agent)) : t('hubSearchHint')));
+  const modes = $derived([{ value: 'messages' as const, label: t('hubSearchModeMessages') }, { value: 'files' as const, label: t('hubSearchModeFiles') }]);
 </script>
 
 <!-- Keys are read for the whole region at the window, in the capture phase (an Escape that closes this box must not also reach a dialog behind it), not per element: the bar is a landmark, not a control. -->
@@ -175,19 +186,51 @@
     <div class="menu-heading sr-head">
       <span class="sr-status" role="status">
         {#if search.status === 'pending'}{t('hubSearchPending')}
-        {:else if search.status === 'error'}{search.error === 'too-many' ? t('hubSearchTooMany').replace('{n}', String(SEARCH_MAX_TERMS)) : t('hubSearchFailed')}
-        {:else if search.status === 'empty'}{t('hubSearchEmpty')}
-        {:else if search.status === 'idle'}{search.agent ? t('hubSearchHintFrom').replace('{name}', agentName(search.agent)) : t('hubSearchHint')}{/if}
+        {:else if search.status === 'error'}{search.error === 'too-many' ? t('hubSearchTooMany').replace('{n}', String(SEARCH_MAX_TERMS)) : search.error === 'files-unsupported' ? t('hubSearchFilesUnsupported') : t('hubSearchFailed')}
+        {:else if search.status === 'empty'}{search.label?.mode === 'files' ? t('hubSearchFilesEmpty') : t('hubSearchEmpty')}
+        {:else if search.status === 'idle'}{hint}{/if}
       </span>
       <span class="sr-tools compact-tools">
-        {#if search.status === 'error' && search.error !== 'too-many'}<CommandButton variant="secondary" label={t('hubSearchRetry')} onclick={() => search.retry()} />{/if}
+        <Segmented options={modes} value={search.mode} onchange={(m) => search.setMode(m)} ariaLabel={t('hubSearchModes')} />
+        {#if search.status === 'error' && search.error !== 'too-many' && search.error !== 'files-unsupported'}<CommandButton variant="secondary" label={t('hubSearchRetry')} onclick={() => search.retry()} />{/if}
         <CommandButton variant="secondary" label={t('hubSearchAllRooms')} pressed={search.scope === 'all'}
           onclick={() => search.setScope(search.scope === 'all' ? 'room' : 'all')} />
       </span>
     </div>
     {#if search.notice}<div class="config-error sr-notice" role="alert">{search.notice}</div>{/if}
     {#if forLabel}<div class="sr-label" role="note">{forLabel}</div>{/if}
-    {#if search.rows.length}
+    {#if search.mode === 'files' && search.files.length}
+      <ul class="sr-list">
+        {#each search.files as file (`${file.room}|${file.path}`)}
+          {@const parts = pathParts(file.path, terms)}
+          <li class="sr-file">
+            <button type="button" class="menu-item sr-row" aria-label={t('hubSearchFileOpen').replace('{path}', file.path)} onclick={() => onopenfile(file)}>
+              <span class="sr-top">
+                <span class="sr-name">{#each parts.name as seg}{#if seg.mark}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}{lineSuffix(file)}</span>
+                {#if file.count > 1}<span class="sr-count">×{file.count}</span>{/if}
+                <span class="sr-time">{when(file.ts)}</span>
+              </span>
+              {#if parts.dir.length}<span class="sr-dir">{#each parts.dir as seg}{#if seg.mark}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>{/if}
+              <span class="sr-top">
+                <span class="sr-who" style:--who-ink={agentHue(file.from)}>{agentName(file.from)}</span>
+                {#if search.label?.scope === 'all'}<span class="sr-project">{projectName(file.room)}</span>{/if}
+              </span>
+            </button>
+            <CommandButton variant="icon" icon="chat" label={t('hubSearchFileJump').replace('{path}', file.path)} onclick={() => onjump(file)} />
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if search.mode === 'files' && search.label?.mode === 'files' && (search.files.length || search.next !== null)}
+      <div class="sr-more" role="note">{t('hubSearchFilesNote').replace('{n}', String(search.scanned))}</div>
+      {#if search.canOlder || search.loadingOlder || search.olderFailed}
+        <div class="sr-older">
+          {#if search.olderFailed}<span class="config-error sr-older-failed" role="alert">{t('hubSearchFilesOlderFailed')}</span>{/if}
+          <CommandButton variant="secondary" label={search.loadingOlder ? t('hubSearchFilesOlderPending') : t('hubSearchFilesOlder')} disabled={search.loadingOlder} onclick={() => search.loadOlder()} />
+        </div>
+      {/if}
+    {/if}
+    {#if search.mode === 'messages' && search.rows.length}
       <ul class="sr-list">
         {#each search.rows as hit (`${hit.room}|${hit.id}`)}
           <li>
@@ -237,6 +280,13 @@
   .sr-label, .sr-more { padding: 0 var(--menu-item-padding-x); color: var(--text3); font-size: var(--fs-micro); }
   .sr-more { padding-top: var(--menu-item-padding-y); }
   .sr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--menu-gap); }
+  .sr-file { display: flex; align-items: center; gap: var(--menu-item-gap); }
+  .sr-file .sr-row { flex: 1 1 auto; min-width: 0; width: auto; }
+  .sr-name { flex: 0 1 auto; min-width: 0; color: var(--text); font-size: var(--fs-body); font-weight: 600; overflow-wrap: anywhere; }
+  .sr-count { flex: none; color: var(--text3); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+  .sr-dir { color: var(--text3); font-size: var(--fs-micro); overflow-wrap: anywhere; }
+  .sr-older { display: flex; align-items: center; justify-content: space-between; gap: var(--menu-item-gap); padding: var(--menu-item-padding-y) var(--menu-item-padding-x) 0; }
+  .sr-older-failed { min-width: 0; }
   .sr-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--menu-gap); width: 100%; text-align: left; }
   .sr-top { display: flex; align-items: center; gap: var(--menu-item-gap); min-width: 0; }
   .sr-who { flex: 0 1 auto; min-width: 0; color: var(--who-ink); font-size: var(--fs-meta); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

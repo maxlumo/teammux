@@ -75,14 +75,14 @@ test('a hit opens through the bell’s jump with its own report; it is never rec
 test('the request is invalidated at the input, and an answer needs a current generation', async () => {
   const src = await read('./hub-search.svelte.ts');
   assert.match(src, /function run\(now: boolean\) \{\s*\n\s*const g = bump\(\);/u, 'bump first, synchronously, before any debounce');
-  assert.equal((src.match(/if \(g !== gen \|\| !state\.open\) return;/gu) ?? []).length, 3, 'before sending and after the answer, and on a failure');
+  assert.equal((src.match(/if \(g !== gen \|\| !state\.open\) return;/gu) ?? []).length, 6, 'before sending, after each of the two answers, on a failure, and in both halves of an older page');
   assert.match(src, /clearTimeout\(timer\)/u);
 });
 
 test('the client sends all/global only when set, so the default stays any-term', async () => {
   const api = await read('../core/ws-api.ts');
   assert.match(api, /\.\.\.\(opts\.all \? \{ all: true \} : \{\}\), \.\.\.\(opts\.global \? \{ global: true \} : \{\}\)/u);
-  assert.match(api, /hubSearch: 'read'/u);
+  assert.match(api, /hubSearch: 'read', hubFiles: 'read'/u, 'both are reads: a blocked-storage server keeps them');
 });
 
 test('spacing comes from the existing tokens; the only literal lengths are the popover’s own geometry caps (#432 review P2)', async () => {
@@ -110,4 +110,36 @@ test('the term cap is one number on both sides, and the chip is capped on the bu
 test('the token keeps its name until the field is at its minimum (#432 validator P2-D)', async () => {
   const src = await read('./HubSearch.svelte');
   assert.match(src, /\.search-token \{[^}]*flex: 0 0 auto; max-width: 50%;/u, 'it does not shrink with the field; only a very long name is cut, at half the bar');
+});
+
+// ── Files mode (board #432) ─────────────────────────────────────────────────
+
+test('Files mode adds no new species: the mode switch is the ONE Segmented, the rows are menu items in the same list, the older page is a CommandButton', async () => {
+  const src = await read('./HubSearch.svelte');
+  assert.match(src, /<Segmented options=\{modes\} value=\{search\.mode\} onchange=\{\(m\) => search\.setMode\(m\)\}/u);
+  assert.doesNotMatch(src, /role="tab"|class="tabs?\b/u, 'not a hand-made tab strip');
+  assert.match(src, /<li class="sr-file">\s*<button type="button" class="menu-item sr-row"/u, 'a file row is the result row, plus its chat button');
+  assert.match(src, /<CommandButton variant="icon" icon="chat" label=\{t\('hubSearchFileJump'\)/u);
+  assert.match(src, /<CommandButton variant="secondary" label=\{search\.loadingOlder/u);
+  assert.doesNotMatch(src, /color:\s*#|rgba?\(/u, 'no literal colours');
+});
+
+test('the note under the files says how much was read and what is not listed; it is shown for any answer with files or older messages', async () => {
+  const src = await read('./HubSearch.svelte');
+  assert.match(src, /search\.mode === 'files' && search\.label\?\.mode === 'files' && \(search\.files\.length \|\| search\.next !== null\)/u);
+  assert.match(src, /t\('hubSearchFilesNote'\)\.replace\('\{n\}', String\(search\.scanned\)\)/u, 'the scanned count, never "all"');
+});
+
+test('the Hub opens a file against the project that NAMED it, never the selected one, and re-checks the generation after every await', async () => {
+  const src = await read('./Hub.svelte');
+  const at = src.indexOf('async function openFileHit(file)');
+  assert.ok(at > 0, 'openFileHit exists');
+  const body = src.slice(at, src.indexOf('// The jump is over (landed', at));
+  assert.match(body, /const src = file\.source;/u, 'the project the row was stamped with when the answer landed');
+  assert.match(body, /let base = src\.path;/u);
+  assert.doesNotMatch(body, /\bprojectPath\b|\bselectedRow\b/u, 'the selected project’s folder is never the base');
+  assert.equal((body.match(/\bsame\(\)/gu) ?? []).length, 2, 'the project is the same one before any lookup, and again right before the route (after the only await)');
+  assert.equal((body.match(/search\.isCurrent\(g\)/gu) ?? []).length, 1, 'right before the route, after the only await');
+  assert.match(src, /files: page\.files\.map\(\(f\) => \(\{ \.\.\.f, source: sourceOf\(f\.room\) \}\)\)/u, 'every page is stamped as it lands');
+  assert.match(body, /if \(session === selected\) void routePathRef\(path\);\s*\n\s*else openFilesTab\?\.\(session, '', path\);/u);
 });

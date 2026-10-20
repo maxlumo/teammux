@@ -70,7 +70,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
@@ -906,6 +906,14 @@
     ask: ({ terms, scope, agent, limit }) => selected
       ? hubSearch(selected, terms, { all: true, global: scope === 'all', ...(agent ? { from: agent } : {}), limit })
       : Promise.reject(new Error('no project')),
+    // Files mode: the files the room's messages mention, paged by the server's cursor.
+    // Each row is stamped, as the answer lands, with the project that named it as the Hub knows it
+    // NOW (id, session, declared folder): opening checks it is still that project.
+    askFiles: async ({ terms, scope, agent, limit, before }) => {
+      if (!selected) throw new Error('no project');
+      const page = await hubFiles(selected, terms, { all: true, global: scope === 'all', ...(agent ? { from: agent } : {}), limit, ...(before ? { before } : {}) });
+      return { ...page, files: page.files.map((f) => ({ ...f, source: sourceOf(f.room) })) };
+    },
     stale: () => { if (ownedJump) { const n = ownedJump; ownedJump = 0; centre.consume(n); } },
   });
   // A hit opens through the SAME jump the bell uses (`openAt`), reporting to the
@@ -918,6 +926,41 @@
       { viewed: () => { if (search.isCurrent(g)) search.close(); }, failed: (reason) => search.fail(g, reason) },
     );
     ownedJump = centre.jump?.n ?? 0;
+  }
+  // The project a room belongs to, as the Hub knows it now.
+  const sourceOf = (room) => {
+    const r = rows.find((x) => roomKey(x) === room);
+    return r ? { id: r.project.id, session: r.project.session, path: r.project.path ?? '' } : null;
+  };
+  // A file row opens the file against the project that NAMED it (its room), never the one that
+  // happens to be selected: a relative path means the project it was said in, and with
+  // "all rooms" the two differ. The selected project's own files take the feed's route (the
+  // drawer on a wide screen); another project's open on the Files page, which takes any session.
+  // Everything after an await is re-checked against the search generation that asked.
+  async function openFileHit(file) {
+    const g = search.gen;
+    // The row's own project, as it was when the answer landed; if it is not the very same project
+    // now (renamed away, deleted and recreated, a new folder, another room), the list is old.
+    const src = file.source;
+    const same = () => !!src && sourceOf(file.room)?.id === src.id && sourceOf(file.room)?.session === src.session && sourceOf(file.room)?.path === src.path;
+    if (!src) { search.fail(g, t('hubJumpNoProject')); return; }
+    if (!same()) { search.fail(g, t('hubSearchFileProjectChanged')); return; }       // before any lookup is spent on it
+    const session = src.session;
+    let path = file.path;
+    if (!path.startsWith('/') && !path.startsWith('~')) {
+      let base = src.path;
+      if (!base) { try { base = (await fsCwd(session)).path; } catch {} }
+      // (`fail` only speaks for a generation that is still current, so a box that closed while the
+      // folder was being asked says nothing; the checks before the route keep it unopened.)
+      if (!base) { search.fail(g, t('hubSearchFileNoBase')); return; }
+      path = resolvePathRef(base, path);
+    }
+    // After the only await, and for an absolute path too: still the same project, still this box.
+    if (!search.isCurrent(g)) return;
+    if (!same()) { search.fail(g, t('hubSearchFileProjectChanged')); return; }
+    search.close();
+    if (session === selected) void routePathRef(path);
+    else openFilesTab?.(session, '', path);
   }
   // The jump is over (landed, failed, superseded or cancelled) when the surface lets go of it.
   $effect(() => { if (!centre.jump) ownedJump = 0; });
@@ -2496,7 +2539,7 @@
           controls={mobile || compact || !drawerShown ? undefined : drawerId}
           onclick={() => termOpen && drawerView === 'term' && !compact ? closeDrawer() : (drawerView = 'term', openDrawer())} />
         </div>
-        <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onclearagent={() => setFilter('', 'user')} />
+        <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onopenfile={openFileHit} onclearagent={() => setFilter('', 'user')} />
         {#if headerCopyFeedback && headerCopyAnchor}
           <div class="header-copy-feedback pop-layer" use:feedbackPosition={{ trigger: headerCopyAnchor, bounds: headerCopyAnchor.closest('main'), keepClear: headerCopyAnchor.closest('.chat-head') }}>
             <OperationFeedback value={headerCopyFeedback} ondismiss={headerCopyFeedback.kind === 'error' ? headerCopyLifetime.clear : undefined} />

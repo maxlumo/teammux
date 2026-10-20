@@ -6,6 +6,8 @@
 // insensitive, body or sender. The excerpt marks the same thing in the text a
 // row shows, so the mark and the hit cannot disagree.
 
+import type { FileMention } from '../core/ws-api.ts';
+
 /** One search hit as the server returns it (`message_json`): enough to draw a
  * row and to ask the Hub to open the message. */
 export interface SearchHit {
@@ -19,6 +21,17 @@ export interface SearchHit {
   room: string;
   body: string;
 }
+
+/** The project a file row came from, as the Hub knew it WHEN THE ANSWER LANDED (board #432
+ * review): its id and session, and the folder it declared. Opening checks the project is still
+ * that one; a relative path is never explained by a different project. */
+export interface FileSource { id: string; session: string; path: string }
+
+/** One file row of the Files mode: the wire shape (see `FileMention`) and the project it came from. */
+export type FileHit = FileMention & { source: FileSource | null };
+
+/** What the search box lists: the messages that match, or the files they mention. */
+export type SearchMode = 'messages' | 'files';
 
 /** A piece of text and whether it is the part that matched. Drawn as text
  * nodes, never as HTML, so a message body cannot inject markup. */
@@ -105,4 +118,53 @@ export function excerptOf(body: string, terms: readonly string[], max = 90, lead
  * is newest first. */
 export function newestFirst<T>(hits: readonly T[]): T[] {
   return [...hits].reverse();
+}
+
+/** A file row's identity, the same rule the server de-duplicates by: an absolute or `~` path is
+ * one file wherever it was named, a relative one belongs to the room that named it. Pages of
+ * one scan can repeat a key (an older message mentions it again); the client folds them. */
+export function fileKey(f: Pick<FileHit, 'path' | 'room'>): string {
+  return f.path.startsWith('/') || f.path.startsWith('~') ? f.path : `${f.room}\0${f.path}`;
+}
+
+/** Fold a later (OLDER) page into the rows so far: a file already listed keeps its newest
+ * mention and only gains the page's count. The server never splits a message across pages,
+ * so no mention is counted twice. */
+export function mergeFiles(rows: readonly FileHit[], page: readonly FileHit[]): FileHit[] {
+  const out = rows.map((r) => ({ ...r }));
+  const at = new Map(out.map((r, i) => [fileKey(r), i] as const));
+  for (const f of page) {
+    const i = at.get(fileKey(f));
+    const have = i === undefined ? undefined : out[i];
+    if (have) have.count += f.count; else { at.set(fileKey(f), out.length); out.push({ ...f }); }
+  }
+  return out;
+}
+
+/** A path as a row draws it: the file name apart from the folder it is in. */
+export function splitPath(path: string): { dir: string; name: string } {
+  const cut = path.lastIndexOf('/');
+  return cut === -1 ? { dir: '', name: path } : { dir: path.slice(0, cut + 1), name: path.slice(cut + 1) };
+}
+
+/** `:12` or `:12:3` for a mention that named a line, else ''. */
+export function lineSuffix(f: Pick<FileHit, 'line' | 'col'>): string {
+  return f.line == null ? '' : f.col == null ? `:${f.line}` : `:${f.line}:${f.col}`;
+}
+
+/** A path cut for drawing: its folder and its file name apart, each with the parts a term
+ * matched marked. Marked on the WHOLE path first, so a term that runs across the slash
+ * ("src/ma") still marks both sides. */
+export function pathParts(path: string, terms: readonly string[]): { dir: Segment[]; name: Segment[] } {
+  const cut = splitPath(path).dir.length;
+  const dir: Segment[] = [];
+  const name: Segment[] = [];
+  let at = 0;
+  for (const seg of highlight(path, terms)) {
+    const end = at + seg.text.length;
+    if (at < cut) dir.push({ text: seg.text.slice(0, Math.max(0, cut - at)), mark: seg.mark });
+    if (end > cut) name.push({ text: seg.text.slice(Math.max(0, cut - at)), mark: seg.mark });
+    at = end;
+  }
+  return { dir: dir.filter((x) => x.text), name: name.filter((x) => x.text) };
 }
