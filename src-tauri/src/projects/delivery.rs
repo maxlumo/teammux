@@ -322,7 +322,7 @@ pub fn report_unconfirmed(session: &str) -> Vec<telemetry::Report> {
             return Vec::new();
         }
     };
-    let reports = telemetry::sweep_deliveries(session, &|row| unconfirmed_report(&room, row));
+    let reports = telemetry::sweep_deliveries(session, &|row| unconfirmed_report(session, &room, row));
     // The sending AGENT is told once per sweep, best effort, after every
     // lock is released (review P1-B: its pane cannot commit with the store;
     // the room line and its unread are the guarantee). Not a self-wake
@@ -330,17 +330,27 @@ pub fn report_unconfirmed(session: &str) -> Vec<telemetry::Report> {
     // room is where they read), and only a live managed agent's pane
     // (`deliver_chat_line` is quiet otherwise). One attempt, no retry, so
     // it is never typed twice.
-    let mut by_sender: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = Default::default();
-    for r in &reports {
-        if r.sender != r.recipient && r.sender != "human" && !r.sender.is_empty() {
-            by_sender.entry(&r.sender).or_default().push((&r.recipient, &r.when));
-        }
-    }
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-    for (sender, items) in by_sender {
+    for (sender, items) in senders_to_tell(&reports) {
         let _ = super::deliver_chat_line(session, sender, &unconfirmed_notice(&items, &stamp));
     }
     reports
+}
+
+/// Who is told, and of what (board #437, #442): every message a report NAMES — the row's own and
+/// the lines steered behind it — grouped by its sender, as (window, time). Not a self-wake (the
+/// stuck pane is the sender's own), not a human or UI sender (no pane: the room is where they
+/// read). Pure, so the rule is pinned without a pane.
+pub fn senders_to_tell(reports: &[telemetry::Report]) -> std::collections::BTreeMap<&str, Vec<(&str, &str)>> {
+    let mut by_sender: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = Default::default();
+    for r in reports {
+        for item in &r.items {
+            if item.sender != r.recipient && item.sender != "human" && !item.sender.is_empty() {
+                by_sender.entry(&item.sender).or_default().push((&r.recipient, &item.when));
+            }
+        }
+    }
+    by_sender
 }
 
 /// The ONE line a sending agent's pane gets for its unconfirmed messages
@@ -372,22 +382,33 @@ pub fn report_all_unconfirmed() {
 /// hold. A failed read is `Err` (review P1 on b92c3d88): the sweep then
 /// reports nothing for that row and consumes nothing, and the next sweep
 /// reads again.
-fn unconfirmed_report(room: &str, row: &super::store::DeliveryRow) -> Result<Option<telemetry::Report>, String> {
-    if row.msg_id.is_empty() {
+fn unconfirmed_report(session: &str, room: &str, row: &super::store::DeliveryRow) -> Result<Option<telemetry::Report>, String> {
+    let now = chrono::Local::now();
+    // The row's own message (none for the #355 nudge or a board notice; or purged), and the
+    // lines steered BEHIND it (board #442), which share its fate. The whole group is read
+    // before anything is decided: a failed read of any of them is an `Err` (the row stays
+    // unreported for the next sweep), and one with no source never hides the others.
+    let anchor = if row.msg_id.is_empty() { None } else { super::with_store(|s| s.hub_message_by_id(room, &row.msg_id))? };
+    let mut later = Vec::new();
+    for id in telemetry::steered_behind(session, row)? {
+        if let Some(m) = super::with_store(|s| s.hub_message_by_id(room, &id))? {
+            later.push(m);
+        }
+    }
+    if anchor.is_none() && later.is_empty() {
         return Ok(None);
     }
-    let Some(msg) = super::with_store(|s| s.hub_message_by_id(room, &row.msg_id))? else { return Ok(None) };
-    let when = short_when(msg.ts, chrono::Local::now());
+    let named: Vec<(String, String)> = later.iter().map(|m| (m.sender.clone(), short_when(m.ts, now))).collect();
+    let anchor_item = anchor.map(|m| (m.sender, short_when(m.ts, now)));
+    let body = match &anchor_item {
+        Some((sender, when)) => unconfirmed_line(&row.window, sender, when, &named),
+        None => unconfirmed_line_without_source(&row.window, &named),
+    };
+    let items = anchor_item.into_iter().chain(named).map(|(sender, when)| telemetry::ReportItem { sender, when }).collect();
     Ok(Some(telemetry::Report {
-        line: super::store::OnceLine {
-            room: room.to_string(),
-            id: format!("unconfirmed:{}", row.id),
-            sender: NOTICE_SENDER.to_string(),
-            body: unconfirmed_line(&row.window, &msg.sender, &when),
-        },
-        sender: msg.sender,
+        line: super::store::OnceLine { room: room.to_string(), id: format!("unconfirmed:{}", row.id), sender: NOTICE_SENDER.to_string(), body },
         recipient: row.window.clone(),
-        when,
+        items,
     }))
 }
 
@@ -395,10 +416,36 @@ fn unconfirmed_report(room: &str, row: &super::store::DeliveryRow) -> Result<Opt
 /// what is known — no echo of it was seen — and the remedy that does no harm
 /// first. It never says the CLI refused the line, and it does not suggest a
 /// resend, an Enter or an interrupt.
-pub fn unconfirmed_line(recipient: &str, sender: &str, when: &str) -> String {
+///
+/// `later` (board #442) names the lines steered in behind it, each with its sender and time:
+/// they went into the same prompt, so they share the row's fate. They are named, not
+/// counted as confirmed or lost, and the wording claims no more than "followed it". With none,
+/// the line is exactly #437's.
+pub fn unconfirmed_line(recipient: &str, sender: &str, when: &str, later: &[(String, String)]) -> String {
     format!(
-        "[tmm] unconfirmed {recipient} — no confirmation was seen for {sender}'s message of {when}; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone."
+        "[tmm] unconfirmed {recipient} — no confirmation was seen for {sender}'s message of {when}{}; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.",
+        followed(later)
     )
+}
+
+/// The line when the row itself names no message the room holds (a board notice, a reply, a
+/// first prompt, or a message since purged) but lines steered behind it do (board #442): the
+/// facts stay true and nobody is invented as the row's sender.
+pub fn unconfirmed_line_without_source(recipient: &str, later: &[(String, String)]) -> String {
+    format!(
+        "[tmm] unconfirmed {recipient} — no confirmation was seen for an earlier line typed to it{}; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.",
+        followed(later)
+    )
+}
+
+/// `; 2 later messages followed it into the same prompt: bob 16:43, human 16:44`, or nothing.
+fn followed(later: &[(String, String)]) -> String {
+    if later.is_empty() {
+        return String::new();
+    }
+    let who: Vec<String> = later.iter().map(|(sender, when)| format!("{sender} {when}")).collect();
+    let n = if later.len() == 1 { "1 later message".to_string() } else { format!("{} later messages", later.len()) };
+    format!("; {n} followed it into the same prompt: {}", who.join(", "))
 }
 
 /// `HH:MM` for a message from today, `YYYY-MM-DD HH:MM` otherwise: how a
@@ -603,19 +650,30 @@ fn deliver_gated(
     // fact, so an unknown log (#394) changes nothing for it.
     let strict = strict_occupied(session, window);
     let unknown = strict.is_none() && mode.is_some() && !known;
+    // The two facts that make a window "open" are READ ONCE, here, and used for the decision AND
+    // for the steer's anchor (board #442 review P1-A): the in-flight row's age is measured against
+    // a clock, so a second read could cross the 45 s edge between the decision and the anchor and
+    // name nobody. Lazy exactly as the old expression was: nothing is asked for a strict CLI, a
+    // backend with no mode, or an unknown turn.
+    let (hook_busy, in_flight) = if strict.is_none() && mode.is_some() && !unknown {
+        (telemetry::turn_busy(session, window), if mode == Some("steer") { telemetry::in_flight_row(session, window) } else { None })
+    } else {
+        (false, None)
+    };
     let open = match strict {
         Some(occupied) => occupied,
-        None => {
-            mode.is_some()
-                && (unknown
-                    || telemetry::turn_busy(session, window)
-                    || (mode == Some("steer") && telemetry::line_in_flight(session, window)))
-        }
+        None => mode.is_some() && (unknown || hook_busy || in_flight.is_some()),
     };
     let busy = open && (strict.is_some() || mode == Some("queue"));
     let steered = open && !unknown && strict.is_none() && mode == Some("steer");
+    // The anchor of a steer (board #442), decided ONCE, here, in the same step as the decision
+    // and before anything is typed: a hook-known running turn is its own evidence (0); otherwise
+    // the steer is only because a previous line is still in flight, and that row is what it sits
+    // behind. Carried down BOTH exits (`type_steered`, and `flush_locked` -> `flush_steered`):
+    // the held tail of a long queue is released here too, and no function guesses it from its name.
+    let behind = if steered && !hook_busy { in_flight.unwrap_or(0) } else { 0 };
     if steered && held.is_empty() {
-        return type_steered(session, window, target, line, ask_at, msg_id);
+        return type_steered(session, window, target, line, ask_at, msg_id, behind);
     }
     if !busy && !unknown && held.is_empty() {
         return type_now(session, window, target, line, ask_at, msg_id);
@@ -641,10 +699,10 @@ fn deliver_gated(
         }
         eprintln!("⚠️  could not hold a delivery for {session}:{window} ({e}); typing it now");
         // Into a steer turn it is steered, owing no echo (validator, #276).
-        return if steered { type_steered(session, window, target, line, ask_at, msg_id) } else { type_now(session, window, target, line, ask_at, msg_id) };
+        return if steered { type_steered(session, window, target, line, ask_at, msg_id, behind) } else { type_now(session, window, target, line, ask_at, msg_id) };
     }
     if may_release(known, busy, strict.is_some(), &held) {
-        flush_locked(session, window, target, steered);
+        flush_locked(session, window, target, steered.then_some(behind));
     } else if strict.is_some() {
         warn_if_overdue(session, window);
     }
@@ -656,10 +714,13 @@ fn deliver_gated(
 /// report a line the model did receive. Recorded as a `steered` event naming
 /// its message, so the feed draws no ring that promises a check. A refusal
 /// is said at once, as for any line (#250).
-fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
+///
+/// `behind` (board #442): the in-flight row this steer sits behind, 0 for a hook-known running
+/// turn. The event records it, so the report of that row can name the lines that followed it.
+fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, behind: i64) -> bool {
     match type_text(session, window, target, line) {
         Ok(()) => {
-            telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id]);
+            telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id], behind);
             super::vitals::sniff_window_soon(session, window);
             true
         }
@@ -739,7 +800,8 @@ fn flush_at(session: &str, window: &str, target: &str) {
     }
     // An overdue flush into a turn still open: steered if the session now
     // runs steer (#276), so its rows are owed no echo.
-    let steered = busy && strict.is_none() && input_mode(session, window) == Some("steer");
+    // (`busy` here is the hook-known running turn, `known && turn_busy`: no in-flight anchor.)
+    let steered = (busy && strict.is_none() && input_mode(session, window) == Some("steer")).then_some(0);
     flush_locked(session, window, target, steered);
 }
 
@@ -770,7 +832,7 @@ fn may_release(known: bool, busy: bool, strict: bool, held: &[super::store::Deli
 /// put back on a refusal: a pane in copy mode keeps them held, reported once,
 /// retried at the next trigger (board #257 decision 2 — the sender was
 /// already told the line is queued).
-fn flush_locked(session: &str, window: &str, target: &str, steered: bool) {
+fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>) {
     let rows = telemetry::held_rows(session, window);
     let take = first_prompt(&rows.iter().map(|r| r.line.as_str()).collect::<Vec<_>>(), FLUSH_MAX_CHARS);
     if take == 0 {
@@ -779,8 +841,8 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: bool) {
     let batch = &rows[..take];
     let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
     let text = batch.iter().map(|r| r.line.as_str()).collect::<Vec<_>>().join(SEPARATOR);
-    if steered {
-        return flush_steered(session, window, target, batch, &ids, &text);
+    if let Some(behind) = steered {
+        return flush_steered(session, window, target, batch, &ids, &text, behind);
     }
     // The batch flips as ONE transaction; if it cannot, nothing is typed and
     // every row stays held for the next trigger (orchestrator 04:49).
@@ -807,7 +869,7 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: bool) {
 /// nothing to sweep). The retire failing types nothing — the rows stay held,
 /// typed at the turn's end like any queue line. Typing failing after it is a
 /// line that did not land: the #250 `undelivered` warn, no row to point at.
-fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::store::DeliveryRow], ids: &[i64], text: &str) {
+fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::store::DeliveryRow], ids: &[i64], text: &str, behind: i64) {
     if let Err(e) = telemetry::retire_held(ids) {
         eprintln!("⚠️  could not retire held deliveries for {session}:{window} ({e}); kept held for the turn's end");
         return;
@@ -816,7 +878,7 @@ fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::stor
     let shown = batch.iter().map(|r| r.shown()).collect::<Vec<_>>().join(SEPARATOR);
     match type_text(session, window, target, text) {
         Ok(()) => {
-            telemetry::record_steered(session, window, &shown, &msgs);
+            telemetry::record_steered(session, window, &shown, &msgs, behind);
             super::vitals::sniff_window_soon(session, window);
         }
         Err(e) => telemetry::record_undelivered(session, window, &shown, e.trim()),
@@ -2039,7 +2101,7 @@ mod tests {
         sql("CREATE TEMP TRIGGER retire_fault BEFORE DELETE ON deliveries
              WHEN OLD.line LIKE '%retire-fault-b%'
              BEGIN SELECT RAISE(ABORT, 'locked'); END;");
-        flush_locked(&s, "dev", "t", true);
+        flush_locked(&s, "dev", "t", Some(0));
         assert!(typed().is_empty(), "the retire failed: nothing typed");
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (2, 0), "both rows still held (the first DELETE rolled back)");
         sql("DROP TRIGGER retire_fault;");
@@ -2047,7 +2109,7 @@ mod tests {
         // The retire succeeds, the "process dies" before typing: refuse the
         // keys to stand in for the lost moment. No row is left to sweep.
         refuse(Some("server gone"));
-        flush_locked(&s, "dev", "t", true);
+        flush_locked(&s, "dev", "t", Some(0));
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (0, 0), "retired before the keys: nothing pending, ever");
         let w = warns(&s);
         assert_eq!(w.len(), 1, "a line that did not land is SAID once (#250): {w:?}");
@@ -2062,7 +2124,7 @@ mod tests {
         for tag in ["x", "y"] {
             deliver_as(&t, "dev", "t", &format!("[tmm chat 03:05] lead: @dev {tag}"), &format!("m-{tag}"), true);
         }
-        flush_locked(&t, "dev", "t", true);
+        flush_locked(&t, "dev", "t", Some(0));
         assert_eq!(typed().len(), 1);
         assert_eq!((held(&t, "dev"), pending(&t, "dev")), (0, 0));
         let named: Vec<String> = telemetry::recent_events(&t, 0).into_iter().filter(|e| e.kind == "steered").flat_map(|e| e.deliveries).map(|d| d.msg).collect();
@@ -2153,5 +2215,376 @@ mod tests {
         assert_eq!(typed().len(), 1, "one prompt per turn end");
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (2, 1), "the overflow waits for the next end");
         assert!(typed()[0].chars().count() <= FLUSH_MAX_CHARS + 64);
+    }
+
+    // ---- board #442: lines steered behind an in-flight row -----------------
+
+    fn steer() -> Option<&'static str> {
+        Some("steer")
+    }
+    /// A chat message in the session's room addressed to `to`; its id.
+    fn say(room: &str, from: &str, to: &str, text: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        crate::projects::rooms::post_routed_as(room, &id, from, &format!("@{to} {text}"), &[to.to_string()]).unwrap();
+        id
+    }
+    fn line_of(from: &str, to: &str, text: &str) -> String {
+        format!("[tmm chat 2026-10-20 08:40] {from}: @{to} {text}")
+    }
+    /// (id, sender, body) of the room's `[tmm] unconfirmed` lines.
+    fn unconfirmed_lines(room: &str) -> Vec<(String, String, String)> {
+        crate::projects::rooms::history_page(room, None, 1000)["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["id"].as_str().unwrap().to_string(), m["from"].as_str().unwrap_or_default().to_string(), m["body"].as_str().unwrap().to_string()))
+            .filter(|(_, _, b)| b.starts_with("[tmm] unconfirmed"))
+            .collect()
+    }
+    /// Every steered event of the session: (messages, behind of each).
+    fn steered_refs(session: &str) -> Vec<(String, i64)> {
+        telemetry::recent_events(session, 0).into_iter().filter(|e| e.kind == "steered").flat_map(|e| e.deliveries).map(|d| (d.msg, d.behind)).collect()
+    }
+    fn the_row(session: &str, window: &str) -> i64 {
+        crate::projects::with_store(|st| st.pending_deliveries(session, Some(window))).unwrap()[0].id
+    }
+    fn age(session: &str) {
+        telemetry::backdate_deliveries_for_test(session, 50);
+    }
+    /// The swallowing fake CLI of the #436 shape, in steer mode: it takes every typed line
+    /// (the `typed()` seam records it) and never fires a prompt hook, so the first line owes an
+    /// echo that does not come, and everything typed within its ack window is steered behind it.
+    struct Stuck {
+        session: String,
+        room: String,
+        first: String,
+        row: i64,
+    }
+    fn stuck(tag: &str, first_from: &str, first_msg: Option<&str>) -> Stuck {
+        telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = setup(tag);
+        let room = crate::projects::rooms::session_room(&session);
+        let first = match first_msg {
+            Some(id) => id.to_string(),
+            None => say(&room, first_from, "dev", "first"),
+        };
+        assert!(deliver_with(&session, "dev", "t", &line_of(first_from, "dev", "first"), 0, &first, steer));
+        assert_eq!(pending(&session, "dev"), 1, "an idle window owes the echo");
+        let row = the_row(&session, "dev");
+        Stuck { session, room, first, row }
+    }
+    fn steer_in(st: &Stuck, from: &str, text: &str) -> String {
+        let id = say(&st.room, from, "dev", text);
+        assert!(deliver_with(&st.session, "dev", "t", &line_of(from, "dev", text), 0, &id, steer));
+        id
+    }
+
+    /// Board #442: the lines steered behind a line whose composer swallowed it are reported WITH
+    /// it, in its one transaction: one room line naming them, the feed warn once, and every agent
+    /// sender among them told once. A self-wake and a human are told nothing; a second sweep says
+    /// nothing; the anchor's late echo still settles it as before.
+    #[test]
+    fn lines_steered_behind_a_swallowed_line_are_reported_with_it() {
+        let st = stuck("behind-1", "lead", None);
+        let (m2, m3, m4) = (steer_in(&st, "bob", "two"), steer_in(&st, "human", "three"), steer_in(&st, "dev", "a self wake"));
+        assert_eq!(typed().len(), 4, "all four went into the pane");
+        assert_eq!(steered_refs(&st.session), vec![(m2.clone(), st.row), (m3.clone(), st.row), (m4.clone(), st.row)], "each names the row it sits behind");
+        age(&st.session);
+        let reports = report_unconfirmed(&st.session);
+        assert_eq!(reports.len(), 1, "one report for the group");
+        let mut told: Vec<(&str, &str)> = reports[0].items.iter().map(|i| (i.sender.as_str(), "")).collect();
+        told.sort();
+        assert_eq!(told, vec![("bob", ""), ("dev", ""), ("human", ""), ("lead", "")], "the row's sender first, then each later one");
+        let lines = unconfirmed_lines(&st.room);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!((lines[0].0.as_str(), lines[0].1.as_str()), (format!("unconfirmed:{}", st.row).as_str(), "tmm"));
+        assert!(lines[0].2.contains("lead's message of ") && lines[0].2.contains("3 later messages followed it into the same prompt: bob "), "{}", lines[0].2);
+        assert!(lines[0].2.contains(", human ") && lines[0].2.contains(", dev "), "{}", lines[0].2);
+        assert_eq!(warns(&st.session).len(), 1, "one feed warn, for the anchor");
+        assert!(report_unconfirmed(&st.session).is_empty(), "a second sweep says nothing");
+        assert_eq!(unconfirmed_lines(&st.room).len(), 1);
+        // Who is told: bob and lead, once each, for every message that names them; never the human or the self-wake.
+        let told = senders_to_tell(&reports);
+        assert_eq!(told.keys().copied().collect::<Vec<_>>(), vec!["bob", "lead"]);
+        assert_eq!(told["bob"].len(), 1);
+        // A late echo of the combined submit still settles the anchor as before.
+        assert!(record_prompt(&st.session, "dev", &format!("{}\n{}", line_of("lead", "dev", "first"), line_of("bob", "dev", "two"))));
+        assert_eq!(pending(&st.session, "dev"), 0);
+        assert_eq!(unconfirmed_lines(&st.room).len(), 1, "the report stays: it said only what was known then");
+    }
+
+    /// Board #442: the echo first. The anchor is settled by the prompt, so nothing is reported for
+    /// it or for anything steered behind it — their fate is its fate — and a steer into a
+    /// hook-known running turn has no anchor at all.
+    #[test]
+    fn an_echo_settles_the_group_and_a_hook_busy_steer_has_no_anchor() {
+        let st = stuck("behind-2", "lead", None);
+        steer_in(&st, "bob", "two");
+        assert!(record_prompt(&st.session, "dev", &line_of("lead", "dev", "first")), "the echo settles the anchor");
+        age(&st.session);
+        assert!(report_unconfirmed(&st.session).is_empty());
+        assert!(unconfirmed_lines(&st.room).is_empty() && warns(&st.session).is_empty());
+        // The turn is hook-known running now: a further steer has no anchor, and is never reported.
+        assert!(telemetry::turn_busy(&st.session, "dev"));
+        let id = say(&st.room, "bob", "dev", "mid turn");
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("bob", "dev", "mid turn"), 0, &id, steer));
+        assert_eq!(steered_refs(&st.session).last().cloned(), Some((id.clone(), 0)), "behind = 0");
+        assert!(report_unconfirmed(&st.session).is_empty());
+        // Hook-busy AND a row in flight: the hook-known turn is the evidence, so no anchor. A person's
+        // own prompt opens a turn while our line is still owed its echo.
+        let both = stuck("behind-2b", "lead", None);
+        assert!(!record_prompt(&both.session, "dev", "a prompt the person typed at the keyboard"), "not ours: the row stays owed");
+        assert_eq!(pending(&both.session, "dev"), 1);
+        assert!(telemetry::turn_busy(&both.session, "dev") && telemetry::in_flight_row(&both.session, "dev") == Some(both.row));
+        let id = steer_in(&both, "bob", "into the person's turn");
+        assert_eq!(steered_refs(&both.session), vec![(id, 0)], "no anchor while the hook knows a turn runs");
+    }
+
+    /// Board #442 review P1-A: the HELD TAIL of a long queue is released through `flush_steered`
+    /// too. The first batch became the young row R; a new steer arrives while R is in flight and
+    /// the turn is not hook-busy: the tail and the new message are all behind R.
+    #[test]
+    fn a_held_tail_flushed_while_the_first_batch_is_in_flight_is_behind_it() {
+        telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let s = setup("behind-tail");
+        let room = crate::projects::rooms::session_room(&s);
+        let long = "x".repeat(FLUSH_MAX_CHARS / 2 + 10);
+        // Three lines held (a restart's leftovers, a copy-mode refusal): the window is idle and known.
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let id = say(&room, "lead", "dev", &format!("q{n}"));
+            telemetry::record_held(&s, "dev", &format!("[tmm chat 2026-10-20 08:4{n}] lead: @dev {n} {long}"), 0, &id).unwrap();
+            ids.push(id);
+        }
+        assert_eq!(held(&s, "dev"), 3);
+        flush_at(&s, "dev", "t");
+        assert_eq!((typed().len(), held(&s, "dev"), pending(&s, "dev")), (1, 2, 1), "the first batch is typed and is now the young row R; the tail waits");
+        let row = the_row(&s, "dev");
+        assert!(!telemetry::turn_busy(&s, "dev"), "no hook-known turn: R is the only evidence");
+        let late = say(&room, "bob", "dev", "late");
+        assert!(deliver_with(&s, "dev", "t", &line_of("bob", "dev", "late"), 0, &late, steer));
+        let refs = steered_refs(&s);
+        assert_eq!(refs.iter().map(|(_, b)| *b).collect::<Vec<_>>(), vec![row; refs.len()], "every one sits behind R: {refs:?}");
+        // The flush took the first prompt's worth of the tail (one long line): it was steered
+        // through `flush_steered`, not `type_steered`, and still names R.
+        assert_eq!(refs, vec![(ids[1].clone(), row)], "the released part of the tail sits behind R");
+        assert_eq!(held(&s, "dev"), 2, "the rest of the tail and the new line wait for their turn: they get ordinary rows, as before");
+        age(&s);
+        let reports = report_unconfirmed(&s);
+        assert_eq!(reports.len(), 1);
+        let line = &unconfirmed_lines(&room)[0].2;
+        assert!(line.contains("1 later message followed it into the same prompt: lead "), "{line}");
+        let _ = late;
+        // The control: the same flush into a turn the HOOK knows is running has no anchor.
+        let b = setup("behind-tail-busy");
+        for n in 0..2 {
+            telemetry::record_held(&b, "dev", &format!("[tmm chat 2026-10-20 08:5{n}] lead: @dev {n} {long}"), 0, &format!("b{n}")).unwrap();
+        }
+        busy(&b, "dev");
+        flush_locked(&b, "dev", "t", Some(0));
+        assert_eq!(steered_refs(&b).len(), 1);
+        assert!(steered_refs(&b).iter().all(|(_, behind)| *behind == 0), "{:?}", steered_refs(&b));
+    }
+
+    /// Board #442 review P1-B: an anchor with no source (a board notice, a reply: no message id; or
+    /// a message since purged) must not swallow the lines behind it. The room line is written
+    /// without inventing its sender; only a group with no source at all is feed-only.
+    #[test]
+    fn an_anchor_without_a_source_still_reports_the_lines_behind_it() {
+        for (tag, first_msg) in [("behind-3a", Some("")), ("behind-3b", Some("purged-message-id"))] {
+            let st = stuck(tag, "tmm", first_msg);
+            steer_in(&st, "bob", "two");
+            steer_in(&st, "carol", "three");
+            age(&st.session);
+            let reports = report_unconfirmed(&st.session);
+            assert_eq!(reports.len(), 1, "{tag}");
+            assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["bob", "carol"], "{tag}: nobody is invented as the row's sender");
+            let lines = unconfirmed_lines(&st.room);
+            assert_eq!(lines.len(), 1, "{tag}");
+            assert!(lines[0].2.starts_with("[tmm] unconfirmed dev — no confirmation was seen for an earlier line typed to it; 2 later messages followed it into the same prompt: bob "), "{tag}: {}", lines[0].2);
+            assert!(!lines[0].2.contains("tmm's message"), "{tag}");
+            assert_eq!(warns(&st.session).len(), 1);
+        }
+        // Nothing in the group has a source: the feed warn alone, as #437.
+        let st = stuck("behind-3c", "tmm", Some(""));
+        let ghost = uuid::Uuid::new_v4().to_string();
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("bob", "dev", "ghost"), 0, &ghost, steer));
+        age(&st.session);
+        assert!(report_unconfirmed(&st.session).is_empty(), "no sender to name");
+        assert!(unconfirmed_lines(&st.room).is_empty());
+        assert_eq!(warns(&st.session).len(), 1, "the warn is still there");
+    }
+
+    /// Board #442: a failed READ of any member consumes nothing; a member whose message the room
+    /// does not hold is not named and does not hide the others.
+    #[test]
+    fn a_failed_read_of_a_member_consumes_nothing_and_an_absent_member_hides_no_other() {
+        let st = stuck("behind-4", "lead", None);
+        let m2 = steer_in(&st, "bob", "two");
+        let ghost = uuid::Uuid::new_v4().to_string();
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("carol", "dev", "ghost"), 0, &ghost, steer));
+        age(&st.session);
+        let sql = |q: &str| crate::projects::with_store(|s| s.exec_test_sql(q)).unwrap();
+        sql(&format!("UPDATE hub_msgs SET ts = 'unreadable' WHERE id = '{m2}'"));
+        assert!(report_unconfirmed(&st.session).is_empty());
+        assert!(unconfirmed_lines(&st.room).is_empty() && warns(&st.session).is_empty(), "nothing posted");
+        assert!(!crate::projects::with_store(|s| s.pending_deliveries(&st.session, Some("dev"))).unwrap()[0].warned, "not marked");
+        sql(&format!("UPDATE hub_msgs SET ts = 1000 WHERE id = '{m2}'"));
+        let reports = report_unconfirmed(&st.session);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["lead", "bob"], "the absent member is not named");
+        assert!(unconfirmed_lines(&st.room)[0].2.contains("1 later message followed it into the same prompt: bob "));
+    }
+
+    /// Board #442 review P2: the group is read WHOLE from the durable log. A steered event that
+    /// does not decode is an error for the row (nothing consumed), a group larger than any page
+    /// is found at both ends, and a restart (nothing in memory) changes nothing.
+    #[test]
+    fn the_group_is_read_whole_from_the_durable_log() {
+        let st = stuck("behind-5", "lead", None);
+        let first_member = steer_in(&st, "bob", "early");
+        // Far more events than any page: they sit between the first member and the last.
+        for n in 0..1300 {
+            telemetry::record_steered(&st.session, "dev", "noise", &[&format!("noise-{n}")], 0);
+        }
+        // Steers into a hook-known running turn (behind 0) that the room DOES hold: they sit in the
+        // window's log right inside the anchor's time floor, and are nobody's group.
+        for n in 0..3 {
+            let id = say(&st.room, "dave", "dev", &format!("mid turn {n}"));
+            telemetry::record_steered(&st.session, "dev", "mid turn", &[&id], 0);
+        }
+        let last_member = steer_in(&st, "carol", "late");
+        age(&st.session);
+        assert!(crate::projects::with_store(|s| s.steered_events(&st.session, "dev")).unwrap().len() >= 1300, "the noise is in the durable log");
+        // An event whose JSON does not decode: the row is not reported and not consumed.
+        crate::projects::with_store(|s| s.exec_test_sql("UPDATE activity SET deliveries = 'not json' WHERE kind = 'steered' AND text = 'noise' AND id = (SELECT MIN(id) FROM activity WHERE kind = 'steered' AND text = 'noise')")).unwrap();
+        let untouched = report_unconfirmed(&st.session);
+        assert!(untouched.is_empty() && unconfirmed_lines(&st.room).is_empty(), "an undecodable event is an error, not a missing one");
+        assert!(!crate::projects::with_store(|s| s.pending_deliveries(&st.session, Some("dev"))).unwrap()[0].warned);
+        crate::projects::with_store(|s| s.exec_test_sql("UPDATE activity SET deliveries = '' WHERE deliveries = 'not json'")).unwrap();
+        let reports = report_unconfirmed(&st.session);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["lead", "bob", "carol"], "both ends of a group no page could hold, and nobody steered into a running turn");
+        let _ = (first_member, last_member);
+    }
+
+    /// Board #442 review P1-A: the in-flight row is read ONCE per steer and that one answer decides
+    /// both "is the window open" and "behind which row". A second read could land after the row
+    /// crossed the 45 s edge and name nobody, leaving a steer that is anchor-less AND rowless. The
+    /// hook ages the row right after the first read; a second read would see it gone.
+    #[test]
+    fn the_in_flight_row_is_read_once_and_both_exits_keep_the_row_that_made_it_steered() {
+        // Exit 1: a direct steer (nothing held).
+        let st = stuck("once-1", "lead", None);
+        telemetry::IN_FLIGHT_READS.with(|n| n.set(0));
+        let s1 = st.session.clone();
+        telemetry::IN_FLIGHT_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || telemetry::backdate_deliveries_for_test(&s1, 50))));
+        let id = say(&st.room, "bob", "dev", "across the edge");
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("bob", "dev", "across the edge"), 0, &id, steer));
+        assert_eq!(telemetry::IN_FLIGHT_READS.with(|n| n.get()), 1, "asked once for the decision and the anchor together");
+        assert_eq!(steered_refs(&st.session), vec![(id, st.row)], "the row that made it steered is the row it names");
+        assert!(telemetry::in_flight_row(&st.session, "dev").is_none(), "and the row has indeed aged out since");
+
+        // Exit 2: the same through the held tail (`flush_locked` -> `flush_steered`).
+        telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let s = setup("once-2");
+        let room = crate::projects::rooms::session_room(&s);
+        let long = "x".repeat(FLUSH_MAX_CHARS / 2 + 10);
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let m = say(&room, "lead", "dev", &format!("q{n}"));
+            telemetry::record_held(&s, "dev", &format!("[tmm chat 2026-10-20 08:4{n}] lead: @dev {n} {long}"), 0, &m).unwrap();
+            ids.push(m);
+        }
+        flush_at(&s, "dev", "t");
+        let row = the_row(&s, "dev");
+        telemetry::IN_FLIGHT_READS.with(|n| n.set(0));
+        let s2 = s.clone();
+        telemetry::IN_FLIGHT_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(move || telemetry::backdate_deliveries_for_test(&s2, 50))));
+        let late = say(&room, "bob", "dev", "late");
+        assert!(deliver_with(&s, "dev", "t", &line_of("bob", "dev", "late"), 0, &late, steer));
+        assert_eq!(telemetry::IN_FLIGHT_READS.with(|n| n.get()), 1);
+        assert_eq!(steered_refs(&s), vec![(ids[1].clone(), row)], "the flushed tail names the row too");
+    }
+
+    /// Board #442 review P1-B: a member is a member by its `behind`, not by a clock. The activity
+    /// clock and the delivery clock are not comparable (a wall clock stepped back, a long quiet
+    /// spell), so the members here are dated far BEFORE their anchor and still belong to its report.
+    #[test]
+    fn a_member_dated_before_its_anchor_is_still_in_the_report() {
+        let st = stuck("behind-clock", "lead", None);
+        steer_in(&st, "bob", "two");
+        steer_in(&st, "carol", "three");
+        crate::projects::with_store(|s| s.exec_test_sql("UPDATE activity SET ts = 1000 WHERE kind = 'steered'")).unwrap();
+        age(&st.session);
+        let reports = report_unconfirmed(&st.session);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["lead", "bob", "carol"]);
+    }
+
+    /// Board #442 (validator P2): attribution is EXACT. R1 was settled with its own steer behind it;
+    /// R2 is a later stuck line with its own. R2's report names R2's group and nobody else's: a rule
+    /// that took "any anchored steer" (`behind != 0`) would carry R1's steer into R2's report.
+    #[test]
+    fn a_later_anchor_reports_only_its_own_group() {
+        let st = stuck("behind-two", "lead", None);
+        steer_in(&st, "bob", "belongs to the first");
+        // R1's echo arrived: the row is gone (what `record_prompt` does to the table).
+        assert!(crate::projects::with_store(|s| s.delete_delivery_id(st.row)).unwrap());
+        assert_eq!(pending(&st.session, "dev"), 0);
+        // A later line is typed to the idle window: R2, owed its own echo; one more steers behind it.
+        let second = say(&st.room, "carol", "dev", "second stuck line");
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("carol", "dev", "second stuck line"), 0, &second, steer));
+        let r2 = the_row(&st.session, "dev");
+        assert_ne!(r2, st.row);
+        let child = steer_in(&st, "dave", "belongs to the second");
+        let by_row: Vec<(String, i64)> = steered_refs(&st.session).into_iter().filter(|(m, _)| *m != second).collect();
+        assert_eq!(by_row.iter().map(|(_, b)| *b).collect::<Vec<_>>(), vec![st.row, r2], "each steer names its own anchor: {by_row:?}");
+        age(&st.session);
+        let reports = report_unconfirmed(&st.session);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["carol", "dave"], "bob belongs to the settled first anchor");
+        let _ = child;
+        let lines = unconfirmed_lines(&st.room);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].2.contains("1 later message followed it into the same prompt: dave ") && !lines[0].2.contains("bob"), "{}", lines[0].2);
+    }
+
+    /// Board #442 review P2: a row that has been REPORTED is no anchor, even while it still reads
+    /// young (a wall clock stepped back can make an old row young again): a new steer must not
+    /// hang off a report that has already been consumed. The line is typed as an ordinary delivery.
+    #[test]
+    fn a_reported_row_is_no_anchor_even_when_it_reads_young() {
+        let st = stuck("behind-warned", "lead", None);
+        assert!(crate::projects::with_store(|s| s.mark_delivery_warned(st.row)).unwrap());
+        assert_eq!(telemetry::in_flight_row(&st.session, "dev"), None, "young but warned");
+        let id = say(&st.room, "bob", "dev", "after the report");
+        assert!(deliver_with(&st.session, "dev", "t", &line_of("bob", "dev", "after the report"), 0, &id, steer));
+        assert!(steered_refs(&st.session).is_empty(), "not steered");
+        assert_eq!(pending(&st.session, "dev"), 2, "it owes its own echo, and will be swept on its own");
+    }
+
+    /// Board #442: only a typed CHAT line is an anchor. A slash command's expected echo is a row
+    /// too, but the sweep never reports it, so a steer "behind" it would be named nowhere.
+    #[test]
+    fn a_pending_command_row_is_no_anchor() {
+        let s = setup("behind-cmd");
+        telemetry::record_command_delivery(&s, "dev", "goal x", "m-cmd").unwrap();
+        assert_eq!(pending(&s, "dev"), 1, "the command's expected echo is a pending row");
+        assert_eq!(telemetry::in_flight_row(&s, "dev"), None);
+        assert!(!telemetry::line_in_flight(&s, "dev"));
+        let chat = stuck("behind-cmd2", "lead", None);
+        assert_eq!(telemetry::in_flight_row(&chat.session, "dev"), Some(chat.row), "a chat line is");
+    }
+
+    /// Board #442: a steer into a turn the HOOK knows is running names no row, so it is never
+    /// part of any group; and the wording of a group claims no more than "followed it".
+    #[test]
+    fn the_wording_claims_only_that_the_lines_followed() {
+        let line = unconfirmed_line("dev", "lead", "08:40", &[("bob".into(), "08:41".into()), ("human".into(), "08:42".into())]);
+        assert_eq!(line, "[tmm] unconfirmed dev — no confirmation was seen for lead's message of 08:40; 2 later messages followed it into the same prompt: bob 08:41, human 08:42; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.");
+        assert!(!line.contains("lost") && !line.contains("confirmed by"), "{line}");
+        assert_eq!(unconfirmed_line("dev", "lead", "08:40", &[]), "[tmm] unconfirmed dev — no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "with none it is #437's line");
+        assert!(unconfirmed_line_without_source("dev", &[("bob".into(), "08:41".into())]).contains("an earlier line typed to it; 1 later message followed it into the same prompt: bob 08:41;"));
     }
 }

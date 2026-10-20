@@ -283,11 +283,16 @@ pub struct DeliveryRef {
     pub id: i64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub msg: String,
+    /// On a `steered` event only (board #442): the id of the in-flight row this line was steered
+    /// BEHIND — the previous line, still owing an echo, with no hook-known turn running. Its fate
+    /// is that row's. 0 for every other ref and for a steer into a hook-known running turn.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub behind: i64,
 }
 
 impl DeliveryRef {
     fn of(row: &super::store::DeliveryRow) -> Self {
-        DeliveryRef { id: row.id, msg: row.msg_id.clone() }
+        DeliveryRef { id: row.id, msg: row.msg_id.clone(), behind: 0 }
     }
 }
 
@@ -1668,10 +1673,10 @@ fn drop_held_because(session: &str, window: &str, reason: &str) {
 /// pending rows no hook would ever settle. Not a turn fact (`turn_facts`
 /// reads prompt/tool/notif only), and hidden in the feed except as the
 /// reason a bubble shows no ring.
-pub fn record_steered(session: &str, window: &str, line: &str, msgs: &[&str]) {
+pub fn record_steered(session: &str, window: &str, line: &str, msgs: &[&str], behind: i64) {
     recovery_mark(session);
     with_rec(session, window, |_| {});
-    let refs = msgs.iter().filter(|m| !m.is_empty()).map(|m| DeliveryRef { id: 0, msg: m.to_string() }).collect();
+    let refs = msgs.iter().filter(|m| !m.is_empty()).map(|m| DeliveryRef { id: 0, msg: m.to_string(), behind }).collect();
     push_full(session, window, "steered", truncate_chars(line, 160), String::new(), String::new(), refs);
 }
 
@@ -2151,17 +2156,51 @@ pub fn sweep_deliveries(session: &str, report_for: &dyn Fn(&super::store::Delive
     reported
 }
 
-/// What the room and the sender are told about one unconfirmed row (board
-/// #437), built by `delivery::report_unconfirmed` before the transaction.
+/// What the room and the senders are told about one unconfirmed row (board #437), built by
+/// `delivery::report_unconfirmed` before the transaction. One report covers the row AND the
+/// lines steered behind it (board #442): they share its fate and its single `warned` mark.
 #[derive(Debug, Clone)]
 pub struct Report {
     /// The room line, written in the same transaction as the mark.
     pub line: super::store::OnceLine,
-    /// Who sent the message, and to which window it was typed.
-    pub sender: String,
+    /// The window the lines were typed to.
     pub recipient: String,
-    /// The message's time as the line says it (`HH:MM`).
+    /// The messages the report names, the row's own first when the room holds it: each one's
+    /// sender and time. A sender is told once per sweep for all of its messages.
+    pub items: Vec<ReportItem>,
+}
+
+/// One message a report names: who sent it and its time as the line says it (`HH:MM`).
+#[derive(Debug, Clone)]
+pub struct ReportItem {
+    pub sender: String,
     pub when: String,
+}
+
+/// The messages steered BEHIND one in-flight row (board #442), in the order they were steered.
+/// The group is read WHOLE from the durable log (state.db), never from the in-memory feed: a
+/// restart must not shrink it, and a page cap must not either. A `steered` event is a member
+/// when one of its refs names `row.id` as `behind`. There is NO time bound (board #442 review
+/// P1-B): the row's clock (wall seconds) and the activity clock (its own high-water) are not
+/// comparable, so any floor derived from one against the other can drop a member; the
+/// `behind` id is the only proof of membership. The cost is the window's `steered` history,
+/// read once per reported row. An event whose JSON does not decode is an `Err`, never skipped:
+/// the caller then reports nothing and consumes nothing.
+pub fn steered_behind(session: &str, row: &super::store::DeliveryRow) -> Result<Vec<String>, String> {
+    let events = queue(|s| s.steered_events(session, &row.window))?;
+    let mut msgs: Vec<String> = Vec::new();
+    for (id, json) in events {
+        if json.trim().is_empty() {
+            continue;
+        }
+        let refs: Vec<DeliveryRef> = serde_json::from_str(&json).map_err(|e| format!("steered event {id} does not decode: {e}"))?;
+        for r in refs {
+            if r.behind == row.id && !r.msg.is_empty() && !msgs.contains(&r.msg) {
+                msgs.push(r.msg);
+            }
+        }
+    }
+    Ok(msgs)
 }
 
 /// The sessions the capture tick sweeps (board #437): those holding a typed
@@ -2465,11 +2504,36 @@ pub fn retain_windows(session: &str, live: &[String]) {
 /// settles the row, after which `turn_busy` answers; a line that never
 /// echoes stops counting when the sweep's clock would report it.
 pub fn line_in_flight(session: &str, window: &str) -> bool {
+    in_flight_row(session, window).is_some()
+}
+
+/// The row that makes a line "in flight" (board #442): the OLDEST young, unwarned chat-line row of
+/// the window. The ONE definition: `line_in_flight` is this, so the rule that makes the next line
+/// steered and the rule that names the row it is steered behind cannot differ.
+pub fn in_flight_row(session: &str, window: &str) -> Option<i64> {
     let now = now();
-    queue(|s| s.pending_deliveries(session, Some(window)))
+    let found = queue(|s| s.pending_deliveries(session, Some(window)))
         .unwrap_or_default()
         .iter()
-        .any(|r| r.command.is_none() && !r.warned && now.saturating_sub(r.ts) < DELIVERY_ACK_SECS)
+        .find(|r| r.command.is_none() && !r.warned && now.saturating_sub(r.ts) < DELIVERY_ACK_SECS)
+        .map(|r| r.id);
+    #[cfg(test)]
+    {
+        IN_FLIGHT_READS.with(|n| n.set(n.get() + 1));
+        if let Some(hook) = IN_FLIGHT_HOOK.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
+    }
+    found
+}
+
+// Test seams (board #442 review P1-A), per thread: how many times `in_flight_row` was asked, and
+// a hook that runs right AFTER the first read (a clock that moves on, a row that ages past the
+// 45 s edge), so a second read would see something the first did not.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static IN_FLIGHT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static IN_FLIGHT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Test-only: a window's outstanding (typed, unsettled) rows, in typed order.
@@ -3978,7 +4042,7 @@ mod tests {
             record_notification(&session, "w1", "permission_required");
             record_tool(&session, "w1", "Edit", &format!("{turn}.rs"));
             record_undelivered(&session, "w2", "a line", "the pane is gone");
-            record_steered(&session, "w2", "a steered line", &[]);
+            record_steered(&session, "w2", "a steered line", &[], 0);
             record_notification(&session, "w1", "completed");
         };
         writers("one");
@@ -5088,7 +5152,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "the tick reported it with no feed read: {lines:?}");
         assert_eq!(lines[0].0, format!("unconfirmed:{row}"), "the row's stable id");
         assert_eq!(lines[0].1, "tmm", "posted under tmm, not the human's or the sender's name");
-        assert_eq!(lines[0].2, crate::projects::delivery::unconfirmed_line("dev", "lead", &when));
+        assert_eq!(lines[0].2, crate::projects::delivery::unconfirmed_line("dev", "lead", &when, &[]));
         assert!(lines[0].2.contains("no confirmation was seen") && lines[0].2.contains("Look at its pane first"), "{}", lines[0].2);
         assert!(!lines[0].2.contains("never took") && !lines[0].2.contains("interrupt"), "{}", lines[0].2);
         assert_eq!(durable_warns(&session), 1, "the feed warn is durable too");
@@ -5198,6 +5262,31 @@ mod tests {
         let lines = room_lines(&room);
         assert_eq!((lines.len(), lines[0].0.as_str(), durable_warns(&session)), (1, format!("unconfirmed:{row}").as_str(), 1));
         assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "and only once");
+    }
+
+    /// Board #442: the group is read from state.db, so a restart in between loses nobody. The
+    /// anchor was typed, a line was steered behind it (its event names the row), the process
+    /// forgot everything it held in memory, and the sweep after the restart still reports both.
+    #[test]
+    fn a_line_steered_behind_an_anchor_is_still_reported_after_a_restart() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("restart442-{}", uuid::Uuid::new_v4());
+        let ((room, row), _) = overdue_message_at(&session, "lead", "dev", "first");
+        let child = uuid::Uuid::new_v4().to_string();
+        crate::projects::rooms::post_routed_as(&room, &child, "bob", "@dev second", &["dev".to_string()]).unwrap();
+        record_steered(&session, "dev", "second", &[&child], row);
+        // Dated long before its anchor, as a wall clock that stepped back can leave it.
+        test_exec_sql("UPDATE activity SET ts = 1000 WHERE kind = 'steered'");
+        simulate_restart(&session);
+        // The restart's own grace (a fresh listening clock for rows it did not type) is not
+        // what is under test: the process before it had already listened for a long time.
+        recovery_marks().lock().unwrap().insert(session.clone(), (row, 1));
+        let reports = crate::projects::delivery::report_unconfirmed(&session);
+        assert_eq!(reports.len(), 1, "reported after the restart");
+        assert_eq!(reports[0].items.iter().map(|i| i.sender.as_str()).collect::<Vec<_>>(), vec!["lead", "bob"]);
+        assert!(room_lines(&room)[0].2.contains("1 later message followed it into the same prompt: bob "), "{}", room_lines(&room)[0].2);
+        PERSIST_IN_TEST.with(|p| p.set(false));
     }
 
     /// Board #437: the tick and a feed read racing each other report once.

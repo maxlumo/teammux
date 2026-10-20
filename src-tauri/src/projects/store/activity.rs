@@ -807,6 +807,22 @@ impl Store {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    /// Every `steered` event of one window, with its `deliveries` JSON, oldest first (board
+    /// #442). The WHOLE answer: no LIMIT and no time bound, because a group of steered lines is
+    /// reported once, with its anchor row, and anything that could leave a member out would
+    /// leave it out of the one report it will ever get. A row that cannot be read is an error,
+    /// not a missing event.
+    pub fn steered_events(&self, session: &str, window: &str) -> Result<Vec<(i64, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, deliveries FROM activity WHERE session = ?1 AND win = ?2 AND kind = 'steered' ORDER BY id")
+            .map_err(|e| format!("prepare steered events: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session, window], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("query steered events: {e}"))?;
+        rows.collect::<Result<_, _>>().map_err(|e| format!("read steered events: {e}"))
+    }
+
     /// A line is settled — acknowledged by its echo, or reported as
     /// unconfirmed. By ROW, so a duplicate body's sibling stays outstanding.
     /// Report a row once: true only for the call that flipped it (board #249).
