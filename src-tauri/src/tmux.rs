@@ -1085,6 +1085,14 @@ pub fn pane_in_mode(target: &str) -> Result<bool, String> {
 
 /// 向 pane 发送文本 + Enter
 pub fn send_command(target: &str, command: &str) -> Result<(), String> {
+    send_command_with(target, command, || Ok(()))
+}
+
+/// `send_command` with one step between the beat and the Enter, run under
+/// the same pane lock: `before_enter` may look at the pane and send a key
+/// (board #436: the kiro picker guard of a verbatim `/command`,
+/// `delivery::send_into`). An error from it sends no Enter.
+pub fn send_command_with(target: &str, command: &str, before_enter: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     // Serialize per pane (board #122): the text→Enter pair below must land
     // whole before another caller's does.
     let lock = pane_send_lock(target);
@@ -1124,37 +1132,9 @@ pub fn send_command(target: &str, command: &str) -> Result<(), String> {
     // ("the TUI needs a beat to settle"). 200 ms is imperceptible next to a
     // model turn; shells do not care either way.
     std::thread::sleep(std::time::Duration::from_millis(200));
-    // backend-quirk(measured): kiro-cli 2.18.1 opens a file picker on `@`.
-    // kiro-cli's terminal UI (2.18.1) opens a fuzzy FILE PICKER the moment an
-    // `@` is typed — pasted or keyed, idle or mid-turn — and filters it with
-    // the text that follows. Every delivery starts `@name`, so in a workspace
-    // holding a file that fuzzy-matches the agent's name (kirocrew-agentcore:
-    // `@kiro` → `runtime/kirocrew-artifact.json`) the picker is still open when
-    // our Enter arrives, and Enter there means SELECT: the whole mention became
-    // `@file:runtime/kirocrew-artifact.json` and kiro answered "Received
-    // runtime/kirocrew-artifact.json…" (owner, 2026-09-03, board #10 there).
-    // Escape closes the picker and leaves the typed line intact, and while the
-    // picker is open it reaches ONLY the picker — measured on a 12-second
-    // streaming turn, which ran to its end. With no picker open, Escape is
-    // kiro's cancel-agent / clear-queue key, so it is sent only when the
-    // picker's own footer is on screen. Nothing else is touched: an `@`-less
-    // line skips the capture, and no other backend draws that footer.
-    if command.contains('@') && file_picker_open(&capture_pane_plain(target, Some(8)).unwrap_or_default()) {
-        send_keys(target, "Escape", false)?;
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    before_enter()?;
     send_keys(target, "Enter", false)?;
     Ok(())
-}
-
-/// backend-quirk(measured): kiro-cli 2.18.1's picker footer is the only gate.
-/// kiro-cli's `@` file picker, recognised by its footer ("esc to cancel · ↵ to
-/// select"). Both halves are required: a running turn shows "Thinking…
-/// (esc to cancel)" with nothing to select, and Escape there would cancel it.
-pub fn file_picker_open(screen: &str) -> bool {
-    screen
-        .lines()
-        .any(|l| l.contains("esc to cancel") && l.contains("to select"))
 }
 
 #[cfg(test)]
@@ -2343,23 +2323,6 @@ mod tests {
 
         kill_session(&spaced).expect("kill spaced");
         kill_session(&sibling).expect("kill sibling");
-    }
-
-    /// kiro-cli 2.18.1 screens as captured live (2026-09-03): the picker is
-    /// recognised by its own footer, never by the turn's "esc to cancel".
-    #[test]
-    fn kiro_file_picker_is_recognised_by_its_footer_only() {
-        let picker = "[tmm chat] human: @kiro [board #10] hello there\n\
-                      @runtime/kirocrew-artifact.json\n\
-                      ────────────────\n\
-                       esc to cancel · ↵ to select\n";
-        assert!(file_picker_open(picker));
-        let streaming = "⠹ Thinking... (esc to cancel)\n\
-                         ● 8 MCP failures — see /mcp\n\
-                          Kiro is working · Type to steer · Ctrl+S to queue\n";
-        assert!(!file_picker_open(streaming), "a running turn is not a picker");
-        assert!(!file_picker_open("[tmm chat] human: @zzqx hello there\n"), "no match, no picker");
-        assert!(!file_picker_open(""));
     }
 
     fn table(entries: &[(u32, u32, &str)]) -> std::collections::HashMap<u32, (u32, String)> {

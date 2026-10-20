@@ -744,7 +744,20 @@ fn first_prompt(lines: &[&str], max: usize) -> usize {
 
 #[cfg(not(test))]
 fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
-    send_into(session, window, target, text)
+    send_into(session, window, target, &typed_form(session, window, text))
+}
+
+/// The text a DELIVERY types into `window`: the line itself, or, for a CLI
+/// whose typed `@` opens a file picker (`Backend::at_opens_picker`, kiro,
+/// board #436), the line with every `@` as `＠` (`address::unaddressed`, the
+/// one neutralizer). Every delivery, held flush and steered line passes
+/// through `type_text`; a verbatim `/command` (`hub_command`) does not. The
+/// stored row keeps `@`; the receipt reads `＠` as `@` (`telemetry`'s canon).
+fn typed_form<'a>(session: &str, window: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    if text.contains('@') && recipe_mode(session, window).is_some_and(|(backend, _)| backend.at_opens_picker()) {
+        return std::borrow::Cow::Owned(crate::address::unaddressed(text));
+    }
+    std::borrow::Cow::Borrowed(text)
 }
 
 /// THE send door (board #422 round 3, H2 review P1-D): every input typed
@@ -759,7 +772,25 @@ fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<()
 /// read here, at the write). Every other window is typed as always.
 pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
     let guard = gate(session, window, target, false)?;
-    crate::tmux::with_write_guard(guard, || crate::tmux::send_command(target, text))
+    // A verbatim `/command` keeps its `@` (non-negotiable 12), so into a CLI
+    // whose `@` opens a picker it gets the one-read picker guard before its
+    // Enter (board #436 validator P1; limits at `kiro::picker_open`). A
+    // delivery never reaches this with an `@` for such a CLI: `type_text`
+    // typed it as `＠`.
+    let picker = text.contains('@')
+        .then(|| recipe_mode(session, window).map(|(backend, _)| backend))
+        .flatten()
+        .filter(|backend| backend.at_opens_picker());
+    crate::tmux::with_write_guard(guard, || match picker {
+        None => crate::tmux::send_command(target, text),
+        Some(backend) => crate::tmux::send_command_with(target, text, || {
+            if backend.picker_open(&crate::tmux::capture_pane_plain(target, Some(8)).unwrap_or_default()) {
+                crate::tmux::send_keys(target, "Escape", false)?;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Ok(())
+        }),
+    })
 }
 
 /// The same door for ONE named key — never text, never an Enter: the CLI's
@@ -805,6 +836,7 @@ thread_local! {
 
 #[cfg(test)]
 fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+    let text = &typed_form(session, window, text);
     let faked = TYPED.with(|t| t.borrow().is_some());
     if !faked {
         return send_into(session, window, target, text);

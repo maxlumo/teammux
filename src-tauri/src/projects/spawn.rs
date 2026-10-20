@@ -2026,6 +2026,9 @@ mod tests {
         let prompt = conf.get("prompt").and_then(|p| p.as_str()).unwrap();
         assert!(prompt.contains("tmm send"), "the tmm paragraph IS the integration");
         assert!(!prompt.contains("fix the bug"), "brief is delivered as the first user message");
+        // Board #436: a kiro agent reads every delivered `@` as `＠`, and its
+        // own config says so, as the last bullet of the collaboration flow.
+        assert!(prompt.ends_with(&format!("for the remaining commands.\n{}", crate::backends::kiro::AT_TYPED_NOTE)), "{prompt}");
         // The prompt must NOT carry a date: it is replayed every time the window
         // is restored, so a baked-in "today" becomes a lie. The KICK carries it.
         let year = chrono::Local::now().format("%Y").to_string();

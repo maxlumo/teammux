@@ -400,6 +400,28 @@ impl Backend {
         }
     }
 
+    /// Does a typed `@` open this CLI's file picker, so the Enter after a
+    /// delivered line can select a file instead of submitting it (board
+    /// #436)? Then the delivery door types every `@` as `＠`
+    /// (`delivery::type_text`). Measured in the backend's own file.
+    pub fn at_opens_picker(self) -> bool {
+        match self {
+            Backend::Kiro => kiro::AT_OPENS_FILE_PICKER,
+            // Not measured to open a picker on a typed `@`: typed as is.
+            Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+        }
+    }
+
+    /// Is this backend's `@` picker open on `screen` (board #436)? Read once
+    /// before the Enter of a verbatim `/command` that still carries `@`
+    /// (`delivery::send_into`); never for a delivery, which types no `@`.
+    pub fn picker_open(self, screen: &str) -> bool {
+        match self {
+            Backend::Kiro => kiro::picker_open(screen),
+            Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+        }
+    }
+
     /// For a backend that loses typed text (`loses_busy_input`): is its pane
     /// ready for a typed line now, by the CLI side's own fact (dsh: the managed
     /// shell's ready file, written once ZLE owns the TTY and removed when a
@@ -894,7 +916,10 @@ mod tests {
     /// seed is registry data), and a statement whose preceding comment block
     /// carries `// backend-quirk(measured): …` — the marker for a measured,
     /// screen-triggered adaptation that generic code has to keep (tmux.rs's
-    /// codex beat and kiro picker; the owner accepted those, 2026-09-09).
+    /// codex beat; the owner accepted it, 2026-09-09. The kiro picker gate
+    /// that sat beside it moved to `kiro::picker_open` by board #436: a kiro
+    /// delivery never types `@`, and a verbatim `/command` asks it through
+    /// `Backend::picker_open`).
     /// Marker comments, never line numbers: the exemption moves with the
     /// code it explains.
     #[test]
@@ -970,7 +995,7 @@ mod tests {
         });
         assert!(fenced, "no file carries the backend-seeds fence");
         let tmux = std::fs::read_to_string(root.join("tmux.rs")).unwrap();
-        assert!(tmux.matches("backend-quirk(measured):").count() >= 2, "tmux.rs lost its quirk markers");
+        assert!(tmux.matches("backend-quirk(measured):").count() >= 1, "tmux.rs lost its quirk marker");
     }
 
     /// `describe` derives resource names by convention; this is where the

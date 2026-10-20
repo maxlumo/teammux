@@ -2618,7 +2618,7 @@ mod tests {
 
         let told = super::tell_team_of_join(&session, "squad", "helper", "kiro", "", "");
         assert_eq!(told, ["lead", "rev"], "the team's live members, sub-team included");
-        let wanted = "tmm: [reply] @helper joined your team squad";
+        let wanted = "tmm: [reply] ＠helper joined your team squad"; // kiro panes: `@` typed as `＠` (#436)
         let pane = |name: &str| crate::tmux::capture_pane_plain(&format!("{session}:{name}"), Some(0)).unwrap_or_default();
         for name in ["lead", "rev"] {
             let mut text = String::new();
@@ -2699,12 +2699,13 @@ mod tests {
         assert_eq!(moved.result.unwrap(), serde_json::json!({ "agent": "helper", "team": "squad", "left": null, "changed": true, "untold": [], "unread": null }));
         assert_eq!(recipe("helper")["team"], "squad");
         assert_eq!(recipe("helper")["member"], "", "a joined member");
-        assert!(wait_for("lead", "tmm: [reply] @helper joined your team squad"), "the team's member is told: {:?}", pane("lead"));
+        // kiro panes are typed `＠` for every `@` (board #436).
+        assert!(wait_for("lead", "tmm: [reply] ＠helper joined your team squad"), "the team's member is told: {:?}", pane("lead"));
         // The backend is the recipe's (`detect_pane`), not only a sniff of the
         // process: these panes run `cat`, as a managed window that fell back
         // to a shell does (live proof, 2026-10-15: "a  agent moved in").
         assert!(pane("lead").contains("a kiro agent moved in by human"), "its backend, and who moved it, not who started it: {:?}", pane("lead"));
-        assert!(wait_for("helper", "tmm: [reply] @helper: you were moved into team squad at runtime"), "the mover is told: {:?}", pane("helper"));
+        assert!(wait_for("helper", "tmm: [reply] ＠helper: you were moved into team squad at runtime"), "the mover is told: {:?}", pane("helper"));
         assert!(pane("helper").contains("Your prompt changes at your next start"));
         std::thread::sleep(std::time::Duration::from_millis(300));
         for name in ["solo", "other"] {
@@ -2716,7 +2717,7 @@ mod tests {
 
         let out = set("helper", "");
         assert_eq!(out.result.unwrap(), serde_json::json!({ "agent": "helper", "team": null, "left": "squad", "changed": true, "untold": [], "unread": null }));
-        assert!(wait_for("lead", "tmm: [reply] @helper left your team squad"), "{:?}", pane("lead"));
+        assert!(wait_for("lead", "tmm: [reply] ＠helper left your team squad"), "{:?}", pane("lead"));
         assert!(wait_for("helper", "you left team squad and are standalone now"), "{:?}", pane("helper"));
         let lines: Vec<String> = room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] moved") || b.starts_with("[tmm] left")).collect();
         assert_eq!(lines, ["[tmm] moved helper — to team squad", "[tmm] left helper — team squad, now standalone"]);
@@ -2777,15 +2778,15 @@ mod tests {
         // B -> C (ops -> core) commits and is announced: the difference from
         // what was told (squad: lead), not a replay of its request (ops).
         assert_eq!(set("core").result.unwrap()["left"], "ops");
-        assert!(wait_for("lead", "@helper left your team squad"), "the old team is told: {:?}", pane("lead"));
-        assert!(wait_for("core1", "@helper joined your team core"), "{:?}", pane("core1"));
+        assert!(wait_for("lead", "＠helper left your team squad"), "the old team is told: {:?}", pane("lead")); // `＠` in a kiro pane (#436)
+        assert!(wait_for("core1", "＠helper joined your team core"), "{:?}", pane("core1"));
         assert!(wait_for("helper", "you were moved into team core"), "{:?}", pane("helper"));
         // Move 1's announcement is released: overtaken, it says nothing.
         super::announce_move(&session, &room_id, &ws_s, "helper", rev1, &super::move_line("helper", "ops", "squad"), "", &crate::projects::recipe::announcement(&home));
         quiet(&["ops1", "solo"]);
-        assert_eq!(times("lead", "@helper left your team squad"), 1, "squad hears it left exactly once");
+        assert_eq!(times("lead", "＠helper left your team squad"), 1, "squad hears it left exactly once");
         assert_eq!(times("lead", "joined your team"), 0);
-        assert_eq!(times("core1", "@helper joined your team core"), 1);
+        assert_eq!(times("core1", "＠helper joined your team core"), 1);
         assert_eq!(times("helper", "you were moved into team"), 1, "the mover is told once, its current team");
         assert!(!pane("helper").contains("moved into team ops"));
         assert_eq!(lines(), ["[tmm] moved helper — to team core, from team ops"], "the room says only the move that stands");
@@ -2796,7 +2797,7 @@ mod tests {
         assert!(set("core").error.is_none());
         super::announce_move(&session, &room_id, &ws_s, "helper", rev3, &super::move_line("helper", "ops", "core"), "", &crate::projects::recipe::announcement(&home));
         quiet(&["ops1", "solo"]);
-        assert_eq!((times("core1", "tmm: [reply] @helper"), times("lead", "tmm: [reply] @helper"), times("helper", "tmm: [reply]")), (1, 1, 1), "A -> B -> A tells nobody anything new");
+        assert_eq!((times("core1", "tmm: [reply] ＠helper"), times("lead", "tmm: [reply] ＠helper"), times("helper", "tmm: [reply]")), (1, 1, 1), "A -> B -> A tells nobody anything new");
 
         // One agent's announcements in commit order: while one is told, the
         // next commits at once but is told after it.
@@ -2809,7 +2810,7 @@ mod tests {
         drop(turn);
         assert!(mover.join().unwrap().error.is_none());
         assert_eq!(lines().len(), before + 1, "told once the earlier turn ended");
-        assert!(wait_for("core1", "@helper left your team core"));
+        assert!(wait_for("core1", "＠helper left your team core"));
     }
 
     /// Board #388 (validator R5/R5b): a notice the delivery door does not take
@@ -3861,7 +3862,7 @@ mod tests {
             None,
         );
         assert!(from_dev.error.is_none());
-        let wanted = "tmm: [reply] offline \u{2014} @ghost (stopped)";
+        let wanted = "tmm: [reply] offline \u{2014} ＠ghost (stopped)"; // a kiro pane: `@` typed as `＠` (#436)
         let mut pane = String::new();
         for _ in 0..30 {
             pane = crate::tmux::capture_pane_plain(&target, Some(0)).unwrap_or_default();
@@ -4193,6 +4194,127 @@ mod tests {
         assert!(lead.contains("first line for lead") && lead.contains("second line for lead"), "lead: {lead:?}");
         assert!(solo.contains("first line for solo") && solo.contains("second line for solo"), "solo: {solo:?}");
         assert!(!lead.contains("for solo") && !solo.contains("for lead"), "no cross-pane text: {lead:?} / {solo:?}");
+    }
+
+    /// Board #436 (owner 2026-10-20 10:27): a `[wake]` to a kiro agent was
+    /// typed with `@engineer`, kiro-cli 2.32.0's file picker matched it to
+    /// `m3-g2-engineering-appendix.md`, and our Enter SELECTED the file, so
+    /// the line was never submitted. The fake CLI does what the real one was
+    /// measured to do: bracketed paste on, a "picker" that opens 150 ms after
+    /// any `@` it reads (the real one: 170-316 ms, an async search), and an
+    /// Enter outside a paste that, with the picker open, attaches a file
+    /// (`PICKED-FILE`) instead of submitting (`SUBMIT:<text>`). Through the
+    /// real wake path, ten times: every delivery submits, with `＠` for `@`,
+    /// and its receipt settles on the echo as typed. A `/command` with `@`
+    /// is typed verbatim and SUBMITS (validator P1): the fake paints kiro's
+    /// picker footer when its picker opens and closes it on a bare Escape,
+    /// and the command door's one-read guard (`kiro::picker_open`) sends
+    /// that Escape before the Enter. Control in the test: the same pane,
+    /// typed by `send_command` directly with `@` (no guard), is picked.
+    #[test]
+    fn a_kiro_delivery_types_no_at_so_its_file_picker_never_takes_the_enter() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-picker-{}", uuid::Uuid::new_v4());
+        let ws = std::env::temp_dir().join(format!("tmm-picker-ws-{}", uuid::Uuid::new_v4()));
+        for name in ["engineer", "lead"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": format!("kiro-cli chat --agent {name}"), "team": "" }).to_string()).unwrap();
+        }
+        let fake = ws.join("picker.py");
+        std::fs::write(&fake, "\
+import os, select, sys, time, tty
+tty.setraw(0)
+def out(s):
+    sys.stdout.write(s + '\\r\\n'); sys.stdout.flush()
+sys.stdout.write('\\x1b[?2004h'); sys.stdout.flush()
+buf, esc, paste, at, shown = b'', b'', False, None, False
+def ready(t):
+    return bool(select.select([0], [], [], t)[0])
+while True:
+    if at is not None and not shown and time.time() - at >= 0.15:
+        out(' esc to cancel \\u00b7 \\u21b5 to select'); shown = True
+    if not ready(0.01):
+        continue
+    c = os.read(0, 1)
+    if c == b'\\x1b' and not esc and not ready(0.05):
+        if shown: out('PICKER-CLOSED')
+        at, shown = None, False
+        continue
+    if esc or c == b'\\x1b':
+        esc += c
+        if esc == b'\\x1b[200~': paste, esc = True, b''
+        elif esc == b'\\x1b[201~': paste, esc = False, b''
+        elif c == b'~' or len(esc) >= 6: buf, esc = buf + esc, b''
+        continue
+    if c == b'\\r' and not paste:
+        if at is not None and time.time() - at >= 0.15: out('PICKED-FILE')
+        else: out('SUBMIT:' + buf.decode('utf-8', 'replace').replace('\\r', '|'))
+        buf, at, shown = b'', None, False
+        continue
+    buf += c
+    if c == b'@' and at is None: at = time.time()
+").unwrap();
+        let run = format!("bash -c 'exec -a kiro-cli python3 {}'", fake.display());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "engineer", "-c", &ws.to_string_lossy(), &run])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("picker-test")).expect("adopt project");
+        let target = format!("{session}:engineer");
+        let screen = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        let count = |what: &str| screen().lines().filter(|l| l.starts_with(what)).count();
+        let wait = |what: &str, n: usize| (0..100).any(|_| count(what) >= n || { std::thread::sleep(std::time::Duration::from_millis(30)); false });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Control: the fake is a picker. `@` typed as is, through the same
+        // send shape, loses the Enter to it.
+        crate::tmux::send_command(&target, "@engineer typed with its at").unwrap();
+        assert!(wait("PICKED-FILE", 1), "{:?}", screen());
+        assert_eq!(count("SUBMIT:"), 0, "{:?}", screen());
+
+        // The owner's case, through the real wake path, ten times: the shape
+        // of row 13432 (the self-wake, a fenced block, nine newlines).
+        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
+        let now = crate::projects::now() as i64;
+        for i in 0..10 {
+            let body = format!("@engineer task fashion{i} exited:0 after 23m; last lines:\n```\nfashion status=0\n>> RTF: 1.1734\n{{\"id\": \"M4-luxury-s33\", \"mail\": \"a@b.dev\"}}\n```\nContinue the work this task was for: read the output and post the result.");
+            let w = call("hub_wake_add", serde_json::json!({ "session": session, "from": "engineer", "body": body, "due": now + 3600 }));
+            let w: crate::projects::store::Wake = serde_json::from_value(w.result.expect("scheduled")).unwrap();
+            fire_wake(w.id);
+            assert!(wait("SUBMIT:", i + 1), "delivery {i}: {:?}", screen());
+            let submitted = screen().lines().filter(|l| l.starts_with("SUBMIT:")).last().unwrap().to_string();
+            assert!(submitted.contains(&format!("[wake] ＠engineer task fashion{i} exited:0")), "{submitted:?}");
+            assert!(submitted.contains("\"a＠b.dev\""), "every @ is typed as ＠: {submitted:?}");
+            assert!(!submitted.contains('@'), "{submitted:?}");
+            // The receipt: the row keeps `@`, the echo carries `＠`; it settles.
+            assert_eq!(crate::projects::telemetry::pending_receipts(&session, "engineer").len(), 1, "owed once");
+            let echo = submitted.trim_start_matches("SUBMIT:").replace('|', "\n");
+            assert!(crate::projects::telemetry::record_prompt(&session, "engineer", &echo), "the typed echo is our delivery");
+            crate::projects::telemetry::record_notification(&session, "engineer", "completed");
+            assert!(crate::projects::telemetry::pending_receipts(&session, "engineer").is_empty(), "settled");
+        }
+        assert_eq!(count("PICKED-FILE"), 1, "only the control was picked: {:?}", screen());
+        let room: Vec<String> = call("hub_log", serde_json::json!({ "session": session })).result
+            .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned()).unwrap_or_default()
+            .iter().filter_map(|m| m.get("body").and_then(|b| b.as_str()).map(str::to_string)).filter(|b| b.starts_with("[wake]")).collect();
+        assert_eq!(room.len(), 10);
+        assert!(room.iter().all(|b| b.starts_with("[wake] @engineer task fashion") && !b.contains('＠')), "the room keeps @: {room:?}");
+
+        // A `/command` is typed verbatim (non-negotiable 12): its `@` stays,
+        // and it SUBMITS: the door's guard closes the open picker first.
+        let r = call("hub_command", serde_json::json!({ "session": session, "from": "lead", "agent": "engineer", "text": "/context add @docs/notes.md" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait("SUBMIT:/context add @docs/notes.md", 1), "the verbatim command submits with its @: {:?}", screen());
+        assert_eq!(count("PICKER-CLOSED"), 1, "closed by the guard's Escape: {:?}", screen());
+        assert_eq!(count("PICKED-FILE"), 1, "still only the control was picked: {:?}", screen());
     }
 
     /// Board #250 (orchestrator 17:00/17:21), through hub_post: a message to
@@ -4960,7 +5082,8 @@ mod tests {
             .filter_map(|m| Some((m.get("from")?.as_str()?.to_string(), m.get("body")?.as_str()?.to_string())))
             .collect();
         assert!(!dev.contains("note to self now"), "an ordinary line is never typed back into its sender: {dev:?}");
-        assert!(dev.contains("dev: [wake] @dev check the build"), "the wake reaches its own sender: {dev:?}");
+        // A kiro pane is typed `＠` for every `@` (board #436).
+        assert!(dev.contains("dev: [wake] ＠dev check the build"), "the wake reaches its own sender: {dev:?}");
         // Once: `cat` shows a typed line twice (tty echo + its output), so the
         // count is the delivery row the one typing recorded.
         let owed = crate::projects::telemetry::owed_rows(&session, "dev");
@@ -4980,8 +5103,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(400));
         let dev = crate::tmux::capture_pane_plain(&format!("{session}:dev"), Some(0)).unwrap_or_default();
         let lead = crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default();
-        assert!(dev.contains("dev: @lead @dev [watcher] job done"), "the detached copy reaches its sender: {dev:?}");
-        assert!(lead.contains("dev: @lead @dev [watcher] job done"), "{lead:?}");
+        assert!(dev.contains("dev: ＠lead ＠dev [watcher] job done"), "the detached copy reaches its sender: {dev:?}");
+        assert!(lead.contains("dev: ＠lead ＠dev [watcher] job done"), "{lead:?}");
         assert!(!dev.contains("note to self now"), "the in-turn line still did not: {dev:?}");
     }
 
@@ -5040,7 +5163,8 @@ mod tests {
         fire_wake(keep.id);
         std::thread::sleep(std::time::Duration::from_millis(400));
         let pane = crate::tmux::capture_pane_plain(&format!("{c}:dev"), Some(0)).unwrap_or_default();
-        assert!(pane.contains("lead: [wake] @dev after two renames"), "typed into the real pane: {pane:?}");
+        // A kiro pane is typed `＠` for every `@` (board #436); the room keeps `@`.
+        assert!(pane.contains("lead: [wake] ＠dev after two renames"), "typed into the real pane: {pane:?}");
         assert_eq!(crate::projects::telemetry::owed_rows(&c, "dev").len(), 1, "once");
         let room: Vec<String> = call("hub_log", serde_json::json!({ "session": c })).result
             .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned()).unwrap_or_default()
@@ -5164,7 +5288,8 @@ mod tests {
         let after_bracket = crate::tmux::capture_pane_plain(&format!("{session}:bob"), Some(0)).unwrap_or_default();
         assert!(!after_email.contains("mail me"), "an in-word @ types into nobody: {after_email:?}");
         assert_eq!(email.get("to"), Some(&serde_json::json!([])), "and is stored with no recipient: {email}");
-        assert!(after_bracket.contains("(@bob) please look"), "a bracketed address reaches bob: {after_bracket:?}");
+        // bob is a kiro pane, typed `＠` for every `@` (board #436).
+        assert!(after_bracket.contains("(＠bob) please look"), "a bracketed address reaches bob: {after_bracket:?}");
         assert_eq!(bracket.get("to"), Some(&serde_json::json!(["bob"])), "{bracket}");
     }
 
@@ -5224,15 +5349,17 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let lead = crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default();
         let solo = crate::tmux::capture_pane_plain(&format!("{session}:solo"), Some(0)).unwrap_or_default();
-        assert!(lead.contains("@lead @solo decide"), "lead receives the current request: {lead:?}");
+        // The panes are kiro panes, typed `＠` for every `@` (board #436); the
+        // row below keeps the line as sent.
+        assert!(lead.contains("＠lead ＠solo decide"), "lead receives the current request: {lead:?}");
         assert!(lead.contains("[tmm team context"), "team member receives catch-up: {lead:?}");
-        assert!(lead.contains("writer -> @researcher"), "explicit route is named: {lead:?}");
-        assert!(lead.contains("researcher -> @writer"), "automatic reply route is named: {lead:?}");
+        assert!(lead.contains("writer -> ＠researcher"), "explicit route is named: {lead:?}");
+        assert!(lead.contains("researcher -> ＠writer"), "automatic reply route is named: {lead:?}");
         // What was TYPED (the row), not the pane: `cat` echoes a typed line
         // back a timing-dependent number of times.
         let typed_lead = crate::projects::telemetry::owed_rows(&session, "lead").into_iter().next().expect("lead's row").line;
         assert_eq!(typed_lead.matches("@lead @solo decide").count(), 1, "the current message is not part of its own catch-up: {typed_lead}");
-        assert!(solo.contains("@lead @solo decide"), "solo receives the current request: {solo:?}");
+        assert!(solo.contains("＠lead ＠solo decide"), "solo receives the current request: {solo:?}");
         assert!(!solo.contains("[tmm team context"), "solo stays one-line: {solo:?}");
         // Each typed line names the message it carries (board #249), so its
         // echo can mark that message delivered on any client.

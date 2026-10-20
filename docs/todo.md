@@ -266,9 +266,12 @@ closed; kept as the record of what the scattering looked like.
    `sniff_*` functions belong beside the other backend knowledge.
 8. The frontend maintains its own backend lists, icons, colors and command
    palettes (section C).
-9. Generic tmux code contains codex's 200ms interval and kiro file-picker
-   detection. These measured, screen-triggered adaptations are acceptable,
-   but they remain backend knowledge in a generic module.
+9. Generic tmux code contains codex's 200ms interval. This measured,
+   screen-triggered adaptation is acceptable, but it remains backend
+   knowledge in a generic module. (The kiro file-picker detection beside it
+   moved to the backend, board #436: deliveries type no `@`
+   (`Backend::at_opens_picker`) and only a verbatim `/command` asks
+   `Backend::picker_open`.)
 
 ## E. Recorded Limitations (P3)
 

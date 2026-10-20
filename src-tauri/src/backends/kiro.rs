@@ -883,6 +883,51 @@ fn exclude_from_git(workspace: &Path, name: &str) {
     let _ = std::fs::write(&path, format!("{current}{sep}{mark}{line}\n"));
 }
 
+/// kiro-cli's composer opens its `@` FILE PICKER for any `@` anywhere before
+/// the cursor, and an Enter while the picker has results SELECTS a file
+/// instead of submitting (board #436, kiro-cli 2.32.0 `--agent-engine v3`;
+/// the same picker bit on 2.18.1, board #10 in kirocrew). Read from 2.32.0's
+/// tui.js: the triggers are hard-coded (`[{key:"/",type:"start"},{key:"@",
+/// type:"inline"}]`), an inline trigger is `lastIndexOf("@")` in the text
+/// before the cursor, Enter goes to the picker when `activeTrigger.key ===
+/// "@" && filePickerHasResults`, and that flag is set by an async file
+/// search; no `chat.*` setting turns it off. Measured: the picker's footer
+/// first painted 170-205 ms after the typing in a one-file workspace and
+/// 239-316 ms in one shaped like lingting (559 files), so a screen check at
+/// the 200 ms beat raced it. The owner's case: `[wake] @engineer …` became
+/// the chip `m3-g2-engineering-appendix.md 114 lines`, never submitted.
+///
+/// So a delivery never types `@` into kiro: `delivery::type_text` types
+/// `address::unaddressed(text)` (every `@` as `＠`), which nothing in the CLI
+/// treats as a trigger. The room, the feed and the delivery rows keep `@`;
+/// the receipt reads `＠` as `@` (`telemetry::canon_char`). A `/command` is
+/// typed verbatim (`hub_command`), so it does not pass through here.
+pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
+
+/// Is kiro-cli's `@` file picker on this screen? Recognised by its own
+/// footer, BOTH halves: `esc to cancel · ↵ to select` (2.18.1, and 2.32.0
+/// `--agent-engine v3`, captured on the #436 rig). A running turn paints
+/// `(esc to cancel)` alone with nothing to select, and Escape there would
+/// cancel the turn.
+///
+/// Used ONLY for a verbatim `/command` (`delivery::send_into`, validator P1
+/// on #436): a delivery never types `@` (`AT_OPENS_FILE_PICKER`), but a
+/// command is the person's own text and keeps its `@`, so before its Enter
+/// the screen is read once and Escape closes an open picker (it reaches only
+/// the picker and leaves the line intact: measured on 2.18.1 over a running
+/// turn, and on 2.32.0 on the #436 rig). Its limit, measured on #436: the
+/// picker opens after an async file search, 170-316 ms after the typing, so
+/// one read at the 200 ms beat can come before it; main's guard submitted 5/5
+/// such commands on the validator's rig, and without it 1/5.
+pub(crate) fn picker_open(screen: &str) -> bool {
+    screen.lines().any(|l| l.contains("esc to cancel") && l.contains("to select"))
+}
+
+/// What a kiro agent is told about the `＠` it reads (board #436): the one
+/// cost of `AT_OPENS_FILE_PICKER`, said where it is paid. Appended to the
+/// collaboration flow's bullets in the agent's own config.
+pub(crate) const AT_TYPED_NOTE: &str = "- A `＠` in a message delivered to you stands for `@`: it is typed that way so kiro-cli's file picker does not open. Restore `@` when you quote code, and write `@name` yourself when you address someone.";
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_kiro(
     def: &RegAgent, name: &str, home: &Path, workspace: &Path, system_prompt: &str,
@@ -922,7 +967,7 @@ pub(crate) fn render_kiro(
     let mut conf = json!({
         "name": name,
         "description": format!("{} (registry agent)", def.name),
-        "prompt": system_prompt,
+        "prompt": format!("{system_prompt}\n{AT_TYPED_NOTE}"),
         "tools": ["*"],
         "allowedTools": ["*"],
         "resources": resources,
@@ -1500,6 +1545,30 @@ pub(crate) const VERSION_PROGRAM: &str = "kiro-cli";
 
 #[cfg(test)]
 mod tests {
+    /// kiro-cli screens as captured live: 2.18.1 (2026-09-03, board #10 in
+    /// kirocrew) and 2.32.0 `--agent-engine v3` (the #436 rig,
+    /// `capture-pane -p -J -S -8` 200 ms after the paste). The picker is
+    /// recognised by its own footer, never by a running turn's "esc to
+    /// cancel".
+    #[test]
+    fn the_picker_is_recognised_by_its_footer_only() {
+        let v2_18 = "[tmm chat] human: @kiro [board #10] hello there\n\
+                     @runtime/kirocrew-artifact.json\n\
+                     ────────────────\n\
+                      esc to cancel · ↵ to select\n";
+        assert!(super::picker_open(v2_18));
+        let v2_32 = "  post the result. \n\
+                     @docs/m3-g2-engineering-appendix.md\n\
+                     ──────────────────────────────────────────────────────────────\n \
+                     esc to cancel · ↵ to select\n";
+        assert!(super::picker_open(v2_32));
+        let streaming = "⠹ Thinking... (esc to cancel)\n\
+                         ● 8 MCP failures — see /mcp\n\
+                          Kiro is working · Type to steer · Ctrl+S to queue\n";
+        assert!(!super::picker_open(streaming), "a running turn is not a picker");
+        assert!(!super::picker_open("[tmm chat] human: @zzqx hello there\n"), "no match, no picker");
+        assert!(!super::picker_open(""));
+    }
     use super::*;
 
     /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the

@@ -1980,8 +1980,9 @@ fn canon_with_origin(s: &str) -> (String, Vec<(usize, usize)>) {
     let mut canon = String::with_capacity(s.len());
     let mut origin = Vec::with_capacity(s.len());
     for (i, c) in s.char_indices().filter(|(_, c)| !c.is_whitespace()) {
-        canon.push(c);
-        origin.extend(std::iter::repeat_n((i, i + c.len_utf8()), c.len_utf8()));
+        let k = canon_char(c);
+        canon.push(k);
+        origin.extend(std::iter::repeat_n((i, i + c.len_utf8()), k.len_utf8()));
     }
     (canon, origin)
 }
@@ -1991,7 +1992,15 @@ fn canon_with_origin(s: &str) -> (String, Vec<(usize, usize)>) {
 /// gentler lost multi-line messages: byte-exact lost them to newline→space,
 /// squash-to-one-space lost them to newline→NOTHING (tmux dropped the byte).
 fn strip_ws(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).collect()
+    s.chars().filter(|c| !c.is_whitespace()).map(canon_char).collect()
+}
+
+/// `＠` reads as `@` in the receipt's form (board #436): a kiro delivery is
+/// TYPED with every `@` as `＠` (`delivery::typed_form`, so the CLI's file
+/// picker never opens) while its row keeps the line as sent, and the echo
+/// must still settle that row. The one place the two spellings meet.
+fn canon_char(c: char) -> char {
+    if c == '＠' { '@' } else { c }
 }
 
 /// Is a typed line overdue for its echo? Pure, so the rule is testable.

@@ -169,8 +169,9 @@ agent experience** is a baseline, not an optional feature.
 - Manually launched windows are recognized too, using word boundaries; they
   simply lack an isolated home. The Terminal page shows the actual pane,
   not a transcript.
-- The 200ms text-to-Enter interval and kiro `@` file-picker footer detection
-  require measurement and adaptation precisely because we do not bypass the TUI.
+- The 200ms text-to-Enter interval and the kiro rule that a delivery never
+  types `@` (its `@` file picker would take the Enter, board #436) require
+  measurement and adaptation precisely because we do not bypass the TUI.
 
 **Implications.**
 1. Do not modify, fork or proxy a CLI's default harness. Inject only through

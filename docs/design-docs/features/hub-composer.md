@@ -1020,6 +1020,36 @@ description below omits broadcast; this dated rule corrects that omission.
 
 a name (the default lead) types into ONE agent's input; `@all` types into EVERY managed agent's input, so every agent starts a turn at once; no recipient records it in the room and interrupts NOBODY (agents see it at their next `tmm log`). A line is never typed back into the pane of the agent that sent it, except a fired wake and a post from a script that agent left running (board #285, tmm-cli.md § Self-wake). The third was once labelled "everyone", which was exactly backwards — it is the one that reaches nobody live.
 
+### A kiro pane is never typed an `@` (board #436, 2026-10-20)
+
+Owner, 10:27: "wake 的消息好像没有正确发送给 kiro". A `[wake] @engineer task fashion43 …` (nine newlines, 407 bytes) sat in engineer's composer as `› [tmm chat 2026-10-20 08:40] engineer: [wake]` plus the chip `m3-g2-engineering-appendix.md  114 lines`. That is a file attachment, not a paste: kiro-cli's `@` FILE PICKER fuzzy-matched `@engineer` to lingting's `docs/m3-g2-engineering-appendix.md`, and our Enter SELECTED it. The line was never submitted. Its receipt was reported `unconfirmed` only at 10:26, when the owner opened the feed: `sweep_deliveries` runs on a live feed read, never on a timer (agent-status.md). The #355 stall nudge did not apply either, because it answers a turn that ENDED empty, and no turn had started.
+
+The mechanism, read from kiro-cli 2.32.0's `tui.js` (`--agent-engine v3`):
+- The triggers are hard-coded: `[{key:"/",type:"start"},{key:"@",type:"inline"}]`. An inline trigger is the `lastIndexOf("@")` in the text before the cursor, so ANY `@` anywhere in a typed line counts, a code sample's or an email's included.
+- Enter goes to the picker while `activeTrigger.key === "@" && filePickerHasResults`.
+- That flag is set by an async file search.
+- No `chat.*` setting turns the picker off.
+
+The screen guard that used to sit in `tmux::send_command` was measured against this. It read the screen once at the 200 ms beat, sent Escape if the picker's footer (`esc to cancel · ↵ to select`, unchanged since 2.18.1) was painted, and then sent Enter. Measured on the real CLI (private tmux 3.6a socket, a 62×48 pane like engineer's, the userPromptSubmit hook killing the CLI before it returns):
+
+| trial | workspace | shape | submitted |
+|---|---|---|---|
+| no guard | 1 file | paste, 200 ms, Enter | 0/1, the owner's screen |
+| the guard as shipped | 1 file | 200 ms + footer check | 7/7 |
+| the guard as shipped | lingting's 559 file names | 200 ms + footer check | 3/4; the miss is the owner's screen |
+| a longer beat | lingting-shaped | 500 ms / 1 s + footer check | 3/3, 3/3 |
+| `@` typed as `＠` | lingting-shaped | 200 ms, no guard | 3/3 |
+
+The footer first painted 170-205 ms after the typing in the one-file workspace and 239-316 ms in the lingting-shaped one. So the guard was a race between one screen read and a search whose time depends on the workspace and the load. A longer beat narrows the race without closing it, and it would delay every kiro line that contains `@`.
+
+**The rule (orchestrator ruling).** A delivery never types `@` into a kiro pane. `delivery::type_text`, which every delivery, held flush and steered line passes through, types `address::unaddressed(text)` (every `@` as the full-width `＠`, the #290/#367 neutralizer) when the window's backend says `Backend::at_opens_picker`. That is a fact in the backend's own file (`kiro::AT_OPENS_FILE_PICKER`). The screen guard left `tmux::send_command`; deliveries no longer need it.
+- **What stays `@`.** The room, the feed and the delivery rows keep `@`. Only the bytes typed into kiro's composer change.
+- **Receipts.** The receipt's canonical form (`telemetry::canon_char`, used by both `strip_ws` and `canon_with_origin`) reads `＠` as `@`, so the echo of the typed line settles the row it came from.
+- **What the agent is told.** The kiro agent reads `＠` for every `@`, so its own config says so. `kiro::AT_TYPED_NOTE` is the last bullet of the collaboration flow, written by `render_kiro`: a `＠` stands for `@`; restore `@` when quoting code; write `@name` yourself when addressing. A running agent picks it up at its next restart, like any prompt change.
+- **Commands keep the guard (validator P1).** A `/command` is typed verbatim (`hub_command`, the section above), so its `@` stays and can open the picker. Deleting the guard regressed exactly that path: on the validator's offline rig (kiro-cli 2.32.0, the lingting-shaped workspace), `/context add @mdc-datasets.md` submitted 1/5 without it and 5/5 on main with it, counted from kiro's own session history, while tmm answered `✓` every time. So `delivery::send_into`, the one door, keeps the one-read guard for a text that still carries `@` into a backend with `at_opens_picker`: before the Enter it reads the screen once (`Backend::picker_open`, kiro's footer `esc to cancel · ↵ to select`, both halves) and sends Escape when the picker is open, which closes it and leaves the line intact. A delivery never reaches it with an `@` (it was typed as `＠`), so only a verbatim command pays. Its limit is the race measured above: one read at the 200 ms beat against a picker that opens 170-316 ms after the typing. It is the imperfect, measured control for the one path that must type a raw `@`, not a replacement for `＠` on deliveries.
+
+Pinned by `a_kiro_delivery_types_no_at_so_its_file_picker_never_takes_the_enter` (real tmux, the real wake path, ten deliveries). The fake CLI turns on bracketed paste, opens a "picker" 150 ms after any `@` it reads, and lets an Enter with the picker open attach a file instead of submitting. Every delivery submits with `＠`, its receipt settles on the typed echo, and the room keeps `@`. A `/command` with `@` reaches the CLI as `@` and SUBMITS: the fake paints kiro's footer when its picker opens and closes it on a bare Escape, which the door's guard sends. In-test control: `send_command` typing `@` directly into the same pane, without the guard, is picked. The footer matcher is pinned on 2.18.1 and 2.32.0 screens (`kiro::tests::the_picker_is_recognised_by_its_footer_only`). Also pinned by the `render_kiro` assertion in `kiro_home_is_isolated_and_wired_to_tmm`.
+
 ### A busy queue-mode agent gets its lines combined at the turn's end (board #257, 2026-09-28)
 
 Owner, 2026-09-28 02:44: "如果在短时间内一下子有大量消息堆积，就会让 kiro 响应的实时性受到很大的影响…kiro 有堆积未处理消息时，可以合并投递". Before, every line typed at a busy queue-mode agent sat in the CLI's own queue and was drained ONE per turn boundary, each its own turn with its own full reply: a burst of 20 lines cost 20 turns, and on 2026-09-27 builder's median delivery lag was ~19.5 min, p90 ~44 min (`temp/stall-analysis.md`).
