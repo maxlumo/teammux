@@ -326,9 +326,10 @@ test('sidebar dots and roster cards drink from ONE state map (board #8)', () => 
   // project's keys onto the shared map, and the rooms poll overlays the
   // CURRENT roster onto its fresh snapshot before adopting it — whichever
   // response lands last, the freshest source drives the selected project.
-  assert.match(source, /agentStates = mergeStates\(agentStates, s, got\);/u,
+  // Each lands through adopt (core/adopt.ts, #444): an unchanged map keeps its reference.
+  assert.match(source, /agentStates = adopt\(agentStates, mergeStates\(agentStates, s, got\)\);/u,
     'the 5s roster poll refreshes the shared dot map');
-  assert.match(source, /agentStates = mergeStates\(roomsRes\.states \?\? \{\}, selected, agents\);/u,
+  assert.match(source, /agentStates = adopt\(agentStates, mergeStates\(roomsRes\.states \?\? \{\}, selected, agents\)\);/u,
     'the 20s snapshot is overlaid with the roster before it is adopted');
   assert.ok(!/agentStates = roomsRes\.states/u.test(source),
     'the raw snapshot is never adopted bare — that is the rollback bug');
@@ -366,7 +367,7 @@ test('history paging: anchored prepend, guarded rooms, parked cursors (board #9)
 });
 
 test('the gap walk keeps captured inputs and validates its added return boundary (#118)', () => {
-  const poll = source.slice(source.indexOf('async function loadFeed('), source.indexOf('async function loadActivity('));
+  const poll = source.slice(source.indexOf('async function readFeed('), source.indexOf('async function readActivity('));
   assert.match(source, /import \{ walkFeedGap \} from '\.\/hub-history\.ts';/u);
   assert.match(poll, /const floorTs = lastTs;/u, 'the floor is captured before the initial poll');
   assert.match(poll, /else if \(res\.has_more && \(res\.oldest_seq \?\? 0\) > 0\)/u,
@@ -456,7 +457,7 @@ test('a confirmed project verb runs on the row it was asked on, never on `select
   // about the project it asked about, or a project switch mid-flight merges
   // the OLD room's data into the NEW one. Each poller freezes `selected` and
   // drops a stale answer.
-  const pollers = ['async function loadFeed', 'async function loadActivity', 'async function loadAgents'];
+  const pollers = ['async function readFeed', 'async function readActivity', 'async function readAgents'];
   for (const head of pollers) {
     const at = source.indexOf(head);
     assert.ok(at >= 0, `${head} exists`);

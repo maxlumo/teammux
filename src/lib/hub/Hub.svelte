@@ -23,6 +23,8 @@
   import { bumpRecipientIntent, registerComposer } from '../files/review-state.ts';
   import { appendDraft } from '../files/review-ui.ts';
   import { copyText } from '../core/clipboard.ts';
+  import { poll, single } from '../core/poll.ts';
+  import { adopt } from '../core/adopt.ts';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
   import { feedbackPosition } from '../ui/feedback-position.ts';
@@ -141,7 +143,9 @@
   let agentStates = $state({});     // "<session>:<window>" -> derived state, all projects
   let selected = $state('');        // selected project session
   let selectionGeneration = 0, alive = true;
-  onDestroy(() => { alive = false; selectionGeneration++; });
+  // The loaders go with the page: a queued follow-up read retires instead of
+  // asking after the tree is gone (#444 review P1-A residual).
+  onDestroy(() => { alive = false; selectionGeneration++; for (const l of [reload, loadFeed, loadActivity, loadAgents]) l.dispose(); });
   let agents = $state([]);          // HubAgent[] for selected session (all windows)
   // Stopped managed agent → its team path (hub_agents, board #258), so a
   // team's "Start stopped" knows which stopped identities are its members.
@@ -326,7 +330,10 @@
   /** The list's own state for the union (P1-C4): has it ever answered, and
    * did the latest refresh fail. A failure keeps the rows (last good list). */
   let listAnswered = $state(false), listFailed = $state(false);
-  async function reload(report = false) {
+  // One read of each kind in flight per context (core/poll.ts, #444): ticks,
+  // entries, pushes and refreshes after an action share the loader's state.
+  const reload = single(readList);
+  async function readList() {
     const request = ++projectReadSequence;
     try {
       // The sidebar is ordered by CONVERSATION, so the list needs one more fact:
@@ -343,29 +350,31 @@
       // answers "when did this project last say something" on each row, and
       // the states map colours the agent chips (owner, 2026-08-24: "上次回复
       // 的时间 … 当前几个 Agent 的简单 logo 状态").
-      talkMap = talk;
+      // A poll answer that changes nothing assigns nothing (core/adopt.ts, #444).
+      talkMap = adopt(talkMap, talk);
       // Overlay the current roster BEFORE adopting the snapshot: hub_rooms
       // answers on a 20s cadence, so for the selected project this response
       // is usually OLDER than the 5s roster — adopting it raw rolled the
       // sidebar dots back and the two UIs disagreed again (board #8).
-      agentStates = mergeStates(roomsRes.states ?? {}, selected, agents);
+      agentStates = adopt(agentStates, mergeStates(roomsRes.states ?? {}, selected, agents));
       // Archived projects are the RECYCLE BIN (owner, 2026-08-21: "相当于回收
       // 站的功能"): they leave the working list and wait, restorable, in the
       // collapsed section at the bottom of the sidebar.
       const all = projects ?? [];
-      trash = all.filter((r) => r.project.archived);
-      rows = sortRows(all.filter((r) => !r.project.archived), talk);
+      trash = adopt(trash, all.filter((r) => r.project.archived));
+      rows = adopt(rows, sortRows(all.filter((r) => !r.project.archived), talk));
       void refreshUnread();
       if (!rowsBase && rows.length) rowsBase = new Set(rows.map((r) => r.project.id));
-      panes = sp.panes ?? [];
+      panes = adopt(panes, sp.panes ?? []);
       // First load: go back to the conversation that was open, and only fall
       // back to the top row when that project is gone. Not while HIDDEN (D4):
       // opening a room is room work (its log, roster, read mark); a hidden
       // member publishes its list and waits — the room opens when it is shown.
       if (!selected && rows.length && visible) openFirst();
     } catch (e) {
-      if (alive && request === projectReadSequence) listFailed = true;
-      if (report && alive && request === projectReadSequence) throw e;
+      // A failure of THIS read is thrown to the loader, which hands it to the
+      // callers that asked to see it ({ report: true }, #444 review P1-B).
+      if (alive && request === projectReadSequence) { listFailed = true; throw e; }
     }
   }
 
@@ -577,7 +586,8 @@
     }
   }
 
-  async function loadFeed(report = false) {
+  const loadFeed = single(readFeed, () => selected);
+  async function readFeed() {
     if (!selected || windowed) return; // a history window takes no live rows (#322)
     // The answer must still be about the question: every poller here freezes
     // the project it asked ABOUT and drops the reply if the user has switched
@@ -619,7 +629,7 @@
         if (!walked || !ours()) return;
       }
       if (messages?.length) {
-        feed = mergeMessages(feed, messages);
+        feed = adopt(feed, mergeMessages(feed, messages));
         lastTs = Math.max(lastTs, ...messages.map((m) => m.ts ?? 0));
         // New-message notification (board #57) ran above, before the
         // generation check: a poll batch that lands while the reader is AWAY
@@ -629,10 +639,11 @@
         // seen keys make the two alert once.
         if (following) scrollFeed(); else newBelow = true;
       }
-    } catch (e) { if (report) throw e; /* hub not available */ }
+    } catch (e) { throw e; /* hub not available: the loader decides who sees it (#444 review P1-B) */ }
   }
 
-  async function loadActivity() {
+  const loadActivity = single(readActivity, () => selected);
+  async function readActivity() {
     // Polled at EVERY feed level: delivery receipts and undelivered-line
     // reports ride this channel, and those are about the message the user just
     // sent, not opt-in telemetry detail. feedBlocks does the level filtering.
@@ -660,7 +671,8 @@
     } catch { /* hub not available */ }
   }
 
-  async function loadAgents(report = false) {
+  const loadAgents = single(readAgents, () => selected);
+  async function readAgents() {
     if (!selected) return;
     const s = selected;
     const request = ++rosterReadSequence;
@@ -671,12 +683,12 @@
       // must not dress the NEW project (and then re-pick its recipient).
       if (selected !== s) return;
       if (!alive || request !== rosterReadSequence) return;
-      agents = got;
-      stoppedTeams = r.stopped_teams ?? {};
+      agents = adopt(agents, got);
+      stoppedTeams = adopt(stoppedTeams, r.stopped_teams ?? {});
       // The sidebar chips share this truth (board #8): the roster is the
       // freshest reading for THIS project, so its states overwrite the
       // 20s-cadence snapshot's keys instead of disagreeing beside them.
-      agentStates = mergeStates(agentStates, s, got);
+      agentStates = adopt(agentStates, mergeStates(agentStates, s, got));
       // The recipient follows the room: an agent that left cannot be the
       // recipient, and a room that just gained its first agent gets a lead
       // without the user choosing one. ALL_TARGET is not a window, so it stays.
@@ -691,7 +703,6 @@
       if (targetTeam(storedLead) && !targetMembers(storedLead, agents).length) hubPrefs.setLead(selected, '');
     } catch (e) {
       if (!alive || request !== rosterReadSequence || selected !== s) return;
-      if (report) throw e;
       // "I could not ask" is not "there is nobody". Emptying the roster on a
       // failed poll is what made the cards — and with them the model and context
       // readings — blink away whenever the socket hiccuped or an RPC timed out
@@ -699,6 +710,7 @@
       // a last-known state; `selectProject` is the one place that clears it,
       // because that is the one time it is genuinely unknown.
       console.warn('hub agents poll failed, keeping the last roster', e);
+      throw e; // to the callers that asked to see it ({ report: true }, #444 review P1-B)
     }
   }
 
@@ -1702,7 +1714,7 @@
     const current = () => alive && generation === selectionGeneration && request === actionRefreshSequence;
     actionRefreshing = true;
     try {
-      await Promise.all([reload(true), loadAgents(true), loadFeed(true)]);
+      await Promise.all([reload({ report: true }), loadAgents({ report: true }), loadFeed({ report: true })]);
       if (current()) actionReadError = '';
     }
     catch (e) {
@@ -1987,17 +1999,15 @@
   // Single a hidden Hub polls nothing, as before (`union` is null).
   $effect(() => {
     if (!visible && !union) return;
-    reload();
-    const pi = setInterval(reload, 20000);
-    return () => clearInterval(pi);
+    return poll(reload.tick, 20000, { now: true });
   });
   $effect(() => {
     if (!visible) return;
     registryList().then((r) => { registry = r.agents ?? []; }).catch(() => {});
     teamsList().then((r) => { teams = r.teams ?? []; }).catch(() => {});
-    const ai = setInterval(() => { loadAgents(); loadActivity(); }, 5000);
-    const fi = setInterval(loadFeed, 10000);
-    return () => { clearInterval(ai); clearInterval(fi); };
+    // One request of each kind in flight at most (core/poll.ts, #444).
+    const stops = [poll(loadAgents.tick, 5000), poll(loadActivity.tick, 5000), poll(loadFeed.tick, 10000)];
+    return () => { for (const stop of stops) stop(); };
   });
 
   // Esc closes the drawer — but ONLY when it is pressed OUTSIDE the terminal.

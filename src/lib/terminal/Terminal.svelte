@@ -19,6 +19,7 @@
   import { moveMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import { t } from '../core/i18n.svelte.ts';
+  import { poll, single } from '../core/poll.ts';
   import { agentByBackend, paneIsAgent, paneAgent } from '../core/agents.ts';
   import { copyText } from '../core/clipboard.ts';
   import { fonts } from '../app/fonts.svelte.ts';
@@ -435,22 +436,14 @@
     // is pure waste — skip it entirely (N agent cells would otherwise each
     // poll listPanes every few seconds).
     if (chromeless) return;
-    // In-flight guard: on a slow link a poll RPC can outlive the 5 s
-    // interval; without the guard, ticks stack unbounded requests on a
-    // link that is already struggling.
-    let polling = false;
-    const load = async () => {
-      if (polling) return;
-      polling = true;
-      try {
-        const p = await listPanes(session);
-        windowPanes = p;
-      } catch {}
-      polling = false;
-    };
-    load();
-    const id = setInterval(load, WINDOW_LIST_POLL_MS);
-    return () => clearInterval(id);
+    // On a slow link a poll RPC can outlive its interval; the loader skips a
+    // tick while its read is in flight (core/poll.ts, #444). Its life is this
+    // effect's: one session's window list.
+    const load = single(async () => {
+      try { windowPanes = await listPanes(session); } catch {}
+    });
+    const stop = poll(load.tick, WINDOW_LIST_POLL_MS, { now: true });
+    return () => { stop(); load.dispose(); };
   });
 
   // Read xterm's actual rendered cell dimensions (falls back to font-size-based estimate

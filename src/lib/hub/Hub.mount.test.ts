@@ -312,17 +312,208 @@ test('a second completed Hub mutation gets a newer refresh and old snapshots can
       for (let i = 0; i < 5; i++) await app.flush();
     }
     assert.deepEqual(stopped, ['alice', 'bob']);
+    // One read of a kind in flight (core/poll.ts, #444): the second mutation's
+    // refresh does not start beside the first; it is ONE follow-up read once
+    // the pending one has answered, so it still sees the second stop.
+    assert.equal(projects.length, 1, 'the second refresh waits for the pending read (#444)');
+    assert.equal(rosters.length, 1);
+    projects[0]!(await rpc.projectList()); rosters[0]!(await rpc.hubAgents());
+    for (let i = 0; i < 5; i++) await app.flush();
     assert.equal(projects.length, 2, 'a newer mutation cannot lose its refresh behind an older one');
+    assert.equal(rosters.length, 2, 'one follow-up roster read, not dropped and not doubled');
     const latest = await rpc.projectList();
     latest.projects[0]!.project.name = 'Fresh project';
     projects[1]!(latest); rosters[1]!({ agents: [] });
-    for (let i = 0; i < 5; i++) await app.flush();
-    projects[0]!(await rpc.projectList()); rosters[0]!(await rpc.hubAgents());
     for (let i = 0; i < 5; i++) await app.flush();
     assert.equal(app.document.querySelector('.h1-text')?.textContent, 'Fresh project');
     assert.equal(app.document.querySelectorAll('.agent-select').length, 0, 'old roster cannot resurrect stopped agents');
   } finally { await app.close(); }
 });
+
+// ── Board #444: one read of a kind in flight per room, owned by the read ────
+// A held answer stands in for a stalled phone link. The roster read is counted
+// per room; `hold` keeps the next answers pending until the test releases them.
+async function heldRoster(context: TestContext, holdFirst = false) {
+  const { rpc, pushed } = roomFixture();
+  const calls: { room: string; answer: (agents: unknown[]) => void; fail: (message: string) => void }[] = [];
+  let hold = holdFirst;
+  const roster = (state: string) => [{ name: 'alice', window: 0, managed: true, agent: 'kiro', state }];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [{ ...rpc,
+      projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({
+        project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [],
+      })) }),
+      hubAgents: (room: string) => hold
+        ? new Promise((yes, no) => calls.push({ room, answer: (agents) => yes({ agents }), fail: (message) => no(new Error(message)) }))
+        : (calls.push({ room, answer: () => {}, fail: () => {} }), Promise.resolve({ agents: roster('idle') })),
+      hubAgentStop: async () => ({}),
+    }],
+  });
+  const settle = async () => { for (let i = 0; i < 8; i++) await app.flush(); };
+  const held = (room = 'fixture') => calls.filter((c) => c.room === room);
+  const push = (body: string) => {
+    const message = app.window.JSON.parse(JSON.stringify({ id: body, seq: 9, room: 'proj:fixture', from: 'alice', ts: Date.now(), body }));
+    for (const listener of pushed) (listener as (m: unknown) => void)(message);
+  };
+  const room = async (name: string) => {
+    app.document.querySelector<HTMLElement>(`[aria-label="${name}"] .proj-pick`)!.click();
+    for (let i = 0; i < 20 && app.document.querySelector('.h1-text')?.textContent !== name; i++) await app.flush();
+    assert.equal(app.document.querySelector('.h1-text')?.textContent, name);
+  };
+  const stop = async (name: string) => {
+    stripCard(app.document, name).querySelector('.agent-select')!
+      .dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true }));
+    await app.flush();
+    [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')]
+      .find((button) => button.textContent?.trim() === 'Stop')!.click(); await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions button:last-child')!.click();
+    await settle();
+  };
+  return { app, calls, held, settle, push, roster, room, stop, setHold: (v: boolean) => { hold = v; } };
+}
+
+test('a pending roster read survives hide -> show: the new timer does not read beside it (#444)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  try {
+    await h.settle();
+    const before = h.held().length;
+    h.setHold(true);
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held().length, before + 1, 'the tick asked once and the answer is held');
+    await h.app.setProps({ visible: false });
+    await h.app.setProps({ visible: true });
+    await h.app.advance(5000); await h.settle();
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held().length, before + 1, 'hidden and shown again, still one read in flight');
+    h.setHold(false);
+    h.held().at(-1)!.answer(h.roster('running')); await h.settle();
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held().length, before + 2, 'the first tick after the answer reads again');
+  } finally { await h.app.close(); }
+});
+
+test('the first roster read of a room is not doubled by the first tick (#444)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context, true);
+  try {
+    for (let i = 0; i < 20 && !h.held().length; i++) await h.app.flush();
+    assert.equal(h.held().length, 1, 'entering the room asked once');
+    await h.app.advance(5000); await h.settle();
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held().length, 1, 'ticks during the first read send nothing');
+    h.setHold(false);
+    h.held()[0]!.answer(h.roster('idle')); await h.settle();
+    assert.ok(stripCard(h.app.document, 'alice'), 'the first answer renders');
+    assert.equal(h.held().length, 1, 'and no tick was queued behind it');
+  } finally { await h.app.close(); }
+});
+
+test('a push during a pending roster read gets ONE follow-up read after it, never a second at once (#444)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  try {
+    await h.settle();
+    const before = h.held().length;
+    h.setHold(true);
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held().length, before + 1);
+    h.push('first'); await h.app.advance(300); await h.settle();
+    h.push('second'); await h.app.advance(300); await h.settle();
+    assert.equal(h.held().length, before + 1, 'the pushes do not read beside the pending one');
+    h.held().at(-1)!.answer(h.roster('idle')); await h.settle();
+    assert.equal(h.held().length, before + 2, 'the turn edge is not dropped: one follow-up read, after the answer');
+    h.held().at(-1)!.answer(h.roster('running')); await h.settle();
+    assert.equal(h.held().length, before + 2, 'not doubled');
+    assert.ok(stripCard(h.app.document, 'alice')?.querySelector('.live-dot'), 'the follow-up answer is the one on screen');
+  } finally { await h.app.close(); }
+});
+
+test('a project switch reads the new room at once, beside the old room\'s pending read (#444)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  try {
+    await h.settle();
+    h.setHold(true);
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held('fixture').length >= 1 && h.calls.at(-1)!.room, 'fixture', 'fixture\'s tick is held');
+    const otherBefore = h.held('other').length;
+    h.app.document.querySelector<HTMLElement>('[aria-label="other"] .proj-pick')!.click();
+    for (let i = 0; i < 20 && h.app.document.querySelector('.h1-text')?.textContent !== 'other'; i++) await h.app.flush();
+    assert.equal(h.held('other').length, otherBefore + 1, 'the new room does not wait behind the old room\'s read');
+  } finally { await h.app.close(); }
+});
+
+test('a queued roster read retires when its room is left: the new room keeps ONE read in flight (#444 review P1-A residual)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  try {
+    await h.settle();
+    h.setHold(true);
+    await h.app.advance(5000); await h.settle();
+    const fixtureHeld = h.held('fixture').length;
+    h.push('turn edge'); await h.app.advance(300); await h.settle();   // fixture's follow-up, queued
+    assert.equal(h.held('fixture').length, fixtureHeld, 'queued, not read beside');
+    await h.room('other');
+    assert.equal(h.held('other').length, 1, 'other\'s first read starts at once');
+    const total = h.calls.length;
+    h.held('fixture').at(-1)!.answer(h.roster('idle')); await h.settle();
+    assert.equal(h.calls.length, total, 'fixture\'s queued read retired: no hub_agents for other under fixture\'s key');
+    await h.app.advance(5000); await h.settle();
+    assert.equal(h.held('other').length, 1, 'other still has exactly one read in flight');
+    h.held('other')[0]!.answer(h.roster('running')); await h.settle();
+    assert.ok(stripCard(h.app.document, 'alice')?.querySelector('.live-dot'), 'other\'s own answer is the one on screen');
+  } finally { await h.app.close(); }
+});
+
+test('A -> B -> A: the queued read of A runs for A once A is back, and only once (#444 review P1-A residual)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  try {
+    await h.settle();
+    h.setHold(true);
+    await h.app.advance(5000); await h.settle();
+    const before = h.held('fixture').length;
+    h.push('turn edge'); await h.app.advance(300); await h.settle();
+    await h.room('other');
+    await h.room('fixture');                                              // the entry joins the queued read
+    assert.equal(h.held('fixture').length, before, 'back in A, still one read of A in flight');
+    h.held('fixture').at(-1)!.answer(h.roster('idle')); await h.settle();
+    assert.equal(h.held('fixture').length, before + 1, 'ONE follow-up read of A');
+    h.held('fixture').at(-1)!.answer(h.roster('running')); await h.settle();
+    assert.equal(h.held('fixture').length, before + 1, 'not doubled');
+    assert.ok(stripCard(h.app.document, 'alice')?.querySelector('.live-dot'));
+  } finally { await h.app.close(); }
+});
+
+test('a read queued when the Hub goes away is never sent (#444 review P1-A residual)', { timeout: 60000 }, async context => {
+  const h = await heldRoster(context);
+  await h.settle();
+  h.setHold(true);
+  await h.app.advance(5000); await h.settle();
+  h.push('turn edge'); await h.app.advance(300); await h.settle();
+  const total = h.calls.length;
+  await h.app.close();
+  h.held('fixture').at(-1)!.answer(h.roster('idle'));
+  for (let i = 0; i < 6; i++) await new Promise<void>((r) => setImmediate(r));
+  assert.equal(h.calls.length, total, 'the old tree asked nothing after it ended');
+});
+
+for (const order of ['refresh first', 'push first']) {
+  test(`a refresh after an action still shows its failure when a push shares the read (${order}, #444 review P1-B)`, { timeout: 60000 }, async context => {
+    const h = await heldRoster(context);
+    try {
+      await h.settle();
+      h.setHold(true);
+      await h.app.advance(5000); await h.settle();                        // a roster read is pending
+      const before = h.held('fixture').length;
+      if (order === 'push first') { h.push('turn edge'); await h.app.advance(300); await h.settle(); await h.stop('alice'); }
+      else { await h.stop('alice'); h.push('turn edge'); await h.app.advance(300); await h.settle(); }
+      assert.equal(h.held('fixture').length, before, 'the refresh and the push are queued behind the pending read');
+      h.held('fixture').at(-1)!.answer(h.roster('idle')); await h.settle();
+      assert.equal(h.held('fixture').length, before + 1, 'they share ONE follow-up read');
+      h.held('fixture').at(-1)!.fail('link dropped'); await h.settle();
+      assert.match(h.app.document.querySelector('.action-read-error')?.textContent ?? '', /refreshing failed: link dropped/u,
+        'the refresh after the action reports the failure; the push did not turn it into a success');
+    } finally { await h.app.close(); }
+  });
+}
 
 async function characterize(context: TestContext, fixture: Awaited<ReturnType<typeof compileMount>>) {
   const { pushed, rpc } = roomFixture();
@@ -1859,7 +2050,10 @@ test('late font completion remeasures the composer and releases its listener on 
     await app.flush();
     const before = reads;
     signal.dispatchEvent(event);
-    assert.equal(reads, before + 1);
+    signal.dispatchEvent(event);
+    assert.equal(reads, before, 'the measurement waits for the frame (#444)');
+    await app.flush();
+    assert.equal(reads, before + 1, 'two triggers in one frame share ONE measurement (#444)');
   } finally { await app.close(); }
   const closed = reads;
   signal.dispatchEvent(event);

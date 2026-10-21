@@ -141,9 +141,13 @@ test('an older Board refresh cannot resurrect a subsequently deleted issue (#167
       .find(card => card.textContent?.includes('Second issue'))!.click(); await flush(app);
     app.document.querySelector<HTMLButtonElement>('[aria-label="Delete issue"]')!.click(); await app.flush();
     confirm(app).click(); await flush(app);
-    assert.equal(reads.length, 2);
-    reads[1]!({ issues: [] }); await flush(app);
+    // One read in flight (core/poll.ts, #444): the second delete's refresh is
+    // ONE follow-up read after the pending one answers, never a second
+    // concurrent read; the older answer is followed, not left last.
+    assert.equal(reads.length, 1, 'the second refresh waits for the pending read (#444)');
     reads[0]!({ issues: [second] }); await flush(app);
+    assert.equal(reads.length, 2, 'the follow-up read starts once the pending one answered');
+    reads[1]!({ issues: [] }); await flush(app);
     assert.equal(deletes, 2);
     assert.equal(app.document.querySelectorAll('.card').length, 0, 'old read cannot resurrect the deleted issue');
   } finally { await app.close(); }

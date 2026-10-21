@@ -36,6 +36,16 @@ test('composer measurement observes available geometry, not the textarea it resi
   assert.match(observer, /columnGap/u);
 });
 
+test('the composer measures once per frame, never in the input handler (#444)', () => {
+  // A key ran the measurement twice (oninput and the composerText effect), each
+  // a forced layout inside the input handler: about 56 ms a key at phone CPU on
+  // a long room. Every trigger now asks for the next frame and they share it.
+  assert.match(source, /function requestGrow\(\) \{\s*if \(growFrame\) return;\s*growFrame = requestAnimationFrame\(\(\) => \{ growFrame = 0; growComposer\(\); \}\);/u);
+  assert.equal([...source.matchAll(/growComposer\(\)/gu)].length, 2, 'declared once and called only from the frame');
+  assert.doesNotMatch(source, /oninput=\{growComposer\}/u, 'the input handler measures nothing');
+  assert.match(source, /onDestroy\(\(\) => \{ if \(growFrame\) cancelAnimationFrame\(growFrame\); \}\);/u);
+});
+
 test('natural textarea measurement cannot transiently expand the Feed (#180)', () => {
   const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('let lastShellH'));
   assert.match(grow, /row\.style\.minHeight = `\$\{row\.offsetHeight\}px`/u);

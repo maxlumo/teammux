@@ -569,7 +569,7 @@ test('the sidebar consumes ONE bulk counts read and reacts to local writes at on
     'the shown rows are derived from the full list + counts');
   // load() folds the fresh issues into the counts map — create-first appears
   // and delete-last disappears NOW, not at the 20 s poll.
-  const load = source.slice(source.indexOf('async function load()'), source.indexOf('let agents ='));
+  const load = source.slice(source.indexOf('async function readBoard()'), source.indexOf('let agents ='));
   assert.match(load, /countsMap = applyCounts\(countsMap, s, issues\);/u,
     'a successful boardList refreshes this session\'s counts immediately (keyed by the frozen session)');
   // The page-head names the CURRENT board from the FULL list: an empty board
@@ -654,7 +654,7 @@ test('load() is pinned to the board it was asked FOR — a stale response never 
   // new session, hiding/showing the wrong project in the sidebar. So the
   // session is FROZEN at entry, every RPC asks for the frozen name, and
   // every await re-checks identity before touching state.
-  const load = source.slice(source.indexOf('async function load()'), source.indexOf('let agents ='));
+  const load = source.slice(source.indexOf('async function readBoard()'), source.indexOf('let agents ='));
   assert.match(load, /const s = cur;/u, 'the session is frozen at entry');
   assert.match(load, /await boardList\(s\)/u, 'the board read asks for the frozen session');
   assert.match(load, /await hubAgents\(s\)/u, 'the roster read asks for the frozen session');
@@ -1033,7 +1033,7 @@ test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026
   // A foreign pick is the host s: focus + landing; the body stays one server s.
   assert.match(source, /if \(r\.serverId === serverId\) \{ pick\(r\.item\.project\.session\); return; \}\s*sideOpen = false;\s*onPickServer\?\.\(r\.ref\);/u);
   // D4: a hidden member keeps ONLY its list refresh; the age tick is shown-only.
-  assert.match(source, /if \(!visible && !union\) return;\s*loadProjects\(\);\s*const iv = setInterval\(loadProjects, 20000\);\s*return \(\) => clearInterval\(iv\);/u, 'the one existing 20 s cadence, cleared when the tree goes or the member leaves (#357 rule b): no second timer, none that outlives its tree');
+  assert.match(source, /if \(!visible && !union\) return;\s*return poll\(loadProjects\.tick, 20000, \{ now: true \}\);/u, 'the one existing 20 s cadence, through the one poll scheduler (core/poll.ts, #444), cleared when the tree goes or the member leaves (#357 rule b): no second timer, none that outlives its tree');
   assert.match(source, /\$effect\(\(\) => \{\s*if \(!visible\) return;\s*const ageIv = setInterval\(\(\) => \{ projectTick = Date\.now\(\); \}, 1000\);/u);
   // A landing with no issue opens nothing.
   assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);/u);

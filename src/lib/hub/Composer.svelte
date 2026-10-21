@@ -131,19 +131,32 @@
     }
   }
   let lastShellH = 0;
+  /* ONE measurement per pending frame, never in the input handler (board
+     #444): every trigger asks for the next animation frame and the triggers
+     that come before it share that one. A key used to run the transaction
+     twice (the input handler and this effect), each a write/read cycle that
+     forced a layout inside the input handler. The measurement itself still
+     lays out once; a ResizeObserver or font trigger lands in the frame after
+     the one it was noticed in. */
+  let growFrame = 0;
+  function requestGrow() {
+    if (growFrame) return;
+    growFrame = requestAnimationFrame(() => { growFrame = 0; growComposer(); });
+  }
+  onDestroy(() => { if (growFrame) cancelAnimationFrame(growFrame); });
   $effect(() => {
     void composerText;
     void pending;
     void compact;
     void composerIsCmd;
     void fonts.custom; void uiFont.custom;
-    growComposer();
+    requestGrow();
   });
   $effect(() => {
     const fontSet = document.fonts;
     if (!fontSet) return;
     let live = true;
-    const remeasure = () => { if (live) growComposer(); };
+    const remeasure = () => { if (live) requestGrow(); };
     fontSet.ready.then(remeasure);
     fontSet.addEventListener('loadingdone', remeasure);
     return () => {
@@ -163,7 +176,7 @@
         + `${actionsEl.offsetWidth}:${actionsEl.offsetHeight}:${getComputedStyle(actionsEl).columnGap}`;
       if (next === measured) return;
       measured = next;
-      growComposer();
+      requestGrow();
     });
     observer.observe(available);
     observer.observe(actionsEl);
@@ -331,7 +344,6 @@
   <div class="compose-line">
   <textarea class="c-input" rows="1" bind:this={composerEl} bind:value={composerText}
     aria-label={composerLabel} placeholder={composerLabel}
-    oninput={growComposer}
     onkeydown={onComposerKey}
     onpaste={onComposerPaste}
   ></textarea>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { useServerRuntime } from '../app/server-context.ts';
   import type { TmuxSession, TmuxPane } from '../core/ws.ts';
   import type { SessionsUnion, SessionPick } from '../app/sessions-union.svelte.ts';
@@ -8,6 +9,7 @@
   import ServerTag from '../ui/ServerTag.svelte';
   import Icon from '../ui/Icon.svelte';
   import { scrollFade } from '../core/scrollFade.ts';
+  import { poll, single } from '../core/poll.ts';
   import AgentChip from '../ui/AgentChip.svelte';
   import Projects from '../projects/Projects.svelte';
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
@@ -236,9 +238,7 @@
   // of the union, or its tree goes (the effect's cleanup is the leave).
   $effect(() => {
     if (visible || !union) return;
-    void refresh();
-    const timer = setInterval(() => void refresh(), 20000);
-    return () => clearInterval(timer);
+    return poll(refresh.tick, 20000, { now: true });
   });
 
   // After a reconnect, the cached sessions/panes likely went stale (process
@@ -252,7 +252,11 @@
     return () => window.removeEventListener('ws-reconnected', onReconn);
   });
 
-  async function refresh(generation = viewEpoch) {
+  // One read in flight (core/poll.ts, #444): the hidden member's ticks, the
+  // show, a reconnect and a refresh after an action share it.
+  const refresh = single(readSessions);
+  onDestroy(() => refresh.dispose());
+  async function readSessions(generation = viewEpoch) {
     try {
       // Single round-trip: server returns sessions[] + panes[] (across all
       // sessions). We group panes by session_name client-side to populate
@@ -367,7 +371,7 @@
     if (generation !== viewEpoch || pendingKill !== act) return;
     // The mutation is complete. A failed read must not offer another kill.
     pendingKill = null;
-    await refresh(generation);
+    await refresh();
   }
 
   // ─── Create session ───────────────────────────────────

@@ -106,7 +106,7 @@ before the dense group redefines the token, `.composer-actions` takes
 `signatureLayout` moves the collision box AND the reserved band up by the same
 amount (`reserved = controlsHeight + lift`, 38 on the phone). Measured at
 390: controls 746–778 in a 740–784 field (centre delta 0); a short last line
-shares the row; a last line under the commands reserves 38px. At the scroll ceiling the commands keep their own bottom band outside
+shares the row; a last line under the commands reserves 38px. **One measurement per pending frame, never in the input handler** (board #444): the text effect, a font completion and the ResizeObserver each call `requestGrow`, which schedules `growComposer` in the next animation frame; the triggers that come before that frame share it. The input handler measures nothing; it used to run the transaction once there and again from the text effect, each a forced layout. The measurement still lays out once in its frame (the #444 profile: growComposer 726-757 ms per 12 s of typing at 6x, from 1194-1262), and a ResizeObserver or font trigger lands in the frame after the one it was noticed in. The geometry is the same as before (390 px, empty / one line / wrapped / past the ceiling, read back on the #444 rig). `field-sizing: content` does not replace it: it sizes the height only, not the signature band, and the macOS WKWebView follows the OS's Safari, which has it only from 26.2. At the scroll ceiling the commands keep their own bottom band outside
 the scrolling text; no typed line loses a permanent right column. Only an
 empty placeholder gives width to the controls, and the empty field stays
 one native control high.

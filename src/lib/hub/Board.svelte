@@ -16,6 +16,7 @@
   import Lightbox from '../ui/Lightbox.svelte';
   import type { ProjectRow } from '../projects/projects.ts';
   import { t, hanLang } from '../core/i18n.svelte.ts';
+  import { poll, single } from '../core/poll.ts';
   import { onDestroy, untrack, tick } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
   import { useServerScope } from '../app/server-context.ts';
@@ -150,7 +151,7 @@
   type OpCtx = { session: string; id: number | null; gen: number };
   const freeze = (): OpCtx => ({ session: cur, id: sel?.id ?? null, gen: opGen });
   const owns = (c: OpCtx) => alive && c.gen === opGen;
-  onDestroy(() => { alive = false; opGen++; viewGeneration++; readSequence++; setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
+  onDestroy(() => { alive = false; opGen++; viewGeneration++; readSequence++; loadProjects.dispose(); load.dispose(); setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
   let picked = $state(false);      // a manual pick overrides the session follow
   // The Board sheet's own condition (≤760px — the old media gate, expressed
   // where the class is applied; see app.css .side-sheet).
@@ -285,7 +286,9 @@
   let completeOnce = $state(false);
   let listFailed = $state(false);
   let projectReadSequence = 0;
-  async function loadProjects() {
+  // One read in flight per context (core/poll.ts, #444).
+  const loadProjects = single(readProjects);
+  async function readProjects() {
     const request = ++projectReadSequence;
     try {
       // The SAME order as the Hub/Chat sidebar (reopened #11): newest
@@ -327,9 +330,7 @@
   // nothing else; in Single a hidden Board polls nothing, as before.
   $effect(() => {
     if (!visible && !union) return;
-    loadProjects();
-    const iv = setInterval(loadProjects, 20000);
-    return () => clearInterval(iv);
+    return poll(loadProjects.tick, 20000, { now: true });
   });
   $effect(() => {
     if (!visible) return;
@@ -555,7 +556,8 @@
     else action();
   }
 
-  async function load() {
+  const load = single(readBoard, () => cur ?? '');
+  async function readBoard() {
     // FROZEN at entry (lead review, board #39): every await below is a window
     // for the user to switch projects, and with live `cur` the OLD board's
     // response would paint its issues into the NEW board — and, worse since
@@ -605,9 +607,7 @@
   // nothing renders as "empty" before the first answer.
   $effect(() => {
     if (!visible || !cur) return;
-    load();
-    const iv = setInterval(load, 8000);
-    return () => clearInterval(iv);
+    return poll(load.tick, 8000, { now: true });
   });
   // Switching projects resets the view to the new board's list.
   $effect(() => {
