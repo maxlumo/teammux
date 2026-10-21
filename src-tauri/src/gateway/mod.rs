@@ -222,6 +222,7 @@ pub async fn start_ready(cfg: Config, ready: Option<tokio::sync::oneshot::Sender
         cfg.tls_cert,
         cfg.tls_key,
         cfg.disconnect_grace_secs,
+        cfg.trusted_proxies,
         ready,
     )
     .await

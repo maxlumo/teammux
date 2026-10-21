@@ -2131,8 +2131,9 @@ fn print_status(sys: &tmux_mobile::gateway::service::Sys, name: &str, show_token
         }
     }
     println!("gateway   {answer}");
-    if let probe::Verdict::Ours { build, .. } = &verdict {
+    if let probe::Verdict::Ours { build, lockout, .. } = &verdict {
         println!("build     {}", build_line(build.as_ref(), &tmux_mobile::build_info::Build::ours()));
+        println!("lockout   {}", lockout_line(lockout.as_ref(), &cfg.trusted_proxies.describe()));
     }
     println!("listen    {}:{}{}", cfg.host, cfg.port, if cfg.tls_cert.is_some() { " (TLS)" } else { "" });
     println!("config    {}", tmux_mobile::config::config_dir().display());
@@ -2152,6 +2153,26 @@ fn build_line(gateway: Option<&tmux_mobile::build_info::Build>, ours: &tmux_mobi
         Some(g) if g.commit == ours.commit && g.version == ours.version => g.line(),
         Some(g) => format!("{} — this tmm is {}", g.line(), ours.line()),
     }
+}
+
+/// How the RUNNING gateway keys its auth lockout (board #441), from its own
+/// login answer — never inferred from config.toml, which may be newer than
+/// the process. A config that says otherwise is named as waiting for a
+/// restart.
+fn lockout_line(running: Option<&Value>, configured: &Value) -> String {
+    let say = |v: &Value| -> String {
+        let proxies = v.get("trusted_proxies").and_then(|p| p.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        match (v.get("keyed_by").and_then(|k| k.as_str()), v.get("ignored").and_then(|i| i.as_str())) {
+            (Some("x-forwarded-for"), _) => format!("keyed by X-Forwarded-For behind {proxies}"),
+            (Some("peer"), Some(why)) => format!("keyed by the TCP peer (trusted_proxies ignored: {why})"),
+            (Some("peer"), None) => "keyed by the TCP peer".into(),
+            _ => "unknown".into(),
+        }
+    };
+    let Some(running) = running else { return "unknown (this gateway predates board #441)".into() };
+    let now = say(running);
+    if running == configured { now } else { format!("{now} — config.toml says {}; tmm gateway restart applies it", say(configured)) }
 }
 
 /// `tmm review add`'s selection (board #434 P1-D): `--lines A` or `A-B`,
@@ -3033,6 +3054,20 @@ mod tests {
     }
 
     use tmux_mobile::build_info::Build;
+
+    /// Board #441: the lockout line is the RUNNING gateway's answer; a config
+    /// that differs is said as waiting for a restart, an old gateway unknown.
+    #[test]
+    fn the_lockout_line_is_the_running_gateways() {
+        let off = json!({ "keyed_by": "peer" });
+        let on = json!({ "keyed_by": "x-forwarded-for", "trusted_proxies": ["127.0.0.1/32", "::1/128"] });
+        let ignored = json!({ "keyed_by": "peer", "ignored": "entry 2 is not an IP address or CIDR" });
+        assert_eq!(lockout_line(Some(&off), &off), "keyed by the TCP peer");
+        assert_eq!(lockout_line(Some(&on), &on), "keyed by X-Forwarded-For behind 127.0.0.1/32, ::1/128");
+        assert_eq!(lockout_line(Some(&ignored), &ignored), "keyed by the TCP peer (trusted_proxies ignored: entry 2 is not an IP address or CIDR)");
+        assert_eq!(lockout_line(Some(&off), &on), "keyed by the TCP peer — config.toml says keyed by X-Forwarded-For behind 127.0.0.1/32, ::1/128; tmm gateway restart applies it");
+        assert_eq!(lockout_line(None, &on), "unknown (this gateway predates board #441)");
+    }
 
     /// Board #368: `tmm gateway status` names the running gateway's build, says
     /// so plainly when an older gateway sends none, and shows which build THIS

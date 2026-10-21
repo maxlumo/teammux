@@ -13,6 +13,7 @@ mod hub_rpc;
 mod rpc;
 mod connection;
 mod dispatch;
+pub mod client_ip;
 mod local_socket;
 pub mod ui;
 pub use connection::{handle_connection, ConnContext, Peer};
@@ -208,7 +209,7 @@ pub async fn start_with_socket(
     tls_key: Option<String>,
     disconnect_grace_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    start_with_socket_ready(host, port, token, machine_id, socket, tls_cert, tls_key, disconnect_grace_secs, None).await
+    start_with_socket_ready(host, port, token, machine_id, socket, tls_cert, tls_key, disconnect_grace_secs, client_ip::TrustedProxies::Off, None).await
 }
 
 /// `start_with_socket`, telling `ready` the moment the listener is bound and
@@ -225,6 +226,7 @@ pub async fn start_with_socket_ready(
     tls_cert: Option<String>,
     tls_key: Option<String>,
     disconnect_grace_secs: u64,
+    trusted_proxies: client_ip::TrustedProxies,
     ready: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tmux::set_socket(socket);
@@ -244,6 +246,12 @@ pub async fn start_with_socket_ready(
         "port": port,
         "config": std::fs::canonicalize(&config_dir).unwrap_or_else(|_| config_dir.clone()).to_string_lossy(),
     }));
+    // Board #441: whose X-Forwarded-For the lockout believes. Said once at
+    // start when the key is set but ignored, by position only.
+    if let client_ip::TrustedProxies::Ignored(why) = &trusted_proxies {
+        eprintln!("⚠️ trusted_proxies ignored ({why}): the auth lockout keys on the TCP peer");
+    }
+    let trusted_proxies = Arc::new(trusted_proxies);
     let notifications = Arc::new(AgentNotificationHub::load());
     notifications.ensure_helper().map_err(|error| format!("Failed to prepare agent notification helper: {error}"))?;
     // Board #394: every session's turn facts are replayed from the activity
@@ -364,6 +372,7 @@ pub async fn start_with_socket_ready(
             grace_secs: disconnect_grace_secs,
             notifications: notifications.clone(),
             endpoint: endpoint.clone(),
+            trusted_proxies: trusted_proxies.clone(),
         };
         // Every step that can fail comes BEFORE the announcement and the
         // published path (review P2): a failure drops the socket (its own
@@ -406,6 +415,7 @@ pub async fn start_with_socket_ready(
             grace_secs: disconnect_grace_secs,
             notifications: notifications.clone(),
             endpoint: endpoint.clone(),
+            trusted_proxies: trusted_proxies.clone(),
         };
         if let Some(ref acceptor) = tls_acceptor {
             let acceptor = acceptor.clone();
@@ -478,6 +488,7 @@ mod admit_local_tests {
             grace_secs: 0,
             notifications: Arc::new(AgentNotificationHub::load()),
             endpoint: Arc::new(serde_json::json!({ "port": 1, "config": "/c" })),
+            trusted_proxies: Arc::new(Default::default()),
         }
     }
 

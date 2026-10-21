@@ -30,6 +30,11 @@ struct FileConfig {
     // round 4 (false turns it off; an unreadable file is off); read once per
     // start (and per decision a capture tick needs).
     restore_on_start: Option<bool>,
+    // The proxies whose X-Forwarded-For the auth lockout believes (board
+    // #441): IPs or CIDRs. Absent or empty: the lockout is keyed by the TCP
+    // peer, as before. Read loosely (any TOML value) so a wrong shape turns
+    // only this key off, never the whole file. config.toml only.
+    trusted_proxies: Option<toml::Value>,
 }
 
 #[derive(Clone)]
@@ -45,6 +50,8 @@ pub struct Config {
     pub disconnect_grace_secs: u64,
     pub kiro_engine: String,
     pub ui_dir: Option<String>,
+    /// The auth lockout's trusted proxies (board #441, `server::client_ip`).
+    pub trusted_proxies: crate::server::client_ip::TrustedProxies,
 }
 
 /// `restore_on_start` in config.toml (board #422), side-effect free. ON only
@@ -312,8 +319,26 @@ impl Config {
                 &env("KIRO_ENGINE").or(file_cfg.kiro_engine).unwrap_or_default(),
             ),
             ui_dir: file_cfg.ui_dir.filter(|d| !d.trim().is_empty()),
+            trusted_proxies: trusted_proxies(file_cfg.trusted_proxies.as_ref()),
         }
     }
+}
+
+/// `trusted_proxies` from config.toml: absent is OFF; a list of strings is
+/// parsed entry by entry; any other shape is ignored as a whole, with the
+/// reason (board #441).
+fn trusted_proxies(v: Option<&toml::Value>) -> crate::server::client_ip::TrustedProxies {
+    use crate::server::client_ip::TrustedProxies;
+    let Some(v) = v else { return TrustedProxies::Off };
+    let Some(list) = v.as_array() else { return TrustedProxies::Ignored("not a list of addresses".into()) };
+    let mut entries = Vec::with_capacity(list.len());
+    for (i, e) in list.iter().enumerate() {
+        match e.as_str() {
+            Some(s) => entries.push(s.to_string()),
+            None => return TrustedProxies::Ignored(format!("entry {} is not a string", i + 1)),
+        }
+    }
+    TrustedProxies::from_config(Some(&entries))
 }
 
 fn load_or_create_machine_id() -> String {
@@ -583,6 +608,27 @@ mod restore_switch_tests {
     /// Round 4 review P1-D: the default is ON only for a valid config without
     /// the key (or no file at all); a file that cannot be read or parsed is
     /// OFF, never "the default", so a person's `false` survives a torn file.
+    /// Board #441: `trusted_proxies` is read loosely, so a wrong shape turns
+    /// only that key off; the rest of the file (the token) still loads.
+    #[test]
+    fn trusted_proxies_is_off_unless_a_list_of_addresses_and_never_breaks_the_file() {
+        use crate::server::client_ip::TrustedProxies;
+        use super::{Config, FileConfig};
+        let read = |toml_text: &str| {
+            let file: FileConfig = toml::from_str(toml_text).expect("the file still parses");
+            Config::from_parts(&|_| None, file, String::new(), "m".into())
+        };
+        assert_eq!(read("token = \"t\"").trusted_proxies, TrustedProxies::Off);
+        assert_eq!(read("token = \"t\"\ntrusted_proxies = []").trusted_proxies, TrustedProxies::Off);
+        let on = read("token = \"t\"\ntrusted_proxies = [\"127.0.0.1/32\", \"::1\"]");
+        assert!(matches!(on.trusted_proxies, TrustedProxies::On(ref c) if c.len() == 2));
+        let wrong = read("token = \"t\"\ntrusted_proxies = \"127.0.0.1\"");
+        assert_eq!(wrong.trusted_proxies, TrustedProxies::Ignored("not a list of addresses".into()));
+        assert_eq!(wrong.token, "t", "the rest of the file loads");
+        assert_eq!(read("token = \"t\"\ntrusted_proxies = [1]").trusted_proxies, TrustedProxies::Ignored("entry 1 is not a string".into()));
+        assert_eq!(read("token = \"t\"\ntrusted_proxies = [\"127.0.0.1\", \"localhost\"]").trusted_proxies, TrustedProxies::Ignored("entry 2 is not an IP address or CIDR".into()));
+    }
+
     #[test]
     fn the_restore_switch_is_on_by_default_and_off_when_the_config_cannot_be_read() {
         let p = std::path::Path::new("/c/config.toml");

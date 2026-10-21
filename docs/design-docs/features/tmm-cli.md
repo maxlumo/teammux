@@ -113,6 +113,9 @@ Global flags: `--project <session>`, `--agent <name>`, `--server <ws://…>`,
 `--output json` (every read). Token from `config.toml`, overridable with
 `$TMM_TOKEN`; server from `$TMM_SERVER`, default `ws://127.0.0.1:<port>`.
 
+### The lockout line (board #441)
+`tmm gateway status` prints `lockout   keyed by the TCP peer`, `keyed by X-Forwarded-For behind <trusted_proxies>`, or `keyed by the TCP peer (trusted_proxies ignored: <reason>)`. It is the RUNNING gateway's own answer (the `lockout` member of its login answer, read on the probe's authenticated session), never inferred from config.toml: a file edited since the start is named as `— config.toml says …; tmm gateway restart applies it`, and a gateway older than #441 shows `unknown`. See websocket-server.md § The lockout key behind a trusted proxy.
+
 ### Which transport (board #440)
 The gateway also listens on a 0600 Unix socket, `<config>/sock/gateway.sock`, which carries no per-IP auth lockout (websocket-server.md § Two transports). On this host 127.0.0.1 is every agent's tmm, the Vite proxy and the SSH tunnel at once: five bad tokens from a rig that probed the default port locked the whole team out of tmm for 60 s (validator, 2026-10-20 14:52). No hook envelope was lost: the hook helper only writes the inbox and opens no socket (`the_hook_helper_never_opens_a_network_connection`).
 

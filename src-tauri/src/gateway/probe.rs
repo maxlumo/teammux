@@ -32,8 +32,9 @@ pub const DEADLINE: Duration = Duration::from_millis(1500);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// `build` is the gateway's own, from its login answer; None for a
-    /// gateway older than board #368, which sends none.
-    Ours { machine_id: String, url: String, build: Option<crate::build_info::Build> },
+    /// gateway older than board #368, which sends none. `lockout` is how
+    /// that process keys its auth lockout (board #441), None before #441.
+    Ours { machine_id: String, url: String, build: Option<crate::build_info::Build>, lockout: Option<serde_json::Value> },
     Occupied(String),
     None,
 }
@@ -53,7 +54,7 @@ pub(crate) fn judge(answer: &serde_json::Value, our_machine: &str, url: &str) ->
     }
     let id = r.and_then(|r| r.get("machine_id")).and_then(|v| v.as_str()).unwrap_or("");
     if id == our_machine && !id.is_empty() {
-        Verdict::Ours { machine_id: id.to_string(), url: url.to_string(), build: r.and_then(crate::build_info::parse) }
+        Verdict::Ours { machine_id: id.to_string(), url: url.to_string(), build: r.and_then(crate::build_info::parse), lockout: r.and_then(|r| r.get("lockout")).cloned() }
     } else {
         Verdict::Occupied(format!("{url} is another machine's gateway"))
     }
@@ -122,7 +123,7 @@ where
 /// An authenticated session: frames sealed under c2s / opened under s2c,
 /// each direction with its own counter (the server's `HalfCipher` rule:
 /// nonce = 4 zero bytes + the counter, big-endian).
-struct Session<S> {
+pub(crate) struct Session<S> {
     ws: tokio_tungstenite::WebSocketStream<S>,
     c2s: aes_gcm::Aes256Gcm,
     s2c: aes_gcm::Aes256Gcm,
@@ -186,9 +187,10 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Session<S> {
 /// key, and accept only a reply ENCRYPTED under the s2c key — which only a
 /// holder of the same token can produce. A peer that does not greet, or
 /// whose reply does not decrypt, is classified, never quoted.
-async fn login<S>(stream: S, url: &str, token: &str) -> Result<(serde_json::Value, Session<S>), Refusal>
+pub(crate) async fn login<S, R>(stream: S, url: R, token: &str) -> Result<(serde_json::Value, Session<S>), Refusal>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    R: tokio_tungstenite::tungstenite::client::IntoClientRequest + Unpin,
 {
     use aes_gcm::KeyInit;
     use hmac::Mac;
@@ -463,7 +465,7 @@ mod tests {
         drop(l);
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = crate::server::start_with_socket_ready("127.0.0.1", port, "tok-ours", "m-ours", None, None, None, 5, Some(tx)).await;
+            let _ = crate::server::start_with_socket_ready("127.0.0.1", port, "tok-ours", "m-ours", None, None, None, 5, Default::default(), Some(tx)).await;
         });
         tokio::time::timeout(Duration::from_secs(5), rx).await.expect("ready in time").expect("ready sent");
         assert!(matches!(probe(&cfg(port)).await, Verdict::Ours { .. }), "ready means really listening");
@@ -471,7 +473,7 @@ mod tests {
         // The race: something takes the port after a None probe.
         let (held, busy) = listener().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let r = crate::server::start_with_socket_ready("127.0.0.1", busy, "tok-ours", "m-ours", None, None, None, 5, Some(tx)).await;
+        let r = crate::server::start_with_socket_ready("127.0.0.1", busy, "tok-ours", "m-ours", None, None, None, 5, Default::default(), Some(tx)).await;
         assert!(r.is_err(), "the bind fails");
         assert!(rx.await.is_err(), "ready was never sent");
         drop(held);
@@ -479,7 +481,7 @@ mod tests {
         let (l, port) = listener().await;
         drop(l);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let r = crate::server::start_with_socket_ready("127.0.0.1", port, "tok-ours", "m-ours", None, Some("/nonexistent/c.pem".into()), Some("/nonexistent/k.pem".into()), 5, Some(tx)).await;
+        let r = crate::server::start_with_socket_ready("127.0.0.1", port, "tok-ours", "m-ours", None, Some("/nonexistent/c.pem".into()), Some("/nonexistent/k.pem".into()), 5, Default::default(), Some(tx)).await;
         assert!(r.is_err() && rx.await.is_err(), "no ready for a server that cannot serve");
     }
 

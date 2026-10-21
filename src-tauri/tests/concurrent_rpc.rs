@@ -80,6 +80,7 @@ async fn spawn_server_once(token: &str) -> SocketAddr {
                 grace_secs: 0,
                 notifications: Arc::new(AgentNotificationHub::load()),
                 endpoint: Arc::new(serde_json::json!({})),
+                trusted_proxies: Arc::new(Default::default()),
             };
             tokio::spawn(handle_connection(stream, peer, ctx));
         }

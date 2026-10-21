@@ -1274,7 +1274,7 @@ mod tests {
                         *loaded.borrow_mut() = true;
                         let next = pid.borrow().map(|p| p + 1).unwrap_or(100);
                         *pid.borrow_mut() = Some(next);
-                        *verdict.borrow_mut() = Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None };
+                        *verdict.borrow_mut() = Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None, lockout: None };
                         Ok(String::new())
                     }
                     "disable" | "bootout" => {
@@ -1817,7 +1817,7 @@ mod tests {
         *f.verdict.borrow_mut() = Verdict::Occupied("another gateway".into());
         assert!(install(&sys, N, false).unwrap_err().contains("held"));
         assert!(!sys.file(N).exists(), "nothing written");
-        *f.verdict.borrow_mut() = Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None };
+        *f.verdict.borrow_mut() = Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None, lockout: None };
         assert!(install(&sys, N, false).unwrap_err().contains("outside this service"), "a foreground gateway would mask a dead service");
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1900,7 +1900,7 @@ mod tests {
     }
 
     const OLD_PLIST: &str = "<plist><dict><key>Label</key><string>cc.voka.tmux-mobile</string><key>ProgramArguments</key><array><string>/old/server</string></array></dict></plist>";
-    fn ours_answering() -> Verdict { Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None } }
+    fn ours_answering() -> Verdict { Verdict::Ours { machine_id: "m".into(), url: "ws://x".into(), build: None, lockout: None } }
 
     /// clawdbjs's case: the #313 hand plist RUNS and is the gateway on the
     /// port. --replace backs it up and stops it before the port check.

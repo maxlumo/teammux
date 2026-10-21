@@ -214,22 +214,36 @@ async fn subscription_loop(
 /// peer came through the gateway's own 0600 Unix socket and is not: it
 /// neither checks the lockout, nor counts a failure into it, nor clears a TCP
 /// counter by succeeding. No made-up 127.0.0.1 stands in for it.
+///
+/// `Forwarded` (board #441) is a TCP peer inside `trusted_proxies` whose
+/// request named its client in X-Forwarded-For: the lockout is keyed by that
+/// client, decided once in `dispatch` from the request head
+/// (`client_ip::lockout_key`), and every check, count and clear uses it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Peer {
     Tcp(SocketAddr),
+    Forwarded { via: SocketAddr, client: std::net::IpAddr },
     Local,
 }
 
 impl Peer {
     /// The lockout's key, for the peers it applies to.
     fn tracked_ip(&self) -> Option<std::net::IpAddr> {
-        match self { Peer::Tcp(a) => Some(a.ip()), Peer::Local => None }
+        match self {
+            Peer::Tcp(a) => Some(super::client_ip::canonical(a.ip())),
+            Peer::Forwarded { client, .. } => Some(*client),
+            Peer::Local => None,
+        }
     }
 }
 
 impl std::fmt::Display for Peer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Peer::Tcp(a) => write!(f, "{a}"), Peer::Local => f.write_str("local socket") }
+        match self {
+            Peer::Tcp(a) => write!(f, "{a}"),
+            Peer::Forwarded { via, client } => write!(f, "{client} (via {via})"),
+            Peer::Local => f.write_str("local socket"),
+        }
     }
 }
 
@@ -250,6 +264,9 @@ pub struct ConnContext {
     /// this config's TCP port and canonical config dir, recorded at bind, so a
     /// tmm can refuse a socket that is not its own config's gateway.
     pub endpoint: Arc<serde_json::Value>,
+    /// Whose X-Forwarded-For the lockout believes (board #441), from
+    /// config.toml at start; `Off` keys every TCP login by its peer.
+    pub trusted_proxies: Arc<super::client_ip::TrustedProxies>,
 }
 
 pub async fn handle_connection(stream: TcpStream, addr: SocketAddr, ctx: ConnContext) {
@@ -272,14 +289,25 @@ where
         }
     };
     let route = classify(&bytes[..end]);
+    // The lockout key, once, from the head already read (board #441): a TCP
+    // peer inside trusted_proxies is keyed by the client its X-Forwarded-For
+    // names, anything else by itself. Only a WebSocket login uses it.
+    let peer = match (peer, &route) {
+        (Peer::Tcp(addr), Route::WebSocket) => {
+            let key = super::client_ip::lockout_key_logged(addr.ip(), &bytes[..end], &ctx.trusted_proxies);
+            if key == super::client_ip::canonical(addr.ip()) { Peer::Tcp(addr) } else { Peer::Forwarded { via: addr, client: key } }
+        }
+        (p, _) => p,
+    };
     let stream = Prefixed::new(bytes, stream);
     // The local socket is tmm's door: WebSocket only, no downloads or UI.
     match (peer, route) {
         (_, Route::WebSocket) => {}
         (Peer::Local, _) => return super::ui::bad_request(stream).await,
-        (Peer::Tcp(addr), Route::Download) => return handle_http_download(stream, addr, ctx.token).await,
-        (Peer::Tcp(_), Route::Static { head, target, accept }) => return super::ui::serve(stream, head, &target, &accept).await,
-        (Peer::Tcp(_), Route::Bad) => return super::ui::bad_request(stream).await,
+        // Only a WebSocket head is keyed as Forwarded; the arms say both.
+        (Peer::Tcp(addr) | Peer::Forwarded { via: addr, .. }, Route::Download) => return handle_http_download(stream, addr, ctx.token).await,
+        (Peer::Tcp(_) | Peer::Forwarded { .. }, Route::Static { head, target, accept }) => return super::ui::serve(stream, head, &target, &accept).await,
+        (Peer::Tcp(_) | Peer::Forwarded { .. }, Route::Bad) => return super::ui::bad_request(stream).await,
     }
 
     let conn_id = CONN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -317,7 +345,7 @@ pub(super) async fn handle_connection_ws<S>(ws_stream: tokio_tungstenite::WebSoc
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnContext { token, machine_id, auth_tracker, resize_tracker, grace_secs, notifications, endpoint } = ctx;
+    let ConnContext { token, machine_id, auth_tracker, resize_tracker, grace_secs, notifications, endpoint, trusted_proxies } = ctx;
     let addr = peer;
     // Check if IP is locked out (a local peer never is, board #440).
     if let Some(ip) = peer.tracked_ip() {
@@ -614,7 +642,7 @@ where
                             // cipher ready. We enqueue it first, then the
                             // auth response.
                             let _ = out_tx.send(Outbound::InitCipher(HalfCipher::new(&send_key)));
-                            let mut result = serde_json::json!({"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version,"build":crate::build_info::json(),"caps":super::LOGIN_CAPS});
+                            let mut result = serde_json::json!({"authenticated":true,"machine_id":*machine_id,"hostname":&hostname,"e2e":e2e_version,"build":crate::build_info::json(),"caps":super::LOGIN_CAPS,"lockout":trusted_proxies.describe()});
                             if peer == Peer::Local { result["endpoint"] = (*endpoint).clone(); }
                             let resp = serde_json::to_string(&serde_json::json!({ "result": result })).unwrap();
                             let _ = out_tx.send(Outbound::Encrypted(resp));
@@ -642,7 +670,10 @@ where
                         // Legacy plain token auth (http:// fallback)
                         authenticated = true;
                         if let Some(ip) = peer.tracked_ip() { auth_tracker.lock().await.remove(&ip); }
-                        let mut answer = serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname, "build": crate::build_info::json(), "caps": super::LOGIN_CAPS });
+                        // `lockout` (board #441): how THIS process keys the auth
+                        // lockout, which `tmm gateway status` shows instead of
+                        // guessing from a config file that may be newer.
+                        let mut answer = serde_json::json!({ "authenticated": true, "machine_id": *machine_id, "hostname": &hostname, "build": crate::build_info::json(), "caps": super::LOGIN_CAPS, "lockout": trusted_proxies.describe() });
                         // Only a LOCAL login, and only once it succeeded, is
                         // told which gateway it reached (board #440).
                         if peer == Peer::Local { answer["endpoint"] = (*endpoint).clone(); }
@@ -859,7 +890,7 @@ where
     let up = conn_started_at.elapsed().as_secs();
     let why = why.unwrap_or_else(|| "peer ended the stream (no close frame)".into());
     #[cfg(test)]
-    DISCONNECTS.lock().unwrap().push((match peer { Peer::Tcp(a) => a.port(), Peer::Local => 0 }, why.clone()));
+    DISCONNECTS.lock().unwrap().push((match peer { Peer::Tcp(a) | Peer::Forwarded { via: a, .. } => a.port(), Peer::Local => 0 }, why.clone()));
     println!(
         "👋 Client disconnected: {} (conn_id={}, authed={}, up={}s, reason={})",
         addr, conn_id, authenticated, up, why
@@ -1043,6 +1074,7 @@ mod local_peer_tests {
             grace_secs: 0,
             notifications: Arc::new(AgentNotificationHub::load()),
             endpoint: Arc::new(serde_json::json!({ "port": 19440, "config": "/cfg" })),
+            trusted_proxies: Arc::new(Default::default()),
         }
     }
 
@@ -1123,6 +1155,111 @@ mod local_peer_tests {
         let v: serde_json::Value = serde_json::from_str(&other).unwrap();
         assert_eq!(v["result"]["authenticated"], true);
         assert!(v["result"].get("endpoint").is_none(), "a TCP login is not told the endpoint: {other}");
+    }
+
+    // ── Board #441: the key behind a trusted proxy ─────────────────────────
+    fn trusting(tracker: AuthTracker) -> ConnContext {
+        ConnContext { trusted_proxies: Arc::new(super::super::client_ip::TrustedProxies::from_config(Some(&["127.0.0.1/32".to_string()]))), ..ctx(tracker) }
+    }
+
+    /// A plain-token login through `dispatch` from TCP peer `peer`, with the
+    /// given X-Forwarded-For lines, under `c`.
+    async fn login_as(c: ConnContext, peer: &str, xff: &[&str], token: &str) -> String {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, Peer::Tcp(peer.parse().unwrap()), c, false));
+        let mut req = "ws://local/".into_client_request().unwrap();
+        for v in xff { req.headers_mut().append("X-Forwarded-For", v.parse().unwrap()); }
+        let (mut ws, _) = match tokio_tungstenite::client_async(req, client).await {
+            Ok(ws) => ws,
+            Err(e) => return format!("handshake refused: {e}"),
+        };
+        let _nonce = ws.next().await;
+        ws.send(Message::Text(format!(r#"{{"id":1,"method":"auth","params":{{"token":"{token}"}}}}"#).into())).await.unwrap();
+        let reply = ws.next().await.and_then(|m| m.ok()).map(|m| m.to_text().unwrap_or("").to_string()).unwrap_or_default();
+        let _ = ws.close(None).await;
+        reply
+    }
+
+    fn count(tracker: &AuthTracker, ip: &str) -> Option<u32> {
+        tracker.try_lock().unwrap().get(&ip.parse::<std::net::IpAddr>().unwrap()).map(|e| e.0)
+    }
+
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_five_failures_lock_the_forwarded_client_not_the_proxy() {
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        let t = || trusting(tracker.clone());
+        for _ in 0..MAX_AUTH_FAILURES {
+            assert!(login_as(t(), "127.0.0.1:40001", &["198.51.100.1"], "tok-wrong").await.contains("invalid token"));
+        }
+        assert_eq!(count(&tracker, "198.51.100.1"), Some(MAX_AUTH_FAILURES), "counted under the forwarded client");
+        assert_eq!(count(&tracker, "127.0.0.1"), None, "the proxy is not counted");
+        // A is refused before the handshake (the pre-accept check uses the key) …
+        assert!(login_as(t(), "127.0.0.1:40002", &["198.51.100.1"], "tok-440").await.starts_with("handshake refused"));
+        // … B, behind the same proxy, logs in and is told how the lockout is keyed.
+        let ok = login_as(t(), "127.0.0.1:40003", &["198.51.100.2"], "tok-440").await;
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["result"]["authenticated"], true, "{ok}");
+        assert_eq!(v["result"]["lockout"], serde_json::json!({ "keyed_by": "x-forwarded-for", "trusted_proxies": ["127.0.0.1/32"] }));
+        assert_eq!(count(&tracker, "198.51.100.1"), Some(MAX_AUTH_FAILURES), "B's success does not clear A");
+        // A spoofed left part cannot pick the key: the right-most untrusted entry is A.
+        assert!(login_as(t(), "127.0.0.1:40004", &["203.0.113.66, 198.51.100.1"], "tok-440").await.starts_with("handshake refused"));
+        // A local login does not clear A either.
+        let local = login(Peer::Local, &tracker, "tok-440").await;
+        assert!(local.contains("\"authenticated\":true"), "{local}");
+        assert_eq!(count(&tracker, "198.51.100.1"), Some(MAX_AUTH_FAILURES), "a local success does not clear A");
+        // A's own success clears A's counter (the same key clears it).
+        tracker.lock().await.insert("198.51.100.1".parse().unwrap(), (1, tokio::time::Instant::now()));
+        let a = login_as(t(), "127.0.0.1:40005", &["198.51.100.1"], "tok-440").await;
+        assert!(a.contains("\"authenticated\":true"), "{a}");
+        assert_eq!(count(&tracker, "198.51.100.1"), None, "A's success clears A");
+    }
+
+    #[tokio::test]
+    async fn off_or_untrusted_or_unusable_headers_key_by_the_peer_as_before() {
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        // OFF: the header is never read; failures count against the peer.
+        assert!(login_as(ctx(tracker.clone()), "127.0.0.1:40010", &["198.51.100.1"], "tok-wrong").await.contains("invalid token"));
+        assert_eq!(count(&tracker, "127.0.0.1"), Some(1));
+        assert_eq!(count(&tracker, "198.51.100.1"), None);
+        let off = login_as(ctx(tracker.clone()), "127.0.0.1:40011", &[], "tok-440").await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&off).unwrap()["result"]["lockout"], serde_json::json!({ "keyed_by": "peer" }));
+        tracker.lock().await.clear();
+        // ON, but the peer is not a trusted proxy: keyed by itself.
+        assert!(login_as(trusting(tracker.clone()), "10.0.0.9:40012", &["198.51.100.1"], "tok-wrong").await.contains("invalid token"));
+        assert_eq!(count(&tracker, "10.0.0.9"), Some(1));
+        assert_eq!(count(&tracker, "198.51.100.1"), None);
+        // ON, trusted peer, no header / a bad entry / only trusted entries: the peer.
+        for xff in [&[][..], &["unknown"][..], &["127.0.0.1"][..], &[""][..]] {
+            assert!(login_as(trusting(tracker.clone()), "127.0.0.1:40013", xff, "tok-wrong").await.contains("invalid token"), "{xff:?}");
+        }
+        assert_eq!(count(&tracker, "127.0.0.1"), Some(4), "every unusable header fails closed to the peer");
+    }
+
+    /// The E2E login, through the real dispatch with the header: a bad proof
+    /// counts under the forwarded client, a good one clears that client only.
+    #[tokio::test]
+    async fn the_encrypted_login_counts_and_clears_under_the_same_key() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let tracker: AuthTracker = Arc::new(Mutex::new(HashMap::new()));
+        let e2e = |token: &'static str, xff: &'static str| {
+            let c = trusting(tracker.clone());
+            async move {
+                let (client, server) = tokio::net::UnixStream::pair().unwrap();
+                tokio::spawn(dispatch(server, Peer::Tcp("127.0.0.1:40020".parse().unwrap()), c, false));
+                let mut req = "ws://local/".into_client_request().unwrap();
+                req.headers_mut().append("X-Forwarded-For", xff.parse().unwrap());
+                crate::gateway::probe::login(client, req, token).await.map(|(answer, _)| answer)
+            }
+        };
+        assert!(e2e("tok-wrong", "198.51.100.7").await.is_err(), "a wrong token's proof is refused");
+        assert_eq!(count(&tracker, "198.51.100.7"), Some(1), "counted under the forwarded client");
+        tracker.lock().await.insert("198.51.100.8".parse().unwrap(), (2, tokio::time::Instant::now()));
+        let answer = e2e("tok-440", "198.51.100.7").await.expect("the right token logs in");
+        assert_eq!(answer["result"]["lockout"]["keyed_by"], "x-forwarded-for", "{answer}");
+        assert_eq!(count(&tracker, "198.51.100.7"), None, "its success clears its own key");
+        assert_eq!(count(&tracker, "198.51.100.8"), Some(2), "and no other");
+        assert_eq!(count(&tracker, "127.0.0.1"), None, "the proxy was never counted");
     }
 
     #[tokio::test]
