@@ -226,9 +226,19 @@ pub(crate) fn render_omp(
 }
 
 /// Where the user's own omp agent state lives. Only read, never written.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
 pub(crate) fn omp_user_agent_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".omp").join("agent")
+}
+
+/// Under test the user's omp state is a per-process temp dir (codex's
+/// pattern): a render test never reads, or copies, the developer's real
+/// `~/.omp` (board #448 P2: the agent.db and models.yml copies are driven
+/// against it).
+#[cfg(test)]
+pub(crate) fn omp_user_agent_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::config::fresh_process_dir("tmm-omp-user-home")).clone()
 }
 
 /// The telemetry extension a managed omp home carries: a hook factory (omp's

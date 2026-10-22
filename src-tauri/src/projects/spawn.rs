@@ -2111,6 +2111,49 @@ mod tests {
         }
     }
 
+    /// Board #448 P2 (reviewer on 44c15858): a copy into the home whose target
+    /// is a link refuses the render, for grok's auth.json and omp's agent.db,
+    /// and through the restart's re-materialize the start is refused; the
+    /// link's target is untouched. The user homes are per-process temp dirs.
+    #[test]
+    #[cfg(unix)]
+    fn a_copy_into_a_home_whose_target_is_a_link_refuses_the_render_and_the_start() {
+        let ws = std::env::temp_dir().join(format!("tmm-copy-link-{}", uuid::Uuid::new_v4()));
+        let outside = ws.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("theirs");
+        std::fs::write(&sentinel, "the user's").unwrap();
+        let cases: [(&str, PathBuf, &str); 2] = [
+            ("grok", crate::backends::grok::grok_user_home(), "auth.json"),
+            ("omp", crate::backends::omp::omp_user_agent_dir(), "agent.db"),
+        ];
+        for (backend, user, file) in &cases {
+            std::fs::create_dir_all(user).unwrap();
+            std::fs::write(user.join(file), format!("SENTINEL-{backend}")).unwrap();
+            let name = format!("cp{backend}");
+            let home = agent_home(&ws.to_string_lossy(), &name);
+            make_home_private(&home).unwrap();
+            std::os::unix::fs::symlink(&sentinel, home.join(file)).unwrap();
+            let d = def(backend);
+            let prompt = build_prompt(&d, &name, "proj", "", "", "");
+            let r = match *backend {
+                "grok" => crate::backends::grok::render_grok(&d, &name, &home, &prompt, &[]),
+                _ => crate::backends::omp::render_omp(&d, &name, &home, &prompt, &[]),
+            };
+            assert!(r.is_err(), "{backend}: the render is refused");
+            // The start door: a registry definition and its recipe, restarted.
+            let def_name = format!("{name}-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            super::super::registry_save(&json!({ "name": def_name, "backend": backend, "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+            std::fs::write(home.join("launch.json"), json!({ "backend": backend, "cmd": "true", "env": [], "agent_def": def_name }).to_string()).unwrap();
+            let err = refresh_agent(&ws.to_string_lossy(), "proj", &name).unwrap_err();
+            assert!(err.contains("not started"), "{backend}: {err}");
+            super::super::registry_delete(&def_name).ok();
+            std::fs::remove_file(user.join(file)).ok();
+        }
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "the user's", "the links' target is untouched");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     /// Board #448 P1-B: a home that cannot be made private (its `.tmm` is a
     /// link to another directory) fails refresh_hooks, never "no change".
     #[test]

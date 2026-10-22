@@ -172,7 +172,7 @@ Every step acts on the one held directory (the `safe_fs::Dir` walk, which #433's
 - The legacy team.db and its siblings are closed in place under the store's trust rule (P1-D): in a directory others can change it is NOT tightened and left as it is. Every existing file and sidecar, the store's included, is opened `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and verified on that fd (a regular file of ours) before `fchmod`, so a name swapped between the check and the open, or a FIFO, is refused without blocking. It is never reopened once imported.
 - Each project's `.tmm/mcp.json`.
 - Every managed home of every stored project is walked private, including a LIVE one, which `reconcile::create_or_keep` keeps without `refresh_hooks`.
-- A failure, and anything that cannot be audited (the project list, a `.tmm/agents` listing or entry, a home whose marker cannot be read, a parent whose `stat` fails), is logged as "NOT tightened — needs the owner: <path> (<why>)". Only NotFound is absent; an orphan `-wal`/`-shm`/`-journal` is closed even when its main file is gone. The exposure is not called closed.
+- A failure, and anything that cannot be audited (the project list, a `.tmm/agents` listing or entry, a home whose marker cannot be read, a parent whose `stat` fails or that is not a directory), is logged as "NOT tightened — needs the owner: <path> (<why>)". Only NotFound is absent; an orphan `-wal`/`-shm`/`-journal` is closed even when its main file is gone. The exposure is not called closed.
 
 What permissions do not do: a running process keeps the argv it was started with until it is restarted, and nothing here replaces rotating a key that was exposed.
 
@@ -182,7 +182,7 @@ Pinned by:
 - `managed::tighten_tests` (a wide live home closed at startup).
 - `backends::shared::tests` (the profile's fields, a user profile of the same name, revocation).
 - `spawn::tests::no_backend_puts_an_mcp_secret_on_the_line_and_every_copy_is_private` (every backend: a sentinel env and header in neither the line, the env, launch.json nor the script, and every copy 0600 in a 0700 home, after a render, a refresh, the recipe door and a revoking re-render; the workspace mcp.json private, also on its no-change path). Fork and live-config updates re-materialize through the same render and writer and are not driven separately by this test.
-- `safe_fs::walk_tests` (a link inside a home on a nested write, a home renamed after the walk, a FIFO or link in place of a file, a legacy DB in a shared directory, an owned file in place) and `hub_rpc::tests::a_start_whose_privacy_fails_is_refused_and_the_old_secret_line_is_never_replayed` (the full start door).
+- `safe_fs::walk_tests` (a link inside a home on a nested write, a home renamed after the walk, a FIFO or link in place of a file, a legacy DB in a shared directory, an owned file in place, a parent that is a file) and `spawn::tests::a_copy_into_a_home_whose_target_is_a_link_refuses_the_render_and_the_start` (grok's auth.json and omp's agent.db against per-process test user homes: the render and the restart refused, the link's target untouched) and `hub_rpc::tests::a_start_whose_privacy_fails_is_refused_and_the_old_secret_line_is_never_replayed` (the full start door).
 - `spawn::tests::production_code_writes_agent_files_only_through_the_private_writer`.
 
 ### The omp backend: one relocatable agent directory (2026-09-07)

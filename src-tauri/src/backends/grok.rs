@@ -223,9 +223,18 @@ pub(crate) fn render_grok(
 }
 
 /// Where the user's own grok lives. Only read, never written.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
 pub(crate) fn grok_user_home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".grok")
+}
+
+/// Under test the user's grok is a per-process temp dir (codex's and kimi's
+/// pattern): a render test never reads, or copies, the developer's real
+/// `~/.grok` (board #448 P2: the auth copy is driven against it).
+#[cfg(test)]
+pub(crate) fn grok_user_home() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::config::fresh_process_dir("tmm-grok-user-home")).clone()
 }
 
 /// The isolated home's config.toml: folder-trust off, the user's model

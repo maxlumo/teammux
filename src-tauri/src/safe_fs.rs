@@ -318,11 +318,13 @@ pub(crate) fn private_subdir(dir: &Path) -> io::Result<Dir> {
 }
 
 /// Is `p`'s directory there? `Ok(false)` only for NotFound; anything else
-/// (permission, I/O) cannot be audited and is an error (P2).
+/// (permission, I/O, a path that exists but is not a directory) cannot be
+/// audited and is an error (P2, reviewer on 44c15858).
 fn dir_present(p: Option<&Path>) -> io::Result<bool> {
     let Some(p) = p.filter(|p| !p.as_os_str().is_empty()) else { return Ok(true) };
     match std::fs::metadata(p) {
-        Ok(m) => Ok(m.is_dir()),
+        Ok(m) if m.is_dir() => Ok(true),
+        Ok(_) => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
@@ -990,6 +992,20 @@ mod walk_tests {
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
             assert!(r1.is_err() && r2.is_err() && r3.is_err(), "{r1:?} {r2:?} {r3:?}");
         }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// P2 (reviewer on 44c15858): a parent that exists but is a regular
+    /// file is not "absent": it cannot be audited, so it is an error.
+    #[test]
+    fn a_parent_that_is_a_file_is_an_error_not_absent() {
+        let d = scratch("notdir");
+        std::fs::write(d.join("plain"), "x").unwrap();
+        let p = d.join("plain");
+        assert!(tighten_db(&p.join("team.db")).is_err());
+        assert!(tighten_file(&p.join("mcp.json")).is_err());
+        assert!(remove_private(&p.join("mcp.json")).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "x", "the file is untouched");
         std::fs::remove_dir_all(&d).ok();
     }
 }
