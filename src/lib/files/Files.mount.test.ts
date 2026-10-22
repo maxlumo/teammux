@@ -607,6 +607,15 @@ test('a sound previews as a stream too: one stream-signed /dl URL into an <audio
     assert.deepEqual(calls, ['pause'], 'showing it never plays');
     assert.equal(app.document.querySelector('.preview-body audio, .media-preview audio'), audio, 'the same element: the position is kept');
     assert.equal(audio.getAttribute('src'), 'https://h/dl?path=%2Ffixture%2Fdemo.mp3&exp=9&sig=s&stream=1', 'and the signed URL');
+    // #453 review P1-B: the scope's eligibility is the same gate (the image viewer's).
+    await app.setScope({ eligible: false });
+    assert.deepEqual(calls, ['pause', 'pause'], 'an ineligible Files pauses the media too');
+    app.document.querySelector<HTMLButtonElement>('.mp-bar [aria-label="Play"]')!.click();
+    await settle(app);
+    assert.deepEqual(calls, ['pause', 'pause'], 'and its player refuses to play');
+    await app.setScope({ eligible: true });
+    assert.deepEqual(calls, ['pause', 'pause'], 'eligible again: nothing resumes');
+    assert.equal(app.document.querySelector('.preview-body audio, .media-preview audio'), audio, 'kept mounted');
   } finally { await app.close(); }
 });
 

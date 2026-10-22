@@ -1003,7 +1003,9 @@
     imageView = null;
   }
   // The viewer retires on the host's own gate, on its false edge, in the same tick: a hidden
-  // or unfocused Files is not destroyed, and coming back is a fresh tap.
+  // or unfocused Files is not destroyed, and coming back is a fresh tap. The media player
+  // answers to the SAME gate (FilePreview's `visible`, #453 review P1-B): closed, it pauses
+  // and ends its life.
   const imageActive = $derived(visible && (scope.eligible ? scope.eligible() : true));
   $effect(() => { if (!imageActive) untrack(closeImage); });
   $effect(() => () => viewerDl.dispose());
@@ -1911,8 +1913,9 @@
     <FileReview file={currentFile} body={previewBodyEl} {session} refresh={reviewRefresh} compact={narrowViewport} {onfeedback} context={feedbackContext}>
       <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
         bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
-        {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { viewerDl.retire(); imageView = viewerOpen(src, currentFile?.path ?? null, currentFile?.name ?? ''); }} {visible}
-        previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }} />
+        {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { viewerDl.retire(); imageView = viewerOpen(src, currentFile?.path ?? null, currentFile?.name ?? ''); }} visible={imageActive}
+        previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }}
+        reopenMedia={() => fsDownloadHttp(currentFile.path, { stream: true }).then((r) => r.url)} />
     </FileReview>
     {#if reading}
       <!-- The one way back that is not a gesture: a floating control above the

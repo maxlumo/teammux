@@ -96,6 +96,8 @@ const ROUND_ALLOWED: { file: string; match: string; why: string }[] = [
   { file: 'App.svelte', match: 'border-top-color', why: 'a spinner' },
   { file: 'lib/projects/Projects.svelte', match: 'width: 7px; height: 7px', why: 'a dot' },
   { file: 'lib/terminal/Terminal.svelte', match: '.sel-handle::after', why: 'the selection handle dot' },
+  { file: 'lib/ui/MediaRange.svelte', match: 'slider-thumb', why: 'the position bar\'s thumb, a dot on a native range (board #453)' },
+  { file: 'lib/ui/MediaRange.svelte', match: 'range-thumb', why: 'the same thumb, Firefox\'s pseudo-element' },
 ];
 
 test('no button is a circle or a capsule: full-round shapes are the listed non-buttons (board #218)', async () => {

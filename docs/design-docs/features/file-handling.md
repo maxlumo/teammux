@@ -466,8 +466,8 @@ owner:
 
 Guards: `Files.mount.test.ts` opens a 2 GB `demo.mp4` — one
 `fsDownloadHttp(path, { stream: true })`, no `fs_download`/`fs_read`, a
-`<video>` with that URL; `FilePreview.render.ts` pins `controls`,
-`playsinline`, `preload="metadata"`; `file-preview.test.ts` pins the
+`<video>` with that URL; `FilePreview.render.ts` pins `playsinline`,
+`preload="metadata"` (and, since #453, NO native `controls`); `file-preview.test.ts` pins the
 category and the gate bypass. Not verified here: actual playback on the
 owner's devices (the WebView's probe-and-decide, and codec support, are the
 browser's).
@@ -494,7 +494,7 @@ true for `video/*` and `audio/*` and nothing else, so a stream signature is
 still refused at mint and at `/dl` for every other extension, and the 403
 matrix of point 1 is unchanged. Guards: the `download.rs` and `fs.rs` unit
 rows (one per extension, and a test that both callers agree with the lookup), `file-preview.test.ts` (category, gate bypass),
-`FilePreview.render.ts` (`controls`, `preload="metadata"`), and
+`FilePreview.render.ts` (`preload="metadata"`, no native `controls` since #453), and
 `Files.mount.test.ts` (a 300 MB `demo.mp3`: one stream-signed call, no
 `fs_download`/`fs_read`; hiding the page pauses it, showing it never plays). **Hiding the page pauses the media** (video and audio share it): Files stays
 mounted and hidden on a tab or server switch, so without it a track would go
@@ -503,6 +503,101 @@ turns false the element is paused, nothing else changes (same element, same
 signed URL, same position), and showing the page again never plays. Leaving
 the preview removes the element, which pauses it. Not in scope: waveform, playlist, background
 playback, metadata or cover art. Device playback stays with the owner.
+
+### The preview plays through our own controls (board #453, 2026-10-22)
+
+Owner, 2026-10-22 21:18: "视频和音频的预览，你看能不能不要用最原始的这种播放器？看看有没有轻量、好用一点的加载播放器，能有比较好的拖动控制（尤其是在平板或手机上），缓存buffer，就是更现代一些的播放器".
+The engine stays the browser's `<video>`/`<audio>` — it decodes, buffers and
+fetches its own Range windows from the signed `/dl` stream above, which is
+byte-identical (minted once at open, never at play or seek). What changed is
+the controls layer: `files/MediaPlayer.svelte` over the element (no native
+`controls`), its rules in `files/media-player.ts`, the position bar the
+`ui/MediaRange` atom (design-language.md § atoms). Packaged players were
+measured and refused (gzip of the JS, 2026-10-22): Plyr 3.8.5 33.0 KB plus
+5 KB CSS and a CDN sprite by default; media-chrome 4.19.3 33.5 KB, styled
+through `::part`; Vidstack 1.15.7 124.9 KB — each a second visual species.
+An hls/dash engine is out of scope (the files are files, not manifests).
+
+- **Seeking.** Seekable span = the duration or `seekable`, never `buffered`
+  (a seek past the buffer is legal; the element fetches it); a time in a hole
+  between seekable ranges lands on the nearest seekable point (a tie goes
+  forward). A drag previews the time and commits ONE seek on release;
+  keyboard/AT commit on change. Each input is one transaction with an id,
+  bound to the player's gesture epoch (review round 4 P1-A): a cancel, a lost
+  pointer, a hide, a new source or focus leaving bumps it, and from then on
+  that finger's moves, change and release do nothing — not even on the next
+  file — until it is lifted. The PRESS is tracked apart from the transaction
+  (review round 5): a `pointercancel` or `lostpointercapture` ends the
+  transaction, not the press — the finger may still be down and Chromium
+  keeps dragging its native slider (rig: 16 real `input`s after a lost
+  capture, all dropped, the thumb back at the host value, no seek) — so its
+  inputs are never re-read as an AT adjust. Only that pointer's own release
+  (on the range, or on the window wherever it lands; a touch's last
+  `touchend`/`touchcancel`) or a new pointerdown ends the press; another
+  finger's pointerup does not; a released pointer's owed `change` is swallowed
+  only while no newer input came (so an AT adjust after a still press
+  commits: validator V1). One commit per gesture, not one Range
+  request per seek: how many requests a seek costs is the element's.
+- **Buffer.** The track paints `el.buffered` and the played part; no buffer
+  of our own. While `waiting` during playback, the played part dims.
+- **Gestures.** A tap on the picture shows or hides the bar (never plays); a
+  double tap in the left/right third seeks −10/+10 s within 250 ms. Nothing
+  in the bar reaches the picture or Files' edge swipe, and the bar takes no
+  horizontal pan (`touch-action: pan-y`): on the rig a sideways drag from
+  its Play button was Chrome's overscroll history back, which no handler
+  can stop. A single tap toggles from the bar's state at pointerdown, before
+  the tap's own focus move into the player shows it.
+- **Auto-hide** (video only): 3 s into playback; held while paused, waiting,
+  failed, dragging, a menu is open, the pointer is on the bar, or keyboard
+  focus (`:focus-visible`) is in the player. Hidden, the bar is `inert`.
+  A press on the bar restarts the 3 s. Hiding never drops focus to the page:
+  a bar control that holds (mouse) focus hands it to the player first, else
+  `inert` blurs it and the focusout re-showed the bar, hiding at ~6 s
+  instead (validator V2). Tab from the player into a hidden bar shows it
+  synchronously (`flushSync`) and lands on its first control; showing makes
+  `visibility` instant (only the fade plays), because a visibility
+  transition from hidden starts at hidden and Tab skipped the bar on the
+  rig (validator V3).
+- **Keys** act only when the player container itself has focus, never with
+  Ctrl/Meta/Alt or while composing: Space/k, ←/→ 5 s, m, f.
+- **Lifetime.** The player's gate is Files' own `imageActive` (the page is
+  seen AND its server scope is eligible — the gate the image viewer retires
+  on), handed down as `FilePreview`'s `visible` (review round 4 P1-B). Every
+  forward entry — play, seek (range, keys, double tap), mute, the modes, the
+  More menu and its choices, the picture's taps — asks it first, and the
+  seek paths share the range's limits (no window, or unplayable: nothing).
+  Every async request (play, fullscreen, PiP, retry) carries a per-kind
+  ticket (`Intents`); closing the gate, a new source or destroy ends the
+  life, which also closes the menu, drops the picture's pointerdown and the
+  range's transaction, and clears the timers. A late result re-asserts the
+  CURRENT intent — it never starts anything and never undoes a newer
+  request — and only modes THIS player holds are exited. Pause-on-hide stays
+  `FilePreview`'s one rule (above), on the same gate.
+- **Errors.** A media error is never shown as playing, whatever the
+  element's `paused` still reads (review round 4 P1-C): the one action is
+  Play. Codes 3/4 (decode, unsupported) disable it; a blocked autoplay, a
+  network error or an abort keep it, and for a network error that one click
+  is the retry, which re-opens the file through Files' own path (a fresh
+  stream signature) as one intent. `emptied` (a new load) forgets the old
+  source's error; a paused player never shows `waiting`.
+- **v1 scope.** Mute only, no volume range (the device has one). Speed in
+  "More". Fullscreen where the host gives it: NOT in the Android app (wry's
+  `onShowCustomView` cancels at once) or the macOS app (wry's `fullscreen`
+  feature is off) — board #454 for the owner; PiP wherever the API exists.
+  Under 520 px the range takes its own row and PiP/fullscreen fold into
+  "More"; when even that row has no room (347 px at uiZoom 1.2 on the rig
+  pushed More 30 px out of the bar), the time keeps its position and drops
+  "/ duration" (one line that wraps the second part away), never a control.
+- **Cost.** Whole-build delta against main 7b4705f0 (every JS/CSS asset,
+  gzip -9): +7.57 KB after review round 5 (+7.43 KB at round 4, +6.91 KB at hand-off one, which
+  the orchestrator accepted over the 6 KB yardstick, no lazy chunk); per
+  module compiled alone: MediaPlayer 4.64 KB, MediaRange 1.52 KB, the rules
+  0.83 KB, strings and icons 0.72 KB.
+
+Guards: `MediaPlayer.mount.test.ts` (the protocols above, including the
+R1-pending → hide → show → R2 interleaving), `MediaRange.mount.test.ts`,
+`media-player.test.ts`, `FilePreview.render.ts`, and the round-shape
+allowlist in `tokens.source.test.ts`.
 
 ### An HTML preview loads its relative resources through a signed directory cap (board #433, 2026-10-20)
 

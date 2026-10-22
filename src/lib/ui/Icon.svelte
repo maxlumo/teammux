@@ -152,6 +152,16 @@
     <path d="M13 7.7V9" stroke-width="1.8"/>
     <circle cx="12.2" cy="15.1" r="1.25" fill="currentColor" stroke="none"/>
     <circle cx="17.3" cy="15.1" r="1.25" fill="currentColor" stroke="none"/>
+  {:else if name === 'play'}
+    <path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z"/>
+  {:else if name === 'pause'}
+    <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+  {:else if name === 'volume'}
+    <path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+  {:else if name === 'volume-off'}
+    <path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>
+  {:else if name === 'pip'}
+    <rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="12" width="7" height="5" rx="1"/>
   {:else if name === 'maximize'}
     <path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
   {:else if name === 'minimize'}

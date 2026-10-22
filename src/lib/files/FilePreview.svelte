@@ -2,6 +2,7 @@
   import type { HLJSApi } from 'highlight.js';
   import { renderMarkdown } from '../core/markdown.ts';
   import { t } from '../core/i18n.svelte.ts';
+  import MediaPlayer from './MediaPlayer.svelte';
   import { basedPreviewDoc, highlightLine, mimeCategory, renderCsv, type PreviewFile, type PreviewScope } from './file-preview.ts';
 
   interface Props {
@@ -28,10 +29,13 @@
     onpreviewerror?: (message: string) => void;
     /** A change asks the HTML preview for a fresh base (the Refresh button). */
     renew?: number;
+    /** A fresh stream URL for the media on screen (board #453): Files' own
+     * open path, for the player's retry after a network error. */
+    reopenMedia?: (() => Promise<string>) | null;
   }
   let {
     currentFile, fontSize, wrapLines, hljs, onview = () => {}, visible = true,
-    previewBase = () => Promise.reject(new Error('no preview base')), onpreviewerror = () => {}, renew = 0,
+    previewBase = () => Promise.reject(new Error('no preview base')), onpreviewerror = () => {}, renew = 0, reopenMedia = null,
     showAllLines = $bindable(false),
     previewLinkClick, attachHtmlPreviewLinks,
     previewBodyEl = $bindable(null), previewEl = $bindable(null),
@@ -117,17 +121,15 @@
       </button>
     </div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'video'}
-    <!-- Board #182: the browser's own player streams ranges from the signed
+    <!-- Board #182: the browser's own element streams ranges from the signed
          /dl URL (206 + Accept-Ranges); preload=metadata costs the header, not
          the film; playsinline keeps the phone in the preview, not a forced
-         fullscreen player. -->
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <div class="image-preview"><video bind:this={mediaEl} controls playsinline preload="metadata" src={currentFile.mediaUrl}></video></div>
+         fullscreen player. Board #453: its controls are ours (MediaPlayer). -->
+    <div class="image-preview media-preview"><MediaPlayer kind="video" src={currentFile.mediaUrl ?? ''} name={currentFile.name} {visible} reopen={reopenMedia} bind:mediaEl /></div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'audio'}
-    <!-- Board #416: the same stream as the video above, into the browser's own
-         audio player; preload=metadata costs the header, not the track. -->
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <div class="image-preview"><audio bind:this={mediaEl} controls preload="metadata" src={currentFile.mediaUrl}></audio></div>
+    <!-- Board #416: the same stream as the video above, into an <audio>;
+         preload=metadata costs the header, not the track. -->
+    <div class="image-preview media-preview"><MediaPlayer kind="audio" src={currentFile.mediaUrl ?? ''} name={currentFile.name} {visible} reopen={reopenMedia} bind:mediaEl /></div>
   {:else if currentFile.convertedHtml}
     <div class="md-render">{@html currentFile.convertedHtml}</div>
   {:else}
@@ -191,8 +193,8 @@
   .image-preview {
     flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 12px;
   }
-  .image-preview img, .image-preview video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
-  .image-preview audio { width: 100%; }
+  .image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+  .media-preview { align-items: stretch; }
   .image-open { display: block; max-width: 100%; max-height: 100%; padding: 0; margin: 0; border: 0; background: none; cursor: zoom-in; touch-action: none; }
   .md-render { font-size: var(--file-font-size, 14px); line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
   .md-render :global(h1) { font-size: 1.55em; margin: 16px 0 8px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }

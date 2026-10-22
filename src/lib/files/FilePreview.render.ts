@@ -47,13 +47,19 @@ test('the extracted preview renders every existing branch and preserves the code
   // Board #182: a video is a <video> pointed at the signed stream URL — the
   // browser fetches ranges itself; no bytes pass through the RPC.
   const video = renderFile({ name: 'demo.mp4', stat: { mime_hint: 'video/mp4' }, mediaUrl: 'https://h/dl?path=%2Fdemo.mp4&exp=9&sig=s&stream=1' });
-  assert.match(video, /<video[^>]*\bcontrols\b[^>]*src="https:\/\/h\/dl\?path=%2Fdemo\.mp4&amp;exp=9&amp;sig=s&amp;stream=1"/u);
+  assert.match(video, /<video[^>]*src="https:\/\/h\/dl\?path=%2Fdemo\.mp4&amp;exp=9&amp;sig=s&amp;stream=1"/u);
+  // Board #453: the controls are ours, so the element has none of its own.
+  assert.doesNotMatch(video, /<video[^>]*\bcontrols\b/u, 'no native controls');
+  assert.match(video, /role="toolbar"/u);
+  for (const label of ['Play', 'Mute', 'More', 'Position']) assert.match(video, new RegExp(`aria-label="${label}"`, 'u'), label);
+  assert.match(video, /<input type="range"[^>]*aria-valuetext="--:-- of --:--"/u, 'the position says its value before metadata');
   assert.match(video, /<video[^>]*\bplaysinline\b/u, 'the phone plays in place, not in a forced fullscreen player');
   assert.match(video, /<video[^>]*preload="metadata"/u, 'opening a preview costs the header, not the film');
   assert.ok(!video.includes('<img'));
   // Board #416: a sound is an <audio> on the same signed stream URL, header only until played.
   const audio = renderFile({ name: 'song.mp3', stat: { mime_hint: 'audio/mpeg' }, mediaUrl: 'https://h/dl?path=%2Fsong.mp3&exp=9&sig=s&stream=1' });
-  assert.match(audio, /<audio[^>]*\bcontrols\b[^>]*src="https:\/\/h\/dl\?path=%2Fsong\.mp3&amp;exp=9&amp;sig=s&amp;stream=1"/u);
+  assert.match(audio, /<audio[^>]*src="https:\/\/h\/dl\?path=%2Fsong\.mp3&amp;exp=9&amp;sig=s&amp;stream=1"/u);
+  assert.doesNotMatch(audio, /<audio[^>]*\bcontrols\b/u, 'no native controls');
   assert.match(audio, /<audio[^>]*preload="metadata"/u, 'opening a preview costs the header, not the track');
   assert.ok(!audio.includes('<video') && !audio.includes('<img'));
 
