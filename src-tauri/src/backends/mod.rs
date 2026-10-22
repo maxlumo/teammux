@@ -634,6 +634,16 @@ impl Backend {
         }
     }
 
+    /// Whether a SAVED launch line may be replayed (board #448 P1-B): a line
+    /// an older build wrote with a definition's MCP values on it is never
+    /// typed again. Only codex ever carried them (`-c mcp_servers.…`).
+    pub fn line_is_private(self, cmd: &str) -> bool {
+        match self {
+            Backend::Codex => codex::line_is_private(cmd),
+            _ => true,
+        }
+    }
+
     /// Whether `id` is an exact conversation id for this backend's strict
     /// resume — the shared rule, plus the backend's own reserved selectors.
     pub fn exact_id_ok(self, id: &str) -> bool {
@@ -665,7 +675,7 @@ impl Backend {
         window_name: &str,
         workspace: &std::path::Path,
         notifications: &crate::agent_notifications::AgentNotificationHub,
-    ) -> bool {
+    ) -> Result<bool, String> {
         match self {
             Backend::Kiro => kiro::refresh(home, window_name, workspace, &notifications.helper_command("kiro")),
             Backend::Claude => claude::refresh(home, workspace, &notifications.helper_command("claude")),

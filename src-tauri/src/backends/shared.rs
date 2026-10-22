@@ -106,77 +106,79 @@ pub(crate) fn claude_mcp_value(m: &McpDef) -> Value {
     }
 }
 
-fn codex_key_segment(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-    {
-        value.to_string()
-    } else {
-        serde_json::to_string(value).unwrap()
-    }
-}
-
 pub(crate) fn codex_config_override(key: &str, value: Value) -> String {
     let assignment = format!("{}={}", key, serde_json::to_string(&value).unwrap());
     format!("-c {}", crate::shell::quote(&assignment))
 }
 
-/// Codex CLI overrides for one extra MCP server. The system config.toml stays
-/// intact; agent-specific MCP settings are layered at launch.
-pub(crate) fn codex_mcp_overrides(m: &McpDef) -> Vec<String> {
-    let name = codex_key_segment(&m.name);
-    let prefix = format!("mcp_servers.{}", name);
-    let mut args = Vec::new();
-    if let Some(url) = &m.url {
-        args.push(codex_config_override(&format!("{}.url", prefix), Value::String(url.clone())));
-        args.push(codex_config_override(&format!("{}.enabled", prefix), Value::Bool(true)));
-        args.push(codex_config_override(
-            &format!("{}.experimental_use_rmcp_client", prefix),
-            Value::Bool(true),
-        ));
-        for (key, value) in &m.headers {
-            match header_env_reference(value) {
-                Some((name, true)) if key.eq_ignore_ascii_case("authorization") => {
-                    args.push(codex_config_override(
-                        &format!("{}.bearer_token_env_var", prefix),
-                        Value::String(name.to_string()),
-                    ));
-                }
-                Some((name, false)) => {
-                    args.push(codex_config_override(
-                        &format!("{}.env_http_headers.{}", prefix, codex_key_segment(key)),
-                        Value::String(name.to_string()),
-                    ));
-                }
-                _ => {
-                    args.push(codex_config_override(
-                        &format!("{}.http_headers.{}", prefix, codex_key_segment(key)),
-                        Value::String(value.clone()),
-                    ));
+/// The managed codex profile's name (board #448): `--profile tmm-agent`
+/// layers `<CODEX_HOME>/tmm-agent.config.toml` over the user's config.toml
+/// (codex docs, Advanced Configuration § profiles, 0.134.0 and later).
+pub(crate) const CODEX_PROFILE: &str = "tmm-agent";
+
+/// The file `CODEX_PROFILE` names in a codex home. Ours only: the user's
+/// `*.config.toml` inheritance skips it.
+pub(crate) fn codex_profile_file() -> String {
+    format!("{CODEX_PROFILE}.config.toml")
+}
+
+/// The definition's MCP servers as the managed codex profile (board #448):
+/// a structural TOML document of `[mcp_servers.<name>]` tables, written
+/// privately into the home, so no env or header VALUE ever rides the launch
+/// line. The semantics of the old `-c` form are kept per field: stdio
+/// `command`, `args` and `env` (a literal table); http `url`, `enabled`,
+/// `experimental_use_rmcp_client`, an `Authorization: Bearer $VAR` header as
+/// `bearer_token_env_var`, a `$VAR` header as `env_http_headers`, a literal
+/// header as `http_headers`. Always a whole document: no server leaves only
+/// the header comment, so a revoked server or secret never survives.
+pub(crate) fn codex_mcp_profile(defs: &[McpDef]) -> String {
+    use toml::Value as T;
+    let mut servers = toml::map::Map::new();
+    for m in defs.iter().filter(|m| !m.name.is_empty()) {
+        let mut t = toml::map::Map::new();
+        if let Some(url) = &m.url {
+            t.insert("url".into(), T::String(url.clone()));
+            t.insert("enabled".into(), T::Boolean(true));
+            t.insert("experimental_use_rmcp_client".into(), T::Boolean(true));
+            let (mut env_headers, mut headers) = (toml::map::Map::new(), toml::map::Map::new());
+            for (key, value) in &m.headers {
+                match header_env_reference(value) {
+                    Some((name, true)) if key.eq_ignore_ascii_case("authorization") => {
+                        t.insert("bearer_token_env_var".into(), T::String(name.to_string()));
+                    }
+                    Some((name, false)) => {
+                        env_headers.insert(key.clone(), T::String(name.to_string()));
+                    }
+                    _ => {
+                        headers.insert(key.clone(), T::String(value.clone()));
+                    }
                 }
             }
+            if !env_headers.is_empty() {
+                t.insert("env_http_headers".into(), T::Table(env_headers));
+            }
+            if !headers.is_empty() {
+                t.insert("http_headers".into(), T::Table(headers));
+            }
+        } else if let Some(cmd) = &m.command {
+            t.insert("command".into(), T::String(cmd.clone()));
+            if !m.args.is_empty() {
+                t.insert("args".into(), T::Array(m.args.iter().map(|a| T::String(a.clone())).collect()));
+            }
+            if !m.env.is_empty() {
+                t.insert("env".into(), T::Table(m.env.iter().map(|(k, v)| (k.clone(), T::String(v.clone()))).collect()));
+            }
+        } else {
+            continue;
         }
-    } else if let Some(cmd) = &m.command {
-        args.push(codex_config_override(
-            &format!("{}.command", prefix),
-            Value::String(cmd.clone()),
-        ));
-        if !m.args.is_empty() {
-            args.push(codex_config_override(
-                &format!("{}.args", prefix),
-                serde_json::to_value(&m.args).unwrap(),
-            ));
-        }
-        for (key, value) in &m.env {
-            args.push(codex_config_override(
-                &format!("{}.env.{}", prefix, codex_key_segment(key)),
-                Value::String(value.clone()),
-            ));
-        }
+        servers.insert(m.name.clone(), T::Table(t));
     }
-    args
+    let mut doc = toml::map::Map::new();
+    if !servers.is_empty() {
+        doc.insert("mcp_servers".into(), T::Table(servers));
+    }
+    let body = toml::to_string(&T::Table(doc)).unwrap_or_default();
+    format!("# tmux-mobile managed codex profile (regenerated on every launch; board #448)\n{body}")
 }
 
 /// Keep the managed home's runtime state isolated while sharing the system
@@ -188,31 +190,53 @@ pub(crate) fn inherit_codex_system_files(home: &Path) -> Result<(), String> {
     inherit_codex_system_files_from(home, &super::codex::codex_user_home())
 }
 
-/// Replace `path` WHOLE: the text goes to a sibling temp file that is renamed
-/// over it, so a reader (a process starting while this runs) sees all of the
-/// old file or all of the new, never a truncated or half-written one. For the
-/// owned files a running agent may read at any moment (board #411: dsh reads
-/// its profile at the start of every turn).
+/// Replace `path` WHOLE and PRIVATELY (board #448): a reader sees all of the
+/// old file or all of the new (board #411: dsh reads its profile at the start
+/// of every turn), and on Unix the file is published by
+/// `safe_fs::write_private` — its directory held and 0700, the file 0600
+/// from its first byte, a symlink or another user's file at the target an
+/// error. Every file a render writes into an agent home goes through here,
+/// because any of them may carry a definition's MCP env or header value.
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.tmp-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-    std::fs::write(&tmp, text)
-        .and_then(|_| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("{}: {e}", path.display())
-        })
+    #[cfg(unix)]
+    return crate::safe_fs::write_private(path, text);
+    #[cfg(not(unix))]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let tmp = path.with_file_name(format!(".{name}.tmp-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::write(&tmp, text)
+            .and_then(|_| std::fs::rename(&tmp, path))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("{}: {e}", path.display())
+            })
+    }
 }
 
-/// A config file the render OWNS: `Some` writes it, `None` removes it. A home
-/// is re-rendered on every spawn, so "nothing to declare" must leave nothing
-/// behind; skipping the write kept the previous render's file, and the CLI
-/// kept loading a revoked MCP server or an unpinned model (#241, validator).
+/// Copy a user file into an agent home PRIVATELY (board #448): read, then
+/// published like every other home file. `std::fs::copy` kept the source's
+/// mode and followed a link at the destination.
+pub(crate) fn copy_private(from: &Path, to: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    #[cfg(unix)]
+    return crate::safe_fs::write_private_bytes(to, &bytes);
+    #[cfg(not(unix))]
+    return std::fs::write(to, bytes).map_err(|e| format!("{}: {e}", to.display()));
+}
+
+/// A config file the render OWNS: `Some` writes it (`write_atomic`, private),
+/// `None` removes it. A home is re-rendered on every spawn, so "nothing to
+/// declare" must leave nothing behind; skipping the write kept the previous
+/// render's file, and the CLI kept loading a revoked MCP server or an
+/// unpinned model (#241, validator).
 pub(crate) fn write_owned(path: &Path, content: Option<&str>) -> Result<(), String> {
     match content {
-        Some(text) => std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display())),
+        Some(text) => write_atomic(path, text),
+        #[cfg(unix)]
+        None => crate::safe_fs::remove_private(path),
+        #[cfg(not(unix))]
         None => match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
             _ => Ok(()),
@@ -220,66 +244,53 @@ pub(crate) fn write_owned(path: &Path, content: Option<&str>) -> Result<(), Stri
     }
 }
 
-fn link_codex_system_file(
-    home: &Path,
-    system_home: &Path,
-    filename: &str,
-    replace_team_owned: bool,
-) -> Result<(), String> {
+/// One link of the user's codex file `filename` into the held home
+/// directory (board #448: every step relative to the one `Dir` walked from
+/// the project entry, never by pathname, so a link inside the home cannot
+/// redirect the change to an outside directory). `replace_team_owned`: a
+/// file or link of ours by that name may be replaced; otherwise an
+/// existing entry is refused.
+#[cfg(unix)]
+fn link_codex_system_file(home: &crate::safe_fs::Dir, system_home: &Path, filename: &str, replace_team_owned: bool) -> Result<(), String> {
+    use crate::safe_fs::{euid, is_file};
+    let entry = |st: &libc::stat| st.st_mode & libc::S_IFMT == libc::S_IFLNK || is_file(st);
+    let existing = home.stat_at(filename).map_err(|e| format!("{filename}: {e}"))?;
     let source = system_home.join(filename);
     if !source.is_file() {
         if replace_team_owned {
-            let target = home.join(filename);
-            match std::fs::symlink_metadata(&target) {
-                Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-                    std::fs::remove_file(target).map_err(|e| e.to_string())?;
-                }
-                Ok(_) => return Err(format!("refusing to replace Codex path: {}", target.display())),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
+            match existing {
+                Some(st) if entry(&st) && st.st_uid == euid() => home.unlink(filename).map_err(|e| format!("{filename}: {e}"))?,
+                Some(_) => return Err(format!("refusing to replace Codex path: {filename}")),
+                None => {}
             }
         }
         return Ok(());
     }
     let source = std::fs::canonicalize(source).map_err(|e| e.to_string())?;
-
-    std::fs::create_dir_all(home).map_err(|e| e.to_string())?;
-    let target = home.join(filename);
-    match std::fs::symlink_metadata(&target) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink()
-                && std::fs::read_link(&target).is_ok_and(|path| path == source)
-            {
-                return Ok(());
-            }
-            if replace_team_owned && (metadata.file_type().is_file() || metadata.file_type().is_symlink()) {
-                std::fs::remove_file(&target).map_err(|e| e.to_string())?;
-            } else {
-                return Err(format!(
-                    "refusing to replace existing Codex path: {}",
-                    target.display()
-                ));
-            }
+    if let Some(st) = existing {
+        if st.st_mode & libc::S_IFMT == libc::S_IFLNK && home.read_link(filename).is_ok_and(|p| p == source) {
+            return Ok(());
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
+        if replace_team_owned && entry(&st) && st.st_uid == euid() {
+            home.unlink(filename).map_err(|e| format!("{filename}: {e}"))?;
+        } else {
+            return Err(format!("refusing to replace existing Codex path: {filename}"));
+        }
     }
-
-    symlink_file(&source, &target).map_err(|e| {
-        format!(
-            "failed to inherit Codex system file from {}: {}",
-            source.display(),
-            e
-        )
-    })
+    home.symlink(&source, filename)
+        .map_err(|e| format!("failed to inherit Codex system file from {}: {e}", source.display()))
 }
 
+#[cfg(unix)]
 fn inherit_codex_system_files_from(home: &Path, system_home: &Path) -> Result<(), String> {
+    // The codex home, held through the private walk from the project entry
+    // BEFORE anything in it changes (board #448 P1-A residual).
+    let dir = crate::safe_fs::private_subdir(home).map_err(|e| format!("{}: {e}", home.display()))?;
     // config.toml in the private home was generated by us before MCP settings
     // moved to CLI overrides, so it is the one path we may replace.
-    link_codex_system_file(home, system_home, "config.toml", true)?;
-    link_codex_system_file(home, system_home, ".env", false)?;
-    link_codex_system_file(home, system_home, "auth.json", false)?;
+    link_codex_system_file(&dir, system_home, "config.toml", true)?;
+    link_codex_system_file(&dir, system_home, ".env", false)?;
+    link_codex_system_file(&dir, system_home, "auth.json", false)?;
     // Profile layers (`codex --profile <name>` reads `<name>.config.toml`).
     // A machine whose codex auth lives in a profile (e.g. a Bedrock provider
     // with the bearer token in .env, no ChatGPT login) needs these in the
@@ -288,17 +299,34 @@ fn inherit_codex_system_files_from(home: &Path, system_home: &Path) -> Result<()
         for entry in entries.flatten() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.ends_with(".config.toml") && entry.path().is_file() {
-                link_codex_system_file(home, system_home, &name, true)?;
+            // The managed profile (board #448) is never a user's: a user
+            // file of the same name stays where it is, unread.
+            if name.ends_with(".config.toml") && name != codex_profile_file() && entry.path().is_file() {
+                link_codex_system_file(&dir, system_home, &name, true)?;
             }
         }
+    }
+    // A LINK by that name, made by an older inheritance, is removed itself
+    // (never followed); its target, the user's file, is untouched. A regular
+    // file there is ours and the render replaces it.
+    let ours = codex_profile_file();
+    if dir.stat_at(&ours).map_err(|e| format!("{ours}: {e}"))?.is_some_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFLNK) {
+        dir.unlink(&ours).map_err(|e| format!("{ours}: {e}"))?;
     }
     Ok(())
 }
 
-#[cfg(unix)]
-fn symlink_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, target)
+#[cfg(not(unix))]
+fn inherit_codex_system_files_from(home: &Path, system_home: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(home).map_err(|e| e.to_string())?;
+    for name in ["config.toml", ".env", "auth.json"] {
+        let source = system_home.join(name);
+        let target = home.join(name);
+        if source.is_file() && std::fs::symlink_metadata(&target).is_err() {
+            symlink_file(&std::fs::canonicalize(source).map_err(|e| e.to_string())?, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -391,8 +419,9 @@ pub(crate) fn exact_id_ok(id: &str) -> bool {
 /// sourcing it keeps the typed line ~60 bytes regardless of prompt size.
 pub(crate) fn write_launch_script(home: &std::path::Path, name: &str, full_cmd: &str) -> Result<std::path::PathBuf, String> {
     let path = home.join(format!("launch-{}.sh", name));
-    std::fs::write(&path, format!("# tmux-mobile team launcher (regenerated on every launch)\n{}\n", full_cmd))
-        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    // The line carries the launch env; written privately (board #448).
+    write_atomic(&path, &format!("# tmux-mobile team launcher (regenerated on every launch)\n{}\n", full_cmd))
+        .map_err(|e| format!("write {e}"))?;
     Ok(path)
 }
 
@@ -661,6 +690,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Board #448 P1-A residual, the full render: the codex home of a managed
+    /// agent is a link to an outside directory of the same user. The render
+    /// is refused BEFORE the inheritance changes anything there: the
+    /// outside config.toml and a file named like the managed profile are
+    /// neither replaced, deleted nor chmodded.
+    #[test]
+    #[cfg(unix)]
+    fn a_linked_codex_home_is_refused_before_the_inheritance_touches_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("teamtest-codex-linked-{}", uuid::Uuid::new_v4()));
+        let user = super::super::codex::codex_user_home();
+        std::fs::create_dir_all(&user).unwrap();
+        let user_cfg = user.join("config.toml");
+        let had = user_cfg.exists();
+        if !had { std::fs::write(&user_cfg, "model = \"user\"").unwrap(); }
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        for (name, body) in [("config.toml", "outside config"), ("tmm-agent.config.toml", "outside profile")] {
+            std::fs::write(outside.join(name), body).unwrap();
+            std::fs::set_permissions(outside.join(name), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let home = root.join("ws/.tmm/agents/cx");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("codex")).unwrap();
+        let def = crate::projects::store::RegAgent { name: "cx".into(), backend: "codex".into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), system: "x".into(), skills: "[]".into(), mcp: "[]".into() };
+        let r = super::super::codex::render_codex(&def, "cx", &home, &root.join("ws"), "prompt", &[]);
+        if !had { std::fs::remove_file(&user_cfg).ok(); }
+        assert!(r.is_err(), "refused");
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        for (name, body) in [("config.toml", "outside config"), ("tmm-agent.config.toml", "outside profile")] {
+            let p = outside.join(name);
+            assert!(std::fs::symlink_metadata(&p).unwrap().is_file(), "{name} is still a regular file, not a link");
+            assert_eq!((std::fs::read_to_string(&p).unwrap().as_str(), mode(&p)), (body, 0o644), "{name} untouched");
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 2, "nothing added outside");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_owned_file_is_removed_only_when_it_is_a_regular_file_of_ours() {
+        // Board #448: `write_owned(None)` removes through the held directory;
+        // a link by that name is an error and its target stays.
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("teamtest-owned-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let target = root.join("user.json");
+        std::fs::write(&target, "the user's").unwrap();
+        std::os::unix::fs::symlink(&target, home.join("mcp.json")).unwrap();
+        assert!(write_owned(&home.join("mcp.json"), None).is_err());
+        assert!(std::fs::symlink_metadata(home.join("mcp.json")).unwrap().file_type().is_symlink(), "the link is left");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "the user's");
+        std::fs::remove_file(home.join("mcp.json")).unwrap();
+        write_owned(&home.join("mcp.json"), Some("{}")).unwrap();
+        assert_eq!(std::fs::metadata(home.join("mcp.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        write_owned(&home.join("mcp.json"), None).unwrap();
+        assert!(!home.join("mcp.json").exists(), "a regular file of ours is removed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_managed_codex_profile_is_never_a_users_and_is_rewritten_whole() {
+        // Board #448 P1-C: a user profile named like ours stays as it is
+        // (content and mode), a stale LINK to it is removed itself, and our
+        // profile is a private file rewritten whole on every render.
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("teamtest-codex-profile-{}", uuid::Uuid::new_v4()));
+        let (system_home, agent_home) = (root.join("system"), root.join("agent"));
+        std::fs::create_dir_all(&system_home).unwrap();
+        std::fs::create_dir_all(&agent_home).unwrap();
+        let user = system_home.join(codex_profile_file());
+        std::fs::write(&user, "model = \"the user's own\"").unwrap();
+        std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // An older inheritance linked it into the home.
+        std::os::unix::fs::symlink(&user, agent_home.join(codex_profile_file())).unwrap();
+        inherit_codex_system_files_from(&agent_home, &system_home).unwrap();
+        let ours = agent_home.join(codex_profile_file());
+        assert!(std::fs::symlink_metadata(&ours).is_err(), "the stale link is gone and nothing was linked in its place");
+        let server = |name: &str| McpDef { name: name.into(), command: Some("mcp".into()), env: [("K".to_string(), format!("SENTINEL-{name}"))].into(), ..Default::default() };
+        write_atomic(&ours, &codex_mcp_profile(&[server("a"), server("b")])).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&ours), 0o600);
+        // A second inheritance (every launch) keeps our regular file.
+        inherit_codex_system_files_from(&agent_home, &system_home).unwrap();
+        assert!(std::fs::read_to_string(&ours).unwrap().contains("SENTINEL-a"));
+        // Revocation: the next render writes the whole profile without it.
+        write_atomic(&ours, &codex_mcp_profile(&[server("b")])).unwrap();
+        let text = std::fs::read_to_string(&ours).unwrap();
+        assert!(!text.contains("SENTINEL-a") && !text.contains("[mcp_servers.a]") && text.contains("SENTINEL-b"), "{text}");
+        assert_eq!((std::fs::read_to_string(&user).unwrap().as_str(), mode(&user)), ("model = \"the user's own\"", 0o644), "the user's file is untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn mcp_value_remote_and_local_per_backend() {
         let remote = McpDef {
@@ -689,20 +813,28 @@ mod tests {
         );
         assert_eq!(kiro_mcp_value(&remote)["headers"]["X-Static"], "literal");
 
-        let remote_overrides = codex_mcp_overrides(&remote).join(" ");
-        assert!(remote_overrides.contains("mcp_servers.gh.bearer_token_env_var"));
-        assert!(remote_overrides.contains("API_TOKEN"));
-        assert!(remote_overrides.contains("mcp_servers.gh.env_http_headers.X-Features"));
-        assert!(remote_overrides.contains("FEATURES"));
-        assert!(remote_overrides.contains("mcp_servers.gh.http_headers.X-Static"));
-        assert!(!remote_overrides.contains("Bearer $API_TOKEN"));
-
-        let local = McpDef { name: "pg".into(), command: Some("mcp-pg".into()), args: vec!["--stdio".into()], ..Default::default() };
-        let overrides = codex_mcp_overrides(&local).join(" ");
-        assert!(overrides.contains("mcp_servers.pg.command"));
-        assert!(overrides.contains("mcp-pg"));
-        assert!(overrides.contains("mcp_servers.pg.args"));
-        assert!(overrides.contains("--stdio"));
+        // codex (board #448): the same semantics, as a structural profile file.
+        let local = McpDef {
+            name: "pg".into(), command: Some("mcp-pg".into()), args: vec!["--stdio".into()],
+            env: [("API_KEY".to_string(), "SENTINEL-env".to_string())].into(), ..Default::default()
+        };
+        let mut lit = remote.clone();
+        lit.name = "lit".into();
+        lit.headers = [("Authorization".to_string(), "Bearer SENTINEL-literal".to_string())].into();
+        let doc: toml::Table = codex_mcp_profile(&[remote.clone(), local, lit]).parse().unwrap();
+        let gh = &doc["mcp_servers"]["gh"];
+        assert_eq!(gh["url"].as_str(), Some("https://x/mcp"));
+        assert_eq!(gh["bearer_token_env_var"].as_str(), Some("API_TOKEN"), "Bearer $VAR is a name");
+        assert_eq!(gh["env_http_headers"]["X-Features"].as_str(), Some("FEATURES"), "$VAR is a name");
+        assert_eq!(gh["http_headers"]["X-Static"].as_str(), Some("literal"));
+        assert!(gh.get("http_headers").and_then(|h| h.get("Authorization")).is_none());
+        let pg = &doc["mcp_servers"]["pg"];
+        assert_eq!((pg["command"].as_str(), pg["args"][0].as_str()), (Some("mcp-pg"), Some("--stdio")));
+        assert_eq!(pg["env"]["API_KEY"].as_str(), Some("SENTINEL-env"), "a stdio env value is a literal table entry");
+        assert_eq!(doc["mcp_servers"]["lit"]["http_headers"]["Authorization"].as_str(), Some("Bearer SENTINEL-literal"), "a literal Authorization stays a literal header");
+        // No server: only the header comment, so a revoked server leaves nothing.
+        let empty = codex_mcp_profile(&[]);
+        assert!(empty.starts_with('#') && empty.parse::<toml::Table>().unwrap().is_empty(), "{empty}");
     }
 
 }

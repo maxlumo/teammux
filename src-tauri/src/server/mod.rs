@@ -301,6 +301,9 @@ pub async fn start_with_socket_ready(
         tokio::spawn(crate::projects::recovery::drift_loop());
         // Pull any pre-#107 chat history out of the legacy team.db, exactly
         // once. Blocking SQLite work, so it runs before the listener loop.
+        // Close what older builds left readable by other users (board #448).
+        #[cfg(unix)]
+        crate::projects::tighten_existing();
         crate::projects::rooms::import_legacy();
         // Inject the room poster so hook-sourced stop events can auto-post
         // managed agents' final replies into the project chat room. The hub's

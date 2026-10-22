@@ -132,6 +132,59 @@ the supervised server can have a service-only PATH even when the user's CLIs are
 
 **Managed Claude trust is per explicit workspace, never global**: `ensure_claude_state` merges Claude's documented `projects[repo_root].hasTrustDialogAccepted=true` into the isolated `.claude.json` before launch/restart, preserving all other state and mode 0600; the Down→Enter prompt confirmer is fallback only. On this host Bedrock has no built-in WebSearch, so local Claude defaults carry pinned `kiro-web-search==0.1.3` native MCP; its `KIRO_API_KEY` remains private local config/state and never enters the repo.
 
+### A definition's secrets are files only the owner can read (board #448, 2026-10-22)
+
+An MCP server's env values and literal headers are secrets, and they reached other local users four ways. kiro found it during #446: the reviewer's codex launch line carried an API key as `-c mcp_servers.<name>.env.<KEY>=…`, readable by anyone through `ps`. The same line sat in `launch.json` and the launch script (0644), the backends' MCP files were 0644, one agent home was 0755, and `state.db`, which holds the definitions, was 0644 in a 0755 directory. The rule now: a value never rides a launch line, and every copy is a file only our uid can read. Unix only: modes, `O_EXCL` and uid checks; no Windows ACL is claimed.
+
+**codex's MCP servers are a profile file.** `render_codex` writes them into `<CODEX_HOME>/tmm-agent.config.toml` and launches with `--profile tmm-agent`. codex layers that file over the user's config.toml, below trusted project config and below `-c` (codex docs, Advanced Configuration § profiles, 0.134.0 and later).
+- The file is built as structural TOML (`shared::codex_mcp_profile`) and keeps each field's meaning. Stdio: `command`, `args`, `env`. HTTP: `url`, `enabled`, `experimental_use_rmcp_client`. A `Bearer $VAR` Authorization header becomes `bearer_token_env_var`, a `$VAR` header becomes `env_http_headers`, and a literal header becomes `http_headers`.
+- It is rewritten whole on every render, so a revoked server leaves nothing.
+- The user's `*.config.toml` inheritance skips this one name. A link by that name, left by an older inheritance, is removed itself; its target is never touched. The whole inheritance (linking config.toml, `.env`, `auth.json` and the user's profiles, and that removal) acts on the codex home HELD through the private walk (`safe_fs::private_subdir`: `symlinkat`/`unlinkat`/`readlinkat` on that one `Dir`), so a codex home that is a link to an outside directory is refused before anything there changes (reviewer residual on d2c24e38).
+- Measured on codex-cli 0.162.1: a profile's stdio env reached the server on a fresh launch and on `resume --last`, and no process's cmdline carried it.
+- The other codex answers stay on the line (`-c`), because they must win over a project config.
+
+**Limit: a trusted project decides where those credentials go.** Measured on 0.162.1, with a profile `[mcp_servers.fake]` (command A, a sentinel env):
+- A trusted `.codex/config.toml` that sets only `command = B` for the SAME name: B started and received the profile's env, because the tables merge per key.
+- A server under a DIFFERENT name: A kept the sentinel, and the other server got only its own env.
+
+A project its owner trusts is above our profile by codex's design, and this is that trust boundary, accepted.
+
+**Every file a render writes is published privately** (`safe_fs::write_private`, behind `shared::write_atomic`/`write_owned`):
+- The directory is reached from the ENTRY only (reviewer P1-A on 151b36eb). The prefix before the path's `.tmm` component, the project root, is opened from its canonical path, so a legitimate HOME alias is resolved there and only there. Then `.tmm` (ours, mode kept) and every component below it is opened one handle after the other with `O_DIRECTORY|O_NOFOLLOW`, verified to be ours, and made 0700 with `fchmod` on that handle. A link anywhere inside a home, even one to another directory of ours, is refused. A path with no `.tmm` component is refused in production; only a test's scratch directory is walked from its canonical parent. A directory we only pass through (`.tmm`, kept 0755) loses group and other write if it had them, and `publish` refuses any held directory still writable by another user or not ours: a handle protects the directory object, not the names inside a directory others can write.
+- A temp file is created with `O_CREAT|O_EXCL` and made exactly 0600 by `fchmod` before the first byte, whatever the umask. It is written and fsynced.
+- The target is checked with `fstatat` and no link is followed. Absent, or a regular file of ours, means it is replaced by `renameat`, and the directory is fsynced. A link, anything else, or another user's file is an ERROR and is left as it is.
+
+Every step acts on the one held directory (the `safe_fs::Dir` walk, which #433's scope download also uses). So a directory whose NAME is swapped keeps receiving the write, and nothing goes through the new name. A user file copied into a home (grok's `auth.json`, omp's `agent.db` and `models.yml`) is read and published the same way (`shared::copy_private`); `std::fs::copy` kept the source's mode and followed a link at the destination. A source PIN, not a proof, keeps `std::fs::write`, `fs::copy`, `File::create` and `OpenOptions::new` out of `backends/`, `spawn.rs`, `live_config.rs` and `recipe.rs`. The recipe door's one write is this publication.
+
+**A start whose privacy fails is refused** (reviewer P1-B on 151b36eb and its residual). The start does not go ahead when `refresh_hooks` cannot make the home private, when any backend's refresh write (`Backend::refresh` returns `Result`: hooks, profiles, settings, recipe migrations and backfills) or a copy into the home is refused, or when `refresh_agent` cannot re-materialize. "Nothing to refresh" (no file, not parseable, no optional source) stays `Ok(false)`; only a failed write is an error. The error is the answer, and neither the old recipe nor the respawn fallback runs (`resume_slot` answers `refused`; `reconcile::create_or_keep` refuses before a window exists). The replay door itself (`spawn::recipe_parts`, behind both relaunch forms) also refuses a saved line that may not be replayed: an older build's codex line carrying `-c mcp_servers.…` values (`Backend::line_is_private`). Staging a managed agent's relaunch script privately is required too; the line is never typed directly instead.
+
+**The workspace's own MCP file is private** (P1-C). `<project>/.tmm/mcp.json`, which `seed_mcp_config` keeps for `tmm mcp` and which holds the same values, is published privately when it changes and closed in place (mode only, its content and merge rules untouched) on the no-change path and at startup.
+
+**A managed home is private.** At materialize and on every `refresh_hooks`, `safe_fs::private_home` walks `<root>/.tmm/agents/<name>` from the canonical project root: `.tmm` must be ours, and `agents` and the home are set to 0700. No link is followed.
+
+**The store is private before SQLite opens it, or refused** (`safe_fs::private_db`, run in `Store::open`):
+- Only the parent prefix is canonicalized, so a HOME alias resolves. The file name is never resolved.
+- The app's own config directory is made 0700. A custom `TMM_STATE_DB` directory is only checked, never chmodded. The direct parent must be ours and not group- or other-writable. Every ancestor must be owned by root or by us, AND either not writable or sticky. Sticky relaxes only the write bit under a trusted owner, so a 1777 directory of another uid is refused. Otherwise the store is refused with "choose a private directory". SQLite opens by pathname and makes its sidecars by pathname, so the whole chain must be one no other user can change.
+- Through the parent's handle, a new database is created empty at 0600 with `O_EXCL` before SQLite's first write. An existing one, and each `-wal`/`-shm`/`-journal`, is set to 0600 with `fchmod`. A link is refused untouched.
+- SQLite opens the verified canonical parent plus the file name. Measured with the bundled SQLite under umask 022: WAL and SHM take the main file's mode, also when re-created after a checkpoint and a reopen.
+
+**Old copies close at startup** (`projects::tighten_existing`, every server start, before the legacy import):
+- The legacy team.db and its siblings are closed in place under the store's trust rule (P1-D): in a directory others can change it is NOT tightened and left as it is. Every existing file and sidecar, the store's included, is opened `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and verified on that fd (a regular file of ours) before `fchmod`, so a name swapped between the check and the open, or a FIFO, is refused without blocking. It is never reopened once imported.
+- Each project's `.tmm/mcp.json`.
+- Every managed home of every stored project is walked private, including a LIVE one, which `reconcile::create_or_keep` keeps without `refresh_hooks`.
+- A failure, and anything that cannot be audited (the project list, a `.tmm/agents` listing or entry, a home whose marker cannot be read, a parent whose `stat` fails), is logged as "NOT tightened — needs the owner: <path> (<why>)". Only NotFound is absent; an orphan `-wal`/`-shm`/`-journal` is closed even when its main file is gone. The exposure is not called closed.
+
+What permissions do not do: a running process keeps the argv it was started with until it is restarted, and nothing here replaces rotating a key that was exposed.
+
+Pinned by:
+- `safe_fs::tests`: the umask cases, a wide old file, a planted temp, a link at the target or the directory, a directory swapped after it was opened, a failure before the rename, the project-root walk.
+- `safe_fs::db_tests`: the trust table, a new store and its re-created sidecars, an old store and WAL, a shared or changeable parent, a linked store or WAL through `Store::open`, an alias parent, team.db.
+- `managed::tighten_tests` (a wide live home closed at startup).
+- `backends::shared::tests` (the profile's fields, a user profile of the same name, revocation).
+- `spawn::tests::no_backend_puts_an_mcp_secret_on_the_line_and_every_copy_is_private` (every backend: a sentinel env and header in neither the line, the env, launch.json nor the script, and every copy 0600 in a 0700 home, after a render, a refresh, the recipe door and a revoking re-render; the workspace mcp.json private, also on its no-change path). Fork and live-config updates re-materialize through the same render and writer and are not driven separately by this test.
+- `safe_fs::walk_tests` (a link inside a home on a nested write, a home renamed after the walk, a FIFO or link in place of a file, a legacy DB in a shared directory, an owned file in place) and `hub_rpc::tests::a_start_whose_privacy_fails_is_refused_and_the_old_secret_line_is_never_replayed` (the full start door).
+- `spawn::tests::production_code_writes_agent_files_only_through_the_private_writer`.
+
 ### The omp backend: one relocatable agent directory (2026-09-07)
 
 omp (oh-my-pi, the `omp` CLI) keeps its ENTIRE state — auth store

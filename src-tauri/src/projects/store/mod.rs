@@ -55,9 +55,11 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        }
+        // Private before SQLite opens it, or refused (#448, safe_fs::private_db).
+        #[cfg(unix)]
+        let path = &crate::safe_fs::private_db(path, path.parent() == Some(crate::config::config_dir().as_path())).map_err(|e| format!("state.db at {}: {e}", path.display()))?;
+        #[cfg(not(unix))]
+        if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?; }
         let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         Self::init(conn)
     }

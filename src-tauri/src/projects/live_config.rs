@@ -310,6 +310,7 @@ pub fn run(project_path: &str, window_name: &str, backend: Backend, command: App
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safe_fs::{jam, unjam};
     use serde_json::json;
 
     /// A workspace with one project row and managed dsh homes in it: a window is
@@ -506,7 +507,11 @@ mod tests {
         ws.def(a, "deepseek-flash", "");
         for w in ["good", "bad"] { ws.window(w, "dsh", a, ""); }
         let bad_profile = agent_home(&ws.path, "bad").join("dsh/profiles/tmm");
-        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o555)).unwrap();   // the rename into it fails
+        // The patch's name is a link to its own content: the private writer
+        // refuses to publish over a link (board #448), and the CLI still reads
+        // the old file through it. (A read-only directory no longer fails:
+        // the writer makes a home directory of ours 0700.)
+        jam(&bad_profile.join("cordis.patch.yml"));
 
         let saved = super::super::registry_save(&json!({ "name": a, "backend": "dsh", "model": "deepseek-v4-pro", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
         let unapplied = saved["unapplied"].as_array().expect("the failure is in the answer");
@@ -525,7 +530,7 @@ mod tests {
         assert!(done.others_unapplied[0].starts_with("bad: "));
 
         // Retry after the cause is gone: the next save reaches it.
-        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unjam(&bad_profile.join("cordis.patch.yml"));
         let saved = super::super::registry_save(&json!({ "name": a, "backend": "dsh", "model": "deepseek-v4-pro", "effort": "high", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
         assert!(saved.get("unapplied").is_none(), "{saved}");
         assert_eq!(model_of(&ws.patch("bad")), "deepseek-v4-pro");
@@ -690,8 +695,8 @@ mod tests {
         let mut moved = super::super::registry_get(other).unwrap().unwrap();
         moved.model = "deepseek-v4-pro".into();
         super::super::with_store(|st| st.reg_save(&moved, 3)).unwrap();
-        let lock = |ws: &Ws| std::fs::set_permissions(agent_home(&ws.path, "w").join("dsh/profiles/tmm"), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let unlock = |ws: &Ws| std::fs::set_permissions(agent_home(&ws.path, "w").join("dsh/profiles/tmm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let lock = |ws: &Ws| jam(&agent_home(&ws.path, "w").join("dsh/profiles/tmm/cordis.patch.yml"));
+        let unlock = |ws: &Ws| unjam(&agent_home(&ws.path, "w").join("dsh/profiles/tmm/cordis.patch.yml"));
         lock(&p2);
         lock(&p3);
 
@@ -786,8 +791,9 @@ mod tests {
         moved.model = "deepseek-v4-pro".into();
         super::super::with_store(|st| st.reg_save(&moved, 3)).unwrap();
         let profile = |w: &str| agent_home(&ws.path, w).join("dsh/profiles/tmm");
-        let set = |mode: u32| for w in ["inherits", "overrides", "strange"] { std::fs::set_permissions(profile(w), std::fs::Permissions::from_mode(mode)).unwrap(); };
-        set(0o555);
+        // A jammed patch fails the write and keeps its content (board #448).
+        let set = |jammed: bool| for w in ["inherits", "overrides", "strange"] { let p = profile(w).join("cordis.patch.yml"); if jammed { jam(&p) } else { unjam(&p) } };
+        set(true);
 
         // The lineage itself: where each window's model and effort come from.
         let lineage = |w: &str| project_window(&ws.path, w).1.unwrap();
@@ -819,7 +825,7 @@ mod tests {
         let saved = team(others, json!([{ "name": "strange", "base": other }]));
         let mine: Vec<&str> = saved["unapplied"].as_array().unwrap().iter().filter(|u| u["project"] == ws.path.as_str()).filter_map(|u| u["window"].as_str()).collect();
         assert_eq!(mine, vec!["strange"], "{saved}");
-        set(0o755);
+        set(false);
         super::super::teams_delete(crew).ok();
         super::super::teams_delete(others).ok();
         for n in [base, other] { super::super::registry_delete(n).ok(); }
@@ -861,8 +867,9 @@ mod tests {
         moved.model = "deepseek-v4-pro".into();
         super::super::with_store(|st| st.reg_save(&moved, 3)).unwrap();
         let profile = |w: &str| agent_home(&ws.path, w).join("dsh/profiles/tmm");
-        let set = |mode: u32| for w in ["overrides", "strange"] { std::fs::set_permissions(profile(w), std::fs::Permissions::from_mode(mode)).unwrap(); };
-        set(0o555);
+        // A jammed patch fails the write and keeps its content (board #448).
+        let set = |jammed: bool| for w in ["overrides", "strange"] { let p = profile(w).join("cordis.patch.yml"); if jammed { jam(&p) } else { unjam(&p) } };
+        set(true);
         let mcp = json!([{ "name": "echo", "command": "node", "args": ["srv.mjs"] }]).to_string();
         let saved = super::super::registry_save(&json!({ "name": base, "backend": "dsh", "model": "deepseek-flash", "effort": "", "system": "Persona.", "skills": "[]", "mcp": mcp })).unwrap();
         let mine: Vec<(&str, &str, &str)> = saved["unapplied"].as_array().map(|a| a.iter().filter(|u| u["project"] == ws.path.as_str()).filter_map(|u| Some((u["window"].as_str()?, u["definition"].as_str()?, u["kind"].as_str()?))).collect()).unwrap_or_default();
@@ -874,7 +881,7 @@ mod tests {
         // A model-only command on the base still does not attribute the overriding member.
         let done = command(&ws, "solo", "/model", "deepseek-v4-pro").expect("the standalone window itself was applied");
         assert!(done.others_unapplied.iter().all(|u| !u.starts_with("overrides")), "{:?}", done.others_unapplied);
-        set(0o755);
+        set(false);
         assert_eq!(project_window(&ws.path, "overrides").0, Outcome::Applied);
         let patch = ws.patch("overrides");
         assert!(patch.contains("- id: tmm-mcp-echo\n") && patch.contains("model: \"deepseek-v4-pro\"") && patch.contains("reasoningEffort: \"max\""), "the rows reached it, its own model and effort kept: {patch}");

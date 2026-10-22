@@ -406,6 +406,18 @@ fn legacy_db_path() -> std::path::PathBuf {
     crate::config::config_dir().join("team.db")
 }
 
+/// Close the legacy team.db and its siblings (board #448 D3): it is never
+/// opened again once imported (`hub_import_done`), so only this startup step
+/// reaches a copy an older build left 0644. Only files of ours are touched;
+/// a failure is said, never taken for done.
+#[cfg(unix)]
+pub(super) fn tighten_legacy_db() {
+    let legacy = legacy_db_path();
+    if let Err(e) = crate::safe_fs::tighten_db(&legacy) {
+        eprintln!("⚠  privacy: NOT tightened — needs the owner: {} ({e})", legacy.display());
+    }
+}
+
 /// Import every `proj:*` room's transcript out of the legacy team.db, exactly
 /// once (a `meta` flag remembers). The file itself is left on disk, unread
 /// from then on — the room is the only record, and losing chat history to a

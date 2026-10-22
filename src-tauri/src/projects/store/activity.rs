@@ -1085,7 +1085,7 @@ mod tests {
     /// its id and message — never one without the other.
     #[test]
     fn a_numbered_prompt_settles_its_receipts_with_its_row_or_not_at_all() {
-        let path = std::env::temp_dir().join(format!("tmm-settle-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("tmm-settle-{}", uuid::Uuid::new_v4())).join("state.db"); // a private parent: /tmp itself is refused (#448)
         let mut store = Store::open(&path).unwrap();
         store.insert_delivery("s", "w", "[tmm chat 2026-10-16 21:30] lead: @w go", 0, 100, "m-1").unwrap();
         let d = store.pending_deliveries("s", Some("w")).unwrap()[0].id;
@@ -1131,7 +1131,7 @@ mod tests {
         assert!(rows[0].1.contains(&format!("\"id\":{d}")) && rows[0].1.contains("m-1"), "{}", rows[0].1);
         let (won, _, _) = store.settle_prompt(&[d], row).unwrap();
         assert!(won.is_empty(), "a second echo cannot take the same receipt");
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// Board #414: the stamp is the store's, across EVERY writer and across a
@@ -1143,7 +1143,7 @@ mod tests {
     /// is written as dated and moves nothing.
     #[test]
     fn a_restart_never_stamps_below_the_durable_high_water() {
-        let path = std::env::temp_dir().join(format!("tmm-hw-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("tmm-hw-{}", uuid::Uuid::new_v4())).join("state.db"); // a private parent: /tmp itself is refused (#448)
         let ahead = wall_ms() + 3_600_000;
         let mut store = Store::open(&path).unwrap();
         store.set_activity_clock(move || ahead);
@@ -1169,7 +1169,7 @@ mod tests {
         assert_eq!(next, ahead + 3, "above the durable high-water, not on the wall clock behind it");
         let tail: Vec<String> = store.activity_since("s", m_ts, 10).unwrap().into_iter().map(|r| r.text).collect();
         assert_eq!(tail, ["after the restart"], "the old process's last cursor sees it");
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// Board #257 review: the 24 h prune drops stale TYPED lines and never a

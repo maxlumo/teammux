@@ -124,6 +124,57 @@ pub fn managed_home(session: &str, window_name: &str) -> Option<std::path::PathB
     home_is_managed(&dir, window_name).then_some(dir)
 }
 
+/// Close what older builds left readable by other users (board #448 D3),
+/// once per server start, for the copies no other path revisits: the legacy
+/// team.db (never reopened after its import) and every managed home of every
+/// stored project, a LIVE one included (`reconcile::create_or_keep` keeps a
+/// running pane without `refresh_hooks`). Each home is walked by
+/// `safe_fs::private_home` (ours, no link followed; `agents` and the home
+/// 0700). A failure is logged as "NOT tightened — needs the owner", and the
+/// exposure is not called closed. Running processes keep their argv until
+/// they are restarted; this does not replace rotating an exposed key.
+#[cfg(unix)]
+pub fn tighten_existing() {
+    let warn = |what: &str, why: &str| eprintln!("⚠  privacy: NOT tightened — needs the owner: {what} ({why})");
+    super::rooms::tighten_legacy_db();
+    let projects = match with_store(|s| s.list_projects(true)) {
+        Ok(p) => p,
+        Err(e) => return warn("the managed homes of every project", &format!("the project list cannot be read: {e}")),
+    };
+    for p in projects {
+        let tmm = std::path::Path::new(&p.path).join(".tmm");
+        // The workspace's own MCP file holds the definitions' values too (P1-C).
+        if let Err(e) = super::spawn::tighten_owned(&tmm.join("mcp.json")) {
+            warn(&tmm.join("mcp.json").display().to_string(), &e);
+        }
+        let agents = tmm.join("agents");
+        let entries = match std::fs::read_dir(&agents) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => { warn(&agents.display().to_string(), &format!("cannot be listed: {e}")); continue; }
+        };
+        for e in entries {
+            let e = match e {
+                Ok(e) => e,
+                Err(err) => { warn(&agents.display().to_string(), &format!("an entry cannot be read: {err}")); continue; }
+            };
+            let dir = e.path();
+            let Some(name) = e.file_name().to_str().map(str::to_string) else {
+                warn(&dir.display().to_string(), "the name is not UTF-8");
+                continue;
+            };
+            match managed_state(&p.path, &name) {
+                ManagedState::Managed => {}
+                ManagedState::Plain => continue,
+                ManagedState::Unknown(why) => { warn(&dir.display().to_string(), &format!("cannot tell whether it is a managed home: {why}")); continue; }
+            }
+            if let Err(err) = crate::safe_fs::private_home(&dir) {
+                warn(&dir.display().to_string(), &err.to_string());
+            }
+        }
+    }
+}
+
 /// Same question, when the caller already knows the workspace path (it is
 /// listing every window of one session and must not hit the store per row).
 pub fn is_managed_in(workspace: Option<&str>, window_name: &str) -> bool {
@@ -458,5 +509,42 @@ mod tests {
         std::fs::write(ws.join(".tmm/agents/file"), "x").unwrap();
         assert!(!is_managed_in(Some(&path), "file"));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tighten_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Board #448 D3: a LIVE home an older build left 0755 (the pane runs, so
+    /// `create_or_keep` never calls `refresh_hooks`) is closed by the startup
+    /// step without a respawn; a directory under `.tmm/agents/` that is not a
+    /// managed home is left as it is.
+    #[test]
+    fn a_wide_home_is_closed_at_startup_without_a_respawn_and_a_plain_dir_is_not() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-tighten-{}", uuid::Uuid::new_v4()));
+        let (home, plain) = (ws.join(".tmm/agents/dev"), ws.join(".tmm/agents/notes"));
+        for d in [&home, &plain] { std::fs::create_dir_all(d).unwrap(); }
+        std::fs::write(home.join("launch.json"), r#"{"backend":"codex"}"#).unwrap();
+        std::fs::write(ws.join(".tmm/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        std::fs::set_permissions(ws.join(".tmm/mcp.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        for d in [ws.join(".tmm/agents"), home.clone(), plain.clone()] {
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let id = format!("tighten-{}", uuid::Uuid::new_v4());
+        with_store(|s| s.insert_project(&Project {
+            id: id.clone(), name: id.clone(), path: ws.to_string_lossy().into(), icon: None,
+            session: id.clone(), adopted: false, autostart: false, created_at: 1,
+            last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        })).unwrap();
+        tighten_existing();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&ws.join(".tmm/agents")), mode(&home)), (0o700, 0o700), "the managed home and its parent close");
+        assert_eq!(mode(&plain), 0o755, "a directory that is not a managed home is not ours to change");
+        assert_eq!(mode(&ws.join(".tmm/mcp.json")), 0o600, "the workspace's own MCP file closes too");
+        with_store(|s| s.delete_project(&id)).ok();
+        std::fs::remove_dir_all(&ws).ok();
     }
 }

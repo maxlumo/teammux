@@ -1316,11 +1316,11 @@ pub(crate) fn new_conversation(home: &Path) -> Result<bool, String> {
 /// The dsh half of `refresh_hooks`: the plugin and the shell are generated
 /// files, rewritten whole when this build's text differs (omp's rule).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     if !home.join("dsh").join("profiles").join(PROFILE).is_dir() {
-        return false;
+        return Ok(false);
     }
-    write_runtime(home, notify).unwrap_or(false)
+    write_runtime(home, notify)
 }
 
 /// Is this managed home's shell at its prompt, ready for a typed line (board
@@ -2240,11 +2240,11 @@ if (at < 0) {
         let patch = std::fs::read_to_string(dsh.join("profiles/tmm/cordis.patch.yml")).unwrap();
         assert!(patch.contains("model: \"deepseek-flash\"") && !patch.contains("reasoningEffort"), "{patch}");
         assert_eq!(std::fs::read_to_string(dsh.join("AGENTS.md")).unwrap(), "You are d1, again.");
-        assert!(!refresh(&home, &crate::agent_notifications::AgentNotificationHub::load().helper_command("dsh")), "nothing stale");
+        assert!(!refresh(&home, &crate::agent_notifications::AgentNotificationHub::load().helper_command("dsh")).unwrap(), "nothing stale");
         std::fs::write(dsh.join("plugins/tmm-telemetry/index.mjs"), "// edited").unwrap();
-        assert!(refresh(&home, &crate::agent_notifications::AgentNotificationHub::load().helper_command("dsh")));
+        assert!(refresh(&home, &crate::agent_notifications::AgentNotificationHub::load().helper_command("dsh")).unwrap());
         assert!(std::fs::read_to_string(dsh.join("plugins/tmm-telemetry/index.mjs")).unwrap().contains("tmm-telemetry"));
-        assert!(!refresh(&ws.join("not-a-home"), "x"), "a home without the profile is not ours");
+        assert!(!refresh(&ws.join("not-a-home"), "x").unwrap(), "a home without the profile is not ours");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

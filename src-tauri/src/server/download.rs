@@ -515,34 +515,20 @@ fn scope_content_type(name: &str) -> Option<&'static str> {
 /// each segment opens from the one before with O_NOFOLLOW, so a symlink at
 /// ANY step is refused (ELOOP/ENOTDIR), in-scope ones included (v1); the last
 /// must be a regular file. The file returned is the object checked. `Err` is
-/// the HTTP status to answer: 404 for a missing segment, 403 otherwise.
+/// the HTTP status to answer: 404 for a missing segment, 403 otherwise. The
+/// handle walk is `crate::safe_fs::Dir` (board #448), the one fd-walk.
 #[cfg(unix)]
 fn open_in_scope(root: &str, dev: u64, ino: u64, segs: &[String]) -> Result<std::fs::File, u16> {
-    use std::ffi::CString;
-    use std::os::fd::FromRawFd;
-    struct Fd(libc::c_int);
-    impl Drop for Fd {
-        fn drop(&mut self) { if self.0 >= 0 { unsafe { libc::close(self.0) }; } }
-    }
-    let status = |errno: i32| if errno == libc::ENOENT { 404 } else { 403 };
-    let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    let c = |s: &str| CString::new(s).map_err(|_| 403u16);
-    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    let mut fd = Fd(unsafe { libc::open(c(root)?.as_ptr(), dir_flags) });
-    if fd.0 < 0 { return Err(403); }
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.0, &mut st) } != 0 { return Err(403); }
+    use crate::safe_fs::Dir;
+    let status = |e: std::io::Error| -> u16 { if e.raw_os_error() == Some(libc::ENOENT) { 404 } else { 403 } };
+    let mut dir = Dir::open(std::path::Path::new(root)).map_err(|_| 403u16)?;
+    let st = dir.stat().map_err(|_| 403u16)?;
     if st.st_dev as u64 != dev || st.st_ino as u64 != ino { return Err(403); }
     let (last, dirs) = segs.split_last().ok_or(403u16)?;
     for seg in dirs {
-        let next = Fd(unsafe { libc::openat(fd.0, c(seg)?.as_ptr(), dir_flags) });
-        if next.0 < 0 { return Err(status(errno())); }
-        fd = next;
+        dir = dir.open_dir(seg).map_err(status)?;
     }
-    let file_flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
-    let target = unsafe { libc::openat(fd.0, c(last)?.as_ptr(), file_flags) };
-    if target < 0 { return Err(status(errno())); }
-    let file = unsafe { std::fs::File::from_raw_fd(target) };
+    let file = dir.open_file(last, libc::O_RDONLY | libc::O_NONBLOCK, 0).map_err(status)?;
     match file.metadata() {
         Ok(m) if m.is_file() => Ok(file),
         _ => Err(403),

@@ -280,12 +280,11 @@ pub(crate) fn render_kimi(
     let notify = notifications.helper_command("kimi");
 
     let user_config = std::fs::read_to_string(kimi_user_home().join("config.toml")).ok();
-    std::fs::write(
-        kimi_home.join("config.toml"),
-        kimi_config_toml_from(user_config.as_deref(), &def.effort, &notify),
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(kimi_home.join("tui.toml"), kimi_tui_toml()).map_err(|e| e.to_string())?;
+    shared::write_atomic(
+        &kimi_home.join("config.toml"),
+        &kimi_config_toml_from(user_config.as_deref(), &def.effort, &notify),
+    )?;
+    shared::write_atomic(&kimi_home.join("tui.toml"), &kimi_tui_toml())?;
 
     // The prompt is a FILE (codex's pattern): kimi reads `$KIMI_CODE_HOME/
     // AGENTS.md` as its global instructions on every start, and this home is
@@ -296,7 +295,7 @@ pub(crate) fn render_kimi(
     } else {
         format!("{}\n\n{}", system_prompt, crate::projects::skills::skills_index_text(skills))
     };
-    std::fs::write(kimi_home.join("AGENTS.md"), &full_prompt).map_err(|e| e.to_string())?;
+    shared::write_atomic(&kimi_home.join("AGENTS.md"), &full_prompt)?;
 
     // mcp.json in this home's user scope — `{command,args,env}` / `{url,
     // headers}`, kiro's shape (kimi's mcp doc: no `type` key).
@@ -323,8 +322,7 @@ pub(crate) fn render_kimi(
         .unwrap_or(0);
     let trust = kimi_home.join("workspace-trust").join(workspace_trust_key(&ws));
     if !trust.is_file() {
-        std::fs::write(&trust, serde_json::to_string(&json!({ "root": ws, "trustedAt": now_ms })).unwrap())
-            .map_err(|e| e.to_string())?;
+        shared::write_atomic(&trust, &serde_json::to_string(&json!({ "root": ws, "trustedAt": now_ms })).unwrap())?;
     }
 
     // `-m <alias>` only when the registry pins one; empty = the user's own
@@ -360,17 +358,17 @@ pub(crate) const KIMI_FOLDER_TRUST_MARKERS: &[&str] = &["Trust this folder?", "D
 /// config.toml, so the array is replaced and everything else (the carried
 /// catalog, the effort) left alone. A no-op when it already matches.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     let path = home.join("kimi").join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else { return false };
-    let Ok(mut root) = text.parse::<toml::Table>() else { return false };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Ok(mut root) = text.parse::<toml::Table>() else { return Ok(false) };
     let fresh = toml::Value::Array(kimi_hooks(notify));
     if root.get("hooks") == Some(&fresh) {
-        return false;
+        return Ok(false);
     }
     root.insert("hooks".into(), fresh);
-    let Ok(body) = toml::to_string(&root) else { return false };
-    std::fs::write(&path, format!("# Written by tmux-mobile — regenerated at every spawn and restart.\n{body}")).is_ok()
+    let Ok(body) = toml::to_string(&root) else { return Ok(false) };
+    shared::write_atomic(&path, &format!("# Written by tmux-mobile — regenerated at every spawn and restart.\n{body}")).map(|_| true)
 }
 
 /// kimi resume dialect: `-S <id>` exact, `-c` the cwd's previous session
@@ -681,8 +679,8 @@ pattern = "Bash(rm -rf*)"
         let dir = std::env::temp_dir().join(format!("tmm-kimi-refresh-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("kimi")).unwrap();
         std::fs::write(dir.join("kimi").join("config.toml"), &cfg).unwrap();
-        assert!(!refresh(&dir, "/bin/sh helper kimi # tmm"), "same hooks: no rewrite");
-        assert!(refresh(&dir, "/bin/sh moved kimi # tmm"));
+        assert!(!refresh(&dir, "/bin/sh helper kimi # tmm").unwrap(), "same hooks: no rewrite");
+        assert!(refresh(&dir, "/bin/sh moved kimi # tmm").unwrap());
         let t: toml::Table = std::fs::read_to_string(dir.join("kimi").join("config.toml")).unwrap().parse().unwrap();
         assert!(t["hooks"].as_array().unwrap().iter().all(|h| h["command"].as_str() == Some("/bin/sh moved kimi # tmm")));
         assert_eq!(t["thinking"]["effort"].as_str(), Some("high"), "the rest survives");

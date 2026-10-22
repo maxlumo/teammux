@@ -203,7 +203,7 @@ final shape:
 
 - **Native MCP is the invocation path**: registry defs materialize into each
   backend's own config at spawn (kiro `mcpServers`, claude `mcp.json` +
-  `--strict-mcp-config`, codex `-c mcp_servers.*`, grok `[mcp_servers.*]`
+  `--strict-mcp-config`, codex's managed profile `tmm-agent.config.toml` (`--profile tmm-agent`, board #448), grok `[mcp_servers.*]`
   toml), exactly as before the detour.
 - **kiro gets toolSearch**: managed kiro homes carry `toolSearch.enabled=true`
   with `minPct=0`/`minTokens=0` (`kiro_cli_settings` — written at spawn,

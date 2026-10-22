@@ -220,7 +220,7 @@ pub(crate) fn ensure_claude_state(home: &Path, workspace: &Path) -> Result<bool,
     }
     if changed {
         let text = format!("{}\n", serde_json::to_string_pretty(&root).unwrap());
-        std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        shared::write_atomic(&path, &text).map_err(|e| format!("write {e}"))?;
     }
     #[cfg(unix)]
     {
@@ -251,8 +251,7 @@ pub(crate) fn render_claude(
         }
     }
     let mcpfile = home.join("mcp.json");
-    std::fs::write(&mcpfile, serde_json::to_string_pretty(&json!({ "mcpServers": mcp_servers })).unwrap())
-        .map_err(|e| e.to_string())?;
+    shared::write_atomic(&mcpfile, &serde_json::to_string_pretty(&json!({ "mcpServers": mcp_servers })).unwrap())?;
     // The isolated home is the agent's CLAUDE_CONFIG_DIR (claude's KIRO_HOME:
     // history, session state and .claude.json live here, so a managed agent
     // never leaks into the user's ~/.claude). That relocation also means the
@@ -264,17 +263,16 @@ pub(crate) fn render_claude(
     // 我们全局定义的配置 但是自己管理好类似kirohome这种"). Plugins and
     // marketplaces deliberately do NOT carry.
     let settingsfile = home.join("settings.json");
-    std::fs::write(
+    shared::write_atomic(
         &settingsfile,
-        serde_json::to_string_pretty(&json!({
+        &serde_json::to_string_pretty(&json!({
             "env": shared::claude_user_env(),
             "statusLine": shared::claude_status_line_config(),
             "skipDangerousModePermissionPrompt": true,
             "hooks": claude_hooks(&notify)
         }))
         .unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     // A fresh CLAUDE_CONFIG_DIR otherwise parks at the theme/onboarding and
     // workspace-trust dialogs before the TUI. Claude documents the persisted
     // trust shape (`projects[repo_root].hasTrustDialogAccepted = true`); this
@@ -295,7 +293,7 @@ pub(crate) fn render_claude(
     // relocated dir's CLAUDE.md and obeyed its instruction). The old
     // `--append-system-prompt <6 KB literal>` was the last launch line bigger
     // than a send-keys burst; every start path is a short line now.
-    std::fs::write(home.join("CLAUDE.md"), &full_prompt).map_err(|e| e.to_string())?;
+    shared::write_atomic(&home.join("CLAUDE.md"), &full_prompt)?;
     // An empty model means the BACKEND default — with Bedrock that is the
     // inherited env's ANTHROPIC_MODEL, so no `--model` is passed (the old
     // hardcoded `sonnet` alias overrode the env and does not resolve on
@@ -350,27 +348,27 @@ pub(crate) fn merge_missing_claude_env(conf: &mut Value, inherited: &Value) -> b
 /// (see `backends_shared::claude_user_env`). Fail-soft: refresh must never
 /// block a start. Returns true when the file changed.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn ensure_claude_env(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let Ok(mut conf) = serde_json::from_str::<Value>(&text) else { return false };
+pub(crate) fn ensure_claude_env(path: &Path) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let Ok(mut conf) = serde_json::from_str::<Value>(&text) else { return Ok(false) };
     let inherited = shared::claude_user_env();
     if !merge_missing_claude_env(&mut conf, &inherited) {
-        return false;
+        return Ok(false);
     }
-    std::fs::write(path, serde_json::to_string_pretty(&conf).unwrap()).is_ok()
+    shared::write_atomic(path, &serde_json::to_string_pretty(&conf).unwrap()).map(|_| true)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn ensure_claude_status_line(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let Ok(mut conf) = serde_json::from_str::<Value>(&text) else { return false };
-    let Some(root) = conf.as_object_mut() else { return false };
+pub(crate) fn ensure_claude_status_line(path: &Path) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let Ok(mut conf) = serde_json::from_str::<Value>(&text) else { return Ok(false) };
+    let Some(root) = conf.as_object_mut() else { return Ok(false) };
     let canonical = shared::claude_status_line_config();
     if root.get("statusLine") == Some(&canonical) {
-        return false;
+        return Ok(false);
     }
     root.insert("statusLine".into(), canonical);
-    std::fs::write(path, serde_json::to_string_pretty(&conf).unwrap()).is_ok()
+    shared::write_atomic(path, &serde_json::to_string_pretty(&conf).unwrap()).map(|_| true)
 }
 
 
@@ -378,16 +376,16 @@ pub(crate) fn ensure_claude_status_line(path: &Path) -> bool {
 /// Bedrock keys backfilled without overwriting per-agent overrides), the
 /// official statusLine, and pre-seeded workspace trust.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, workspace: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, workspace: &Path, notify: &str) -> Result<bool, String> {
     let mut changed = false;
     let settings = home.join("settings.json");
     if settings.is_file() {
-        changed |= patch_hooks(&settings, claude_hooks(notify));
-        changed |= ensure_claude_env(&settings);
-        changed |= ensure_claude_status_line(&settings);
-        changed |= ensure_claude_state(home, workspace).unwrap_or(false);
+        changed |= patch_hooks(&settings, claude_hooks(notify))?;
+        changed |= ensure_claude_env(&settings)?;
+        changed |= ensure_claude_status_line(&settings)?;
+        changed |= ensure_claude_state(home, workspace)?;
     }
-    changed
+    Ok(changed)
 }
 
 /// claude resume dialect: `--resume <id>` exact, `--continue` recent

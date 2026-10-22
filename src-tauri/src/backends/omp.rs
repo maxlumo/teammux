@@ -145,18 +145,17 @@ pub(crate) fn render_omp(
     std::fs::create_dir_all(home.join("extensions")).map_err(|e| e.to_string())?;
     let notifications = crate::agent_notifications::AgentNotificationHub::load();
     notifications.ensure_helper()?;
-    std::fs::write(
-        home.join("extensions").join("tmm-telemetry.ts"),
-        omp_telemetry_extension(&notifications.helper_command("omp")),
-    )
-    .map_err(|e| e.to_string())?;
+    shared::write_atomic(
+        &home.join("extensions").join("tmm-telemetry.ts"),
+        &omp_telemetry_extension(&notifications.helper_command("omp")),
+    )?;
 
     // Auth carry: agent.db holds `auth_credentials` — an isolated home
     // without it is a logged-out agent for OAuth-keyed providers. Best
     // effort, like grok's auth.json copy.
     let user_db = omp_user_agent_dir().join("agent.db");
     if user_db.is_file() {
-        let _ = std::fs::copy(&user_db, home.join("agent.db"));
+        shared::copy_private(&user_db, &home.join("agent.db"))?;
     }
     // Model-catalog carry (grok's config.toml lesson, in omp's dialect): the
     // user's `models.yml` declares the custom providers/models the bundled
@@ -167,7 +166,7 @@ pub(crate) fn render_omp(
     // isolation is for).
     let user_models = omp_user_agent_dir().join("models.yml");
     if user_models.is_file() {
-        let _ = std::fs::copy(&user_models, home.join("models.yml"));
+        shared::copy_private(&user_models, &home.join("models.yml"))?;
     }
 
     // config.yml: the model is identity, so it lives in the config the owner
@@ -198,7 +197,7 @@ pub(crate) fn render_omp(
         format!("{}\n\n{}", system_prompt, crate::projects::skills::skills_index_text(skills))
     };
     let prompt_path = home.join("system-prompt.md");
-    std::fs::write(&prompt_path, full_prompt).map_err(|e| e.to_string())?;
+    shared::write_atomic(&prompt_path, &full_prompt)?;
 
     let effort = def.effort.trim();
     let thinking = if effort.is_empty() {
@@ -328,16 +327,16 @@ export default function hook(pi: any): void {{
 /// in someone else's config — rewritten whole when this build's text differs
 /// (helper path moves, new events), same ownership rule as patch_hooks.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     let ext = home.join("extensions").join("tmm-telemetry.ts");
     if !ext.is_file() {
-        return false;
+        return Ok(false);
     }
     let fresh = omp_telemetry_extension(notify);
     if std::fs::read_to_string(&ext).ok().as_deref() != Some(fresh.as_str()) {
-        return std::fs::write(&ext, fresh).is_ok();
+        return shared::write_atomic(&ext, &fresh).map(|_| true);
     }
-    false
+    Ok(false)
 }
 
 /// omp resume dialect: `--resume <id>` (id prefix), `--continue` follows the

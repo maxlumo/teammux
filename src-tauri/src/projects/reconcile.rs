@@ -95,8 +95,12 @@ fn create_or_keep(project: &Project, slot: &Slot) -> SlotResult {
     // A managed agent's hooks are re-materialized before it starts: the config
     // on disk was written by whatever version spawned it, and hooks are how we
     // observe the agent at all.
+    // A home that cannot be made private, or a saved line that may not be
+    // replayed, refuses the start BEFORE a window exists (board #448 P1-B).
     if slot.kind == SlotKind::Agent {
-        super::spawn::refresh_hooks(&project.path, &slot.window_name);
+        if let Err(e) = super::spawn::refresh_hooks(&project.path, &slot.window_name).and_then(|_| slot_command_in(slot, Some(&project.path))) {
+            return SlotResult { window_name: slot.window_name.clone(), status: "failed", error: Some(e) };
+        }
     }
     match tmux::new_named_window(&project.session, &slot.window_name, &cwd) {
         Ok(pane) => {
@@ -147,7 +151,7 @@ fn start_in_existing(project: &Project, slot: &Slot, target: &str) -> SlotResult
 /// it was in, not to a blank prompt — see `agents::launch_line`.
 #[cfg(test)]
 pub(super) fn slot_command(slot: &Slot) -> Option<String> {
-    slot_command_in(slot, None)
+    slot_command_in(slot, None).unwrap()
 }
 
 /// `project_path` enables the managed-agent path: a spawned agent restarts
@@ -156,26 +160,31 @@ pub(super) fn slot_command(slot: &Slot) -> Option<String> {
 /// line runs the user-space config, whose kiro hooks never fire (measured) —
 /// the restarted agent kept answering but went observably deaf: no tool rows,
 /// no delivery receipts, every message "unconfirmed" (owner report 2026-08-18).
-pub(super) fn slot_command_in(slot: &Slot, project_path: Option<&str>) -> Option<String> {
+/// `Err` when the agent's saved recipe may not be replayed (board #448 P1-B).
+pub(super) fn slot_command_in(slot: &Slot, project_path: Option<&str>) -> Result<Option<String>, String> {
     if !slot.auto_run {
-        return None;
+        return Ok(None);
     }
     let command = match slot.kind {
         SlotKind::Agent => {
-            let recipe = project_path.and_then(|p| {
-                super::spawn::relaunch_line(p, &slot.window_name, slot.agent_session_id.as_deref())
-            });
+            let recipe = match project_path {
+                Some(p) => super::spawn::relaunch_line(p, &slot.window_name, slot.agent_session_id.as_deref())?,
+                None => None,
+            };
             match recipe {
                 Some(line) => line,
-                None => slot
-                    .command
-                    .as_deref()
-                    .and_then(|backend| agents::launch_line(backend, slot.agent_session_id.as_deref()))?,
+                None => match slot.command.as_deref().and_then(|backend| agents::launch_line(backend, slot.agent_session_id.as_deref())) {
+                    Some(line) => line,
+                    None => return Ok(None),
+                },
             }
         }
-        SlotKind::Shell => slot.command.clone()?,
+        SlotKind::Shell => match slot.command.clone() {
+            Some(c) => c,
+            None => return Ok(None),
+        },
     };
-    (!command.trim().is_empty()).then_some(command)
+    Ok((!command.trim().is_empty()).then_some(command))
 }
 
 /// The strict launch door for a restore after a reboot (board #422):
@@ -208,7 +217,10 @@ pub(crate) fn slot_command_exact(project_path: &str, slot: &Slot, managed: bool)
 /// `launch` is a restore's launch uuid (board #422 round 3): it rides as
 /// `TMM_LAUNCH` so the CLI's hooks (the notify helper) and dsh's readiness
 /// files name this incarnation. Only a uuid is ever passed.
-pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str, launch: Option<&str>) -> String {
+/// `Err` when a managed agent's line could not be staged privately (board
+/// #448 P1-B): the line is then NOT typed directly, since it carries the
+/// launch env and identity; a window with no home types it as before.
+pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str, launch: Option<&str>) -> Result<String, String> {
     let prefixed = if slot.kind == SlotKind::Agent {
         let launch = launch.filter(|l| l.len() == 36 && l.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).map(|l| format!("TMM_LAUNCH={l} ")).unwrap_or_default();
         format!(
@@ -220,14 +232,14 @@ pub(crate) fn launch_text(project: &Project, slot: &Slot, cmd: &str, launch: Opt
     } else {
         cmd.to_string()
     };
-    let staged = (slot.kind == SlotKind::Agent)
-        .then(|| stage_relaunch_script(&project.path, &slot.window_name, &prefixed))
-        .flatten();
-    staged.unwrap_or(prefixed)
+    if slot.kind != SlotKind::Agent {
+        return Ok(prefixed);
+    }
+    Ok(stage_relaunch_script(&project.path, &slot.window_name, &prefixed)?.unwrap_or(prefixed))
 }
 
 fn run_slot_command(project: &Project, slot: &Slot, target: &str) -> Result<(), String> {
-    match slot_command_in(slot, Some(&project.path)) {
+    match slot_command_in(slot, Some(&project.path))? {
         // Agents get their tmm identity: the project is the session, the agent
         // name is the window. Resumed agents keep the user's own config (no
         // isolated home — that is spawn's job), but tmm works in their window
@@ -250,7 +262,7 @@ fn run_slot_command(project: &Project, slot: &Slot, target: &str) -> Result<(), 
                 },
                 _ => None,
             };
-            tmux::send_command(target, &launch_text(project, slot, &cmd, launch.as_deref()))
+            tmux::send_command(target, &launch_text(project, slot, &cmd, launch.as_deref())?)
         }
         None => Ok(()),
     }
@@ -261,13 +273,14 @@ fn run_slot_command(project: &Project, slot: &Slot, target: &str) -> Result<(), 
 /// isolated home (an adopted agent slot) or the write fails — the caller then
 /// types the line directly, which is the old behaviour and fine for the short
 /// generic launch lines those windows have.
-fn stage_relaunch_script(project_path: &str, window_name: &str, full: &str) -> Option<String> {
-    let home = super::agents::home_dir(project_path, window_name)?;
+fn stage_relaunch_script(project_path: &str, window_name: &str, full: &str) -> Result<Option<String>, String> {
+    let Some(home) = super::agents::home_dir(project_path, window_name) else { return Ok(None) };
     if !home.is_dir() {
-        return None;
+        return Ok(None);
     }
-    let script = crate::backends::shared::write_launch_script(&home, window_name, full).ok()?;
-    Some(format!(". {}", crate::shell::quote(&script.to_string_lossy())))
+    let script = crate::backends::shared::write_launch_script(&home, window_name, full)
+        .map_err(|e| format!("{window_name}: its launch could not be staged privately, so it is not started: {e}"))?;
+    Ok(Some(format!(". {}", crate::shell::quote(&script.to_string_lossy()))))
 }
 
 /// Take a project down: kill the session, keep the declaration.
@@ -322,6 +335,37 @@ mod tests {
             archived: false,
             room: String::new(),
         }
+    }
+
+    /// Board #448 P1-B: an agent whose saved line may not be replayed (an
+    /// older build's codex line with MCP values) is refused BEFORE a window
+    /// exists; and a managed line whose private staging fails is not typed
+    /// directly.
+    #[test]
+    #[cfg(unix)]
+    fn a_line_that_may_not_be_replayed_or_staged_refuses_the_start() {
+        let ws = std::env::temp_dir().join(format!("tmm-p1b-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = "command codex -c 'mcp_servers.s.env.K=\"SENTINEL\"'";
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "codex", "cmd": legacy, "env": [] }).to_string()).unwrap();
+        let p = project(&format!("p1b-nosession-{}", uuid::Uuid::new_v4()), &ws.to_string_lossy());
+        let mut agent = slot("dev", "", true);
+        agent.kind = SlotKind::Agent;
+        agent.auto_run = true;
+        agent.command = Some("codex".into());
+        let r = create_or_keep(&p, &agent);
+        assert_eq!(r.status, "failed");
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("not replayed")), "refused by the replay door, not by tmux: {:?}", r.error);
+        // Staging into a home whose script name is a link: an error, never the raw line.
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat", "env": [] }).to_string()).unwrap();
+        let outside = ws.join("outside.sh");
+        std::fs::write(&outside, "# the user's").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("launch-dev.sh")).unwrap();
+        let err = launch_text(&p, &agent, "kiro-cli chat", None).unwrap_err();
+        assert!(err.contains("not started"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "# the user's");
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]
@@ -493,14 +537,14 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let ws_str = ws.to_string_lossy().to_string();
         let long_line = format!("TMM_PROJECT=p TMM_AGENT=dev command codex {}", "x".repeat(6000));
-        let staged = stage_relaunch_script(&ws_str, "dev", &long_line).expect("managed home stages");
+        let staged = stage_relaunch_script(&ws_str, "dev", &long_line).unwrap().expect("managed home stages");
         assert!(staged.starts_with(". "), "a source line, not the payload: {staged}");
         assert!(staged.len() < 200, "short enough for one burst: {}", staged.len());
         let script_path = staged.trim_start_matches(". ").trim_matches('\'').to_string();
         let script = std::fs::read_to_string(&script_path).unwrap();
         assert!(script.contains(&long_line), "the script carries the full line");
         // No isolated home → no staging, the caller types the line directly.
-        assert!(stage_relaunch_script(&ws_str, "byhand", "kiro-cli chat").is_none());
+        assert!(stage_relaunch_script(&ws_str, "byhand", "kiro-cli chat").unwrap().is_none());
         std::fs::remove_dir_all(&ws).ok();
     }
 }

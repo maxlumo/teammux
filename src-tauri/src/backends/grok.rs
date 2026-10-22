@@ -175,11 +175,10 @@ pub(crate) fn render_grok(
     // Telemetry hooks: `<GROK_HOME>/hooks/*.json` is that home's "global"
     // scope, always trusted — no folder-trust dance (verified live, grok
     // 1.0.5: loaded by `grok inspect`, fired on a real turn).
-    std::fs::write(
-        home.join("hooks").join("tmux-mobile.json"),
-        serde_json::to_string_pretty(&json!({ "hooks": grok_hooks(&notify) })).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    shared::write_atomic(
+        &home.join("hooks").join("tmux-mobile.json"),
+        &serde_json::to_string_pretty(&json!({ "hooks": grok_hooks(&notify) })).unwrap(),
+    )?;
 
     // config.toml: folder trust off (the workspace is the user's own project,
     // spawned deliberately; an untrusted folder would gate project rules and
@@ -187,11 +186,10 @@ pub(crate) fn render_grok(
     // catalog carried over — grok auth is HOME-scoped (`auth.json` + custom
     // [model.*] entries whose keys ride env vars), so an isolated home without
     // the catalog is a logged-out agent (measured: "You are not authenticated").
-    std::fs::write(home.join("config.toml"), grok_config_toml(&crate::projects::spawn::mcp_defs(def)))
-        .map_err(|e| e.to_string())?;
+    shared::write_atomic(&home.join("config.toml"), &grok_config_toml(&crate::projects::spawn::mcp_defs(def)))?;
     let user_auth = grok_user_home().join("auth.json");
     if user_auth.is_file() {
-        let _ = std::fs::copy(&user_auth, home.join("auth.json"));
+        shared::copy_private(&user_auth, &home.join("auth.json"))?;
     }
 
     // The agent definition: kiro's pattern in grok's dialect — YAML
@@ -211,8 +209,7 @@ pub(crate) fn render_grok(
         fm.push_str(&format!("model: {model}\n"));
     }
     fm.push_str("---\n\n");
-    std::fs::write(home.join("agents").join(format!("{name}.md")), format!("{fm}{full_prompt}"))
-        .map_err(|e| e.to_string())?;
+    shared::write_atomic(&home.join("agents").join(format!("{name}.md")), &format!("{fm}{full_prompt}"))?;
 
     Ok(Rendered {
         env: vec![("GROK_HOME".into(), home.to_string_lossy().to_string())],
@@ -292,9 +289,10 @@ pub(crate) fn grok_config_toml_from(mcps: &[shared::McpDef], user_config: Option
 
 /// The grok half of `refresh_hooks`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     let hooks = home.join("hooks").join("tmux-mobile.json");
-    hooks.is_file() && patch_hooks(&hooks, grok_hooks(notify))
+    if !hooks.is_file() { return Ok(false); }
+    patch_hooks(&hooks, grok_hooks(notify))
 }
 
 /// grok resume dialect: `--resume <id>` exact, `--continue` recent.

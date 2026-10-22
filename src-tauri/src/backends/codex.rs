@@ -521,18 +521,18 @@ pub(crate) fn render_codex(
 ) -> Result<Rendered, String> {
 
     let codex_home = home.join("codex");
-    std::fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
+    // No create_dir_all by pathname: the inheritance holds the codex home
+    // through the private walk, creating it, before anything in it changes.
     shared::inherit_codex_system_files(&codex_home)?;
     let notifications = crate::agent_notifications::AgentNotificationHub::load();
     notifications.ensure_helper()?;
     let notify = notifications.helper_command("codex");
 
-    let mut config_args: Vec<String> = Vec::new();
-    for m in &crate::projects::spawn::mcp_defs(def) {
-        if !m.name.is_empty() {
-            config_args.extend(shared::codex_mcp_overrides(m));
-        }
-    }
+    // The definition's MCP servers are a FILE, like every other backend's
+    // (board #448): the managed profile, written whole and privately, and
+    // selected with --profile. No env or header value is on the line.
+    shared::write_atomic(&codex_home.join(shared::codex_profile_file()), &shared::codex_mcp_profile(&crate::projects::spawn::mcp_defs(def)))?;
+    let mut config_args: Vec<String> = vec![format!("--profile {}", shared::CODEX_PROFILE)];
     let full_prompt = if skills.is_empty() {
         system_prompt.to_string()
     } else {
@@ -548,15 +548,14 @@ pub(crate) fn render_codex(
     // restart replay typed into the pane — and a tty burst ≳2KB is exactly
     // what send-keys mangles (team/launch.rs). A restart also re-materializes
     // this file (refresh_agent), so the text stays current.
-    std::fs::write(codex_home.join("AGENTS.md"), &full_prompt).map_err(|e| e.to_string())?;
-    std::fs::write(
-        codex_home.join("hooks.json"),
-        serde_json::to_vec_pretty(&json!({
+    shared::write_atomic(&codex_home.join("AGENTS.md"), &full_prompt)?;
+    shared::write_atomic(
+        &codex_home.join("hooks.json"),
+        &serde_json::to_string_pretty(&json!({
             "hooks": codex_hooks(&notify)
         }))
         .unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
     if !def.model.is_empty() {
         config_args.push(format!("--model {}", crate::shell::quote(&def.model)));
@@ -635,9 +634,10 @@ fn codex_trust_key(workspace: &Path) -> Option<String> {
 
 /// The codex half of `refresh_hooks`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     let hooks = home.join("codex").join("hooks.json");
-    hooks.is_file() && patch_hooks(&hooks, codex_hooks(notify))
+    if !hooks.is_file() { return Ok(false); }
+    patch_hooks(&hooks, codex_hooks(notify))
 }
 
 /// codex's resume is a SUBCOMMAND, so it splices in after the binary instead
@@ -645,6 +645,13 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> bool {
 /// to this one agent and `--last` is cwd-filtered, so the recent fallback
 /// cannot cross into another project/session. An unexpected recipe shape
 /// relaunches without resume rather than guessing where the subcommand goes.
+/// A saved codex line from before board #448 put the definition's MCP
+/// servers on it (`-c mcp_servers.<n>.env.<K>=<value>`); such a line is not
+/// private and is never replayed. Since #448 codex's MCP is the profile.
+pub(crate) fn line_is_private(cmd: &str) -> bool {
+    !cmd.contains("mcp_servers.")
+}
+
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     let which = id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string());
     with_resume(cmd, &which).unwrap_or_else(|| cmd.to_string())

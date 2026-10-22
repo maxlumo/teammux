@@ -343,10 +343,10 @@ pub(crate) fn kiro_permissions() -> Value {
 /// absent (a block the user or the CLI wrote is theirs). Returns true on
 /// change.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn patch_profile(path: &Path, hooks: Value) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let Ok(mut root) = serde_json::from_str::<Value>(&text) else { return false };
-    let Some(obj) = root.as_object_mut() else { return false };
+pub(crate) fn patch_profile(path: &Path, hooks: Value) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let Ok(mut root) = serde_json::from_str::<Value>(&text) else { return Ok(false) };
+    let Some(obj) = root.as_object_mut() else { return Ok(false) };
     let mut changed = false;
     if obj.get("hooks") != Some(&hooks) {
         obj.insert("hooks".into(), hooks);
@@ -356,7 +356,10 @@ pub(crate) fn patch_profile(path: &Path, hooks: Value) -> bool {
         obj.insert("permissions".into(), kiro_permissions());
         changed = true;
     }
-    changed && std::fs::write(path, serde_json::to_string_pretty(&root).unwrap_or(text)).is_ok()
+    if !changed {
+        return Ok(false);
+    }
+    shared::write_atomic(path, &serde_json::to_string_pretty(&root).unwrap_or(text)).map(|_| true)
 }
 
 /// The CLI settings every managed kiro agent runs with (`<home>/settings/
@@ -404,11 +407,8 @@ pub(crate) const DEFAULT_MODEL_KEY: &str = "chat.defaultModel";
 /// no-op write when everything already matches — the same contract as
 /// `patch_hooks`, because the app owns these configs. Returns true on change.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn ensure_kiro_settings(home: &Path, model: &str) -> bool {
+pub(crate) fn ensure_kiro_settings(home: &Path, model: &str) -> Result<bool, String> {
     let dir = home.join("settings");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return false;
-    }
     let path = dir.join("cli.json");
     let mut root = std::fs::read_to_string(&path)
         .ok()
@@ -437,7 +437,10 @@ pub(crate) fn ensure_kiro_settings(home: &Path, model: &str) -> bool {
         obj.insert(DEFAULT_MODEL_KEY.into(), json!(model));
         changed = true;
     }
-    changed && std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap()).is_ok()
+    if !changed {
+        return Ok(false);
+    }
+    shared::write_atomic(&path, &serde_json::to_string_pretty(&root).unwrap()).map(|_| true)
 }
 
 /// The model a managed profile pins (its `model` key), or "" — what refresh
@@ -470,7 +473,7 @@ pub(crate) fn engine_flag() -> String {
 /// the line lacks it, drop any ` --agent-engine <x>` when it is closed. Exact
 /// token surgery on the recorded line, like `migrate_launch_model`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn reconcile_recipe_engine(home: &Path) -> bool {
+pub(crate) fn reconcile_recipe_engine(home: &Path) -> Result<bool, String> {
     // Through the recipe's one door (board #384): the read is inside the
     // home's section and only `cmd` changes, so a team move is never undone.
     let flag = engine_flag();
@@ -481,7 +484,6 @@ pub(crate) fn reconcile_recipe_engine(home: &Path) -> bool {
         recipe["cmd"] = json!(next);
         true
     })
-    .unwrap_or(false)
 }
 
 /// The pure half: `Some(new line)` when the engine segment has to change.
@@ -730,7 +732,7 @@ fn legacy_sessions_root() -> Option<std::path::PathBuf> {
 /// the config it survives every start (`up`, restart, resume) because they all
 /// pass `--agent`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> bool {
+pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> Result<bool, String> {
     // Through the recipe's one door (board #384): the read is inside the
     // home's section and only `cmd` changes, so a team move is never undone.
     // `None` = nothing to migrate; `Some(model)` = the line was rewritten.
@@ -748,11 +750,11 @@ pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> bool {
         recipe["cmd"] = json!(tokens.join(" "));
         Some(model)
     });
-    let Ok(Some(model)) = migrated else { return false };
+    let Some(model) = migrated? else { return Ok(false) };
     let recipe_written = true;
     // Only fill a config that has no model of its own: a value already there
     // came from a newer spawn (or the user) and outranks the old launch line.
-    let Some(model) = model else { return recipe_written };
+    let Some(model) = model else { return Ok(recipe_written) };
     // And only if the backend actually accepts it. An id it rejects was never
     // the agent's model — kiro fell back to its default and said so above the
     // splash — so carrying the typo into the config would turn a working agent
@@ -760,7 +762,7 @@ pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> bool {
     // really running.
     if let Err(e) = crate::projects::models::validate("kiro", &model) {
         eprintln!("projects: dropping the launch line's model for a managed agent — {e}");
-        return recipe_written;
+        return Ok(recipe_written);
     }
     let config_written = std::fs::read_to_string(config)
         .ok()
@@ -771,10 +773,10 @@ pub(crate) fn migrate_launch_model(home: &Path, config: &Path) -> bool {
                 return None;
             }
             obj.insert("model".into(), json!(model));
-            Some(std::fs::write(config, serde_json::to_string_pretty(&root).unwrap()).is_ok())
+            Some(shared::write_atomic(config, &serde_json::to_string_pretty(&root).unwrap()).map(|_| true))
         })
-        .unwrap_or(false);
-    recipe_written || config_written
+        .unwrap_or(Ok(false))?;
+    Ok(recipe_written || config_written)
 }
 
 /// The environment a managed kiro pane launches with — ONE definition for
@@ -944,11 +946,10 @@ pub(crate) fn render_kiro(
     if !def.model.trim().is_empty() {
         settings.insert(DEFAULT_MODEL_KEY.into(), json!(def.model.trim()));
     }
-    std::fs::write(
-        home.join("settings").join("cli.json"),
-        serde_json::to_string_pretty(&Value::Object(settings)).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    shared::write_atomic(
+        &home.join("settings").join("cli.json"),
+        &serde_json::to_string_pretty(&Value::Object(settings)).unwrap(),
+    )?;
 
     let notifications = crate::agent_notifications::AgentNotificationHub::load();
     notifications.ensure_helper()?;
@@ -997,8 +998,7 @@ pub(crate) fn render_kiro(
     if !model.is_empty() {
         conf["model"] = json!(model);
     }
-    std::fs::write(home.join("agents").join(format!("{name}.json")), serde_json::to_string_pretty(&conf).unwrap())
-        .map_err(|e| e.to_string())?;
+    shared::write_atomic(&home.join("agents").join(format!("{name}.json")), &serde_json::to_string_pretty(&conf).unwrap())?;
     // v3 finds the identity through the workspace (fail loud: a foreign file
     // there would be read as this agent).
     ensure_workspace_entry(workspace, home, name)?;
@@ -1021,7 +1021,7 @@ pub(crate) fn render_kiro(
 /// `agents/<name>.json` exists but whose recipe does not is an old spawn
 /// whose restart identity is reconstructible from the isolated home itself.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: &str) -> bool {
+pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: &str) -> Result<bool, String> {
     let mut changed = false;
     let config = home.join("agents").join(format!("{window_name}.json"));
     if config.is_file() {
@@ -1031,22 +1031,22 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
             Ok(c) => changed |= c,
             Err(e) => eprintln!("projects: kiro v3 workspace entry for '{window_name}': {e}"),
         }
-        changed |= patch_profile(&config, kiro_hooks(notify));
-        changed |= migrate_launch_model(home, &config);
+        changed |= patch_profile(&config, kiro_hooks(notify))?;
+        changed |= migrate_launch_model(home, &config)?;
         // Settings drift is config drift: agents spawned before queue-mode
         // (or before settings existed at all) get the canonical file on their
         // next start, same as hooks; the v3 model mirror follows the profile.
-        changed |= ensure_kiro_settings(home, &profile_model(&config));
+        changed |= ensure_kiro_settings(home, &profile_model(&config))?;
         // The engine door is read at every start (board #207).
-        changed |= reconcile_recipe_engine(home);
+        changed |= reconcile_recipe_engine(home)?;
         // The pre-recipe backfill, decided INSIDE the home's recipe section
         // (board #384): "no recipe yet" is read and acted on in one step, so
         // a spawn writing one meanwhile is never overwritten.
         let section = crate::projects::recipe::recipe_section(home);
         if matches!(section.read(), Ok(None)) {
-            // Best effort: a backfill that cannot be written changes nothing,
-            // and the restart then takes the generic launch path.
-            changed |= crate::projects::spawn::LaunchRecipe {
+            // A backfill is a private write too: its failure refuses the
+            // start (board #448 P1-B), it is never taken for "no change".
+            crate::projects::spawn::LaunchRecipe {
                 backend: "kiro",
                 env: &kiro_launch_env(home),
                 cmd: &format!(
@@ -1064,11 +1064,11 @@ pub(crate) fn refresh(home: &Path, window_name: &str, workspace: &Path, notify: 
                 from_member: "",
                 input_mode: "",
             }
-            .write_in(&section)
-            .is_ok();
+            .write_in(&section)?;
+            changed = true;
         }
     }
-    changed
+    Ok(changed)
 }
 
 /// kiro resume dialect, per engine (the engine is read off the launch line —
@@ -1621,13 +1621,13 @@ mod tests {
             assert!(worker.join().unwrap(), "and then migrates");
             read()
         };
-        let after = race("command kiro-cli chat --agent dev --model claude-haiku-4.5 --trust-all-tools", migrate_launch_model);
+        let after = race("command kiro-cli chat --agent dev --model claude-haiku-4.5 --trust-all-tools", |h, c| migrate_launch_model(h, c).unwrap());
         assert_eq!(after["team"], "squad", "the move survives the model migration");
         assert!(!after["cmd"].as_str().unwrap().contains("--model"), "{after}");
         // The engine line: whichever way the door is set, make it change.
         let flag = engine_flag();
         let start = if flag.is_empty() { "command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3" } else { "command kiro-cli chat --agent dev --trust-all-tools" };
-        let after = race(start, |h, _| reconcile_recipe_engine(h));
+        let after = race(start, |h, _| reconcile_recipe_engine(h).unwrap());
         assert_eq!(after["team"], "squad", "the move survives the engine reconcile");
         assert_eq!(after["cmd"].as_str(), reconcile_engine_in(start, &flag).as_deref());
         let _ = std::fs::remove_dir_all(home.parent().unwrap().parent().unwrap().parent().unwrap());
@@ -2328,9 +2328,9 @@ mod tests {
         std::fs::write(&path, serde_json::to_string_pretty(&json!({
             "name": "a", "prompt": "p", "hooks": { "stop": [ { "command": "old" } ] }
         })).unwrap()).unwrap();
-        assert!(patch_profile(&path, kiro_hooks("n")), "2.0 object → 3.0 array + permissions");
+        assert!(patch_profile(&path, kiro_hooks("n")).unwrap(), "2.0 object → 3.0 array + permissions");
         let once = std::fs::read_to_string(&path).unwrap();
-        assert!(!patch_profile(&path, kiro_hooks("n")), "already 3.0: no write");
+        assert!(!patch_profile(&path, kiro_hooks("n")).unwrap(), "already 3.0: no write");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), once);
         let v: Value = serde_json::from_str(&once).unwrap();
         assert!(v["hooks"].is_array());
@@ -2339,7 +2339,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_string_pretty(&json!({
             "name": "a", "hooks": kiro_hooks("n"), "permissions": { "rules": [ { "capability": "shell", "effect": "ask" } ] }
         })).unwrap()).unwrap();
-        assert!(!patch_profile(&path, kiro_hooks("n")));
+        assert!(!patch_profile(&path, kiro_hooks("n")).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

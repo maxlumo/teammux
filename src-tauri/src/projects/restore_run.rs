@@ -1700,7 +1700,10 @@ fn launch(b: &mut Batch, pi: usize, wi: usize) -> Result<(), String> {
         Err(why) => return kill_owned(b, pi, wi, why),
     };
     if let (Some(line), Ok(row)) = (line, &row) {
-        let text = super::reconcile::launch_text(row, &slot, &line, w.launch.as_deref());
+        let text = match super::reconcile::launch_text(row, &slot, &line, w.launch.as_deref()) {
+            Ok(t) => t,
+            Err(why) => return kill_owned(b, pi, wi, why),
+        };
         // The launch is typed ONLY into a shell whose prompt was seen — the
         // observable edge, never a timeout (validator load finding,
         // orchestrator 00:55): a shell still starting when the host is busy

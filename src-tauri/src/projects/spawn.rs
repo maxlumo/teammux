@@ -338,7 +338,7 @@ fn materialize(
     if !section.is_for(&home) {
         return Err(format!("internal: materialize '{window_name}' outside its recipe section"));
     }
-    std::fs::create_dir_all(&home).map_err(|e| format!("create agent home: {e}"))?;
+    make_home_private(&home).map_err(|e| format!("create agent home: {e}"))?;
     ensure_gitignore(workspace);
     // A JOINED agent (board #382: a team and no member, however its def was
     // made) gets its team block HERE and only here, so its spawn, every
@@ -413,13 +413,17 @@ fn materialize(
 /// (degrades soft: the spawn-time materials keep working, logged once per
 /// window), or a def edited into an invalid model (a config the backend
 /// would refuse must not brick the restart).
-pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bool {
+/// `Ok(true)` re-materialized, `Ok(false)` nothing to re-materialize from (no
+/// recipe, the definition gone, an invalid model: the snapshot is kept), and
+/// `Err` when re-materializing FAILED (a private write refused, board #448
+/// P1-B): the start is refused, never replayed from the old recipe.
+pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Result<bool, String> {
     let home = agent_home(project_path, window_name);
     // The recipe's section from this read to materialize's write: the whole
     // read-modify-write, registry/team resolution and the backend's render
     // included, so a team move cannot land in between and be undone.
     let section = super::recipe::recipe_section(&home);
-    let Ok(Some(recipe)) = section.read() else { return false };
+    let Ok(Some(recipe)) = section.read() else { return Ok(false) };
     let p = provenance_of(&recipe);
     let Some(def) = effective_def(project_path, window_name, &p) else {
         // The def (or its team/base) is gone. Keep the spawn-time snapshot —
@@ -433,17 +437,19 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> bo
                 p.agent_def, p.team
             );
         }
-        return false;
+        return Ok(false);
     };
     // A def edited into an invalid model must not brick the restart: keep the
     // old materials rather than write a config the backend will refuse.
     if super::models::validate(&def.backend, &def.model).is_err()
         || super::models::validate_effort(&def.backend, &def.effort).is_err()
     {
-        return false;
+        return Ok(false);
     }
     let team_opt = (!p.team.is_empty()).then_some(p.team.as_str());
-    materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member).is_ok()
+    materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member)
+        .map(|_| true)
+        .map_err(|e| format!("{window_name}: its materials could not be brought up to date, so it is not started: {e}"))
 }
 
 /// Start a managed window again from scratch, in its own home (the restart's
@@ -1418,10 +1424,10 @@ fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Opti
 
 /// Replay the persisted identity (env + backend command), preferring an exact
 /// conversation id and otherwise the isolated home's newest cwd conversation.
-pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&str>) -> Option<String> {
-    let (cmd, backend, env, home) = recipe_parts(project_path, window_name)?;
+pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&str>) -> Result<Option<String>, String> {
+    let Some((cmd, backend, env, home)) = recipe_parts(project_path, window_name)? else { return Ok(None) };
     let cmd = resume_command(&cmd, &backend, session_id, Some(&home), window_name);
-    Some(with_env(&env, &cmd))
+    Ok(Some(with_env(&env, &cmd)))
 }
 
 /// The strict relaunch for a restore after a reboot (board #422): the
@@ -1429,7 +1435,7 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
 /// cannot be read, an unknown backend, or a resume the backend cannot prove
 /// is exact is refused, never relaunched recent or blank.
 pub fn relaunch_line_exact(project_path: &str, window_name: &str, session_id: &str) -> Result<String, String> {
-    let (cmd, backend, env, home) = recipe_parts(project_path, window_name).ok_or_else(|| format!("{window_name}: no readable launch recipe"))?;
+    let (cmd, backend, env, home) = recipe_parts(project_path, window_name)?.ok_or_else(|| format!("{window_name}: no readable launch recipe"))?;
     let b = crate::backends::Backend::parse(&backend).ok_or_else(|| format!("{window_name}: unknown backend '{backend}'"))?;
     let cmd = b
         .resume_exact(&cmd, session_id, Some(&home), window_name)
@@ -1439,11 +1445,17 @@ pub fn relaunch_line_exact(project_path: &str, window_name: &str, session_id: &s
 
 /// A recipe's command, backend, `K=V` env prefix and home — the ONE reader
 /// both relaunch forms use.
-fn recipe_parts(project_path: &str, window_name: &str) -> Option<(String, String, String, PathBuf)> {
+/// `Err` when the recipe is a line that may not be replayed (board #448
+/// P1-B: an older build's codex line carrying MCP values): the start is
+/// refused, never typed. `Ok(None)` = no readable recipe.
+fn recipe_parts(project_path: &str, window_name: &str) -> Result<Option<(String, String, String, PathBuf)>, String> {
     let home = agent_home(project_path, window_name);
-    let recipe: Value = serde_json::from_str(&std::fs::read_to_string(home.join("launch.json")).ok()?).ok()?;
-    let cmd = recipe.get("cmd")?.as_str()?.to_string();
+    let Some(recipe) = std::fs::read_to_string(home.join("launch.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return Ok(None) };
+    let Some(cmd) = recipe.get("cmd").and_then(|c| c.as_str()).map(str::to_string) else { return Ok(None) };
     let backend = recipe.get("backend").and_then(|b| b.as_str()).unwrap_or("").to_string();
+    if crate::backends::Backend::parse(&backend).is_some_and(|b| !b.line_is_private(&cmd)) {
+        return Err(format!("{window_name}: its saved launch line carries MCP values from before board #448; it is not replayed — restart it from its definition"));
+    }
     let env = recipe.get("env").and_then(|e| e.as_array()).map(|arr| {
         arr.iter()
             .filter_map(|kv| Some((kv.get(0)?.as_str()?, kv.get(1)?.as_str()?)))
@@ -1451,7 +1463,7 @@ fn recipe_parts(project_path: &str, window_name: &str) -> Option<(String, String
             .collect::<Vec<_>>()
             .join(" ")
     }).unwrap_or_default();
-    Some((cmd, backend, env, home))
+    Ok(Some((cmd, backend, env, home)))
 }
 
 fn with_env(env: &str, cmd: &str) -> String {
@@ -1540,7 +1552,7 @@ mod relaunch_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("session.json"), format!(r#"{{"id":"{id}","agentMode":"{mode}"}}"#)).unwrap();
         };
-        let line = || relaunch_line(ws.to_str().unwrap(), "lead", Some(id)).unwrap();
+        let line = || relaunch_line(ws.to_str().unwrap(), "lead", Some(id)).unwrap().unwrap();
 
         // Recorded id, nothing in the home (the id lives only in ~/.kiro): fresh.
         assert!(!line().contains("--resume"), "global-only id must not resume: {}", line());
@@ -1605,12 +1617,12 @@ mod relaunch_tests {
     #[test]
     fn a_restart_resumes_a_quoted_non_ascii_agent_name() {
         let (ws, id) = v3_agent_with_session("翻译", "翻译", "翻译");
-        let line = relaunch_line(ws.to_str().unwrap(), "翻译", Some(&id)).unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "翻译", Some(&id)).unwrap().unwrap();
         assert!(line.contains("--agent '翻译'"), "the fixture really is quoted: {line}");
         assert!(line.ends_with(&format!("--resume-id {id}")), "its own session resumes despite the quotes: {line}");
         // And a vibe session under the same quoted name is still the incident.
         let (ws2, id2) = v3_agent_with_session("翻译", "翻译", "vibe");
-        let vibe = relaunch_line(ws2.to_str().unwrap(), "翻译", Some(&id2)).unwrap();
+        let vibe = relaunch_line(ws2.to_str().unwrap(), "翻译", Some(&id2)).unwrap().unwrap();
         assert!(vibe.contains("--agent '翻译'") && !vibe.contains("--resume"), "vibe stays fresh: {vibe}");
         std::fs::remove_dir_all(&ws).ok();
         std::fs::remove_dir_all(&ws2).ok();
@@ -1625,13 +1637,13 @@ mod relaunch_tests {
     #[test]
     fn the_name_compared_is_the_window_name_not_the_registry_def_name() {
         let (ws, id) = v3_agent_with_session("builder-2", "builder", "builder-2");
-        let line = relaunch_line(ws.to_str().unwrap(), "builder-2", Some(&id)).unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "builder-2", Some(&id)).unwrap().unwrap();
         assert!(line.contains("--agent builder-2"), "the window name is what --agent carries: {line}");
         assert!(line.ends_with(&format!("--resume-id {id}")), "agentMode builder-2 resumes as builder-2: {line}");
         // A session whose mode is the BASE def's name belongs to `builder`, not
         // to this window: fresh, even though the registry def is `builder`.
         let (ws2, id2) = v3_agent_with_session("builder-2", "builder", "builder");
-        let other = relaunch_line(ws2.to_str().unwrap(), "builder-2", Some(&id2)).unwrap();
+        let other = relaunch_line(ws2.to_str().unwrap(), "builder-2", Some(&id2)).unwrap().unwrap();
         assert!(!other.contains("--resume"), "a session of the def name is not this window's: {other}");
         std::fs::remove_dir_all(&ws).ok();
         std::fs::remove_dir_all(&ws2).ok();
@@ -1672,7 +1684,7 @@ mod relaunch_tests {
         LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent lead --model m --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&home)
             .unwrap();
-        let line = relaunch_line(ws.to_str().unwrap(), "lead", Some("id-1")).unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "lead", Some("id-1")).unwrap().unwrap();
         assert!(line.starts_with("KIRO_HOME="), "isolated home first: {line}");
         assert!(line.contains("--agent lead"), "identity: {line}");
         assert!(line.ends_with("--resume-id id-1"), "conversation resumes: {line}");
@@ -1689,11 +1701,11 @@ mod relaunch_tests {
         // No recorded conversation yet: the managed home is isolated to this
         // one agent, so relaunch the newest conversation instead of opening a
         // blank prompt while the 20s capture tick catches up.
-        let recent = relaunch_line(ws.to_str().unwrap(), "lead", None).unwrap();
+        let recent = relaunch_line(ws.to_str().unwrap(), "lead", None).unwrap().unwrap();
         assert!(recent.ends_with("--resume"), "managed kiro resumes recent: {recent}");
         // A window with no recipe (hand-started) stays None — the caller falls
         // back to the generic backend line.
-        assert!(relaunch_line(ws.to_str().unwrap(), "byhand", None).is_none());
+        assert!(relaunch_line(ws.to_str().unwrap(), "byhand", None).unwrap().is_none());
 
         for (name, backend, cmd, flag) in [
             ("cl", "claude", "command claude --settings /tmp/settings.json", "--continue"),
@@ -1702,9 +1714,9 @@ mod relaunch_tests {
             let ahome = agent_home(ws.to_str().unwrap(), name);
             std::fs::create_dir_all(&ahome).unwrap();
             LaunchRecipe { backend: backend, env: &[], cmd: cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&ahome).unwrap();
-            let exact = relaunch_line(ws.to_str().unwrap(), name, Some("conv-1")).unwrap();
+            let exact = relaunch_line(ws.to_str().unwrap(), name, Some("conv-1")).unwrap().unwrap();
             assert!(exact.ends_with("--resume conv-1"), "{backend} exact resume: {exact}");
-            let recent = relaunch_line(ws.to_str().unwrap(), name, None).unwrap();
+            let recent = relaunch_line(ws.to_str().unwrap(), name, None).unwrap().unwrap();
             assert!(recent.ends_with(flag), "{backend} recent resume: {recent}");
         }
 
@@ -1717,12 +1729,12 @@ mod relaunch_tests {
         LaunchRecipe { backend: "codex", env: &[("CODEX_HOME".to_string(), chome.to_string_lossy().to_string())], cmd: "command codex -c a=b --dangerously-bypass-approvals-and-sandbox", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&chome)
             .unwrap();
-        let cx = relaunch_line(ws.to_str().unwrap(), "cx", Some("01a0-abc")).unwrap();
+        let cx = relaunch_line(ws.to_str().unwrap(), "cx", Some("01a0-abc")).unwrap().unwrap();
         assert!(
             cx.contains("command codex resume 01a0-abc -c a=b --dangerously-bypass-approvals-and-sandbox"),
             "subcommand splice: {cx}"
         );
-        let cx_recent = relaunch_line(ws.to_str().unwrap(), "cx", None).unwrap();
+        let cx_recent = relaunch_line(ws.to_str().unwrap(), "cx", None).unwrap().unwrap();
         assert!(
             cx_recent.contains("command codex resume --last -c a=b --dangerously-bypass-approvals-and-sandbox"),
             "isolated CODEX_HOME can safely resume its last cwd session: {cx_recent}"
@@ -1799,6 +1811,17 @@ pub(crate) fn agent_home(workspace: &str, name: &str) -> PathBuf {
     super::agents::home_dir(workspace, name).unwrap_or_else(|| {
         Path::new(workspace).join(".tmm").join("agents").join("__invalid-name__")
     })
+}
+
+/// A managed agent's home, created or kept and made PRIVATE (board #448): on
+/// Unix the `safe_fs::private_home` walk — from the canonical project root,
+/// `.tmm` (ours), `agents` and the home (each 0700, ours, no link followed).
+/// Every file in it may carry a definition's MCP env or header value.
+pub(crate) fn make_home_private(home: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    return crate::safe_fs::private_home(home).map(|_| ()).map_err(|e| format!("{}: {e}", home.display()));
+    #[cfg(not(unix))]
+    return std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()));
 }
 
 /// `.tmm/` self-gitignores (same convention as team runtime homes).
@@ -1885,10 +1908,25 @@ pub(crate) fn seed_mcp_config(
         }
     }
     if changed || !path.is_file() {
-        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap())
+        shared::write_atomic(&path, &serde_json::to_string_pretty(&root).unwrap())
             .map_err(|e| format!("write mcp.json: {e}"))?;
+    } else {
+        // Unchanged content, still private (board #448 P1-C): a copy an
+        // older build left 0644 is closed in place, its content untouched.
+        tighten_owned(&path).map_err(|e| format!("mcp.json: {e}"))?;
     }
     Ok(path)
+}
+
+/// An existing owned file made private in place (mode only), Unix only.
+pub(crate) fn tighten_owned(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    return crate::safe_fs::tighten_file(path);
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// MCP: an array entry that is a STRING names a central server (reg_mcp);
@@ -1921,14 +1959,18 @@ pub(crate) fn mcp_defs(def: &RegAgent) -> Vec<shared::McpDef> {
 /// Called on every start (`hub_agent_restart`, and `reconcile` when a project
 /// comes up), so the app owns these configs rather than trusting whatever an
 /// older version wrote.
-pub fn refresh_hooks(project_path: &str, window_name: &str) -> bool {
-    let Some(home) = super::agents::home_dir(project_path, window_name) else { return false };
+pub fn refresh_hooks(project_path: &str, window_name: &str) -> Result<bool, String> {
+    let Some(home) = super::agents::home_dir(project_path, window_name) else { return Ok(false) };
     if !home.is_dir() {
-        return false; // not a managed agent
+        return Ok(false); // not a managed agent
     }
+    // Every start closes a home an older build left wide (board #448). A
+    // failure REFUSES the start (P1-B): an agent is never launched from a
+    // home that could not be made private.
+    make_home_private(&home).map_err(|e| format!("{window_name}: its home could not be made private, so it is not started: {e}"))?;
     let notifications = crate::agent_notifications::AgentNotificationHub::load();
     if notifications.ensure_helper().is_err() {
-        return false;
+        return Ok(false);
     }
     // Each backend repairs its own on-disk surface (board #128): every half
     // probes for its file(s) and no-ops otherwise, exactly as the inline
@@ -1936,23 +1978,26 @@ pub fn refresh_hooks(project_path: &str, window_name: &str) -> bool {
     // home belongs to.
     let mut changed = false;
     for b in crate::backends::Backend::ALL {
-        changed |= b.refresh(&home, window_name, Path::new(project_path), &notifications);
+        changed |= b.refresh(&home, window_name, Path::new(project_path), &notifications)
+            .map_err(|e| format!("{window_name}: its configuration could not be refreshed privately, so it is not started: {e}"))?;
     }
-    changed
+    Ok(changed)
 }
 
 /// Replace the `hooks` key of a JSON config, leaving everything else alone.
 /// A no-op when the value already matches, so starting a project does not
-/// rewrite files for nothing.
-pub(crate) fn patch_hooks(path: &std::path::Path, hooks: Value) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let Ok(mut root) = serde_json::from_str::<Value>(&text) else { return false };
-    let Some(obj) = root.as_object_mut() else { return false };
+/// rewrite files for nothing. `Ok(false)` when there is nothing to patch (no
+/// file, not JSON); `Err` when the private write itself failed (board #448
+/// P1-B), which refuses the start.
+pub(crate) fn patch_hooks(path: &std::path::Path, hooks: Value) -> Result<bool, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
+    let Ok(mut root) = serde_json::from_str::<Value>(&text) else { return Ok(false) };
+    let Some(obj) = root.as_object_mut() else { return Ok(false) };
     if obj.get("hooks") == Some(&hooks) {
-        return false;
+        return Ok(false);
     }
     obj.insert("hooks".into(), hooks);
-    std::fs::write(path, serde_json::to_string_pretty(&root).unwrap_or(text)).is_ok()
+    shared::write_atomic(path, &serde_json::to_string_pretty(&root).unwrap_or(text)).map(|_| true)
 }
 
 /// ` --effort <level>` for the backends whose CLI takes the flag (kiro,
@@ -1991,6 +2036,123 @@ mod tests {
             skills: "[]".into(),
             mcp: r#"[{"name":"files","command":"mcp-files","args":["--root","/tmp"]}]"#.into(),
         }
+    }
+
+    /// Board #448 D4: a definition's MCP secrets, by VALUE (any name), never
+    /// reach the launch line, the launch env, launch.json or the launch
+    /// script, for every backend; every file that holds one is 0600 inside a
+    /// 0700 home. Checked after the first render, after a re-render that
+    /// revokes a server (it leaves no copy), and after a refresh (every
+    /// start's rewrite of the backend's own files).
+    #[test]
+    #[cfg(unix)]
+    fn no_backend_puts_an_mcp_secret_on_the_line_and_every_copy_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        const ENV: &str = "SENTINEL-ENV-7f3a";
+        const HDR: &str = "SENTINEL-HDR-9c1e";
+        fn holding(dir: &Path, needle: &str, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                if m.is_dir() { holding(&p, needle, out); continue; }
+                if m.is_file() && std::fs::read(&p).map(|b| String::from_utf8_lossy(&b).contains(needle)).unwrap_or(false) { out.push(p); }
+            }
+        }
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        let notifications = crate::agent_notifications::AgentNotificationHub::load();
+        for b in crate::backends::Backend::ALL {
+            let ws = std::env::temp_dir().join(format!("tmm-sentinel-{}-{}", b.name(), uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&ws).unwrap();
+            let home = ws.join(".tmm/agents/sec");
+            make_home_private(&home).unwrap();
+            let mut d = def(b.name());
+            d.mcp = json!([
+                { "name": "local", "command": "mcp-local", "env": { "ANY_NAME": ENV } },
+                { "name": "remote", "url": "https://mcp.example/x", "headers": { "Authorization": format!("Bearer {HDR}"), "X-Plain": HDR } },
+            ]).to_string();
+            let prompt = build_prompt(&d, "sec", "proj", "", "", "");
+            let check = |stage: &str, r: &Rendered| {
+                let line = format!("{} {}", r.cmd, r.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+                for s in [ENV, HDR] {
+                    assert!(!line.contains(s), "{} {stage}: a secret on the line or env: {line}", b.name());
+                }
+                LaunchRecipe { backend: b.name(), env: &r.env, cmd: &r.cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+                let script = shared::write_launch_script(&home, "sec", &format!("{} {}", r.env.iter().map(|(k, v)| format!("{k}={}", crate::shell::quote(v))).collect::<Vec<_>>().join(" "), r.cmd)).unwrap();
+                for s in [ENV, HDR] {
+                    for f in [home.join("launch.json"), script.clone()] {
+                        assert!(!std::fs::read_to_string(&f).unwrap().contains(s), "{} {stage}: a secret in {}", b.name(), f.display());
+                    }
+                }
+                let mut copies = Vec::new();
+                for s in [ENV, HDR] { holding(&home, s, &mut copies); }
+                for c in &copies {
+                    assert_eq!(mode(c), 0o600, "{} {stage}: {} holds a secret and is not private", b.name(), c.display());
+                }
+                assert_eq!(mode(&home), 0o700, "{} {stage}", b.name());
+                copies
+            };
+            let r = b.render(&d, "sec", &home, &ws, &prompt, &[]).unwrap();
+            // The workspace's own MCP file (P1-C) holds the values too: private.
+            let seeded = seed_mcp_config(&ws, &mcp_defs(&d)).unwrap();
+            assert_eq!(mode(&seeded), 0o600, "{}: the workspace mcp.json", b.name());
+            std::fs::set_permissions(&seeded, std::fs::Permissions::from_mode(0o644)).unwrap();
+            seed_mcp_config(&ws, &mcp_defs(&d)).unwrap();
+            assert_eq!(mode(&seeded), 0o600, "{}: an old wide copy closes on the no-change path", b.name());
+            let first = check("first render", &r);
+            assert!(!first.is_empty(), "{}: the servers are rendered somewhere (a file)", b.name());
+            b.refresh(&home, "sec", &ws, &notifications).unwrap();
+            check("refresh", &r);
+            // Revoke both servers: the re-render leaves no copy of either value.
+            d.mcp = "[]".into();
+            let r = b.render(&d, "sec", &home, &ws, &prompt, &[]).unwrap();
+            let left = check("revoked re-render", &r);
+            assert!(left.is_empty(), "{}: a revoked secret survived in {left:?}", b.name());
+            std::fs::remove_dir_all(&ws).ok();
+        }
+    }
+
+    /// Board #448 P1-B: a home that cannot be made private (its `.tmm` is a
+    /// link to another directory) fails refresh_hooks, never "no change".
+    #[test]
+    #[cfg(unix)]
+    fn refresh_hooks_refuses_a_home_it_cannot_make_private() {
+        let ws = std::env::temp_dir().join(format!("tmm-refresh-priv-{}", uuid::Uuid::new_v4()));
+        let outside = ws.join("outside");
+        std::fs::create_dir_all(outside.join("agents/dev")).unwrap();
+        std::fs::write(outside.join("agents/dev/launch.json"), "{}").unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join(".tmm")).unwrap();
+        let err = refresh_hooks(&ws.to_string_lossy(), "dev").unwrap_err();
+        assert!(err.contains("could not be made private"), "{err}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #448 D4: the private writer is the ONE way a backend or the
+    /// spawn/recipe/live-config code writes a file, so a new write entry
+    /// cannot publish a definition's value wide. (The kiro git exclude file
+    /// is the user's repo, not a home.) A PIN on the textual writers
+    /// (`std::fs::write`, `fs::copy`, `File::create`, `OpenOptions::new`),
+    /// not a proof: the sentinel test is the behaviour.
+    #[test]
+    fn production_code_writes_agent_files_only_through_the_private_writer() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("backends")).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "rs")).collect();
+        for f in ["projects/spawn.rs", "projects/live_config.rs", "projects/recipe.rs"] { files.push(root.join(f)); }
+        let mut raw = Vec::new();
+        for f in &files {
+            let src = std::fs::read_to_string(f).unwrap();
+            // Production is everything before the first test module.
+            let prod: String = src.split("\n#[cfg(test)]\nmod ").next().unwrap().split("\n#[cfg(test)]\npub(crate) mod ").next().unwrap().to_string();
+            for (i, line) in prod.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !(t.contains("std::fs::write(") || t.contains("fs::copy(") || t.contains("File::create(") || t.contains("OpenOptions::new(")) { continue; }
+                if t.contains("format!(\"{current}{sep}{mark}{line}\\n\")") { continue; } // kiro's .git/info/exclude
+                // The non-Unix fallbacks of write_atomic and copy_private themselves.
+                if f.ends_with("backends/shared.rs") && (t.starts_with("std::fs::write(&tmp, text)") || t.starts_with("return std::fs::write(to, bytes)")) { continue; }
+                raw.push(format!("{}:{}: {t}", f.strip_prefix(&root).unwrap().display(), i + 1));
+            }
+        }
+        assert!(raw.is_empty(), "a raw write outside the private writer: {raw:#?}");
     }
 
     #[test]
@@ -2112,7 +2274,7 @@ mod tests {
             "hooks": { "stop": [ { "command": "old-helper kiro" } ] }
         })).unwrap()).unwrap();
 
-        assert!(refresh_hooks(&ws.to_string_lossy(), "dev"), "a stale config is rewritten");
+        assert!(refresh_hooks(&ws.to_string_lossy(), "dev").unwrap(), "a stale config is rewritten");
         let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         // The 2.0 object gives way to the 3.0 array (board #207), permissions are added.
         let hooks = after.get("hooks").and_then(|h| h.as_array()).unwrap();
@@ -2126,9 +2288,9 @@ mod tests {
             "the brief survives — only hooks are ours to rewrite"
         );
         // Idempotent: a config already current is not rewritten.
-        assert!(!refresh_hooks(&ws.to_string_lossy(), "dev"), "no needless writes");
+        assert!(!refresh_hooks(&ws.to_string_lossy(), "dev").unwrap(), "no needless writes");
         // A window with no isolated home is not ours to touch.
-        assert!(!refresh_hooks(&ws.to_string_lossy(), "byhand"));
+        assert!(!refresh_hooks(&ws.to_string_lossy(), "byhand").unwrap());
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -2149,7 +2311,7 @@ mod tests {
         let cli = home.join("settings/cli.json");
 
         // Case 1: a pre-settings home has NO cli.json — it is created whole.
-        assert!(refresh_hooks(&ws.to_string_lossy(), "dev"));
+        assert!(refresh_hooks(&ws.to_string_lossy(), "dev").unwrap());
         let read = || -> serde_json::Value {
             serde_json::from_str(&std::fs::read_to_string(&cli).unwrap()).unwrap()
         };
@@ -2161,7 +2323,7 @@ mod tests {
             "chat.disableTrustAllConfirmation": true,
             "chat.editMode": "vi"
         })).unwrap()).unwrap();
-        assert!(ensure_kiro_settings(&home, ""), "missing key is backfilled");
+        assert!(ensure_kiro_settings(&home, "").unwrap(), "missing key is backfilled");
         let after = read();
         assert_eq!(after.get("chat.defaultInterruptBehavior").and_then(|v| v.as_str()), Some("queue"));
         assert_eq!(after.get("chat.editMode").and_then(|v| v.as_str()), Some("vi"), "foreign keys are not ours to drop");
@@ -2170,15 +2332,15 @@ mod tests {
 
         // Case 3: already canonical — no write, so starting a project does not
         // churn mtimes.
-        assert!(!ensure_kiro_settings(&home, ""), "no needless writes");
+        assert!(!ensure_kiro_settings(&home, "").unwrap(), "no needless writes");
 
         // Case 4 (#207): the v3 model mirror follows the profile's model —
         // written when pinned, DELETED when cleared (a stale pin must not
         // outlive the config), idempotent in between.
-        assert!(ensure_kiro_settings(&home, "claude-sonnet-5"));
+        assert!(ensure_kiro_settings(&home, "claude-sonnet-5").unwrap());
         assert_eq!(read().get("chat.defaultModel").and_then(|v| v.as_str()), Some("claude-sonnet-5"));
-        assert!(!ensure_kiro_settings(&home, "claude-sonnet-5"), "same model, no write");
-        assert!(ensure_kiro_settings(&home, ""), "cleared → the stale key goes");
+        assert!(!ensure_kiro_settings(&home, "claude-sonnet-5").unwrap(), "same model, no write");
+        assert!(ensure_kiro_settings(&home, "").unwrap(), "cleared → the stale key goes");
         assert!(read().get("chat.defaultModel").is_none());
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -2195,7 +2357,7 @@ mod tests {
             "theme": "dark"
         })).unwrap()).unwrap();
 
-        assert!(refresh_hooks(&ws.to_string_lossy(), "cc"));
+        assert!(refresh_hooks(&ws.to_string_lossy(), "cc").unwrap());
         let read = || -> Value {
             serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
         };
@@ -2203,7 +2365,7 @@ mod tests {
         assert_eq!(after["statusLine"], shared::claude_status_line_config());
         assert_eq!(after["env"]["ANTHROPIC_MODEL"], "agent-override");
         assert_eq!(after["theme"], "dark");
-        assert!(!refresh_hooks(&ws.to_string_lossy(), "cc"), "canonical home is a no-op");
+        assert!(!refresh_hooks(&ws.to_string_lossy(), "cc").unwrap(), "canonical home is a no-op");
         std::fs::remove_dir_all(&ws).ok();
     }
 
@@ -2382,7 +2544,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             .write(&home)
             .unwrap();
 
-        assert!(refresh_hooks(&ws.to_string_lossy(), "dev"), "a stale config is rewritten");
+        assert!(refresh_hooks(&ws.to_string_lossy(), "dev").unwrap(), "a stale config is rewritten");
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(after.get("model").and_then(|m| m.as_str()), Some("claude-haiku-4.5"));
         let recipe: Value =
@@ -2391,7 +2553,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!cmd.contains("--model"), "the line must not keep a second opinion: {cmd}");
         assert!(cmd.contains("--agent dev") && cmd.contains("--trust-all-tools"), "{cmd}");
         // Idempotent, and a model already in the config outranks the line.
-        assert!(!refresh_hooks(&ws.to_string_lossy(), "dev"), "no needless writes");
+        assert!(!refresh_hooks(&ws.to_string_lossy(), "dev").unwrap(), "no needless writes");
         std::fs::remove_dir_all(&ws).ok();
     }
 
@@ -2413,7 +2575,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         LaunchRecipe { backend: "kiro", env: &[], cmd: // The owner's real value: one character off `claude-sonnet-4.5`.
             "command kiro-cli chat --agent dev --model claude-sonnet-4-5 --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
 
-        refresh_hooks(&ws.to_string_lossy(), "dev");
+        refresh_hooks(&ws.to_string_lossy(), "dev").unwrap();
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert!(after.get("model").is_none(), "a rejected id must not reach the config: {after}");
         let recipe: Value =
@@ -2552,12 +2714,12 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(cli()["chat.defaultInterruptBehavior"], "steer", "a restart re-renders the def's mode");
         // The repair path (project up, no def) keeps a valid mode and only
         // backfills a home that predates the key.
-        assert!(!ensure_kiro_settings(&dir, ""), "steer is kept, nothing to write");
+        assert!(!ensure_kiro_settings(&dir, "").unwrap(), "steer is kept, nothing to write");
         assert_eq!(cli()["chat.defaultInterruptBehavior"], "steer");
         let mut stale = cli();
         stale.as_object_mut().unwrap().remove("chat.defaultInterruptBehavior");
         std::fs::write(dir.join("settings/cli.json"), stale.to_string()).unwrap();
-        assert!(ensure_kiro_settings(&dir, ""));
+        assert!(ensure_kiro_settings(&dir, "").unwrap());
         assert_eq!(cli()["chat.defaultInterruptBehavior"], "queue", "a pre-key home backfills queue");
 
         let mut c = def("codex");
@@ -2617,7 +2779,10 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
                 _ => render_codex(&d, "tester", &dir, &dir, &prompt, &[]).unwrap(),
             };
             assert!(!r.cmd.contains("x-room"), "no team room headers");
-            assert!(r.cmd.contains("files") || dir.join("mcp.json").exists(), "registry MCP present");
+            // codex's MCP is the managed profile, never the line (board #448).
+            let profile = std::fs::read_to_string(dir.join("codex/tmm-agent.config.toml")).unwrap_or_default();
+            assert!(dir.join("mcp.json").exists() || profile.contains("[mcp_servers.files]"), "registry MCP present");
+            assert!(!r.cmd.contains("mcp_servers"), "no MCP override on the line: {}", r.cmd);
             // The prompt does NOT teach `tmm mcp` — the CLI door is a SKILL
             // an agent opts into, never the native path (owner, 2026-08-28).
             assert!(!prompt.contains("tmm mcp"), "prompt must not teach the MCP CLI");
@@ -2873,7 +3038,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             "members": r#"[{"name":"lead","base":"jnbase","role":"owns merges"},{"name":"dev","base":"jnbase","role":"implements"}]"#
         })).unwrap();
         save("jnhelper", "Helper persona v2.");
-        assert!(refresh_agent(&ws_str, "proj", "jnhelper"));
+        assert!(refresh_agent(&ws_str, "proj", "jnhelper").unwrap());
         let p = prompt();
         assert!(p.contains("Helper persona v2.") && p.contains("- @lead — owns merges"), "{p}");
         assert_eq!(p.matches("## Your team:").count(), 1, "one block, not one per restart");
@@ -2947,7 +3112,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(team_mates(&ws_str, "mvteam", "mvsolo"), [("lead".to_string(), "leads".to_string())]);
         let prompt = || read(&agent_home(&ws_str, "mvsolo").join("agents").join("mvsolo.json"))["prompt"].as_str().unwrap().to_string();
         assert!(!prompt().contains("## Your team"), "the running agent's config is not rewritten");
-        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo").unwrap());
         assert!(prompt().contains("## Your team: \"mvteam\"") && prompt().contains("- @lead — leads"), "its next start carries the block: {}", prompt());
         assert_eq!(set_agent_team(&ws_str, "mvsolo", "mvteam", &|_| Ok(Vec::new())).unwrap(), ("mvteam".to_string(), false, 1), "already there: no new revision");
 
@@ -2979,7 +3144,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         LaunchRecipe { backend: "kiro", env: &[], cmd: "x", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&seeded_home).unwrap();
         assert!(read(&seeded_home.join("launch.json")).get("team_told").is_none());
         assert_eq!(read(&seeded_home.join("launch.json"))["team_rev"], 2, "the revision stays");
-        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo").unwrap());
         assert!(!prompt().contains("## Your team"), "and its next start drops the block");
         assert!(set_agent_team(&ws_str, "nobody", "mvteam", &|_| Ok(Vec::new())).unwrap_err().contains("is not an agent this app started"));
 
@@ -3008,12 +3173,12 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let mover = { let ws = ws_str.clone(); std::thread::spawn(move || set_agent_team(&ws, "mvsolo", "mvteam", &|_| Ok(Vec::new()))) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(recipe()["team"], "", "the move waits for the section");
-        assert!(refresh_agent(&ws_str, "proj", "lead"), "another home's restart is not held up");
+        assert!(refresh_agent(&ws_str, "proj", "lead").unwrap(), "another home's restart is not held up");
         drop(held);
         assert_eq!(mover.join().unwrap().unwrap(), (String::new(), true, 3));
         assert_eq!(recipe()["team"], "mvteam");
         let held = super::super::recipe::recipe_section(&agent_home(&ws_str, "mvsolo"));
-        let restart = { let ws = ws_str.clone(); std::thread::spawn(move || refresh_agent(&ws, "proj", "mvsolo")) };
+        let restart = { let ws = ws_str.clone(); std::thread::spawn(move || refresh_agent(&ws, "proj", "mvsolo").unwrap()) };
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(!restart.is_finished(), "a restart's refresh takes the same section");
         drop(held);
@@ -3023,7 +3188,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // A spawn-time rewrite of the recipe (materialize) keeps a key it does
         // not own: a later feature's field survives a restart.
         super::super::recipe::update_recipe(&agent_home(&ws_str, "mvsolo"), |r| r.as_mut().unwrap()["later"] = json!(7)).unwrap();
-        assert!(refresh_agent(&ws_str, "proj", "mvsolo"));
+        assert!(refresh_agent(&ws_str, "proj", "mvsolo").unwrap());
         assert_eq!(recipe()["later"], 7, "materialize preserves what it does not own");
 
         super::super::teams_delete("mvteam").ok();
@@ -3055,10 +3220,23 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let cfg = agent_home(&ws_str, name).join("agents").join(format!("{name}.json"));
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         assert!(read(&cfg)["prompt"].as_str().unwrap().contains("Old persona."));
+        // Board #448: materialize makes the home private, `.tmm/agents` included.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!((mode(&ws.join(".tmm/agents")), mode(&agent_home(&ws_str, name))), (0o700, 0o700));
+            // A home an older build left wide closes on the next start's refresh_hooks.
+            for p in [ws.join(".tmm/agents"), agent_home(&ws_str, name)] {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            refresh_hooks(&ws_str, name).unwrap();
+            assert_eq!((mode(&ws.join(".tmm/agents")), mode(&agent_home(&ws_str, name))), (0o700, 0o700), "refresh_hooks closed it");
+        }
 
         // The def evolves after the spawn; restart must launch THIS text.
         save("New persona.");
-        assert!(refresh_agent(&ws_str, "proj", name), "a registry-named agent refreshes");
+        assert!(refresh_agent(&ws_str, "proj", name).unwrap(), "a registry-named agent refreshes");
         let prompt = read(&cfg)["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("New persona."), "current def text: {prompt}");
         assert!(!prompt.contains("Old persona."));
@@ -3067,9 +3245,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(recipe["spawned_by"], "lead", "spawner provenance survives");
 
         // No def / no recipe = no refresh — those windows replay verbatim.
-        assert!(!refresh_agent(&ws_str, "proj", "no-such-def"));
+        assert!(!refresh_agent(&ws_str, "proj", "no-such-def").unwrap());
         std::fs::remove_dir_all(agent_home(&ws_str, name)).unwrap();
-        assert!(!refresh_agent(&ws_str, "proj", name), "a home without a recipe is not ours to rewrite");
+        assert!(!refresh_agent(&ws_str, "proj", name).unwrap(), "a home without a recipe is not ours to rewrite");
         super::super::registry_delete(name).ok();
         std::fs::remove_dir_all(&ws).ok();
     }
@@ -3123,7 +3301,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // the member's own override is untouched.
         save("mmbase", "kiro", "steer");
         team(r#"[{"name":"st","base":"mmbase","input_mode":"queue"},{"name":"in","base":"mmbase"}]"#).unwrap();
-        assert!(refresh_agent(&ws_str, "proj", "st") && refresh_agent(&ws_str, "proj", "in"));
+        assert!(refresh_agent(&ws_str, "proj", "st").unwrap() && refresh_agent(&ws_str, "proj", "in").unwrap());
         assert_eq!((mode("st").as_str(), mode("in").as_str()), ("queue", "steer"), "restart: the override, and the base's new mode");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -3235,7 +3413,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let def = super::super::registry_get("rfuniq").unwrap().unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rfuniq-2")), &def, "rfuniq-2", "proj", &ws_str, "", "", None, "rfuniq", "", "").unwrap();
         save("rfuniq", "Uniq new.");
-        assert!(refresh_agent(&ws_str, "proj", "rfuniq-2"), "the uniquified window refreshes via agent_def");
+        assert!(refresh_agent(&ws_str, "proj", "rfuniq-2").unwrap(), "the uniquified window refreshes via agent_def");
         let cfg = agent_home(&ws_str, "rfuniq-2").join("agents").join("rfuniq-2.json");
         let prompt = read(&cfg)["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("Uniq new.") && !prompt.contains("Uniq old."), "{prompt}");
@@ -3262,7 +3440,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, w)), &d, w, "proj", &ws_str, "", "lead", Some("rfteam"), "", f.member.name.trim(), "").unwrap();
         }
         save("rfbase", "Base new.");
-        assert!(refresh_agent(&ws_str, "proj", "dev-2"), "the team member refreshes via team+member");
+        assert!(refresh_agent(&ws_str, "proj", "dev-2").unwrap(), "the team member refreshes via team+member");
         let cfg = agent_home(&ws_str, "dev-2").join("agents").join("dev-2.json");
         let prompt = read(&cfg)["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("Base new.") && !prompt.contains("Base old."), "{prompt}");
@@ -3277,7 +3455,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         // spawn-time materials stay, nothing is rewritten.
         super::super::registry_delete("rfuniq").unwrap();
         let before = read(&agent_home(&ws_str, "rfuniq-2").join("agents").join("rfuniq-2.json"));
-        assert!(!refresh_agent(&ws_str, "proj", "rfuniq-2"), "a gone def is a soft no");
+        assert!(!refresh_agent(&ws_str, "proj", "rfuniq-2").unwrap(), "a gone def is a soft no");
         let after = read(&agent_home(&ws_str, "rfuniq-2").join("agents").join("rfuniq-2.json"));
         assert_eq!(before, after, "the snapshot keeps working untouched");
 
@@ -3324,7 +3502,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let plan = team_plan_for(&session, "tpteam").unwrap();
         assert_eq!(plan, TeamPlan { restart: vec!["dev".into()], stop: vec![], spawn: vec![("tpteam".into(), "rev".into())] },
             "no window is live: old is already stopped, so nothing to stop");
-        assert!(refresh_agent(&ws_str, &session, "dev"));
+        assert!(refresh_agent(&ws_str, &session, "dev").unwrap());
         let prompt: Value = serde_json::from_str(&std::fs::read_to_string(agent_home(&ws_str, "dev").join("agents").join("dev.json")).unwrap()).unwrap();
         let prompt = prompt["prompt"].as_str().unwrap();
         assert!(prompt.contains("@rev") && !prompt.contains("@old"), "the restarted member's roster is the edited team: {prompt}");
@@ -3491,7 +3669,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         // It restarts on the member's CURRENT def, and can itself be forked.
         fk_save("fkbase", "Base newer.", "steer");
-        assert!(refresh_agent(&ws_str, "proj", "dev-2"));
+        assert!(refresh_agent(&ws_str, "proj", "dev-2").unwrap());
         let prompt = read(&agent_home(&ws_str, "dev-2").join("agents").join("dev-2.json"))["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("Base newer.") && prompt.contains("Your role: implement the change"), "{prompt}");
         let live: Vec<String> = ["dev", "rev", "dev-2"].iter().map(|s| s.to_string()).collect();
@@ -3559,7 +3737,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let recipe = fk_materialize(&plan.request("proj", "lead"), &ws_str);
         assert_eq!((recipe["team"].as_str(), recipe["member"].as_str()), (Some("fnouter"), Some("")));
         fk_save("fnbase", "Nested newer.", "queue");
-        assert!(refresh_agent(&ws_str, "proj", "rev-2"), "the member is found through the recorded path");
+        assert!(refresh_agent(&ws_str, "proj", "rev-2").unwrap(), "the member is found through the recorded path");
         let prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(agent_home(&ws_str, "rev-2").join("agents").join("rev-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("Nested newer.") && prompt.contains("Your role: review the diff"), "{prompt}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -3772,7 +3950,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             assert_eq!(prompt.matches("Review only: never edit files.").count(), 1, "the child's once: {prompt}");
         };
         check(&prompt_of());
-        assert!(refresh_agent(&ws_str, "proj", "rev-2"));
+        assert!(refresh_agent(&ws_str, "proj", "rev-2").unwrap());
         check(&prompt_of());
         let _ = std::fs::remove_dir_all(&ws);
     }

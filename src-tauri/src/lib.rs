@@ -4,6 +4,8 @@ pub mod config;
 pub mod downloads;
 pub mod fs;
 pub mod pptx;
+#[cfg(unix)]
+pub(crate) mod safe_fs;
 pub mod server;
 pub mod backends;
 pub mod shell;

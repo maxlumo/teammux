@@ -1049,8 +1049,12 @@ fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit)
 /// recreate THIS slot from the declaration. `None` = no such slot yet.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str) -> Option<crate::projects::reconcile::SlotResult> {
-    if !crate::projects::spawn::refresh_agent(&project.path, session, agent) {
-        crate::projects::spawn::refresh_hooks(&project.path, agent);
+    // A privacy or materialization failure REFUSES the start (board #448
+    // P1-B): it is reported, and neither the old recipe nor a respawn runs.
+    let refreshed = crate::projects::spawn::refresh_agent(&project.path, session, agent)
+        .and_then(|done| if done { Ok(true) } else { crate::projects::spawn::refresh_hooks(&project.path, agent) });
+    if let Err(e) = refreshed {
+        return Some(crate::projects::reconcile::SlotResult { window_name: agent.to_string(), status: "refused", error: Some(e) });
     }
     crate::projects::up_agent(&project.id, agent).ok().flatten()
 }
@@ -1073,6 +1077,9 @@ fn start_agent_with(
     let mut resumed = false;
     if let Ok(Some(project)) = crate::projects::project_for_session(session) {
         let r = resume(&project, session, agent);
+        if let Some(r) = r.as_ref().filter(|r| r.status == "refused") {
+            return Err(r.error.clone().unwrap_or_else(|| format!("{agent} was not started")));
+        }
         if let Some(r) = r.filter(|r| r.status == "created" || r.status == "existing") {
             if window_of_agent(session, agent).is_some() {
                 if let Some(e) = r.error {
@@ -2477,6 +2484,62 @@ mod tests {
     use super::*;
     use crate::projects::rooms;
     use crate::projects::telemetry;
+
+    /// Board #448 P1-B, the full start door: an agent whose saved recipe is an
+    /// older build's codex line WITH an MCP secret, and whose re-materialize
+    /// fails (a private write refused: its AGENTS.md is a link), is REFUSED:
+    /// the error is the answer, the respawn fallback never runs, no window is
+    /// made, and the old line is not replayed.
+    #[test]
+    #[cfg(unix)]
+    fn a_start_whose_privacy_fails_is_refused_and_the_old_secret_line_is_never_replayed() {
+        let (session, _) = unique("p448");
+        let ws = std::env::temp_dir().join(format!("tmm-p448-{}", uuid::Uuid::new_v4()));
+        let home = ws.join(".tmm/agents/lg");
+        std::fs::create_dir_all(home.join("codex")).unwrap();
+        let def = format!("p448-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        crate::projects::registry_save(&serde_json::json!({ "name": def, "backend": "codex", "model": "", "effort": "", "system": "x", "skills": "[]",
+            "mcp": serde_json::json!([{ "name": "s", "command": "mcp-s", "env": { "K": "SENTINEL-p448" } }]).to_string() })).unwrap();
+        let legacy = "command codex -c 'mcp_servers.s.env.K=\"SENTINEL-legacy\"' --dangerously-bypass-approvals-and-sandbox";
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "codex", "cmd": legacy, "env": [], "agent_def": def }).to_string()).unwrap();
+        let outside = ws.join("outside.md");
+        std::fs::write(&outside, "the user's").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("codex/AGENTS.md")).unwrap();
+        crate::projects::restore_hold::with_store_for_test(|st| st.insert_project(&crate::projects::store::Project {
+            id: session.clone(), name: session.clone(), path: ws.to_string_lossy().into(), icon: None,
+            session: session.clone(), adopted: false, autostart: false, created_at: 1,
+            last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        })).unwrap();
+        let project = crate::projects::project_for_session(&session).unwrap().unwrap();
+        let r = resume_slot(&project, &session, "lg").expect("an answer");
+        assert_eq!(r.status, "refused");
+        assert!(r.error.as_deref().unwrap().contains("not started"), "{:?}", r.error);
+        let respawned = std::cell::Cell::new(false);
+        let permit = crate::projects::start_permit(&session, "lg").unwrap();
+        let got = start_agent_with(&session, "lg", permit, resume_slot, |_: &str, _: &str| { respawned.set(true); Ok(serde_json::json!({})) });
+        assert!(got.as_ref().is_err_and(|e| e.contains("not started")), "{got:?}");
+        assert!(!respawned.get(), "no fallback launch");
+        assert!(window_of_agent(&session, "lg").is_none(), "no window");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "the user's", "the link's target is untouched");
+        // And without a definition at all, the legacy line is refused by the replay door itself.
+        crate::projects::registry_delete(&def).ok();
+        let err = crate::projects::spawn::relaunch_line(&ws.to_string_lossy(), "lg", None).unwrap_err();
+        assert!(err.contains("not replayed"), "{err}");
+        // The definition-gone fallback (refresh_hooks) with a refresh target
+        // the private writer refuses: a kiro profile that is a link. The start
+        // is refused, not taken for "no change".
+        let kh = ws.join(".tmm/agents/kh");
+        std::fs::create_dir_all(kh.join("agents")).unwrap();
+        std::fs::write(kh.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "command kiro-cli chat --agent kh", "env": [] }).to_string()).unwrap();
+        let profile = ws.join("outside-profile.json");
+        std::fs::write(&profile, r#"{"name":"kh"}"#).unwrap();
+        std::os::unix::fs::symlink(&profile, kh.join("agents/kh.json")).unwrap();
+        let r = resume_slot(&project, &session, "kh").expect("an answer");
+        assert_eq!(r.status, "refused", "{:?}", r.error);
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), r#"{"name":"kh"}"#, "the link's target is untouched");
+        crate::projects::restore_hold::with_store_for_test(|st| st.delete_project(&session)).ok();
+        std::fs::remove_dir_all(&ws).ok();
+    }
 
     /// Every store-touching test seeds its own unique session/room: the test
     /// store (state.db under TMM_STATE_DB) is one file per process, and the
@@ -5110,7 +5173,7 @@ while True:
         }
         let _cleanup = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("cmd-all-test")).expect("adopt project");
-        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o555)).unwrap();
+        crate::safe_fs::jam(&bad_profile.join("cordis.patch.yml"));
         let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "all", "text": "/effort low" })), None);
         let result = r.result.expect("one window took it, so the call answers");
         assert_eq!(result["sent"], serde_json::json!([good]), "{result}");
@@ -5119,7 +5182,7 @@ while True:
         let log = handle_hub_request(&req("hub_log", serde_json::json!({ "session": session, "limit": 20 })), None);
         let bodies: Vec<String> = log.result.unwrap()["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect();
         assert!(bodies.iter().any(|b| b.contains("/effort low") && b.contains(&format!("not run for {bad}"))), "the room line names it: {bodies:?}");
-        std::fs::set_permissions(&bad_profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::safe_fs::unjam(&bad_profile.join("cordis.patch.yml"));
         for n in [&good, &bad] { crate::projects::registry_delete(n).ok(); }
     }
 

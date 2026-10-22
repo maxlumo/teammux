@@ -130,11 +130,11 @@ impl RecipeSection {
     }
 
     fn write(&self, recipe: &Value) -> Result<(), String> {
+        // Private and whole (board #448): the recipe's env and cmd are the
+        // launch identity, and the one writer publishes them 0600.
         let path = self.home.join("launch.json");
-        let tmp = self.home.join("launch.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(recipe).unwrap())
-            .and_then(|_| std::fs::rename(&tmp, &path))
-            .map_err(|e| format!("write launch recipe {}: {e}", path.display()))
+        crate::backends::shared::write_atomic(&path, &serde_json::to_string_pretty(recipe).unwrap())
+            .map_err(|e| format!("write launch recipe {e}"))
     }
 }
 
