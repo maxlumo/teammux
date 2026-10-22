@@ -88,3 +88,45 @@ test('a direct URL needs no signature and no observer round-trip', async (contex
     void io;
   } finally { await app.close(); }
 });
+
+// Board #447: the viewer is handed the URL AND the reference of the SAME tap, so a download from it
+// saves the file the reader tapped, whatever the thumbnail does afterwards.
+test('the tap hands the viewer its URL, its claim and the reference taken at that tap; a later src change cannot change them (#447)', async (context) => {
+  const opened: { url: string; claim: unknown; ref: string | null }[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((ok) => { release = ok; });
+  const app = await (await compiled).mount(context, {
+    props: {
+      src: '/ws/a.png', alt: 'x',
+      onviewstart: () => ({ n: 1 }),
+      onview: (url: string, claim: unknown, ref: string | null) => opened.push({ url, claim, ref }),
+    },
+    modules: [{ fsDownloadHttp: async (path: string) => { await held; return { url: `https://h/dl?p=${encodeURIComponent(path)}`, name: 'a.png' }; } }],
+    setup: (win) => { fakeIntersection(win); },
+  });
+  try {
+    app.document.querySelector<HTMLButtonElement>('button.ci-link')!.click();   // the tap on A; its signature is held
+    await app.flush();
+    await app.setProps({ src: '/ws/b.png' });                                     // the thumbnail moves on to B
+    release();
+    await app.flush(); await app.flush();
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0]!.ref, '/ws/a.png', 'the reference is the one of the tap, not the prop read later');
+    assert.equal(opened[0]!.url, 'https://h/dl?p=%2Fws%2Fa.png', 'and the URL was signed for that same reference');
+    assert.deepEqual(opened[0]!.claim, { n: 1 });
+  } finally { await app.close(); }
+});
+
+test('a direct URL has no server file: the viewer is told no reference (#447)', async (context) => {
+  const opened: (string | null)[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { src: 'https://example.test/a.png', alt: 'x', onview: (_url: string, _claim: unknown, ref: string | null) => opened.push(ref) },
+    modules: [{ fsDownloadHttp: async () => assert.fail('a direct url is never signed') }],
+    setup: (win) => { fakeIntersection(win); },
+  });
+  try {
+    app.document.querySelector<HTMLButtonElement>('button.ci-link')!.click();
+    await app.flush(); await app.flush();
+    assert.deepEqual(opened, [null]);
+  } finally { await app.close(); }
+});

@@ -15,7 +15,7 @@ const issueA = { id: 1, title: 'A', body: 'Body A', status: 'todo', assignee: ''
 const issueB = { id: 2, title: 'B', body: 'Body B', status: 'todo', assignee: '', editable: true, created_at: 100, updated_at: 100, notes: [] };
 
 type Calls = { saves: any[]; notes: any[]; posts: any[]; uploads: string[] };
-type Opts = { list?: (session: string) => Promise<unknown>; caps?: string[]; refuse?: (patch: any) => void; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown> };
+type Opts = { list?: (session: string) => Promise<unknown>; caps?: string[]; refuse?: (patch: any) => void; answer?: (patch: any) => unknown; projects?: string[]; stateful?: boolean; download?: (path: string) => Promise<{ url: string }>; issues?: any[]; upload?: (path: string) => Promise<unknown>; agents?: any[]; save?: (patch: any) => Promise<unknown>; note?: () => Promise<unknown>; setup?: (window: any) => void };
 const guardsSeen: LeaveGuard[] = [];
 const cleanups = new Map<LeaveGuard, () => void>();
 const unregister = (g: LeaveGuard) => cleanups.get(g)?.();
@@ -42,6 +42,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
       w.HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob) => void) { cb(new w.Blob(['img'], { type: 'image/webp' })); };
       w.URL.createObjectURL = () => 'blob:thumb';
       w.URL.revokeObjectURL = () => {};
+      opts.setup?.(w);
     },
     modules: [{
       getCaps: () => capsNow, // the login answer's capabilities (board #377)
@@ -951,4 +952,100 @@ test('clearing the issue\u2019s assignee ends its old Reassign even though the s
     assert.ok(!button(), 'the old Reassign is gone: it can no longer restore what was just removed');
     assert.equal(app.calls.saves.length, 2);
   } finally { await app.close(); }
+});
+
+// Board #447: a download button in the Lightbox. One open = one record taken at the tap, retired on
+// the board's own visible-and-eligible gate (a hidden board is NOT destroyed), and the download
+// signs at ITS tap, for the reference of that open.
+const shotBody = '![](/work/fixture/.tmm/uploads/a1-12345678.webp)';
+
+test('the viewer of a chat image offers a download of that file: one fresh signature at the download tap (#447)', async (context) => {
+  const signed: string[] = [];
+  let gate: Promise<void> | null = null;
+  let release!: () => void;
+  const app = await mount(context, {
+    issues: [{ ...issueA, body: shotBody }],
+    setup: (w) => { w.fetch = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-length': '3' } }); },
+    download: async (path) => { signed.push(path); if (gate) await gate; return { url: `https://dl.test/?p=${encodeURIComponent(path)}` }; },
+  });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    app.q<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();
+    assert.ok(app.q('.lb img'), 'the viewer opened');
+    const download = app.q<HTMLButtonElement>('.lb .lb-download');
+    assert.ok(download, 'a chat image is a server file: the control is offered');
+    const before = signed.length;
+    gate = new Promise<void>((ok) => { release = ok; });
+    download.click(); await app.flush();
+    assert.equal(signed.length, before + 1, 'exactly one signature for the download tap, none at render or open');
+    assert.equal(signed.at(-1), '/work/fixture/.tmm/uploads/a1-12345678.webp', 'for the reference of THIS open');
+    assert.ok(app.q('.lb .lb-status'), 'the attempt shows its feedback inside the viewer');
+    assert.equal(app.q('.lb .lb-download'), null, 'and the control is gone while it runs: one tap, one attempt');
+    release();
+    for (let i = 0; i < 20 && app.q('.lb .lb-download') === null; i++) await app.flush();
+    assert.ok(app.q('.lb .lb-download'), 'the control returns when the attempt has ended');
+  } finally { release?.(); await app.close(); }
+});
+
+test('an attachment thumbnail opens the same viewer with no download: it is a local blob, not a server file (#447)', async (context) => {
+  const app = await mount(context);
+  try {
+    [...app.document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /new/i.test(b.getAttribute('aria-label') ?? b.title ?? ''))?.click(); await app.flush();
+    const body = app.q<HTMLTextAreaElement>('.d-body-edit.fill')!;
+    await app.type(body, 'See ');
+    await app.paste(body);
+    app.q<HTMLElement>('.pend-thumb button, .pend-thumb img')!.click(); await app.flush();
+    assert.ok(app.q('.lb img'), 'the viewer opened');
+    assert.equal(app.q('.lb .lb-download'), null, 'no server file, no control');
+  } finally { await app.close(); }
+});
+
+test('a hidden or unfocused Board retires the viewer at once, and a late signature cannot reopen it on return (#447)', async (context) => {
+  const pending: Array<{ path: string; done: (v: { url: string }) => void }> = [];
+  const app = await mount(context, { issues: [{ ...issueA, body: shotBody }], download: (path) => new Promise((done) => pending.push({ path, done })) });
+  const lb = () => app.q<HTMLImageElement>('.lb img');
+  const answer = async (i: number) => { const p = pending[i]!; p.done({ url: `https://dl.test/${p.path.split('/').pop()}` }); await app.flush(); };
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    pending.length = 0;
+    // 1. hide/show on ONE mounted instance with the signature held: the late answer opens nothing.
+    app.q<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();
+    const held = pending.length - 1;
+    await app.setProps({ visible: false }); await app.setProps({ visible: true });
+    await answer(held);
+    assert.equal(lb(), null, 'the claim died on the hide; showing the board again does not revive it');
+    // 2. the same when the host says this tree is no longer the focus, room and path unchanged.
+    app.q<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();
+    const heldAgain = pending.length - 1;
+    await app.setScope({ eligible: false }); await app.setScope({ eligible: true });
+    await answer(heldAgain);
+    assert.equal(lb(), null, 'an ineligible/eligible round trip is the same ABA');
+    // 3. an OPEN viewer closes on the edge, and a return does not reopen it.
+    app.q<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();
+    await answer(pending.length - 1);
+    assert.ok(lb(), 'opened normally');
+    await app.setProps({ visible: false });
+    assert.equal(lb(), null, 'closed in the same tick as the hide');
+    await app.setProps({ visible: true });
+    assert.equal(lb(), null, 'and a fresh tap is the only way back');
+  } finally { for (const p of pending) p.done({ url: 'https://dl.test/x' }); await app.close(); }
+});
+
+test('a local attachment that opens while a chat image\'s signature is held cannot be overwritten by that late answer (#447 review P1-A)', async (context) => {
+  const pending: Array<{ path: string; done: (v: { url: string }) => void }> = [];
+  const app = await mount(context, { issues: [{ ...issueA, body: shotBody }], download: (path) => new Promise((done) => pending.push({ path, done })) });
+  const lb = () => app.q<HTMLImageElement>('.lb img');
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    pending.length = 0;
+    app.q<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();          // A: the remote picture, its signature held
+    const held = pending.length - 1;
+    await app.paste(app.q<HTMLTextAreaElement>('.note-input')!);                        // B: a local attachment in the note editor
+    assert.ok(app.q('.pend-thumb button'), 'the attachment is staged');
+    app.q<HTMLButtonElement>('.pend-thumb button')!.click(); await app.flush();
+    assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'B opened at once');
+    pending[held]!.done({ url: 'https://dl.test/late-a.webp' }); await app.flush();
+    assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'A\u2019s late answer does not replace the later open');
+    assert.equal(app.q('.lb .lb-download'), null, 'and the local picture still has no download');
+  } finally { for (const p of pending) p.done({ url: 'https://dl.test/x' }); await app.close(); }
 });

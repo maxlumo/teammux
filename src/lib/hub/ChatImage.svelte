@@ -24,7 +24,11 @@
 
   // `onviewstart` (optional, board #329): called at the TAP, before the
   // signature is minted; whatever it returns is handed back with the URL, so
-  // the host can tell this tap's answer from a later one's.
+  // the host can tell this tap's answer from a later one's. The answer also
+  // carries the REFERENCE taken at the same tap (board #447): the viewer shows
+  // the URL and, if it offers a download, saves that reference's file — the two
+  // are one record and cannot be completed from anything read later. A direct
+  // URL (http, data, blob) has no server file: its reference is null.
   let { src = '', alt = '', onview = null, onviewstart = null } = $props();
   // The server this image's reference is signed by: the subtree's (board
   // #335 ②b-3), read once at init.
@@ -96,8 +100,9 @@
   /** The viewer opens what the server signs NOW — a thumbnail viewed five
    * minutes later would otherwise open a 403. */
   function view() {
+    const ref = src;
     const claim = onviewstart?.();
-    resolve(src).then((u) => onview?.(u, claim)).catch(() => { failed = true; });
+    resolve(ref).then((u) => onview?.(u, claim, isDirectUrl(ref) ? null : ref)).catch(() => { failed = true; });
   }
 </script>
 

@@ -95,7 +95,7 @@ test('Feed preserves reveal gates and consumes the shared rendering and path mec
   // the action row, and only the project's own ids are linked.
   assert.match(source, /return handlePathLinkClick\(e, routePathRef\) \|\| openIssueRef\(e\);/u);
   assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), managedNames\), issueSet\)\}/u);
-  assert.match(source, /<ChatImage \{src\} alt=\{m\.from\} onview=\{onimage\} \/>/u);
+  assert.match(source, /<ChatImage \{src\} alt=\{m\.from\} onviewstart=\{onimagestart\} onview=\{onimage\} \/>/u, 'the tap\'s claim and reference travel with the image (board #447)');
 });
 
 test('the feed layers remain below the Composer stacking context', () => {

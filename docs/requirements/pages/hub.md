@@ -241,7 +241,7 @@ completion).
   constant), so narrow phones keep the same approximate row budget. Window
   resize and drawer regrids re-measure/re-cut inside `withReadingAnchor`
   before restoring tail or history position (board #53). Images render as
-  thumbnails and open the in-app Lightbox; markdown + LaTeX render in bubbles.
+  thumbnails and open the in-app Lightbox (which offers a download button for a picture that is a server file, #447); markdown + LaTeX render in bubbles.
 - **A tapped bubble reveals its Copy / Raw row; long-press selection stays
   the system's** (board #48; owner, 2026-09-07: "我只要消息气泡下边的这两个
   按钮，不要出现右键那种选项卡"): `.m-body` explicitly enables selection

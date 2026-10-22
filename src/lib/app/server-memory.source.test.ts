@@ -46,6 +46,9 @@ const GLOBAL: Record<string, Record<string, string>> = {
   'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself', spanCache: 'the review span render, keyed by the file text itself (#434)' },
   'hub/hub.ts': { squashed: 'a WeakMap on message objects; the tree that holds them is gone' },
   'hub/reveal.ts': { inFlight: 'a WeakMap on DOM nodes' },
+  // The ONE drop of stale Rust download claims (board #447): a property of the page's
+  // PROCESS, begun once at load and awaited by every download, never of a server.
+  'files/save-file.ts': { realm: 'once per page load, the process\'s claims in Rust' },
   'app/leave-guards.ts': { guards: 'instances unregister on unmount' },
   'app/shortcuts.svelte.ts': { state: 'a preference' },
   // The person's and the window's Hub preferences (feed level, tool-row cap,

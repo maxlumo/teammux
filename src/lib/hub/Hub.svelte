@@ -29,6 +29,8 @@
   import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import Lightbox from '../ui/Lightbox.svelte';
+  import { createViewClaim } from './view-claim.ts';
+  import { createViewerDownload, viewerOpen } from '../files/viewer-download.svelte.ts';
   import CommandButton from '../ui/CommandButton.svelte';
   import Select from '../ui/Select.svelte';
   import Dialog from '../ui/Dialog.svelte';
@@ -987,6 +989,13 @@
   const searchActive = $derived(visible && (scope.eligible ? scope.eligible() : true));
   $effect(() => { if (!searchActive) untrack(() => search.dispose()); });
   onDestroy(() => search.dispose());
+  // The viewer retires on the SAME gate, on its false edge, in the same tick (board #447): a
+  // hidden or unfocused Hub is not destroyed, so a late signature or a late download result
+  // must find the claim and the token already dead, and coming back is a fresh tap.
+  $effect(() => { if (!searchActive) untrack(closeShot); });
+  // …and when the room changes under an open viewer.
+  $effect(() => { void selected; untrack(() => { if (shotView) closeShot(); }); });
+  onDestroy(() => { viewClaim.retire(); viewerDl.dispose(); });
   // Leaving the Hub page invalidates a pending jump: it may not land on a
   // hidden feed, mark anything viewed, or move the reader on return.
   $effect(() => {
@@ -2140,12 +2149,34 @@
   });
 
   // The lightbox is the topmost transient layer: back peels it first.
-  let shotView = $state('');
+  // One open = one immutable record { src, ref } (board #447): what the viewer shows and the
+  // server file its download saves are taken together at the tap, never completed later.
+  // `ref` is null for a composer thumbnail or a direct URL: nothing to download.
+  let shotView = $state.raw(null);
+  const viewClaim = createViewClaim(() => selectionGeneration);
+  // A download starts only for the host's CURRENT open while the host is active (the door, not
+  // just the effect that removes the button): a handler kept from a closed viewer starts nothing.
+  const viewerDl = createViewerDownload(scope, (record) => shotView === record && searchActive);
+  /** The viewer's display ends here (close, another image, room change, host not active):
+   * no earlier tap may open, no earlier attempt may speak. A transfer already
+   * requested is the runtime's and carries on. */
+  function closeShot() {
+    viewClaim.retire();
+    viewerDl.retire();
+    shotView = null;
+  }
+  /** Every way a viewer opens comes here (a signed chat image, a local attachment): it ends the
+   * earlier open's claim and feedback, so no held signature can overwrite what opened since. */
+  function showShot(record) {
+    viewClaim.retire();
+    viewerDl.retire();
+    shotView = record;
+  }
   const backLayers = createHubBackRegistry();
   $effect(() => {
     if (!onGoBack) return;
     const disposers = [
-      backLayers.register('lightbox', () => { if (shotView) { shotView = ''; return true; } return false; }),
+      backLayers.register('lightbox', () => { if (shotView) { closeShot(); return true; } return false; }),
       backLayers.register('contextMenu', () => { if (ctxAt) { closeCtx(); return true; } return false; }),
       backLayers.register('action', () => { if (!pendingAct) return false; if (!acting) pendingAct = null; return true; }),
       backLayers.register('trash', () => { if (!trashAsk) return false; if (!purging) trashAsk = null; return true; }),
@@ -2626,7 +2657,8 @@
         stepsRows={hubPrefs.stepsRows} {stateLabel} {emptyFeed} bind:following bind:newBelow
         onseen={markSeen} onolder={loadOlder} onpath={routePathRef}
         windowed={!!windowed} onlatest={returnToLatest}
-        onimage={(url) => { shotView = url; }}
+        onimagestart={() => viewClaim.begin()}
+        onimage={(url, claim, ref) => { if (searchActive && viewClaim.accept(claim)) showShot(viewerOpen(url, ref)); }}
         onreply={replyToMessage}
         onboard={(id) => {
           if (mobile || compact) { openBoardTab?.(selected, id); return; }
@@ -2659,7 +2691,7 @@
         issues={roomIssues} onissues={(s) => loadIssues(s)}
         onclearreply={() => { replyTo = null; composer?.focus(); }}
         onsend={send} onstage={stageFiles} onremove={removeAttachment}
-        onmodels={modelsList} oninterrupt={interrupt} onpreview={(path) => { shotView = path; }}
+        onmodels={modelsList} oninterrupt={interrupt} onpreview={(path) => showShot(viewerOpen(path))}
         onheightchange={() => { if (following) scrollFeed(true); }}
         registerBack={onGoBack ? backLayers.register : null} />
       {#if commandFeedback && commandFeedbackAnchor}
@@ -2772,7 +2804,10 @@
       oncancel={() => createOpen = false} />
   {/if}
   {#if shotView}
-    <Lightbox src={shotView} onclose={() => shotView = ''} />
+    {@const open = shotView}
+    <Lightbox src={open.src} onclose={closeShot}
+      ondownload={open.ref ? () => viewerDl.start(open) : undefined} downloading={viewerDl.busy(open)}
+      status={viewerDl.status} onstatusdismiss={viewerDl.dismiss} />
   {/if}
 </div>
 

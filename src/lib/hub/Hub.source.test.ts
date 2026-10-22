@@ -210,7 +210,7 @@ test('Hub keeps Composer transport and capture listeners at the coordinator boun
 test('Back keeps the original priority and current live guards in one dispatcher (#119/#167)', () => {
   const region = source.slice(source.indexOf('const backLayers ='), source.indexOf('function agentItems'));
   const guards = {
-    lightbox: "if (shotView) { shotView = ''; return true; }",
+    lightbox: "if (shotView) { closeShot(); return true; }",
     contextMenu: 'if (ctxAt) { closeCtx(); return true; }',
     action: 'if (!pendingAct) return false; if (!acting) pendingAct = null; return true;',
     trash: 'if (!trashAsk) return false; if (!purging) trashAsk = null; return true;',

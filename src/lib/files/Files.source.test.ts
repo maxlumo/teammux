@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('./Files.svelte', import.meta.url), 'utf8');
+// The download attempt moved out of Files (board #447): its rules are pinned where the text lives.
+const saveFile = await readFile(new URL('./save-file.ts', import.meta.url), 'utf8');
 
 test('copy and download feedback share the UI owner and never restore private toast/ring chrome (#167)', () => {
   // The slots may coexist, but two absolutely positioned toasts overlapped.
@@ -299,7 +301,7 @@ test('reading mode: the header hides as a cut, the return floats above the safe 
   assert.match(source, /\$effect\(\(\) => \{ if \(!readingEligible \|\| !visible\) reading = false; \}\);/u);
   assert.match(source, /\$effect\(\(\) => \{ onimmersive\?\.\(reading\); \}\);/u, 'the host hides its chrome from this one signal');
   // Back order: the viewer, then reading mode, then the file menu.
-  const back = source.indexOf("if (imageView) { imageView = ''; return true; }");
+  const back = source.indexOf('if (imageView) { closeImage(); return true; }');
   const reading = source.indexOf('if (reading) { reading = false; return true; }');
   const menu = source.indexOf('if (fileMenu) { closeFileMenu(); return true; }');
   assert.ok(back > 0 && back < reading && reading < menu, 'reading mode is the layer under the viewer');
@@ -310,8 +312,9 @@ test('a download that ends while Files is hidden reports once, outside the outco
   // ONE door for every outcome: seen -> the outcome slot (a saved file with
   // Open); hidden -> the earlier notice, told once, with no Open.
   assert.match(source, /function tell\(value, savedPath = null\) \{\s*if \(!alive\) return;\s*if \(!visible\) \{\s*heldOutcome = /u);
-  assert.match(source, /tell\(\{ kind: 'result', message: t\('saved'\), detail: savedPath \}, savedPath\);/u);
-  assert.match(source, /tell\(\{ kind: 'error', message: String\(e\.message \|\| e\), detail: path \}\);/u);
+  assert.match(source, /saved: \(savedPath\) => tell\(\{ kind: 'result', message: t\('saved'\), detail: savedPath \}, savedPath\),/u);
+  assert.match(source, /error: \(message, p\) => tell\(\{ kind: 'error', message, detail: p \}\)/u);
+  assert.match(saveFile, /say\.error\(message, path\);/u, 'the attempt says its failure once, to whoever asked');
   assert.doesNotMatch(source, /else earlier\(/u, 'no second routing rule');
   assert.doesNotMatch(source.slice(source.indexOf('return () => { copyLifetime.clear();'), source.indexOf('return () => { copyLifetime.clear();') + 120), /earlierLifetime/u,
     'leaving the context is the case it reports, so the context exit does not clear it');
@@ -325,7 +328,7 @@ test('the download stack is a bounded scroll region; Cancel only while honored; 
   assert.match(source, /\.files-feedback > :global\(\.operation-feedback\) \{ flex: none; \}/u);
   // P2-C: no Cancel in 'saving'; the boundaries outside download() check it.
   assert.match(source, /actions=\{row\.state === 'downloading' \? cancelAction : undefined\}/u);
-  assert.match(source, /throwIfCancelled\(control\.signal\);\s*\/\/ There is no measured write fraction\. Only transfer bytes report a percentage\.\s*store\.saving\(rowId\);/u, 'the one check sits right before saving');
+  assert.match(saveFile, /throwIfCancelled\(control\.signal\);\s*\/\/ There is no measured write fraction\. Only transfer bytes report a percentage\.\s*store\.saving\(rowId\);/u, 'the one check sits right before saving');
   // P1-B: hidden -> held, latest wins; its life starts when Files is seen.
   assert.match(source, /if \(!visible\) \{\s*heldOutcome = value\.kind === 'result' \? \{ \.\.\.value, kind: 'success' \} : value;\s*return;/u);
   assert.match(source, /if \(!visible \|\| !heldOutcome\) return;\s*const value = heldOutcome;\s*heldOutcome = null;\s*earlierLifetime\.update\(earlierLifetime\.begin\(\), value\);/u);
@@ -338,14 +341,14 @@ test('the feedback stack shows every running download from the store; it keeps n
   assert.match(source, /const sessionRows = \$derived\(store\.rows\);/u);
   assert.match(source, /const stackedRows = \$derived\(view === 'local' \? \[\] : activeRows\);/u, 'the stack reads the store rows; the Downloads view lists them itself');
   // Progress writes the store and nothing else.
-  assert.match(source, /const progress = \(fraction, received = 0, total = 0\) => \{ store\.progress\(rowId, received, total\); \};/u);
+  assert.match(saveFile, /const progress = \(_fraction: number \| null, received = 0, total = 0\) => \{ store\.progress\(rowId, received, total\); \};/u);
   assert.doesNotMatch(source, /downloadLifetime\.update\(token, feedbackOf\(/u, 'no slot holds a copy of the progress');
   assert.doesNotMatch(source, /shown = \{ kind: 'progress'/u, 'the old private progress copy is gone');
   // ONE card, drawn by the Downloads view and by the stack alike.
   assert.match(source, /\{#snippet activeDownload\(row\)\}[\s\S]*?<OperationFeedback value=\{rowFeedback\(row\)\} actions=\{row\.state === 'downloading' \? cancelAction : undefined\} \/>\s*\{\/snippet\}/u);
   assert.equal(source.match(/\{@render activeDownload\(row\)\}/gu)?.length, 2, 'the view and the stack render the same card');
   assert.match(source, /\{#each stackedRows as row \(row\.id\)\}\{@render activeDownload\(row\)\}\{\/each\}/u);
-  assert.match(source, /store\.done\(rowId, savedPath\);/u);
+  assert.match(saveFile, /store\.done\(rowId, savedPath\);/u);
 });
 
 // The Files page's server door (board #358, owner 2026-10-13: "在 File 页面…能

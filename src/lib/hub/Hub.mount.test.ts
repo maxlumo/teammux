@@ -5235,3 +5235,159 @@ test('a review feedback block lands in the LIVE composer after the typed text; a
     assert.equal(app.input.value, 'B1\n\nB2\n\nB3', 'each block landed once, in order');
   } finally { await app.close(); }
 });
+
+// Board #447: the chat image's viewer. Before it the Hub took whatever URL an image's signature
+// finally returned and opened it; now each tap takes a claim, an open is one record of URL and
+// reference, and the Hub (kept mounted, only toggled) retires it on its own visible/eligible gate.
+test('a chat image opens a viewer that can save its file; a late signature never opens after a hide/show or an eligibility round trip (#447)', { timeout: 60000 }, async (context) => {
+  const fixture = await compiledHub();
+  const { rpc } = roomFixture();
+  const shot = { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'look ![](/fixture/shot.png)' };
+  const pending: Array<{ path: string; done: (value: { url: string; name: string }) => void }> = [];
+  const signed: string[] = [];
+  let gate = false;
+  const app = await fixture.mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      (window as any).fetch = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-length': '3' } });
+      window.URL.createObjectURL = () => 'blob:x';
+      window.URL.revokeObjectURL = () => {};
+    },
+    modules: [{
+      ...rpc,
+      hubLog: async () => ({ messages: [shot], has_more: false }),
+      fsDownloadHttp: (path: string) => {
+        signed.push(path);
+        if (!gate) return Promise.resolve({ url: `https://dl.test/?p=${encodeURIComponent(path)}`, name: 'shot.png' });
+        return new Promise((done) => pending.push({ path, done: done as never }));
+      },
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const tap = async () => { app.document.querySelector<HTMLButtonElement>('.feed .shots .ci-link')!.click(); await settle(4); };
+  const lb = () => app.document.querySelector('.lb img');
+  const answer = async (i: number) => { pending[i]!.done({ url: 'https://dl.test/late.png', name: 'shot.png' }); await settle(4); };
+  try {
+    await settle();
+    assert.ok(app.document.querySelector('.feed .shots .ci-link'), 'the agent\u2019s picture is a thumbnail button');
+    // 1. an ordinary tap opens a viewer that offers the file, and the download signs at ITS tap.
+    await tap();
+    assert.ok(lb(), 'opened');
+    const before = signed.length;
+    app.document.querySelector<HTMLButtonElement>('.lb .lb-download')!.click(); await settle(8);
+    assert.equal(signed.length, before + 1, 'one signature for the download tap');
+    assert.equal(signed.at(-1), '/fixture/shot.png', 'for the reference of the tap');
+    app.document.querySelector<HTMLButtonElement>('.lb .lb-close')!.click(); await settle(4);
+    assert.equal(lb(), null);
+    // 2. hide/show with the signature held: the late answer opens nothing.
+    gate = true;
+    await tap();
+    const held = pending.length - 1;
+    await app.setProps({ visible: false }); await app.setProps({ visible: true });
+    await answer(held);
+    assert.equal(lb(), null, 'the claim died on the hide');
+    // 3. the same on an eligibility round trip, room and path unchanged.
+    await tap();
+    const heldAgain = pending.length - 1;
+    await app.setScope({ eligible: false }); await app.setScope({ eligible: true });
+    await answer(heldAgain);
+    assert.equal(lb(), null, 'the ABA of eligible false/true');
+    // 4. an open viewer closes on the hide edge and stays closed on return.
+    gate = false;
+    await tap();
+    assert.ok(lb(), 'a fresh tap opens');
+    await app.setProps({ visible: false });
+    assert.equal(lb(), null, 'closed in the same tick');
+    await app.setProps({ visible: true });
+    assert.equal(lb(), null, 'and not reopened');
+  } finally { for (const p of pending) p.done({ url: 'https://dl.test/x', name: 'x' }); await app.close(); }
+});
+
+test('a room switch retires the viewer and the claim: a held signature from the old room opens nothing, and an open viewer closes (#447)', { timeout: 60000 }, async (context) => {
+  const fixture = await compiledHub();
+  const { rpc } = roomFixture();
+  const shot = { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'look ![](/fixture/shot.png)' };
+  const pending: Array<(value: { url: string; name: string }) => void> = [];
+  let gate = true;
+  const app = await fixture.mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [{
+      ...rpc,
+      projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({
+        project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [],
+      })) }),
+      hubLog: async (session: string) => ({ messages: session === 'fixture' ? [shot] : [], has_more: false }),
+      fsDownloadHttp: (path: string) => gate
+        ? new Promise((done) => pending.push(done as never))
+        : Promise.resolve({ url: `https://dl.test/?p=${encodeURIComponent(path)}`, name: 'shot.png' }),
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const room = async (name: string) => {
+    app.document.querySelector<HTMLElement>(`[aria-label="${name}"] .proj-pick`)!.click();
+    for (let i = 0; i < 20 && app.document.querySelector('.h1-text')?.textContent !== name; i++) await app.flush();
+  };
+  const tap = async () => { app.document.querySelector<HTMLButtonElement>('.feed .shots .ci-link')!.click(); await settle(4); };
+  try {
+    await room('fixture'); await settle();
+    // 1. a tap in `fixture`, its signature held; the reader moves to `other`; the answer arrives late.
+    await tap();
+    const held = pending.length - 1;
+    await room('other'); await settle();
+    pending[held]!({ url: 'https://dl.test/late.png', name: 'shot.png' }); await settle(4);
+    assert.equal(app.document.querySelector('.lb img'), null, 'a tap made in another room opens nothing here');
+    // 2. an open viewer does not outlive its room.
+    gate = false;
+    await room('fixture'); await settle();
+    await tap();
+    assert.ok(app.document.querySelector('.lb img'), 'opened in fixture');
+    await room('other'); await settle();
+    assert.equal(app.document.querySelector('.lb img'), null, 'closed with its room');
+  } finally { for (const done of pending) done({ url: 'https://dl.test/x', name: 'x' }); await app.close(); }
+});
+
+test('a local attachment that opens while a chat image\'s signature is held cannot be overwritten by that late answer (#447 review P1-A)', { timeout: 60000 }, async (context) => {
+  const fixture = await compiledHub();
+  const { rpc } = roomFixture();
+  const shot = { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'look ![](/fixture/shot.png)' };
+  const pending: Array<(value: { url: string; name: string }) => void> = [];
+  const app = await fixture.mount(context, {
+    props: { visible: true },
+    setup(window) {
+      const w = window as any;
+      w.Element.prototype.getAnimations = () => [];
+      w.createImageBitmap = async () => ({ width: 10, height: 10, close() {} });
+      w.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, measureText: () => ({ width: 8 }) });
+      w.HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob) => void) { cb(new w.Blob(['img'], { type: 'image/webp' })); };
+      w.URL.createObjectURL = () => 'blob:thumb';
+      w.URL.revokeObjectURL = () => {};
+    },
+    modules: [{
+      ...rpc,
+      hubLog: async () => ({ messages: [shot], has_more: false }),
+      fsMkdir: async () => ({}),
+      fsUpload: async () => ({}),
+      fsDownloadHttp: () => new Promise((done) => pending.push(done as never)),
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  const lb = () => app.document.querySelector<HTMLImageElement>('.lb img');
+  try {
+    await settle();
+    pending.length = 0;
+    app.document.querySelector<HTMLButtonElement>('.feed .shots .ci-link')!.click(); await settle(4);   // A, held
+    const held = pending.length - 1;
+    const picker = app.document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(picker, 'files', { value: [new app.window.File(['raw'], 'shot.png', { type: 'image/png' })] });
+    picker.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+    for (let i = 0; i < 20 && !app.document.querySelector('.pend-thumb button'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.pend-thumb button')!.click(); await settle(4);
+    assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'B (the attachment) opened at once');
+    pending[held]!({ url: 'https://dl.test/late-a.png', name: 'shot.png' }); await settle(4);
+    assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'A\u2019s late answer does not replace the later open');
+    assert.equal(app.document.querySelector('.lb .lb-download'), null, 'and the local picture has no download');
+  } finally { for (const done of pending) done({ url: 'https://dl.test/x', name: 'x' }); await app.close(); }
+});

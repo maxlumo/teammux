@@ -12,8 +12,9 @@
   // A fresh page has no writer yet: drop claims a previous page (a webview
   // reload in a live process) left in Rust, or its parts could never be
   // resumed. Once per realm, before any download can start — a property of
-  // the PROCESS, not of any server, so it stays here.
-  if (isTauri) invokeNative('download_release_all').catch(() => {});
+  // the PROCESS, not of any server. `save-file.ts` owns it (memoised; every
+  // download awaits it, board #447), and it is still begun here, at load.
+  realmReady();
 
 </script>
 
@@ -23,7 +24,8 @@
   import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
   import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
-  import { download, bytesToB64, memorySink, nativeSink, partId, PIECE_BYTES, SUSPEND, throwIfCancelled } from './download.ts';
+  import { bytesToB64 } from './download.ts';
+  import { saveServerFile, realmReady } from './save-file.ts';
   import { speed as bytesPerSecond, feedbackOf } from './downloads.svelte.ts';
   import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
@@ -36,6 +38,7 @@
   import ContextMenu from '../ui/ContextMenu.svelte';
   import { longpress } from '../ui/longpress.ts';
   import Lightbox from '../ui/Lightbox.svelte';
+  import { createViewerDownload, viewerOpen } from './viewer-download.svelte.ts';
   import { anchorOf } from '../ui/placement.ts';
   import { systemOwnsContextMenu } from '../ui/native-context-menu.ts';
   import { copyActions, entryToolActions, visibleToolCount } from './file-tools.ts';
@@ -64,6 +67,8 @@
   const store = files.downloads;
   const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
   const { getMachineId } = scope.runtime.connection;
+  // What one download attempt needs from this server (`save-file.ts`).
+  const saveDeps = { memory, store, fsDownload, fsDownloadHttp, getMachineId };
 
   // Tauri plugin imports (tree-shaken in browser builds). The platform flags
   // come from the ONE module (rule 3); `tauriPlugins` is this file's own
@@ -142,7 +147,7 @@
   $effect(() => {
     if (onGoBack) onGoBack(() => {
       if (cancelPendingAct()) return true;
-      if (imageView) { imageView = ''; return true; } // the viewer is the topmost layer (board #188)
+      if (imageView) { closeImage(); return true; } // the viewer is the topmost layer (board #188)
       if (reading) { reading = false; return true; } // reading mode is a layer over the preview (board #226)
       if (fileMenu) { closeFileMenu(); return true; }
       // navAnim('back') rides only the branches that CHANGE the view — the
@@ -985,8 +990,23 @@
   let previewRenew = $state(0);
   /** Bumped by every re-read of the preview (Reload, a return): review cards follow (#434). */
   let reviewRefresh = $state(0);
-  /** The picture open in the one fullscreen viewer (ui/Lightbox), board #188. */
-  let imageView = $state('');
+  /** The picture open in the one fullscreen viewer (ui/Lightbox), board #188. One open = one
+   * record { src, ref } taken at the tap (board #447): the data URL it shows and the server
+   * file its download saves are never completed from the live selection, so a viewer open on
+   * A still saves A when the preview moves on to B. */
+  let imageView = $state.raw(null);
+  // A download starts only for the CURRENT open while this Files is active (the door, not just
+  // the effect that removes the button).
+  const viewerDl = createViewerDownload(scope, (record) => imageView === record && imageActive);
+  function closeImage() {
+    viewerDl.retire();
+    imageView = null;
+  }
+  // The viewer retires on the host's own gate, on its false edge, in the same tick: a hidden
+  // or unfocused Files is not destroyed, and coming back is a fresh tap.
+  const imageActive = $derived(visible && (scope.eligible ? scope.eligible() : true));
+  $effect(() => { if (!imageActive) untrack(closeImage); });
+  $effect(() => () => viewerDl.dispose());
 
   /** Reading mode (board #226, owner: "放大按钮全屏显示，上下隐藏起来，悬浮一个按钮
    * 回到普通模式"): the preview header and the app's tab bar step away, the
@@ -1368,13 +1388,6 @@
     downloadOperation = null;
   }
 
-  /** An RPC fallback arrives whole as base64 (≤50 MB server cap). */
-  async function writeWhole(sink, b64) {
-    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    await sink.reset(null);
-    await sink.write(bytes);
-    await sink.flush();
-  }
 
   /** One writer per part id (board #305). The id is stable per server +
    * file so a later session can resume; two concurrent attempts on one id
@@ -1412,133 +1425,16 @@
     downloadLifetime.update(token, value);
   }
 
-  async function handleDownload(path) {
-    const name = path.split('/').pop();
-    // Without a machine id (should not happen after auth) the id must not be
-    // shared across servers: a one-off id downloads correctly, it just cannot
-    // resume in a later session.
-    const server = isTauri ? getMachineId() || `once-${Date.now()}-${Math.random()}` : '';
-    const id = isTauri ? partId(server, path) : null;
-    const running = id ? memory.writerOf(id) : null;
-    // Its card is already in the stack (board #420): nothing to take back.
-    if (running?.owner === instance) return;
-    if (running) { tell({ kind: 'success', message: t('downloadInProgress'), detail: path }); return; }
-    // The store's row is this attempt's ONE record (board #308): progress
-    // writes it, and its card in the feedback stack shows what it says.
-    const rowId = id ?? memory.nextWebRowId();
-    const control = new AbortController();
-    let settle;
-    // The gate (board #335 ②b-2-3, reviewer P1-a): a record being released
-    // refuses the attempt, which ends here — no row, no claim, no RPC.
-    if (!memory.track(rowId, control, new Promise((resolve) => { settle = resolve; }))) return;
-    store.begin(rowId, name, path);
-    const progress = (fraction, received = 0, total = 0) => { store.progress(rowId, received, total); };
-    if (id) memory.claim(id, { owner: instance });
-    const completed = (savedPath) => {
-      store.done(rowId, savedPath);
-      tell({ kind: 'result', message: t('saved'), detail: savedPath }, savedPath);
-    };
-    try {
-    progress();
-    // ONE download core (board #305, download.ts); only the sink differs.
-    // A Tauri shell writes a resumable part on disk, the browser holds the
-    // file in memory for <a download>.
-    const native = id ? nativeSink(invokeNative, id, PIECE_BYTES, { name, path, server }) : null;
-    const memory = native ? null : memorySink();
-    const sink = native ?? memory;
-    try {
-      const dlInfo = await fsDownloadHttp(path);
-      if (dlInfo.url) {
-        // freshUrl re-signs on each retry: the /dl signature has a 60 s TTL,
-        // so resuming a long transfer needs a new URL, not the original.
-        const freshUrl = () => fsDownloadHttp(path).then(info => info.url);
-        try {
-          await download({ url: dlInfo.url, freshUrl, sink, signal: control.signal,
-            onProgress: progress,
-            // The part on disk is of an older version of the file: the row
-            // says so for the rest of the attempt (told once).
-            onRestart: () => { store.restarted(rowId); } });
-        } catch (e) {
-          if (e.code !== 'DL_HTTP_UNREACHABLE') throw e;
-          // The WS connection demonstrably works (we just got the signed
-          // URL over it) but plain HTTP to the same host doesn't — typical
-          // when a reverse proxy only forwards WebSocket upgrades. Fall
-          // back to the WS RPC download (base64, 50 MB server-side cap).
-          await writeWhole(sink, (await fsDownload(path)).data);
-        }
-      } else {
-        // wss:// fallback path: we got base64 over WS RPC. No progress to
-        // report mid-decode.
-        await writeWhole(sink, dlInfo.base64);
-      }
-
-      // Cancel is honored up to here (review P2-C): download() checks it on
-      // the streamed path, and this one check covers the whole-file fallback
-      // and a URL ask a Cancel overtook. Past it the row is 'saving' and its
-      // card offers no Cancel (a dialog or a finish is not cancelled here).
-      throwIfCancelled(control.signal);
-      // There is no measured write fraction. Only transfer bytes report a percentage.
-      store.saving(rowId);
-      if (native) {
-        let dest = null;
-        if (!isAndroid) {
-          await tauriPlugins;
-          // macOS / desktop: the dialog comes after the bytes, as before.
-          dest = await tauriDialog.save({ defaultPath: name });
-          if (!dest) {
-            // Cancelled: the finished part stays in the app cache, so the
-            // next Download of this file asks again without refetching.
-            await native.release();
-            store.paused(rowId, null);
-            tell({ kind: 'success', message: t('downloadPartKept'), detail: name });
-            return;
-          }
-        }
-        completed(await native.finish(name, dest ? String(dest) : null));
-        return;
-      }
-      const bytes = memory.bytes();
-      // Plain browser: trigger a tag-based download.
-      const blob = new Blob([bytes]);
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl; a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(blobUrl); }, 100);
-      store.done(rowId, null, Date.now(), true);
-      tell({ kind: 'success', message: t('downloadRequested'), detail: name });
-    } catch (e) {
-      // A NETWORK failure keeps the part for a later resume (download.ts
-      // flushed what arrived); anything else (a write or save failure, a
-      // missing file) leaves no half-file behind.
-      // Another writer holds the part (Rust refused the claim): it is theirs
-      // to finish, so neither abort nor release it, and say so as the JS
-      // guard does.
-      if (e?.partBusy) {
-        store.forget(rowId);
-        tell({ kind: 'success', message: t('downloadInProgress'), detail: path });
-        return;
-      }
-      // Suspended by a server switch (board 315): the part stays for a
-      // resume on this server; the row goes with the rest of its memory.
-      if (e?.cancelled && e.keepPart) {
-        await native?.release();
-        store.forget(rowId);
-        return;
-      }
-      // Cancelled (its card or the Downloads view): the part goes, the row
-      // goes and with it the card; nothing more is said.
-      if (e?.cancelled) {
-        await native?.abort();
-        store.forget(rowId);
-        return;
-      }
-      if (e?.keepPart) { await native?.release(); store.paused(rowId, String(e.message || e)); }
-      else { await native?.abort(); store.failed(rowId, String(e.message || e)); }
-      tell({ kind: 'error', message: String(e.message || e), detail: path });
-    }
-    } finally { if (id) memory.release(id); memory.untrack(rowId); settle(); }
+  /** The download attempt itself is `save-file.ts` (board #447: the viewers share
+   * it); this is where ITS outcome is told, in this Files' slot. */
+  function handleDownload(path) {
+    return saveServerFile(saveDeps, path, instance, {
+      inProgress: (p) => tell({ kind: 'success', message: t('downloadInProgress'), detail: p }),
+      saved: (savedPath) => tell({ kind: 'result', message: t('saved'), detail: savedPath }, savedPath),
+      kept: (name) => tell({ kind: 'success', message: t('downloadPartKept'), detail: name }),
+      requested: (name) => tell({ kind: 'success', message: t('downloadRequested'), detail: name }),
+      error: (message, p) => tell({ kind: 'error', message, detail: p }),
+    });
   }
 
   // ONE destination rule and ONE byte→b64 encoder for every upload entry point
@@ -2015,7 +1911,7 @@
     <FileReview file={currentFile} body={previewBodyEl} {session} refresh={reviewRefresh} compact={narrowViewport} {onfeedback} context={feedbackContext}>
       <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
         bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
-        {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { imageView = src; }} {visible}
+        {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { viewerDl.retire(); imageView = viewerOpen(src, currentFile?.path ?? null, currentFile?.name ?? ''); }} {visible}
         previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }} />
     </FileReview>
     {#if reading}
@@ -2251,7 +2147,10 @@
 </div>
 
 {#if imageView}
-  <Lightbox src={imageView} alt={currentFile?.name ?? ''} onclose={() => { imageView = ''; }} />
+  {@const open = imageView}
+  <Lightbox src={open.src} alt={open.label} onclose={closeImage}
+    ondownload={open.ref ? () => viewerDl.start(open) : undefined} downloading={viewerDl.busy(open)}
+    status={viewerDl.status} onstatusdismiss={viewerDl.dismiss} />
 {/if}
 <ContextMenu at={fileMenu?.at} items={menuActions} who={fileMenu?.entry?.name || fileMenu?.cwd || t('filesTools')}
   id={`${panelId}-menu`} oncancel={closeFileMenu} />

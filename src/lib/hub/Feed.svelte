@@ -26,7 +26,7 @@
     following = $bindable(true), newBelow = $bindable(false),
     stateLabel = (state) => state, emptyFeed = null,
     onseen: markSeen = () => {}, onolder: loadOlder = async () => {},
-    onpath: routePathRef = () => {}, onboard = () => {}, onimage = () => {}, onreply = null,
+    onpath: routePathRef = () => {}, onboard = () => {}, onimage = () => {}, onimagestart = null, onreply = null,
     registerActions = null,
     /** A jump's history window is on screen (board #322): it is not the
      * tail, so nothing here follows, marks seen or writes the tail — the
@@ -945,7 +945,7 @@
                      is never pinned, so no held bubble hides or grows a strip. -->
                 <div class="shots">
                   {#each parts.images as src, k (`${k}-${src}`)}
-                    <ChatImage {src} alt={m.from} onview={onimage} />
+                    <ChatImage {src} alt={m.from} onviewstart={onimagestart} onview={onimage} />
                   {/each}
                 </div>
               {/if}

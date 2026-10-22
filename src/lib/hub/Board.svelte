@@ -14,6 +14,9 @@
   import AttachStrip from './AttachStrip.svelte';
   import ChatImage from './ChatImage.svelte';
   import Lightbox from '../ui/Lightbox.svelte';
+  import { createViewClaim } from './view-claim.ts';
+  import { createViewerDownload, viewerOpen } from '../files/viewer-download.svelte.ts';
+  import type { ViewerOpen } from '../files/viewer-download.svelte.ts';
   import type { ProjectRow } from '../projects/projects.ts';
   import { t, hanLang } from '../core/i18n.svelte.ts';
   import { poll, single } from '../core/poll.ts';
@@ -151,7 +154,7 @@
   type OpCtx = { session: string; id: number | null; gen: number };
   const freeze = (): OpCtx => ({ session: cur, id: sel?.id ?? null, gen: opGen });
   const owns = (c: OpCtx) => alive && c.gen === opGen;
-  onDestroy(() => { alive = false; opGen++; viewGeneration++; readSequence++; loadProjects.dispose(); load.dispose(); setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
+  onDestroy(() => { alive = false; opGen++; viewClaim.retire(); viewerDl.dispose(); viewGeneration++; readSequence++; loadProjects.dispose(); load.dispose(); setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
   let picked = $state(false);      // a manual pick overrides the session follow
   // The Board sheet's own condition (≤760px — the old media gate, expressed
   // where the class is applied; see app.css .side-sheet).
@@ -207,6 +210,10 @@
   let landingParked: (() => void) | null = null;
   let landingParkedOk: (() => boolean) | null = null;   // is the parked question still the landing's to ask?
   const eligible = () => visible && (scope.eligible ? scope.eligible() : true) && alive;
+  // The viewer retires on this gate's false edge, in the same tick (board #447): a hidden or
+  // unfocused board is not destroyed, so a late signature or download result must find its
+  // claim and token dead; coming back is a fresh tap.
+  $effect(() => { if (!eligible()) untrack(closeShot); });
   function voidLanding() {
     landingGen++;
     landing = null;
@@ -382,7 +389,7 @@
       if (pendingDelete) { if (!busy) pendingDelete = null; return true; } // pending Back is consumed, not dismissed
       if (pendingDiscard) { cancelDiscard(); return true; }
       if (submitting) return true; // consumed: the request answers first
-      if (shotView) { shotView = ''; return true; } // the viewer first, then the detail
+      if (shotView) { closeShot(); return true; } // the viewer first, then the detail
       if (sel && (dirty || noteDirty)) { pendingDiscard = () => { sel = null; }; return true; }
       if (creating && createDirty) { pendingDiscard = () => { creating = false; }; return true; }
       if (sel || creating) { sel = null; creating = false; return true; }
@@ -439,7 +446,7 @@
     if (id === stagedFor) return;
     stagedFor = id;
     // The note text and its images have ONE owner, the issue: they go together.
-    untrack(() => { opGen++; bodyStage.clear(); noteStage.clear(); noteText = ''; shotView = ''; });
+    untrack(() => { opGen++; closeShot(); bodyStage.clear(); noteStage.clear(); noteText = ''; });
   });
   let wasDrilled = false;
   $effect(() => { if (drilled !== wasDrilled) { drillAnim = drilled ? 'fwd' : 'back'; wasDrilled = drilled; } });
@@ -493,15 +500,36 @@
   const pasteInto = (st: Stager) => (e: ClipboardEvent) => { if (submitting) { e.preventDefault(); return; } attachPaste(e, (f) => st.stage(f)); };
   // The Lightbox (the shared viewer): opened from any image in the detail;
   // Back and Escape close IT before the detail (backLayers order below).
-  let shotView = $state('');
+  // One open = one immutable record { src, ref } (board #447): what the viewer shows and the
+  // server file its download saves are taken together at the tap. `ref` is null for an
+  // attachment thumbnail (a local blob): nothing to download.
+  let shotView = $state.raw<ViewerOpen | null>(null);
   /** The viewer URL is signed at the tap, asynchronously. Each tap takes its
    * OWN claim — the generation then, and a sequence number — and only the
    * answer to the LATEST tap, in the generation it was made, may open the
-   * viewer: an answer from another issue (A→B→A) or an older tap is dropped. */
-  let viewSeq = 0;
-  const claimView = () => ({ gen: opGen, n: ++viewSeq });
-  const acceptView = (u: string, c: { gen: number; n: number } | undefined) => {
-    if (alive && c && c.gen === opGen && c.n === viewSeq) shotView = u;
+   * viewer: an answer from another issue (A→B→A) or an older tap is dropped
+   * (board #329; the rule is `view-claim.ts`, shared with the Hub). */
+  const viewClaim = createViewClaim(() => opGen);
+  // A download starts only for the board's CURRENT open while it is eligible (the door, not just
+  // the effect that removes the button).
+  const viewerDl = createViewerDownload(scope, (record) => shotView === record && eligible());
+  const claimView = () => viewClaim.begin();
+  /** The viewer's display ends (close, another issue, the board not active): no earlier tap
+   * may open, no earlier attempt may speak; a transfer already requested is the runtime's. */
+  function closeShot() {
+    viewClaim.retire();
+    viewerDl.retire();
+    shotView = null;
+  }
+  /** Every way a viewer opens comes here (a signed chat image, a local attachment): it ends the
+   * earlier open's claim and feedback, so no held signature can overwrite what opened since. */
+  function showShot(record: ViewerOpen) {
+    viewClaim.retire();
+    viewerDl.retire();
+    shotView = record;
+  }
+  const acceptView = (u: string, c: ReturnType<typeof claimView> | undefined, ref: string | null = null) => {
+    if (eligible() && viewClaim.accept(c)) showShot(viewerOpen(u, ref));
   };
   /** Body/note text and its images (the feed's own parser). Text without an
    * image is returned BYTE-FOR-BYTE — history is shown verbatim (#28/#11);
@@ -614,7 +642,7 @@
     void cur;
     viewGeneration++;
     sel = null; creating = false; ready = false; issues = []; noteText = ''; nTitle = ''; nBody = ''; nAssignee = ''; pendingDiscard = null; pendingDelete = null;
-    shotView = ''; opGen++;
+    closeShot(); opGen++;
     err = ''; resend = null; // the old board's error line and its Reassign belong to it
     untrack(() => { createStage.clear(); bodyStage.clear(); noteStage.clear(); });
     if (justLoadedTimer) clearTimeout(justLoadedTimer); justLoaded = false; // the unfold belongs to the board that loaded
@@ -1218,7 +1246,7 @@
         <div class="attach-line">
           <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || bodyStage.attaching}
             pending={bodyStage.attaching} onclick={() => pickFor(bodyStage)} />
-          <AttachStrip pending={bodyStage.pending} onremove={(i) => { if (!submitting) bodyStage.remove(i); }} onpreview={(u) => { shotView = u; }} />
+          <AttachStrip pending={bodyStage.pending} onremove={(i) => { if (!submitting) bodyStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
         </div>
         <!-- The SAVED images (board #329): the refs already in the stored body,
              seen through the feed's image atom; the chips above are only
@@ -1271,7 +1299,7 @@
           {/each}
         {/if}
       </div>
-      <AttachStrip pending={noteStage.pending} onremove={(i) => { if (!submitting) noteStage.remove(i); }} onpreview={(u) => { shotView = u; }} />
+      <AttachStrip pending={noteStage.pending} onremove={(i) => { if (!submitting) noteStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
       <div class="note-add">
         <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || noteStage.attaching}
           pending={noteStage.attaching} onclick={() => pickFor(noteStage)} />
@@ -1333,7 +1361,7 @@
       <div class="attach-line">
         <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || createStage.attaching}
           pending={createStage.attaching} onclick={() => pickFor(createStage)} />
-        <AttachStrip pending={createStage.pending} onremove={(i) => { if (!submitting) createStage.remove(i); }} onpreview={(u) => { shotView = u; }} />
+        <AttachStrip pending={createStage.pending} onremove={(i) => { if (!submitting) createStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
       </div>
     </div>
   {:else}
@@ -1415,7 +1443,12 @@
     {/if}
   {/snippet}
   <input type="file" multiple hidden bind:this={fileEl} onchange={onPickFiles} />
-  {#if shotView}<Lightbox src={shotView} onclose={() => { shotView = ''; }} />{/if}
+  {#if shotView}
+    {@const open = shotView}
+    <Lightbox src={open.src} onclose={closeShot}
+      ondownload={open.ref ? () => viewerDl.start(open) : undefined} downloading={viewerDl.busy(open)}
+      status={viewerDl.status} onstatusdismiss={viewerDl.dismiss} />
+  {/if}
   <ConfirmDialog open={!!pendingDiscard} danger={false} compact={narrowVp}
     confirmIcon="check"
     title={t('confirmDiscardTitle')} note={creating ? t('boardCreateDiscardNote') : t('boardDiscardNote')}

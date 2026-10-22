@@ -1586,3 +1586,61 @@ test('an HTML preview whose base is refused still reads, says so, and Refresh mi
     assert.equal(app.document.querySelector('.error'), null, 'the line goes once the resources can load');
   } finally { await app.close(); }
 });
+
+// Board #447: the image viewer's download. The record of an open is taken at the tap; the control
+// saves THAT file, signed at the download tap, and the viewer retires with the page's own gate.
+function imageRpc(signed: string[], extra: Record<string, (...args: any[]) => unknown> = {}) {
+  return rpc({
+    fsList: async () => ({ path: '/fixture', entries: [
+      { name: 'one.png', path: '/fixture/one.png', type: 'file', size: 10 },
+      { name: 'two.png', path: '/fixture/two.png', type: 'file', size: 10 },
+    ] }),
+    fsStat: async (path: string) => ({ path, is_text: false, writable: true, readable: true, size: 10, mime_hint: 'image/png' }),
+    fsDownload: async () => ({ data: 'eA==' }),
+    fsDownloadHttp: async (path: string) => { signed.push(path); return { url: `https://h/dl?path=${encodeURIComponent(path)}` }; },
+    ...extra,
+  });
+}
+const fetchOk = (win: any) => { win.fetch = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-length': '3' } }); };
+
+test('the viewer saves the file it was opened on, signed at the download tap, even after the preview moves on (#447)', async context => {
+  const signed: string[] = [];
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture', navRequest: null }, modules: [imageRpc(signed)], setup: fetchOk });
+  try {
+    await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.file-row .file-main')!.click(); await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.image-open')!.click(); await settle(app);
+    assert.ok(app.document.querySelector('.lb .lb-img'), 'the viewer opened on one.png');
+    assert.equal(signed.length, 0, 'opening the viewer signs nothing: its picture is the preview\u2019s data URL');
+    // The preview moves on to two.png underneath the open viewer (a navigation request).
+    await app.setProps({ navRequest: { file: '/fixture/two.png', n: 1 } }); await settle(app);
+    assert.match(app.document.querySelector('.preview-name')?.textContent ?? '', /two\.png/u, 'the preview really is two.png now');
+    assert.ok(app.document.querySelector('.lb .lb-img'), 'the viewer is still the one that was opened');
+    const download = app.document.querySelector<HTMLButtonElement>('.lb .lb-download');
+    assert.ok(download, 'a previewed server file offers the control');
+    download.click(); await settle(app);
+    assert.deepEqual(signed, ['/fixture/one.png'], 'one signature at the tap, for the file the viewer shows, not the live selection');
+  } finally { await app.close(); }
+});
+
+test('a hidden or unfocused Files retires its viewer on the edge and a return does not reopen it (#447)', async context => {
+  const signed: string[] = [];
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [imageRpc(signed)], setup: fetchOk });
+  try {
+    await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.file-row .file-main')!.click(); await settle(app);
+    const open = () => { app.document.querySelector<HTMLButtonElement>('.image-open')!.click(); return settle(app); };
+    await open();
+    assert.ok(app.document.querySelector('.lb'), 'opened');
+    await app.setProps({ visible: false });
+    assert.equal(app.document.querySelector('.lb'), null, 'closed in the tick of the hide');
+    await app.setProps({ visible: true });
+    assert.equal(app.document.querySelector('.lb'), null, 'a return is not a reopen');
+    await open();
+    assert.ok(app.document.querySelector('.lb'), 'a fresh tap is');
+    await app.setScope({ eligible: false });
+    assert.equal(app.document.querySelector('.lb'), null, 'the host says this tree lost the focus: same edge');
+    await app.setScope({ eligible: true });
+    assert.equal(app.document.querySelector('.lb'), null);
+  } finally { await app.close(); }
+});

@@ -1,5 +1,9 @@
 <script lang="ts">
   import { moveMs } from './motion.ts';
+  import Icon from './Icon.svelte';
+  import OperationFeedback from './OperationFeedback.svelte';
+  import { t } from '../core/i18n.svelte.ts';
+  import type { FeedbackValue } from './feedback-lifetime.ts';
   // Fullscreen image viewer (owner, 2026-08-26: "看图片的支持"). One fixed
   // overlay above everything — like every fixed layer it assumes the VIEWPORT
   // as containing block (design-language.md §2). Gestures are the ones a photo
@@ -8,8 +12,19 @@
   // Dismissal is the standard set: backdrop tap (only when NOT zoomed — a pan
   // that ends on the backdrop must not close it), Escape, the ✕, and the
   // Android back gesture via the host page's onGoBack chain.
-  let { src = '', alt = '', onclose = () => {} } = $props<{
+  //
+  // Download (board #447): a host that can save this picture's FILE hands
+  // `ondownload`; the control sits beside ✕ in the same bar, and `status` is the
+  // host's feedback for it, drawn by the one OperationFeedback. Without
+  // `ondownload` the viewer is exactly what it was. `downloading` hides the
+  // control while a save for THIS open runs (one tap, one attempt). The bar and
+  // the status are SIBLINGS of the stage that owns every gesture below: the
+  // stage captures the pointer on press, so anything inside it would lose its
+  // release (and its click) to the capture.
+  let { src = '', alt = '', onclose = () => {}, ondownload = undefined, downloading = false, status = null, onstatusdismiss = undefined } = $props<{
     src?: string; alt?: string; onclose?: () => void;
+    ondownload?: () => void; downloading?: boolean;
+    status?: FeedbackValue | null; onstatusdismiss?: () => void;
   }>();
 
   let scale = $state(1);
@@ -109,15 +124,26 @@
 
 <svelte:window onkeydown={onKey} />
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
 <div class="lb" role="dialog" aria-label={alt || 'image'} tabindex="-1"
-  style:background={dismissP ? `color-mix(in srgb, var(--bg) ${Math.round(88 * (1 - 0.6 * dismissP))}%, transparent)` : null}
-  onpointerdown={onPointerDown} onpointermove={onPointerMove}
-  onpointerup={onPointerUp} onpointercancel={onPointerUp}
-  onclick={onBackdrop} onwheel={onWheel}>
-  <img class="lb-img" class:settle {src} {alt} draggable="false"
-    style:transform={`translate(${tx}px, ${ty}px) scale(${scale * (1 - 0.18 * dismissP)})`} />
-  <button class="lb-close" aria-label="close" onclick={onclose}>✕</button>
+  style:background={dismissP ? `color-mix(in srgb, var(--bg) ${Math.round(88 * (1 - 0.6 * dismissP))}%, transparent)` : null}>
+  <!-- The stage: the picture and every gesture on it (pinch, pan, swipe, wheel, backdrop tap). -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <div class="lb-stage"
+    onpointerdown={onPointerDown} onpointermove={onPointerMove}
+    onpointerup={onPointerUp} onpointercancel={onPointerUp}
+    onclick={onBackdrop} onwheel={onWheel}>
+    <img class="lb-img" class:settle {src} {alt} draggable="false"
+      style:transform={`translate(${tx}px, ${ty}px) scale(${scale * (1 - 0.18 * dismissP)})`} />
+  </div>
+  <div class="lb-bar">
+    {#if ondownload && !downloading}
+      <button class="lb-btn lb-download" type="button" aria-label={t('filesDownload')} onclick={ondownload}><Icon name="download" size={16} /></button>
+    {/if}
+    <button class="lb-btn lb-close" type="button" aria-label="close" onclick={onclose}>✕</button>
+  </div>
+  {#if status}
+    <div class="lb-status"><OperationFeedback value={status} ondismiss={status.kind === 'error' ? onstatusdismiss : undefined} /></div>
+  {/if}
 </div>
 
 <style>
@@ -125,8 +151,12 @@
     position: fixed; inset: 0; z-index: 300;
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    overscroll-behavior: contain;
+  }
+  .lb-stage {
+    position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    touch-action: none; overscroll-behavior: contain;
+    touch-action: none;
     /* The APK's real status-bar inset arrives via --sat, never raw env(). */
     padding-top: var(--sat, 0px);
   }
@@ -141,15 +171,33 @@
   /* Springing back from an aborted dismiss swipe is the ONE animated moment;
      while a finger is down the finger is the animation. */
   .lb-img.settle { transition: transform var(--t-move) ease; }
-  @media (prefers-reduced-motion: reduce) { .lb-img.settle, .lb-close { transition: none; } }
-  .lb-close {
-    position: absolute; top: calc(8px + var(--sat, 0px)); right: 8px;
-    width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
-    border-radius: var(--ui-radius-control); border: 1px solid var(--border2);
-    background: var(--surface); color: var(--text2); font-size: var(--fs-body);
-    cursor: pointer;
-    transition: border-color var(--t-fast), color var(--t-fast);
+  @media (prefers-reduced-motion: reduce) { .lb-img.settle, .lb-btn::before, .lb-btn { transition: none; } }
+  /* The bar: ✕ keeps its place (34px paint, 8px from the corner and below the status
+     strip); each control's 44px touch box is real, so neighbours abut instead of
+     overlapping their hit areas. */
+  .lb-bar {
+    position: absolute; top: calc(8px - 5px + var(--sat, 0px)); right: calc(8px - 5px);
+    display: flex; gap: var(--ui-gap);
   }
-  .lb-close::after { content: ''; position: absolute; inset: -5px; }
-  .lb-close:hover { border-color: var(--accent); color: var(--text); }
+  .lb-btn {
+    position: relative; isolation: isolate;
+    width: 44px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center;
+    border: 0; background: none; color: var(--text2); font-size: var(--fs-body);
+    cursor: pointer;
+    transition: color var(--t-fast);
+  }
+  .lb-btn::before {
+    content: ''; position: absolute; inset: 5px; z-index: -1;
+    border-radius: var(--ui-radius-control); border: 1px solid var(--border2);
+    background: var(--surface);
+    transition: border-color var(--t-fast);
+  }
+  .lb-btn:hover { color: var(--text); }
+  .lb-btn:hover::before { border-color: var(--accent); }
+  .lb-status {
+    position: absolute; left: var(--ui-gap); right: var(--ui-gap);
+    bottom: calc(var(--ui-gap) * 4 + var(--sab, 0px));
+    display: flex; justify-content: center; pointer-events: none;
+  }
+  .lb-status > :global(.operation-feedback) { pointer-events: auto; max-width: 100%; }
 </style>
