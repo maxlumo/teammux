@@ -2882,8 +2882,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
     /// Effort rides each backend's own knob (owner, 2026-08-22: "agent配置里
     /// 应该有thinking effort的配置选项"): a `--effort` flag for kiro/claude/
-    /// grok (measured on each CLI), a `-c model_reasoning_effort=…` config
-    /// override for codex. Empty = the backend default, nothing on the line.
+    /// grok (measured on each CLI); for codex, the managed profile's
+    /// `model_reasoning_effort` with the model beside it, never the line
+    /// (#455, non-negotiable 10). Empty = not set, nothing on the line.
     #[test]
     fn effort_reaches_each_backend_in_its_own_dialect() {
         let dir = std::env::temp_dir().join(format!("tmm-effort-{}", uuid::Uuid::new_v4()));
@@ -2897,10 +2898,24 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         d.backend = "grok".into();
         assert!(render_grok(&d, "t", &dir, &prompt, &[]).unwrap().cmd.ends_with("--effort high"));
         d.backend = "codex".into();
+        d.model = "gpt-6-luna".into();
         let cx = render_codex(&d, "t", &dir, &dir, &prompt, &[]).unwrap().cmd;
-        assert!(cx.contains("model_reasoning_effort=\\\"high\\\"") || cx.contains("model_reasoning_effort=\"high\""), "{cx}");
-        // Empty effort leaves every line clean.
+        assert!(!cx.contains("model_reasoning_effort") && !cx.contains("--model") && !cx.contains("gpt-6-luna"), "codex's identity is not on the line: {cx}");
+        let profile = |dir: &std::path::Path| -> toml::Table {
+            std::fs::read_to_string(dir.join("codex").join(shared::codex_profile_file())).unwrap().parse().unwrap()
+        };
+        let p = profile(&dir);
+        assert_eq!((p["model"].as_str(), p["model_reasoning_effort"].as_str()), (Some("gpt-6-luna"), Some("high")), "{p:?}");
+        // A cleared definition clears the file (a whole-document render), and a
+        // `/model` default codex wrote into it does not survive the next render.
+        std::fs::write(dir.join("codex").join(shared::codex_profile_file()), "model = \"picked-in-pane\"\n").unwrap();
+        d.model = String::new();
         d.effort = String::new();
+        let cx = render_codex(&d, "t", &dir, &dir, &prompt, &[]).unwrap().cmd;
+        assert!(!cx.contains("model_reasoning_effort") && !cx.contains("--model"), "{cx}");
+        let p = profile(&dir);
+        assert!(!p.contains_key("model") && !p.contains_key("model_reasoning_effort"), "not set at this layer: {p:?}");
+        // Empty effort leaves every line clean.
         d.backend = "kiro".into();
         assert!(!render_kiro(&d, "t", &dir, &dir, &prompt, &[]).unwrap().cmd.contains("--effort"));
         // Validation is a fixed enum per backend; empty always passes.
@@ -3431,6 +3446,50 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!stripped.contains("steer"), "{stripped}");
         super::super::teams_save(&json!({ "name": "upteam", "description": "", "members": stripped })).unwrap();
         assert_eq!(members("upteam")[1].agent.as_ref().unwrap().input_mode, "steer", "an existing steer member stays steer");
+    }
+
+    /// Board #455: a codex definition's model and effort reach a restart
+    /// through the managed profile, never the line. `refresh_agent` (every
+    /// restart with a definition) rewrites the profile from the CURRENT
+    /// definition and writes a recipe line without either flag. That codex
+    /// then RESUMES with the profile's pair was measured on 0.162.1 (#455:
+    /// `resume --last` and `resume <id>`), not here.
+    #[test]
+    fn a_codex_restart_takes_the_definitions_model_from_the_profile_not_the_line() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-cx455-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let name = format!("cx455-{}", &uuid::Uuid::new_v4().to_string()[..6]);
+        let save = |model: &str, effort: &str| {
+            super::super::registry_save(&json!({ "name": name, "backend": "codex", "model": model, "effort": effort,
+                "system": "x", "skills": "[]", "mcp": json!([{ "name": "s", "command": "mcp-s" }]).to_string() })).unwrap();
+        };
+        save("gpt-6-luna", "high");
+        let def = super::super::registry_get(&name).unwrap().expect("saved def");
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, &name)), &def, &name, "proj", &ws_str, "", "", None, &name, "", "").unwrap();
+        let home = agent_home(&ws_str, &name);
+        let profile = || -> toml::Table { std::fs::read_to_string(home.join("codex").join(shared::codex_profile_file())).unwrap().parse().unwrap() };
+        let line = || -> String { serde_json::from_str::<Value>(&std::fs::read_to_string(home.join("launch.json")).unwrap()).unwrap()["cmd"].as_str().unwrap().to_string() };
+        let p = profile();
+        assert_eq!((p["model"].as_str(), p["model_reasoning_effort"].as_str()), (Some("gpt-6-luna"), Some("high")));
+        assert!(p["mcp_servers"].get("s").is_some());
+        let cmd = line();
+        assert!(cmd.contains("--profile tmm-agent") && !cmd.contains("--model") && !cmd.contains("model_reasoning_effort"), "{cmd}");
+
+        save("gpt-6-astra", "minimal");
+        assert!(refresh_agent(&ws_str, "proj", &name).unwrap(), "a definition change is re-materialized at restart");
+        let p = profile();
+        assert_eq!((p["model"].as_str(), p["model_reasoning_effort"].as_str()), (Some("gpt-6-astra"), Some("minimal")), "the restart's profile is today's definition");
+        assert!(p["mcp_servers"].get("s").is_some(), "and keeps the servers");
+        let cmd = line();
+        assert!(!cmd.contains("--model") && !cmd.contains("model_reasoning_effort") && !cmd.contains("gpt-6"), "no second opinion on the line: {cmd}");
+
+        save("", "");
+        assert!(refresh_agent(&ws_str, "proj", &name).unwrap());
+        let p = profile();
+        assert!(!p.contains_key("model") && !p.contains_key("model_reasoning_effort"), "cleared: not set at this layer: {p:?}");
+        let _ = super::super::registry_delete(&name);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// The recipe's provenance (`agent_def`, or `team`+`member`) is what the

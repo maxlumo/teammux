@@ -528,10 +528,18 @@ pub(crate) fn render_codex(
     notifications.ensure_helper()?;
     let notify = notifications.helper_command("codex");
 
-    // The definition's MCP servers are a FILE, like every other backend's
-    // (board #448): the managed profile, written whole and privately, and
-    // selected with --profile. No env or header value is on the line.
-    shared::write_atomic(&codex_home.join(shared::codex_profile_file()), &shared::codex_mcp_profile(&crate::projects::spawn::mcp_defs(def)))?;
+    // The definition's identity and MCP servers are a FILE, like every other
+    // backend's (board #448; model and effort since #455, non-negotiable 10):
+    // the managed profile, written whole and privately on every render, and
+    // selected with --profile. Neither a value nor the model is on the line.
+    // Measured on 0.162.1 (#455): a fresh launch, `resume --last` and
+    // `resume <id>` all take the profile's model and effort; a TRUSTED project
+    // config is above the profile (the #448 boundary), and a person's
+    // `/model` default lands in this file until the next render.
+    shared::write_atomic(
+        &codex_home.join(shared::codex_profile_file()),
+        &shared::codex_profile(&crate::projects::spawn::mcp_defs(def), &def.model, &def.effort),
+    )?;
     let mut config_args: Vec<String> = vec![format!("--profile {}", shared::CODEX_PROFILE)];
     let full_prompt = if skills.is_empty() {
         system_prompt.to_string()
@@ -557,17 +565,6 @@ pub(crate) fn render_codex(
         .unwrap(),
     )?;
 
-    if !def.model.is_empty() {
-        config_args.push(format!("--model {}", crate::shell::quote(&def.model)));
-    }
-    // Effort is a codex CONFIG key (`model_reasoning_effort`), so it rides a
-    // `-c` override like the rest of codex's identity — the recipe replays it.
-    if !def.effort.trim().is_empty() {
-        config_args.push(shared::codex_config_override(
-            "model_reasoning_effort",
-            Value::String(def.effort.trim().to_string()),
-        ));
-    }
     // A managed pane is UNATTENDED (board #184, owner 2026-09-12: "codex 启动会
     // 有提示是否升级，这个也要屏蔽掉，以及…是否信任当前文件夹目录"): codex's two
     // startup screens are answered here, as config overrides on the launch

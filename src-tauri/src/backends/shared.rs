@@ -122,16 +122,24 @@ pub(crate) fn codex_profile_file() -> String {
     format!("{CODEX_PROFILE}.config.toml")
 }
 
-/// The definition's MCP servers as the managed codex profile (board #448):
-/// a structural TOML document of `[mcp_servers.<name>]` tables, written
-/// privately into the home, so no env or header VALUE ever rides the launch
-/// line. The semantics of the old `-c` form are kept per field: stdio
-/// `command`, `args` and `env` (a literal table); http `url`, `enabled`,
-/// `experimental_use_rmcp_client`, an `Authorization: Bearer $VAR` header as
-/// `bearer_token_env_var`, a `$VAR` header as `env_http_headers`, a literal
-/// header as `http_headers`. Always a whole document: no server leaves only
-/// the header comment, so a revoked server or secret never survives.
-pub(crate) fn codex_mcp_profile(defs: &[McpDef]) -> String {
+/// The managed codex profile (board #448; model and effort since #455): the
+/// definition's IDENTITY and MCP servers as one structural TOML document,
+/// written privately into the home, so neither a value nor the model rides
+/// the launch line (non-negotiable 10).
+///
+/// `model` and `model_reasoning_effort` are top-level keys, omitted when the
+/// definition leaves them empty: "not set at this layer", and codex's own
+/// config and resume rules decide (measured on 0.162.1, #455: a resumed
+/// session restores its own last pair when the profile names neither, and
+/// takes the configured values for both when it names either). The MCP
+/// servers are `[mcp_servers.<name>]` tables, keeping the old `-c` form's
+/// semantics per field: stdio `command`, `args` and `env` (a literal table);
+/// http `url`, `enabled`, `experimental_use_rmcp_client`, an
+/// `Authorization: Bearer $VAR` header as `bearer_token_env_var`, a `$VAR`
+/// header as `env_http_headers`, a literal header as `http_headers`. Always a
+/// whole document: a revoked server, a cleared model, or a person's `/model`
+/// default (which codex writes into this file) never survives a render.
+pub(crate) fn codex_profile(defs: &[McpDef], model: &str, effort: &str) -> String {
     use toml::Value as T;
     let mut servers = toml::map::Map::new();
     for m in defs.iter().filter(|m| !m.name.is_empty()) {
@@ -174,11 +182,17 @@ pub(crate) fn codex_mcp_profile(defs: &[McpDef]) -> String {
         servers.insert(m.name.clone(), T::Table(t));
     }
     let mut doc = toml::map::Map::new();
+    if !model.trim().is_empty() {
+        doc.insert("model".into(), T::String(model.trim().to_string()));
+    }
+    if !effort.trim().is_empty() {
+        doc.insert("model_reasoning_effort".into(), T::String(effort.trim().to_string()));
+    }
     if !servers.is_empty() {
         doc.insert("mcp_servers".into(), T::Table(servers));
     }
     let body = toml::to_string(&T::Table(doc)).unwrap_or_default();
-    format!("# tmux-mobile managed codex profile (regenerated on every launch; board #448)\n{body}")
+    format!("# tmux-mobile managed codex profile (regenerated on every launch; boards #448, #455)\n{body}")
 }
 
 /// Keep the managed home's runtime state isolated while sharing the system
@@ -771,14 +785,14 @@ mod tests {
         let ours = agent_home.join(codex_profile_file());
         assert!(std::fs::symlink_metadata(&ours).is_err(), "the stale link is gone and nothing was linked in its place");
         let server = |name: &str| McpDef { name: name.into(), command: Some("mcp".into()), env: [("K".to_string(), format!("SENTINEL-{name}"))].into(), ..Default::default() };
-        write_atomic(&ours, &codex_mcp_profile(&[server("a"), server("b")])).unwrap();
+        write_atomic(&ours, &codex_profile(&[server("a"), server("b")], "", "")).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&ours), 0o600);
         // A second inheritance (every launch) keeps our regular file.
         inherit_codex_system_files_from(&agent_home, &system_home).unwrap();
         assert!(std::fs::read_to_string(&ours).unwrap().contains("SENTINEL-a"));
         // Revocation: the next render writes the whole profile without it.
-        write_atomic(&ours, &codex_mcp_profile(&[server("b")])).unwrap();
+        write_atomic(&ours, &codex_profile(&[server("b")], "", "")).unwrap();
         let text = std::fs::read_to_string(&ours).unwrap();
         assert!(!text.contains("SENTINEL-a") && !text.contains("[mcp_servers.a]") && text.contains("SENTINEL-b"), "{text}");
         assert_eq!((std::fs::read_to_string(&user).unwrap().as_str(), mode(&user)), ("model = \"the user's own\"", 0o644), "the user's file is untouched");
@@ -821,7 +835,7 @@ mod tests {
         let mut lit = remote.clone();
         lit.name = "lit".into();
         lit.headers = [("Authorization".to_string(), "Bearer SENTINEL-literal".to_string())].into();
-        let doc: toml::Table = codex_mcp_profile(&[remote.clone(), local, lit]).parse().unwrap();
+        let doc: toml::Table = codex_profile(&[remote.clone(), local.clone(), lit], "", "").parse().unwrap();
         let gh = &doc["mcp_servers"]["gh"];
         assert_eq!(gh["url"].as_str(), Some("https://x/mcp"));
         assert_eq!(gh["bearer_token_env_var"].as_str(), Some("API_TOKEN"), "Bearer $VAR is a name");
@@ -832,9 +846,30 @@ mod tests {
         assert_eq!((pg["command"].as_str(), pg["args"][0].as_str()), (Some("mcp-pg"), Some("--stdio")));
         assert_eq!(pg["env"]["API_KEY"].as_str(), Some("SENTINEL-env"), "a stdio env value is a literal table entry");
         assert_eq!(doc["mcp_servers"]["lit"]["http_headers"]["Authorization"].as_str(), Some("Bearer SENTINEL-literal"), "a literal Authorization stays a literal header");
-        // No server: only the header comment, so a revoked server leaves nothing.
-        let empty = codex_mcp_profile(&[]);
+        // No server and no identity: only the header comment, so a revoked
+        // server leaves nothing.
+        let empty = codex_profile(&[], "", "");
         assert!(empty.starts_with('#') && empty.parse::<toml::Table>().unwrap().is_empty(), "{empty}");
+
+        // Board #455: model and effort are top-level keys of the SAME whole
+        // document. Setting, changing or clearing either keeps the MCP tables,
+        // and revoking the servers keeps the identity.
+        let read = |model: &str, effort: &str, defs: &[McpDef]| -> toml::Table { codex_profile(defs, model, effort).parse().unwrap() };
+        let with = read("gpt-6-luna", "high", std::slice::from_ref(&local));
+        assert_eq!((with["model"].as_str(), with["model_reasoning_effort"].as_str()), (Some("gpt-6-luna"), Some("high")));
+        assert_eq!(with["mcp_servers"]["pg"]["env"]["API_KEY"].as_str(), Some("SENTINEL-env"));
+        let changed = read("gpt-6-astra", "minimal", std::slice::from_ref(&local));
+        assert_eq!((changed["model"].as_str(), changed["model_reasoning_effort"].as_str()), (Some("gpt-6-astra"), Some("minimal")));
+        assert!(changed["mcp_servers"].get("pg").is_some(), "a model change keeps the servers");
+        for (model, effort) in [("", "high"), ("gpt-6-luna", ""), ("", "")] {
+            let doc = read(model, effort, std::slice::from_ref(&local));
+            assert_eq!(doc.contains_key("model"), !model.is_empty(), "an empty model is NOT SET at this layer: {doc:?}");
+            assert_eq!(doc.contains_key("model_reasoning_effort"), !effort.is_empty(), "{doc:?}");
+            assert!(doc["mcp_servers"].get("pg").is_some(), "clearing keeps the servers: {doc:?}");
+        }
+        let revoked = read("gpt-6-luna", "high", &[]);
+        assert!(!revoked.contains_key("mcp_servers"), "a revoked server leaves nothing");
+        assert_eq!((revoked["model"].as_str(), revoked["model_reasoning_effort"].as_str()), (Some("gpt-6-luna"), Some("high")), "and the identity stays");
     }
 
 }
