@@ -1123,14 +1123,15 @@ pub fn send_command_with(target: &str, command: &str, before_enter: impl FnOnce(
     } else {
         send_keys(target, command, true)?;
     }
-    // backend-quirk(measured): codex-cli 0.148.0 needs a beat before Enter.
-    // A beat between the text and the Enter. An agent TUI that receives the
-    // burst back-to-back can treat the Enter as part of a paste and leave the
-    // line sitting in its composer unsubmitted — measured live on codex-cli
-    // 0.148.0 (a delivered @mention parked in the input box; grok/kiro/claude
-    // tolerate the burst). Team's nudge_pane learned the same lesson earlier
-    // ("the TUI needs a beat to settle"). 200 ms is imperceptible next to a
-    // model turn; shells do not care either way.
+    // backend-quirk(measured): a beat before the Enter (codex 0.148.0, kiro's picker guard).
+    // A beat between the text and the Enter. It was added for codex
+    // (0.148.0: a delivered line parked in its composer). That symptom is
+    // consistent with codex's paste-burst heuristic, measured on 0.162.1
+    // only (board #446), which no beat wins reliably: a long line still
+    // lost at 200 ms and 500 ms there. codex's own door switches it off
+    // (`tui.disable_paste_burst`, codex.rs). The beat stays for what reads
+    // the screen before the Enter (kiro's picker guard, `before_enter`);
+    // 200 ms is imperceptible next to a model turn.
     std::thread::sleep(std::time::Duration::from_millis(200));
     before_enter()?;
     send_keys(target, "Enter", false)?;

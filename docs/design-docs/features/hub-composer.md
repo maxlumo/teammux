@@ -1050,6 +1050,47 @@ The footer first painted 170-205 ms after the typing in the one-file workspace a
 
 Pinned by `a_kiro_delivery_types_no_at_so_its_file_picker_never_takes_the_enter` (real tmux, the real wake path, ten deliveries). The fake CLI turns on bracketed paste, opens a "picker" 150 ms after any `@` it reads, and lets an Enter with the picker open attach a file instead of submitting. Every delivery submits with `＠`, its receipt settles on the typed echo, and the room keeps `@`. A `/command` with `@` reaches the CLI as `@` and SUBMITS: the fake paints kiro's footer when its picker opens and closes it on a bare Escape, which the door's guard sends. In-test control: `send_command` typing `@` directly into the same pane, without the guard, is picked. The footer matcher is pinned on 2.18.1 and 2.32.0 screens (`kiro::tests::the_picker_is_recognised_by_its_footer_only`). Also pinned by the `render_kiro` assertion in `kiro_home_is_isolated_and_wired_to_tmm`.
 
+### A typed line's Enter submits in codex: paste-burst is off (board #446, 2026-10-22)
+
+Twice a delivery sat unsubmitted in the reviewer's codex composer, once for ten hours (09:33 → 19:31). One Enter pressed by hand submitted it. All three stuck lines were SINGLE-line and long (542, 593 and 795 characters; what looked like lines in the pane was the composer's soft wrap), and the pane was idle each time. A single line is typed by `tmux::send_command` as one `send-keys -l`, then the 200 ms beat, then a named Enter. Only a line holding `\n` is a bracketed paste.
+
+The mechanism is codex's paste-burst heuristic (`tui/src/bottom_pane/paste_burst.rs`), meant for terminals without bracketed paste. A fast run of un-bracketed keystrokes is taken for a paste, and an Enter that arrives while that burst is open is inserted as a newline. `send-keys -l` is such a burst, and whether the beat outlasts it depends on how fast codex consumes it, so it is a race that a long line loses. The "codex needs a beat before Enter" quirk noted on 0.148.0 is consistent with this mechanism; only 0.162.1 was measured here.
+
+Measured on codex-cli 0.162.1: a private tmux 3.6a socket with `extended-keys on`, an 80×24 pane like the reviewer's, its keymap overrides, and an isolated `CODEX_HOME` whose provider is a dead local port and whose `UserPromptSubmit` hook records and blocks the prompt. The text is the real stored lines.
+
+| shape | text | Enter after | submitted |
+|---|---|---|---|
+| `send-keys -l` (as shipped) | 632 B / 832 B | 200 ms | 0/10, 2/10 |
+| `send-keys -l` | 632 B | 0 / 500 ms / 1 s | 0/5, 1/3, 3/3 |
+| `send-keys -l` | 60–200 B / 300–400 B | 200 ms | 9/9, 3/6 |
+| bracketed paste | 632 B, 3-line | 200 ms | 5/5, 5/5 |
+| `send-keys -l` + `-c disable_paste_burst=true` (legacy key) | 632 B / 832 B | 200 ms and 0 | 40/40 |
+
+A second Enter two seconds later submitted every miss. codex's default keymap misses the same way (0/5), so the input mode is not involved.
+
+**Which key wins** (reviewer P1). codex's [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) says `tui.disable_paste_burst` takes precedence over the legacy top-level `disable_paste_burst`. The managed home's `config.toml` is the user's own (symlinked), so a user setting can sit under either key. Measured on 0.162.1, same rig, the 632 B line, Enter after 200 ms, 10 trials each:
+
+| inherited config.toml | launch override | submitted |
+|---|---|---|
+| `[tui] disable_paste_burst = false` | `-c disable_paste_burst=true` | 0/10 |
+| both keys `false` | `-c disable_paste_burst=true` | 0/10 |
+| `[tui] disable_paste_burst = false` | `-c tui.disable_paste_burst=true` | 10/10 |
+| top-level `disable_paste_burst = false` | `-c tui.disable_paste_burst=true` | 10/10 |
+| both keys `false` | `-c tui.disable_paste_burst=true` | 10/10 |
+| neither | `-c tui.disable_paste_burst=true` | 10/10 |
+| neither | `-c disable_paste_burst=true` | 10/10 |
+| neither | none | 0/10 |
+
+So the legacy override loses to a user's `[tui]` false, and the `[tui]` override wins against every adverse config tried. 0.162.1 reads the `[tui]` key with no legacy key present, so the legacy key is not set as well. In the user's file alone, a `true` under either key switched the heuristic off (both orders measured, 10/10).
+
+**The rule (orchestrator ruling).** `render_codex` launches every managed codex with `-c tui.disable_paste_burst=true`, the codex config key that wins, on the launch line like its other answers (agents-overview.md § codex's startup screens). A person's own paste arrives bracketed from the terminal, the path the heuristic does not handle. Rejected alternatives:
+- A longer beat: it only moves the race (500 ms: 1/3).
+- Pasting every codex line: a second typing path for one backend, where the CLI has a door.
+
+The beat stays for what reads the screen before the Enter (kiro's picker guard). A running codex gets the flag only at its next launch, so restart codex agents after deploying.
+
+Pinned by `codex_launch_line_pre_answers_its_startup_prompts`: the exact `-c tui.disable_paste_burst=true` token on the launch line, and no legacy top-level token (control: the legacy key fails the pin). The race itself lives in codex, so it is measured above, not faked in a test.
+
 ### A busy queue-mode agent gets its lines combined at the turn's end (board #257, 2026-09-28)
 
 Owner, 2026-09-28 02:44: "如果在短时间内一下子有大量消息堆积，就会让 kiro 响应的实时性受到很大的影响…kiro 有堆积未处理消息时，可以合并投递". Before, every line typed at a busy queue-mode agent sat in the CLI's own queue and was drained ONE per turn boundary, each its own turn with its own full reply: a burst of 20 lines cost 20 turns, and on 2026-09-27 builder's median delivery lag was ~19.5 min, p90 ~44 min (`temp/stall-analysis.md`).

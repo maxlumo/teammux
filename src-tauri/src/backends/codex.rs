@@ -585,6 +585,24 @@ pub(crate) fn render_codex(
     // The definition's input mode (board #245): queue unless it says steer.
     config_args.extend(input_mode_keymap_overrides(def.input_mode == "steer"));
     config_args.push(shared::codex_config_override("check_for_update_on_startup", Value::Bool(false)));
+    // A delivery is TYPED (non-negotiable 12): a single line rides one
+    // `send-keys -l`, a burst of un-bracketed keystrokes. codex's paste-burst
+    // heuristic (for terminals without bracketed paste) takes such a burst
+    // for a paste and inserts an Enter that arrives while it is open as a
+    // NEWLINE, so the line sat unsubmitted (board #446: twice, once for ten
+    // hours). Measured on codex-cli 0.162.1, the real stored lines, Enter
+    // 200 ms after the text: 0/10 and 2/10 submitted. The key is the [tui]
+    // one, `tui.disable_paste_burst`, which codex's config reference says
+    // takes precedence over the legacy top-level `disable_paste_burst`
+    // (reviewer P1). Measured on 0.162.1 against an inherited config.toml
+    // that sets the setting false (the home's config is the user's):
+    // `-c tui.disable_paste_burst=true` submits 10/10 whether the user's
+    // false is the [tui] key, the top-level key or both, while
+    // `-c disable_paste_burst=true` submits 0/10 under a [tui] false. With
+    // no user setting the tui key alone submits 10/10, so the legacy key is
+    // not set as well. A person's own paste arrives bracketed from the
+    // terminal, the path the heuristic does not handle.
+    config_args.push(shared::codex_config_override("tui.disable_paste_burst", Value::Bool(true)));
     if let Some(key) = codex_trust_key(workspace) {
         config_args.push(shared::codex_config_override(&key, Value::String("trusted".into())));
     }

@@ -2511,6 +2511,13 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let prompt = build_prompt(&d, "tester", "proj", "", "", "");
         let cmd = render_codex(&d, "tester", &dir, Path::new("/srv/work/my-app"), &prompt, &[]).unwrap().cmd;
         assert!(cmd.contains("check_for_update_on_startup=false"), "no update prompt: {cmd}");
+        // Board #446: a typed line's Enter submits instead of joining a
+        // "paste" (codex's paste-burst heuristic; measured on 0.162.1). The
+        // [tui] key exactly: it is the one that wins over an inherited
+        // config (the legacy top-level key loses to a [tui] false).
+        let tokens: Vec<&str> = cmd.split_whitespace().collect();
+        assert!(tokens.windows(2).any(|w| w == ["-c", "tui.disable_paste_burst=true"]), "a typed delivery's Enter submits: {cmd}");
+        assert!(!tokens.iter().any(|t| t.starts_with("disable_paste_burst=")), "not the legacy top-level key: {cmd}");
         // Measured on codex-cli 0.154.0: the `-c` key is split on dots and a
         // quoted segment is NOT honoured, so the path rides unquoted.
         assert!(cmd.contains("projects./srv/work/my-app.trust_level="), "trust pre-answered for the workspace: {cmd}");
