@@ -529,12 +529,17 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   file — until it is lifted. The PRESS is tracked apart from the transaction
   (review round 5): a `pointercancel` or `lostpointercapture` ends the
   transaction, not the press — the finger may still be down and Chromium
-  keeps dragging its native slider (rig: 16 real `input`s after a lost
-  capture, all dropped, the thumb back at the host value, no seek) — so its
-  inputs are never re-read as an AT adjust. Only that pointer's own release
+  keeps dragging its native slider — so its inputs are never re-read as an
+  AT adjust. Evidence limit: the rig could not make Chrome 152 lose capture
+  by itself, so it DISPATCHED a synthetic `lostpointercapture` with the real
+  pointerId mid mouse drag; the 16 real native `input`s after it were all
+  dropped, the thumb went back to the host value and nothing was sought. Only that pointer's own release
   (on the range, or on the window wherever it lands; a touch's last
   `touchend`/`touchcancel`) or a new pointerdown ends the press; another
-  finger's pointerup does not; a released pointer's owed `change` is swallowed
+  finger's pointerup does not. A range destroyed mid-input (the player
+  moves it between its narrow and wide rows) retires its own live
+  transaction, so the player drops that preview and its auto-hide hold; it
+  runs in the swap's own flush, before the new range can take input; a released pointer's owed `change` is swallowed
   only while no newer input came (so an AT adjust after a still press
   commits: validator V1). One commit per gesture, not one Range
   request per seek: how many requests a seek costs is the element's.
@@ -589,7 +594,7 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   pushed More 30 px out of the bar), the time keeps its position and drops
   "/ duration" (one line that wraps the second part away), never a control.
 - **Cost.** Whole-build delta against main 7b4705f0 (every JS/CSS asset,
-  gzip -9): +7.57 KB after review round 5 (+7.43 KB at round 4, +6.91 KB at hand-off one, which
+  gzip -9): +7.63 KB with the post-merge P2, +7.57 KB after review round 5 (+7.43 KB at round 4, +6.91 KB at hand-off one, which
   the orchestrator accepted over the 6 KB yardstick, no lazy chunk); per
   module compiled alone: MediaPlayer 4.64 KB, MediaRange 1.52 KB, the rules
   0.83 KB, strings and icons 0.72 KB.

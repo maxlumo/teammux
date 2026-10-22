@@ -74,10 +74,10 @@ function stubMedia(win: any, opts: { fullscreen?: boolean; pip?: boolean } = {})
   win.__exits = exits;
 }
 
-async function player(context: TestContext, props: Record<string, unknown> = {}, opts: { fullscreen?: boolean; pip?: boolean } = {}) {
+async function player(context: TestContext, props: Record<string, unknown> = {}, opts: { fullscreen?: boolean; pip?: boolean } = {}, extra?: (win: any) => void) {
   const app = await (await compiled).mount(context, {
     props: { kind: 'video', src: 'https://h/dl?path=%2Fa.mp4&stream=1', name: 'a.mp4', visible: true, ...props },
-    setup: (win) => stubMedia(win, opts),
+    setup: (win) => { stubMedia(win, opts); extra?.(win); },
     modules: [],
   });
   const w = app.window as any;
@@ -611,5 +611,35 @@ test('a press on a bar control restarts the countdown; Tab from the player into 
     const css = readFileSync(new URL('./MediaPlayer.svelte', import.meta.url), 'utf8');
     assert.match(css, /\.mp-bar \{[^}]*transition: opacity var\(--t-fast\), visibility 0s;/u, 'showing: visibility is instant');
     assert.match(css, /\.mp-bar\.hidden \{[^}]*visibility 0s var\(--t-fast\)/u, 'hiding: visible until the fade ends');
+  } finally { await p.app.close(); }
+});
+
+test('the narrow/wide switch mid-drag destroys the range: its drag is retired, so the time and the auto-hide are free again (review P2 after #453)', async (context) => {
+  // jsdom has no layout: the player's width and the size observer are driven by hand.
+  const p = await player(context, {}, {}, (win: any) => {
+    win.__width = 800;
+    const observers: { cb: (entries: { target: Element }[]) => void; els: Element[] }[] = [];
+    win.ResizeObserver = class { cb: any; els: Element[] = []; constructor(cb: any) { this.cb = cb; observers.push(this); } observe(el: Element) { this.els.push(el); } unobserve() {} disconnect() {} };
+    Object.defineProperty(win.HTMLDivElement.prototype, 'clientWidth', { configurable: true, get() { return this.classList.contains('media-player') ? win.__width : 0; } });
+    win.__resize = () => { for (const o of observers) o.cb(o.els.map((target) => ({ target }))); };
+  });
+  try {
+    await p.loaded();
+    assert.equal(p.bar().classList.contains('narrow'), false, 'wide: one row');
+    p.button('Play')!.click(); await p.settlePlay(0);
+    const wideRange = p.range();
+    p.fireRange('pointerdown'); wideRange.value = '300'; p.fireRange('input'); await p.app.flush();
+    assert.match(p.app.document.querySelector('.mp-time')!.textContent!, /^5:00 /u, 'the drag previews');
+    p.w.__width = 400; p.w.__resize(); await p.app.flush();
+    assert.equal(p.bar().classList.contains('narrow'), true, 'narrow: the range moved to its own row');
+    assert.notEqual(p.range(), wideRange, 'a new range instance');
+    assert.match(p.app.document.querySelector('.mp-time')!.textContent!, /^0:00 /u, 'the old drag\'s preview is gone');
+    await p.app.advance(3100);
+    assert.equal(p.bar().classList.contains('hidden'), true, 'and it no longer holds the bar');
+    assert.deepEqual(p.m().seeks, [], 'nothing was sought');
+    // The new range works on its own.
+    await p.tap(150); await p.app.advance(300);
+    p.fireRange('pointerdown'); p.range().value = '120'; p.fireRange('input'); p.fireRange('pointerup'); await p.app.flush();
+    assert.deepEqual(p.m().seeks, [120]);
   } finally { await p.app.close(); }
 });

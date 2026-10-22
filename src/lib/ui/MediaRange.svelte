@@ -56,7 +56,12 @@
   // ends there. The range's own pointerup is handled on the range.
   function away(e: PointerEvent) { if (mine(e) && e.target !== input) { kill(); unpress(); } }
   function touchAway(e: TouchEvent) { if (press?.type === 'touch' && e.touches.length === 0) { kill(); unpress(); } }
-  $effect(() => unpress);
+  // Destroyed mid-input (the player swaps its narrow/wide row while a finger
+  // is down): this range retires its OWN open transaction, so the host drops
+  // its preview and drag hold (review P2 after #453), then lets the press go.
+  // It runs in the same flush as the swap, before the new range can take any
+  // input, and the host clears only a drag whose id it holds.
+  $effect(() => () => { if (kind) oncancel(tx); kind = null; unpress(); });
 </script>
 
 <div class="media-range" class:waiting>
