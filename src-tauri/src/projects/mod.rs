@@ -24,6 +24,7 @@ pub mod delivery;
 pub mod live_config;
 pub mod global_prompt;
 pub mod managed;
+pub mod mcp_mask;
 pub mod message_paths;
 pub mod models;
 pub mod projects;

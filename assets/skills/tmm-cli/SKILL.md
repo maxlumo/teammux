@@ -253,5 +253,8 @@ tmm skills save --name <n> --source <abs dir|github url>   # import files
 tmm skills refresh <name>           # re-sync from the recorded source
 tmm skills delete <name>            # (built-in skills refuse: they reseed)
 tmm mcp list|save|delete            # central MCP server defs (the catalog;
-                                    #   calling MCP tools is the mcp-cli skill)
+                                    #   calling MCP tools is the mcp-cli skill).
+                                    #   Every env/header value lists as "<set>"; saving
+                                    #   "<set>" keeps the stored value, so a listed def
+                                    #   saves back whole. There is no way to print a value.
 ```

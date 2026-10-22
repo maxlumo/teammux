@@ -32,11 +32,14 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// Hub may offer moving a running agent between teams. `hub_files` (board #432): `hub_search`
 /// with `files: true` lists the files the messages mention. An older server REFUSES an empty
 /// `grep` before it ever looks at `files`, and answers a worded one with messages, so a client
-/// that needs Files asks for this first instead of guessing from the shape of an answer. An older server announces no `caps` at all, and a client that
+/// that needs Files asks for this first instead of guessing from the shape of an answer. `mcp_masked`
+/// (board #451): `mcp_list`, `registry_list` and `teams_list` mask every MCP env/header value as
+/// `"<set>"`, and their saves keep the stored value for it. An older server prints the values and
+/// would store the marker as a literal, so a client sends none of those six calls without it. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team", "hub_files"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

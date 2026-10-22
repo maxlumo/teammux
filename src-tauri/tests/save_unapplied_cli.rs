@@ -24,7 +24,9 @@ fn fake(result: serde_json::Value) -> String {
                 let Ok((stream, _)) = listener.accept().await else { return };
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
                 let Some(Ok(Message::Text(_))) = ws.next().await else { continue };
-                let login = r#"{"id":1,"result":{"ok":true,"authenticated":true}}"#;
+                // A current server: it announces `mcp_masked` (board #451), which
+                // `tmm registry save` / `teams save` require before sending.
+                let login = r#"{"id":1,"result":{"ok":true,"authenticated":true,"caps":["mcp_masked"]}}"#;
                 let _ = ws.send(Message::Text(login.to_string().into())).await;
                 let Some(Ok(Message::Text(_))) = ws.next().await else { continue };
                 let body = serde_json::json!({ "id": 2, "result": result });

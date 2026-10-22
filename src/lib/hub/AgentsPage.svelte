@@ -102,6 +102,22 @@
   let teams = $state([]);       // agent teams (board #74): RegTeam[]
   let skills = $state([]);      // central skill assets
   let mcps = $state([]);        // central MCP server defs
+  // A definition list the server REFUSED (board #451): an older server (no
+  // `mcp_masked`), or a stored row it cannot read safely. While refused, that
+  // kind's cached rows are not offered and no draft of it can be saved — a
+  // save from a list read before the refusal would carry an old field that
+  // the repair path accepts, overwriting the stored one. A timeout or a lost
+  // link is not a refusal: the last list stays, as before.
+  let listErrors = $state({ agents: '', teams: '', mcp: '' });
+  const LIST_OF = { agent: 'agents', team: 'teams', mcp: 'mcp', agents: 'agents', teams: 'teams' };
+  const refusedFor = (kind) => !!listErrors[LIST_OF[kind]];
+  /** A definitive answer: the server's own error (a JSON-RPC code) or a server too old to ask. */
+  const refusalOf = (e) => (typeof e?.code === 'number' || e?.code === 'server_too_old') ? String(e?.message ?? e) : null;
+  // The newest list read of each kind (see `reload`'s `read`); plain, not
+  // reactive: it orders answers, it is never shown.
+  const readGen = { agents: 0, teams: 0, mcp: 0 };
+  let alive = true;
+  $effect(() => () => { alive = false; });
   let editing = $state(null);   // agent working copy or null
   let isNew = $state(false);
   // One editor at a time across the three kinds.
@@ -162,7 +178,7 @@
     : draft?.value.name ?? '');
   const dirty = $derived(!!draft && configFingerprint(draft) !== original);
   const savable = $derived(!saving && !removing && !pendingExit && !pending
-    && configValid(draft, creating) && (creating || dirty));
+    && configValid(draft, creating) && (creating || dirty) && !refusedFor(draft?.kind));
   const rememberDraft = () => { original = configFingerprint(draft); };
   /** `cancel` runs when the person answers "keep editing" (#335 ③a): a host
    * that revealed this editor to ask can put its view back. */
@@ -417,10 +433,36 @@
     // on a failed RPC (same rule as the Hub roster). Wiping them meant one
     // timed-out call emptied the whole page until the next visit.
     backends = spawnableBackends();
-    try { defs = (await registryList()).agents ?? []; } catch { /* keep last */ }
-    try { teams = (await teamsList()).teams ?? []; } catch { /* keep last */ }
+    // A list the server REFUSES (board #451) says why where its rows would be
+    // and closes that kind to editing until a read succeeds (`listErrors`).
+    // Each read owns its kind's state by generation (reviewer P1-B residual):
+    // only the NEWEST read of a kind may publish rows, a refusal or a
+    // recovery, so an older success held in flight cannot lift a newer
+    // refusal, nor an older refusal cover a newer success; a page that is
+    // gone publishes nothing.
+    const read = async (kind, ask) => {
+      const mine = ++readGen[kind];
+      const current = () => alive && mine === readGen[kind];
+      try {
+        const r = await ask();
+        if (!current()) return null;
+        // Recovery clears only what the refusal put there, never another error.
+        if (listErrors[kind] && error === listErrors[kind]) error = '';
+        listErrors[kind] = '';
+        return r;
+      } catch (e) {
+        const why = refusalOf(e);
+        if (why === null || !current()) return null;
+        listErrors[kind] = why;
+        // An open draft of that kind keeps its text, and says why it cannot be saved.
+        if (draft && LIST_OF[draft.kind] === kind) error = why;
+        return null;
+      }
+    };
+    const a = await read('agents', registryList); if (a) defs = a.agents ?? [];
+    const tm = await read('teams', teamsList); if (tm) teams = tm.teams ?? [];
     try { skills = (await skillsList()).skills ?? []; } catch { /* keep last */ }
-    try { mcps = (await mcpList()).mcp ?? []; } catch { /* keep last */ }
+    const m = await read('mcp', mcpList); if (m) mcps = m.mcp ?? [];
     if (!painted) {
       painted = true;
       justLoaded = true;
@@ -516,8 +558,12 @@
     };
   }
   function startTeam(team) {
+    if (refusedFor('team')) return;
     if (team && editingTeam?.name === team.name && !teamIsNew) return;
     requestLeave(() => {
+      // Checked again when the leave is confirmed: the list may have been
+      // refused while the discard question waited (reviewer P2).
+      if (refusedFor('team')) return;
       closeAll();
       if (!section) { cat = 'teams'; categoryOpen = true; try { localStorage.setItem(CAT_KEY, 'teams'); } catch {} }
       teamIsNew = !team;
@@ -670,8 +716,12 @@
   }
 
   function startMcp(m) {
+    if (refusedFor('mcp')) return;
     if (m && editingMcp?.name === m.name && !mcpIsNew) return;
     requestLeave(() => {
+      // Checked again when the leave is confirmed: the list may have been
+      // refused while the discard question waited (reviewer P2).
+      if (refusedFor('mcp')) return;
       closeAll();
       mcpIsNew = !m;
       editingMcp = m ? { ...m, defText: pretty(m.def) } : { name: '', defText: '{\n  "command": "",\n  "args": []\n}' };
@@ -680,8 +730,12 @@
   }
 
   function startEdit(def) {
+    if (refusedFor('agent')) return;
     if (def && editing?.name === def.name && !isNew) return;
     requestLeave(() => {
+      // Checked again when the leave is confirmed: the list may have been
+      // refused while the discard question waited (reviewer P2).
+      if (refusedFor('agent')) return;
       closeAll();
       if (!section) { cat = 'agents'; categoryOpen = true; try { localStorage.setItem(CAT_KEY, 'agents'); } catch {} }
       isNew = !def;
@@ -740,6 +794,7 @@
   <!-- One kind's definitions as rows — the phone's sidebar list (narrowed by
        `section`) and the desktop's main list (the chosen category) render the
        SAME markup, so the two cannot drift apart. -->
+      {#if listErrors[kind]}<p class="hint over" role="alert">{listErrors[kind]}</p>{/if}
       {#if kind === 'agents'}
       <!-- The house rules row: what EVERY agent below is told first. On the
            desktop it is a CATEGORY of its own (the sidebar's first row). -->
@@ -750,21 +805,23 @@
         <span class="r-backend">AGENTS.md</span>
       </button>
       {/if}
-      {#each defs as d (d.name)}
+      {#each (listErrors.agents ? [] : defs) as d (d.name)}
         <button class="side-row" class:open={editing?.name === d.name && !isNew} onclick={() => startEdit(d)}>
           {#if backendIcon(d.backend)}<img class="ava" src={backendIcon(d.backend)} alt={d.backend} />{:else}<span class="ava" style:background={backendColor(d.backend)}>{d.name.slice(0, 1).toUpperCase()}</span>{/if}
           <span class="r-name">{d.name}</span>
           <span class="r-backend">{d.backend}</span>
         </button>
       {/each}
+      {#if !listErrors.agents}
       <button class="side-row add" onclick={() => startEdit(null)}>
         <Icon name="plus" size={13} />{t('agentsNew')}
       </button>
       {/if}
+      {/if}
 
       <!-- Agent TEAMS (board #74): a named set of the agents above, each with
            a role. Same row dialect; the second line names the members. -->
-      {#if kind === 'teams'}
+      {#if kind === 'teams' && !listErrors.teams}
       {#each teams as tm (tm.name)}
         <button class="side-row team-row" class:open={editingTeam?.name === tm.name && !teamIsNew} onclick={() => startTeam(tm)}>
           <Icon name="bots" size={13} />
@@ -788,7 +845,7 @@
       </button>
       {/if}
 
-      {#if kind === 'mcp'}
+      {#if kind === 'mcp' && !listErrors.mcp}
       {#each mcps as m (m.name)}
         <button class="side-row" class:open={editingMcp?.name === m.name && !mcpIsNew} onclick={() => startMcp(m)}>
           <Icon name="link" size={13} />
@@ -962,6 +1019,7 @@
         <label class="config-field"><span class="config-field-label">{t('mcpDef')}</span>
           <textarea class="config-input mono" rows="10" bind:value={editingMcp.defText} spellcheck="false"></textarea>
         </label>
+        <p class="hint">{t('mcpSetHint')}</p>
         {#if dirty && !configValid(draft, creating)}<p class="config-error">{t('agentsMcpInvalid')}</p>{/if}
       </fieldset></div>
     {:else if editingTeam}

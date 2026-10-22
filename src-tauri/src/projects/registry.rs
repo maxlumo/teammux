@@ -8,7 +8,12 @@ use super::*;
 pub fn registry_list() -> Result<Value, String> {
     with_store(|store| {
         store.reg_seed(now())?;
-        let agents = store.reg_list()?;
+        let mut agents = store.reg_list()?;
+        // Every inline MCP value masked (board #451); one unreadable row
+        // fails the whole answer rather than listing a half definition.
+        for a in &mut agents {
+            a.mcp = mcp_mask::masked_agent(&a.name, &a.mcp)?;
+        }
         Ok(json!({ "agents": agents }))
     })
 }
@@ -42,7 +47,7 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
         if let Some(obj) = def.as_object_mut() { obj.remove("input_mode"); }
     }
     let mut agent: store::RegAgent =
-        serde_json::from_value(def).map_err(|e| format!("invalid agent def: {e}"))?;
+        serde_json::from_value(def).map_err(|e| format!("invalid agent def {}", mcp_mask::no_echo(&e)))?;
     // The registry name becomes the window name and the isolated home's
     // directory — one rule for both (`agents::valid_name`).
     agents::valid_name(&agent.name)?;
@@ -54,8 +59,8 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
         ));
     }
     // Validate the JSON columns now, not at spawn time.
-    serde_json::from_str::<Vec<String>>(&agent.skills).map_err(|e| format!("skills must be a JSON array of refs: {e}"))?;
-    serde_json::from_str::<Vec<Value>>(&agent.mcp).map_err(|e| format!("mcp must be a JSON array of defs: {e}"))?;
+    serde_json::from_str::<Vec<String>>(&agent.skills).map_err(|e| format!("skills must be a JSON array of refs {}", mcp_mask::no_echo(&e)))?;
+    mcp_mask::check_agent(&format!("agent '{}'", agent.name), &agent.mcp)?;
     // Same rule for the model, and for a sharper reason: a backend that does
     // not know the id does not fail, it falls back to its default and says so
     // in a line nobody reads. See `models`.
@@ -65,10 +70,13 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
     // it: two separate sections would let a concurrent save decide "new"
     // about a row that is no longer new.
     with_store(|store| {
+        let stored = store.reg_get(&agent.name)?;
         if !named {
-            let stored = store.reg_get(&agent.name)?;
             agent.input_mode = unnamed_input_mode(&agent.backend, stored.as_ref().map(|a| a.input_mode.as_str()));
         }
+        // A `"<set>"` MCP value keeps the value of the row as stored NOW, by
+        // server name and key (board #451) — never a list-time snapshot.
+        agent.mcp = mcp_mask::restore_agent(&format!("agent '{}'", agent.name), &agent.mcp, stored.as_ref().map(|a| a.mcp.as_str()))?;
         models::validate_input_mode(&agent.backend, &agent.input_mode)?;
         store.reg_save(&agent, now())?;
         Ok(json!({ "ok": true, "name": agent.name }))
@@ -179,7 +187,14 @@ fn fill_member_input_modes(members: &str, stored: Option<&store::RegTeam>) -> Re
 }
 
 pub fn teams_list() -> Result<Value, String> {
-    with_store(|store| Ok(json!({ "teams": store.teams_list()? })))
+    with_store(|store| {
+        let mut teams = store.teams_list()?;
+        // Every inline agent's MCP values masked (board #451).
+        for t in &mut teams {
+            t.members = mcp_mask::masked_team(&t.name, &t.members)?;
+        }
+        Ok(json!({ "teams": teams }))
+    })
 }
 
 pub fn team_get(name: &str) -> Result<Option<store::RegTeam>, String> {
@@ -191,7 +206,8 @@ pub fn team_get(name: &str) -> Result<Option<store::RegTeam>, String> {
 /// backend or with a model the backend rejects — each would otherwise be
 /// discovered by the human the moment they try to start the team.
 pub fn teams_save(def: &Value) -> Result<Value, String> {
-    let mut team: store::RegTeam = serde_json::from_value(def.clone()).map_err(|e| format!("invalid team def: {e}"))?;
+    let mut team: store::RegTeam = serde_json::from_value(def.clone()).map_err(|e| format!("invalid team def {}", mcp_mask::no_echo(&e)))?;
+    mcp_mask::check_team(&team.name, &team.members)?;
     let (known, known_teams): (Vec<String>, Vec<String>) = with_store(|store| {
         store.reg_seed(now())?;
         Ok((
@@ -238,8 +254,8 @@ pub fn teams_save(def: &Value) -> Result<Value, String> {
             models::validate(&a.backend, &a.model).map_err(|e| format!("member '{}': {e}", m.name))?;
             models::validate_effort(&a.backend, &a.effort).map_err(|e| format!("member '{}': {e}", m.name))?;
             models::validate_input_mode(&a.backend, &a.input_mode).map_err(|e| format!("member '{}': {e}", m.name))?;
-            serde_json::from_str::<Vec<String>>(&a.skills).map_err(|e| format!("member '{}': skills must be a JSON array: {e}", m.name))?;
-            serde_json::from_str::<Vec<Value>>(&a.mcp).map_err(|e| format!("member '{}': mcp must be a JSON array: {e}", m.name))?;
+            serde_json::from_str::<Vec<String>>(&a.skills).map_err(|e| format!("member '{}': skills must be a JSON array {}", m.name, mcp_mask::no_echo(&e)))?;
+            serde_json::from_str::<Vec<Value>>(&a.mcp).map_err(|e| format!("member '{}': mcp must be a JSON array {}", m.name, mcp_mask::no_echo(&e)))?;
         }
     }
     // A NEW bare member gets its backend's input mode (#336); an existing
@@ -248,7 +264,11 @@ pub fn teams_save(def: &Value) -> Result<Value, String> {
     // backend by construction (`unnamed_input_mode`), so the validation
     // above still holds for the text stored.
     with_store(|store| {
-        team.members = fill_member_input_modes(&team.members, store.team_get(&team.name)?.as_ref())?;
+        let stored = store.team_get(&team.name)?;
+        // A `"<set>"` MCP value of an inline agent keeps the SAME member's
+        // value as stored now (board #451).
+        team.members = mcp_mask::restore_team(&team.name, &team.members, stored.as_ref().map(|t| t.members.as_str()))?;
+        team.members = fill_member_input_modes(&team.members, stored.as_ref())?;
         store.team_save(&team, now())?;
         Ok(json!({ "ok": true, "name": team.name, "members": members.len() }))
     })

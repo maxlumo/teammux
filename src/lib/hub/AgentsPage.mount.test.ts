@@ -758,3 +758,180 @@ test('a save every running agent took shows no alert (#411)', async context => {
     assert.equal(app.document.querySelector('[role=alert]'), null);
   } finally { await app.close(); }
 });
+
+test('a refused definition list says why where its rows would be, and opens nothing to save (#451 delta 2)', async context => {
+  const writes: unknown[] = [];
+  const reason = "agent 'old': its stored mcp is not valid JSON of the expected shape, so no agent definition is listed";
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, section: 'agents' },
+    modules: [rpc({ registryList: async () => { throw Object.assign(new Error(reason), { code: -32603 }); }, registrySave: (v: unknown) => { writes.push(v); return Promise.resolve({}); } })],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('[role=alert]'); i++) await app.flush();
+    assert.equal(app.document.querySelector('[role=alert]')?.textContent, reason);
+    const rows = [...app.document.querySelectorAll('.side-row .r-name')].map(n => n.textContent);
+    assert.ok(!rows.includes('alpha') && !rows.includes('old'), `no definition row: ${rows}`);
+    assert.equal(app.document.querySelector('.editor'), null, 'no draft opens');
+    assert.deepEqual(writes, [], 'and nothing can be saved from it');
+  } finally { await app.close(); }
+});
+
+test('an inline MCP server the editor does not show goes back with its "<set>" markers, byte for byte (#451)', async context => {
+  const writes: any[] = [];
+  const masked = { ...alpha, mcp: '["files",{"name":"inline","command":"c","env":{"KIRO_API_KEY":"<set>"},"headers":{"Authorization":"<set>"}}]' };
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, section: 'agents' },
+    modules: [rpc({ registryList: async () => ({ agents: [masked] }), registrySave: (v: unknown) => { writes.push(v); return Promise.resolve({}); } })],
+  });
+  try {
+    await openAgent(app); await text(app, 'Only the persona changed');
+    command(app, 'Save').click(); await app.flush();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].system, 'Only the persona changed');
+    assert.equal(writes[0].mcp, masked.mcp, 'the server restores each marker from the stored row');
+  } finally { await app.close(); }
+});
+
+// Reviewer P1-B on #451: a list read BEFORE the refusal must not stay saveable — its old
+// "[]" carries no marker, and a marker-free save is the repair path, so it would overwrite
+// the field the server just refused to list. Closed or open, nothing of that kind saves.
+for (const open of [false, true]) {
+  test(`a list refused after a good read closes ${open ? 'the open draft' : 'its cached rows'} to saving, keeping the text (#451 P1-B)`, async context => {
+    const fixture = await hostFixture();
+    let controls!: { show: (value: boolean) => void };
+    let reads = 0;
+    const writes: unknown[] = [];
+    const reason = "agent 'alpha': its stored mcp is not valid JSON of the expected shape, so no agent definition is listed";
+    const app = await fixture.mount(context, {
+      props: { ready: (value: typeof controls) => controls = value },
+      modules: [rpc({
+        registryList: async () => {
+          if (++reads === 1) return { agents: [alpha] };
+          throw Object.assign(new Error(reason), { code: -32603 });
+        },
+        registrySave: (v: unknown) => { writes.push(v); return Promise.resolve({}); },
+      })],
+    });
+    try {
+      if (open) { await openAgent(app); await text(app, 'Only the persona changed'); }
+      else for (let i = 0; i < 12 && !app.document.querySelector('.r-name'); i++) await app.flush();
+      controls.show(false); await app.flush();
+      controls.show(true);
+      for (let i = 0; i < 8; i++) await app.flush();
+      assert.equal(reads, 2, 'the page read the list again');
+      const rows = [...app.document.querySelectorAll('.side-row .r-name')].map(n => n.textContent);
+      assert.ok(!rows.includes('alpha'), `the cached row is not offered: ${rows}`);
+      if (open) {
+        assert.equal(app.document.querySelector('textarea')?.value, 'Only the persona changed', 'the draft text is kept');
+        assert.equal(command(app, 'Save').disabled, true, 'but it cannot be saved');
+        assert.match(app.document.querySelector('.editor .err')?.textContent ?? '', /not valid JSON/u, 'and it says why');
+        command(app, 'Save').click(); await app.flush();
+      } else {
+        assert.equal(app.document.querySelector('.editor'), null, 'no editor can be opened from it');
+      }
+      assert.deepEqual(writes, [], 'nothing was saved');
+    } finally { await app.close(); }
+  });
+}
+
+test('a timed-out list read is not a refusal: the last rows stay editable (#451 P1-B)', async context => {
+  const fixture = await hostFixture();
+  let controls!: { show: (value: boolean) => void };
+  let reads = 0;
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value },
+    modules: [rpc({ registryList: async () => { if (++reads === 1) return { agents: [alpha] }; throw new Error('RPC timeout'); } })],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.r-name'); i++) await app.flush();
+    controls.show(false); await app.flush();
+    controls.show(true);
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.equal(reads, 2);
+    assert.equal(app.document.querySelector('[role=alert]'), null, 'no refusal is shown');
+    await openAgent(app);
+    assert.ok(app.document.querySelector('.editor'), 'the last list is still there to edit');
+  } finally { await app.close(); }
+});
+
+// Reviewer P1-B residual on #451: list answers are ordered by request, per kind. Read 1 lands;
+// read 2 is HELD; read 3 answers at once; then read 2 is released. Only the newest read may
+// publish rows, a refusal or a recovery.
+async function heldReads(context: any, second: 'success' | 'refusal', third: 'success' | 'refusal') {
+  const fixture = await hostFixture();
+  let controls!: { show: (value: boolean) => void };
+  let reads = 0;
+  let release!: () => void;
+  const writes: unknown[] = [];
+  const reason = "agent 'alpha': its stored mcp is not valid JSON of the expected shape, so no agent definition is listed";
+  const refused = () => Object.assign(new Error(reason), { code: -32603 });
+  const answer = (kind: 'success' | 'refusal') => kind === 'success' ? Promise.resolve({ agents: [alpha] }) : Promise.reject(refused());
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value },
+    modules: [rpc({
+      registryList: () => {
+        const n = ++reads;
+        if (n === 1) return Promise.resolve({ agents: [alpha] });
+        if (n === 2) return new Promise((yes, no) => { release = () => second === 'success' ? yes({ agents: [alpha] }) : no(refused()); });
+        return answer(third);
+      },
+      registrySave: (v: unknown) => { writes.push(v); return Promise.resolve({}); },
+    })],
+  });
+  const settle = async () => { for (let i = 0; i < 8; i++) await app.flush(); };
+  const again = async () => { controls.show(false); await app.flush(); controls.show(true); await settle(); };
+  for (let i = 0; i < 12 && !app.document.querySelector('.r-name'); i++) await app.flush();
+  await again(); // read 2, held
+  await again(); // read 3, answered
+  release(); await settle();
+  const offered = () => [...app.document.querySelectorAll('.side-row .r-name')].some(n => n.textContent === 'alpha');
+  return { app, reads: () => reads, writes, offered };
+}
+
+test('an older success held in flight does not lift a newer refusal (#451 P1-B residual)', async context => {
+  const { app, reads, writes, offered } = await heldReads(context, 'success', 'refusal');
+  try {
+    assert.equal(reads(), 3);
+    assert.equal(offered(), false, 'the rows stay closed after the late success');
+    assert.match(app.document.querySelector('[role=alert]')?.textContent ?? '', /not valid JSON/u, 'and the refusal stays said');
+    assert.equal(app.document.querySelector('.editor'), null);
+    assert.deepEqual(writes, [], 'no payload');
+  } finally { await app.close(); }
+});
+
+test('an older refusal held in flight does not close a newer success (#451 P1-B residual)', async context => {
+  const { app, reads, offered } = await heldReads(context, 'refusal', 'success');
+  try {
+    assert.equal(reads(), 3);
+    assert.equal(offered(), true, 'the newest read lists the rows');
+    assert.equal(app.document.querySelector('[role=alert]'), null, 'and no stale refusal covers them');
+    await openAgent(app);
+    assert.ok(app.document.querySelector('.editor'));
+  } finally { await app.close(); }
+});
+
+test('a new successful read after a refusal reopens the kind, and clears only the refusal it left (#451 P1-B residual)', async context => {
+  const fixture = await hostFixture();
+  let controls!: { show: (value: boolean) => void };
+  let reads = 0;
+  const reason = "agent 'alpha': its stored mcp is not valid JSON of the expected shape, so no agent definition is listed";
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value },
+    modules: [rpc({ registryList: async () => {
+      if (++reads === 2) throw Object.assign(new Error(reason), { code: -32603 });
+      return { agents: [alpha] };
+    } })],
+  });
+  try {
+    await openAgent(app); await text(app, 'Kept through the refusal');
+    const again = async () => { controls.show(false); await app.flush(); controls.show(true); for (let i = 0; i < 8; i++) await app.flush(); };
+    await again();
+    assert.equal(command(app, 'Save').disabled, true);
+    assert.match(app.document.querySelector('.editor .err')?.textContent ?? '', /not valid JSON/u);
+    await again();
+    assert.equal(reads, 3);
+    assert.equal(app.document.querySelector('textarea')?.value, 'Kept through the refusal');
+    assert.equal(command(app, 'Save').disabled, false, 'the draft can be saved again');
+    assert.equal(app.document.querySelector('.editor .err'), null, 'the refusal it showed is gone');
+  } finally { await app.close(); }
+});

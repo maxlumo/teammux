@@ -21,12 +21,19 @@ export const AGENT_TEAM = 'agent_team';
  * messages, so the Files mode asks for this BEFORE it sends, not after reading an answer. */
 export const HUB_FILES = 'hub_files';
 
+/** The definition reads mask every MCP env/header value as `"<set>"`, and their saves keep the
+ * stored value for it (board #451). An older server answers `mcp_list`, `registry_list` and
+ * `teams_list` WITH the values (into a textarea) and would store the marker as a literal, so
+ * none of those six calls is sent without this. */
+export const MCP_MASKED = 'mcp_masked';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
   [SPAWN_JOIN]: 'This server is older than the app. Update the server to start an agent inside a team.',
   [AGENT_TEAM]: 'This server is older than the app. Update the server to move an agent between teams.',
   [HUB_FILES]: 'This server is older than the app. Update the server to list files.',
+  [MCP_MASKED]: 'This server is older than the app and shows MCP secrets. Update the server to see or edit agent, team and MCP definitions.',
 };
 
 /** A login answer's `caps`: the plain, non-empty strings in it, or `[]` for an

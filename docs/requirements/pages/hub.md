@@ -222,6 +222,15 @@ completion).
   the expanded bare-agent prompt uses a full-width editor, and compact layouts
   stack every field into one column. At most 8 agents after sub-team expansion
   (the spawn cap).
+  MCP servers (the MCP section, and inline servers inside an agent or team
+  definition) never show a secret: every env and header value reads `"<set>"`,
+  and saving it keeps the stored value; replacing it changes the value and
+  deleting the key removes it. There is no way to reveal a value, here or in
+  `tmm` (board #451). A server that predates this is refused with "update the
+  server" instead of listing its definitions. A list the server refuses (an
+  older server, or a stored definition it cannot read safely) shows the reason
+  in place of its rows; that kind cannot be opened or saved until a read
+  succeeds, and an editor already open keeps its text but cannot save.
 
 ## Feed (the conversation)
 - Telegram-like bubbles: name header, floated time trailer, delivery ring on

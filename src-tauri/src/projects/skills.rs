@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use super::{db_path, now, store, with_store};
+use super::{db_path, mcp_mask, now, store, with_store};
 
 use serde_json::{json, Value};
 
@@ -660,17 +660,30 @@ pub fn skill_delete(name: &str) -> Result<Value, String> {
     Ok(json!({ "ok": deleted }))
 }
 
+/// The central MCP defs, every env/header value masked (board #451). One row
+/// that cannot be read safely fails the whole answer: no half list, no text.
 pub fn mcp_list() -> Result<Value, String> {
-    with_store(|store| Ok(json!({ "mcp": store.mcp_list()? })))
+    with_store(|store| {
+        let rows = store.mcp_list()?;
+        let masked = rows
+            .into_iter()
+            .map(|m| Ok(json!({ "name": m.name, "def": mcp_mask::masked_central(&m.name, &m.def)? })))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(json!({ "mcp": masked }))
+    })
 }
 
+/// Save a central def. A `"<set>"` value keeps the value stored for the same
+/// server and key, read in the SAME store section that writes (board #451).
 pub fn mcp_save(def: &Value) -> Result<Value, String> {
-    let m: store::RegMcp = serde_json::from_value(def.clone()).map_err(|e| format!("invalid mcp: {e}"))?;
+    let mut m: store::RegMcp = serde_json::from_value(def.clone()).map_err(|_| "invalid mcp: give {\"name\": \"…\", \"def\": \"<def JSON text>\"}".to_string())?;
     if m.name.trim().is_empty() {
         return Err("mcp server needs a name".into());
     }
-    serde_json::from_str::<Value>(&m.def).map_err(|e| format!("def must be JSON: {e}"))?;
+    mcp_mask::check_central(&m.name, &m.def)?;
     with_store(|store| {
+        let stored = store.mcp_list()?.into_iter().find(|s| s.name == m.name).map(|s| s.def);
+        m.def = mcp_mask::restore_central(&m.name, &m.def, stored.as_deref())?;
         store.mcp_save(&m, now())?;
         Ok(json!({ "ok": true, "name": m.name }))
     })

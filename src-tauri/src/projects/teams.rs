@@ -61,7 +61,7 @@ pub struct Member {
 }
 
 pub fn parse_members(team: &RegTeam) -> Result<Vec<Member>, String> {
-    serde_json::from_str::<Vec<Member>>(&team.members).map_err(|e| format!("team '{}': members must be a JSON array: {e}", team.name))
+    serde_json::from_str::<Vec<Member>>(&team.members).map_err(|e| format!("team '{}': members must be a JSON array of member objects {}", team.name, super::mcp_mask::no_echo(&e)))
 }
 
 /// Everything `teams_save` refuses. `known` = registry agent names; `cap` =

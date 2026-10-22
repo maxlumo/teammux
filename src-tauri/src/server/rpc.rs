@@ -947,4 +947,171 @@ mod tests {
         assert!(preview_scope(&s(&base.join("proj/missing.html")), &[]).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// Validator V1 on 60414c91: a save door's parse error never quotes what was
+    /// submitted (serde's `invalid type: string "<value>"`), at every shape a
+    /// value can sit in that is not the expected one.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_save_with_a_value_in_the_wrong_shape_is_refused_without_echoing_it() {
+        use serde_json::json;
+        crate::projects::tests::use_test_store();
+        let secret = format!("SENTINEL-451v-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let call = |method: &str, params: serde_json::Value| handle_request(&Request { id: Some(1), method: method.into(), params }, "");
+        let quoted = serde_json::to_string(&secret).unwrap();
+        let bare = |skills: &str, mcp: &str| json!({ "name": "m", "agent": { "name": "", "backend": "kiro", "model": "", "effort": "", "system": "x", "skills": skills, "mcp": mcp } });
+        let cases = [
+            ("teams_save", json!({ "def": { "name": "v451t", "members": json!([secret]).to_string() } })),
+            ("teams_save", json!({ "def": { "name": "v451t", "members": json!([[{ "env": { "K": secret } }]]).to_string() } })),
+            ("teams_save", json!({ "def": { "name": "v451t", "members": json!([bare(&quoted, "[]")]).to_string() } })),
+            ("teams_save", json!({ "def": { "name": "v451t", "members": json!([bare("[]", &quoted)]).to_string() } })),
+            ("teams_save", json!({ "def": { "name": "v451t", "members": quoted.clone() } })),
+            ("registry_save", json!({ "def": { "name": "v451a", "backend": "kiro", "system": "x", "skills": quoted.clone(), "mcp": "[]" } })),
+            ("registry_save", json!({ "def": { "name": "v451a", "backend": "kiro", "system": "x", "skills": "[]", "mcp": quoted.clone() } })),
+            ("mcp_save", json!({ "def": { "name": "v451c", "def": quoted.clone() } })),
+        ];
+        for (method, params) in cases {
+            let r = call(method, params.clone());
+            let e = r.error.unwrap_or_else(|| panic!("{method} {params}: accepted")).message;
+            assert!(!e.contains(&secret), "{method} {params}: echoed: {e}");
+        }
+        assert!(crate::projects::team_get("v451t").unwrap().is_none() && crate::projects::registry_get("v451a").unwrap().is_none(), "nothing was written");
+    }
+
+    /// Board #451: no definition read carries an MCP env or header value —
+    /// the three read doors, as a client calls them — while the store keeps
+    /// every value, a listed definition saved back unchanged keeps them, and
+    /// a marker with nothing behind it writes nothing. `tmm` reads only these
+    /// answers, so this is also what `tmm mcp list` and the `--json` lists print.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn no_definition_read_carries_an_mcp_value_and_a_listed_definition_saves_back_whole() {
+        use serde_json::json;
+        crate::projects::tests::use_test_store();
+        let tag = &uuid::Uuid::new_v4().to_string()[..8];
+        let secret = format!("SENTINEL-451-{tag}");
+        let (central, agent, team) = (format!("c451-{tag}"), format!("a451-{tag}"), format!("t451-{tag}"));
+        let call = |method: &str, params: serde_json::Value| handle_request(&Request { id: Some(1), method: method.into(), params }, "");
+        let ok = |method: &str, params: serde_json::Value| {
+            let r = call(method, params);
+            assert!(r.error.is_none(), "{method}: {:?}", r.error.map(|e| e.message));
+            r.result.unwrap()
+        };
+        struct Cleanup(String, String, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::projects::mcp_delete(&self.0);
+                let _ = crate::projects::registry_delete(&self.1);
+                let _ = crate::projects::teams_delete(&self.2);
+            }
+        }
+        let _cleanup = Cleanup(central.clone(), agent.clone(), team.clone());
+
+        let inline_agent = |mcp: serde_json::Value| json!({ "name": "", "backend": "kiro", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": mcp.to_string() });
+        ok("mcp_save", json!({ "def": { "name": central, "def": json!({ "url": "https://mcp.example", "headers": { "Authorization": format!("Bearer {secret}") } }).to_string() } }));
+        ok("registry_save", json!({ "def": { "name": agent, "backend": "kiro", "system": "x", "skills": "[]",
+            "mcp": json!([central, { "name": "inl", "command": "c", "env": { "K": secret, "R": "${HOME}" } }]).to_string() } }));
+        ok("teams_save", json!({ "def": { "name": team, "members": json!([
+            { "name": "bare", "agent": inline_agent(json!([{ "name": "inl", "command": "c", "env": { "K": secret } }])) },
+        ]).to_string() } }));
+
+        let lists = || ["mcp_list", "registry_list", "teams_list"].map(|m| ok(m, json!({})));
+        for (m, r) in ["mcp_list", "registry_list", "teams_list"].iter().zip(lists()) {
+            assert!(!r.to_string().contains(&secret), "{m} carries the secret");
+        }
+        let [mcps, agents, teams] = lists();
+        let row = |list: &serde_json::Value, key: &str, name: &str| list[key].as_array().unwrap().iter().find(|r| r["name"] == name).unwrap().clone();
+        let listed_central = row(&mcps, "mcp", &central);
+        let listed_agent = row(&agents, "agents", &agent);
+        let listed_team = row(&teams, "teams", &team);
+        let def: serde_json::Value = serde_json::from_str(listed_central["def"].as_str().unwrap()).unwrap();
+        assert_eq!(def["headers"]["Authorization"], crate::projects::mcp_mask::VALUE_SET, "the name stays, the value is the marker");
+        let inline: serde_json::Value = serde_json::from_str(listed_agent["mcp"].as_str().unwrap()).unwrap();
+        assert_eq!((inline[0].as_str(), inline[1]["env"]["R"].as_str()), (Some(central.as_str()), Some("<set>")), "a central name stays; a reference is masked too");
+
+        // Saved back exactly as listed: every value is the stored one still.
+        ok("mcp_save", json!({ "def": listed_central }));
+        ok("registry_save", json!({ "def": listed_agent }));
+        ok("teams_save", json!({ "def": listed_team }));
+        let stored = crate::projects::registry_get(&agent).unwrap().unwrap();
+        let defs = crate::projects::spawn::mcp_defs(&stored);
+        let by = |n: &str| defs.iter().find(|d| d.name == n).unwrap();
+        assert_eq!(by(&central).headers["Authorization"], format!("Bearer {secret}"), "the central def materializes its value");
+        assert_eq!((by("inl").env["K"].as_str(), by("inl").env["R"].as_str()), (secret.as_str(), "${HOME}"));
+        let members = crate::projects::team_get(&team).unwrap().unwrap().members;
+        assert!(members.contains(&secret), "the team member keeps its value");
+
+        // Rotated by another save after the list: the old listed def keeps the NEW value.
+        let rotated = format!("{secret}-rotated");
+        ok("mcp_save", json!({ "def": { "name": central, "def": json!({ "url": "https://mcp.example", "headers": { "Authorization": rotated } }).to_string() } }));
+        ok("mcp_save", json!({ "def": listed_central }));
+        let kept = crate::projects::with_registry_mcp()[&central].clone();
+        assert!(kept.contains(&rotated), "{kept}");
+
+        // A marker with nothing behind it: refused, naming the path, no value, nothing written.
+        let before = crate::projects::registry_get(&agent).unwrap().unwrap().mcp;
+        let r = call("registry_save", json!({ "def": { "name": agent, "backend": "kiro", "system": "x", "skills": "[]",
+            "mcp": json!([{ "name": "inl", "command": "c", "env": { "NEW": "<set>" } }]).to_string() } }));
+        let e = r.error.expect("refused").message;
+        assert!(e.contains("env.NEW") && e.contains(&format!("agent '{agent}'")) && !e.contains(&secret), "{e}");
+        assert_eq!(crate::projects::registry_get(&agent).unwrap().unwrap().mcp, before, "nothing was written");
+    }
+
+    /// Board #451 delta 2: a stored MCP-bearing field that does not parse fails
+    /// the WHOLE list — no text, no half definition — and a full save repairs it.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn an_unreadable_stored_mcp_field_fails_the_list_without_its_text_and_a_full_save_repairs_it() {
+        use serde_json::json;
+        crate::projects::tests::use_test_store();
+        let tag = &uuid::Uuid::new_v4().to_string()[..8];
+        let secret = format!("SENTINEL-451u-{tag}");
+        let call = |method: &str, params: serde_json::Value| handle_request(&Request { id: Some(1), method: method.into(), params }, "");
+        let raw = |f: &dyn Fn(&mut crate::projects::store::Store) -> Result<(), String>| crate::projects::restore_hold::with_store_for_test(|st| f(st)).unwrap();
+
+        let central = format!("u451-{tag}");
+        raw(&|st| st.mcp_save(&crate::projects::store::RegMcp { name: central.clone(), def: format!("{{\"env\":\"{secret}\"}}") }, 1));
+        let r = call("mcp_list", json!({}));
+        let e = r.error.expect("the whole list fails").message;
+        assert!(e.contains(&format!("mcp server '{central}'")) && !e.contains(&secret), "{e}");
+        assert!(r.result.is_none());
+        let r = call("mcp_save", json!({ "def": { "name": central, "def": json!({ "command": "c", "env": { "K": "<set>" } }).to_string() } }));
+        assert!(r.error.is_some_and(|e| !e.message.contains(&secret)), "a marker over an unreadable row is refused");
+        let r = call("mcp_save", json!({ "def": { "name": central, "def": json!({ "command": "c", "env": { "K": "fresh" } }).to_string() } }));
+        assert!(r.error.is_none(), "a full save repairs it");
+        assert!(call("mcp_list", json!({})).error.is_none(), "it lists again");
+        let _ = crate::projects::mcp_delete(&central);
+
+        let agent = format!("u451a-{tag}");
+        crate::projects::registry_save(&json!({ "name": agent, "backend": "kiro", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        let mut row = crate::projects::registry_get(&agent).unwrap().unwrap();
+        row.mcp = format!("[{{\"name\":\"s\",\"env\":\"{secret}\"}}]");
+        raw(&|st| st.reg_save(&row, 1));
+        let r = call("registry_list", json!({}));
+        let e = r.error.expect("the whole list fails").message;
+        assert!(e.contains(&format!("agent '{agent}'")) && !e.contains(&secret), "{e}");
+        let r = call("registry_save", json!({ "def": { "name": agent, "backend": "kiro", "system": "x", "skills": "[]", "mcp": "[]" } }));
+        assert!(r.error.is_none(), "a full save repairs it");
+        assert!(call("registry_list", json!({})).error.is_none());
+        let _ = crate::projects::registry_delete(&agent);
+
+        let team = format!("u451t-{tag}");
+        let member = json!({ "name": "m", "agent": { "name": "", "backend": "kiro", "mcp": json!([{ "name": "s", "env": { "K": secret } }]).to_string() } });
+        // An unreadable inline mcp, and members that are not objects (reviewer
+        // P1-A on 60414c91): wrapped in an array, encoded as a string, null.
+        for members in [
+            json!([{ "name": "m", "agent": { "name": "", "backend": "kiro", "mcp": format!("{{\"env\":\"{secret}\"}}") } }]),
+            json!([[member.clone()]]),
+            json!([member.to_string()]),
+            json!([member.clone(), null]),
+        ] {
+            raw(&|st| st.team_save(&crate::projects::store::RegTeam { name: team.clone(), description: String::new(), members: members.to_string() }, 1));
+            let r = call("teams_list", json!({}));
+            assert!(r.result.is_none(), "{members}: no half list");
+            let e = r.error.expect("the whole list fails").message;
+            assert!(e.contains(&format!("team '{team}'")) && !e.contains(&secret), "{members}: {e}");
+            let _ = crate::projects::teams_delete(&team);
+        }
+        assert!(call("teams_list", json!({})).error.is_none());
+    }
 }

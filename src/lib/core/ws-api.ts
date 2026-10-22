@@ -14,7 +14,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { AGENT_TEAM, BOARD_DISPATCH, CapError, HUB_FILES, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
+import { AGENT_TEAM, BOARD_DISPATCH, CapError, HUB_FILES, MCP_MASKED, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -548,15 +548,24 @@ export function createWsApi(connection: Connection) {
   const hubTeamRestart = (session: string, team: string, only?: string[]) =>
     call<{ team: string; restarted: string[]; stopped: string[]; spawned: string[]; errors: { name: string; error: string }[] }>(
       'hub_team_restart', only ? { session, team, only } : { session, team }, 180000);
-  const registryList = () => call<{ agents: RegAgent[] }>('registry_list');
-  const registrySave = (def: RegAgent) => call('registry_save', { def });
+  /** The six definition calls (board #451) go only to a server that masks MCP
+   * env/header values and keeps the stored one for `"<set>"`: the #377 gate —
+   * wait for an unanswered login, then check THIS socket's caps in the block
+   * that sends. An older server would put the values in the answer. */
+  const masked = async <T>(method: string, params?: Record<string, unknown>) => {
+    await holdForLogin(connection);
+    requireCap(connection, MCP_MASKED);
+    return call<T>(method, params);
+  };
+  const registryList = () => masked<{ agents: RegAgent[] }>('registry_list');
+  const registrySave = (def: RegAgent) => masked('registry_save', { def });
   const registryDelete = (name: string) => call('registry_delete', { name });
   /** The app-wide agent instructions (`<config>/AGENTS.md`): prepended to every
    * managed agent's system prompt at spawn (tmm-cli.md § The app-wide instructions). */
   const globalPromptGet = () => call<{ text: string; path: string; max_bytes: number }>('global_prompt_get');
   const globalPromptSet = (text: string) => call('global_prompt_set', { text });
-  const teamsList = () => call<{ teams: RegTeam[] }>('teams_list');
-  const teamsSave = (def: RegTeam) => call('teams_save', { def });
+  const teamsList = () => masked<{ teams: RegTeam[] }>('teams_list');
+  const teamsSave = (def: RegTeam) => masked('teams_save', { def });
   const teamsDelete = (name: string) => call('teams_delete', { name });
   /** The backends this server can spawn, with the client's resource names for
    * each (name, avatar path, colour token, effort levels), first = default. */
@@ -574,8 +583,8 @@ export function createWsApi(connection: Connection) {
   const skillsImport = (source: string) => call<{ ok: boolean; imported: string[]; skipped: string[] }>('skills_import', { source });
   const skillsFiles = (name: string) => call<{ name: string; files: { path: string; size: number }[] }>('skills_files', { name });
   const skillsFile = (name: string, path: string) => call<{ name: string; path: string; content: string }>('skills_file', { name, path });
-  const mcpList = () => call<{ mcp: RegMcpServer[] }>('mcp_list');
-  const mcpSave = (def: RegMcpServer) => call('mcp_save', { def });
+  const mcpList = () => masked<{ mcp: RegMcpServer[] }>('mcp_list');
+  const mcpSave = (def: RegMcpServer) => masked('mcp_save', { def });
   const mcpDelete = (name: string) => call('mcp_delete', { name });
 
   /** The signed HTTP URL for `path`, resolved against the origin of THIS

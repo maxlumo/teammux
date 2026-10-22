@@ -245,7 +245,14 @@ before `Config::load()`):
   never offer. `$TMM_MCP_CONFIG` (set at spawn) names it from any cwd; without
   the env var the CLI walks up from cwd like git does.
 - `tmm mcp list|save|delete` (the central registry defs) stay RPC — they are
-  the catalog; `servers|tools|schema|call|add` is the runtime.
+  the catalog; `servers|tools|schema|call|add` is the runtime. `mcp list`
+  never prints an env or header VALUE (board #451): each shows as `"<set>"`,
+  and `mcp save` of a listed def keeps the stored values. There is no
+  `--reveal`, for agents or anyone (CLI/UI parity: the Hub's editor shows the
+  same marker). `mcp list|save`, `registry list|save` and `teams list|save`
+  need the gateway's `mcp_masked` login cap and refuse an older gateway
+  before sending (`rpc_needing`). Design and reasons: agents-overview.md §
+  A definition read never carries an MCP value.
 
 ### Why this belongs to an agent at all
 

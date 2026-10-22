@@ -166,8 +166,10 @@ USAGE (human or agent — self-management):
   tmm skills save --name <n> --source <abs dir|github url>  (imports the files)
   tmm skills import <url|abs dir>     install EVERYTHING a source contains
                                       (a claude plugin/marketplace url works as-is)
-  tmm mcp list|delete <name>          central MCP server defs
-  tmm mcp save --name <n> --def '<json>' 
+  tmm mcp list|delete <name>          central MCP server defs; every env/header value shows as
+                                      "{set}", never the value (board #451)
+  tmm mcp save --name <n> --def '<json>'   an env/header value "{set}" keeps the stored one
+                                      (it is reserved: never a new value); omit a key to delete it
 
 MCP TOOLS (local; config = $TMM_MCP_CONFIG, else .tmm/mcp.json up from cwd).
 Progressive: each tier loads only what the last one made you want —
@@ -194,7 +196,7 @@ EXIT CODES: 0 ok · 1 local/tmux failure · 2 server unreachable · 3 auth
 /// (`SPAWNABLE_BACKENDS`, derived from the Backend enum): the CLI must not
 /// advertise five backends while six spawn (tenet 14; kimi, board #224).
 fn usage() -> String {
-    USAGE.replace("{backends}", &backends_help())
+    USAGE.replace("{backends}", &backends_help()).replace("{set}", tmux_mobile::projects::mcp_mask::VALUE_SET)
 }
 
 fn backends_help() -> String {
@@ -930,7 +932,7 @@ async fn main() {
             }
         }
         ("teams", rest) if rest.first().map(String::as_str) == Some("list") => {
-            let r = rpc(&ctx, "teams_list", json!({})).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "teams_list", json!({})).await;
             if ctx.json {
                 println!("{r}");
             } else {
@@ -968,7 +970,7 @@ async fn main() {
                 fail(EXIT_USAGE, "--def must be valid JSON");
             }
             let description = flags.get("description").cloned().flatten().unwrap_or_default();
-            let r = rpc(&ctx, "teams_save", json!({ "def": { "name": name, "description": description, "members": members } })).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "teams_save", json!({ "def": { "name": name, "description": description, "members": members } })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved team {name} ({} members)", r.get("members").and_then(|v| v.as_u64()).unwrap_or(0)); print_unapplied(&r); }
         }
         ("teams", rest) if rest.first().map(String::as_str) == Some("delete") => {
@@ -1004,7 +1006,7 @@ async fn main() {
             }
         }
         ("registry", rest) if rest.first().map(String::as_str) == Some("list") => {
-            let r = rpc(&ctx, "registry_list", json!({})).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "registry_list", json!({})).await;
             if ctx.json {
                 println!("{r}");
             } else {
@@ -1249,7 +1251,7 @@ async fn main() {
             };
             let backend = flags.get("backend").cloned().flatten().unwrap_or_default();
             let def = registry_def(&name, &backend, &flags);
-            let r = rpc(&ctx, "registry_save", json!({ "def": def })).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "registry_save", json!({ "def": def })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); print_unapplied(&r); }
         }
         ("skills", rest) if rest.first().map(String::as_str) == Some("list") => {
@@ -1306,7 +1308,7 @@ async fn main() {
             if ctx.json { println!("{r}"); } else { println!("✓ deleted {name}"); }
         }
         ("mcp", rest) if rest.first().map(String::as_str) == Some("list") => {
-            let r = rpc(&ctx, "mcp_list", json!({})).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "mcp_list", json!({})).await;
             if ctx.json { println!("{r}"); } else {
                 let empty = Vec::new();
                 for m in r.get("mcp").and_then(|v| v.as_array()).unwrap_or(&empty) {
@@ -1319,7 +1321,7 @@ async fn main() {
             let (Some(Some(name)), Some(Some(defv))) = (flags.get("name").cloned(), flags.get("def").cloned()) else {
                 fail(EXIT_USAGE, "mcp save needs --name and --def '<json>': tmm mcp save --name files --def '{\"command\":\"mcp-files\"}'");
             };
-            let r = rpc(&ctx, "mcp_save", json!({ "def": { "name": name, "def": defv } })).await;
+            let r = rpc_needing(&ctx, MCP_MASKED, "mcp_save", json!({ "def": { "name": name, "def": defv } })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); }
         }
         ("mcp", rest) if rest.first().map(String::as_str) == Some("delete") => {
@@ -2413,6 +2415,12 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
     try_rpc_with(ctx, method, params, None).await
 }
 
+/// The capability the six definition calls need (board #451): a gateway that
+/// masks MCP env/header values on read and keeps the stored value for a
+/// `"<set>"` on save. An older one prints the values and would store the
+/// marker as a literal, so tmm sends none of the six to it.
+const MCP_MASKED: &str = "mcp_masked";
+
 /// `rpc` for a call that only an up-to-date server can do (board #377): the
 /// login answer's `caps` is read BEFORE the call is sent, so a server that
 /// lacks `need` is refused with nothing written. Without this a `tmm board
@@ -2423,6 +2431,10 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// nothing was written.
 fn cap_refusal(need: &str) -> String {
     match need {
+        MCP_MASKED => format!(
+            "this gateway does not mask MCP secrets in definitions (its login answer lacks `{need}`; an older gateway prints env and header values, and would store \"{}\" as a literal) — update the gateway. Nothing was read or saved.",
+            tmux_mobile::projects::mcp_mask::VALUE_SET
+        ),
         "hub_files" => format!(
             "this gateway does not list files (its login answer lacks `{need}`; an older gateway refuses an empty search or answers with messages) — update the gateway. Nothing was read."
         ),
