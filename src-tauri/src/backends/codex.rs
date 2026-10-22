@@ -540,7 +540,17 @@ pub(crate) fn render_codex(
         &codex_home.join(shared::codex_profile_file()),
         &shared::codex_profile(&crate::projects::spawn::mcp_defs(def), &def.model, &def.effort),
     )?;
-    let mut config_args: Vec<String> = vec![format!("--profile {}", shared::CODEX_PROFILE)];
+    // The line answers the startup screens and the shared background server
+    // (board #457), so a managed pane neither starts nor connects to codex's
+    // app-server daemon: `--no-daemon` is codex's own documented door ("Run
+    // without the shared background server, even if it is already running",
+    // `codex --help` and `codex resume --help`, 0.162.1). Measured on 0.162.1:
+    // a plain launch starts a daemon that copies the release into the home,
+    // outlives the pane and updates itself (it had fetched 0.163.0 within the
+    // hour), and a plain launch CONNECTS to a daemon already running there;
+    // with this flag, fresh, `resume --last` and `resume <id>` start none and
+    // connect to none, and a daemon some other entry started is left alone.
+    let mut config_args: Vec<String> = vec![format!("--profile {}", shared::CODEX_PROFILE), "--no-daemon".to_string()];
     let full_prompt = if skills.is_empty() {
         system_prompt.to_string()
     } else {

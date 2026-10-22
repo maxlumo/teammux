@@ -2716,6 +2716,17 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let prompt = build_prompt(&d, "tester", "proj", "", "", "");
         let cmd = render_codex(&d, "tester", &dir, Path::new("/srv/work/my-app"), &prompt, &[]).unwrap().cmd;
         assert!(cmd.contains("check_for_update_on_startup=false"), "no update prompt: {cmd}");
+        // Board #457: a managed pane neither starts nor connects to codex's
+        // app-server daemon. `--no-daemon` is codex's documented door (0.162.1
+        // --help, codex and codex resume); `--profile` is the identity/MCP
+        // door. A SOURCE pin on both: on 0.162.1 either one alone already
+        // suppressed the daemon's start, so this test does not show two
+        // independent behavioural causes; the rig rows on #457 do the measuring.
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        assert!(words.windows(2).any(|w| w == ["--profile", "tmm-agent"]), "the profile door: {cmd}");
+        assert!(words.contains(&"--no-daemon"), "no shared background server, started or joined: {cmd}");
+        let resumed = crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"));
+        assert!(resumed.starts_with("command codex resume ") && resumed.split_whitespace().any(|w| w == "--no-daemon"), "a resume keeps it: {resumed}");
         // Board #446: a typed line's Enter submits instead of joining a
         // "paste" (codex's paste-burst heuristic; measured on 0.162.1). The
         // [tui] key exactly: it is the one that wins over an inherited
