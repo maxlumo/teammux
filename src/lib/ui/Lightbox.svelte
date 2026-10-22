@@ -44,6 +44,14 @@
   let pinchDist = 0;
   let lastTap = 0;
   let moved = false;
+  /* May the click that ends this gesture close the viewer? (board #449) Decided from the
+     GESTURE, never from the scale when the click arrives: the click comes after pointerup,
+     so a double-tap that has just zoomed back out would otherwise look like a tap on an
+     unzoomed backdrop and close the viewer. A gesture qualifies if it begins as the only
+     finger on an unzoomed picture and nothing in it changes the zoom (a second finger, a
+     double-tap in or out, a wheel step while the button is held) or cancels it. The next
+     single-finger press takes its own qualification afresh. */
+  let tapCloses = false;
 
   function clamp() {
     if (scale <= 1) { scale = 1; tx = 0; ty = 0; }
@@ -56,12 +64,14 @@
     const ox = cx - innerWidth / 2, oy = cy - innerHeight / 2;
     tx = ox - (ox - tx) * k;
     ty = oy - (oy - ty) * k;
+    if (s2 !== scale) tapCloses = false;   // the gesture changed the zoom: its click is not a close
     scale = s2;
     clamp();
   }
 
   function onPointerDown(e: PointerEvent) {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    tapCloses = pointers.size === 0 && scale === 1;   // only a first finger on an unzoomed picture
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     moved = false;
     settle = false;
@@ -90,6 +100,7 @@
     }
   }
   function onPointerUp(e: PointerEvent) {
+    if (e.type === 'pointercancel') tapCloses = false;   // a cancelled gesture is not a tap
     pointers.delete(e.pointerId);
     pinchDist = 0;
     if (pointers.size === 0 && dismissing) {
@@ -99,11 +110,11 @@
       tx = 0; ty = 0;
       setTimeout(() => { settle = false; }, moveMs());
     }
-    if (pointers.size === 0 && !moved) {
+    if (pointers.size === 0 && !moved && e.type !== 'pointercancel') {   // a cancelled gesture is no tap, nor half a double-tap
       const now = performance.now();
       if (now - lastTap < 300) {
         // Double-tap: zoom into the tapped point, or all the way back out.
-        if (scale > 1) { scale = 1; tx = 0; ty = 0; }
+        if (scale > 1) { scale = 1; tx = 0; ty = 0; tapCloses = false; }
         else zoomAt(e.clientX, e.clientY, 2.5);
         lastTap = 0;
       } else lastTap = now;
@@ -114,8 +125,8 @@
     zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.2 : 1 / 1.2);
   }
   function onBackdrop(e: MouseEvent) {
-    // Only a clean tap on the backdrop itself, while unzoomed, closes.
-    if (e.target === e.currentTarget && scale === 1 && !moved) onclose();
+    // Only a clean tap on the backdrop itself closes, and only if its GESTURE qualified (#449).
+    if (e.target === e.currentTarget && tapCloses && !moved) onclose();
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') { e.stopPropagation(); onclose(); }

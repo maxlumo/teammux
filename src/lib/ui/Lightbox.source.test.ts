@@ -40,3 +40,16 @@ test('the status is the one OperationFeedback atom, above the safe area (#447)',
   assert.match(style, /\.lb-status \{[^}]*bottom: calc\(var\(--ui-gap\) \* 4 \+ var\(--sab, 0px\)\);[^}]*pointer-events: none;/u);
   assert.doesNotMatch(source, /createFeedbackLifetime|setTimeout\([^)]*status/u, 'the host owns the feedback lifetime, not the atom');
 });
+
+test('a tap closes by its gesture\'s record, never by the scale its click finds (#449)', () => {
+  const backdrop = source.slice(source.indexOf('function onBackdrop'), source.indexOf('function onKey'));
+  assert.doesNotMatch(backdrop, /\bscale\b/u, 'the click arrives after pointerup: reading the scale there sees a double-tap that just zoomed out');
+  assert.match(backdrop, /e\.target === e\.currentTarget && tapCloses && !moved\) onclose\(\)/u);
+  const down = source.slice(source.indexOf('function onPointerDown'), source.indexOf('function onPointerMove'));
+  assert.match(down, /tapCloses = pointers\.size === 0 && scale === 1;[^\n]*\n\s*pointers\.set\(/u, 'taken afresh by each first finger, before it is counted');
+  // every real zoom path ends the qualification, not one hand-picked branch
+  assert.match(source, /if \(s2 !== scale\) tapCloses = false;/u, 'pinch, wheel and double-tap zoom-in all go through zoomAt');
+  assert.match(source, /scale = 1; tx = 0; ty = 0; tapCloses = false;/u, 'the double-tap zoom-out');
+  assert.match(source, /if \(e\.type === 'pointercancel'\) tapCloses = false;/u);
+  assert.match(source, /!moved && e\.type !== 'pointercancel'\)/u, 'a cancelled gesture is no half of a double-tap');
+});
