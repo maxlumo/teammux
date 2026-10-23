@@ -187,6 +187,10 @@ CONTEXT:
   --agent <name>        who is speaking (default: $TMM_AGENT, else "human")
   --server <ws://host:port>  (default: $TMM_SERVER, else config.toml)
   --output json         machine-readable output
+  These four belong to the commands that talk to the server. A flag a command does not read
+  is REFUSED (exit 5, naming the flag and the form it has), never ignored: `--json` is
+  `--output json`. `tmm task|gateway|mcp servers|ui|setup` are local and take only their own.
+  `--name=value` also works; text that looks like a flag goes after `--` (tmm board note 3 -- -json)
 
 EXIT CODES: 0 ok · 1 local/tmux failure · 2 server unreachable · 3 auth
             4 not found · 5 usage
@@ -261,17 +265,25 @@ fn fail(code: i32, msg: &str) -> ! {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Everything after a bare `--` is a command to be run verbatim, so it must
-    // never reach the flag parser — `-- cargo build --release` would otherwise
-    // lose its `--release` to `flags`.
-    let (head, cmdv) = match args.iter().position(|a| a == "--") {
-        Some(i) => (&args[..i], args[i + 1..].to_vec()),
-        None => (&args[..], Vec::new()),
+    // `--help` is answered before anything else, even beside a flag that is refused or a value
+    // that is missing: it is the one explicit exception to the unknown-flag check below.
+    let help_asked = args.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--help");
+    let CommandLine { flags, mut pos, repeated, cmdv } = match parse_command_line(&args) {
+        Ok(line) => line,
+        Err(_) if help_asked => {
+            print!("{}", usage());
+            std::process::exit(EXIT_OK);
+        }
+        Err(e) => fail(EXIT_USAGE, &e),
     };
-    let (flags, mut pos, repeated) = split_flags(head);
     if pos.is_empty() || flags.contains_key("help") {
         print!("{}", usage());
         std::process::exit(if pos.is_empty() { EXIT_USAGE } else { EXIT_OK });
+    }
+    // The ONE place a flag the command does not read is refused (board #456): before the local
+    // subtrees, before `Config::load()` seeds a config, before any socket or window.
+    if let Err(e) = refuse_unknown_flags(&pos, &flags, &repeated) {
+        fail(EXIT_USAGE, &e);
     }
 
     let json = flags.get("output").cloned().flatten().as_deref() == Some("json");
@@ -798,7 +810,9 @@ async fn main() {
                 "add" => {
                     // The title is OPTIONAL (board #31): `tmm board add --body "…"`
                     // files a body-only issue. Something must be said, though.
-                    let title = rest[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect::<Vec<_>>().join(" ");
+                    // The parser has already told flags from text (and a bare `--` made the rest text): the
+                    // title is the positionals, as they are.
+                    let title = rest[1..].join(" ");
                     let images = image_refs(&repeated);
                     let given = match flags.get("body") { Some(Some(b)) => b.clone(), _ => String::new() };
                     // An image is a body too (board #329): its ref, like tmm send's.
@@ -1590,7 +1604,7 @@ fn cmd_mcp_local(rest: &[String], flags: &Flags, _json: bool) {
 /// Every `tmm task` verb reaps expired finished windows at its door (board
 /// #206) — AFTER its own work and never its own target, so `logs`/`status`/`rm`
 /// on an expired task still answer. `list` reaps first so what it prints is
-/// what exists. Reaped names go to stderr, so `--json` stdout stays clean.
+/// what exists. Reaped names go to stderr, so `--output json` stdout stays clean.
 fn reap_at_the_door(except: Option<&str>, json: bool) {
     let reaped = tasks::reap_expired(except);
     if reaped.is_empty() {
@@ -2243,12 +2257,13 @@ fn search_flag_example(flag: &str) -> String {
 }
 
 /// `tmm log --grep … --from <name>`: the sender to narrow to (board #432). `--from` with no
-/// value, an empty one, or one that is really the next flag (`--from --all`) is a usage
-/// error: running the search for EVERYONE would answer a question nobody asked.
+/// value or an empty one is a usage error: running the search for EVERYONE would answer a
+/// question nobody asked. (`--from --all` never gets here: the splitter refuses a value that
+/// is the next flag, so there is one reading of what is a flag, not a second guess here.)
 fn log_from(flags: &std::collections::HashMap<String, Option<String>>) -> Result<Option<String>, String> {
     let Some(value) = flags.get("from") else { return Ok(None) };
     match value.as_deref().map(str::trim) {
-        Some(name) if !name.is_empty() && !name.starts_with("--") => Ok(Some(name.to_string())),
+        Some(name) if !name.is_empty() => Ok(Some(name.to_string())),
         _ => Err("--from needs a sender name: tmm log --grep \"deploy\" --from kiro".to_string()),
     }
 }
@@ -2330,38 +2345,289 @@ fn file_line(f: &Value, with_room: bool) -> String {
 /// The third return is every valued occurrence in order, so a flag that may be
 /// REPEATED (`--image a.png --image b.png`) does not lose all but the last —
 /// the map keeps one value per key by design and that is fine for the rest.
-fn split_flags(args: &[String]) -> (std::collections::HashMap<String, Option<String>>, Vec<String>, Vec<(String, String)>) {
-    const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
+/// Flags that take a value: `--name value` or `--name=value`. Everything else is a switch.
+const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note"];
-    let mut flags = std::collections::HashMap::new();
+                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json"];
+
+/// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
+/// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
+/// is text: a markdown bullet `- done`, a lone `-` (`board assign 3 -`), a negative number `-5`.
+/// Before this, `a.len() > 1 && a.starts_with('-')` made `- done` a flag named " done", and the
+/// words of a note vanished without a word.
+fn flag_shaped(a: &str) -> bool {
+    let rest = if let Some(r) = a.strip_prefix("--") { r } else if let Some(r) = a.strip_prefix('-') { r } else { return false };
+    let name = rest.split('=').next().unwrap_or("");
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Split the arguments BEFORE any bare `--` into flags, positionals and the repeatable
+/// `(name, value)` list. A valued flag written `--name value` takes the next token only if there
+/// is one and it is not itself flag-shaped; otherwise it is refused (`--limit --grep x` used to
+/// swallow `--grep`). `--name=value` takes everything after the first `=`, empty included: the
+/// explicit-empty form (`--model=`) clears, and `--body=--literal` is a literal. A switch given a
+/// value is refused later, once the command is known (`refuse_unknown_flags`).
+fn split_flags(args: &[String]) -> Result<(Flags, Vec<String>, Vec<(String, String)>), String> {
+    let mut flags = Flags::new();
     let mut pos = Vec::new();
     let mut repeats: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if let Some(name) = a.strip_prefix("--") {
-            if VALUED.contains(&name) && i + 1 < args.len() {
-                flags.insert(name.to_string(), Some(args[i + 1].clone()));
-                repeats.push((name.to_string(), args[i + 1].clone()));
-                i += 2;
-                continue;
-            }
-            flags.insert(name.to_string(), None);
-        } else if a.len() > 1 && a.starts_with('-') {
-            // A LONE `-` is a positional, not a nameless flag (board #367,
-            // found by running the verb): it is how a shell spells "nobody"
-            // for `tmm board assign <id> -`, and `strip_prefix('-')` turned
-            // it into a flag named "" that nothing reads, so the argument
-            // vanished and the command asked for a name it had been given.
-            flags.insert(a[1..].to_string(), None);
-        } else {
+        if !flag_shaped(a) {
             pos.push(a.clone());
+            i += 1;
+            continue;
+        }
+        let body = a.strip_prefix("--").or_else(|| a.strip_prefix('-')).unwrap_or(a);
+        if let Some((name, value)) = body.split_once('=') {
+            flags.insert(name.to_string(), Some(value.to_string()));
+            // EVERY `=value` occurrence is kept, a switch's included: the flag map keeps only the
+            // last one, and a later bare `--kill` must not wash an earlier `--kill=0` out of the
+            // check that refuses a switch given a value.
+            repeats.push((name.to_string(), value.to_string()));
+        } else if VALUED.contains(&body) {
+            match args.get(i + 1).filter(|next| !flag_shaped(next)) {
+                Some(value) => {
+                    flags.insert(body.to_string(), Some(value.clone()));
+                    repeats.push((body.to_string(), value.clone()));
+                    i += 1;
+                }
+                None => return Err(format!("--{body} needs a value (write --{body}=<value> if the value itself starts with a dash and a letter)")),
+            }
+        } else {
+            flags.insert(body.to_string(), None);
         }
         i += 1;
     }
-    (flags, pos, repeats)
+    Ok((flags, pos, repeats))
+}
+
+/// What the command line comes to once parsed.
+#[derive(Debug)]
+struct CommandLine {
+    flags: Flags,
+    pos: Vec<String>,
+    repeated: Vec<(String, String)>,
+    /// The command `tmm task start <name> -- <cmd...>` runs, verbatim. Only that verb has one.
+    cmdv: Vec<String>,
+}
+
+/// Parse `args` into flags, positionals, repeats and the `task start` command. A bare `--` ends
+/// flag parsing: after it, `task start` keeps its tail as an opaque command (`-- cargo build
+/// --release` must never lose `--release`), and every other command reads the rest as ordinary
+/// positional text (before #456 it was silently thrown away, so `tmm board note 3 -- --weird`
+/// recorded nothing). Whether the verb is `task start` is decided from the positionals the flag
+/// metadata produced, not from argv positions, so `tmm --project p task start x -- cmd` is the
+/// same command as `tmm task start x --project p -- cmd`.
+fn parse_command_line(args: &[String]) -> Result<CommandLine, String> {
+    let cut = args.iter().position(|a| a == "--");
+    let (head, tail) = match cut {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &args[..0]),
+    };
+    let (flags, mut pos, repeated) = split_flags(head)?;
+    let mut cmdv = Vec::new();
+    if pos.first().map(String::as_str) == Some("task") && pos.get(1).map(String::as_str) == Some("start") {
+        cmdv = tail.to_vec();
+    } else {
+        pos.extend(tail.iter().cloned());
+    }
+    Ok(CommandLine { flags, pos, repeated, cmdv })
+}
+
+/// One command's flags. The table below is the ONLY list of what each verb accepts, and a flag is
+/// listed only for a verb that reads it: there is no set of flags every command takes (board #456).
+/// `ctx` adds the four every RPC command reads through the Ctx it builds (`--project`, `--agent`,
+/// `--server`, `--output`); the local commands (`task`, `gateway`, `mcp servers|tools|…`, `ui`,
+/// `setup`) never build one, so `gateway restart --server ws://other` is REFUSED instead of
+/// quietly restarting this machine's service.
+struct VerbFlags {
+    key: &'static str,
+    ctx: bool,
+    flags: &'static [&'static str],
+}
+
+const CTX_FLAGS: &[&str] = &["project", "agent", "server", "output"];
+
+/// Verb path -> flags it reads. The tests in this file hold it to the code: every flag read
+/// anywhere is listed, every listed flag is read by the region that serves the key, and the
+/// local commands are checked branch by branch. What no test proves is that a flag shared by
+/// every sub-verb of one dispatch arm is read by each of them.
+const VERB_FLAGS: &[VerbFlags] = &[
+    VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re"] },
+    VerbFlags { key: "scratch", ctx: true, flags: &["kill"] },
+    VerbFlags { key: "log", ctx: true, flags: &["since", "limit", "f", "follow", "grep", "all", "from", "global", "files", "before"] },
+    VerbFlags { key: "wake", ctx: true, flags: &["all"] },
+    VerbFlags { key: "wake list", ctx: true, flags: &["all"] },
+    VerbFlags { key: "wake cancel", ctx: true, flags: &[] },
+    VerbFlags { key: "review", ctx: true, flags: &[] },
+    VerbFlags { key: "review list", ctx: true, flags: &["all"] },
+    VerbFlags { key: "review add", ctx: true, flags: &["lines", "cols", "note"] },
+    VerbFlags { key: "review resolve", ctx: true, flags: &[] },
+    VerbFlags { key: "review reopen", ctx: true, flags: &[] },
+    VerbFlags { key: "review delete", ctx: true, flags: &[] },
+    VerbFlags { key: "review feedback", ctx: true, flags: &[] },
+    VerbFlags { key: "board", ctx: true, flags: &[] },
+    VerbFlags { key: "board list", ctx: true, flags: &[] },
+    VerbFlags { key: "board show", ctx: true, flags: &[] },
+    VerbFlags { key: "board add", ctx: true, flags: &["body", "image", "assignee"] },
+    VerbFlags { key: "board delete", ctx: true, flags: &[] },
+    VerbFlags { key: "board assign", ctx: true, flags: &[] },
+    VerbFlags { key: "board take", ctx: true, flags: &[] },
+    VerbFlags { key: "board move", ctx: true, flags: &[] },
+    VerbFlags { key: "board note", ctx: true, flags: &["image"] },
+    VerbFlags { key: "spawn", ctx: true, flags: &["brief", "join", "team"] },
+    VerbFlags { key: "teams", ctx: true, flags: &[] },
+    VerbFlags { key: "teams list", ctx: true, flags: &[] },
+    VerbFlags { key: "teams save", ctx: true, flags: &["name", "def", "description"] },
+    VerbFlags { key: "teams delete", ctx: true, flags: &[] },
+    VerbFlags { key: "registry", ctx: true, flags: &[] },
+    VerbFlags { key: "registry list", ctx: true, flags: &[] },
+    VerbFlags { key: "registry save", ctx: true, flags: &["name", "backend", "system", "model", "effort", "skills", "mcp", "input-mode"] },
+    VerbFlags { key: "registry delete", ctx: true, flags: &[] },
+    VerbFlags { key: "agent", ctx: true, flags: &[] },
+    VerbFlags { key: "agent list", ctx: true, flags: &[] },
+    VerbFlags { key: "agent stop", ctx: true, flags: &[] },
+    VerbFlags { key: "agent restart", ctx: true, flags: &["team"] },
+    VerbFlags { key: "agent remove", ctx: true, flags: &[] },
+    VerbFlags { key: "agent interrupt", ctx: true, flags: &[] },
+    VerbFlags { key: "agent mode", ctx: true, flags: &[] },
+    VerbFlags { key: "agent team", ctx: true, flags: &[] },
+    VerbFlags { key: "agent fork", ctx: true, flags: &["as"] },
+    VerbFlags { key: "project", ctx: true, flags: &[] },
+    VerbFlags { key: "project list", ctx: true, flags: &[] },
+    VerbFlags { key: "project create", ctx: true, flags: &["name", "session", "with-agent"] },
+    VerbFlags { key: "project rename", ctx: true, flags: &["name"] },
+    VerbFlags { key: "project restore", ctx: true, flags: &["run", "abandon"] },
+    VerbFlags { key: "project up", ctx: true, flags: &[] },
+    VerbFlags { key: "project down", ctx: true, flags: &[] },
+    VerbFlags { key: "project archive", ctx: true, flags: &[] },
+    VerbFlags { key: "project unarchive", ctx: true, flags: &[] },
+    VerbFlags { key: "project delete", ctx: true, flags: &[] },
+    VerbFlags { key: "skills", ctx: true, flags: &[] },
+    VerbFlags { key: "skills list", ctx: true, flags: &[] },
+    VerbFlags { key: "skills load", ctx: true, flags: &[] },
+    VerbFlags { key: "skills import", ctx: true, flags: &["source"] },
+    VerbFlags { key: "skills save", ctx: true, flags: &["name", "source", "description", "ref"] },
+    VerbFlags { key: "skills refresh", ctx: true, flags: &[] },
+    VerbFlags { key: "skills delete", ctx: true, flags: &[] },
+    VerbFlags { key: "mcp list", ctx: true, flags: &[] },
+    VerbFlags { key: "mcp save", ctx: true, flags: &["name", "def"] },
+    VerbFlags { key: "mcp delete", ctx: true, flags: &[] },
+    VerbFlags { key: "prompt", ctx: true, flags: &[] },
+    VerbFlags { key: "prompt show", ctx: true, flags: &[] },
+    VerbFlags { key: "prompt path", ctx: true, flags: &[] },
+    VerbFlags { key: "prompt clear", ctx: true, flags: &[] },
+    VerbFlags { key: "prompt set", ctx: true, flags: &["file"] },
+    // `task wake` is the one task verb that talks to the server: an RPC arm with a Ctx.
+    VerbFlags { key: "task wake", ctx: true, flags: &["to", "code", "signal"] },
+    // The LOCAL commands: no Ctx, only what their own branch reads. The task verbs take `--output`
+    // because each branch prints through the `json` that flag sets.
+    VerbFlags { key: "task start", ctx: false, flags: &["project", "agent", "server", "session", "replace", "wake", "output"] },
+    VerbFlags { key: "task list", ctx: false, flags: &["output"] },
+    VerbFlags { key: "task status", ctx: false, flags: &["output"] },
+    VerbFlags { key: "task logs", ctx: false, flags: &["limit", "grep", "output"] },
+    VerbFlags { key: "task stop", ctx: false, flags: &["keep", "output"] },
+    VerbFlags { key: "task rm", ctx: false, flags: &["output"] },
+    VerbFlags { key: "gateway", ctx: false, flags: &["replace", "service"] },
+    VerbFlags { key: "gateway install", ctx: false, flags: &["replace", "service"] },
+    VerbFlags { key: "gateway start", ctx: false, flags: &["service"] },
+    VerbFlags { key: "gateway status", ctx: false, flags: &["show-token"] },
+    VerbFlags { key: "gateway logs", ctx: false, flags: &["f", "follow"] },
+    VerbFlags { key: "gateway restart", ctx: false, flags: &[] },
+    VerbFlags { key: "gateway uninstall", ctx: false, flags: &[] },
+    VerbFlags { key: "mcp servers", ctx: false, flags: &[] },
+    VerbFlags { key: "mcp tools", ctx: false, flags: &[] },
+    VerbFlags { key: "mcp schema", ctx: false, flags: &[] },
+    VerbFlags { key: "mcp add", ctx: false, flags: &["def"] },
+    VerbFlags { key: "mcp call", ctx: false, flags: &["args-json"] },
+    VerbFlags { key: "ui", ctx: false, flags: &["open"] },
+    VerbFlags { key: "setup", ctx: false, flags: &[] },
+    VerbFlags { key: "claude-statusline", ctx: false, flags: &[] },
+];
+
+impl VerbFlags {
+    fn allows(&self, name: &str) -> bool {
+        self.flags.contains(&name) || (self.ctx && CTX_FLAGS.contains(&name))
+    }
+    fn allowed(&self) -> Vec<&'static str> {
+        let mut all: Vec<&'static str> = self.flags.to_vec();
+        if self.ctx {
+            all.extend(CTX_FLAGS.iter().copied());
+        }
+        all.sort_unstable();
+        all
+    }
+}
+
+/// The table row that owns this command line: `<word> <sub-word>` first, then `<word>` alone
+/// (`tmm board` is `board list`, `tmm wake` is `wake list`). A command the table does not know
+/// is left to the dispatcher's own unknown-command answer.
+fn verb_row(pos: &[String]) -> Option<&'static VerbFlags> {
+    let first = pos.first()?;
+    let two = pos.get(1).map(|sub| format!("{first} {sub}"));
+    two.and_then(|key| VERB_FLAGS.iter().find(|row| row.key == key)).or_else(|| VERB_FLAGS.iter().find(|row| row.key == first))
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// What to say instead, using only forms THIS verb really has: the usual wrong guess (`--json`
+/// for `--output json`) if it has `--output`, else the closest real flag, else its flag list.
+fn flag_suggestion(row: &VerbFlags, name: &str) -> String {
+    let allowed = row.allowed();
+    if name == "json" && allowed.contains(&"output") {
+        return "did you mean --output json?".to_string();
+    }
+    let nearest = allowed.iter().map(|a| (edit_distance(name, a), *a)).filter(|(d, _)| *d <= 2).min();
+    match nearest {
+        Some((_, flag)) => format!("did you mean --{flag}?"),
+        None if allowed.is_empty() => "it takes no flags".to_string(),
+        None => format!("its flags: {}", allowed.iter().map(|f| format!("--{f}")).collect::<Vec<_>>().join(" ")),
+    }
+}
+
+/// Refuse a flag the command does not read, BEFORE anything runs (board #456). `--json` was
+/// accepted and ignored: a script that wrote it believed it had asked for JSON. The refusal names
+/// the flag (never its value) and a form this verb has. A switch given a value (`--kill=1`) is
+/// refused too, so the `=` form cannot become a new silent ignore. `--help` is answered before
+/// this runs, and is the one exception.
+fn refuse_unknown_flags(pos: &[String], flags: &Flags, occurrences: &[(String, String)]) -> Result<(), String> {
+    let Some(row) = verb_row(pos) else { return Ok(()) };
+    let mut names: Vec<&String> = flags.keys().collect();
+    names.sort();
+    for name in names {
+        let shown = if name.len() == 1 { format!("-{name}") } else { format!("--{name}") };
+        if !row.allows(name) {
+            return Err(format!("unknown flag {shown} for \"tmm {}\": {} (text that starts with a dash goes after --)", row.key, flag_suggestion(row, name)));
+        }
+    }
+    // Every `--name=value` the line carries, in any order against a bare `--name`: each occurrence
+    // meets its flag's arity before the occurrences are merged into one value.
+    for (name, _) in occurrences {
+        if !VALUED.contains(&name.as_str()) {
+            let shown = if name.len() == 1 { format!("-{name}") } else { format!("--{name}") };
+            return Err(if name == "wake" {
+                "--wake takes no value; name who to wake as the next word: --wake @lead".to_string()
+            } else {
+                format!("{shown} takes no value; write {shown} on its own for \"tmm {}\"", row.key)
+            });
+        }
+    }
+    Ok(())
 }
 
 /// An image reference as the client will have to resolve it. A URL is passed
@@ -3173,13 +3439,13 @@ mod tests {
     #[test]
     fn in_and_at_are_valued_flags() {
         let args: Vec<String> = ["send", "@dev check", "--in", "10m", "--at", "14:30"].iter().map(|s| s.to_string()).collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["send", "@dev check"]);
         assert_eq!(flags.get("in").cloned().flatten().as_deref(), Some("10m"));
         assert_eq!(flags.get("at").cloned().flatten().as_deref(), Some("14:30"));
         // Board #290: --re takes the quoted message's seq or id.
         let args: Vec<String> = ["send", "@lead which one?", "--re", "4127"].iter().map(|s| s.to_string()).collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["send", "@lead which one?"]);
         assert_eq!(flags.get("re").cloned().flatten().as_deref(), Some("4127"));
     }
@@ -3269,7 +3535,7 @@ mod tests {
         assert!(review_lines("3-2", None).is_err());
         assert!(review_lines("0", None).is_err());
         assert!(review_lines("2", Some("6-1")).is_err());
-        let (flags, pos, _) = split_flags(&["review".into(), "add".into(), "f.rs".into(), "--lines".into(), "2-3".into(), "--cols".into(), "1-4".into(), "--note".into(), "why".into()]);
+        let (flags, pos, _) = split_flags(&["review".into(), "add".into(), "f.rs".into(), "--lines".into(), "2-3".into(), "--cols".into(), "1-4".into(), "--note".into(), "why".into()]).unwrap();
         assert_eq!(pos, ["review", "add", "f.rs"]);
         assert_eq!((flags["lines"].as_deref(), flags["cols"].as_deref(), flags["note"].as_deref()), (Some("2-3"), Some("1-4"), Some("why")));
     }
@@ -3336,7 +3602,7 @@ mod tests {
         // shape exactly — one ref per line after the text, paths absolute.
         let args: Vec<String> = ["board", "note", "3", "see", "--image", "/a.png", "--image", "https://x/b.png"]
             .iter().map(|s| s.to_string()).collect();
-        let (_flags, pos, repeated) = split_flags(&args);
+        let (_flags, pos, repeated) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["board", "note", "3", "see"]);
         let refs = image_refs(&repeated);
         assert_eq!(with_images("see", &refs), "see\n![](/a.png)\n![](https://x/b.png)");
@@ -3354,7 +3620,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (flags, pos, repeated) = split_flags(&args);
+        let (flags, pos, repeated) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["send", "look"], "the text stays positional");
         assert_eq!(flags.get("image").cloned().flatten().as_deref(), Some("b.png"), "map keeps the last");
         let images: Vec<&str> = repeated.iter().filter(|(k, _)| k == "image").map(|(_, v)| v.as_str()).collect();
@@ -3388,7 +3654,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert_eq!(flags.get("input-mode").cloned().flatten().as_deref(), Some("steer"));
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
@@ -3400,7 +3666,7 @@ mod tests {
     /// flag without `--grep` fails instead of printing the plain log.
     #[test]
     fn log_from_is_valued_and_a_narrowing_without_grep_is_refused() {
-        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let (flags, pos, repeated) = parse(&["log", "--grep", "kiwi", "--from", "bob", "--all"]);
         assert_eq!(pos, vec!["log"], "bob is the flag's value, not a positional");
         assert_eq!(flags.get("from").cloned().flatten().as_deref(), Some("bob"));
@@ -3419,7 +3685,7 @@ mod tests {
     /// that names nobody is refused instead of searching everyone.
     #[test]
     fn log_from_goes_on_the_request_and_an_empty_one_is_refused() {
-        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let terms = vec!["kiwi".to_string(), "fig".to_string()];
         let (flags, _, _) = parse(&["log", "--grep", "kiwi", "--grep", "fig", "--from", "bob", "--all", "--global"]);
         assert_eq!(
@@ -3431,15 +3697,24 @@ mod tests {
         assert!(params.get("from").is_none(), "no --from: the key is absent");
         assert_eq!((params["all"].as_bool(), params["global"].as_bool()), (Some(false), Some(false)));
         for (label, args) in [
-            ("no value", vec!["log", "--grep", "kiwi", "--from"]),
             ("an empty value", vec!["log", "--grep", "kiwi", "--from", ""]),
+            ("an explicit empty value", vec!["log", "--grep", "kiwi", "--from="]),
             ("blanks", vec!["log", "--grep", "kiwi", "--from", "  "]),
-            ("the next flag as the value", vec!["log", "--grep", "kiwi", "--from", "--all"]),
         ] {
             let (flags, _, _) = parse(&args);
             let e = log_search_params("proj", &terms, &flags, 50).unwrap_err();
             assert!(e.contains("--from needs a sender name") && e.contains("--from kiro"), "{label}: {e}");
         }
+        // A missing value, or the next flag standing where the value should be, never reaches the
+        // helper any more: the splitter refuses it first (board #456), so `--from --all` cannot
+        // swallow `--all` as a sender's name.
+        for args in [vec!["log", "--grep", "kiwi", "--from"], vec!["log", "--grep", "kiwi", "--from", "--all"]] {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            assert!(split_flags(&args).unwrap_err().contains("--from needs a value"), "{args:?}");
+        }
+        // An explicit value is the user's word, whatever it looks like: no second guess at what is a flag.
+        let (flags, _, _) = parse(&["log", "--grep", "kiwi", "--from=--odd"]);
+        assert_eq!(log_search_params("proj", &terms, &flags, 50).unwrap()["from"], json!("--odd"));
         assert_eq!(search_flag_example("from"), "--from kiro", "the example names a sender");
         assert_eq!(search_flag_example("all"), "--all");
     }
@@ -3449,7 +3724,7 @@ mod tests {
     /// path is one file across rooms and a relative one is per room, and a row reads as one line.
     #[test]
     fn log_files_requests_merges_pages_and_prints_one_line_per_file() {
-        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let (flags, _, _) = parse(&["log", "--files", "--from", "kiro", "--global"]);
         let params = log_search_params("proj", &[], &flags, 50).unwrap();
         assert_eq!(params["files"], json!(true));
@@ -3486,13 +3761,14 @@ mod tests {
             let e = files_page(&old).unwrap_err();
             assert!(e.contains("does not list files") && e.contains("update the gateway"), "{old}: {e}");
         }
-        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let (flags, pos, _) = parse(&["log", "--files", "--before", "4711", "--limit", "5"]);
         assert_eq!(pos, vec!["log"], "4711 is the flag's value, not a positional");
         assert_eq!(log_search_params("p", &[], &flags, 5).unwrap()["before_seq"], json!(4711));
         let (flags, _, _) = parse(&["log", "--files"]);
         assert!(log_search_params("p", &[], &flags, 5).unwrap().get("before_seq").is_none());
-        for (label, args) in [("no value", vec!["log", "--files", "--before"]), ("not a number", vec!["log", "--files", "--before", "x"]), ("zero", vec!["log", "--files", "--before", "0"]), ("without --files", vec!["log", "--grep", "a", "--before", "9"]), ("without --files or --grep", vec!["log", "--before", "9"])] {
+        assert!(split_flags(&["log", "--files", "--before"].map(String::from)).unwrap_err().contains("--before needs a value"), "no value is refused by the splitter now");
+        for (label, args) in [("not a number", vec!["log", "--files", "--before", "x"]), ("zero", vec!["log", "--files", "--before", "0"]), ("without --files", vec!["log", "--grep", "a", "--before", "9"]), ("without --files or --grep", vec!["log", "--before", "9"])] {
             let (flags, _, _) = parse(&args);
             let e = log_search_params("p", &["a".to_string()], &flags, 5).unwrap_err();
             assert!(e.contains("--before"), "{label}: {e}");
@@ -3507,7 +3783,7 @@ mod tests {
     /// spawn is standalone with no `join` key at all.
     #[test]
     fn spawn_joins_only_with_join() {
-        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse = |args: &[&str]| split_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let (flags, pos, _) = parse(&["spawn", "kiro", "--join", "dev-squad", "--brief", "go"]);
         assert_eq!(pos, vec!["spawn", "kiro"]);
         assert_eq!(spawn_params("p", "kiro", "go", "lead", &flags), json!({ "session": "p", "agent": "kiro", "brief": "go", "by": "lead", "join": "dev-squad" }));
@@ -3545,7 +3821,7 @@ mod tests {
     fn registry_save_without_an_input_mode_omits_the_key() {
         let args: Vec<String> = ["registry", "save", "--name", "dev", "--backend", "kiro", "--system", "x"]
             .iter().map(|s| s.to_string()).collect();
-        let (flags, _, _) = split_flags(&args);
+        let (flags, _, _) = split_flags(&args).unwrap();
         let def = registry_def("dev", "kiro", &flags);
         assert!(def.get("input_mode").is_none(), "no key on the wire: {def}");
         // What an older server does with it: the same struct shape, its
@@ -3575,12 +3851,12 @@ mod tests {
         // It did not, and only running the verb showed it: a lone `-` became
         // a flag named "" and `board assign 3 -` answered "needs a name".
         let args: Vec<String> = ["board", "assign", "3", "-"].iter().map(|s| s.to_string()).collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["board", "assign", "3", "-"], "a lone dash is a positional");
         assert!(flags.is_empty(), "and not a nameless flag");
         // A real flag still parses, and so does a valued one after a dash.
         let args: Vec<String> = ["board", "assign", "3", "-", "--output", "json"].iter().map(|s| s.to_string()).collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert_eq!(pos, vec!["board", "assign", "3", "-"]);
         assert_eq!(flags.get("output").cloned().flatten().as_deref(), Some("json"));
 
@@ -3598,7 +3874,7 @@ mod tests {
 
         let args: Vec<String> =
             ["send", "compiling", "--status"].iter().map(|s| s.to_string()).collect();
-        let (flags, pos, _) = split_flags(&args);
+        let (flags, pos, _) = split_flags(&args).unwrap();
         assert!(flags.contains_key("status"));
         assert_eq!(pos, vec!["send", "compiling"]);
     }
@@ -3652,13 +3928,454 @@ mod tests {
     fn fork_as_is_absent_a_name_or_refused() {
         let flags_of = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            split_flags(&args).0
+            split_flags(&args).unwrap().0
         };
         assert_eq!(fork_as_flag(&flags_of(&["agent", "fork", "dev"])), Ok(None));
         assert_eq!(fork_as_flag(&flags_of(&["agent", "fork", "dev", "--as", " mine "])), Ok(Some("mine".to_string())));
-        for bad in [&["agent", "fork", "dev", "--as"][..], &["agent", "fork", "dev", "--as", ""], &["agent", "fork", "dev", "--as", "  "]] {
+        for bad in [&["agent", "fork", "dev", "--as", ""][..], &["agent", "fork", "dev", "--as="], &["agent", "fork", "dev", "--as", "  "]] {
             let err = fork_as_flag(&flags_of(bad)).unwrap_err();
             assert!(err.contains("--as needs a name"), "{bad:?}: {err}");
+        }
+        let err = split_flags(&["agent", "fork", "dev", "--as"].map(String::from)).unwrap_err();
+        assert!(err.contains("--as needs a value"), "a missing value is the splitter's refusal now: {err}");
+    }
+}
+
+/// Board #456: the unknown-flag refusal, the flag-shape rule, and the contract that holds the
+/// verb table to the code in this file. The table is the only list of what each command
+/// accepts; nothing but these tests keeps it true, so they read the production source of this
+/// very file (`include_str!`) region by region.
+#[cfg(test)]
+mod flags_contract {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+    fn line(a: &[&str]) -> CommandLine {
+        parse_command_line(&args(a)).unwrap()
+    }
+
+    // ---- the parse rules ---------------------------------------------------------------
+
+    #[test]
+    fn only_an_argument_with_a_flags_shape_is_a_flag() {
+        for flag in ["-f", "--output", "--output=json", "-follow", "--a-b_c9", "--model=", "--body=--literal", "--x=a=b"] {
+            assert!(flag_shaped(flag), "{flag} is a flag");
+        }
+        for text in ["-", "- done", "-5", "-1 is bad", "--", "-- note", "--5", "—", "-.5", "- x", "a-b", "", "--=x", "-é"] {
+            assert!(!flag_shaped(text), "{text:?} is text");
+        }
+    }
+
+    #[test]
+    fn a_dash_text_is_recorded_not_dropped() {
+        let c = line(&["board", "note", "7", "- done"]);
+        assert_eq!(c.pos, ["board", "note", "7", "- done"], "the bullet is a positional, not a flag named ' done'");
+        assert!(c.flags.is_empty());
+        let c = line(&["board", "assign", "3", "-"]);
+        assert_eq!(c.pos, ["board", "assign", "3", "-"], "the lone dash that means nobody stays positional");
+        let c = line(&["send", "@x -5"]);
+        assert_eq!(c.pos, ["send", "@x -5"]);
+        let c = line(&["board", "note", "7", "-5"]);
+        assert_eq!(c.pos.last().map(String::as_str), Some("-5"), "a negative number is text");
+    }
+
+    #[test]
+    fn a_valued_flag_takes_a_value_only_if_the_next_token_is_not_a_flag() {
+        let c = line(&["log", "--limit", "5", "--since", "-3"]);
+        assert_eq!(c.flags["limit"].as_deref(), Some("5"));
+        assert_eq!(c.flags["since"].as_deref(), Some("-3"), "-3 is not flag-shaped: it is the value");
+        let c = line(&["board", "note", "1", "--image", "a.png", "- text"]);
+        assert_eq!(c.flags["image"].as_deref(), Some("a.png"));
+        assert_eq!(c.pos.last().map(String::as_str), Some("- text"));
+        for bad in [&["log", "--limit", "--grep", "x"][..], &["log", "--limit"], &["log", "--grep", "-v"], &["log", "--limit", "-f"]] {
+            let e = parse_command_line(&args(bad)).err().unwrap_or_else(|| panic!("{bad:?} should be refused"));
+            assert!(e.contains("needs a value"), "{bad:?}: {e}");
+        }
+        // The explicit forms: any value after `=`, flag-shaped and empty included.
+        let c = line(&["board", "add", "t", "--body=--literal", "--assignee=", "--model=", "--effort="]);
+        assert_eq!(c.flags["body"].as_deref(), Some("--literal"));
+        assert_eq!(c.flags["assignee"].as_deref(), Some(""));
+        assert_eq!(c.flags["model"].as_deref(), Some(""), "an explicit empty is a value: it clears");
+        let c = line(&["log", "--grep=-v", "--limit=5"]);
+        assert_eq!(c.repeated, vec![("grep".to_string(), "-v".to_string()), ("limit".to_string(), "5".to_string())]);
+        assert_eq!(line(&["mcp", "call", "s", "t", "--args-json", "{\"a\":1}"]).flags["args-json"].as_deref(), Some("{\"a\":1}"), "args-json is valued, so its JSON is not a stray positional");
+    }
+
+    #[test]
+    fn a_bare_double_dash_ends_flags_and_only_task_start_keeps_an_opaque_command() {
+        let c = line(&["task", "start", "b", "--wake", "@lead", "--", "cargo", "build", "--release", "--json", "-x"]);
+        assert_eq!(c.cmdv, ["cargo", "build", "--release", "--json", "-x"], "the child's arguments are not ours to parse");
+        assert_eq!(c.pos, ["task", "start", "b", "@lead"]);
+        assert!(c.flags.contains_key("wake") && !c.flags.contains_key("release") && !c.flags.contains_key("json"));
+        // Leading context flags: the same command, recognised from the positionals, not the argv index.
+        let c = line(&["--project", "p", "task", "start", "b", "--", "make", "--json"]);
+        assert_eq!(c.cmdv, ["make", "--json"]);
+        assert_eq!(c.flags["project"].as_deref(), Some("p"));
+        // Every other verb, other task verbs included: the rest is text, never dropped into an unused tail.
+        let c = line(&["board", "note", "3", "--", "-json", "--weird"]);
+        assert!(c.cmdv.is_empty());
+        assert_eq!(c.pos, ["board", "note", "3", "-json", "--weird"]);
+        let c = line(&["task", "list", "--", "x"]);
+        assert!(c.cmdv.is_empty());
+        assert_eq!(c.pos, ["task", "list", "x"]);
+        // A valued flag left without its value by the `--` is refused, not silently emptied.
+        assert!(parse_command_line(&args(&["log", "--limit", "--", "5"])).unwrap_err().contains("--limit needs a value"));
+    }
+
+    // ---- the refusal -------------------------------------------------------------------
+
+    fn flags_for(names: &[(&str, bool)]) -> Flags {
+        names.iter().map(|(n, valued)| (n.to_string(), if *valued { Some("v".to_string()) } else { None })).collect()
+    }
+    /// `refuse_unknown_flags` for a hand-built flag map: each valued entry stands for one `--name=value`.
+    fn check(pos: &[String], flags: &Flags) -> Result<(), String> {
+        let occurrences: Vec<(String, String)> = flags.iter().filter_map(|(n, v)| v.clone().map(|v| (n.clone(), v))).collect();
+        refuse_unknown_flags(pos, flags, &occurrences)
+    }
+    /// The whole line, parsed then checked, exactly as `main` does.
+    fn refused(line: &[&str]) -> Result<(), String> {
+        let c = parse_command_line(&args(line))?;
+        refuse_unknown_flags(&c.pos, &c.flags, &c.repeated)
+    }
+    fn pos_of(key: &str) -> Vec<String> {
+        key.split(' ').map(String::from).collect()
+    }
+    fn every_flag_name() -> BTreeSet<&'static str> {
+        VERB_FLAGS.iter().flat_map(|r| r.flags.iter().copied()).chain(CTX_FLAGS.iter().copied()).collect()
+    }
+
+    #[test]
+    fn every_verb_accepts_its_own_flags_and_refuses_all_others() {
+        for row in VERB_FLAGS {
+            let pos = pos_of(row.key);
+            assert_eq!(verb_row(&pos).map(|r| r.key), Some(row.key), "{} routes to its own row", row.key);
+            for name in every_flag_name() {
+                let valued = VALUED.contains(&name);
+                let result = check(&pos, &flags_for(&[(name, valued)]));
+                if row.allows(name) {
+                    assert_eq!(result, Ok(()), "tmm {} --{name} is accepted", row.key);
+                } else {
+                    let e = result.unwrap_err();
+                    assert!(e.contains(&format!("unknown flag {}", if name.len() == 1 { format!("-{name}") } else { format!("--{name}") })) && e.contains(row.key), "tmm {} --{name}: {e}", row.key);
+                }
+            }
+            let e = check(&pos, &flags_for(&[("nope", false)])).unwrap_err();
+            assert!(e.contains("--nope"), "{}: {e}", row.key);
+        }
+    }
+
+    #[test]
+    fn a_flag_that_is_valid_elsewhere_is_refused_on_a_sibling() {
+        for (key, name) in [
+            ("log", "kill"), ("board list", "assignee"), ("board note", "body"), ("gateway restart", "server"), ("gateway status", "replace"),
+            ("task list", "wake"), ("task logs", "wake"), ("task status", "keep"), ("mcp servers", "args-json"), ("mcp call", "def"),
+            ("ui", "replace"), ("scratch", "grep"), ("agent stop", "team"), ("project rename", "session"), ("claude-statusline", "output"),
+        ] {
+            assert!(every_flag_name().contains(name), "{name} is a real flag somewhere");
+            let e = check(&pos_of(key), &flags_for(&[(name, VALUED.contains(&name))])).unwrap_err();
+            assert!(e.contains(&format!("--{name}")), "{key} --{name}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_flag_and_a_form_the_verb_has() {
+        let e = check(&pos_of("board list"), &flags_for(&[("json", false)])).unwrap_err();
+        assert_eq!(e, "unknown flag --json for \"tmm board list\": did you mean --output json? (text that starts with a dash goes after --)");
+        // No --output on a local command: it does not claim a form the verb lacks.
+        let e = check(&pos_of("gateway status"), &flags_for(&[("json", false)])).unwrap_err();
+        assert!(!e.contains("--output") && e.contains("--show-token"), "{e}");
+        // A near miss of a real flag of THIS verb.
+        let e = check(&pos_of("log"), &flags_for(&[("limt", true)])).unwrap_err();
+        assert!(e.contains("did you mean --limit?"), "{e}");
+        let e = check(&pos_of("setup"), &flags_for(&[("x", false)])).unwrap_err();
+        assert!(e.contains("it takes no flags"), "{e}");
+        // Never the value.
+        let e = check(&pos_of("board list"), &flags_for(&[("secret", true)])).unwrap_err();
+        assert!(!e.contains("\"v\"") && e.contains("--secret"), "{e}");
+    }
+
+    #[test]
+    fn a_switch_given_a_value_is_refused_and_wake_keeps_its_recipient_form() {
+        let e = check(&pos_of("scratch"), &flags_for(&[("kill", true)])).unwrap_err();
+        assert!(e.contains("--kill takes no value"), "{e}");
+        let e = check(&pos_of("task start"), &flags_for(&[("wake", true)])).unwrap_err();
+        assert!(e.contains("--wake @lead"), "{e}");
+        assert_eq!(check(&pos_of("task start"), &flags_for(&[("wake", false)])), Ok(()));
+    }
+
+    #[test]
+    fn an_illegal_occurrence_is_never_washed_out_by_a_later_legal_one() {
+        // The flag map keeps the LAST value of a flag; the arity check meets every occurrence first.
+        for line in [
+            &["scratch", "--kill=0", "--kill"][..],
+            &["scratch", "--kill", "--kill=0"],
+            &["scratch", "--kill=0", "--kill", "--kill"],
+            &["task", "start", "x", "--wake=@other", "--wake", "--", "true"],
+            &["task", "start", "x", "--wake", "--wake=@other", "--", "true"],
+            &["task", "start", "x", "--wake=@other", "--wake", "@lead", "--", "true"],
+        ] {
+            let e = refused(line).unwrap_err();
+            assert!(e.contains("takes no value"), "{line:?}: {e}");
+            assert!(!e.contains("@other") && !e.contains("=0"), "the value is not echoed: {e}");
+        }
+        // Legal repetition keeps its meaning: a valued flag last-wins, repeatable ones repeat.
+        assert_eq!(refused(&["log", "--limit=5", "--limit", "6"]), Ok(()));
+        assert_eq!(refused(&["board", "add", "t", "--image", "a.png", "--image=b.png"]), Ok(()));
+        assert_eq!(refused(&["scratch", "--kill", "--kill"]), Ok(()));
+        assert_eq!(refused(&["task", "start", "x", "--wake", "@lead", "--", "true"]), Ok(()));
+    }
+
+    /// Once the parser has decided a token is text, no command may decide again: the only code
+    /// that looks at a dash prefix is the shape function and the splitter that applies it.
+    #[test]
+    fn nothing_downstream_re_guesses_what_is_a_flag() {
+        let src = production();
+        let mut sites = Vec::new();
+        for (n, line) in src.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for needle in ["starts_with(\"-", "starts_with('-", "strip_prefix(\"-", "strip_prefix('-"] {
+                if code.contains(needle) {
+                    sites.push(n + 1);
+                }
+            }
+        }
+        let allowed = [function(src, "flag_shaped"), function(src, "split_flags")];
+        let at = |text: &str| { let i = src.find(text).unwrap(); src[..i].lines().count() };
+        let allowed_lines: Vec<std::ops::Range<usize>> = allowed.iter().map(|f| { let s = at(f) + 1; s..s + f.lines().count() }).collect();
+        let stray: Vec<_> = sites.iter().filter(|n| !allowed_lines.iter().any(|r| r.contains(n))).collect();
+        assert!(stray.is_empty(), "a dash-prefix test outside flag_shaped/split_flags (lines {stray:?}): the parser's decision is final");
+    }
+
+    #[test]
+    fn a_command_the_table_does_not_know_keeps_its_own_unknown_command_answer() {
+        assert!(verb_row(&args(&["frobnicate"])).is_none());
+        assert_eq!(check(&args(&["frobnicate"]), &flags_for(&[("json", false)])), Ok(()));
+        // A word after a known verb that is not a sub-verb falls back to the verb's own row.
+        assert_eq!(verb_row(&args(&["board", "frobnicate"])).map(|r| r.key), Some("board"));
+        assert_eq!(verb_row(&args(&["board"])).map(|r| r.key), Some("board"));
+    }
+
+    // ---- the table held to the code ----------------------------------------------------
+
+    fn production() -> &'static str {
+        let all = include_str!("tmm.rs");
+        &all[..all.find("#[cfg(test)]\nmod tests {").expect("the unit tests start here")]
+    }
+
+    /// The text of `fn name(`, from its signature to the closing brace at column 0.
+    fn function<'a>(src: &'a str, name: &str) -> &'a str {
+        let head = [format!("\nfn {name}("), format!("\nasync fn {name}(")].iter().find_map(|h| src.find(h.as_str())).unwrap_or_else(|| panic!("fn {name}"));
+        let rest = &src[head + 1..];
+        &rest[..rest.find("\n}\n").expect("fn end") + 2]
+    }
+
+    /// The flag names a stretch of source reads: `flags.get("x")`, `flags.contains_key("x")`,
+    /// the repeatable filter `k == "x"`, the `for (flag, key) in [("x", ..)]` pairs, and what the
+    /// helpers it calls read (a helper's own reads are found in its body, transitively).
+    fn reads(src: &str, text: &str) -> BTreeSet<String> {
+        reads_seen(src, text, &mut BTreeSet::new())
+    }
+    fn reads_seen(src: &str, text: &str, seen: &mut BTreeSet<&'static str>) -> BTreeSet<String> {
+        const HELPERS: &[&str] = &["log_search_params", "log_from", "log_before", "search_flag_without_grep", "fork_as_flag", "spawn_params", "registry_def", "image_refs"];
+        let mut found = BTreeSet::new();
+        // A read may be wrapped over several lines (`flags\n    .get("limit")`): read it compacted.
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ").replace(" .get(", ".get(").replace(" .contains_key(", ".contains_key(");
+        let text = compact.as_str();
+        for pattern in ["flags.get(\"", "flags.contains_key(\"", "k == \""] {
+            let mut rest = text;
+            while let Some(i) = rest.find(pattern) {
+                rest = &rest[i + pattern.len()..];
+                found.insert(rest[..rest.find('"').unwrap()].to_string());
+            }
+        }
+        if let Some(i) = text.find("for (flag, key) in [") {
+            let list = &text[i..text[i..].find(']').map(|e| i + e).unwrap()];
+            for pair in list.split("(\"").skip(1) {
+                found.insert(pair[..pair.find('"').unwrap()].to_string());
+            }
+        }
+        for helper in HELPERS {
+            if text.contains(&format!("{helper}(")) && seen.insert(helper) {
+                found.extend(reads_seen(src, function(src, helper), seen));
+            }
+        }
+        found
+    }
+
+    fn row_flags(keys: &[&str]) -> BTreeSet<String> {
+        keys.iter().flat_map(|k| VERB_FLAGS.iter().find(|r| r.key == *k).unwrap_or_else(|| panic!("row {k}")).flags.iter().map(|f| f.to_string())).collect()
+    }
+
+    /// The match in `main`: every arm, as (command word, head up to `=>`, whole text).
+    fn arms(src: &str) -> Vec<(String, String, String)> {
+        let start = src.find("    match (cmd.as_str(), pos) {\n").expect("the dispatch");
+        let body = &src[start..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        let mut starts: Vec<usize> = body.match_indices("\n        (\"").map(|(i, _)| i + 1).collect();
+        starts.push(body.len());
+        starts.windows(2).map(|w| {
+            let text = &body[w[0]..w[1]];
+            let word = text[10..text[10..].find('"').unwrap() + 10].to_string();
+            (word, text[..text.find("=>").unwrap()].to_string(), text.to_string())
+        }).collect()
+    }
+
+    #[test]
+    fn each_dispatch_arm_reads_exactly_what_its_commands_list() {
+        let src = production();
+        let arms = arms(src);
+        let words: BTreeSet<&str> = arms.iter().map(|(w, _, _)| w.as_str()).collect();
+        for word in &words {
+            // The RPC rows of this command word: the local `mcp servers|tools|…` and `task start|…` rows are served by their own functions.
+            let keys: Vec<&str> = VERB_FLAGS.iter().filter(|r| r.ctx && r.key.split(' ').next() == Some(word)).map(|r| r.key).collect();
+            assert!(!keys.is_empty(), "arm {word} has table rows");
+            let read: BTreeSet<String> = arms.iter().filter(|(w, _, _)| w == word).flat_map(|(_, _, text)| reads(src, text)).collect();
+            assert_eq!(read, row_flags(&keys), "the {word} arms read what the {word} rows list (a flag listed on the wrong command, or read without being listed, fails here)");
+        }
+        // Every command word the table serves over RPC has an arm.
+        for row in VERB_FLAGS.iter().filter(|r| r.ctx) {
+            assert!(words.contains(row.key.split(' ').next().unwrap()), "{} has an arm", row.key);
+        }
+    }
+
+    #[test]
+    fn every_guarded_arm_is_reachable_as_a_table_key() {
+        let src = production();
+        for (word, head, _) in arms(src) {
+            // `Some("save")`, `Some("up" | "down" | …)` in the guard: each is a sub-verb of this command.
+            let mut subs = Vec::new();
+            let mut rest = head.as_str();
+            while let Some(i) = rest.find("Some(\"") {
+                rest = &rest[i + 6..];
+                let end = rest.find(')').unwrap();
+                subs.extend(rest[..end].split('|').map(|s| s.trim().trim_matches('"').to_string()));
+            }
+            for sub in subs {
+                let key = format!("{word} {sub}");
+                assert!(VERB_FLAGS.iter().any(|r| r.key == key), "the guard `{word} {sub}` has the table row {key:?}");
+            }
+        }
+        // Defaults the arms apply without a sub-verb word.
+        for (words, key) in [(&["board"][..], "board"), (&["wake"], "wake"), (&["agent"], "agent")] {
+            assert_eq!(verb_row(&args(words)).map(|r| r.key), Some(key));
+        }
+    }
+
+    #[test]
+    fn the_local_commands_are_held_to_their_branches() {
+        let src = production();
+        // Cut a function into (preamble, [(branch name, text)]) at its uniform `        "name" => {` heads.
+        fn branches<'a>(f: &'a str, scrutinee: &str) -> (&'a str, Vec<(String, &'a str)>) {
+            let at = f.find(scrutinee).unwrap_or_else(|| panic!("{scrutinee}"));
+            let (pre, body) = f.split_at(at);
+            let mut heads: Vec<usize> = body.match_indices("\n        \"").map(|(i, _)| i + 1).collect();
+            heads.push(body.len());
+            (pre, heads.windows(2).map(|w| {
+                let text = &body[w[0]..w[1]];
+                (text[9..text[9..].find('"').unwrap() + 9].to_string(), text)
+            }).collect())
+        }
+        let own = |keys: &[&str], without: &[&str]| -> BTreeSet<String> { row_flags(keys).into_iter().filter(|f| !without.contains(&f.as_str())).collect() };
+
+        // task: each branch reads its row; `output` is on the row exactly because the branch prints through `json`.
+        let (pre, task) = branches(function(src, "cmd_task"), "    match verb {");
+        assert!(reads(src, pre).is_empty(), "cmd_task reads nothing before its branches");
+        assert_eq!(task.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["start", "list", "status", "logs", "stop", "rm"]);
+        for (name, text) in &task {
+            let key = format!("task {name}");
+            assert_eq!(reads(src, text), own(&[&key], &["output"]), "{key}");
+            let uses_json = text.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "json");
+            assert_eq!(VERB_FLAGS.iter().find(|r| r.key == key).unwrap().flags.contains(&"output"), uses_json, "{key} lists --output iff the branch prints through json");
+        }
+        // gateway: `service` is read in the shared preamble for "", install and start; the rest per branch.
+        let (pre, gw) = branches(function(src, "cmd_gateway"), "    match sub {");
+        assert_eq!(reads(src, pre), BTreeSet::from(["service".to_string()]));
+        for key in ["gateway", "gateway install", "gateway start"] {
+            assert!(row_flags(&[key]).contains("service"), "{key} owns the shared --service");
+        }
+        for key in ["gateway status", "gateway logs", "gateway restart", "gateway uninstall"] {
+            assert!(!row_flags(&[key]).contains("service"), "{key} does not read --service");
+        }
+        let by_name: std::collections::BTreeMap<&str, BTreeSet<String>> = gw.iter().map(|(n, t)| (n.as_str(), reads(src, t))).collect();
+        assert_eq!(by_name[""], row_flags(&["gateway install"]).difference(&row_flags(&["gateway start"])).cloned().collect::<BTreeSet<_>>());
+        assert_eq!(by_name["status"], row_flags(&["gateway status"]));
+        assert_eq!(by_name["logs"], row_flags(&["gateway logs"]));
+        assert_eq!(row_flags(&["gateway"]), row_flags(&["gateway install"]), "bare gateway is install");
+        for quiet in ["uninstall", "restart"] {
+            assert!(by_name[quiet].is_empty(), "{quiet}");
+            assert!(row_flags(&[&format!("gateway {quiet}")]).is_empty());
+        }
+        // mcp local: no preamble reads; add reads --def, call reads --args-json, the others nothing.
+        let (pre, mcp) = branches(function(src, "cmd_mcp_local"), "    match rest[0].as_str() {");
+        assert!(reads(src, pre).is_empty());
+        for (name, text) in &mcp {
+            assert_eq!(reads(src, text), row_flags(&[&format!("mcp {name}")]), "mcp {name}");
+        }
+        assert_eq!(mcp.iter().map(|(n, _)| n.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["servers", "tools", "schema", "add", "call"]));
+        // ui and the context the RPC commands share are read in main, before the dispatch.
+        let main = function(src, "main");
+        let before_dispatch = &main[..main.find("    match (cmd.as_str(), pos) {").unwrap()];
+        assert!(before_dispatch.contains("cmd_ui(flags.contains_key(\"open\"))") && row_flags(&["ui"]).contains("open"));
+        let context: BTreeSet<String> = reads(src, before_dispatch).into_iter().filter(|n| n != "open" && n != "help").collect();
+        assert_eq!(context, CTX_FLAGS.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), "the Ctx reads exactly the four context flags");
+        for row in VERB_FLAGS.iter().filter(|r| r.ctx) {
+            assert!(!row.flags.iter().any(|f| CTX_FLAGS.contains(f)), "{}: the context flags come from `ctx`, not the row", row.key);
+        }
+    }
+
+    #[test]
+    fn every_flag_the_code_reads_is_listed_somewhere_and_every_listed_flag_is_read() {
+        let src = production();
+        let table_start = src.find("const VERB_FLAGS").unwrap();
+        let outside_table: String = format!("{}{}", &src[..table_start], &src[src[table_start..].find("\n];\n").unwrap() + table_start..]);
+        let read = reads(&outside_table, &outside_table);
+        let listed: BTreeSet<String> = every_flag_name().into_iter().map(String::from).collect();
+        let unlisted: Vec<_> = read.difference(&listed).filter(|n| *n != "help").collect();
+        assert!(unlisted.is_empty(), "read but listed on no command: {unlisted:?}");
+        let unread: Vec<_> = listed.difference(&read).collect();
+        assert!(unread.is_empty(), "listed but read nowhere: {unread:?}");
+        for name in VALUED {
+            assert!(listed.contains(*name), "valued flag --{name} belongs to a command");
+        }
+    }
+
+    #[test]
+    fn what_the_usage_text_shows_each_command_accepts() {
+        let usage_text = USAGE.split("CONTEXT:").next().unwrap();
+        let mut head: Option<String> = None;
+        for raw in usage_text.lines() {
+            let trimmed = raw.trim_start();
+            if let Some(rest) = raw.strip_prefix("  tmm ") {
+                let words: Vec<&str> = rest.split_whitespace().take_while(|w| !w.starts_with(['[', '<', '"', '-', '{'])).collect();
+                head = if words.is_empty() { None } else {
+                    let first = words[0];
+                    let sub = words.get(1).map(|w| w.split('|').next().unwrap());
+                    Some(match sub { Some(s) => format!("{first} {s}"), None => first.to_string() })
+                };
+            } else if !trimmed.starts_with("tmm ") && !raw.starts_with("  ") {
+                head = None; // a section header or prose
+            }
+            let Some(key) = &head else { continue };
+            let row = verb_row(&pos_of(key)).unwrap_or_else(|| panic!("usage names `{key}`"));
+            // Prose in parentheses names other commands' flags ("use task --wake"): not this command's.
+            let mut shown = String::new();
+            let mut depth = 0;
+            for c in trimmed.chars() {
+                match c { '(' => depth += 1, ')' if depth > 0 => depth -= 1, _ if depth == 0 => shown.push(c), _ => {} }
+            }
+            let words = shown.split_whitespace().flat_map(|tok| tok.trim_start_matches(['[', '<']).trim_end_matches([']', '>', ',']).split('|').map(String::from).collect::<Vec<_>>());
+            for word in words {
+                let word = word.as_str();
+                if let Some(name) = word.strip_prefix("--").or_else(|| word.strip_prefix('-')).filter(|n| !n.is_empty() && flag_shaped(word)) {
+                    let name = name.split('=').next().unwrap();
+                    if !row.allows(name) {
+                        panic!("usage shows --{name} under `tmm {key}` ({}) but the table does not accept it: {raw}", row.key);
+                    }
+                }
+            }
         }
     }
 }

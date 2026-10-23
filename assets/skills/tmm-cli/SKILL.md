@@ -12,9 +12,13 @@ exits 2 in ~20ms and NEVER blocks — telemetry must not stop your work.
 Exit codes: `0` ok · `1` local/tmux failure · `2` server unreachable ·
 `3` auth · `4` not found · `5` usage.
 
-Context flags on every command: `--project <session>` (default
-`$TMM_PROJECT`), `--agent <name>` (default `$TMM_AGENT`, else `human`),
-`--server <ws://host:port>`, `--output json` for machine-readable output.
+Context flags on every command that talks to the server: `--project <session>`
+(default `$TMM_PROJECT`), `--agent <name>` (default `$TMM_AGENT`, else `human`),
+`--server <ws://host:port>`, `--output json` for machine-readable output. A flag a
+command does not read is refused (exit 5, naming the form it has), never ignored: the
+JSON flag is `--output json`, not `--json`. The local commands (`tmm task`, `gateway`,
+`mcp servers|tools|call`, `ui`) take only their own flags. Text that looks like a flag
+goes after `--` (`tmm board note 3 -- -json`).
 
 ## Chat (the basics, for completeness)
 

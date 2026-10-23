@@ -982,7 +982,7 @@ mod tests {
     /// the three read doors, as a client calls them — while the store keeps
     /// every value, a listed definition saved back unchanged keeps them, and
     /// a marker with nothing behind it writes nothing. `tmm` reads only these
-    /// answers, so this is also what `tmm mcp list` and the `--json` lists print.
+    /// answers, so this is also what `tmm mcp list` and the `--output json` lists print.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
     fn no_definition_read_carries_an_mcp_value_and_a_listed_definition_saves_back_whole() {

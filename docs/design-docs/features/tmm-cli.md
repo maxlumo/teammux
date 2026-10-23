@@ -54,7 +54,7 @@ tmm ui [--open]                      the web UI this machine's gateway serves: i
 tmm send … --image <path|url>        attach an image by REFERENCE (repeatable)
 tmm log [--since <ts>] [--limit N] [-f]      read chat; --since exclusive (ms), -f follows
 tmm log --grep <text> [--grep …] [--all] [--from <name>] [--global]  search FULL history (any-match, or every term with --all; body+sender; --from keeps one sender, and a --from with no name is a usage error, never a search for everyone; each of --all/--from/--global without --grep is refused, not ignored)
-tmm log --files [--grep <word>…] [--from <name>] [--global] [--limit N] [--before N]  the FILES the room's messages mention, newest first, with their count in the messages read (words narrow the PATHS and are optional; follows the server's page cursor up to --limit files or 20 pages, and a run that stopped early prints the --before N to continue with (--json: next); refuses a gateway whose login lacks the `hub_files` cap before sending anything (an older one refuses the empty search outright), and one that answers without a file page; a named subset of what the feed links)
+tmm log --files [--grep <word>…] [--from <name>] [--global] [--limit N] [--before N]  the FILES the room's messages mention, newest first, with their count in the messages read (words narrow the PATHS and are optional; follows the server's page cursor up to --limit files or 20 pages, and a run that stopped early prints the --before N to continue with (--output json: next); refuses a gateway whose login lacks the `hub_files` cap before sending anything (an older one refuses the empty search outright), and one that answers without a file page; a named subset of what the feed links)
 
 # the task board
 tmm board [list] | show <id>         the kanban; one issue + its note thread
@@ -177,6 +177,67 @@ unreachable · `3` auth rejected · `4` not found (method missing on this
 server — mobile or old build; or no such task) · `5` usage/params.
 Agents and scripts branch on the class without parsing error prose.
 `tmm task *` opens no socket, so it can never return 2 — see below.
+
+## Flags are refused, not ignored (board #456, 2026-10-23)
+
+`tmm board list --json` used to succeed and print the table: the flag was parsed, nothing read
+it, and a script that wrote it believed it had asked for JSON (the flag is `--output json`).
+The rule now: **a flag a command does not read is refused before anything runs.** Exit 5 (tmm's
+usage code; 2 already means "server unreachable", and a script that treats 2 as "carry on"
+would swallow a typo), nothing on stdout, and one stderr line that names the flag (never its
+value) and a form THIS command has:
+`tmm: unknown flag --json for "tmm board list": did you mean --output json? (text that starts with a dash goes after --)`.
+The suggestion comes only from that command's own flags (the alias `json` -> `--output json`
+where the command has `--output`, else the nearest flag within two edits, else the flag list).
+
+- **One table, no global set.** `VERB_FLAGS` in `tmm.rs` is the only list of what each command
+  accepts, keyed by verb path (`board add`, `task logs`, `gateway status`). `ctx` adds the four
+  flags every RPC command reads through its Ctx (`--project`, `--agent`, `--server`,
+  `--output`). The local commands (`task start|list|status|logs|stop|rm`, `gateway`, `mcp
+  servers|tools|schema|add|call`, `ui`, `setup`, `claude-statusline`) never build a Ctx and list
+  only what their own branch reads: `tmm gateway restart --server ws://other` is refused instead
+  of restarting THIS machine's service, and `tmm mcp servers --output json` is refused because
+  that code never printed JSON. There are no compatibility exceptions: a script that leaned on
+  an ignored flag is told. `--help` is answered first, so `tmm board list --nope --help` prints
+  the usage and exits 0; it is the one exception. A command the table does not know keeps the
+  dispatcher's own unknown-command answer.
+- **Where it runs.** `refuse_unknown_flags` is called once in `main`, right after
+  `parse_command_line`, before the local subtrees, before `Config::load()` (which would seed a
+  `config.toml`), before any socket, window or service call. `tests/tmm_flags.rs` runs the
+  refusals with an empty HOME and a PATH that has no tmux and asserts nothing was created.
+- **What is a flag.** An argument is a flag only if it has a flag's shape,
+  `^--?[A-Za-z][A-Za-z0-9_-]*(=.*)?$`. Everything else that begins with `-` is text: a markdown
+  bullet `- done`, a lone `-` (`board assign 3 -`), a negative number. Before this, `tmm board
+  note 3 "- done"` made " done" a flag and the note lost its words without a word.
+- **Values.** A valued flag written `--name value` takes the next token only if there is one and
+  it is not itself flag-shaped; otherwise `--name needs a value` (`--limit --grep x` used to
+  swallow `--grep`). `-5` and `- x` are values. `--name=value` takes everything after the first
+  `=`, empty included: `--model=` and `--effort=` stay the explicit "clear it" form and
+  `--body=--literal` is a literal. A switch given a value (`--kill=1`) is refused.
+  `--wake [@who]` stays a boolean plus the positional recipient after the task name (`--wake=@lead`
+  is refused with that spelling). `--args-json` joined the valued flags: it was not one, so the
+  documented `mcp call s t --args-json '{...}'` died on "tool arguments are key=value".
+- **`--`.** A bare `--` ends flag parsing. `task start <name> -- <cmd...>` keeps the rest as an
+  opaque command (recognised from the positionals the flag metadata produced, so leading context
+  flags do not change it). For every other command, `task list` included, the rest is ordinary
+  text; before this it was silently dropped, so `tmm board note 3 -- -json` recorded nothing.
+- **How the table is held to the code.** `tmm.rs` tests read this file's own source: every flag
+  read anywhere is listed and every listed flag is read; each dispatch arm group reads exactly
+  the flags its rows list (a flag hung on the wrong command fails); the local functions are cut
+  into their branches and each branch is held to its own row (`--wake` on `task list` fails;
+  `service` is the shared `gateway` preamble and is owned by `gateway`, `gateway install`,
+  `gateway start`); the usage text's flags are accepted by the command they are shown under; every
+  guarded arm has a key. `tests/tmm_flags.rs` covers what a scan of arms cannot, the sub-verbs
+  that share one arm: for each sub-verb-specific flag, changing the flag's value changes what is
+  sent or printed (`board add --assignee`, `project rename --name`, `review add --cols`, ...).
+  Not proven by any test: that a flag shared by EVERY sub-verb of one arm is read by each.
+  The `task start x -- <cmd>` pass-through of `--release`/`--json` is proven at the parse level
+  only (`parse_command_line`, including leading context flags); no test here starts a real task,
+  so a real start is checked by hand (the validator's rig), not claimed by the suite.
+  Every occurrence of `--name=value` is checked for its flag's arity before the occurrences are
+  merged, so `--kill=0 --kill` is refused in either order; a text after `--` is the board title
+  as typed (`board add --body kept -- --literal` files `--literal`), no command re-guesses what a
+  positional is.
 
 ## Background tasks (`tmm task`) — local tmux, no server
 
@@ -338,7 +399,7 @@ prompt read as "run any command as a task".
   (a plain dead window is not ours). A verb reaps AFTER its own work and
   shields its own target, so `logs`/`status`/`rm` on an expired task still
   answer; `list` reaps first so what it prints is what exists. Reaped names go
-  to stderr (`--json` stdout stays clean).
+  to stderr (`--output json` stdout stays clean).
 - **`stop` finishes**: C-c → TERM → KILL as before, then it prints the last
   20 lines (`STOP_TAIL_LINES`) and CLOSES the window; `--keep` leaves it (and
   `logs` still reads it). Stopping an already finished task closes it too.
