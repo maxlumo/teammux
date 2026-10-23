@@ -43,7 +43,7 @@
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createMembers } from './lib/app/server-members.svelte.ts';
-  import { createRefusedAttempts, REFUSED_KEY, REFUSED_ASIDE_KEY } from './lib/app/refused-attempts.ts';
+  import { asideKey, createRefusedAttempts, REFUSED_KEY } from './lib/app/refused-attempts.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
   import { createBoardUnion, createHubUnion } from './lib/app/hub-union.svelte.ts';
@@ -1366,7 +1366,7 @@
     failed: () => { if (!windowDrain.ended) storageFailed(); },
     // An unreadable record is reset once (validator V4): kept aside for
     // diagnosis, said on the Connection page, and every member dials again.
-    aside: (text) => { localStorage.setItem(REFUSED_ASIDE_KEY, text); },
+    aside: (text) => { localStorage.setItem(asideKey(localStorage), text); },
     reset: () => { if (!windowDrain.ended) membershipError = t('refusalsReset'); },
     // Decided: an unpublished member joins again (sync), and a loop that was
     // waiting on the comparison — a published member's — asks again (wake).

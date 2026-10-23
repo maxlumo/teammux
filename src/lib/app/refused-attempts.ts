@@ -20,8 +20,10 @@
 //   another token is the repair. Only a server the stored fact names is.
 // - A stored value that cannot be READ (junk, a digest of the wrong shape) is
 //   a corruption, not a refusal (validator V4 on f20d1ea0; ruling): it is
-//   reset ONCE — moved aside under REFUSED_ASIDE_KEY (never deleted), the
-//   store emptied, the reset reported (`reset`) — and every member dials as
+//   reset ONCE — moved aside under the first free key of REFUSED_ASIDE_KEY,
+//   REFUSED_ASIDE_KEY.2, … (`asideKey`: never deleted, never overwritten by
+//   a later corruption), the store emptied, and only then the reset
+//   reported (`reset`; an emptying that fails goes to `failed` instead) — and every member dials as
 //   on a fresh device. A refusal re-records on its first answer: after a
 //   reset the exposure is one auth failure per refused pair, the same as a
 //   first load on a fresh device. If the value cannot be moved aside it is
@@ -36,6 +38,14 @@ import type { ServerId } from './refs.ts';
 export const REFUSED_KEY = 'tmux_refused_tokens';
 /** Where an unreadable REFUSED_KEY value is kept, for diagnosis. */
 export const REFUSED_ASIDE_KEY = 'tmux_refused_tokens_unreadable';
+/** The first key an unreadable value can be kept under without replacing
+ * one kept before: REFUSED_ASIDE_KEY, then REFUSED_ASIDE_KEY.2, .3, … */
+export function asideKey(storage: { getItem(key: string): string | null }): string {
+  if (storage.getItem(REFUSED_ASIDE_KEY) == null) return REFUSED_ASIDE_KEY;
+  let n = 2;
+  while (storage.getItem(`${REFUSED_ASIDE_KEY}.${n}`) != null) n++;
+  return `${REFUSED_ASIDE_KEY}.${n}`;
+}
 /** Pairs kept per server: a refusal per address it has; more is old history. */
 const MAX_PER_SERVER = 8;
 
@@ -63,7 +73,7 @@ export interface RefusedAttempts {
 export interface RefusedDeps {
   read(): string | null;
   write(text: string | null): void;
-  /** Keep an unreadable value under REFUSED_ASIDE_KEY; throws when it
+  /** Keep an unreadable value under `asideKey`; throws when it
    * cannot. Absent: it cannot, so the value is left in place. */
   aside?: (text: string) => void;
   /** The stored value was unreadable and has been reset (moved aside). */
@@ -106,7 +116,9 @@ export function createRefusedAttempts(deps: RefusedDeps): RefusedAttempts {
       queueMicrotask(() => {
         try { if (!deps.aside) throw new Error('nowhere to keep it'); deps.aside(junk); } catch { deps.failed(); return; }
         pinned = false;
-        try { deps.write(null); } catch { deps.failed(); }
+        // Said reset only once it is: an emptying that failed is a storage
+        // failure, and the old value is still where it was.
+        try { deps.write(null); } catch { deps.failed(); return; }
         deps.reset?.();
       });
     }

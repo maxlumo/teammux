@@ -1315,9 +1315,12 @@ stored value that cannot be READ (junk, a digest that is not 64 hex) is a
 corruption, not a refusal (validator V4 on f20d1ea0: fail-closed there made
 every member unknown on that device, a correct token included, with no
 repair but a token the server would refuse): it is RESET once — moved aside
-under `tmux_refused_tokens_unreadable` (never deleted), the store emptied,
-the Connection page says "The refusal records on this device were unreadable
-and have been reset" — and every member dials as on a fresh device. A
+under `tmux_refused_tokens_unreadable`, or `….2`, `….3` when an earlier one is
+kept (never deleted, never replaced by a later corruption), the store
+emptied, and only then the Connection page says "The refusal records on this
+device were unreadable and have been reset" (an emptying that fails goes to
+`storageFailed` and says nothing of a reset) — and every member dials as on
+a fresh device. A
 refusal records again on its first answer, so the exposure is one auth
 failure per refused pair, the same as a first load on a fresh device (joins
 run in parallel and refusals are per member: k entries with k wrong tokens

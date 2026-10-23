@@ -808,7 +808,7 @@ function editable(addresses: string[]) {
   return {
     storage: { getItem: (k: string) => (map.has(k) ? map.get(k)! : null) },
     /** The person edits the connection: these addresses now. */
-    set: (list: string[]) => put(list),
+    set: (list: string[], token?: string) => put(list, token),
     /** The entry is removed. */
     remove: () => { map.set('tmux_servers', '[]'); },
   };
@@ -858,3 +858,23 @@ test('the decided pair is what connect receives: the token the loop checked, in 
   await h.timers.advance(10);
   assert.deepEqual(sent, [`${LAN} t`]);
 });
+
+for (const window of ['probe', 'host wait'] as const) {
+  test(`after the ${window}: the token was edited meanwhile to one that is ok at the chosen address — the attempt chooses again with the new token; the old one is never sent (#458 validator P2-Z4b on c23e9a7a)`, async () => {
+    const s = editable([LAN, TS]);
+    const sent: string[] = [];
+    let edited = false;
+    const edit = () => { if (!edited) { edited = true; s.set([LAN, TS], 't2'); } };
+    const h = harness({
+      storage: s.storage, eligible: () => 'ok',
+      findBest: async () => { if (window === 'probe') edit(); return TS; },
+      ...(window === 'host wait' ? { beforeDial: async () => { edit(); } } : {}),
+      connectImpl: async (u, t) => { sent.push(`${u} ${t}`); },
+    });
+    h.machine.start();
+    for (let i = 0; i < 4; i++) await h.timers.advance(1000);
+    assert.ok(edited, 'the edit landed during the window');
+    assert.deepEqual(sent, [`${TS} t2`], 'one dial, with the edited token');
+    assert.ok(h.events.some((e) => e.success) && !h.events.some((e) => e.gaveUp));
+  });
+}

@@ -3,7 +3,7 @@
 // comparison and an unknowable one both fail closed, and neither is "no refusal".
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRefusedAttempts } from './refused-attempts.ts';
+import { asideKey, createRefusedAttempts, REFUSED_ASIDE_KEY } from './refused-attempts.ts';
 
 const sha256 = async (text: string) => Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))).toString('hex');
 // Web Crypto answers on the real event loop; under a loaded test run one turn of 20 ms is not always enough.
@@ -93,4 +93,28 @@ test('a write that fails is reported; without Web Crypto the fact is this page s
   assert.equal(noCrypto.check('x', 'ws://x:1', 'T'), 'ok', 'a server the stored fact does not name is dialled');
   noCrypto.add('c', 'ws://c:1', 'T');
   assert.equal(noCrypto.check('c', 'ws://c:1', 'T'), 'refused', 'kept in memory, not written');
+});
+
+test('an emptying that fails after the value is kept aside is a storage failure, never reported as reset (#458 review P2 on c23e9a7a)', async () => {
+  let aside: string | null = null;
+  let failed = 0;
+  let resets = 0;
+  const r = createRefusedAttempts({ read: () => '{broken', write: () => { throw new Error('QuotaExceededError'); }, aside: (t) => { aside = t; }, reset: () => { resets++; }, failed: () => { failed++; }, ready: () => {}, digest: sha256 });
+  assert.equal(r.check('b', 'ws://b:1', 'T'), 'ok', 'members dial all the same');
+  await settle();
+  assert.equal(aside, '{broken', 'kept aside');
+  assert.equal(failed, 1, 'the failed emptying goes to the storage error handling');
+  assert.equal(resets, 0, 'and nothing says it was reset');
+});
+
+test('a later corruption is kept under the next free key, never over one kept before (#458 validator P2 on c23e9a7a)', () => {
+  const m = new Map<string, string>();
+  const storage = { getItem: (k: string) => m.get(k) ?? null };
+  assert.equal(asideKey(storage), REFUSED_ASIDE_KEY);
+  m.set(asideKey(storage), 'first');
+  assert.equal(asideKey(storage), `${REFUSED_ASIDE_KEY}.2`);
+  m.set(asideKey(storage), 'second');
+  assert.equal(asideKey(storage), `${REFUSED_ASIDE_KEY}.3`);
+  assert.equal(m.get(REFUSED_ASIDE_KEY), 'first');
+  assert.equal(m.get(`${REFUSED_ASIDE_KEY}.2`), 'second');
 });

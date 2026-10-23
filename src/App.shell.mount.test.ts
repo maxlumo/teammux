@@ -5382,6 +5382,15 @@ test('#458 validator V4 (ruling): an unreadable refusal record is reset once —
   assert.equal(w.ls.getItem('tmux_refused_tokens_unreadable'), 'not json {', 'the kept value is not touched');
 });
 
+test('#458 validator P2 on c23e9a7a: a second corruption is kept under the next key — the value kept before is never replaced', async (context) => {
+  const w = await choiceWorld(context, { seed: { tmux_refused_tokens: 'second junk', tmux_refused_tokens_unreadable: 'first junk' } });
+  for (let i = 0; i < 10; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); }
+  assert.equal(w.ls.getItem('tmux_refused_tokens_unreadable'), 'first junk', 'the earlier kept value stays');
+  assert.equal(w.ls.getItem('tmux_refused_tokens_unreadable.2'), 'second junk', 'the new one is kept beside it');
+  assert.equal(w.ls.getItem('tmux_refused_tokens'), null, 'the store is emptied');
+  assert.match(w.h.app.document.querySelector('.preferences')?.textContent ?? '', /unreadable and have been reset/iu);
+});
+
 test('#458: only a pick starts a retry budget — a given-up member is not dialled by the choice; one pick starts one loop', async (context) => {
   const w = await choiceWorld(context, { down: ['b'] });
   // B fails until its own loop gives up.
