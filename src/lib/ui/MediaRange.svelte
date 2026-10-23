@@ -25,6 +25,15 @@
   // adjustment is never eaten by an old mark.
   // Its keydown never reaches the player, so the player's own Left/Right
   // shortcut never fires on top of the range's step.
+  // ONE value, ONE geometry (board #462): the dot and the filled line are both
+  // ours, both placed by `--p` (value / max, unsnapped). The browser's own thumb
+  // used to be the dot, and it was a second reading: snapped to `step` (whole
+  // seconds) while the line was not, and travelling one radius inside each end
+  // while the line ran end to end, so it trailed or led the line by up to 13 px
+  // on a 30 s clip. The native thumb stays, invisible and the dot's size, so
+  // the range keeps every pointer, key and AT gesture and maps a pointer the
+  // way it always did; the track is inset by the same radius, so the line's
+  // edge, the dot's centre and that mapping are one line.
   let { value, max, step = 1, label, valuetext, disabled = false, buffered = [], waiting = false, epoch = 0,
     onpreview, oncommit, oncancel }:
     { value: number; max: number; step?: number; label: string; valuetext: string; disabled?: boolean;
@@ -64,11 +73,12 @@
   $effect(() => () => { if (kind) oncancel(tx); kind = null; unpress(); });
 </script>
 
-<div class="media-range" class:waiting>
+<div class="media-range" class:waiting class:disabled style:--p={pct(value) / 100}>
   <div class="mr-track" aria-hidden="true">
     {#each buffered as b, i (i)}<span class="mr-buf" style:left="{pct(b.start)}%" style:width="{pct(b.end - b.start)}%"></span>{/each}
-    <span class="mr-played" style:width="{pct(value)}%"></span>
+    <span class="mr-played"></span>
   </div>
+  <span class="mr-thumb" aria-hidden="true"></span>
   <!-- Native ranges sanitize value immediately, so constraints come first. -->
   <input type="range" min="0" {max} {step} {value} {disabled} aria-label={label} aria-valuetext={valuetext}
     bind:this={input}
@@ -104,10 +114,20 @@
 </div>
 
 <style>
-  .media-range { position: relative; flex: 1; min-width: 0; height: var(--control-height); display: flex; align-items: center; }
-  .mr-track { position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; pointer-events: none; }
+  .media-range { --mr-dot: 14px; position: relative; flex: 1; min-width: 0; height: var(--control-height); display: flex; align-items: center; }
+  /* Inset by the dot's radius: the native thumb's centre travels exactly this
+     span, so the line's edge and the dot's centre meet it at every value. */
+  .mr-track { position: absolute; left: calc(var(--mr-dot) / 2); right: calc(var(--mr-dot) / 2); height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; pointer-events: none; }
   .mr-buf { position: absolute; top: 0; bottom: 0; background: var(--text3); }
-  .mr-played { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-ink); transition: opacity var(--t-fast); }
+  .mr-played { position: absolute; left: 0; top: 0; bottom: 0; width: calc(var(--p) * 100%); background: var(--accent-ink); transition: opacity var(--t-fast); }
+  /* The dot: the same --p over the same inset span, centred on the line's
+     edge; nothing on its position moves by a transition. */
+  .mr-thumb {
+    position: absolute; left: calc(var(--mr-dot) / 2 + var(--p) * (100% - var(--mr-dot))); top: 50%;
+    width: var(--mr-dot); height: var(--mr-dot); transform: translate(-50%, -50%);
+    border-radius: 50%; background: var(--accent-ink); pointer-events: none;
+  }
+  .disabled .mr-thumb { background: var(--text3); }
   .waiting .mr-played { opacity: 0.6; }
   input {
     position: relative; width: 100%; height: 100%; margin: 0; background: transparent;
@@ -116,12 +136,12 @@
   input:disabled { cursor: default; }
   input::-webkit-slider-runnable-track { height: 100%; background: transparent; }
   input::-moz-range-track { background: transparent; }
+  /* The native thumb: the dot's size, so its centre spans the inset track, and
+     never painted (the dot above is). */
   input::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin-top: calc((var(--control-height) - 14px) / 2);
-    border: 0; border-radius: 50%; background: var(--accent-ink);
+    -webkit-appearance: none; appearance: none; width: var(--mr-dot); height: var(--mr-dot);
+    margin-top: calc((var(--control-height) - var(--mr-dot)) / 2); border: 0; background: transparent;
   }
-  input::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--accent-ink); }
-  input:disabled::-webkit-slider-thumb { background: var(--text3); }
-  input:disabled::-moz-range-thumb { background: var(--text3); }
+  input::-moz-range-thumb { width: var(--mr-dot); height: var(--mr-dot); border: 0; background: transparent; }
   @media (prefers-reduced-motion: reduce) { .mr-played { transition: none; } }
 </style>

@@ -205,3 +205,29 @@ test('source pin: min, max and step are written before value (#453)', () => {
   assert.match(src, /<input type="range" min="0" \{max\} \{step\} \{value\}/u);
   assert.match(src, /touch-action: none/u, 'a drag on the bar is a seek, never a page gesture');
 });
+
+test('one value: the played line and the dot both read --p, the unsnapped value / max, on the same inset span (#462)', async (context) => {
+  const { app } = await bar(context);
+  try {
+    const host = app.document.querySelector<HTMLElement>('.media-range')!;
+    assert.equal(host.style.getPropertyValue('--p'), String(10 / 600), 'value / max as a fraction, set once on the bar');
+    assert.equal(app.document.querySelector<HTMLElement>('.mr-played')!.getAttribute('style'), null, 'the line has no width of its own');
+    assert.ok(app.document.querySelector('.mr-thumb[aria-hidden="true"]'), 'the dot is painted by the bar, not by the browser');
+  } finally { await app.close(); }
+});
+
+test('source pin: the dot and the line share --p and the --mr-dot inset, the native thumb is that size and unpainted, and nothing on a position transitions (#462)', () => {
+  const src = readFileSync(new URL('./MediaRange.svelte', import.meta.url), 'utf8');
+  const css = /<style>([\s\S]*?)<\/style>/u.exec(src)![1]!;
+  const rule = (sel: string) => new RegExp(`${sel.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\s*\\{([^}]*)\\}`, 'u').exec(css)?.[1] ?? '';
+  assert.match(rule('.mr-track'), /left: calc\(var\(--mr-dot\) \/ 2\); right: calc\(var\(--mr-dot\) \/ 2\)/u, 'the track is inset by the dot radius');
+  assert.match(rule('.mr-played'), /width: calc\(var\(--p\) \* 100%\)/u, 'the line edge is --p of the inset track');
+  assert.match(rule('.mr-thumb'), /left: calc\(var\(--mr-dot\) \/ 2 \+ var\(--p\) \* \(100% - var\(--mr-dot\)\)\)/u, 'the dot centre is --p of the same span');
+  assert.match(rule('input::-webkit-slider-thumb'), /width: var\(--mr-dot\); height: var\(--mr-dot\)[\s\S]*background: transparent/u, 'the native thumb: the dot\'s size, never painted');
+  assert.match(rule('input::-moz-range-thumb'), /width: var\(--mr-dot\); height: var\(--mr-dot\);[\s\S]*background: transparent/u);
+  for (const sel of ['.mr-played', '.mr-thumb']) {
+    const tr = /transition:\s*([^;]+)/u.exec(rule(sel))?.[1] ?? '';
+    assert.doesNotMatch(tr, /width|left|transform|all/u, `${sel}: no transition on its position (a second tempo)`);
+  }
+  assert.doesNotMatch(src, /style:width="\{pct\(value\)\}%"/u, 'no second reading of the value for the line');
+});

@@ -545,6 +545,7 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   request per seek: how many requests a seek costs is the element's.
 - **Buffer.** The track paints `el.buffered` and the played part; no buffer
   of our own. While `waiting` during playback, the played part dims.
+- **One value, one geometry** (board #462; owner 2026-10-24 "播放进度条圆点和下边高亮线不同步，圆点慢半拍"). The dot and the played line are both painted by `MediaRange` from one `--p` (value / max, unsnapped) over the track inset by the dot's radius; the browser's thumb stays only as the invisible, same-size hit/mapping element. It used to be the dot: snapped to `step` (whole seconds) and travelling one radius inside each end, it trailed or led the line by up to 13 px (mean 4.4 px) on a 30 s clip at 360 px. Measured as geometry per value, not as frames of real playback: each value from 0 to 30 s every 0.25 s rendered statically in headless Chromium 153 and the dot's centre and the line's edge read from pixels, they now coincide at every value but t = 0, where the line has no width and the reading falls back to 0 against the track start at 7 px (mean 0.06 px). With `step="any"` the native mapping of a pointer at x gives the value whose dot centre, by the same formula, is x; in production (`step` 1) a drag moves in whole seconds, the dot and the line together.
 - **Gestures.** A tap on the picture shows or hides the bar (never plays); a
   double tap in the left/right third seeks −10/+10 s within 250 ms. Nothing
   in the bar reaches the picture or Files' edge swipe, and the bar takes no
