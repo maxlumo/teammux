@@ -629,7 +629,6 @@
     transition: color var(--t-move) ease;
     /* No native tap flash: the platform's grey block on touch was the "方块"
        the owner saw at the instant of tapping the name (2026-09-25). */
-    -webkit-tap-highlight-color: transparent;
   }
   .team-label:hover, .team-label[aria-pressed="true"] { color: var(--text); }
   .team-label:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
@@ -766,7 +765,6 @@
     min-height: var(--control-height); min-width: var(--control-height);
     border: 0; border-radius: var(--ui-radius-row); background: transparent; color: inherit;
     padding: 0 var(--roster-card-inset); text-align: left; cursor: pointer; font-size: var(--fs-ui);
-    -webkit-tap-highlight-color: transparent;
   }
   .agent-select:focus-visible { outline-color: var(--accent-ink); outline-offset: 0; }
   /* Only a live card carries a dot, so only it reserves the Stop's room. */

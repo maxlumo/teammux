@@ -1089,7 +1089,6 @@
     padding: 10px 10px 10px 12px;
     cursor: pointer;
     min-width: 0;
-    -webkit-tap-highlight-color: transparent;
   }
   .session-row:hover { background: var(--surface2); }
   .session.active .session-row:hover { background: transparent; }
@@ -1195,7 +1194,6 @@
     align-items: center;
     justify-content: center;
     transition: color var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
 
   /* ─── Pane list (expanded) ──────────────────────────── */
@@ -1228,7 +1226,6 @@
     text-align: left;
     font-size: var(--fs-body);
     min-width: 0;
-    -webkit-tap-highlight-color: transparent;
   }
   .pane:active { background: var(--surface2); border-radius: var(--ui-radius-control); }
   .pane-id {
@@ -1282,7 +1279,6 @@
     align-items: center;
     justify-content: center;
     transition: color var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
   .pane-add {
     display: flex;
@@ -1298,7 +1294,6 @@
     color: var(--text3);
     font-size: var(--fs-sub);
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
   }
   .pane-add:active {
@@ -1348,7 +1343,6 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), border-color var(--t-fast);
   }
   .new-btn:active { color: var(--accent); border-color: var(--accent); }
@@ -1362,7 +1356,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), border-color var(--t-fast);
   }
   .refresh-icon:active { color: var(--accent); border-color: var(--accent); }

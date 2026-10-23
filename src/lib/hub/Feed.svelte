@@ -1170,7 +1170,6 @@
     word-break: break-word; overflow-wrap: anywhere; cursor: text;
     box-shadow: 0 1px 2px rgba(0,0,0,0.10);
     transition: border-color var(--t-fast) ease, box-shadow var(--t-fast) ease;
-    -webkit-tap-highlight-color: transparent;
   }
   .bubble:hover { border-color: var(--input-border); }
   .msg.me .bubble {

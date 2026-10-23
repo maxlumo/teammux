@@ -1235,7 +1235,7 @@
     display: grid; place-items: center;
     border: none; border-radius: var(--ui-radius-control); background: none;
     color: var(--text3); cursor: grab; touch-action: none;
-    -webkit-tap-highlight-color: transparent; transition: color var(--t-fast), background var(--t-fast);
+ transition: color var(--t-fast), background var(--t-fast);
   }
   .addr-grip:hover:not(:disabled) { color: var(--text2); background: var(--bg3); }
   .addr-grip:disabled { opacity: 0.4; cursor: default; }

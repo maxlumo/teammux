@@ -74,7 +74,6 @@
     background: transparent; color: var(--text2); cursor: pointer; letter-spacing: 0;
     font: 500 var(--fs-ui)/var(--control-line-height) var(--font-display);
     transition: color var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
   .command-button::before {
     content: ''; position: absolute; inset: var(--control-paint-inset) 0;

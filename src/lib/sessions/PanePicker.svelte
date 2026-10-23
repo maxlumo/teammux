@@ -212,7 +212,6 @@
     border: 1px solid var(--border2); border-radius: var(--control-paint-radius);
     background: var(--input-bg); color: var(--text3);
     cursor: pointer; display: flex; align-items: center; justify-content: center;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
   }
   .picker-add:active { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }

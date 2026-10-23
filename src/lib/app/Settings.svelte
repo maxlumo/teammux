@@ -468,7 +468,6 @@
     font-weight: 600;
     cursor: pointer;
     transition: transform var(--t-fast) ease, filter var(--t-fast) ease, opacity var(--t-fast) ease;
-    -webkit-tap-highlight-color: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -489,7 +488,7 @@
     width: 100%; margin-top: 8px; padding: 10px;
     border: 1px solid var(--border); border-radius: var(--ui-radius-panel);
     background: none; color: var(--text2); font-size: var(--fs-ui); font-weight: 600;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
     display: flex; align-items: center; justify-content: center; gap: 6px;
     transition: color var(--t-fast), border-color var(--t-fast), transform var(--t-fast);
   }
@@ -498,7 +497,7 @@
   .cancel-btn {
     padding: 13px 20px; border: 1px solid var(--border); border-radius: var(--ui-radius-panel);
     background: none; color: var(--text2); font-size: var(--fs-body); font-weight: 600;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
   }
 
   .spinner {

@@ -376,7 +376,8 @@ test('team tabs use the reference pill, broken baseline and raised member contou
     'a word, not a block: the pill read as a big square beside the tabs (owner, 2026-09-24)');
   assert.match(source, /\.team-label:hover, \.team-label\[aria-pressed="true"\] \{ color: var\(--text\); \}/u, 'it speaks through ink alone');
   assert.doesNotMatch(source, /\.team-label:hover \{ background/u, 'no wash returns on hover');
-  assert.match(rule('.team-label'), /-webkit-tap-highlight-color: transparent/u, 'no native tap flash on the name (owner, 2026-09-25)');
+  // No native tap flash on the name (owner, 2026-09-25) — now the root's one rule (app.css, board #392), inherited here.
+  assert.doesNotMatch(source, /tap-highlight/u, 'not a per-class copy of the root rule');
   assert.match(source, /\.all-choice :global\(\.command-button\.engaged\),\n\s*\.all-choice :global\(\.command-button\.engaged:hover:not\(:disabled\)\),\n\s*\.all-choice :global\(\.command-button\.engaged:active:not\(:disabled\)\) \{ --command-paint: transparent; \}/u,
     'the selected All stays washless on hover and after a tap, not only at rest');
   assert.match(rule('.roster.compact .team-label'), /min-width: var\(--control-height\); min-height: var\(--control-height\)/u,

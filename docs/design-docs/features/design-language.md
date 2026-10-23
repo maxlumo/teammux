@@ -297,7 +297,14 @@ danger semantics.
   reorders with `animate:flip` on `moveMs()`; exits are cuts, layout is never
   animated, `svelte/transition` is not used. The full principles, vocabulary
   and the 2026-09-03 plan: [motion.md](motion.md); `ui/motion.source.test.ts`
-  pins it.
+  pins it. **No stylesheet names a transition duration, or `transition: all`** (board #392, the
+  validator's finding on #391: `transition: all 300ms` on a control passed every test, so the next
+  component would have re-grown its own speed): `ui/tokens.source.test.ts` scans every
+  `<style>` and `.css` in `src` for a time literal in `transition`/`transition-duration`, and each
+  exception is ONE declaration in ONE rule, bound to its file, selector and value and counted once, listed there
+  by reason — the 0.3s THEME cross-fade (app.css `body` and scrollbar thumb, App.svelte `main, nav`) and the fade
+  of xterm's own overlay scrollbar — so the same value on a new control, or twice, is a new tempo and fails.
+  Delays (stagger) are not tempo.
 - **Navigation motion grammar** (owner, 2026-08-25: "对于交互动效也应该有
   规范，大家都共同遵守"): ONE slide language, 120ms linear translateX(40%),
   for every navigation — no fades, no scales, no second tempo. Direction is
@@ -941,10 +948,63 @@ by the contract above, not extended by new page-local overrides.
   rotation on an inner wrapper so its own centring transform stays put); the
   list itself does not animate beyond the "invisible until measured" guard.
 
-## 4 · Hover / active (desktop), two families only
+## 4 · Hover / active, two families only
 
 Configuration commands use the scoped state matrix in §3; the legacy
 press-scale/brightness details below do not override it.
+
+**Hover is a pointer's paint; a finger gets the same paint while it presses, and only then (board
+#392, 2026-10-16).** Owner: "应用里还是有很多按钮，点击的时候背景不太对。背景应该只是按钮的这个区域，现在经常点击
+下去，背景就是一片非常大的方框，看起来非常丑，尤其是在设置页面". Two causes, both measured in Chromium with
+touch emulation (`hover: none`, `any-pointer: coarse`) on 14–16 phone pages (Chat, Board, Files, Terminal,
+all of Settings, the project drawer): **(1)** a tap sets `:hover` and nothing clears it until the next
+tap elsewhere — a Settings `.side-row` still had `:hover` true and its `--surface2` wash on the whole
+374×44 row 1.5 s after the finger lifted (the family-2 wash was correct for a pointer and a stuck slab
+for a finger); **(2)** the browser's own tap flash, `rgba(0,0,0,.18)` over the control's whole border
+box, square-cornered, on every control that had not declared `-webkit-tap-highlight-color` itself — it
+had been added class by class in 54 places, and each control added after them flashed: the Settings
+segmented controls (`.state-ctl`, 79–119×44), the server rows (`.sm-pick.menu-item`, 266×80), the address
+row (358×44), the chat's agent rows (`.start-row`, 370×44), the composer field, the Files breadcrumb, the
+About link. Before, over 271 controls: 36 flashed (11 classes), 142 held a hover paint (15 classes, the
+widest 374×44). After, over 276: 0 and 0, and 155 (not 114) paint on press. The rule, in two places:
+`html { -webkit-tap-highlight-color: transparent }` in app.css, inherited by everything, and no stylesheet
+re-declares it (the 54 copies are gone); and `scripts/hover-guard.mjs`, a PostCSS plugin on every
+stylesheet (app.css and each component's `<style>`), which wraps a `:hover` rule in
+`@media (hover: hover), (pointer: none)` — a pointer that can hover, or no pointing device at all, which is
+what a headless browser reports (`hover: none`, `pointer: none`; measured) and a test rig drives with synthetic
+hovers: guarded on `hover: hover` alone, every hover in a headless Chromium disappeared and a live check of a
+hover wash read as a regression; a phone reports `pointer: coarse` and is in neither branch — and,
+when the rule only repaints its subject (colour, background, border colour, shadow, filter, a paint
+variable) and the selector has no `:active` rule of its own, adds the same declarations under `:active`
+right after. A list is split (`:is(:hover, .cur)` keeps `.cur` everywhere); a rule that reveals or moves
+something (`opacity`, `display`) is guarded and given no press. Selectors and media conditions are READ WITH
+css-tree's parser (a first-match regex rewriter let four shapes through the review; the parser is the fix, not a
+longer list of examples). Accepted: exactly one `:hover` per selector, either in a plain compound or as a member of
+ONE flat `:is()`/`:where()` that is a direct part of the selector, whose alternatives are plain classes and
+argument-less pseudo-classes of the same weight as `:hover` (so splitting cannot lower the hover arm's
+specificity). Everything else throws at build time naming the selector: `:hover` inside `:not()`, `:has()`,
+`:nth-child(of)` or a nested group, a second `:hover`, an id / type / attribute / combinator alternative. An escape
+(`.a\:b:hover`) is read by the parser and is fine. The press twin renames the real `:hover` node, so
+`[data-x=":hover"]:hover` keeps its attribute. A media rule counts as an existing guard only when it IS one
+(`(hover: hover)`, `(any-hover: hover)` or ours); a negation, an OR with another query or any other condition is not
+trusted and the hover inside it is guarded again, which is always correct. `scripts/hover-guard.test.ts` asserts the
+OUTPUT'S meaning, not just that a guard is present: each rewritten selector is run in jsdom with the pseudo-class
+turned into a class by the parser, every element must match with the same specificity as before, and the press twin
+must equal the hover arm exactly. So a control is written ONCE, as the pointer's hover,
+and a finger's press is its twin: nothing authors the pair and nothing can drift. Also pinned there: every stylesheet
+in `src` (as Svelte compiles it) comes out with no `:hover` outside the guard, and no copy of the tap rule. A row that
+contains a button still washes whole while ITS button is pressed (the row is the target; `.proj-row`, `.side-row` —
+the family-2 rule), for as long as the press lasts.
+
+**The rule, and its stated limit (orchestrator ruling on #392, 2026-10-16: no code).** The gate follows the
+PRIMARY input's capability, the platform's standard signal, not the latest input: `hover: hover` is true on a
+touch laptop, so a tap there can still leave a hover until the mouse moves, and a tablet or a phone with a mouse
+attached (`hover: none` primary) gets no hover wash from the mouse. Both are accepted: the owner's report is a
+phone, which the gate covers, and tracking the latest input in JS would be a second mechanism for a rare case.
+The measurements above are the pure-touch profile (`pointer: coarse`) and claim nothing wider. The
+`(pointer: none)` clause is policy too: a device with no pointing device at all has nothing that can tap, so
+showing hover paints there is harmless and keeps a synthetic-hover test rig honest; a phone reports
+`pointer: coarse` and is in neither branch.
 
 - CONTROLS (text chips, inputs, select triggers — anything wearing a drawn
   border): border → `--accent`, text → `--accent` (danger controls red
@@ -1413,9 +1473,14 @@ tag — as one `{#snippet nameStack()}` rendered at the three places the page na
 phone's lead-in after the hamburger, the desktop title, the collapsed desktop head). Stacked
 unconditionally on a phone or a narrow viewport (`stackedHead`: the session-drawer door is present
 or ≤760px, Hub's `compact` rule), fit-decided by `ui/title-fit.ts` otherwise. Measured after, same
-rig: the tag is 35×14 at 9px with the pill radius and `--surface2` wash — the numbers Chat's tag
-has, 2px under the name — and the strip grows by 1px (43px against 42px) only while a tag is
-shown; Single has no tag and the stack is the name alone. The page keeps no paint of its own for
+rig: the tag is as wide as its text (35.5px for "alpha"; the validator's name gave 34) and 14.4px high
+at 9px, with the pill radius and `--surface2` wash — Chat's tag, 2px under the name. The head does
+NOT grow on a phone: under touch emulation (`any-pointer: coarse`) it is 44px with a tag and 44px
+without one (Single), because the two-line stack (35.4px + the strip's 8px) fits the 44px touch head.
+(The first draft of this note said "35×14" and "+1px, 43 against 42": both from a desktop Chrome
+with the phone layout forced and a fine pointer, where the head is 42px and the stack makes it 43.4 —
+a window no phone is; corrected on the validator's measurement, board #390 P3.) Single has no tag
+and the stack is the name alone. The page keeps no paint of its own for
 the stack or the tag. Pinned: `Terminal.source.test.ts` (one snippet, three renders, the shape
 compared with the Hub's and the Board's, no flat h1 + tag pair, no private copy in the page's
 style) and `Terminal.strip.mount.test.ts` (phone: stacked, the tag second in the stack and not a

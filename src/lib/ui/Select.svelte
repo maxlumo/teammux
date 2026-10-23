@@ -260,7 +260,6 @@
     font-size: var(--fs-body); font-family: var(--font-ui);
     line-height: var(--control-line-height);
     cursor: pointer; text-align: left;
-    -webkit-tap-highlight-color: transparent;
   }
   /* Dense remains a text-role option for existing non-form consumers, not
      another control height. Configuration forms use the normal value role. */

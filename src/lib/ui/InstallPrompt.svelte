@@ -249,7 +249,6 @@
     font-size: var(--fs-ui);
     font-weight: 600;
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     font-family: inherit;
     transition: transform var(--t-fast);
   }
@@ -262,7 +261,6 @@
     color: var(--text3);
     font-size: var(--fs-ui);
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     font-family: inherit;
     white-space: nowrap;
     transition: color var(--t-fast);

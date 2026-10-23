@@ -2206,7 +2206,7 @@
      so a long path scrolls under the crumbs, never past the door. */
   .server-door {
     display: inline-flex; align-items: center; flex: none; height: var(--control-height);
-    padding: 0; border: 0; background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent;
+    padding: 0; border: 0; background: transparent; cursor: pointer;
   }
   .server-door:hover :global(.server-tag), .server-door.open :global(.server-tag) { background: var(--control-hover); color: var(--text); }
   .toolbar {
@@ -2325,7 +2325,7 @@
   .file-main {
     flex: 1; display: flex; align-items: center; gap: 8px; padding: 4px 8px;
     border: none; background: none; color: var(--text); cursor: pointer; text-align: left;
-    font-size: var(--fs-body); min-width: 0; -webkit-tap-highlight-color: transparent;
+    font-size: var(--fs-body); min-width: 0;
     font-family: var(--font-ui); /* file names are data, not chrome */
     transition: background var(--t-fast);
     min-height: var(--files-row-height);
@@ -2456,7 +2456,7 @@
     min-height: var(--control-height);
     flex: 1; font-size: var(--fs-body); word-break: break-all; text-align: left;
     background: none; border: none; color: var(--text); cursor: pointer; padding: 0;
-    display: flex; align-items: center; gap: 4px; -webkit-tap-highlight-color: transparent;
+    display: flex; align-items: center; gap: 4px;
     transition: color var(--t-fast);
   }
   .info-path:active { color: var(--accent); }

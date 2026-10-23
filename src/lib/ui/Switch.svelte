@@ -16,7 +16,7 @@
     min-width: var(--control-height); min-height: var(--control-height); padding: 0 6px;
     background: none; border: 0; border-radius: var(--ui-radius-control);
     color: var(--text); font: 400 var(--fs-body)/var(--control-line-height) var(--font-ui);
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
   }
   .labelled { justify-content: space-between; padding-inline: 0; }
   .switch-track {

@@ -295,7 +295,7 @@
   }
   .back-btn {
     padding: 6px; border: none; border-radius: var(--ui-radius-control); background: var(--surface2);
-    color: var(--text2); cursor: pointer; display: flex; -webkit-tap-highlight-color: transparent;
+    color: var(--text2); cursor: pointer; display: flex;
     transition: color var(--t-fast), background var(--t-fast);
   }
   .preview-name {
@@ -305,7 +305,7 @@
   .preview-actions { display: flex; gap: 4px; }
   .act-btn {
     padding: 6px; border: none; border-radius: var(--ui-radius-control); background: none;
-    color: var(--text3); cursor: pointer; display: flex; -webkit-tap-highlight-color: transparent;
+    color: var(--text3); cursor: pointer; display: flex;
     transition: color var(--t-fast);
   }
   .act-btn:active { color: var(--accent); }
@@ -319,7 +319,6 @@
     position: relative; z-index: 1; /* above the travelling pill */
     padding: 6px 16px; border: none; border-radius: var(--ui-radius-control); background: transparent;
     color: var(--text3); font-size: var(--fs-ui); font-weight: 600; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     transition: background var(--t-fast), color var(--t-fast);
   }
   /* The fill is the shared .slide-pill under it — the button only changes colour. */
@@ -332,7 +331,7 @@
   .git-act-btn {
     padding: 5px 12px; border: 1px solid var(--border); border-radius: var(--ui-radius-control);
     background: var(--surface2); color: var(--text2); font-size: var(--fs-ui); font-weight: 500;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
     transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
   }
   .git-act-btn:active { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
@@ -349,7 +348,7 @@
   .git-commit-btn {
     padding: 6px 14px; border: none; border-radius: var(--ui-radius-control);
     background: var(--accent-fill); color: var(--accent-fill-ink); font-size: var(--fs-ui); font-weight: 600;
-    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
     transition: opacity var(--t-fast);
   }
   .git-commit-btn:disabled { opacity: 0.4; }
@@ -361,7 +360,7 @@
        chrome step rather than an off-scale size of its own. */
     background: none; color: var(--accent); font-size: var(--fs-title); font-weight: 600;
     cursor: pointer; display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; -webkit-tap-highlight-color: transparent;
+    flex-shrink: 0;
     transition: background var(--t-fast);
   }
   .git-stage-btn:active { background: var(--accent-bg); }
@@ -386,7 +385,6 @@
     padding: 10px 12px; border: none; background: none;
     border-bottom: 1px solid var(--border2); cursor: pointer;
     text-align: left; color: var(--text); font-size: var(--fs-body);
-    -webkit-tap-highlight-color: transparent;
     transition: background var(--t-fast);
   }
   .git-file:active { background: var(--accent-bg); }

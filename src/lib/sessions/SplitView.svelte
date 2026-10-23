@@ -169,7 +169,6 @@
     border: none; background: transparent;
     color: var(--text3); font-size: var(--fs-body);
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast);
   }
   .cell-empty:hover { color: var(--accent); }

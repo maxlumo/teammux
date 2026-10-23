@@ -207,7 +207,6 @@
     min-height: 40px; padding: 6px 10px; border: none; border-bottom: 1px solid var(--border2);
     background: none; color: var(--text2); font-size: var(--fs-ui); cursor: pointer;
     font-family: var(--font-ui); /* rows carry directory names — data, not chrome */
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast);
   }
   .pk-row:last-child { border-bottom: none; }

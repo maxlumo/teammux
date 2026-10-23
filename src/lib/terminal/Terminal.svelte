@@ -2073,7 +2073,6 @@
   .win-tabs { display: flex; align-items: stretch; gap: 2px; flex: none; position: relative; z-index: 0; }
   .win-tab {
     gap: 6px; padding: 0 10px; background: none; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
   }
   .win-tab-icon { position: relative; width: 14px; height: 14px; flex: none; }
   .win-tab-name { position: relative; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; }
@@ -2116,7 +2115,6 @@
     color: var(--text3);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), background var(--t-fast);
   }
   .win-bar-collapse:active { color: var(--accent); background: var(--surface2); }
@@ -2281,7 +2279,6 @@
     padding: 6px 14px;
     border-radius: var(--ui-radius-control);
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     min-width: 56px;
     min-height: 32px;
   }
@@ -2351,7 +2348,6 @@
     font-family: var(--font-mono);
     font-weight: 500;
     cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
     /* Colour cross-fades (covers the armed Ctrl pill and the keyboard

@@ -207,7 +207,7 @@
   .hist-btn {
     position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
     background: none; border: none; color: var(--text3); cursor: pointer;
-    padding: 4px; display: flex; -webkit-tap-highlight-color: transparent;
+    padding: 4px; display: flex;
     transition: color var(--t-fast);
   }
   .hist-btn:active { color: var(--accent); }
@@ -225,7 +225,6 @@
     flex: 1; min-width: 0; padding: 9px 14px; border: none; background: none;
     color: var(--text); font-size: var(--fs-body); text-align: left; cursor: pointer;
     font-family: var(--font-mono);
-    -webkit-tap-highlight-color: transparent;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     transition: background var(--t-fast), color var(--t-fast);
   }
@@ -281,7 +280,7 @@
   .eye-btn {
     position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
     background: none; border: none; color: var(--text3); cursor: pointer;
-    padding: 4px; display: flex; -webkit-tap-highlight-color: transparent;
+    padding: 4px; display: flex;
     transition: color var(--t-fast);
   }
   .eye-btn:active { color: var(--accent); }

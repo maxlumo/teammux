@@ -192,3 +192,88 @@ test('agent name inks are exactly --agent-1..6 per theme, named only by agentHue
   const hub = await readFile(new URL('lib/hub/hub.ts', SRC), 'utf8');
   assert.equal([...hub.matchAll(/var\(--agent-/gu)].length, 1, 'agentHue is the one place that builds the name');
 });
+
+// ── One tempo vocabulary: --t-fast and --t-move (board #392, from the validator's #391 finding) ──
+//
+// design-language.md: "`--t-fast` / `--t-move`" are the two tempos, and a second sliding tempo is a
+// regression. Nothing enforced it: a control that wrote `transition: all 300ms` — or `background 0.2s`,
+// or a `transition-duration` of its own — passed every test, so the next component re-grew its own
+// speed. Like the type scale above: no stylesheet may name a transition duration, and `all` (which
+// hides WHAT moves, and moves what a later rule adds) is not a property. Delays are choreography, not
+// tempo, and stay out of this. The exceptions are listed here BY REASON.
+const TEMPO_EXCEPTIONS: { file: string; selector: string; value: string; why: string }[] = [
+  { file: 'app.css', selector: 'body', value: 'background-color 0.3s ease, color 0.3s ease', why: 'the THEME cross-fade on body: the whole screen changes at once, no token of its own; --t-move would make a theme switch read as a flash (motion.md § Deliberately not done)' },
+  { file: 'app.css', selector: '.subtle-scroll::-webkit-scrollbar-thumb', value: 'background-color 0.3s ease', why: 'the same theme cross-fade, on the scrollbar thumb' },
+  { file: 'App.svelte', selector: 'main, nav', value: 'background-color 0.3s ease, color 0.3s ease', why: 'the same theme cross-fade, on the two surfaces (main, nav) that sit under every page' },
+  { file: 'lib/terminal/Terminal.svelte', selector: '.xterm-wrap :global(.xterm-scrollable-element > .invisible)', value: 'opacity 0.35s ease 0.2s !important', why: 'xterm\'s own overlay scrollbar fading OUT after its dwell, forced with !important over xterm\'s stylesheet: not a control\'s tempo' },
+  { file: 'lib/terminal/Terminal.svelte', selector: '.xterm-wrap :global(.xterm-scrollable-element > .visible)', value: 'opacity 0.12s ease !important', why: 'the same overlay scrollbar fading IN' },
+];
+
+/** Every transition / transition-duration declaration of a stylesheet's text, with the selector of the rule that holds it. */
+function transitionDeclarations(text: string, isCss: boolean) {
+  const blocks = isCss
+    ? [{ at: 0, css: text }]
+    : [...text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gu)].map((m) => ({ at: (m.index ?? 0) + m[0].indexOf(m[1] ?? ''), css: m[1] ?? '' }));
+  const out: Array<{ line: number; decl: string; value: string; selector: string }> = [];
+  for (const { at, css } of blocks) {
+    // comments out, length kept, so a line number is still the file's
+    const bare = css.replace(/\/\*[\s\S]*?\*\//gu, (c) => c.replace(/[^\n]/gu, ' '));
+    for (const m of bare.matchAll(/(?<![\w-])transition(?:-duration)?\s*:\s*([^;}]*)/gu)) {
+      const idx = m.index ?? 0;
+      let depth = 0; let open = idx;
+      for (; open >= 0; open--) {
+        const ch = bare[open];
+        if (ch === '}') depth++;
+        else if (ch === '{') { if (depth === 0) break; depth--; }
+      }
+      let from = open - 1;
+      while (from >= 0 && !'{};'.includes(bare[from] ?? '')) from--;
+      out.push({
+        line: text.slice(0, at + idx).split('\n').length,
+        decl: m[0].trim(),
+        value: (m[1] ?? '').replace(/\s+/gu, ' ').trim(),
+        selector: bare.slice(from + 1, open).replace(/\s+/gu, ' ').trim(),
+      });
+    }
+  }
+  return out;
+}
+
+test('no stylesheet names a transition duration or `transition: all` — the two tempos are the vocabulary', async () => {
+  const offenders: string[] = [];
+  const used = new Map<string, number>();
+  for await (const file of walk(SRC)) {
+    const rel = file.href.slice(SRC.href.length);
+    if (/\.test\./u.test(rel)) continue;
+    for (const d of transitionDeclarations(await readFile(file, 'utf8'), rel.endsWith('.css'))) {
+      const rest = d.value.replace(/var\(--t-(?:fast|move)\)/gu, '').replace(/(?<![\d.])0s\b/gu, '');
+      if (!/(?<![\w-])\d*\.?\d+m?s\b/u.test(rest) && !/\ball\b/u.test(d.value)) continue;
+      // an exception is ONE declaration in ONE rule: the same value in another rule, or twice, is a new tempo
+      const key = `${rel}|${d.selector}|${d.value}`;
+      const allowed = TEMPO_EXCEPTIONS.some((e) => `${e.file}|${e.selector}|${e.value}` === key);
+      used.set(key, (used.get(key) ?? 0) + 1);
+      if (allowed && used.get(key) === 1) continue;
+      offenders.push(`${rel}:${d.line}  ${d.selector} { ${d.decl} }`);
+    }
+  }
+  assert.deepEqual(offenders, [], `a transition moves on var(--t-fast) or var(--t-move), and names what it moves:\n${offenders.join('\n')}`);
+});
+
+test('the tempo exceptions are real: each is one declaration in one rule, verbatim, so a removed or edited one cannot linger as a free pass', async () => {
+  for (const e of TEMPO_EXCEPTIONS) {
+    const found = transitionDeclarations(await readFile(new URL(e.file, SRC), 'utf8'), e.file.endsWith('.css'))
+      .filter((d) => d.selector === e.selector && d.value === e.value);
+    assert.equal(found.length, 1, `${e.file}: "${e.selector} { transition: ${e.value} }" must exist exactly once — delete the exception if it is gone (${e.why.slice(0, 48)}…)`);
+  }
+});
+
+test('--t-fast and --t-move are each defined once, in app.css', async () => {
+  const css = await readFile(new URL('app.css', SRC), 'utf8');
+  assert.equal((css.match(/--t-fast:\s*\d+ms/gu) ?? []).length, 1, 'one --t-fast');
+  assert.equal((css.match(/--t-move:\s*\d+ms/gu) ?? []).length, 1, 'one --t-move');
+  for await (const file of walk(SRC)) {
+    const rel = file.href.slice(SRC.href.length);
+    if (rel === 'app.css' || /\.test\./u.test(rel)) continue;
+    assert.doesNotMatch(await readFile(file, 'utf8'), /--t-(?:fast|move):\s*\d/u, `${rel} redefines a tempo`);
+  }
+});

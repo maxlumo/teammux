@@ -10,6 +10,7 @@ import {
   devHost,
   devServerTargets,
 } from './scripts/dev-ports.mjs';
+import { hoverGuard } from './scripts/hover-guard.mjs';
 
 export function devProxy(env = process.env) {
   const target = devServerTargets(env);
@@ -278,6 +279,10 @@ export function createViteConfig(command, env = process.env, identityDeps = {}) 
       entries: scanEntries(),
     },
     clearScreen: false,
+    // Every stylesheet — app.css and each component's <style> — passes through the hover guard: a
+    // `:hover` paint applies where a pointer can hover, a finger gets the same paint while it presses
+    // (scripts/hover-guard.mjs; design-language.md § Hover / active).
+    css: { postcss: { plugins: [hoverGuard()] } },
     // Replaced at build time; read through src/lib/core/build-info.ts only.
     // A dev server is `dev` + its start time (never a commit): see devServerIdentity.
     define: {

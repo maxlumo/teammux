@@ -12,6 +12,11 @@
 html {
   overflow: hidden; overscroll-behavior: none;
   width: 100%; height: 100%; background: var(--bg);
+  /* ONE place, inherited by everything: the browser's own tap flash (a translucent grey box over the
+     tapped element's whole box, square-cornered — rgba(0,0,0,.18) by default, measured) is never
+     wanted; the app paints its own pressed state (§ Hover / active). It used to be declared per class,
+     in about fifty places, and every control added without it flashed (board #392). */
+  -webkit-tap-highlight-color: transparent;
   --sat: env(safe-area-inset-top); --sab: env(safe-area-inset-bottom); --app-height: 100dvh;
   /* Two font roles. --font-mono: code, terminal output, file paths, data —
      fixed-width matters (alignment via xterm's cell grid, not the font).
@@ -462,7 +467,6 @@ button:disabled {
   color: var(--text2); border-radius: var(--ui-radius-control); padding: 5px 11px;
   font-size: var(--fs-ui); cursor: pointer;
   transition: border-color var(--t-fast), color var(--t-fast), filter var(--t-fast);
-  -webkit-tap-highlight-color: transparent;
 }
 .chip-btn:hover { border-color: var(--accent); color: var(--accent); }
 .chip-btn:disabled { opacity: 0.4; cursor: default; }
@@ -486,7 +490,6 @@ button:disabled {
   background: none; border: none; color: var(--text2);
   border-radius: var(--ui-radius-control); width: 28px; height: 26px; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast);
-  -webkit-tap-highlight-color: transparent;
 }
 .icon-btn:hover { background: var(--surface2); color: var(--text); }
 .icon-btn:active { background: var(--accent-bg); color: var(--accent); }
@@ -669,7 +672,6 @@ button:disabled {
   padding: 8px 10px; border-radius: var(--ui-radius-row);
   color: var(--text); cursor: pointer; font-size: var(--fs-body);
   transition: background var(--t-fast);
-  -webkit-tap-highlight-color: transparent;
 }
 /* A row's leading glyph never shrinks: as a bare flex child the team rows'
    icon shrank whenever the member line wrapped (owner, 2026-09-23: "前面的
@@ -752,7 +754,6 @@ button:disabled {
   width: 38px; height: 38px; border-radius: var(--ui-radius-control); display: grid; place-items: center;
   background: var(--surface); border: 1px solid var(--border); color: var(--text2);
   cursor: pointer; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-  -webkit-tap-highlight-color: transparent;
   transition: transform var(--t-fast), color var(--t-fast), border-color var(--t-fast);
   /* It mounts when the reader leaves the tail, so it pops in (motion.md) —
      here once, not on each wearer. */

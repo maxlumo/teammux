@@ -1337,7 +1337,6 @@
     background: none; border: none; cursor: pointer; text-align: left;
     font-family: var(--font-mono); font-size: var(--fs-sub); color: var(--text);
     transition: background var(--t-fast), color var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
   .file-row:hover { background: var(--surface2); }
   .file-row.sel { background: var(--accent-bg); color: var(--accent); }
@@ -1358,7 +1357,6 @@
     min-height: var(--control-height);
     white-space: pre-wrap; overflow-wrap: anywhere;
     transition: background var(--t-fast), border-color var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
   .desc-view:hover { background: var(--surface2); }
   .desc-readonly {
@@ -1394,7 +1392,6 @@
     min-width: 0; flex: 1; display: grid; grid-template-columns: 32px minmax(0, 1fr) auto;
     align-items: center; gap: 10px; padding: 9px 10px;
     border: 0; background: none; color: var(--text); text-align: left; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
   }
   .member-ava {
     width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex: none;

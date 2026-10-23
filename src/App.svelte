@@ -4520,7 +4520,6 @@
     /* transform is NOT in the list: the drag carries the icon by an inline
        transform and must follow the pointer with no lag (motion.md §1.7). */
     transition: color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
     position: relative; z-index: 1; /* above the travelling pill */
   }
   .rail-btn:hover { color: var(--text); background: var(--surface2); }
@@ -4555,7 +4554,6 @@
     border: 0; border-radius: var(--control-paint-radius); background: none;
     color: var(--text3); cursor: pointer;
     transition: color var(--t-fast), background var(--t-fast);
-    -webkit-tap-highlight-color: transparent;
   }
   .sys-scratch:hover { color: var(--text); background: var(--surface2); }
   /* Press: the accent wash the icon-only family already uses (.icon-btn). */
@@ -4704,7 +4702,6 @@
     border: none; background: none;
     color: var(--text3); cursor: pointer;
     font-size: var(--fs-meta);
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), transform var(--t-fast);
   }
   .tabbar button.active { color: var(--accent); }
@@ -4720,7 +4717,6 @@
   .gear-btn {
     padding: 6px; border: none; border-radius: var(--ui-radius-control); background: none;
     color: var(--text3); cursor: pointer; display: flex;
-    -webkit-tap-highlight-color: transparent;
     transition: color var(--t-fast), background var(--t-fast);
   }
   .gear-btn:active { color: var(--accent); }
@@ -4765,7 +4761,7 @@
   .reconnect-cancel {
     margin-left: auto; padding: 2px 10px; border: 1px solid var(--accent);
     border-radius: var(--ui-radius-control); background: none; color: var(--accent); font-size: var(--fs-sub);
-    font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent;
+    font-weight: 600; cursor: pointer;
   }
 
   .page {
@@ -4876,7 +4872,6 @@
     border: 1px solid var(--border); border-radius: var(--ui-radius-row);
     background: var(--surface); color: var(--text3);
     cursor: pointer; display: flex; align-items: center; justify-content: center;
-    -webkit-tap-highlight-color: transparent;
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   }
   .split-toggle:hover { color: var(--text2); }
