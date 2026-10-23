@@ -216,6 +216,18 @@ test('one value: the played line and the dot both read --p, the unsnapped value 
   } finally { await app.close(); }
 });
 
+test('--p is the UNSNAPPED value / max: a fractional time is not rounded to the range step (#462 validator P3)', async (context) => {
+  const app = await (await compiled).mount(context, {
+    props: { value: 10.5, max: 600, label: 'Position', valuetext: '0:10 of 10:00', buffered: [], epoch: 0,
+      onpreview: () => {}, oncommit: () => {}, oncancel: () => {} },
+    modules: [],
+  });
+  try {
+    assert.equal(app.document.querySelector<HTMLElement>('.media-range')!.style.getPropertyValue('--p'), String(10.5 / 600),
+      'the dot and the line move with the playing time, not in whole-second jumps');
+  } finally { await app.close(); }
+});
+
 test('source pin: the dot and the line share --p and the --mr-dot inset, the native thumb is that size and unpainted, and nothing on a position transitions (#462)', () => {
   const src = readFileSync(new URL('./MediaRange.svelte', import.meta.url), 'utf8');
   const css = /<style>([\s\S]*?)<\/style>/u.exec(src)![1]!;
