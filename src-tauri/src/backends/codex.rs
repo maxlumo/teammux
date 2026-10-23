@@ -548,8 +548,10 @@ pub(crate) fn render_codex(
     // a plain launch starts a daemon that copies the release into the home,
     // outlives the pane and updates itself (it had fetched 0.163.0 within the
     // hour), and a plain launch CONNECTS to a daemon already running there;
-    // with this flag, fresh, `resume --last` and `resume <id>` start none and
-    // connect to none, and a daemon some other entry started is left alone.
+    // with this flag, fresh, `resume --last` and `resume <id>` start none, and
+    // none connects to a daemon another entry started, which is left alone
+    // (fresh against a 0.163.0 daemon: kiro's X1; both resumes against a
+    // 0.162.1 daemon: the validator's R3/R4, both on #457).
     let mut config_args: Vec<String> = vec![format!("--profile {}", shared::CODEX_PROFILE), "--no-daemon".to_string()];
     let full_prompt = if skills.is_empty() {
         system_prompt.to_string()
