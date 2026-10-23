@@ -2587,6 +2587,11 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 /// What to say instead, using only forms THIS verb really has: the usual wrong guess (`--json`
 /// for `--output json`) if it has `--output`, else the closest real flag, else its flag list.
+/// How a flag is spelled to a person: `-f` for a one-letter flag, `--name` otherwise.
+fn spelled(name: &str) -> String {
+    if name.len() == 1 { format!("-{name}") } else { format!("--{name}") }
+}
+
 fn flag_suggestion(row: &VerbFlags, name: &str) -> String {
     let allowed = row.allowed();
     if name == "json" && allowed.contains(&"output") {
@@ -2594,9 +2599,9 @@ fn flag_suggestion(row: &VerbFlags, name: &str) -> String {
     }
     let nearest = allowed.iter().map(|a| (edit_distance(name, a), *a)).filter(|(d, _)| *d <= 2).min();
     match nearest {
-        Some((_, flag)) => format!("did you mean --{flag}?"),
+        Some((_, flag)) => format!("did you mean {}?", spelled(flag)),
         None if allowed.is_empty() => "it takes no flags".to_string(),
-        None => format!("its flags: {}", allowed.iter().map(|f| format!("--{f}")).collect::<Vec<_>>().join(" ")),
+        None => format!("its flags: {}", allowed.iter().map(|f| spelled(f)).collect::<Vec<_>>().join(" ")),
     }
 }
 
@@ -2610,7 +2615,7 @@ fn refuse_unknown_flags(pos: &[String], flags: &Flags, occurrences: &[(String, S
     let mut names: Vec<&String> = flags.keys().collect();
     names.sort();
     for name in names {
-        let shown = if name.len() == 1 { format!("-{name}") } else { format!("--{name}") };
+        let shown = spelled(name);
         if !row.allows(name) {
             return Err(format!("unknown flag {shown} for \"tmm {}\": {} (text that starts with a dash goes after --)", row.key, flag_suggestion(row, name)));
         }
@@ -2619,7 +2624,7 @@ fn refuse_unknown_flags(pos: &[String], flags: &Flags, occurrences: &[(String, S
     // meets its flag's arity before the occurrences are merged into one value.
     for (name, _) in occurrences {
         if !VALUED.contains(&name.as_str()) {
-            let shown = if name.len() == 1 { format!("-{name}") } else { format!("--{name}") };
+            let shown = spelled(name);
             return Err(if name == "wake" {
                 "--wake takes no value; name who to wake as the next word: --wake @lead".to_string()
             } else {
@@ -4095,6 +4100,16 @@ mod flags_contract {
         // Never the value.
         let e = check(&pos_of("board list"), &flags_for(&[("secret", true)])).unwrap_err();
         assert!(!e.contains("\"v\"") && e.contains("--secret"), "{e}");
+    }
+
+    #[test]
+    fn a_one_letter_flag_is_suggested_in_its_documented_spelling() {
+        let e = check(&pos_of("gateway logs"), &flags_for(&[("x", false)])).unwrap_err();
+        assert!(e.contains("did you mean -f?") && !e.contains("--f?"), "{e}");
+        let e = check(&pos_of("gateway logs"), &flags_for(&[("zzzzz", false)])).unwrap_err();
+        assert!(e.contains("its flags: -f --follow"), "{e}");
+        let e = check(&pos_of("gateway logs"), &flags_for(&[("follw", false)])).unwrap_err();
+        assert!(e.contains("did you mean --follow?"), "{e}");
     }
 
     #[test]
