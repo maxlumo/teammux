@@ -1,13 +1,14 @@
 // Board #460: `build:android` refuses to start unless the SDK tauri will use
 // holds an NDK, instead of reaching tauri's interactive NDK prompt. What the
 // guard checks is what tauri-cli 2.10/2.11 decides on: the SDK from
-// ANDROID_HOME (else ANDROID_SDK_ROOT) and its ndk/<version>/source.properties.
+// ANDROID_HOME (else ANDROID_SDK_ROOT), and in its ndk/ the directory whose
+// name sorts last, which must hold source.properties.
 // It does not prove the NDK is complete (a broken one fails loudly in tauri,
 // with no prompt).
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,13 +61,51 @@ test('android-env: ANDROID_HOME wins over ANDROID_SDK_ROOT, as in tauri — an e
 test('android-env: an SDK with no ndk/ (this host s ~/Android/Sdk) is refused naming the missing ndk/, a correct NDK_HOME notwithstanding (validator V1)', () => {
   const r = run({ ANDROID_HOME: empty, NDK_HOME: ndk });
   assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes(`no ${join(empty, 'ndk')}/<version>/source.properties`), r.stderr);
+  assert.ok(r.stderr.includes(`holds no NDK: no ${join(empty, 'ndk')}/<version>/`), r.stderr);
 });
 
 test('android-env: an ndk/<version> with no source.properties is not an NDK', () => {
   const r = run({ ANDROID_HOME: hollow });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /holds no NDK/u);
+  assert.match(r.stderr, /27\.0\.0 — the NDK tauri would use .* has no source\.properties/u);
+});
+
+/** An SDK whose ndk/ holds the given versions, each a complete-looking NDK
+ * unless listed in `bare`. */
+function sdkWith(name: string, versions: string[], bare: string[] = []) {
+  const root = join(base, name);
+  for (const v of versions) {
+    mkdirSync(join(root, 'ndk', v), { recursive: true });
+    if (!bare.includes(v)) writeFileSync(join(root, 'ndk', v, 'source.properties'), `Pkg.Revision = ${v}\n`);
+  }
+  return root;
+}
+
+test('android-env: with several NDKs the one that counts is tauri s pick, the name that sorts LAST as a string — NDK_HOME must name it (validator P2 on 173d7faf; measured, 2.11.1)', () => {
+  const two = sdkWith('two', ['27.9.0', '28.2.13676358']);
+  assert.equal(run({ ANDROID_HOME: two }).status, 0);
+  assert.equal(run({ ANDROID_HOME: two, NDK_HOME: join(two, 'ndk', '28.2.13676358') }).status, 0);
+  const older = run({ ANDROID_HOME: two, NDK_HOME: join(two, 'ndk', '27.9.0') });
+  assert.equal(older.status, 1, 'an NDK of the SDK that tauri does not use');
+  assert.ok(older.stderr.includes(`is not ${join(two, 'ndk', '28.2.13676358')}, the NDK tauri builds with`), older.stderr);
+  // Not the highest version: tauri sorts names, so 9.0.0 beats 10.0.0.
+  const nine = sdkWith('nine-ten', ['9.0.0', '10.0.0']);
+  assert.equal(run({ ANDROID_HOME: nine, NDK_HOME: join(nine, 'ndk', '9.0.0') }).status, 0);
+  const ten = run({ ANDROID_HOME: nine, NDK_HOME: join(nine, 'ndk', '10.0.0') });
+  assert.equal(ten.status, 1);
+  assert.ok(ten.stderr.includes(`tauri uses ${join(nine, 'ndk', '9.0.0')}`), ten.stderr);
+});
+
+test('android-env: tauri s pick with no source.properties is refused, even when an older NDK has one (tauri would fail on it)', () => {
+  const r = run({ ANDROID_HOME: sdkWith('bare-newest', ['27.9.0', '28.2.13676358'], ['28.2.13676358']) });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /28\.2\.13676358 — the NDK tauri would use .* has no source\.properties/u);
+});
+
+test('android-env: NDK_HOME through a symlink to tauri s NDK is the same NDK (reviewer P2 on 173d7faf)', () => {
+  const alias = join(base, 'ndk-alias');
+  symlinkSync(ndk, alias);
+  assert.equal(run({ ANDROID_HOME: sdk, NDK_HOME: alias }).status, 0);
 });
 
 test('android-env: no SDK named → refused, and NDK_HOME alone does not stand in for it; nothing is guessed', () => {
@@ -86,13 +125,14 @@ test('android-env: an SDK path that does not exist, or is a file, is refused', (
   }
 });
 
-test('android-env: NDK_HOME is optional, and when set must be one of the SDK s NDKs — otherwise refused, listing them as paths', () => {
+test('android-env: NDK_HOME is optional, and when set must be the SDK s NDK — another one is refused, naming the right one as a path', () => {
   assert.equal(run({ ANDROID_HOME: sdk, NDK_HOME: ndk }).status, 0, 'the SDK s own NDK');
   assert.equal(run({ ANDROID_HOME: sdk, NDK_HOME: `${ndk}/` }).status, 0, 'a trailing slash is the same NDK');
-  const r = run({ ANDROID_HOME: sdk, NDK_HOME: join(hollow, 'ndk', '27.0.0') });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /is not one of the NDKs under/u);
-  assert.ok(r.stderr.includes(`     ${ndk}`), 'the usable NDKs, each on its own line as a path');
+  for (const other of [join(hollow, 'ndk', '27.0.0'), sdk, join(base, 'nope')]) {
+    const r = run({ ANDROID_HOME: sdk, NDK_HOME: other });
+    assert.equal(r.status, 1, other);
+    assert.ok(r.stderr.includes(`is not ${ndk}, the NDK tauri builds with`), r.stderr);
+  }
 });
 
 test('build:android runs the guard before tauri, so a missing NDK stops it before tauri can ask', () => {

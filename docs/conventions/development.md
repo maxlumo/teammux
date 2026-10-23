@@ -236,10 +236,13 @@ end up shipping the wrong tree.
   `ndk/<version>`, tauri asks whether to install the command line tools — an
   interactive prompt that hangs a `tmm task` or any shell nobody answers (an
   hour on 2026-10-23: with `ANDROID_HOME` unset, the auto-detect picked an
-  empty SDK). An `ndk/<version>` that is present but broken fails loudly
-  instead; the guard checks only that one holds `source.properties`, the
-  first file tauri reads, not that the NDK is complete. `NDK_HOME` is
-  optional; if set, it must be one of that SDK's NDKs. On this host the SDK
+  empty SDK). Of several NDKs tauri uses the directory under `ndk/` whose
+  NAME sorts last as a string — not the highest version (measured with
+  2.11.1: of `9.0.0` and `10.0.0` it uses `9.0.0`). One that is present but
+  broken fails loudly instead of prompting; the guard checks only that
+  tauri's pick holds `source.properties`, the first file tauri reads, not
+  that the NDK is complete. `NDK_HOME` is optional; if set, it must be that
+  NDK (compared through symlinks). On this host the SDK
   is `/home/cfu/Android/sdk` (lowercase) with the NDK at
   `/home/cfu/Android/sdk/ndk/28.2.13676358`; `/home/cfu/Android/Sdk`
   (capital S) also exists, is empty, and is what the auto-detect picks:
