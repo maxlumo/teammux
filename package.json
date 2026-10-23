@@ -25,7 +25,7 @@
     "test:e2e:docker": "node scripts/e2e-docker.mjs",
     "build:all": "npm run build && npm run tauri:build && npx tauri android build --target aarch64 --apk",
     "build:mac": "tauri build --features embed-ui",
-    "build:android": "npx tauri android build --target aarch64 --apk && node scripts/preflight.mjs android-apk"
+    "build:android": "node scripts/preflight.mjs android-env && npx tauri android build --target aarch64 --apk && node scripts/preflight.mjs android-apk"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",

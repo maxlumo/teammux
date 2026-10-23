@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Preflight for dev/build commands. Two jobs:
+// Preflight for dev/build commands. Three jobs:
 //
 // 1. Development preflights fail FAST when the requested ports are already
 //    taken, and say exactly who owns them. `web` checks 5173, `server` checks
@@ -19,6 +19,11 @@
 //    symlink (dated 2026-08-18), and a fresh git worktree builds in-tree: a
 //    real `app/build` directory, left alone here. The postflight then only
 //    insists that the APK exists at the in-project path.
+//
+// 3. `preflight android-env`: before `tauri android build`, refuse to start
+//    unless ANDROID_HOME (or ANDROID_SDK_ROOT) and NDK_HOME name existing
+//    directories — without them tauri stops at an interactive NDK prompt
+//    (board #460; see that mode below).
 //
 //    Two ways the symlink goes wrong, and the second one is the nasty one:
 //    - DANGLING (cache pruned, or the path canonicalizes differently under the
@@ -146,6 +151,33 @@ if (mode === 'android-apk') {
     console.error(`⚠️  android-apk postflight failed: ${e.message}`);
     process.exit(1);
   }
+}
+
+if (mode === 'android-env') {
+  // Board #460: `tauri android build` with no NDK_HOME auto-detects an SDK
+  // and, finding no NDK there, ASKS whether to install the command line tools
+  // — a prompt nobody answers under a tmm task or any non-interactive shell
+  // (it hung for an hour on 2026-10-23). On this host ~/Android/Sdk exists
+  // WITHOUT an ndk/ and is what the auto-detect picks; the NDK lives under
+  // ~/Android/sdk (lowercase). So the build refuses to start unless both are
+  // named and exist.
+  const isDir = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+  const sdkVar = process.env.ANDROID_HOME ? 'ANDROID_HOME' : process.env.ANDROID_SDK_ROOT ? 'ANDROID_SDK_ROOT' : null;
+  const sdk = sdkVar ? process.env[sdkVar] : '';
+  const ndk = process.env.NDK_HOME || '';
+  const problems = [];
+  if (!sdkVar) problems.push('ANDROID_HOME is not set');
+  else if (!isDir(sdk)) problems.push(`${sdkVar}=${sdk} is not a directory`);
+  if (!ndk) problems.push('NDK_HOME is not set');
+  else if (!isDir(ndk)) problems.push(`NDK_HOME=${ndk} is not a directory`);
+  if (problems.length === 0) process.exit(0);
+  console.error('\n✋ build:android needs the Android SDK and NDK named — refusing to start (tauri would stop at an interactive NDK prompt).\n');
+  for (const p of problems) console.error(`   ${p}`);
+  const sdkGuess = isDir(sdk) ? sdk : '';
+  const ndks = sdkGuess ? (() => { try { return readdirSync(join(sdkGuess, 'ndk')).filter((d) => isDir(join(sdkGuess, 'ndk', d))).sort(); } catch { return []; } })() : [];
+  if (ndks.length) console.error(`\n   NDKs under ${sdkGuess}/ndk: ${ndks.join(', ')}\n   export NDK_HOME=${join(sdkGuess, 'ndk', ndks.at(-1))}`);
+  console.error('\n   See docs/conventions/development.md § Build targets (Android).\n');
+  process.exit(1);
 }
 
 console.error(`unknown preflight mode: ${mode}`);

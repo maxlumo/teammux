@@ -226,7 +226,20 @@ end up shipping the wrong tree.
 
 - **macOS** — `npm run build:mac` → `src-tauri/target/release/bundle/dmg/`.
 - **Android** — `rustup target add aarch64-linux-android && npm run build:android`.
-  Needs the Android SDK, NDK 28+ and Java 17+; signing is below.
+  Needs the Android SDK, NDK 28+ and Java 17+; signing is below. The build
+  needs `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) and `NDK_HOME` in its
+  environment, and `build:android` refuses to start without them
+  (`preflight.mjs android-env`, board #460). Without `NDK_HOME`, tauri
+  auto-detects an SDK, finds no NDK in it and asks whether to install the
+  command line tools — an interactive prompt that hangs a `tmm task` or any
+  non-interactive shell (an hour on 2026-10-23). On this host the SDK is
+  `/home/cfu/Android/sdk` (lowercase) with the NDK at
+  `/home/cfu/Android/sdk/ndk/28.2.13676358`; `/home/cfu/Android/Sdk`
+  (capital S) also exists, has no `ndk/`, and is what the auto-detect picks:
+
+  ```bash
+  ANDROID_HOME=/home/cfu/Android/sdk NDK_HOME=/home/cfu/Android/sdk/ndk/28.2.13676358 npm run build:android
+  ```
 - **Linux server only** — `npm run build:server` needs no WebKitGTK; it is all
   the browser UI and the phone talk to. It runs `vite build` first and embeds
   `dist/` (`embed-ui`), so `tmm gateway` serves the web UI on its own port and
