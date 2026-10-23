@@ -212,6 +212,8 @@ test('Back keeps the original priority and current live guards in one dispatcher
   const guards = {
     lightbox: "if (shotView) { closeShot(); return true; }",
     contextMenu: 'if (ctxAt) { closeCtx(); return true; }',
+    // #461: an open turn preview (hover, scrub or keyboard) is the top-most thing a Back can peel after a menu.
+    turnRail: 'if (feedView?.closeTurnRail()) return true;',
     action: 'if (!pendingAct) return false; if (!acting) pendingAct = null; return true;',
     trash: 'if (!trashAsk) return false; if (!purging) trashAsk = null; return true;',
     // #382: closing the picker also clears its Join (closePicker).
@@ -236,7 +238,7 @@ test('Back keeps the original priority and current live guards in one dispatcher
     assert.ok(region.includes(`backLayers.register('${layer}', () => { ${guard}${suffix} })`),
       `${layer} keeps its current guard/action inside a live callback`);
   }
-  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 14, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first; the search box (#432) closes before the filter peels');
+  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 15, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first; the search box (#432) closes before the filter peels; an open turn preview (#461) peels right after a context menu');
   assert.match(source, /registerBack=\{onGoBack \? backLayers\.register : null\}/u,
     'Composer registers its remaining palette slot with the same registry');
   assert.match(region, /onGoBack\(backLayers\.back\);/u);

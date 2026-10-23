@@ -1,7 +1,7 @@
 // The popover placement contract — pure geometry, no browser.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { menuHeightLimit, menuPlacement, pointAnchor, popOrigin, scrollMovesTrigger, type AnchorRect } from './placement.ts';
+import { intersectRects, menuHeightLimit, menuPlacement, menuPlacementIn, pointAnchor, popOrigin, scrollMovesTrigger, type AnchorRect } from './placement.ts';
 
 test('only a trigger-containing scroller moves an anchored popup (#180)', () => {
   // DOM containment itself is the platform boundary; the menu mount suite
@@ -192,4 +192,50 @@ test('every placement reports the room it found, so no caller has to guess (#326
   const anchor = { left: 420, right: 460, top: 300, bottom: 330 };
   const pos = menuPlacement(anchor, { w: 180, h: 200 }, { w: 1200, h: 800 });
   assert.deepEqual(pos, { x: 280, y: 336, maxW: 1184, maxH: 784 });
+});
+
+test('placement inside a box with a non-zero origin is the zero-origin rule, shifted (#461)', () => {
+  const size = { w: 200, h: 120 };
+  // At the origin the wrapper IS menuPlacement.
+  const flush: AnchorRect = { left: 0, top: 0, right: 390, bottom: 700 };
+  const rail: AnchorRect = { left: 0, right: 44, top: 250, bottom: 450 };
+  for (const side of ['right', 'below'] as const) {
+    assert.deepEqual(menuPlacementIn(flush, rail, size, 8, 8, 'right', side), menuPlacement(rail, size, { w: 390, h: 700 }, 8, 8, 'right', side));
+  }
+  // Under a 56px header and above a 80px composer: the box is 56..620.
+  const box: AnchorRect = { left: 0, top: 56, right: 390, bottom: 620 };
+  const lowRail: AnchorRect = { left: 0, right: 44, top: 540, bottom: 600 };
+  const at = menuPlacementIn(box, lowRail, size, 8, 8, 'right', 'right');
+  assert.equal(at.x, 52);
+  assert.ok(at.y >= 56 + 8, 'never under the header');
+  assert.ok(at.y + size.h <= 620 - 8, 'never over the composer');
+  assert.equal(at.maxH, 564 - 16);
+  assert.equal(at.maxW, 390 - 52 - 8);
+  // A tall popover rests on the box's top margin, not on the viewport's.
+  const tall = menuPlacementIn(box, lowRail, { w: 200, h: 600 }, 8, 8, 'right', 'right');
+  assert.equal(tall.y, 56 + 8, 'taller than the room: clamped to the box top margin');
+  assert.equal(tall.maxH, 564 - 16);
+});
+
+test('a keyboard-shrunk bottom, a narrow column and a left offset all move the box, not the rule (#461)', () => {
+  const size = { w: 260, h: 90 };
+  // Visual viewport cut to 300px tall by the keyboard, composer 70px of that.
+  const keyboard: AnchorRect = { left: 0, top: 50, right: 390, bottom: 230 };
+  const rail: AnchorRect = { left: 0, right: 44, top: 150, bottom: 225 };
+  const k = menuPlacementIn(keyboard, rail, size, 8, 8, 'right', 'right');
+  assert.ok(k.y + size.h <= 230 - 8, 'inside the shrunk box');
+  // A drawer column that starts at x=300 and is 180 wide: the popover takes what is left of it.
+  const column: AnchorRect = { left: 300, top: 0, right: 480, bottom: 600 };
+  const colRail: AnchorRect = { left: 300, right: 344, top: 100, bottom: 200 };
+  const c = menuPlacementIn(column, colRail, size, 8, 8, 'right', 'right');
+  assert.equal(c.x, 352);
+  assert.equal(c.maxW, 480 - 352 - 8, 'the room left in the column, so it narrows instead of leaving it');
+});
+
+test('two rects intersect, and disjoint ones collapse to an empty rect (#461)', () => {
+  assert.deepEqual(intersectRects({ left: 0, top: 0, right: 100, bottom: 100 }, { left: 20, top: 30, right: 200, bottom: 60 }),
+    { left: 20, top: 30, right: 100, bottom: 60 });
+  const e = intersectRects({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 50, top: 50, right: 80, bottom: 80 });
+  assert.equal(e.right - e.left, 0);
+  assert.equal(e.bottom - e.top, 0);
 });

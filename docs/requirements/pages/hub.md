@@ -251,6 +251,7 @@ completion).
   resize and drawer regrids re-measure/re-cut inside `withReadingAnchor`
   before restoring tail or history position (board #53). Images render as
   thumbnails and open the in-app Lightbox (which offers a download button for a picture that is a server file, #447); markdown + LaTeX render in bubbles.
+- A turn rail runs along the feed's leading edge once there are two human messages: one tick per message of the loaded feed, a preview popover on hover, press-and-drag or the arrow keys (the turn, its neighbours, "Turn N of M", its age), and one jump on click, release or Enter (board #461; [hub-feed.md](../../design-docs/features/hub-feed.md)).
 - **A tapped bubble reveals its Copy / Raw row; long-press selection stays
   the system's** (board #48; owner, 2026-09-07: "我只要消息气泡下边的这两个
   按钮，不要出现右键那种选项卡"): `.m-body` explicitly enables selection

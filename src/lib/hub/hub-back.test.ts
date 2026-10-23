@@ -6,7 +6,7 @@ import type { HubBackLayer } from './hub-back.ts';
 // #168 removes agentMenu/recipient/send-arm whole; surviving priority is unchanged.
 // The contract is independent of the implementation's order table.
 const priority: HubBackLayer[] = [
-  'lightbox', 'contextMenu', 'palette',
+  'lightbox', 'contextMenu', 'turnRail', 'palette',
   'action', 'trash', 'picker', 'create', 'rename', 'search', 'filter', 'files', 'drawer', 'sidebar',
 ];
 

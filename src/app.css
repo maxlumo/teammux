@@ -459,6 +459,11 @@ button:disabled {
      transparent. One definition: Hub no longer re-declares it. */
   --bubble-in: color-mix(in srgb, var(--bg) 92%, white 8%);
   --t-fast: 120ms; --t-move: 200ms;
+  /* The Hub feed's turn rail (board #461): a hit column painted as a few px of
+     tick at its inner edge. Defined once; the component holds no px or colour. */
+  --turn-rail-hit: 44px; --turn-rail-inset: calc(var(--control-height) / 2);
+  --turn-tick-pitch: 10px; --turn-tick-len: 10px; --turn-tick-len-cur: 16px; --turn-tick-thick: 2px;
+  --turn-pop-width: 300px;
 }
 
 .chip-btn {

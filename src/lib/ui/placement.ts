@@ -97,6 +97,39 @@ export function menuPlacement(
   return { x, y, maxW: Math.max(0, view.w - 2 * edge), maxH };
 }
 
+/** The overlap of two rects (empty when they do not meet: right/bottom clamp to left/top). */
+export function intersectRects(a: AnchorRect, b: AnchorRect): AnchorRect {
+  const left = Math.max(a.left, b.left), top = Math.max(a.top, b.top);
+  return { left, top, right: Math.max(left, Math.min(a.right, b.right)), bottom: Math.max(top, Math.min(a.bottom, b.bottom)) };
+}
+
+/**
+ * `menuPlacement` inside a box that does not start at the origin: a popover
+ * that must stay out of the composer or under a header (board #461). The
+ * placement rules take a zero-origin view `{w, h}`, so the anchor is moved into
+ * the box's own coordinates, placed by the SAME function, and moved back —
+ * there is no second placement rule to drift. `maxW`/`maxH` are sizes, so they
+ * need no shift. `bounds` and `anchor` are in the same space (the fixed
+ * layer's, i.e. `anchorOf`/`viewBox()`, already divided by the UI zoom).
+ */
+export function menuPlacementIn(
+  bounds: AnchorRect,
+  anchor: AnchorRect,
+  size: { w: number; h: number },
+  gap = POPOVER_GAP,
+  edge = POPOVER_EDGE,
+  align: 'right' | 'left' = 'right',
+  side: 'below' | 'right' = 'below',
+): Placed {
+  const local = {
+    left: anchor.left - bounds.left, right: anchor.right - bounds.left,
+    top: anchor.top - bounds.top, bottom: anchor.bottom - bounds.top,
+  };
+  const view = { w: Math.max(0, bounds.right - bounds.left), h: Math.max(0, bounds.bottom - bounds.top) };
+  const p = menuPlacement(local, size, view, gap, edge, align, side);
+  return { x: p.x + bounds.left, y: p.y + bounds.top, maxW: p.maxW, maxH: p.maxH };
+}
+
 /**
  * Where a placed popover GROWS from (motion.md §2 "popover intro"): the corner
  * that touches its anchor. Below the anchor it grows from its top edge, flipped

@@ -3,6 +3,7 @@
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import ChatImage from './ChatImage.svelte';
+  import TurnRail from './TurnRail.svelte';
   import 'katex/dist/katex.min.css';
   import { t, i18n, hanLang } from '../core/i18n.svelte.ts';
   import { copyText } from '../core/clipboard.ts';
@@ -17,6 +18,7 @@
   import { createDoubleTapDetector } from '../terminal/terminal-keyboard.ts';
   import { heldAnchor, readingDirection, refoldEligible, sameReadingSize } from './hub-reading.ts';
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
+  import { askTurns, blockKey } from './hub-turns.ts';
   import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
@@ -37,6 +39,7 @@
   // A resize snapshot belongs to one room. Tool disclosures, copied-label
   // timing and glyph/held-anchor state retain their old lifetime.
   export function resetForRoom() {
+    turnRail?.retire();
     reading = null;
     expanded = {};
     setMessageActions(-1);
@@ -161,6 +164,32 @@
 
 
   const atBottom = () => !feedEl || bottomGap(feedEl) < TAIL_GAP;
+
+  /** The turns of the loaded feed (board #461): the human messages the anchor
+   * below tracks, from the ONE rule in hub-turns.ts. The markup's `isAsk` reads
+   * this set, so the anchor and the turn rail cannot disagree on what a turn is
+   * (and a bubble does a lookup, not a scan). */
+  const turns = $derived(askTurns(blocks));
+  const askSet = $derived(new Set(turns.map((turn) => turn.key)));
+
+  // The turn rail (board #461). Its gutter is LAYOUT: it takes width from the
+  // column, so its appearance (the 2nd human message) goes through the reading
+  // anchor like every other layout mutation — a reader mid-history does not
+  // drift. What the rail does with a pointer is its own (TurnRail.svelte); here
+  // it is only mounted, fed the turns and the anchor's key, and given the ONE
+  // jump. The owners of a reading-context change call retireTurnRail().
+  let turnRail = $state(null);
+  let wrapEl = $state(null);
+  let railOn = $state(false);
+  const railWanted = $derived(roomReady && turns.length >= 2);
+  $effect(() => {
+    const want = railWanted;
+    untrack(() => { if (want !== railOn) withReadingAnchor(() => { railOn = want; }); });
+  });
+  /** Called at the change itself — a room selection, a new reading, a filter. */
+  export function retireTurnRail() { turnRail?.retire(); }
+  /** The Hub's back stack: close an open turn preview; true when one was open. */
+  export function closeTurnRail() { return turnRail?.close() ?? false; }
 
   let askKey = $state('');        // the ONE user-message anchor on screen
   let askEdge = $state('');       // which edge that same bubble catches
@@ -357,18 +386,21 @@
   /** Bring a user message's NATURAL position into view — the one jump shared
    * by expanding and by double-tapping a held bubble (board #304). A held
    * bubble is sticky, and Chromium reports a sticky element's HELD offsetTop,
-   * so stickiness is neutralized for this synchronous read (as in syncAsk). */
+   * so stickiness is neutralized for this synchronous read (as in syncAsk).
+   * Returns where it landed — 'moved', 'in-view' (the start was already on
+   * screen, so only the anchor is re-seeded) or 'missing' (not mounted: nothing
+   * moved, and the caller must not claim a landing). */
   function jumpToMsg(key) {
-    if (!feedEl) return;
+    if (!feedEl) return 'missing';
     const el = feedEl.querySelector(`[data-ask="${CSS.escape(key)}"]`);
-    if (!(el instanceof HTMLElement)) return;
+    if (!(el instanceof HTMLElement)) return 'missing';
     el.style.position = 'static';
     const at = rowTop(el);
     el.style.removeProperty('position');
     const top = feedEl.scrollTop;
     if (at >= top && at < top + feedEl.clientHeight - 60) {
       syncAsk();
-      return;
+      return 'in-view';
     }
     feedEl.scrollTop = Math.max(0, at - 8);
     // Programmatic jump: seed the anchor path from the destination, the way
@@ -377,6 +409,7 @@
     askScrollTop = feedEl.scrollTop;
     askDirTravel = 0;
     syncAsk(askDir, true);
+    return 'moved';
   }
   /** Bring ONE message — a bubble or a lifecycle row, by its id — to its
    * natural place 8px from the top and ring it once (board #322, the
@@ -621,8 +654,6 @@
     }
     return last;
   });
-  const blockKey = (b, i) =>
-    b.type === 'msg' ? (b.msg.id ?? `m${b.ts}-${i}`) : b.type === 'steps' || b.type === 'sys' ? b.key : `${b.type}${b.ts}-${i}`;
 
 
   // Notification kinds get a human label; unknown kinds fall back to the raw
@@ -656,7 +687,11 @@
 
 </script>
 
-<div class="feed-wrap">
+<div class="feed-wrap" class:railed={railOn} bind:this={wrapEl}>
+{#if railOn}
+  <TurnRail bind:this={turnRail} {turns} current={askKey} live={visible && roomReady && turns.length >= 2}
+    more={histMore || actMore} bounds={wrapEl} jump={jumpToMsg} />
+{/if}
 <div class="feed subtle-scroll" class:reveal-tail={justLoaded} bind:this={feedEl} onscroll={onFeedScroll}
   onloadcapture={onContentLoad} onerrorcapture={onContentLoad}>
   <!-- Low-presence paging feedback at the very top: fetching, or the
@@ -830,7 +865,7 @@
              element catches the edge as it is about to leave; there is no
              duplicate and no invisible midpoint swap. -->
         {@const key = blockKey(b, i)}
-        {@const isAsk = m.from === 'human'}
+        {@const isAsk = askSet.has(key)}
         <!-- Folding is a property of the TEXT, and the DEFAULT for every
              long user message (owner, 2026-08-27: "默认用户消息都截断 不要
              显示太多"): the bubble renders a rear-truncated body until the
@@ -1074,7 +1109,11 @@
   .message-feedback { position: fixed; z-index: 8; }
   /* Bottom padding tight against the composer: the capsule brings its own 8px
      (owner, 2026-08-21: "最后一个消息框，和发送框中间的高度也有点大"). */
-  :global(.hub-root.compact) .feed { padding: 14px 10px max(6px, calc(var(--control-height) / 2)); gap: 9px; }
+  :global(.hub-root.compact) .feed { padding: 14px var(--feed-pad-x) max(6px, calc(var(--control-height) / 2)); gap: 9px; }
+  /* The rail's gutter is counted INTO the leading padding, not stacked on it: the
+     column the rail takes is what the padding no longer gives the bubbles (board
+     #461). A small floor keeps the ticks off the bubbles' edge. */
+  .feed-wrap.railed > .feed { padding-left: max(var(--ui-gap), calc(var(--feed-pad-x) - var(--turn-rail-hit))); }
   :global(.hub-root.compact) .msg, :global(.hub-root.compact) .prompt { max-width: 91%; }
 
   :global(.hub-root.compact) .s-head { min-height: 34px; }
@@ -1087,9 +1126,10 @@
   /* Chat canvas: one quiet tone derived from the theme. It had two radial
      glows for "depth"; the accent one read as a faint blue shadow over the
      conversation and the owner asked for it gone — flat is calmer. */
-  .feed-wrap { flex: 1; position: relative; display: flex; min-height: 0; background: var(--chat-canvas); }
+  .feed-wrap { --feed-pad-x: clamp(18px, 4vw, 64px); flex: 1; position: relative; display: flex; min-height: 0; background: var(--chat-canvas); }
+  :global(.hub-root.compact) .feed-wrap { --feed-pad-x: 10px; }
   .feed {
-    flex: 1; overflow-y: auto; padding: 18px clamp(18px, 4vw, 64px) 24px;
+    flex: 1; overflow-y: auto; padding: 18px var(--feed-pad-x) 24px;
     display: flex; flex-direction: column; gap: 10px;
     /* THE reason a held bubble may change its own height. Chromium's scroll
        anchoring compensated `scrollTop` whenever the held bubble grew or shrank;

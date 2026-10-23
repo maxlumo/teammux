@@ -839,7 +839,10 @@
   // server switch remounts the page). Dropped rows still went through
   // notifyNews, so the centre, the cue and unread lose nothing.
   let readGen = 0;
-  const newReading = () => ++readGen;
+  // A new reading is also the end of whatever the turn rail was previewing or
+  // holding (board #461): retire() is CALLED here, at the change, never inferred
+  // from state a flush may have folded back to what it was.
+  const newReading = () => { feedView?.retireTurnRail(); return ++readGen; };
   let windowed = $state(null);      // {newestSeq, newestTs} while a window is on screen
   let revealId = $state('');        // the target a level/filter would hide, kept for this jump
   let filterNote = $state('');      // "filter cleared for this jump" — visible, Back restores it
@@ -1289,6 +1292,7 @@
    * the new value. Never a global "a jump is pending". */
   function setFilter(next, source = 'user') {
     if (filterAgent === next) return;
+    feedView?.retireTurnRail();   // a filtered feed is another set of turns (board #461)
     filterAgent = next;
     if (source !== 'user' && source.jump && source.jump === ownedJump) search.adoptAgent(next);
     else search.setAgent(next);
@@ -2178,6 +2182,7 @@
     const disposers = [
       backLayers.register('lightbox', () => { if (shotView) { closeShot(); return true; } return false; }),
       backLayers.register('contextMenu', () => { if (ctxAt) { closeCtx(); return true; } return false; }),
+      backLayers.register('turnRail', () => { if (feedView?.closeTurnRail()) return true; return false; }),
       backLayers.register('action', () => { if (!pendingAct) return false; if (!acting) pendingAct = null; return true; }),
       backLayers.register('trash', () => { if (!trashAsk) return false; if (!purging) trashAsk = null; return true; }),
       backLayers.register('picker', () => { if (pickerOpen) { closePicker(); return true; } return false; }),

@@ -1,5 +1,5 @@
 const ORDER = [
-  'lightbox', 'contextMenu', 'palette',
+  'lightbox', 'contextMenu', 'turnRail', 'palette',
   'action', 'trash', 'picker', 'create', 'rename', 'search', 'filter', 'files', 'drawer', 'sidebar',
 ] as const;
 

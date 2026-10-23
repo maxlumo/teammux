@@ -3433,6 +3433,9 @@ test('focusing the composer is not navigation: a history reader keeps their plac
   }));
   try {
     for (let i = 0; i < 12 && app.document.querySelectorAll('.msg').length < 24; i++) await app.flush();
+    // The load also brings the turn rail's gutter (#461), which settles through the reading
+    // anchor in the microtasks after the load; a reader's first scroll is a later task.
+    await app.flush(); await app.flush();
     const feed = app.document.querySelector<HTMLElement>('.feed')!;
     Object.defineProperty(feed, 'scrollHeight', { get: () => 2563, configurable: true });
     Object.defineProperty(feed, 'clientHeight', { get: () => 724, configurable: true });
@@ -5390,4 +5393,92 @@ test('a local attachment that opens while a chat image\'s signature is held cann
     assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'A\u2019s late answer does not replace the later open');
     assert.equal(app.document.querySelector('.lb .lb-download'), null, 'and the local picture has no download');
   } finally { for (const done of pending) done({ url: 'https://dl.test/x', name: 'x' }); await app.close(); }
+});
+
+// Board #461: the turn rail's retirement through the Hub's REAL entries — a room
+// selection (the cached room A to B to A) and the agent filter — not through the
+// test wrapper that calls resetForRoom by hand. A press is held on the rail, the
+// reading context changes through the page's own controls, and the old release
+// lands nowhere. (roomReady is true throughout: the second visit is the cached room.)
+test('the turn rail\u2019s held press does not survive a room switch or a filter, through the Hub\u2019s own controls (#461)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const human = (id: string, ts: number, body: string) => ({ id, seq: ts, ts, from: 'human', body });
+  // Every question is addressed to bob, so the bob filter keeps the same three turns: only a CALLED retirement can end a press.
+  const log = [human('q1', 100, '@bob first'), { id: 'r1', seq: 101, ts: 101, from: 'bob', body: 'reply' }, human('q2', 200, '@bob second'), human('q3', 300, '@bob third')];
+  const app = await compiledHub().then(f => f.mount(context, {
+    props: { visible: true, mobile: true },
+    setup(window) {
+      const proto = window.Element.prototype as any;
+      proto.getAnimations = () => [];
+      (window.HTMLCanvasElement.prototype as any).getContext = () => null;
+      const orig = proto.getBoundingClientRect;
+      proto.getBoundingClientRect = function (this: Element) {
+        if (this.classList.contains('tr-band')) return { left: 0, top: 100, right: 44, bottom: 400, width: 44, height: 300, x: 0, y: 100, toJSON() {} };
+        return orig.call(this);
+      };
+      proto.setPointerCapture = () => {};
+      proto.hasPointerCapture = () => false;
+      proto.releasePointerCapture = () => {};
+    },
+    modules: [{
+      ...rpc,
+      projectList: async () => ({ projects: ['fixture', 'other'].map((session) => ({ project: { id: session, name: session, session, path: `/${session}` }, live: true, slots: [] })) }),
+      hubLog: async () => ({ messages: log, has_more: false }),
+    }],
+  }));
+  const q = (s: string) => app.document.querySelector<HTMLElement>(s);
+  const settle = async () => { for (let i = 0; i < 6; i++) { await app.advance(20); await app.flush(); } };
+  const feed = () => {
+    const el = q('.feed')!;
+    Object.defineProperty(el, 'scrollHeight', { get: () => 4000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { get: () => 500, configurable: true });
+    for (const ask of app.document.querySelectorAll<HTMLElement>('[data-ask]')) {
+      Object.defineProperty(ask, 'offsetTop', { get: () => 2000, configurable: true });
+      Object.defineProperty(ask, 'offsetHeight', { get: () => 60, configurable: true });
+    }
+    return el;
+  };
+  const touch = (type: string, y: number) => q('.tr-band')?.dispatchEvent(new app.window.PointerEvent(type,
+    { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 7, clientX: 20, clientY: y, button: 0 }));
+  const select = async (room: string) => {
+    q(`[aria-label="${room}"] .proj-pick`)!.click();
+    for (let i = 0; i < 12 && q('.h1-text')?.textContent !== room; i++) await app.flush();
+    await settle();
+  };
+  try {
+    for (let i = 0; i < 12 && !q('.tr-band'); i++) await app.flush();
+    await settle();
+    assert.ok(q('.tr-band'), 'three human messages bring the rail');
+    // 1. A room switch away and back while the finger is down — both rooms already visited, so
+    //    both are CACHED (roomReady stays true) and both log the same three turns: nothing but a
+    //    called retirement can tell the second visit from the first.
+    await select('other'); await select('fixture');
+    feed().scrollTop = 0;
+    touch('pointerdown', 250); await settle();
+    assert.ok(q('.tr-pop'), 'the press is open');
+    await select('other'); await select('fixture');
+    assert.ok(q('.tr-band'), 'the cached room has its rail again');
+    feed().scrollTop = 0;
+    touch('pointerup', 250); await settle();
+    assert.equal(q('.tr-pop'), null);
+    assert.equal(q('.feed')!.scrollTop, 0, 'the release of a press begun in the other visit lands nowhere');
+    // 2. A control that does something, so the next rows are not vacuous.
+    touch('pointerdown', 250); touch('pointerup', 250); await settle();
+    assert.equal(q('.feed')!.scrollTop, 1992, 'a fresh press and release on the same rail does land');
+    // 3. The agent filter, through the page's own double click on a card.
+    feed().scrollTop = 0;
+    touch('pointerdown', 250); await settle();
+    const card = q('.acard[data-agent="bob"] .agent-select')!;
+    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+      card.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+    }
+    await settle();
+    assert.ok(q('.cards.filtering'), 'the filter is on');
+    assert.equal(app.document.querySelectorAll('[data-ask]').length, 3, 'and it kept the very same turns');
+    assert.equal(q('.tr-pop'), null, 'turning the filter on ended the press');
+    feed().scrollTop = 0;
+    touch('pointerup', 250); await settle();
+    assert.equal(q('.feed')!.scrollTop, 0, 'and its release landed nowhere');
+  } finally { await app.close(); }
 });
