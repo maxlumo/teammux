@@ -97,10 +97,10 @@ test('the rail is absent with one turn, appears with the second, and takes its w
     assert.equal(t.q('.feed-wrap.railed'), null);
     t.q('.t-set-b')!.click(); await t.frames();
     assert.ok(t.q('.turn-rail'), 'the second human message brings it');
-    assert.ok(t.q('.feed-wrap.railed'), 'and the gutter class that counts it into the padding');
+    assert.ok(t.q('.feed-wrap.railed'), 'and the class that makes the feed\'s padding hold its column');
     assert.equal(t.qa('.turn-rail .tr-tick').length, 3, 'one tick per turn while the band has room');
     assert.equal(t.q('.tr-band')!.getAttribute('aria-valuemax'), '3');
-    assert.ok(t.q('.feed') && t.q('.feed')!.parentElement === t.q('.feed-wrap'), 'a sibling of the scroller');
+    assert.ok(t.q('.feed') && t.q('.feed')!.parentElement === t.q('.feed-wrap'), 'laid over the scroller\'s padding as its sibling');
     assert.equal(t.q('.feed .turn-rail'), null, 'never inside it');
   } finally { await t.app.close(); }
 });

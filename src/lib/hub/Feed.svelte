@@ -172,8 +172,8 @@
   const turns = $derived(askTurns(blocks));
   const askSet = $derived(new Set(turns.map((turn) => turn.key)));
 
-  // The turn rail (board #461). Its gutter is LAYOUT: it takes width from the
-  // column, so its appearance (the 2nd human message) goes through the reading
+  // The turn rail (board #461). Its column is LAYOUT: the feed's leading padding
+  // grows to hold it, so its appearance (the 2nd human message) goes through the reading
   // anchor like every other layout mutation — a reader mid-history does not
   // drift. What the rail does with a pointer is its own (TurnRail.svelte); here
   // it is only mounted, fed the turns and the anchor's key, and given the ONE
@@ -1110,10 +1110,13 @@
   /* Bottom padding tight against the composer: the capsule brings its own 8px
      (owner, 2026-08-21: "最后一个消息框，和发送框中间的高度也有点大"). */
   :global(.hub-root.compact) .feed { padding: 14px var(--feed-pad-x) max(6px, calc(var(--control-height) / 2)); gap: 9px; }
-  /* The rail's gutter is counted INTO the leading padding, not stacked on it: the
-     column the rail takes is what the padding no longer gives the bubbles (board
-     #461). A small floor keeps the ticks off the bubbles' edge. */
-  .feed-wrap.railed > .feed { padding-left: max(var(--ui-gap), calc(var(--feed-pad-x) - var(--turn-rail-hit))); }
+  /* The turn rail's column is the feed's OWN leading padding (board #461): the rail
+     overlays it and the feed's padding grows to the hit column plus a small floor,
+     so the bubbles stand exactly where a flex-sibling gutter put them (compact: 48px
+     from the edge; desktop: where the padding already was) while the column itself
+     stays part of the scroller. A wheel or a finger that starts there scrolls the
+     feed natively; only the band refuses it. */
+  .feed-wrap.railed > .feed { padding-left: max(var(--feed-pad-x), calc(var(--turn-rail-hit) + var(--ui-gap))); }
   :global(.hub-root.compact) .msg, :global(.hub-root.compact) .prompt { max-width: 91%; }
 
   :global(.hub-root.compact) .s-head { min-height: 34px; }

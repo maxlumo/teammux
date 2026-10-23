@@ -248,16 +248,19 @@
 
 <style>
   /* The hit column: --turn-rail-hit wide on both screens, painted as a few px of
-     tick at its INNER edge. Only the band takes the pointer and only the band
-     refuses the browser's scroll (touch-action), so a finger anywhere else on
-     the feed scrolls as before. */
+     tick at its INNER edge. It is laid over the feed's own leading padding and is
+     itself inert (pointer-events none): the wheel and a finger that start anywhere
+     but on the band reach the scroller underneath natively, with no forwarder.
+     Only the band takes the pointer and only the band refuses the browser's scroll
+     (touch-action). */
   .turn-rail {
-    flex: none; width: var(--turn-rail-hit); box-sizing: border-box;
+    position: absolute; z-index: 7; inset-block: 0; inset-inline-start: 0;
+    width: var(--turn-rail-hit); box-sizing: border-box; pointer-events: none;
     display: flex; flex-direction: column; justify-content: center;
     padding-block: var(--turn-rail-inset);
   }
   .tr-band {
-    flex: 0 1 auto; min-height: 0; box-sizing: border-box;
+    flex: 0 1 auto; min-height: 0; box-sizing: border-box; pointer-events: auto;
     height: calc(var(--n, 2) * var(--turn-tick-pitch));
     display: flex; flex-direction: column;
     touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none;

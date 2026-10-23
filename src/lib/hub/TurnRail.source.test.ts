@@ -27,7 +27,7 @@ test('the popover is the one mechanism: menuPlacementIn, the menu surface, one e
   assert.match(markup, /class="menu-list"/u);
   assert.match(markup, /class="menu-item tr-row"/u, 'rows are the menu atom');
   assert.doesNotMatch(rail, /HoverCard|hoverCard|hover\.svelte|role="tooltip"/u, 'not the tooltip protocol');
-  assert.doesNotMatch(style, /pointer-events:\s*none/u, 'it is operable (HoverCard is read-only; this is not)');
+  assert.doesNotMatch(/\.tr-pop \{([^}]*)\}/u.exec(style)?.[1] ?? '', /pointer-events/u, 'the popover is operable (HoverCard is read-only; this is not)');
   assert.doesNotMatch(rail, /setTimeout|clearTimeout/u, 'the band-to-popover gap is a bridge, not a timer');
   // The corridor must be a real element, not a pseudo-element: the surface used to
   // clip it (overflow: hidden on .tr-pop), so the pointer left the cluster in the gap.
@@ -64,7 +64,11 @@ test('tokens and atoms only: no px, no literal colour, no second tempo', () => {
   assert.match(style, /touch-action: none/u);
   assert.equal([...style.matchAll(/touch-action:/gu)].length, 1, 'only the band refuses the browser\'s scroll');
   assert.match(style, /\.tr-band \{[^}]*touch-action: none/u);
-  assert.doesNotMatch(style, /\.turn-rail \{[^}]*touch-action/u, 'the gutter\'s empty parts are untouched');
+  assert.doesNotMatch(style, /\.turn-rail \{[^}]*touch-action/u, 'the column\'s empty parts refuse nothing');
+  // The column is the feed's own padding with the rail laid over it: inert except the band, so
+  // a wheel or a finger starting beside or above the band scrolls the feed natively (validator, #461).
+  assert.match(style, /\.turn-rail \{[^}]*position: absolute;[^}]*pointer-events: none;/u, 'the column overlays the padding and is inert');
+  assert.match(style, /\.tr-band \{[^}]*pointer-events: auto;/u, 'only the band takes the pointer');
 });
 
 test('the band is an operable slider that keeps a Tab exit and follows the preview', () => {
@@ -78,13 +82,14 @@ test('the band is an operable slider that keeps a Tab exit and follows the previ
   assert.doesNotMatch(code(script), /\.focus\(\)/u, 'an outside press never steals focus back to the band');
 });
 
-test('the gutter is counted into the leading padding and appears through the reading anchor', () => {
-  assert.match(feed, /\.feed-wrap\.railed > \.feed \{ padding-left: max\(var\(--ui-gap\), calc\(var\(--feed-pad-x\) - var\(--turn-rail-hit\)\)\); \}/u);
+test('the column is the feed\'s own padding and its appearance goes through the reading anchor', () => {
+  assert.match(feed, /\.feed-wrap\.railed > \.feed \{ padding-left: max\(var\(--feed-pad-x\), calc\(var\(--turn-rail-hit\) \+ var\(--ui-gap\)\)\); \}/u,
+    'the bubbles stand where a flex gutter put them, and the column stays part of the scroller');
   assert.match(feed, /untrack\(\(\) => \{ if \(want !== railOn\) withReadingAnchor\(\(\) => \{ railOn = want; \}\); \}\);/u,
     'the 1-to-2 turns change is a layout mutation like every other');
   assert.match(feed, /const railWanted = \$derived\(roomReady && turns\.length >= 2\);/u, 'hidden with fewer than two turns and until the room settled');
   assert.doesNotMatch(feed, /\.feed-wrap\.railed[^{]*\{[^}]*transition/u, 'the gutter\'s width is not animated');
-  assert.match(feed, /<TurnRail bind:this=\{turnRail\} \{turns\}/u, 'a sibling of the scroller, fed the shared turns');
+  assert.match(feed, /<TurnRail bind:this=\{turnRail\} \{turns\}/u, 'laid over the scroller\'s padding, never inside it, fed the shared turns');
 });
 
 test('retire() is CALLED at every place the reading context changes', () => {

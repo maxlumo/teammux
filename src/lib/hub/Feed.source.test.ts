@@ -125,7 +125,7 @@ test('compact tail padding contains the floating command targets without opening
   assert.match(compact, /padding: 14px var\(--feed-pad-x\) max\(6px, calc\(var\(--control-height\) \/ 2\)\)/u,
     'the absolute action overhang is reserved even before the row opens');
   assert.match(source, /:global\(\.hub-root\.compact\) \.feed-wrap \{ --feed-pad-x: 10px; \}/u,
-    'the compact leading padding is still 10px; the rail gutter (#461) is counted into it');
+    'the compact leading padding is still 10px; the rail column (#461) is laid over it');
   assert.doesNotMatch(compact, /msgOpen/u);
 });
 
