@@ -607,7 +607,8 @@ pub(crate) fn render_codex(
     // `-c` like the other startup answers, so no project config turns it
     // back on. Measured with real model turns (#452): the shell tool still
     // runs, and the checked names/counts and tools passed; but its PATH is
-    // now the recipe's, not the rc-built PATH the snapshot carried (17 more
+    // now built from the recipe's (R1: 10 entries against its 9, the extra one
+    // unidentified), not the rc-built PATH the snapshot carried (17 more
     // directories) — a narrowing accepted as ruling (a) on #452: the
     // snapshot widened the declared recipe environment.
     config_args.push(shared::codex_config_override("features.shell_snapshot", Value::Bool(false)));
