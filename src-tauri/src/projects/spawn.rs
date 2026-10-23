@@ -414,18 +414,32 @@ fn materialize(
 /// window), or a def edited into an invalid model (a config the backend
 /// would refuse must not brick the restart).
 /// `Ok(true)` re-materialized, `Ok(false)` nothing to re-materialize from (no
-/// recipe, the definition gone, an invalid model: the snapshot is kept), and
+/// recipe, the definition ABSENT, an invalid model: the snapshot is kept), and
 /// `Err` when re-materializing FAILED (a private write refused, board #448
-/// P1-B): the start is refused, never replayed from the old recipe.
+/// P1-B) or when a recipe or definition that EXISTS cannot be read or parsed
+/// (board #452 (a)): the start is refused, never replayed from the old recipe.
 pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Result<bool, String> {
     let home = agent_home(project_path, window_name);
     // The recipe's section from this read to materialize's write: the whole
     // read-modify-write, registry/team resolution and the backend's render
     // included, so a team move cannot land in between and be undone.
     let section = super::recipe::recipe_section(&home);
-    let Ok(Some(recipe)) = section.read() else { return Ok(false) };
+    // ABSENT stays "nothing to refresh"; PRESENT but unreadable REFUSES (board
+    // #452 (a)): a recipe that exists and cannot be read or parsed used to be
+    // taken for "no recipe", so the start went ahead on the old materials
+    // silently, skipping the render and everything it enforces.
+    let recipe = match section.read() {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(false),
+        Err(e) => return Err(format!("{window_name}: {e}, so it is not started")),
+    };
     let p = provenance_of(&recipe);
-    let Some(def) = effective_def(project_path, window_name, &p) else {
+    // One resolution that keeps the cause (#452 (a), reviewer P1 on
+    // cb80a7b7): only an ABSENT definition keeps the old materials; one that
+    // exists and cannot be read, or does not make a definition, refuses.
+    let resolved = resolve_provenance_def(project_path, window_name, &p, &mut MemberKind::Unresolved)
+        .map_err(|e| format!("{window_name}: {e}, so it is not started"))?;
+    let Some(def) = resolved else {
         // The def (or its team/base) is gone. Keep the spawn-time snapshot —
         // the agent keeps working — and say so once per window, not per start.
         static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -590,24 +604,98 @@ pub(super) fn effective_def(project_path: &str, window_name: &str, p: &Provenanc
 }
 
 /// `effective_def`, with where its model and effort came from (`MemberKind`),
-/// taken from the one member the resolution found.
+/// taken from the one member the resolution found. The FAIL-SOFT form of
+/// `resolve_provenance_def` for callers that only ask "is there a definition": a read
+/// error is folded into `None` here and nowhere else.
 pub(super) fn effective_def_kind(project_path: &str, window_name: &str, p: &Provenance) -> (Option<RegAgent>, MemberKind) {
     let mut kind = MemberKind::Unresolved;
-    let def = if !p.team.is_empty() && !p.member.is_empty() {
-        refresh_team_def_kind(project_path, &p.team, &p.member, window_name, &mut kind)
+    let def = resolve_provenance_def(project_path, window_name, p, &mut kind).ok().flatten();
+    (def, kind)
+}
+
+/// THE effective-definition resolver (board #452 (a), reviewer P1 on
+/// cb80a7b7): one pass over the recipe's provenance that keeps the cause.
+/// `Ok(None)` only when something it needs is ABSENT (the registry row, the
+/// root team, a sub-team on the member's path, the member, or its base);
+/// `Err` when something PRESENT cannot be read or does not make a definition
+/// (a store read error, a team that does not expand, a member with neither a
+/// base nor an inline agent). `kind` is set as soon as the member is found.
+pub(super) fn resolve_provenance_def(project_path: &str, window_name: &str, p: &Provenance, kind: &mut MemberKind) -> Result<Option<RegAgent>, String> {
+    if !p.team.is_empty() && !p.member.is_empty() {
+        team_member_def(project_path, &p.team, &p.member, window_name, kind, Assembly::Team)
     } else if let Some((team_path, member)) = p.from_member.rsplit_once('/') {
         // A joined fork of a team member: the member's CURRENT def, without
         // holding its slot and without a team section of its own (board #383).
-        fork_member_def_kind(team_path, member, window_name, &mut kind)
-    } else if !p.agent_def.is_empty() {
-        kind = MemberKind::NotTeam;
-        super::registry_get(&p.agent_def).ok().flatten()
+        team_member_def(project_path, team_path, member, window_name, kind, Assembly::Fork)
     } else {
-        // Pre-#113 recipe: the window name IS the def name or nothing.
-        kind = MemberKind::NotTeam;
-        super::registry_get(window_name).ok().flatten()
+        // A solo spawn follows `agent_def`; a pre-#113 recipe names nothing,
+        // and the window name IS the def name or nothing.
+        *kind = MemberKind::NotTeam;
+        let name = if p.agent_def.is_empty() { window_name } else { p.agent_def.as_str() };
+        read_registry(name).map_err(|e| format!("definition '{name}' cannot be read: {e}"))
+    }
+}
+
+/// A registry read, with a test seam that fails one read of `name`.
+fn read_registry(name: &str) -> Result<Option<RegAgent>, String> {
+    #[cfg(test)]
+    if READ_FAULT.with(|f| f.borrow().as_deref() == Some(name)) {
+        READ_FAULT.with(|f| *f.borrow_mut() = None);
+        return Err("injected read error".into());
+    }
+    super::registry_get(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam (#452 (a)): the next registry read of this name fails once.
+    pub(crate) static READ_FAULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How a team member's definition is assembled: as that member (a team
+/// window, with its roster) or as a fork of it (no team section).
+#[derive(Clone, Copy)]
+enum Assembly { Team, Fork }
+
+/// A team member's definition, with the cause kept (see `resolve_provenance_def`).
+fn team_member_def(workspace: &str, team_path: &str, member: &str, window_name: &str, kind: &mut MemberKind, how: Assembly) -> Result<Option<RegAgent>, String> {
+    let root = team_path.split('/').next().unwrap_or("");
+    let cannot = |what: String| move |e: String| format!("{what} cannot be read: {e}");
+    let Some(team) = super::team_get(root).map_err(cannot(format!("team '{root}'")))? else { return Ok(None) };
+    // A sub-team on the member's own path that is gone means the member is
+    // gone: ABSENT, asked by name before the expansion (which would only say
+    // so in an error string).
+    for sub in team_path.split('/').skip(1) {
+        if super::team_get(sub).map_err(cannot(format!("team '{sub}'")))?.is_none() {
+            return Ok(None);
+        }
+    }
+    let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).map_err(cannot(format!("team '{root}'")))?;
+    let Some(f) = flat.iter().find(|f| f.path == team_path && f.member.name.trim() == member) else { return Ok(None) };
+    *kind = member_kind(f);
+    let base = match f.member.base.trim() {
+        "" => None,
+        b => match read_registry(b).map_err(cannot(format!("base '{b}' of member '{member}'")))? {
+            Some(base) => Some(base),
+            None => return Ok(None),
+        },
     };
-    (def, kind)
+    let made = match how {
+        Assembly::Team => {
+            let assigned = team_windows_from_recipes(workspace, root);
+            let roster: Vec<super::teams::RosterEntry> = flat
+                .iter()
+                .map(|g| {
+                    let key = (g.path.clone(), g.member.name.trim().to_string());
+                    let w = assigned.get(&key).cloned().unwrap_or_else(|| g.member.name.trim().to_string());
+                    (w, g.member.role.clone(), g.path.clone())
+                })
+                .collect();
+            super::teams::effective_def(f, base.as_ref(), window_name, &roster)
+        }
+        Assembly::Fork => super::teams::forked_def(f, base.as_ref(), window_name),
+    };
+    made.map(Some).map_err(|e| format!("team '{root}', member '{member}' is not a definition: {e}"))
 }
 
 /// The team whose member's definition this window runs: the SAME two branches
@@ -960,50 +1048,17 @@ fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, Strin
 /// member — with the member's own name as the fallback for a sibling that has
 /// no recipe here (removed, or spawned before provenance existed): that is
 /// the name spawn itself would have used had the window not been taken.
+/// Fail-soft (`None` for absent AND unreadable); `team_member_def` keeps the cause.
 fn refresh_team_def(workspace: &str, team_path: &str, member: &str, window_name: &str) -> Option<RegAgent> {
-    refresh_team_def_kind(workspace, team_path, member, window_name, &mut MemberKind::Unresolved)
-}
-
-fn refresh_team_def_kind(workspace: &str, team_path: &str, member: &str, window_name: &str, kind: &mut MemberKind) -> Option<RegAgent> {
-    let root = team_path.split('/').next()?;
-    let team = super::team_get(root).ok().flatten()?;
-    let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).ok()?;
-    let f = flat
-        .iter()
-        .find(|f| f.path == team_path && f.member.name.trim() == member)?;
-    *kind = member_kind(f);
-    let assigned = team_windows_from_recipes(workspace, root);
-    let roster: Vec<super::teams::RosterEntry> = flat
-        .iter()
-        .map(|g| {
-            let key = (g.path.clone(), g.member.name.trim().to_string());
-            let w = assigned.get(&key).cloned().unwrap_or_else(|| g.member.name.trim().to_string());
-            (w, g.member.role.clone(), g.path.clone())
-        })
-        .collect();
-    let base = if f.member.base.trim().is_empty() {
-        None
-    } else {
-        super::registry_get(f.member.base.trim()).ok().flatten()
-    };
-    super::teams::effective_def(f, base.as_ref(), window_name, &roster).ok()
+    team_member_def(workspace, team_path, member, window_name, &mut MemberKind::Unresolved, Assembly::Team).ok().flatten()
 }
 
 /// A fork's definition of a team member (board #383): the member's CURRENT
 /// definition and role from the team (`teams::forked_def`), with no team section
-/// — the joined block is built once, by `materialize`.
+/// — the joined block is built once, by `materialize`. Fail-soft, like
+/// `refresh_team_def`.
 fn fork_member_def(team_path: &str, member: &str, window_name: &str) -> Option<RegAgent> {
-    fork_member_def_kind(team_path, member, window_name, &mut MemberKind::Unresolved)
-}
-
-fn fork_member_def_kind(team_path: &str, member: &str, window_name: &str, kind: &mut MemberKind) -> Option<RegAgent> {
-    let root = team_path.split('/').next()?;
-    let team = super::team_get(root).ok().flatten()?;
-    let flat = super::teams::expand(&team, &|n| super::team_get(n), SPAWN_CAP).ok()?;
-    let f = flat.iter().find(|f| f.path == team_path && f.member.name.trim() == member)?;
-    *kind = member_kind(f);
-    let base = if f.member.base.trim().is_empty() { None } else { super::registry_get(f.member.base.trim()).ok().flatten() };
-    super::teams::forked_def(f, base.as_ref(), window_name).ok()
+    team_member_def("", team_path, member, window_name, &mut MemberKind::Unresolved, Assembly::Fork).ok().flatten()
 }
 
 /// (team path, member name) -> window name, read off every recipe under
@@ -3514,6 +3569,104 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(!p.contains_key("model") && !p.contains_key("model_reasoning_effort"), "cleared: not set at this layer: {p:?}");
         let _ = super::super::registry_delete(&name);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #452 (a): only an ABSENT definition keeps the old materials
+    /// (`Ok(false)`); a recipe or a definition that EXISTS but cannot be read
+    /// or parsed refuses the start, so a restart never goes ahead silently on
+    /// materials the render would have changed. In every branch nothing in
+    /// the home is removed (the planted snapshot cache stays).
+    #[test]
+    fn refresh_agent_keeps_old_materials_only_when_the_definition_is_absent() {
+        super::super::tests::use_test_store();
+        let ws = std::env::temp_dir().join(format!("tmm-rf452-{}", uuid::Uuid::new_v4()));
+        let ws_str = ws.to_string_lossy().to_string();
+        let tag = &uuid::Uuid::new_v4().to_string()[..8];
+        let setup = |window: &str, recipe: &str| {
+            let home = agent_home(&ws_str, window);
+            std::fs::create_dir_all(home.join("codex/shell_snapshots")).unwrap();
+            std::fs::write(home.join("codex/shell_snapshots/old.1.sh"), "export SENTINEL_452A=x").unwrap();
+            std::fs::write(home.join("launch.json"), recipe).unwrap();
+            home
+        };
+        let kept = |home: &Path| home.join("codex/shell_snapshots/old.1.sh").exists();
+
+        // Absent: the recipe names a definition that is not in the registry.
+        let absent = format!("rfa-{tag}");
+        let h = setup(&absent, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "agent_def": absent }).to_string());
+        assert_eq!(refresh_agent(&ws_str, "proj", &absent), Ok(false), "an absent definition keeps the old materials");
+        assert!(kept(&h));
+
+        // A recipe that exists and does not parse: refused, naming the file.
+        let bad = format!("rfr-{tag}");
+        let h = setup(&bad, "{ not json");
+        let e = refresh_agent(&ws_str, "proj", &bad).unwrap_err();
+        assert!(e.contains("launch recipe") && e.contains("launch.json") && e.contains("not started"), "{e}");
+        assert!(kept(&h), "nothing removed");
+
+        // A team definition that exists and does not expand: refused.
+        let team = format!("rft-{tag}");
+        crate::projects::restore_hold::with_store_for_test(|st| st.team_save(&super::super::store::RegTeam {
+            name: team.clone(), description: String::new(), members: "not json".into() }, 1)).unwrap();
+        let member = format!("rfm-{tag}");
+        let h = setup(&member, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "team": team, "member": "dev" }).to_string());
+        let e = refresh_agent(&ws_str, "proj", &member).unwrap_err();
+        assert!(e.contains(&format!("team '{team}' cannot be read")) && e.contains("not started"), "{e}");
+        assert!(kept(&h), "nothing removed");
+        // The same team ABSENT: the old materials are kept.
+        super::super::teams_delete(&team).ok();
+        assert_eq!(refresh_agent(&ws_str, "proj", &member), Ok(false));
+        assert!(kept(&h));
+
+        // Reviewer P1 on cb80a7b7, the cases a second lookup missed. A team
+        // that expands but whose target leaf has neither a base nor an inline
+        // agent: present, not a definition → refused.
+        let leaf = format!("rfl-{tag}");
+        crate::projects::restore_hold::with_store_for_test(|st| st.team_save(&super::super::store::RegTeam {
+            name: leaf.clone(), description: String::new(), members: r#"[{"name":"dev"}]"#.into() }, 1)).unwrap();
+        let lw = format!("rflw-{tag}");
+        let h = setup(&lw, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "team": leaf, "member": "dev" }).to_string());
+        let e = refresh_agent(&ws_str, "proj", &lw).unwrap_err();
+        assert!(e.contains("is not a definition") && e.contains("not started"), "{e}");
+        assert!(kept(&h));
+        // A member whose base exists but whose READ fails (injected once):
+        // refused, never taken for "base gone".
+        let base = format!("rfb-{tag}");
+        super::super::registry_save(&json!({ "name": base, "backend": "codex", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        let bt = format!("rfbt-{tag}");
+        crate::projects::restore_hold::with_store_for_test(|st| st.team_save(&super::super::store::RegTeam {
+            name: bt.clone(), description: String::new(), members: json!([{ "name": "dev", "base": base }]).to_string() }, 1)).unwrap();
+        let bw = format!("rfbw-{tag}");
+        let h = setup(&bw, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "team": bt, "member": "dev" }).to_string());
+        READ_FAULT.with(|f| *f.borrow_mut() = Some(base.clone()));
+        let e = refresh_agent(&ws_str, "proj", &bw).unwrap_err();
+        assert!(e.contains(&format!("base '{base}'")) && e.contains("cannot be read"), "{e}");
+        assert!(kept(&h));
+        // A solo definition whose FIRST read fails once while a second would
+        // succeed: one resolution, so the failure refuses; it is not washed
+        // into "absent" by a later successful read.
+        let solo = format!("rfs-{tag}");
+        super::super::registry_save(&json!({ "name": solo, "backend": "codex", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        let h = setup(&solo, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "agent_def": solo }).to_string());
+        READ_FAULT.with(|f| *f.borrow_mut() = Some(solo.clone()));
+        let e = refresh_agent(&ws_str, "proj", &solo).unwrap_err();
+        assert!(e.contains(&format!("definition '{solo}' cannot be read")), "{e}");
+        assert!(kept(&h));
+        // The absent cases keep the old materials: the member gone from an
+        // existing team, the base gone, a sub-team on the path gone.
+        let gone = format!("rfgw-{tag}");
+        let h = setup(&gone, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "team": bt, "member": "nobody" }).to_string());
+        assert_eq!(refresh_agent(&ws_str, "proj", &gone), Ok(false), "member gone");
+        super::super::registry_delete(&base).ok();
+        assert_eq!(refresh_agent(&ws_str, "proj", &bw), Ok(false), "base gone");
+        let sub = format!("rfsub-{tag}");
+        let subw = format!("rfsubw-{tag}");
+        let h2 = setup(&subw, &json!({ "backend": "codex", "cmd": "command codex", "env": [], "team": format!("{bt}/{sub}"), "member": "dev" }).to_string());
+        assert_eq!(refresh_agent(&ws_str, "proj", &subw), Ok(false), "a sub-team on the path gone");
+        assert!(kept(&h) && kept(&h2));
+        for t in [&leaf, &bt] { super::super::teams_delete(t).ok(); }
+        super::super::registry_delete(&solo).ok();
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     /// The recipe's provenance (`agent_def`, or `team`+`member`) is what the
