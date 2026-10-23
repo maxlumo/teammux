@@ -27,6 +27,18 @@ fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
+/// This thread's errno, which `readdir` leaves untouched at the END of a
+/// directory and sets on an error; the one way to tell them apart is to
+/// clear it first. Each libc names its accessor differently.
+fn errno_ptr() -> *mut libc::c_int {
+    #[cfg(target_os = "android")]
+    unsafe { libc::__errno() }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe { libc::__error() }
+    #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
+    unsafe { libc::__errno_location() }
+}
+
 /// A held directory handle.
 pub(crate) struct Dir(OwnedFd);
 
@@ -90,6 +102,43 @@ impl Dir {
     /// `unlinkat(name, 0)`: a file or a symlink itself, never its target.
     pub(crate) fn unlink(&self, name: &str) -> io::Result<()> {
         check(unsafe { libc::unlinkat(self.fd(), cstr(name)?.as_ptr(), 0) }).map(|_| ())
+    }
+
+    /// `unlinkat(name, AT_REMOVEDIR)`: an EMPTY child directory.
+    pub(crate) fn rmdir(&self, name: &str) -> io::Result<()> {
+        check(unsafe { libc::unlinkat(self.fd(), cstr(name)?.as_ptr(), libc::AT_REMOVEDIR) }).map(|_| ())
+    }
+
+    /// The names in the held directory (not `.`/`..`), read through a
+    /// duplicate of its fd (`fdopendir`), so the listing is of THIS object
+    /// and never of a path resolved again. A name that is not UTF-8 is an
+    /// error: nothing we write has one.
+    pub(crate) fn names(&self) -> io::Result<Vec<String>> {
+        let dup = check(unsafe { libc::fcntl(self.fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
+        let dirp = unsafe { libc::fdopendir(dup) };
+        if dirp.is_null() {
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(dup) };
+            return Err(e);
+        }
+        unsafe { libc::rewinddir(dirp) };
+        let mut out = Vec::new();
+        let result = loop {
+            unsafe { *errno_ptr() = 0 };
+            let ent = unsafe { libc::readdir(dirp) };
+            if ent.is_null() {
+                let errno = unsafe { *errno_ptr() };
+                break if errno == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(errno)) };
+            }
+            let raw = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+            match raw.to_str() {
+                Ok(".") | Ok("..") => {}
+                Ok(n) => out.push(n.to_string()),
+                Err(_) => break Err(io::Error::from_raw_os_error(libc::EILSEQ)),
+            }
+        };
+        unsafe { libc::closedir(dirp) };
+        result.map(|_| out)
     }
 
     /// `symlinkat(target, name)`: a link named `name` in this directory.
@@ -402,6 +451,55 @@ pub(crate) fn remove_private(path: &Path) -> Result<(), String> {
         Err(e) => Err(e),
     }
     .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Remove a codex home's shell-state cache, `shell_snapshots` (board #452):
+/// files our own earlier launches had codex write into a managed home (the
+/// home is ours), each a copy of the pane shell's exported environment.
+/// Everything acts on handles: the codex home is held through the entry walk
+/// (`private_subdir`); the cache directory goes through the same owned-
+/// directory rule as every other step of a private walk (`step`: opened
+/// without following a link, a directory of ours, made exactly 0700 by
+/// `fchmod` on THAT handle) BEFORE any entry is read, because names inside a
+/// directory others can write could be swapped between a check and an
+/// unlink. Its entries are then listed from the handle and ALL checked
+/// before the first unlink (each must be a regular file of ours); then each
+/// is unlinked and the empty directory removed (`unlinkat`, `AT_REMOVEDIR`).
+/// Absent is done. A link, another user's entry, a nested directory or a
+/// special file refuses the removal before anything is unlinked, and the
+/// caller's render fails. An I/O failure part-way (an unlink, or the final
+/// rmdir when a still-running older CLI added a file) is reported as a
+/// failure; entries already unlinked stay unlinked, there is no rollback.
+/// This unlinks a cache; it does not securely erase anything.
+pub(crate) fn remove_codex_snapshots(codex_home: &Path) -> Result<(), String> {
+    const NAME: &str = "shell_snapshots";
+    let at = codex_home.join(NAME);
+    let home = held_dir(codex_home).map_err(|e| format!("{}: {e}", codex_home.display()))?;
+    let fail = |e: io::Error| format!("{}: {e}", at.display());
+    let Some(st) = home.stat_at(NAME).map_err(fail)? else { return Ok(()) };
+    if !is_dir(&st) || st.st_uid != euid() {
+        return Err(fail(denied(format!("{NAME} is not a directory of this user; it was left as it is"))));
+    }
+    let cache = step(&home, NAME, Some(0o700)).map_err(fail)?;
+    let held = cache.stat().map_err(fail)?;
+    if held.st_ino != st.st_ino || held.st_dev != st.st_dev || held.st_uid != euid() {
+        return Err(fail(denied(format!("{NAME} changed while it was being opened; it was left as it is"))));
+    }
+    let names = cache.names().map_err(fail)?;
+    for n in &names {
+        match cache.stat_at(n).map_err(fail)? {
+            None => {}
+            Some(e) if is_file(&e) && e.st_uid == euid() => {}
+            Some(_) => return Err(fail(denied(format!("{n} is not a regular file of this user; nothing in {NAME} was removed")))),
+        }
+    }
+    for n in &names {
+        match cache.unlink(n) {
+            Err(e) if e.raw_os_error() != Some(libc::ENOENT) => return Err(fail(e)),
+            _ => {}
+        }
+    }
+    home.rmdir(NAME).map_err(fail)
 }
 
 /// Test support: a file the private writer cannot replace. Its name becomes
@@ -1006,6 +1104,76 @@ mod walk_tests {
         assert!(tighten_file(&p.join("mcp.json")).is_err());
         assert!(remove_private(&p.join("mcp.json")).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "x", "the file is untouched");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Board #452: codex's shell-state cache in a managed home is removed
+    /// through the held home; anything that is not our own regular file in it
+    /// refuses the whole removal (nothing removed, an error), and nothing
+    /// outside it is touched, through a link at the top or inside.
+    #[test]
+    fn a_codex_snapshot_cache_is_removed_through_the_held_home_and_nothing_else() {
+        let d = scratch("snap452");
+        let codex = d.join("ws/.tmm/agents/cx/codex");
+        let cache = codex.join("shell_snapshots");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel.sh"), "export KEPT=1").unwrap();
+        let fresh = || {
+            let _ = std::fs::remove_dir_all(&cache);
+            std::fs::create_dir_all(&cache).unwrap();
+            for n in ["a.1.sh", "b.2.sh"] { std::fs::write(cache.join(n), "export SENTINEL_452=x").unwrap(); }
+        };
+        // Absent is done; the home's other files stay.
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("hooks.json"), "{}").unwrap();
+        remove_codex_snapshots(&codex).unwrap();
+        // Our own files: removed, and the directory with them.
+        fresh();
+        remove_codex_snapshots(&codex).unwrap();
+        assert!(!cache.exists(), "the cache is gone");
+        assert_eq!(std::fs::read_to_string(codex.join("hooks.json")).unwrap(), "{}", "nothing else in the home");
+        // A link INSIDE the cache: refused, nothing removed, the target kept;
+        // and the cache was made 0700 (the #448 owned-directory rule) BEFORE
+        // its entries were read, even though the removal was refused.
+        fresh();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::os::unix::fs::symlink(outside.join("sentinel.sh"), cache.join("c.3.sh")).unwrap();
+        let e = remove_codex_snapshots(&codex).unwrap_err();
+        assert!(e.contains("nothing in shell_snapshots was removed"), "{e}");
+        assert!(cache.join("a.1.sh").exists() && cache.join("b.2.sh").exists(), "no partial removal");
+        assert_eq!(std::fs::read_to_string(outside.join("sentinel.sh")).unwrap(), "export KEPT=1");
+        assert_eq!(mode(&cache), 0o700, "a world-writable cache was closed before any entry was touched");
+        // A group-writable cache of ours: closed, then removed.
+        fresh();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o770)).unwrap();
+        remove_codex_snapshots(&codex).unwrap();
+        assert!(!cache.exists());
+        // A nested directory or a special file: refused the same way.
+        fresh();
+        std::fs::create_dir_all(cache.join("nested")).unwrap();
+        assert!(remove_codex_snapshots(&codex).is_err());
+        assert!(cache.join("a.1.sh").exists());
+        fresh();
+        let fifo = std::ffi::CString::new(cache.join("p.fifo").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        assert!(remove_codex_snapshots(&codex).is_err());
+        // The cache directory itself a link to an outside directory: refused,
+        // the outside directory and its file untouched.
+        let _ = std::fs::remove_dir_all(&cache);
+        std::os::unix::fs::symlink(&outside, &cache).unwrap();
+        let e = remove_codex_snapshots(&codex).unwrap_err();
+        assert!(e.contains("not a directory of this user"), "{e}");
+        assert!(outside.join("sentinel.sh").exists() && std::fs::symlink_metadata(&cache).unwrap().file_type().is_symlink());
+        // The codex home a link: the held walk refuses it before anything.
+        std::fs::remove_file(&cache).unwrap();
+        let other = d.join("ws/.tmm/agents/other");
+        std::fs::create_dir_all(other.join("shell_snapshots")).unwrap();
+        std::fs::write(other.join("shell_snapshots/x.sh"), "x").unwrap();
+        let linked = d.join("ws/.tmm/agents/cx/linked");
+        std::os::unix::fs::symlink(&other, &linked).unwrap();
+        assert!(remove_codex_snapshots(&linked).is_err());
+        assert!(other.join("shell_snapshots/x.sh").exists(), "never through a linked home");
         std::fs::remove_dir_all(&d).ok();
     }
 }

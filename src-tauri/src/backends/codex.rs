@@ -524,6 +524,12 @@ pub(crate) fn render_codex(
     // No create_dir_all by pathname: the inheritance holds the codex home
     // through the private walk, creating it, before anything in it changes.
     shared::inherit_codex_system_files(&codex_home)?;
+    // Board #452: a launch before this build had codex write its shell-state
+    // cache here, a copy of the pane shell's whole exported environment
+    // (secrets included). The line below turns the cache off; this removes
+    // what earlier launches left, through the held codex home (refused, and
+    // the render with it, for anything that is not our own regular file).
+    crate::safe_fs::remove_codex_snapshots(&codex_home)?;
     let notifications = crate::agent_notifications::AgentNotificationHub::load();
     notifications.ensure_helper()?;
     let notify = notifications.helper_command("codex");
@@ -593,6 +599,18 @@ pub(crate) fn render_codex(
     // The definition's input mode (board #245): queue unless it says steer.
     config_args.extend(input_mode_keymap_overrides(def.input_mode == "steer"));
     config_args.push(shared::codex_config_override("check_for_update_on_startup", Value::Bool(false)));
+    // Board #452: no shell snapshot. codex 0.162.1 otherwise writes
+    // `shell_snapshots/<session>.sh` at session start, the pane shell's whole
+    // `export` list (its secrets included) plus its functions and aliases,
+    // and keeps every one. `features.shell_snapshot` is codex's documented
+    // switch ("Snapshot shell environment to speed up repeated commands"). A
+    // `-c` like the other startup answers, so no project config turns it
+    // back on. Measured with real model turns (#452): the shell tool still
+    // runs, and the checked names/counts and tools passed; but its PATH is
+    // now the recipe's, not the rc-built PATH the snapshot carried (17 more
+    // directories) — a narrowing accepted as ruling (a) on #452: the
+    // snapshot widened the declared recipe environment.
+    config_args.push(shared::codex_config_override("features.shell_snapshot", Value::Bool(false)));
     // A delivery is TYPED (non-negotiable 12): a single line rides one
     // `send-keys -l`, a burst of un-bracketed keystrokes. codex's paste-burst
     // heuristic (for terminals without bracketed paste) takes such a burst

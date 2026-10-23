@@ -2727,6 +2727,19 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(words.contains(&"--no-daemon"), "no shared background server, started or joined: {cmd}");
         let resumed = crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"));
         assert!(resumed.starts_with("command codex resume ") && resumed.split_whitespace().any(|w| w == "--no-daemon"), "a resume keeps it: {resumed}");
+        // Board #452: no shell snapshot, as a `-c` (beats a user's or a
+        // trusted project's `true`), kept by both resume forms.
+        let snap = crate::backends::shared::codex_config_override("features.shell_snapshot", serde_json::Value::Bool(false));
+        assert!(cmd.contains(&snap), "no shell snapshot: {cmd}");
+        for r in [resumed.clone(), crate::backends::codex::resume_command(&cmd, None)] {
+            assert!(r.contains(&snap), "a resume keeps it: {r}");
+        }
+        // And a render removes the cache an earlier launch left in the home.
+        let cache = dir.join("codex/shell_snapshots");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("old.1.sh"), "export SENTINEL_452=x").unwrap();
+        render_codex(&d, "tester", &dir, Path::new("/srv/work/my-app"), &prompt, &[]).unwrap();
+        assert!(!cache.exists(), "the render removed the old snapshots");
         // Board #446: a typed line's Enter submits instead of joining a
         // "paste" (codex's paste-burst heuristic; measured on 0.162.1). The
         // [tui] key exactly: it is the one that wins over an inherited
