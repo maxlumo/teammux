@@ -349,3 +349,17 @@ test('in the preview frame a fragment scrolls, a path opens Files, and nothing n
   renderers.dispose();
   assert.equal(click('f'), false);
 });
+
+test('review highlights: ONE style after the policy, in the same serialization, on both paths (#434)', () => {
+  for (const scope of [SCOPE, null]) {
+    const doc = parse(basedPreviewDoc('<head><style>p{color:red}</style></head><p>x</p>', scope, new new JSDOM('').window.DOMParser()));
+    const lead = [...doc.head.children].map((el) => el.tagName.toLowerCase() + (el.getAttribute('http-equiv') ? `[${el.getAttribute('http-equiv')}]` : ''));
+    assert.deepEqual(lead, scope
+      ? ['meta[Content-Security-Policy]', 'meta', 'base', 'style', 'style']
+      : ['meta[Content-Security-Policy]', 'meta', 'style', 'style'], 'the policy first, ours next, the author\u2019s after');
+    const ours = doc.head.querySelectorAll('style')[0]!.textContent!;
+    assert.match(ours, /^::highlight\(review\)\{background-color:color-mix\(in srgb,Highlight 30%,transparent\)\}::highlight\(review-hot\)/u);
+    assert.doesNotMatch(ours, /#[0-9a-f]{3,8}\b|rgba?\(|var\(--/iu, 'no literal colour, no app token');
+    assert.equal(doc.querySelectorAll('script').length, 0, 'no script added');
+  }
+});

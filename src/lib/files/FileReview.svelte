@@ -21,6 +21,8 @@
   import { mimeCategory } from './file-preview.ts';
   import { reviewLines, type Mapped, type Range } from './review-anchor.ts';
   import { markdownSourceMap } from '../core/markdown.ts';
+  import { alignedHtml, htmlHighlight, htmlSelection, type HtmlUnit } from './review-html.ts';
+  import { htmlSourceMap } from './review-html-map.ts';
   import { codeSelection, markdownSelection, codeHighlight, markdownHighlight, ownHighlight, reviewProjects, draftKey, HIGHLIGHT, HIGHLIGHT_HOT, type NoteDraft } from './review-ui.ts';
   import { landFeedback, recipientIntent } from './review-state.ts';
   import type { ReviewAnnotation, ReviewListing, ReviewTarget } from '../core/ws-api.ts';
@@ -31,6 +33,8 @@
     file: File | null;
     /** The preview's scroll container (FilePreview's `.preview-body`). */
     body: HTMLElement | null;
+    /** The HTML preview's frame (#433), when the preview is one. */
+    frame?: HTMLIFrameElement | null;
     /** The Files instance's project room: the declared one among several
      * projects at the file's root (the Hub drawer's room). */
     session?: string;
@@ -48,7 +52,7 @@
     context?: () => () => boolean;
     children: Snippet;
   }
-  let { file, body, session = '', refresh = 0, compact = false, onfeedback = () => {}, context = () => () => true, children }: Props = $props();
+  let { file, body, frame = null, session = '', refresh = 0, compact = false, onfeedback = () => {}, context = () => () => true, children }: Props = $props();
 
   const scope = useServerScope()!;
   const api = scope.runtime.api;
@@ -76,10 +80,10 @@
   const TEXT_MIN = 440;
   const QUOTE_MAX = 60;
 
-  const kind = $derived.by((): 'code' | 'markdown' | null => {
+  const kind = $derived.by((): 'code' | 'markdown' | 'html' | null => {
     if (!file || file.content == null || file.convertedHtml) return null;
     const c = mimeCategory(file.stat?.mime_hint);
-    return c === 'markdown' ? 'markdown' : c === 'code' || c === 'other' ? 'code' : null;
+    return c === 'markdown' ? 'markdown' : c === 'html' ? 'html' : c === 'code' || c === 'other' ? 'code' : null;
   });
   const lines = $derived(kind && file?.content != null ? reviewLines(file.content) : []);
   /** What each rendered markdown block shows, tied to the source: the same
@@ -247,35 +251,84 @@
   /** A press on the ＋ itself: the selection may collapse under the finger
    * before the click lands; that collapse is not "the selection went away". */
   let holding = false;
-  function reviewRoot(): HTMLElement | null {
-    return body?.querySelector<HTMLElement>(kind === 'markdown' ? '.md-render' : '.code-lined') ?? null;
-  }
-  function rangeAnchor(r: globalThis.Range): AnchorRect {
-    const box = typeof r.getBoundingClientRect === 'function' ? r.getBoundingClientRect() : null;
+  /**
+   * Where the preview's text lives, and how its geometry reaches the page
+   * (the cards, the ＋): the page's own document for code and markdown, the
+   * frame's document for HTML, and only while a verified binding holds it
+   * (design delta 2). One frame→parent conversion (delta 1 P1-B): inside the
+   * frame, a rect is in the frame document's CSS pixels, which are the
+   * parent's zoomed CSS pixels (the frame is drawn at uiZoom like the rest);
+   * the frame element's own rect is in visual pixels, so it is divided by
+   * uiZoom ONCE (anchorOf's rule) and its border added. Neither scroll is
+   * added twice: an inner rect already reflects the frame's scroll, the
+   * frame's rect any outer one. Hit testing never converts: it stays inside
+   * the frame, on the frame's own coordinates.
+   */
+  type Surface = {
+    doc: Document; win: Window & typeof globalThis; root: HTMLElement; scroller: HTMLElement;
+    /** A client rect of this surface → the page's zoomed CSS pixels. */
+    toParent: (r: { left: number; right: number; top: number; bottom: number }) => AnchorRect;
+  };
+  function surface(): Surface | null {
+    if (kind === 'html') {
+      const doc = frameDoc, f = frame;
+      const root = doc?.body, scroller = (doc?.scrollingElement ?? doc?.documentElement) as HTMLElement | null | undefined;
+      if (!doc || !f || !root || !scroller || f.contentDocument !== doc) return null;
+      const z = uiZoom();
+      const fr = f.getBoundingClientRect();
+      const ox = fr.left / z + f.clientLeft, oy = fr.top / z + f.clientTop;
+      return { doc, win: doc.defaultView as Window & typeof globalThis, root, scroller,
+        toParent: (r) => ({ left: ox + r.left, right: ox + r.right, top: oy + r.top, bottom: oy + r.bottom }) };
+    }
+    const root = body?.querySelector<HTMLElement>(kind === 'markdown' ? '.md-render' : '.code-lined') ?? null;
+    const scroller = (kind === 'code' ? body?.querySelector<HTMLElement>('.code-lined') : null) ?? body;
+    if (!body || !root || !scroller) return null;
     const z = uiZoom();
-    return box ? { left: box.left / z, right: box.right / z, top: box.top / z, bottom: box.bottom / z } : { left: 0, right: 0, top: 0, bottom: 0 };
+    return { doc: body.ownerDocument, win: body.ownerDocument.defaultView as Window & typeof globalThis, root, scroller,
+      toParent: (r) => ({ left: r.left / z, right: r.right / z, top: r.top / z, bottom: r.bottom / z }) };
+  }
+  const rectOf = (r: globalThis.Range) => (typeof r.getBoundingClientRect === 'function' ? r.getBoundingClientRect() : { left: 0, right: 0, top: 0, bottom: 0 });
+  /** The selection mapper for this kind (one per kind, all proved or refused). */
+  function mapSelection(s: Surface, r: globalThis.Range): Mapped | null {
+    const src = file?.content ?? '';
+    if (kind === 'code') return codeSelection(s.root, r, lines);
+    if (kind === 'markdown') return markdownSelection(s.root, r, src, mdMap);
+    return htmlSelection(s.doc, r, src, htmlMap);
+  }
+  function mapHighlight(s: Surface, range: Range, quote: string): globalThis.Range | null {
+    const src = file?.content ?? '';
+    void quote;
+    if (kind === 'code') return codeHighlight(s.root, range, lines);
+    if (kind === 'markdown') return markdownHighlight(s.root, range, src, mdMap);
+    return htmlHighlight(s.doc, range, src, htmlMap);
   }
   function onSelectionChange() {
     if (holding) return;
-    const root = reviewRoot();
-    if (!root || !target || !kind || file?.content == null) { pick = null; return; }
-    const sel = root.ownerDocument.getSelection();
+    const s = surface();
+    if (!s || !target || !kind || file?.content == null) { pick = null; return; }
+    const sel = s.doc.getSelection();
     const r = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
-    if (!r || r.collapsed || !root.contains(r.commonAncestorContainer)) { pick = null; return; }
-    const mapped = kind === 'code' ? codeSelection(root, r, lines) : markdownSelection(root, r, file.content, mdMap);
+    if (!r || r.collapsed || !s.root.contains(r.commonAncestorContainer)) { pick = null; return; }
+    const mapped = mapSelection(s, r);
     if (!mapped || ('refused' in mapped && (mapped.refused === 'reviewRefusedOutside' || mapped.refused === 'reviewRefusedEmpty'))) { pick = null; return; }
-    pick = { mapped, quote: r.toString(), anchor: rangeAnchor(r) };
+    // The quote is what the MAPPED range shows (a reference half selected
+    // is quoted whole), read back through the same inverse a card's
+    // highlight uses; the raw selection only when that cannot be shown.
+    const shown = 'range' in mapped ? mapHighlight(s, mapped.range, '')?.toString() : undefined;
+    pick = { mapped, quote: shown || r.toString(), anchor: s.toParent(rectOf(r)) };
   }
   $effect(() => {
+    void frameDoc; void body; void kind;
     if (!on) return;
-    const doc = body?.ownerDocument;
-    if (!doc) return;
+    const s = untrack(surface);
+    if (!s) return;
+    const page = wrapEl?.ownerDocument ?? body?.ownerDocument;
     const release = () => { setTimeout(() => { holding = false; }, 0); };
-    doc.addEventListener('selectionchange', onSelectionChange);
-    doc.defaultView?.addEventListener('pointerup', release, true);
+    s.doc.addEventListener('selectionchange', onSelectionChange);
+    page?.defaultView?.addEventListener('pointerup', release, true);
     return () => {
-      doc.removeEventListener('selectionchange', onSelectionChange);
-      doc.defaultView?.removeEventListener('pointerup', release, true);
+      s.doc.removeEventListener('selectionchange', onSelectionChange);
+      page?.defaultView?.removeEventListener('pointerup', release, true);
     };
   });
   const pickPos = $derived(pick ? menuPlacement(pick.anchor, { w: pickW, h: pickH }, viewBox(), undefined, undefined, 'left') : null);
@@ -289,7 +342,7 @@
     writeNote('', notes[''] ?? '');
     pick = null;
     folded = false;
-    body?.ownerDocument.getSelection()?.removeAllRanges();
+    untrack(surface)?.doc.getSelection()?.removeAllRanges();
     void tick().then(() => wrapEl?.querySelector<HTMLTextAreaElement>('.rv-new textarea')?.focus());
   }
 
@@ -378,22 +431,20 @@
   let rowsShown = $state(Number.MAX_SAFE_INTEGER);
   let hotId = $state('');
   function paint() {
-    const root = reviewRoot();
+    const s = surface();
     const next = new Map<string, globalThis.Range>();
-    if (root && current && kind) {
-      if (kind === 'code') rowsShown = root.querySelectorAll('.cl-row').length;
+    if (s && current && kind) {
+      if (kind === 'code') rowsShown = s.root.querySelectorAll('.cl-row').length;
       for (const a of shown) {
         if (a.at?.state !== 'located') continue;
-        const r = kind === 'code' ? codeHighlight(root, a.at.range, lines) : markdownHighlight(root, a.at.range, file!.content!, mdMap);
+        const r = mapHighlight(s, a.at.range, a.quote);
         if (r) next.set(a.id, r);
       }
     }
     ranges = next;
     painted = new Set(next.keys());
     // Where the comment being written sits, to place its card (no highlight).
-    newRange = root && newAt && kind && file?.revision === newAt.revision
-      ? (kind === 'code' ? codeHighlight(root, newAt.range, lines) : markdownHighlight(root, newAt.range, file!.content!, mdMap))
-      : null;
+    newRange = s && newAt && kind && file?.revision === newAt.revision ? mapHighlight(s, newAt.range, newAt.quote) : null;
     hl?.set([...next.values()]);
     hot?.set(hotId && next.has(hotId) ? [next.get(hotId)!] : []);
     placeCards();
@@ -406,28 +457,48 @@
     requestAnimationFrame(() => { paintQueued = false; paint(); });
   }
   $effect(() => {
-    const el = body;
-    if (!on || !el) return;
-    const win = el.ownerDocument.defaultView as (Window & typeof globalThis) | null;
-    hl = win ? ownHighlight(win, HIGHLIGHT) : null;
-    hot = win ? ownHighlight(win, HIGHLIGHT_HOT) : null;
+    void frameDoc; void body; void kind;
+    if (!on) return;
+    const s = untrack(surface);
+    if (!s) return;
+    // The highlight registry, Highlight and MutationObserver are the
+    // surface's own window's: for HTML, the frame's, never the page's.
+    hl = ownHighlight(s.win, HIGHLIGHT);
+    hot = ownHighlight(s.win, HIGHLIGHT_HOT);
     // The preview re-renders under us (the highlighter landing, mermaid, a
-    // Reload): paint again whenever its DOM changes.
-    const mo = typeof MutationObserver === 'function' ? new MutationObserver(queuePaint) : null;
-    mo?.observe(el, { childList: true, subtree: true, characterData: true });
+    // Reload, a contenteditable edit in the frame): paint again whenever its
+    // DOM changes.
+    const MO = (s.win as unknown as { MutationObserver?: typeof MutationObserver }).MutationObserver;
+    const mo = typeof MO === 'function' ? new MO(queuePaint) : null;
+    mo?.observe(kind === 'html' ? s.doc.documentElement : body!, { childList: true, subtree: true, characterData: true });
     // A scroll of the preview moves nothing in it, so only the cards move:
     // the lane follows the scroller that moved (reviewer P1-C).
     const onScroll = (e: Event) => {
-      const sc = e.target as HTMLElement;
-      if (sc === scrollerOf() && laneEl) laneEl.scrollTop = sc.scrollTop;
+      const sc = (e.target === s.doc ? s.scroller : e.target) as HTMLElement;
+      if (sc === s.scroller && laneEl) laneEl.scrollTop = sc.scrollTop;
       queuePlace();
     };
-    el.addEventListener('scroll', onScroll, true);
-    el.addEventListener('click', onPreviewClick);
+    const scrollHost: EventTarget = kind === 'html' ? s.doc : body!;
+    scrollHost.addEventListener('scroll', onScroll, true);
+    s.doc.addEventListener('click', onPreviewClick);
+    // An HTML page reflows when its stylesheets, pictures and fonts arrive,
+    // possibly inside a fixed-height root no observer box would see change:
+    // each of those reaches the same re-place entry (design delta 2).
+    const late = () => queuePlace();
+    const RO = (s.win as unknown as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+    const ro = kind === 'html' && typeof RO === 'function' ? new RO(late) : null;
+    ro?.observe(s.doc.documentElement);
+    const outer = kind === 'html' && frame && typeof ResizeObserver === 'function' ? new ResizeObserver(late) : null;
+    if (outer && frame) outer.observe(frame);
+    const fonts = kind === 'html' ? (s.doc as Document & { fonts?: EventTarget }).fonts : undefined;
+    if (kind === 'html') s.doc.addEventListener('load', late, true);
+    fonts?.addEventListener?.('loadingdone', late);
     return () => {
-      mo?.disconnect();
-      el.removeEventListener('scroll', onScroll, true);
-      el.removeEventListener('click', onPreviewClick);
+      mo?.disconnect(); ro?.disconnect(); outer?.disconnect();
+      scrollHost.removeEventListener('scroll', onScroll, true);
+      s.doc.removeEventListener('click', onPreviewClick);
+      s.doc.removeEventListener('load', late, true);
+      fonts?.removeEventListener?.('loadingdone', late);
       hl?.clear(); hot?.clear(); hl = null; hot = null;
       ranges = new Map();
     };
@@ -436,7 +507,7 @@
     // Every change to the cards or what they point at paints AND places,
     // once the DOM shows it: the list read, an add, a resolve, a delete, an
     // editor opened for a new comment, a Reload, the layout changing.
-    void shown; void current; void kind; void file?.content; void hotId; void wide; void newAt;
+    void shown; void current; void kind; void file?.content; void hotId; void wide; void newAt; void frameDoc;
     if (!on) return;
     void tick().then(paint);
   });
@@ -450,8 +521,9 @@
   /** A click on highlighted text focuses its card. A link and a selection
    * keep the click (they win); nothing is ever preventDefault'ed here. */
   function onPreviewClick(e: MouseEvent) {
-    if (!ranges.size || !body) return;
-    const doc = body.ownerDocument;
+    const s = surface();
+    if (!ranges.size || !s) return;
+    const doc = s.doc;
     const sel = doc.getSelection();
     if (sel && !sel.isCollapsed) return;
     if ((e.target as Element | null)?.closest?.('a')) return;
@@ -487,10 +559,6 @@
     return () => ro.disconnect();
   });
   let innerEl = $state<HTMLElement | null>(null);
-  /** The element the preview scrolls in: the lined code view scrolls
-   * itself, the markdown preview scrolls its body. */
-  const scrollerOf = (): HTMLElement | null =>
-    (kind === 'code' ? body?.querySelector<HTMLElement>('.code-lined') : null) ?? body;
   /**
    * The wide column's protocol (reviewer P1-C, validator on 5b2a004f).
    *
@@ -517,17 +585,18 @@
    * a scroll places.
    */
   function placeCards() {
-    const lane = laneEl, inner = innerEl, sc = scrollerOf();
-    if (!wide || !lane || !inner || !sc) return;
+    const lane = laneEl, inner = innerEl, s = surface();
+    if (!wide || !lane || !inner || !s) return;
+    const sc = s.scroller;
     const z = uiZoom();
-    const scTop = sc.getBoundingClientRect().top;
-    // Content geometry only (reviewer P1-C on 93c1b929): the scroller's box
-    // offset from the lane's box, never either one's scroll state, so a
-    // re-place after the person scrolled the lane moves nothing.
-    const offset = (scTop - lane.getBoundingClientRect().top) / z;
+    // Content geometry only (reviewer P1-C on 93c1b929): the scroller's top
+    // in the page (through the one conversion), its offset from the lane's
+    // box, and the scroller's own scroll, never the lane's.
+    const scTop = s.toParent(kind === 'html' ? { left: 0, right: 0, top: 0, bottom: 0 } : sc.getBoundingClientRect()).top;
+    const offset = scTop - lane.getBoundingClientRect().top / z;
     const gap = parseFloat(getComputedStyle(inner).rowGap) || 0;
     const want = (r: globalThis.Range | null | undefined) =>
-      r && typeof r.getBoundingClientRect === 'function' ? (r.getBoundingClientRect().top - scTop) / z + sc.scrollTop + offset : null;
+      r && typeof r.getBoundingClientRect === 'function' ? s.toParent(r.getBoundingClientRect()).top - scTop + sc.scrollTop + offset : null;
     const items = [...inner.children].map((node) => {
       const el = node as HTMLElement;
       const id = el.dataset.reviewId;
@@ -567,6 +636,64 @@
     const ro = new ResizeObserver(queuePlace);
     for (const c of inner.children) ro.observe(c);
     return () => ro.disconnect();
+  });
+
+  // ── The HTML frame's binding (design delta 2) ──────────────────────────
+  /** The frame Document a VERIFIED binding holds, and the map it was checked
+   * against; null whenever there is no current binding. */
+  let frameDoc = $state.raw<Document | null>(null);
+  let htmlMap = $state.raw<HtmlUnit[] | null>(null);
+  /** Why this page cannot be commented on here, or ''. */
+  let htmlReason = $state('');
+  /** Frames that have loaded their srcdoc at least once: a hide→show of the
+   * SAME document binds again without a load. */
+  const loadedFrames = new WeakSet<HTMLIFrameElement>();
+  let frameLoads = $state(0);
+  let bindGen = 0;
+  /** The source map is the source's only, so it may be reused across
+   * bindings; a document's nodes and ranges never are. */
+  let mapCache: { content: string; map: HtmlUnit[] | null } | null = null;
+  $effect(() => {
+    const f = frame;
+    if (!f) return;
+    const onLoad = () => { loadedFrames.add(f); frameLoads++; };
+    f.addEventListener('load', onLoad);
+    return () => f.removeEventListener('load', onLoad);
+  });
+  /**
+   * ONE effect owns the binding. It depends on everything a binding is made
+   * of: the preview's life (Files visible and its context, the host's
+   * eligibility, the review target), the source revision and text, the frame
+   * ELEMENT (a new srcdoc unmounts and remounts it, so a srcdoc about to
+   * change retires the binding when it is set) and each load of it. Any
+   * change retires the old binding AT ONCE (its teardown): bindGen moves,
+   * the document and map are dropped, and the listeners and own ranges go
+   * with the effects that hold them. A new binding exists only once the map
+   * is verified against the CURRENT contentDocument, unit for unit; showing
+   * the same unchanged document again is such a fresh attempt.
+   */
+  $effect(() => {
+    const f = frame, rev = file?.revision, content = file?.content;
+    void frameLoads; void targetId;
+    const live = context()() && (scope.eligible ? scope.eligible() : true);
+    if (kind !== 'html' || !on) return;
+    const my = ++bindGen;
+    untrack(() => { frameDoc = null; htmlMap = null; htmlReason = ''; pick = null; });
+    if (!f || !live || !rev || content == null || !loadedFrames.has(f)) return () => { bindGen++; };
+    let doc: Document | null = null;
+    try { doc = f.contentDocument; } catch { doc = null; }
+    if (!doc?.body) { untrack(() => { htmlReason = t('reviewHtmlNoDocument'); }); return () => { bindGen++; }; }
+    const d = doc;
+    const cached = mapCache && mapCache.content === content ? Promise.resolve(mapCache.map) : htmlSourceMap(content).then((m) => { mapCache = { content, map: m }; return m; });
+    cached.then((map) => {
+      if (my !== bindGen || f.contentDocument !== d || file?.revision !== rev) return;
+      if (!map || !alignedHtml(d, map)) { htmlReason = t('reviewHtmlDisagree'); return; }
+      htmlMap = map;
+      frameDoc = d;
+    }).catch((e: Error) => {
+      if (my === bindGen) htmlReason = `${t('reviewHtmlNoParser')}: ${e?.message ?? String(e)}`;
+    });
+    return () => { bindGen++; };
   });
 
   // ── Send as feedback (delta 2/3 P1-C) ────────────────────────────────────
@@ -700,6 +827,7 @@
     <p class="rv-warn" role="alert">{t('reviewProjectsFailed')}: {projectsError}</p>
     <CommandButton icon="refresh" label={t('reviewRetry')} onclick={() => { projectsRetry++; }} />
   {/if}
+  {#if htmlReason}<p class="rv-status" role="status">{t('reviewHtmlCannot')}: {htmlReason}</p>{/if}
   {#if feedbackNote}<p class="rv-status" role="status">{feedbackNote}</p>{/if}
   {#if error}<p class="rv-warn" role="alert">{error}</p>{/if}
   {#if listing && !current}<p class="rv-status">{t('reviewReloadHint')}</p>{/if}

@@ -23,16 +23,25 @@ test('spacing is tokens: no raw px in a gap or a padding', () => {
   }
 });
 
-test('a card top is in zoomed CSS pixels: client rects are divided by uiZoom', () => {
-  assert.match(source, /const z = uiZoom\(\);/u);
-  assert.match(source, /\(r\.getBoundingClientRect\(\)\.top - scTop\) \/ z/u);
+test('a card top is in zoomed CSS pixels through ONE conversion; uiZoom divides a page rect once', () => {
+  // The page's own rects: divided by uiZoom.
+  assert.match(source, /toParent: \(r\) => \(\{ left: r\.left \/ z, right: r\.right \/ z, top: r\.top \/ z, bottom: r\.bottom \/ z \}\)/u);
+  // The frame's (#434 HTML, design delta 1 P1-B): the frame ELEMENT's rect is
+  // divided once and its border added; the inner rect is already in the
+  // frame's CSS pixels, which are the page's zoomed ones.
+  assert.match(source, /const ox = fr\.left \/ z \+ f\.clientLeft, oy = fr\.top \/ z \+ f\.clientTop;/u);
+  assert.match(source, /toParent: \(r\) => \(\{ left: ox \+ r\.left, right: ox \+ r\.right, top: oy \+ r\.top, bottom: oy \+ r\.bottom \}\)/u);
+  // Cards and the ＋ go through it; nothing else divides by z in placement.
+  const place = source.slice(source.indexOf('function placeCards()'), source.indexOf('let placeQueued'));
+  assert.match(place, /s\.toParent\(r\.getBoundingClientRect\(\)\)\.top - scTop \+ sc\.scrollTop \+ offset/u);
+  assert.match(source, /anchor: s\.toParent\(rectOf\(r\)\)/u);
 });
 
 test('a card top and the lane height never read the lane\u2019s own scroll (reviewer P1-C on 93c1b929)', () => {
   const place = source.slice(source.indexOf('function placeCards()'), source.indexOf('let placeQueued'));
   assert.ok(place.length > 100, 'placeCards found');
   assert.ok(!place.includes('lane.scrollTop'), 'the lane\u2019s own scroll is in no formula');
-  assert.match(source, /if \(sc === scrollerOf\(\) && laneEl\) laneEl\.scrollTop = sc\.scrollTop;/u, 'the preview drives the lane');
+  assert.match(source, /if \(sc === s\.scroller && laneEl\) laneEl\.scrollTop = sc\.scrollTop;/u, 'the preview drives the lane');
 });
 
 test('the Files page takes the strip reserve when its content fills the strip corner (#434 validator on 4500d422)', async () => {

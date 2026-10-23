@@ -44,6 +44,7 @@ const IN_RUNTIME: Record<string, { file: string; built: string; instance: string
 };
 const GLOBAL: Record<string, Record<string, string>> = {
   'core/markdown.ts': { cache: 'rendered HTML keyed by the message text itself', spanCache: 'the review span render, keyed by the file text itself (#434)' },
+  'files/review-html-map.ts': { loading: 'the lazy parse5/entities import, a library module, not a server\'s data (#434)' },
   'hub/hub.ts': { squashed: 'a WeakMap on message objects; the tree that holds them is gone' },
   'hub/reveal.ts': { inFlight: 'a WeakMap on DOM nodes' },
   // The ONE drop of stale Rust download claims (board #447): a property of the page's

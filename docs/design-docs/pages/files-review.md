@@ -5,8 +5,8 @@ laminar-log's portal 批注. Select text in a source or markdown preview, write
 a comment, see it as a card beside the highlight, edit, resolve or delete it.
 The comments are stored with the project, and one "Send as feedback" puts them
 into the Hub composer as a document-feedback block for an agent. `tmm review`
-does the same from an agent's shell. The HTML preview follows in a later
-commit (after #433).
+does the same from an agent's shell. The HTML preview (the #433 frame) is
+reviewable too, through its own source map and frame binding below.
 
 The design was CLEARed at delta 3 on the issue. This page keeps the rules and
 their reasons: the store, the anchors, the rendered-selection mapper, the UI,
@@ -302,11 +302,169 @@ the LINE model's shared rows read out of `review.rs`, the code rows (emoji,
 multi-line, a CRLF row; outside, empty or whitespace-only refused), and the
 offset conversions.
 
+### An HTML selection maps through parse5's positions, checked against the frame
+
+The HTML preview is the #433 frame (`basedPreviewDoc(content)`, sandboxed,
+no scripts). The design was CLEARed at delta 2 on the issue. A selection in
+it maps to the source the way the markdown one does: positions are proved,
+then checked against the DOM, and refused otherwise (`files/review-html.ts`).
+
+**Coordinates, layer by layer.**
+- Raw bytes give the revision, sha256 as before.
+- `content`, the string `fs_read` returns, is what the frame shows. The
+  browser folds CRLF to LF before it tokenizes.
+- The LINE text is `content` with `\r\n` → `\n`. A lone `\r` refuses the
+  document, because the browser reads it as LF and the LINE model as a
+  character. The LINE text is parse5's INPUT, so its offsets ARE LINE
+  offsets.
+- Units are `{ch, from, to}` in LINE UTF-16 units.
+- The wire form is `offsetsToRange`, as for markdown.
+
+**Source positions** come from parse5 8.0.1 (`sourceCodeLocationInfo`,
+`scriptingEnabled: false`, the frame's own scripting state, so `<noscript>`
+is markup in both parses). It is loaded on first use through ONE lazy entry
+(`loadHtmlParser`, together with `entities` 8.1.0, parse5's own decoder).
+A spec parser is not rebuilt by hand (tenet 2).
+
+**Its cost, measured** (`vite build` on this branch, `gzip -c | wc -c`): the
+lazy entry loads three chunks, parse5 26,300 B, the decode tables parse5 and
+entities share 17,782 B, and entities 6,543 B, 50,625 B gzip in all. None is
+in `index.html` or imported statically by the main chunk; they load when an
+HTML preview inside a project is first bound. The one lazy entry is pinned
+by `files/review-html.test.ts`. Measure again when either
+version moves.
+
+**What a text node shows**, unit by unit, from its raw slice:
+- A character reference is recognised only WITH its semicolon (`&name;`,
+  `&#n;`, `&#xn;`) and decoded by `entities.decodeHTML`.
+- All the units a reference shows share its whole source span. Selecting
+  part of an astral `&#x1F600;`, for example, stores the whole reference,
+  and the card's quote and highlight show it.
+- The decoded slice must EQUAL the node's value. If it does not, or the
+  node has no location, the document is refused, never searched. That
+  covers a legacy reference without its semicolon, which parse5 decodes,
+  and text moved by error recovery.
+
+**Hidden and generated.**
+- The head (where basedPreviewDoc's CSP, base and style live), `script`,
+  `style`, `template`, `title` and `noframes` show nothing in either walk.
+- A `textarea`, a `select` (with its options) and a `[contenteditable]`
+  (any value but `false`) are ONE generated unit each, never an anchor. A
+  selection touching one is refused.
+
+**The check.** The frame document's walk must equal the map unit for unit.
+It is checked again at every selection and every paint, so an edit in a
+contenteditable region or a DOM changed under the map is refused.
+
+**Order** (reviewer P1 on 6a4950ec). The walk is in DOM order, and error
+recovery can show text in another order than its source: foster parenting
+moves `B` in `<table><tr><td>A</td></tr>B</table>` before the table, with
+its later location kept, in parse5 and in a browser alike. So the units a
+selection covers are accepted only as ONE ordered span, proved in bounded
+passes (`orderedSpan`): each unit starts at or after the previous one's
+end, or shares its whole span (a reference's units, the one allowed
+equality), and no unit outside the run lies inside the span. Otherwise the
+selection is refused with its reason (`reviewRefusedOrder`), never widened
+to min/max and never cut to its first unit. A stored range is painted by the
+same proof: the units in it must be one DOM run in source order, or the card
+stays without a highlight.
+
+**The quote is the mapped range's.** The draft's quote is what the mapped
+range shows, read back through the same inverse a highlight uses, so a
+reference half selected is quoted and highlighted whole.
+
+Pinned by `files/review-html.test.ts`, each frame built through the real
+`basedPreviewDoc` serialization and parsed again:
+- entities, with the whole span stored, an astral reference half selected,
+  and a reference next to an emoji;
+- CRLF before the node and across lines, with the stored line/col checked;
+- a lone CR refused, in text and in markup;
+- nested inline elements, twins, script and style skipped, noscript shown,
+  a comment;
+- a foster-parented table, single nodes: a proved position or a refusal;
+- text shown out of source order: B→A refused, A→C refused (its span holds
+  the unselected B), single nodes exact, a stored range over both painted
+  nowhere; an ordinary selection across elements exact both ways. jsdom's
+  `DOMParser` leaves the stray text after the table, unlike a browser, so
+  this row sets the frame's DOM in the browser's order;
+- a selection over 200,000 units, computed without an argument spread;
+- form and editable regions refused, and an edited DOM refused;
+- a legacy `&copy` refusing the document, while a bare `AT&T` stays literal.
+
+The module is split by realm: `files/review-html-map.ts` is the source side
+(the lazy parse5 entry, `htmlSourceMap`), `files/review-html.ts` the DOM side
+(the walk, the check, `htmlSelection`, `htmlHighlight`). The mount test mocks
+the source side only, and the DOM side runs in the frame's realm.
+
+### The HTML frame is bound to one loaded Document, or to nothing
+
+The preview lives in an iframe, so the review works on the FRAME's document,
+selection, `Range`s and `CSS.highlights` registry, never the page's.
+
+**One conversion, `Surface.toParent`.** Every surface (the code view, the
+markdown render, the frame) gives its document, window, root, scroller and
+one function from its client rects to the page's zoomed CSS pixels. The page
+surfaces divide by `uiZoom()`. The frame surface adds the frame's own
+content-box origin, `frame.rect / uiZoom + clientLeft/Top`, to the inner
+rect, once: an inner rect already reflects the frame's scroll, the frame's
+rect any outer one. Hit testing (a click on a highlight) never converts; it
+stays in the frame's own coordinates. The ＋, the reason and the card tops
+all go through `toParent`, so there is no second formula.
+
+**One effect owns the binding.** It depends on what a binding is made of:
+the frame ELEMENT, its loads, the source revision and text, the review
+target, the preview's life (`context()`) and the host's eligibility. Every
+run retires the previous binding at once: `bindGen` moves and the document,
+the map and the pending ＋ are dropped. A new binding is installed only when
+its map arrives while `bindGen`, the frame's `contentDocument` and the
+revision are all unchanged, and the map aligns with that document unit for
+unit (`alignedHtml`). Otherwise nothing is bound and the reason is shown.
+- A srcdoc change remounts the frame (FilePreview's `{#if htmlSrcdoc}`), so
+  the old binding is retired by the element changing, before the new
+  document exists.
+- A hide→show of the SAME loaded document fires no load. The frame is
+  remembered in a `WeakSet` once it has loaded, so the effect binds again on
+  the context change alone (reviewer residual on delta 1).
+- The parsed map is cached by source text and may be reused across
+  bindings. A document's nodes and Ranges never are.
+
+**Listeners live in the frame's window**: the MutationObserver on its
+documentElement, the scroll on its document, and the late-resource re-place.
+An HTML root may have a fixed height, so a `ResizeObserver` on it is not
+enough: placement also runs on the document's resource `load` events
+(capture), on `fonts.loadingdone`, and on the frame element's own resize.
+
+**The highlight style is in the frame.** App tokens do not cross into it,
+so `basedPreviewDoc` writes ONE `<style>` after the policy (the CSP and
+referrer, and the base when there is one): `::highlight(review)` and
+`::highlight(review-hot)` from the system `Highlight` colour at 30% and 55%.
+It is after the CSP so the policy governs it, and it is the same on both the
+scoped and unscoped paths.
+
+**The reason line.** A frame that cannot be commented on says why, in the
+person's language: no document, the two parses disagree, or the parser
+failed to load (with its error).
+
+Pinned by `files/FileReview.html.mount.test.ts` (the real Files page and
+frame, with the map module mocked to the real one): select → ＋ → note saves
+`{line 3, col 5, end_col 11}` and paints into the FRAME's registry; hide→show
+of the same document with no load binds and paints again; a map still
+pending over hide→show installs nothing when it arrives, while the new
+binding does; a map arriving while the preview is hidden binds nothing; a
+re-read with the same text at new offsets maps through the new source, not
+a cached map; a resource `load` and a `fonts` `loadingdone` in the frame
+each re-place the cards; part of a multi-scalar reference selected is
+quoted in the draft and stored whole; `&copy` shows the reason and no ＋. By
+`files/file-preview.test.ts` (one style, after the policy, on both paths)
+and `files/FileReview.source.test.ts` (both `toParent` conversions, and card
+tops and the ＋ through them).
+
 ### The cards, the ＋ and the highlights
 
 `files/FileReview.svelte` wraps the preview (`children`) for a text file:
-code (the lined view) and markdown. It is off for every other kind, and for
-a file in no project, where the preview renders alone.
+code (the lined view), markdown and HTML (the frame, bound as above). It is
+off for every other kind, and for a file in no project, where the preview
+renders alone.
 
 **Which project.** The Files instance asks `project_list` when a text file
 opens and on every re-read. The projects whose root holds the file are the
@@ -505,7 +663,14 @@ draft sets no recipient: the room's own lead seating applies when it opens.
   `tmm review add --lines` still reaches it.
 - Without the Custom Highlight API there are cards only.
 - No live sync: Reload or a return shows other writers' changes.
-- The HTML preview is not reviewable yet (it follows #433, a later commit).
+- HTML: the frame runs no scripts, so a page that builds its text with
+  script shows (and maps) only its static markup. A document whose two
+  parses disagree (error recovery the frame's parser does differently) is
+  refused whole, as is one with a legacy entity (no semicolon) or a lone
+  CR. A selection across text shown out of source order (foster-parented
+  table text) is refused. A form or editable region (textarea, select,
+  contenteditable) cannot be selected; `tmm review add --lines` still
+  reaches all of these.
 
 Pinned by `files/FileReview.mount.test.ts` (the real Files page): select → ＋
 → note → the add carries the range and revision, and the card follows; a

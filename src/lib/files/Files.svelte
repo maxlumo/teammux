@@ -1910,7 +1910,7 @@
         {/if}
       </div>
     </div>
-    <FileReview file={currentFile} body={previewBodyEl} {session} refresh={reviewRefresh} compact={narrowViewport} {onfeedback} context={feedbackContext}>
+    <FileReview file={currentFile} body={previewBodyEl} frame={htmlPreviewEl} {session} refresh={reviewRefresh} compact={narrowViewport} {onfeedback} context={feedbackContext}>
       <FilePreview {currentFile} {fontSize} {wrapLines} {hljs}
         bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
         {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { viewerDl.retire(); imageView = viewerOpen(src, currentFile?.path ?? null, currentFile?.name ?? ''); }} visible={imageActive}

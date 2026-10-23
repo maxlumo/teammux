@@ -171,6 +171,17 @@ export function basedPreviewDoc(content: string, scope: PreviewScope | null, par
     base.setAttribute('href', scopeUrl);
     doc.head.prepend(csp, referrer, base);
   }
+  // Review comments' highlights (board #434): the ONE style the frame gets,
+  // added after the policy, in the same DOM and the same serialization on
+  // both paths, allowed by the policy's own 'unsafe-inline'. The app's colour
+  // tokens are custom properties of the PAGE and do not cross into the frame's
+  // document, so the colour is the system colour Highlight mixed over
+  // transparent: no literal, and it follows the reader's platform. Without the
+  // Custom Highlight API it does nothing and the cards stay.
+  const review = doc.createElement('style');
+  review.textContent = '::highlight(review){background-color:color-mix(in srgb,Highlight 30%,transparent)}'
+    + '::highlight(review-hot){background-color:color-mix(in srgb,Highlight 55%,transparent)}';
+  (scopeUrl == null ? referrer : doc.head.children[2]!).after(review);
   // SERIALIZED, never reassembled (#433 review, orchestrator ruling): a fixed
   // doctype, then the serializer's own output of the prepared element. This
   // is a structural guarantee, not the fix for a shown injection: quoting the
