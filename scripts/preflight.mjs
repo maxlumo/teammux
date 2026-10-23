@@ -20,11 +20,6 @@
 //    real `app/build` directory, left alone here. The postflight then only
 //    insists that the APK exists at the in-project path.
 //
-// 3. `preflight android-env`: before `tauri android build`, refuse to start
-//    unless ANDROID_HOME (or ANDROID_SDK_ROOT) and NDK_HOME name existing
-//    directories — without them tauri stops at an interactive NDK prompt
-//    (board #460; see that mode below).
-//
 //    Two ways the symlink goes wrong, and the second one is the nasty one:
 //    - DANGLING (cache pruned, or the path canonicalizes differently under the
 //      zfs-boost overlay): the documented APK path 404s even though the build
@@ -38,6 +33,10 @@
 //    Healing only the dangling case is therefore not enough, and picking the
 //    newest APK across all android-* dirs is exactly how you land on the wrong
 //    checkout. Compute, compare, re-point.
+//
+// 3. `preflight android-env`: before `tauri android build`, refuse to start
+//    unless the SDK tauri will use holds an NDK — without one tauri stops at
+//    an interactive NDK prompt (board #460; see that mode below).
 //
 // Zero dependencies; runs everywhere node does.
 import { execSync } from 'node:child_process';
@@ -154,28 +153,39 @@ if (mode === 'android-apk') {
 }
 
 if (mode === 'android-env') {
-  // Board #460: `tauri android build` with no NDK_HOME auto-detects an SDK
-  // and, finding no NDK there, ASKS whether to install the command line tools
-  // — a prompt nobody answers under a tmm task or any non-interactive shell
-  // (it hung for an hour on 2026-10-23). On this host ~/Android/Sdk exists
-  // WITHOUT an ndk/ and is what the auto-detect picks; the NDK lives under
-  // ~/Android/sdk (lowercase). So the build refuses to start unless both are
-  // named and exist.
+  // Board #460, measured with tauri-cli 2.10.0 (validator) and 2.11.1 (the
+  // version build:android runs here): tauri takes the SDK from ANDROID_HOME,
+  // else ANDROID_SDK_ROOT, else an auto-detected one, and the NDK from that
+  // SDK's ndk/<version>/ — NDK_HOME does not decide it. With no ndk/<version>
+  // there it ASKS whether to install the command line tools, a prompt nobody
+  // answers under a tmm task (it hung for an hour on 2026-10-23: with
+  // ANDROID_HOME unset the auto-detect picked this host's empty ~/Android/Sdk).
+  // An ndk/<version> that is present but broken fails loudly, not with the
+  // prompt. So the build refuses to start unless the SDK is NAMED and holds
+  // at least one NDK whose source.properties (the first file tauri reads)
+  // exists. NDK_HOME is optional; if set it must be one of those NDKs, since
+  // anything else would name a toolchain the build does not use. Nothing here
+  // sets or guesses a variable.
   const isDir = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+  const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
   const sdkVar = process.env.ANDROID_HOME ? 'ANDROID_HOME' : process.env.ANDROID_SDK_ROOT ? 'ANDROID_SDK_ROOT' : null;
   const sdk = sdkVar ? process.env[sdkVar] : '';
-  const ndk = process.env.NDK_HOME || '';
+  const ndkHome = process.env.NDK_HOME || '';
+  const ndkDir = sdk ? join(sdk, 'ndk') : '';
+  const ndks = sdk && isDir(ndkDir)
+    ? (() => { try { return readdirSync(ndkDir).filter((d) => isFile(join(ndkDir, d, 'source.properties'))).sort(); } catch { return []; } })()
+    : [];
   const problems = [];
-  if (!sdkVar) problems.push('ANDROID_HOME is not set');
+  if (!sdkVar) problems.push('ANDROID_HOME is not set — tauri would auto-detect an SDK, and stop at its NDK prompt if that one has no ndk/');
   else if (!isDir(sdk)) problems.push(`${sdkVar}=${sdk} is not a directory`);
-  if (!ndk) problems.push('NDK_HOME is not set');
-  else if (!isDir(ndk)) problems.push(`NDK_HOME=${ndk} is not a directory`);
+  else if (ndks.length === 0) problems.push(`${sdkVar}=${sdk} holds no NDK: no ${ndkDir}/<version>/source.properties`);
+  if (ndkHome && sdkVar && ndks.length > 0 && !(resolve(dirname(ndkHome)) === resolve(ndkDir) && ndks.includes(basename(ndkHome)))) {
+    problems.push(`NDK_HOME=${ndkHome} is not one of the NDKs under ${ndkDir} — tauri builds with ${sdkVar}'s; unset NDK_HOME or name one of those`);
+  }
   if (problems.length === 0) process.exit(0);
-  console.error('\n✋ build:android needs the Android SDK and NDK named — refusing to start (tauri would stop at an interactive NDK prompt).\n');
+  console.error('\n✋ build:android needs an Android SDK that holds an NDK — refusing to start (tauri would stop at an interactive NDK prompt).\n');
   for (const p of problems) console.error(`   ${p}`);
-  const sdkGuess = isDir(sdk) ? sdk : '';
-  const ndks = sdkGuess ? (() => { try { return readdirSync(join(sdkGuess, 'ndk')).filter((d) => isDir(join(sdkGuess, 'ndk', d))).sort(); } catch { return []; } })() : [];
-  if (ndks.length) console.error(`\n   NDKs under ${sdkGuess}/ndk: ${ndks.join(', ')}\n   export NDK_HOME=${join(sdkGuess, 'ndk', ndks.at(-1))}`);
+  if (ndks.length) console.error(`\n   NDKs under ${ndkDir}:\n${ndks.map((d) => `     ${join(ndkDir, d)}`).join('\n')}`);
   console.error('\n   See docs/conventions/development.md § Build targets (Android).\n');
   process.exit(1);
 }

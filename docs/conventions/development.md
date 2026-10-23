@@ -227,18 +227,25 @@ end up shipping the wrong tree.
 - **macOS** — `npm run build:mac` → `src-tauri/target/release/bundle/dmg/`.
 - **Android** — `rustup target add aarch64-linux-android && npm run build:android`.
   Needs the Android SDK, NDK 28+ and Java 17+; signing is below. The build
-  needs `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) and `NDK_HOME` in its
-  environment, and `build:android` refuses to start without them
-  (`preflight.mjs android-env`, board #460). Without `NDK_HOME`, tauri
-  auto-detects an SDK, finds no NDK in it and asks whether to install the
-  command line tools — an interactive prompt that hangs a `tmm task` or any
-  non-interactive shell (an hour on 2026-10-23). On this host the SDK is
-  `/home/cfu/Android/sdk` (lowercase) with the NDK at
+  needs `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) naming an SDK that holds an NDK
+  under `ndk/<version>/`, and `build:android` refuses to start without one
+  (`preflight.mjs android-env`, board #460). Measured with tauri-cli 2.10.0
+  and 2.11.1: tauri takes the SDK from `ANDROID_HOME`, else
+  `ANDROID_SDK_ROOT`, else an auto-detected one, and the NDK from that SDK's
+  `ndk/`; `NDK_HOME` does not decide it. When the SDK it uses has no
+  `ndk/<version>`, tauri asks whether to install the command line tools — an
+  interactive prompt that hangs a `tmm task` or any shell nobody answers (an
+  hour on 2026-10-23: with `ANDROID_HOME` unset, the auto-detect picked an
+  empty SDK). An `ndk/<version>` that is present but broken fails loudly
+  instead; the guard checks only that one holds `source.properties`, the
+  first file tauri reads, not that the NDK is complete. `NDK_HOME` is
+  optional; if set, it must be one of that SDK's NDKs. On this host the SDK
+  is `/home/cfu/Android/sdk` (lowercase) with the NDK at
   `/home/cfu/Android/sdk/ndk/28.2.13676358`; `/home/cfu/Android/Sdk`
-  (capital S) also exists, has no `ndk/`, and is what the auto-detect picks:
+  (capital S) also exists, is empty, and is what the auto-detect picks:
 
   ```bash
-  ANDROID_HOME=/home/cfu/Android/sdk NDK_HOME=/home/cfu/Android/sdk/ndk/28.2.13676358 npm run build:android
+  ANDROID_HOME=/home/cfu/Android/sdk npm run build:android
   ```
 - **Linux server only** — `npm run build:server` needs no WebKitGTK; it is all
   the browser UI and the phone talk to. It runs `vite build` first and embeds
