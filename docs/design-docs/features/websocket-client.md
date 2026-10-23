@@ -1003,10 +1003,11 @@ shaped it (orchestrator, 2026-10-11/12) and its six design points:
   rebuilt on a focus move. No second transport, no aggregation service.
 - **D2 — the focus moves in place.** Picking a connected member changes
   CURRENT and the mirror and brings its tree forward; no dial, no walk, no
-  teardown. Picking a member that is NOT up is not a focus change: the app
-  stays where it is and the row shows that server's own state (an excluded
-  one is included and joins through its own dial); the person focuses it
-  once it is up (orchestrator 02:28/03:23). Single switches as before.
+  teardown. Picking a member that is NOT up is not a focus change NOW: the
+  app stays where it is, and from a server picker the pick is the window's
+  pending choice, completed by the same in-place move once that member is
+  up (#458, § The pick is a choice, below; an excluded one is included and
+  joins through its own dial). Single switches as before.
 - **D3 — one tree, one terminal.** A split stays within a server; another
   server's session is a selector that moves the focus there.
 - **D4 — a hidden member does list work only.** Its Hub's 20 s project
@@ -1179,12 +1180,181 @@ list says so); then the window's attempts aimed at the server left go stale —
 the switch's intent, so a late optimizer probe of A's addresses cannot redial
 over B, and the window activation — while every member's own reconnect is
 untouched; only then do the front and the set move. A member that is not
-connected is NOT a focus change (orchestrator 02:28 and 03:23): the app stays
-where it is, nothing is asked or replaced, and the row shows that server's
-own state — an excluded one is included and joins; one still connecting or
-failing keeps its own loop, and the person focuses it once it is up.
-Aggregate never falls back to the replacing switch for a saved server.
-Single switches as before.
+connected is NOT a focus change now (orchestrator 02:28 and 03:23): the app
+stays where it is and nothing is asked or replaced. From a server picker it
+is the person's choice, completed when the member is up (#458, next
+paragraph); from a union or bell row it is refused with the row's own state
+(`refuseMember`). Aggregate never falls back to the replacing switch for a
+saved server. Single switches as before.
+
+**The pick is a choice, not a claim that the server is up** (board #458,
+owner 2026-10-23 11:28: "现在在 connections 页面里 如果好像连接失败了 就不让我选了
+我觉得这个不太对 我应该也可以选"). Measured on main 422ba921 (rig: Chromium 152 in
+a netns; a refused, a silent and a token-refused server): every not-up row
+was an enabled button whose click `focusMember` refused, with "is not
+connected yet; it stays in the list and connects on its own" — and after
+the 180 s watchdog nothing retried at all (51 dials, then 0), so the notice
+was false and the click a no-op. Now, in Aggregate, a server picker's row
+(Settings › Connection, the popover: `chooseMember`) moves the focus at once
+when the member is up and the window free, and otherwise records the
+window's PENDING CHOICE `chosen = { gen, id, machine }` — one per window,
+in memory, never a preference; CURRENT and aria-current do not move. Its
+row says so in words in the address line, not as an error ("Chosen; the
+app moves there when it connects", or "Chosen; not answering — pick it
+again to retry" once its loop stopped; "Chosen; Paused: storage" when a
+block holds it, the block's own reason, never "not answering"), over the
+existing `link.target` dot. The choice is completed in ONE place, `settleChosen`, run only by the
+window's drain (`drainWindow`: handover, then the choice, then an orphan's
+ask; the chosen member's status and the registry schedule it): same pick,
+still Aggregate, entry saved and included, the machine it named at the pick
+(an entry with none may learn it once, from its own first authentication),
+a published member that is alive, not an orphan and connected, and the
+whole window free (`windowBusy`, a switch panel, a block, an orphan's ask,
+a walk; a connect card's candidate or second handshake holds a window lease,
+so a choice never completes over it). Then `focusMember` moves it in place;
+a `'failed'` storage commit ends the choice and is never retried. A check that can still change waits
+for the next drain; one that cannot retires it. RETIRED at the ONE place the
+window's focus commits to another server — `activate`, as it publishes a
+runtime that is not the bound one (review on d18cd450: the connect card
+reached `arriveAt`/`activate` without a switch or a `focusMember`, so a
+choice made before a manual connect could take the focus back from it) —
+which covers the card, a switch, an arrival and any later entry; and at
+the person's own acts: another pick (including the current focus), any
+successful `focusMember` (a union or bell row's move too, so a late member
+never takes the focus back), Disconnect (the person asked to be offline),
+a Single switch, a mode change, the entry excluded or edited in its details
+(and removed: the drain finds the entry gone), the member reaching another known machine or being absorbed, an
+orphan, the shell's end. An excluded row picked is included first, and the
+include's answer belongs to that pick only. **Only a pick starts a retry
+budget** (`aggregate.ask`): a member whose first join is in flight or whose
+own loop runs gets nothing new — no second dial, the watchdog untouched; one
+whose loop stopped gets exactly one fresh loop; a refusal the app keeps
+(storage, another known machine, an orphan) is not dialled past. **A token
+refusal is terminal for that door** (validator V1 on d18cd450: the client
+called it "Not answering", so each pick re-dialled with the same bad token
+and three picks tripped the server's lockout, #440, for this host's IP).
+It is now a member state of its own, `failed: 'auth'` — from the join's
+answer (`isAuthRefusal`, by the ERR_AUTH code) and from a loop that gave up
+on one (`onGiveUp('auth')`) — read "Token refused — edit its connection" on
+the row; a pick records the choice ("Chosen; Token refused — …") and dials
+nothing. The fact behind it is ONE dial-eligibility rule in the member set
+(review on the token state; `refused-attempts.ts`): the ATTEMPTS a server
+refused, each the (address, token) pair a dial actually sent — carried out of
+`ServerRuntime.dial` on its failed result (`tried`, captured before its first
+await; internal, never logged) and handed over by the member's own loop
+(`refusedBy`), never re-read from the entry when the answer arrives. An auth
+refusal proves only that the peer at THAT address refused THAT token, so a
+misrouted or alternate address saying no does not block the right address
+with the same token (orchestrator's ruling on de5645f7: no all-address
+block). It is kept per member id outside its slot and status, and on this
+device as SHA-256 digests of the pair (Web Crypto, an equality fingerprint,
+not a protection of the token) in `tmux_refused_tokens`, so a reload does not
+re-send it either. Every dial entry asks it: `join` (every sync's, after a
+rename elsewhere, a focus move or a reload), `resume` (storage Retry), the
+pick's `ask`, and the member's own loop — and the member's eligibility is
+derived from its CANDIDATE SET, every address of its machine with the token
+it would send, never from its primary address alone (validator V3 on
+36b2d37e): one refused pair takes out that pair, so a wrong route first and
+the right one second with the same token connects through the second — the
+join dials the first decided-ok address (`via`), a join refused at one address
+starts the member's own loop over what is left, and a loop refused at one
+address goes on to the next candidate in the same budget; only when every
+pair is refused is the member. In the loop it is a HARD rule
+(`eligible`, review P1-A on 36b2d37e), apart from the soft `isAddressViable`
+preference: only an 'ok' pair is a candidate, for the first round's
+multi-address probe and every later round alike, and the loop never falls
+back to the others. One pair's state is never the member's (ruling on
+f20d1ea0: the post-probe recheck gave up on 'auth' with an 'ok' sibling left,
+and a refusal mid-loop gave up while a sibling was still 'pending'): the
+loop reads the WHOLE set through ONE verdict, `candidateVerdict` — any 'ok'
+→ dial one; else any 'pending' → wait; else every pair refused → give up as
+'auth'; else 'unknown' — at every point it chooses again: the start of each
+attempt, after the probe's await, after the host's wait (`beforeDial`, a walk
+asking the person), and after a refusal at one address, which the loop also
+keeps as its own fact for the chain so even a loop the host does not hold
+eligible never re-sends it. After the LAST await the loop reads the target's
+CURRENT declaration (ruling on 77e1185d): the target gone stops the loop; a
+changed token, or a chosen address no longer in the current set or no
+longer 'ok', is not sent — the attempt chooses again from the current set,
+so an address removed or replaced during the probe or the walk is never
+dialled with the membership it had before. The pair checked there is the
+pair sent: the connect adapter dials in the same turn with the token the
+loop decided (`DialOptions.token`; no microtask between, no re-read of the
+entry), and `ServerRuntime.dial` sends nothing when its attempt is not owned
+at that moment; a join likewise dials with the token its check read. Every
+await on the way, and what follows it: the join has none before its dial
+(check → dial in one turn); the loop's attempt reads the target and the set,
+takes its claim, then awaits the probe (multi-address first round) and the
+host's wait — after them, ownership, then the current declaration as above
+— and the dial's own await is the handshake, whose auth refusal re-reads the
+current set; a 'pending' wait ends only at `wake()`, which starts the
+attempt over from the target. The decision to dial is the
+LOOP's, after its last await, never an error thrown through the host's
+connect adapter (ruling on f20d1ea0, P1-B: App's check after the walk threw a
+plain Error, which the adapter's identity-record branch folded into a
+resolved `unrecorded` — a false success that stopped the loop and read as a
+storage failure). A 'pending' set waits inside the same watchdog budget and
+dials nothing until the digest's own result wakes it (`ready` → every loop's
+`wake()`, and a sync for members without a slot — a sync skips published
+ones); the waiting attempt holds its claim, so a join that claims meanwhile
+ends it quietly. A member's status follows the same verdict: one pair
+refused while another is 'ok' or 'pending' keeps it connecting or
+reconnecting, never "Token refused". A member a stored
+refusal stopped before it had a slot is still a member and still choosable:
+the pick records, dials nothing (review P1-A on de5645f7). Another address or
+token is another attempt and may be tried — by the pick, or a join. Two
+states are not "no refusal": PENDING — a stored digest exists and this pair's
+is still being computed — dials nothing, a pick included, until it is decided
+(a match is a refusal); UNKNOWN — a stored fact about that server that
+cannot be COMPARED (no Web Crypto, or a digest call that rejects, which is
+reported like a result) — dials nothing either (fail closed; there is no
+person-forced attempt in #458), the row says "Not dialled: its refusal state
+is unknown — edit its connection", and it holds for the token the server was
+first asked about, so Edit connection with another token is the repair. A
+stored value that cannot be READ (junk, a digest that is not 64 hex) is a
+corruption, not a refusal (validator V4 on f20d1ea0: fail-closed there made
+every member unknown on that device, a correct token included, with no
+repair but a token the server would refuse): it is RESET once — moved aside
+under `tmux_refused_tokens_unreadable` (never deleted), the store emptied,
+the Connection page says "The refusal records on this device were unreadable
+and have been reset" — and every member dials as on a fresh device. A
+refusal records again on its first answer, so the exposure is one auth
+failure per refused pair, the same as a first load on a fresh device (joins
+run in parallel and refusals are per member: k entries with k wrong tokens
+for one gateway fail k times, as they would on a first load). A value that
+cannot be moved aside is left in place and never written over; the page
+starts empty all the same and the failure goes to `storageFailed`. A write
+that fails goes to the one storage error handling (`storageFailed`); the fact
+stays known for the page. Without Web Crypto the fact is kept for the page
+only. The drain never dials at all. Rig (Chromium 152, branch UI, a member with
+a wrong token for gateway B): one auth failure in B's log at the join, then
+0 across three picks and 20 s, no lockout line; the row reads "Chosen;
+Token refused — edit its connection", with its Addresses and token button;
+after a reload, 0 more in 15 s, the stored SHA-256 digest does not contain
+the token, and a pick of the row after the reload reads "Chosen; Token
+refused — edit its connection" with no alert and no dial. Two routes, one
+token (route 1 is another gateway that refuses it, route 2 is B): 1 auth
+failure on the wrong gateway at load, then none through a pick and a
+reload; B connects through route 2 and the pick moves the focus there. Pinned by `App.shell.mount.test.ts` (#458 rows:
+the pick then up; A→B→A; B then C; removed, excluded, mode, edited;
+connected but the window busy; excluded then included, superseded; a union
+move; another known machine; a failed commit; a given-up member and 200 s
+of no pick; a wrong route refused while the right one is compared; a walk-held
+reconnect whose token changes; a token edited right after the loop's last
+check; an unreadable record reset) and `server-members.test.ts` (`ask`, the
+set's verdict for a member's status), `reconnect.test.ts` (the set
+{ok, pending, refused, unknown} at the attempt's start, after the probe,
+after the host's wait and after a refusal mid-loop; an address removed or
+replaced, or the entry removed, during the probe or the wait) and
+`server-runtime.edit.test.ts` (the decided token sent; nothing sent unowned). Rig on the branch
+(Chromium 152, netns, phone 390 touch and desktop): B picked while its
+gateway was down reads "Chosen…", CURRENT unchanged; its gateway started,
+the focus moved to B by itself within 2 s. A refused server: 0 dials in the
+30 s after its give-up, one pick → its loop again (6 dials in 8 s), two
+re-picks while it ran started no second loop, and after the next give-up
+0 dials in 60 s with the choice still held. Not changed: Single
+(dial first, its failure panel), the reconnect policy itself, and how a
+token refusal is worded (#459).
 
 **A switch replaces only its own tree** (reviewer P1-1 on 99566068). The
 switch panel sits OVER the kept trees rather than in place of them: every

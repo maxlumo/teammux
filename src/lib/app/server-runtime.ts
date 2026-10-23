@@ -64,8 +64,12 @@ export type DialResult =
    * for the machine that answered, so the caller can include that one instead;
    * this runtime's socket is already closed and its entry untouched. */
   | { ok: false; reason: 'elsewhere'; entry: ServerEntry; machineId: string; hostname: string }
-  /** Never got there: no socket, no auth, a timeout. */
-  | { ok: false; reason: 'failed'; error: unknown }
+  /** Never got there: no socket, no auth, a timeout. `tried` is the address
+   * and token THIS attempt sent (captured before its first await, never
+   * re-read from the entry): a token refusal belongs to that attempt, not to
+   * whatever the entry holds when the answer comes back (#458). Internal only
+   * — never logged or put in a message. */
+  | { ok: false; reason: 'failed'; error: unknown; tried?: { address: string; token: string } }
   /** A LATER dial (or a dispose) took over while this one was in flight. The
    * attempt touched nothing: it did not record, adopt, disconnect or report an
    * identity, because by the time it came back the socket it dialled had
@@ -84,6 +88,10 @@ export type DialResult =
  * the connection. */
 export interface DialOptions {
   via?: string;
+  /** The token the caller decided to send with `via` (#458 ruling on
+   * 77e1185d): the checked pair is the dialled pair, never the entry's token
+   * re-read after the caller's check. Absent: the entry's own. */
+  token?: string;
   timeoutMs?: number;
 }
 
@@ -302,10 +310,12 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // board #335 ②b-4 retired the mirror it read for the current server).
     const route = targetOf(storage, id);
     const address = how.via || route?.address || target.address;
-    const token = route ? route.token : target.token;
+    const token = how.token ?? (route ? route.token : target.token);
     // What this dial read, for the commit below: an edit of the token or the
     // addresses made while it awaits wins over it (board #402 review P1-A).
     const seen = observe(storage);
+    // Owned at the moment it sends, or nothing is sent (#458 ruling on 77e1185d).
+    if (!owns()) return { ok: false, reason: 'superseded' };
     let reported: string | null;
     try {
       reported = await connection.connect(address, token, how.timeoutMs ?? connectTimeoutMs);
@@ -313,7 +323,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
       // A superseded attempt reports neither the failure nor the success it
       // might otherwise have: whoever took over owns the outcome now.
       if (!mine()) return { ok: false, reason: 'superseded' };
-      return { ok: false, reason: 'failed', error };
+      return { ok: false, reason: 'failed', error, tried: { address, token } };
     }
     if (!mine()) {
       // Two different facts, and they need opposite answers (reviewer P1-1

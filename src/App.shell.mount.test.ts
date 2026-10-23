@@ -472,10 +472,13 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     drop() { connected = false; onDrop?.(); for (const c of (wrapped?.__conns ?? []) as FakeConnection[]) c.drop(); },
     /** The independent connections the fleet made, in the order it made them. */
     conns: () => ((wrapped?.__conns ?? []) as FakeConnection[]),
+    /** Every dial as `url token`, in order. */
+    sent: [] as string[],
   };
   const module = {
-    connect: async (url: string) => {
+    connect: async (url: string, token?: string) => {
       calls.push(`connect:${url}`);
+      net.sent.push(`${url} ${token}`);
       const n = ++dials;
       const mine = machineAt(url, n);
       const held = gate(url, n);
@@ -4254,6 +4257,11 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
 /** Pick `name` from the server list in Settings → Connection, opening it
  * first unless it is already on screen (a focus move leaves the page where
  * it was). */
+/** A Settings › Connection row's pick button, and its text (#458). */
+const rowOf = (h: Awaited<ReturnType<typeof bootApp>>, name: string) => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .sm-pick')]
+  .find((b) => b.querySelector('.sm-name')?.textContent === name);
+const rowText = (h: Awaited<ReturnType<typeof bootApp>>, name: string) => rowOf(h, name)?.textContent ?? '';
+
 async function pickServer(h: Awaited<ReturnType<typeof bootApp>>, name: string) {
   const row = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')]
     .find((b) => new RegExp(`^${name}\\b`, 'iu').test((b.textContent ?? '').trim()));
@@ -4784,7 +4792,7 @@ for (const answer of ['keep', 'discard', 'back'] as const) test(`P1-2: on touch,
   }
 });
 
-test('P1-1: Aggregate, picking a member that is not connected moves nothing and unmounts nothing — C s background draft stays, the row says why', async (context) => {
+test('P1-1 / #458: Aggregate, picking a member that is not connected moves nothing NOW and unmounts nothing — C s draft stays, the row says it is chosen, and the focus moves when it is up', async (context) => {
   const events: string[] = [];
   let bUp = false;
   const servers = [
@@ -4816,14 +4824,586 @@ test('P1-1: Aggregate, picking a member that is not connected moves nothing and 
   assert.equal(h.app.document.querySelector('[role=alertdialog]'), null, 'nothing is asked: nothing is destroyed');
   assert.equal(events.filter((e) => e.startsWith('candidate:')).length, before, 'no candidate switch');
   assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s background draft: the same editor, as typed');
-  assert.match(h.app.document.querySelector('.preferences .server-list [role=alert]')?.textContent ?? '', /beta is not connected yet/iu, 'the list says why');
-  // B comes up on its own; now the pick focuses it.
+  // #458: the pick is recorded — the row says so, in words, not as an error.
+  assert.equal(h.app.document.querySelector('.preferences .server-list [role=alert]'), null, 'no refusal');
+  assert.match(rowText(h, 'beta'), /chosen; the app moves there when it connects/iu, 'the chosen row says it');
+  assert.equal(rowOf(h, 'beta')?.getAttribute('aria-current'), null, 'aria-current does not move ahead of the focus');
+  // B comes up on its own; the focus moves there with no second pick.
   bUp = true; lets.forEach((r) => r());
   for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
   assert.ok(conn(h, 'b')?.isConnected(), 'B up');
-  await pickServer(h, 'beta');
-  assert.equal(ls.getItem('tmux_server_current'), 'b', 'focused once connected');
+  assert.equal(ls.getItem('tmux_server_current'), 'b', 'focused once connected, by the pick made before');
+  assert.doesNotMatch(rowText(h, 'beta'), /chosen/iu, 'the choice is spent');
   assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'C s draft still the same');
+});
+
+// ─── #458: a picker's row is the person's choice of focus ───────────────
+/** Three saved servers, Aggregate, CURRENT alpha. beta's and charlie's own
+ * dials hang (`hold`) or fail (`down`) until let go; alpha is up. */
+/** Web Crypto whose digest of one (address, token) text is held until the
+ * test lets it go (`hold` returns the promise to wait on, or null). */
+function holdDigests(window: any, hold: (text: string) => Promise<void> | null) {
+  const real = globalThis.crypto;
+  const subtle = new Proxy(real.subtle, { get: (t, k) => (k === 'digest'
+    ? async (alg: AlgorithmIdentifier, data: BufferSource) => { await hold(new TextDecoder().decode(data as ArrayBuffer)); return real.subtle.digest(alg, data); }
+    : ((v) => (typeof v === 'function' ? v.bind(t) : v))(Reflect.get(t, k))) });
+  Object.defineProperty(window, 'crypto', { value: { subtle, getRandomValues: real.getRandomValues.bind(real), randomUUID: real.randomUUID.bind(real) }, configurable: true });
+}
+async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse?: string[]; rpc?: Record<string, unknown>; page?: string; bAs?: string; seed?: Record<string, string>; holdDigest?: (text: string) => Promise<void> | null } = {}) {
+  /** What machine beta's dials answer as (another known one: `elsewhere`). */
+  const answers = { b: opts.bAs ?? 'm-b' };
+  /** Make the next write of CURRENT fail, as a full storage does. */
+  const storage = { failCurrent: false };
+  const events: string[] = [];
+  const up = new Set<string>(['a']);
+  const down = new Set<string>(opts.down ?? []);
+  const refuse = new Set<string>(opts.refuse ?? []);
+  const waiting: Record<string, (() => void)[]> = { b: [], c: [], n: [] };
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+    { id: 'c', name: 'charlie', address: 'ws://c:9899', token: 'tokC', machineId: 'm-c', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: opts.page ?? 'files' }), parked: JSON.stringify({ page: opts.page ?? 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop', ...(opts.seed ?? {}),
+  }), (url) => (url.includes('//b') ? answers.b : url.includes('//c') ? 'm-c' : url.includes('//n') ? 'm-n' : 'm-a'), {
+    calls: events, rpc: opts.rpc ?? editorRpc,
+    gate: (url, n) => {
+      // N is a new server the connect card dials: every dial of it is held
+      // until let go (`release('n')`), the candidate s and N s own.
+      if (url.includes('//n')) return up.has('n') ? null : new Promise<void>((r) => { waiting.n!.push(r); });
+      const key = url.includes('//b') ? 'b' : url.includes('//c') ? 'c' : '';
+      if (!key || n === 0) return null;
+      if (down.has(key)) return Promise.reject(new Error('timeout'));
+      // The server answers and refuses the token (its ERR_AUTH).
+      if (refuse.has(key)) return Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 }));
+      return up.has(key) ? null : new Promise<void>((r) => { waiting[key]!.push(r); });
+    },
+    setup(window: any) {
+      sandbox.setup(window);
+      // Web Crypto, as a secure page has it (the refused-attempts digests).
+      if (!window.crypto?.subtle) Object.defineProperty(window, 'crypto', { value: globalThis.crypto, configurable: true });
+      if (opts.holdDigest) holdDigests(window, opts.holdDigest);
+      const set = window.Storage.prototype.setItem;
+      window.Storage.prototype.setItem = function (k: string, v: string) {
+        if (storage.failCurrent && k === 'tmux_server_current') throw new Error('QuotaExceededError');
+        return set.call(this, k, v);
+      };
+    },
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  const ls = h.app.window.localStorage;
+  /** Let a member's dials answer from now on. */
+  const bringUp = async (key: string) => {
+    down.delete(key); up.add(key); waiting[key]!.splice(0).forEach((r) => r());
+    for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  };
+  /** Let N's held dials go and let every later one answer. */
+  const release = async (key: string) => { up.add(key); waiting[key]!.splice(0).forEach((r) => r()); for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); } };
+  const heldDials = (key: string) => waiting[key]!.length;
+  return { h, ls, events, bringUp, release, heldDials, down, refuse, answers, storage, current: () => ls.getItem('tmux_server_current') };
+}
+
+test('#458: A→B→A — a pick of the current focus retires the pending choice; B coming up later moves nothing', async (context) => {
+  const w = await choiceWorld(context);
+  await pickServer(w.h, 'beta');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu);
+  await pickServer(w.h, 'alpha');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'retired at once');
+  await w.bringUp('b');
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B is up');
+  assert.equal(w.current(), 'a', 'and the focus stayed where the last pick put it');
+});
+
+test('#458: pick B, then C while B is pending — B coming up moves nothing; C coming up moves the focus to C', async (context) => {
+  const w = await choiceWorld(context);
+  await pickServer(w.h, 'beta');
+  await pickServer(w.h, 'charlie');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'one choice per window');
+  assert.match(rowText(w.h, 'charlie'), /chosen/iu);
+  await w.bringUp('b');
+  assert.equal(w.current(), 'a', 'B s up is not a move: B is no longer chosen');
+  await w.bringUp('c');
+  assert.equal(w.current(), 'c', 'C s up completes the newest pick');
+});
+
+for (const how of ['remove', 'exclude', 'mode', 'edit'] as const) test(`#458: a pick, then the entry is ${how === 'mode' ? 'left by a mode change' : how === 'edit' ? 'edited (its token)' : how === 'remove' ? 'removed' : 'excluded'} — retired, and B coming up moves nothing`, async (context) => {
+  const w = await choiceWorld(context);
+  const doc = w.h.app.document;
+  await pickServer(w.h, 'beta');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu);
+  if (how === 'remove') {
+    doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Remove beta"]')!.click(); await w.h.settle();
+    answerDialog(w.h.app, /^remove$/iu);
+    for (let i = 0; i < 3; i++) await w.h.settle();
+    assert.ok(!JSON.parse(w.ls.getItem('tmux_servers')!).some((e: any) => e.id === 'b'), 'B removed');
+  } else if (how === 'exclude') {
+    includeSwitch(w.h, 'beta')!.click();
+    for (let i = 0; i < 3; i++) await w.h.settle();
+    assert.equal(includeSwitch(w.h, 'beta')?.getAttribute('aria-checked'), 'false', 'B excluded');
+  } else if (how === 'mode') {
+    modeButton(w.h, /^one server$/iu)!.click();
+    for (let i = 0; i < 3; i++) await w.h.settle();
+    assert.equal(w.ls.getItem('tmux_connection_mode'), 'single', 'Single now');
+  } else {
+    doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+    await w.h.settle();
+    const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+    const input = dialog.querySelector<HTMLInputElement>('input[aria-label="New token"]')!;
+    input.value = 'tokB-new'; input.dispatchEvent(new w.h.app.window.Event('input', { bubbles: true })); await w.h.settle();
+    [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^change token$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+    await w.h.settle();
+    [...dialog.querySelectorAll<HTMLButtonElement>('.dlg-actions button')].find((b) => /^close$/iu.test((b.textContent ?? '').trim()))!.click();
+    await w.h.settle();
+  }
+  if (how !== 'remove') assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'retired');
+  await w.bringUp('b');
+  assert.equal(w.current(), 'a', 'nothing moved');
+});
+
+test('#458: a member that is up while the window is busy is still a choice: it moves when the window is free', async (context) => {
+  const w = await choiceWorld(context);
+  await w.bringUp('b');
+  assert.ok(conn(w.h, 'b')?.isConnected());
+  // The window is busy: an exclusion of charlie is waiting on charlie s own
+  // question (its tree has a draft), so membershipBusy holds.
+  await pickServer(w.h, 'charlie'); // a pending choice of C first, so C has a tree once up
+  await w.bringUp('c');
+  assert.equal(w.current(), 'c');
+  const draftC = await dirtyEditor(w.h.app, w.h.settle);
+  await pickServer(w.h, 'alpha');
+  assert.equal(w.current(), 'a');
+  includeSwitch(w.h, 'charlie')!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  assert.ok(w.h.app.document.querySelector('[role=alertdialog]'), 'charlie s tree asks: the window is busy');
+  await pickServer(w.h, 'beta');
+  assert.equal(w.current(), 'a', 'up, but the window is busy: no move yet');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu, 'the choice is kept, not dropped');
+  answerDialog(w.h.app, /keep editing/iu);
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(10); await w.h.settle(); }
+  assert.equal(w.current(), 'b', 'the window is free: the choice completes, on the drain s own turn');
+  assert.equal(draftC.isConnected && draftC.value, '# notes\n\nunsaved', 'charlie s draft untouched');
+});
+
+test('#458: an excluded server picked is included first, and the choice is that pick s — a newer pick made meanwhile wins', async (context) => {
+  const w = await choiceWorld(context);
+  includeSwitch(w.h, 'beta')!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  assert.equal(includeSwitch(w.h, 'beta')?.getAttribute('aria-checked'), 'false');
+  await pickServer(w.h, 'beta');
+  assert.equal(includeSwitch(w.h, 'beta')?.getAttribute('aria-checked'), 'true', 'the pick included it');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu);
+  await pickServer(w.h, 'charlie');
+  await w.bringUp('b');
+  assert.equal(w.current(), 'a', 'the include s pick was superseded by charlie');
+  await w.bringUp('c');
+  assert.equal(w.current(), 'c');
+});
+
+test('#458: a pick, then a union row moves the focus elsewhere — the choice is retired, and C coming up later does not take the focus back', async (context) => {
+  const w = await choiceWorld(context, { rpc: twoHubs(), page: 'hub' });
+  await w.bringUp('b');
+  await pickServer(w.h, 'charlie');
+  assert.match(rowText(w.h, 'charlie'), /chosen/iu);
+  w.h.app.document.querySelector<HTMLButtonElement>('.tabbar button[aria-label="Chat"], .rail-btn[aria-label="Chat"]')?.click();
+  for (let i = 0; i < 20 && !sideRows(w.h).some((r) => r.startsWith('beta:other')); i++) { await w.h.app.advance(500); await w.h.settle(); }
+  const rowB = [...w.h.app.document.querySelectorAll<HTMLElement>('.scope-tree:not(.held) .hub-root .sidebar .proj-row')].find((r) => r.dataset.server === 'b' && r.querySelector('.p-name')?.textContent === 'other')!;
+  rowB.querySelector<HTMLButtonElement>('.proj-pick')!.click();
+  for (let i = 0; i < 10 && w.current() !== 'b'; i++) await w.h.settle();
+  assert.equal(w.current(), 'b', 'the union row moved the focus to B');
+  await w.bringUp('c');
+  assert.equal(w.current(), 'b', 'the older choice of C is gone: B keeps the focus');
+});
+
+test('#458: a pick, then the member answers as another known machine — retired by the existing rule, nothing moves', async (context) => {
+  const w = await choiceWorld(context, { bAs: 'm-c' });
+  await pickServer(w.h, 'beta');
+  await w.bringUp('b');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'retired');
+  assert.equal(w.current(), 'a');
+});
+
+test('#458: the move s storage commit fails — the choice is over, never retried', async (context) => {
+  const w = await choiceWorld(context);
+  await pickServer(w.h, 'beta');
+  w.storage.failCurrent = true;
+  await w.bringUp('b');
+  assert.equal(w.current(), 'a', 'CURRENT did not move');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'retired on the failed commit');
+  w.storage.failCurrent = false;
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.equal(w.current(), 'a', 'no later drain retries it');
+});
+
+/** Disconnect, then type an address into the connect card and Connect. */
+async function cardConnect(h: Awaited<ReturnType<typeof bootApp>>, address: string) {
+  await toConnection(h);
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  const field = h.app.document.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = address; field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
+}
+
+test('#458 review: Disconnect ends a pending choice — the person asked to be offline, and B coming up moves nothing', async (context) => {
+  const w = await choiceWorld(context);
+  await pickServer(w.h, 'beta');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu);
+  [...w.h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  await w.bringUp('b');
+  assert.equal(w.current(), 'a', 'still the server the person disconnected from');
+  assert.ok(w.h.app.document.querySelector('.card .fields input[type="text"]'), 'still offline, on the connect card');
+});
+
+test('#458 review: a choice made while the connect card dials N waits on the window (its lease), and N binding retires it — B coming up later never takes the focus from N', async (context) => {
+  const w = await choiceWorld(context);
+  await cardConnect(w.h, 'ws://n:9899');
+  assert.ok(w.heldDials('n') > 0, 'the card s candidate dial is held: the window is leased');
+  // A pick made now, from the server popover, without leaving the card (a
+  // page change would end the card s attempt).
+  const doc = w.h.app.document;
+  const opener = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^Servers\b/u.test(b.getAttribute('aria-label') ?? ''));
+  opener!.click();
+  await w.h.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.server-menu .sm-pick')].find((b) => b.querySelector('.sm-name')?.textContent === 'beta')!.click();
+  for (let i = 0; i < 2; i++) await w.h.settle();
+  assert.ok(doc.querySelector('.card .fields input[type="text"]'), 'the card is still at it');
+  assert.equal(w.current(), 'a');
+  await w.bringUp('b');
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B up');
+  assert.notEqual(w.current(), 'b', 'the lease holds the window: B does not take it over the card s attempt');
+  // The card s connect completes: N is bound.
+  await w.release('n');
+  const nId = JSON.parse(w.ls.getItem('tmux_servers')!).find((e: any) => e.address === 'ws://n:9899')?.id;
+  for (let i = 0; i < 6 && w.current() !== nId; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.ok(nId && w.current() === nId, 'the app is on N');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.equal(w.current(), nId, 'and stays there: N s commit retired the older choice');
+});
+
+test('#458 validator V1: a server that refused the token is said to, and nothing dials it again — three picks dial nothing, the choice is recorded, its connection is the action', async (context) => {
+  const w = await choiceWorld(context, { refuse: ['b'] });
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu, 'its own state, not "not answering"');
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  const before = dials();
+  for (let i = 0; i < 3; i++) await pickServer(w.h, 'beta');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(5000); await w.h.settle(); }
+  assert.equal(dials(), before, 'three picks: not one dial (the server s lockout is never fed)');
+  assert.match(rowText(w.h, 'beta'), /chosen; token refused — edit its connection/iu, 'the choice is recorded, with the reason');
+  assert.ok(w.h.app.document.querySelector('.preferences .server-list button[aria-label="Addresses and token beta"]'), 'the action that can change it is on the row');
+  assert.equal(w.current(), 'a');
+  for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dials(), before, '200 s more: nothing passive dials it either');
+});
+
+test('#458 validator V1: a member whose RECONNECT is refused the token is in the same state — its loop says why, and picks dial nothing', async (context) => {
+  const w = await choiceWorld(context);
+  await w.bringUp('b');
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B up');
+  // The server s token changed: B drops, and its own loop is refused.
+  w.refuse.add('b');
+  conn(w.h, 'b')!.drop();
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu, 'the loop s give-up carries the reason');
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  const before = dials();
+  for (let i = 0; i < 3; i++) await pickServer(w.h, 'beta');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(5000); await w.h.settle(); }
+  assert.equal(dials(), before, 'three picks: no dial');
+  assert.equal(w.current(), 'a');
+});
+
+test('#458 review on the token state: after a token refusal no AUTOMATIC path re-sends it — a rename elsewhere, another member s focus move, repeated syncs', async (context) => {
+  const w = await choiceWorld(context, { refuse: ['b'] });
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /token refused/iu);
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  const before = dials();
+  // A rename of another entry: the registry changes, and the member set syncs.
+  const doc = w.h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Rename alpha"]')!.click(); await w.h.settle();
+  const input = doc.querySelector<HTMLInputElement>('.preferences .sm-rename')!;
+  input.value = 'alpha2'; input.dispatchEvent(new w.h.app.window.Event('input', { bubbles: true }));
+  input.dispatchEvent(new w.h.app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  for (let i = 0; i < 3; i++) { await w.h.app.advance(1000); await w.h.settle(); }
+  assert.ok(JSON.parse(w.ls.getItem('tmux_servers')!).some((e: any) => e.name === 'alpha2'), 'renamed');
+  // Another member comes up and takes the focus (CURRENT changes, the set syncs again).
+  await pickServer(w.h, 'charlie');
+  await w.bringUp('c');
+  assert.equal(w.current(), 'c');
+  await pickServer(w.h, 'alpha2');
+  for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dials(), before, 'none of them dialled B with the refused token');
+});
+
+test('#458 ruling on the persisted refusal: after a reload the refused member is still choosable — the pick records, dials nothing, Edit is offered; a corrected token dials once', async (context) => {
+  const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ws://b:9899\u0000tokB'))).toString('hex');
+  // The page before the reload refused B's token and kept it.
+  const w = await choiceWorld(context, { refuse: ['b'], seed: { tmux_refused_tokens: JSON.stringify({ b: [digest] }) } });
+  // Web Crypto answers on the real event loop, not the fake clock.
+  for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); }
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  assert.equal(dials(), 0, 'the reload sent nothing to B');
+  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu);
+  await pickServer(w.h, 'beta');
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /chosen; token refused/iu, 'chosen, not the old "connects on its own" refusal');
+  assert.equal(w.h.app.document.querySelector('.preferences .server-list [role=alert]'), null);
+  assert.equal(dials(), 0, 'and the pick dialled nothing');
+  assert.ok(w.h.app.document.querySelector('.preferences .server-list button[aria-label="Addresses and token beta"]'), 'Edit is the action');
+  // The person corrects the token (the server takes it now), and picks again.
+  const doc = w.h.app.document;
+  doc.querySelector<HTMLButtonElement>('.preferences .server-list button[aria-label="Addresses and token beta"]')!.click();
+  await w.h.settle();
+  const dialog = doc.querySelector<HTMLElement>('[role=dialog]')!;
+  const input = dialog.querySelector<HTMLInputElement>('input[aria-label="New token"]')!;
+  input.value = 'tokB-right'; input.dispatchEvent(new w.h.app.window.Event('input', { bubbles: true })); await w.h.settle();
+  [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^change token$/iu.test((b.getAttribute('aria-label') ?? b.textContent ?? '').trim()))!.click();
+  await w.h.settle();
+  [...dialog.querySelectorAll<HTMLButtonElement>('.dlg-actions button')].find((b) => /^close$/iu.test((b.textContent ?? '').trim()))!.click();
+  await w.h.settle();
+  w.refuse.delete('b');
+  await pickServer(w.h, 'beta');
+  for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); }
+  assert.equal(dials(), 1, 'the corrected token is tried, once');
+  await w.bringUp('b');
+  assert.equal(w.current(), 'b', 'and the choice completes');
+});
+
+test('#458 ruling P1-B: a member s own loop never re-sends an (address, token) its server refused — an alternate address that refused is not a candidate after a pick', async (context) => {
+  const events: string[] = [];
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://b:9899', 'ws://b2:9899'] }),
+  }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
+    calls: events, rpc: editorRpc,
+    // B s own address does not answer; its alternate b2 reaches a gateway that refuses B s token.
+    gate: (url, n) => (n === 0 ? null : url.includes('//b2') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 }))
+      : url.includes('//b:') ? Promise.reject(new Error('timeout')) : null),
+    ...sandbox,
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  const b2 = () => events.filter((e) => e === 'connect:ws://b2:9899').length;
+  for (let i = 0; i < 40 && b2() === 0; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(b2() >= 1, 'the loop reached b2, which refused the token');
+  for (let i = 0; i < 6; i++) { await h.app.advance(3000); await h.settle(); }
+  const before = b2();
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 30; i++) { await h.app.advance(1000); await h.settle(); }
+  assert.ok(events.filter((e) => e === 'connect:ws://b:9899').length > 0, 'the pick s loop dials B s own address');
+  assert.equal(b2(), before, 'and never b2 with the refused token');
+});
+
+test('#458 validator V3: a wrong route first and the right one second, the same token — the right address connects, the refused one is sent once, and a pick moves there', async (context) => {
+  const events: string[] = [];
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://bw:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://bw:9899', 'ws://b:9899'] }),
+  }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
+    calls: events, rpc: editorRpc,
+    // ws://bw reaches another gateway, which refuses B s token; ws://b is B.
+    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 })) : null),
+    ...sandbox,
+  });
+  for (let i = 0; i < 4; i++) await h.settle();
+  await toConnection(h);
+  for (let i = 0; i < 10; i++) { await h.app.advance(1000); await h.settle(); }
+  const sent = (u: string) => events.filter((e) => e === `connect:${u}`).length;
+  assert.equal(sent('ws://bw:9899'), 1, 'the refused route: once');
+  assert.ok(sent('ws://b:9899') >= 1, 'the right one is tried with the same token');
+  assert.ok(conn(h, 'b')?.isConnected(), 'and B is up through it');
+  await pickServer(h, 'beta');
+  for (let i = 0; i < 4; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'b', 'a pick moves the focus there');
+  for (let i = 0; i < 20; i++) { await h.app.advance(10_000); await h.settle(); }
+  assert.equal(sent('ws://bw:9899'), 1, 'and the refused route is never sent again');
+});
+
+test('#458 ruling on f20d1ea0 (P1-A): the wrong route refuses while the right one is still compared — not "token refused", nothing else sent, and the right route connects once decided', async (context) => {
+  const sha = async (text: string) => Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))).toString('hex');
+  let letGo: (() => void) | null = null;
+  const held = new Promise<void>((r) => { letGo = r; });
+  const events: string[] = [];
+  const servers = [
+    { id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true },
+    { id: 'b', name: 'beta', address: 'ws://bw:9899', token: 'tokB', machineId: 'm-b', named: true },
+  ];
+  const h = await bootApp(context, aggregateOn({
+    ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }),
+    tmux_servers: JSON.stringify(servers), tmux_layout_mode: 'desktop',
+    tmux_machines: JSON.stringify({ 'm-a': ['ws://a:9899'], 'm-b': ['ws://bw:9899', 'ws://b:9899'] }),
+    // A refusal of some other pair is on the device, so every pair of B is compared.
+    tmux_refused_tokens: JSON.stringify({ b: [await sha('ws://old:9899\u0000tokB')] }),
+  }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
+    calls: events, rpc: editorRpc,
+    // ws://bw reaches another gateway, which refuses B s token; ws://b is B.
+    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 })) : null),
+    ...sandbox,
+    setup(window: any) { sandbox.setup?.(window); holdDigests(window, (text) => (text === 'ws://b:9899\u0000tokB' ? held : null)); },
+  });
+  const real = async (n = 20) => { for (let i = 0; i < n; i++) { await new Promise((r) => setImmediate(r)); await h.settle(); } };
+  await real();
+  await toConnection(h);
+  for (let i = 0; i < 10; i++) { await h.app.advance(1000); await h.settle(); }
+  await real();
+  const sent = (u: string) => events.filter((e) => e === `connect:${u}`).length;
+  assert.equal(sent('ws://bw:9899'), 1, 'the wrong route, decided ok, was sent once and refused');
+  assert.equal(sent('ws://b:9899'), 0, 'the right route is still compared: not sent');
+  assert.doesNotMatch(rowText(h, 'beta'), /token refused|unknown/iu, `one pair refused is not the member: ${rowText(h, 'beta')}`);
+  for (let i = 0; i < 6; i++) { await h.app.advance(5000); await h.settle(); }
+  assert.equal(sent('ws://bw:9899') + sent('ws://b:9899'), 1, 'and nothing more while it waits');
+  letGo!();
+  await real();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1000); await h.settle(); }
+  await real();
+  assert.equal(sent('ws://b:9899'), 1, 'decided ok: the right route is sent once');
+  assert.ok(conn(h, 'b')?.isConnected(), 'and B is up through it');
+  assert.equal(sent('ws://bw:9899'), 1, 'the refused route never again');
+});
+
+test('#458 ruling on f20d1ea0 (P1-B): a member s reconnect held by a walk while its token changes — the new pair still compared: zero dials, the loop waits (no false success), and it reconnects once decided', async (context) => {
+  const sha = async (text: string) => Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))).toString('hex');
+  let letGo: (() => void) | null = null;
+  const held = new Promise<void>((r) => { letGo = r; });
+  const NEW = 'ws://b:9899\u0000tokB2';
+  // A refusal of some other pair is on the device, so every pair of B is compared.
+  const w = await choiceWorld(context, {
+    seed: { tmux_refused_tokens: JSON.stringify({ b: [await sha('ws://old:9899\u0000tokB')] }) },
+    holdDigest: (text) => (text === NEW ? held : null),
+  });
+  const real = async (n = 20) => { for (let i = 0; i < n; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); } };
+  await real();
+  await w.bringUp('c');
+  await w.bringUp('b');
+  await real();
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B up');
+  // A dirty editor in C's tree, so a mode change has to ask (the walk).
+  await pickServer(w.h, 'charlie');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  await dirtyEditor(w.h.app, w.h.settle);
+  await pickServer(w.h, 'alpha');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  await toConnection(w.h);
+  modeButton(w.h, /one server|single/iu)!.click();
+  for (let i = 0; i < 4; i++) await w.h.settle();
+  assert.ok(w.h.app.document.querySelector('[role=alertdialog]'), 'the walk asks');
+  // B drops while the walk asks: its loop waits for the walk before it dials.
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  const before = dials();
+  conn(w.h, 'b')!.drop();
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(1000); await w.h.settle(); }
+  assert.equal(dials(), before, 'no dial over the walk');
+  // Meanwhile B's token is changed (another tab's edit): a new pair, its digest held.
+  const servers = JSON.parse(w.ls.getItem('tmux_servers')!);
+  servers.find((e: any) => e.id === 'b').token = 'tokB2';
+  w.ls.setItem('tmux_servers', JSON.stringify(servers));
+  answerDialog(w.h.app, /keep editing/iu);
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  await real();
+  assert.equal(dials(), before, 'the walk is over, the new pair is not decided: nothing sent (neither token)');
+  assert.ok(!conn(w.h, 'b')?.isConnected(), 'B is not up');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /refused|unknown|storage|not answering/iu, `not given up for any reason: ${rowText(w.h, 'beta')}`);
+  // Decided ok: the digest's own result wakes the waiting loop (a sync skips a published member).
+  letGo!();
+  await real();
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(1000); await w.h.settle(); }
+  await real();
+  assert.equal(dials(), before + 1, 'one dial, with the new token');
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B reconnected');
+});
+
+test('#458 ruling on 77e1185d (P1-A): a token edited right after the loop decided its pair — the decided pair is dialled in that turn, never the new unchecked token', async (context) => {
+  // A member's loop reads its target at the start of an attempt and again
+  // at its last check; the moment the LAST check reads it, a microtask is
+  // queued that edits the token. Anything between that check and the send
+  // (the old adapter's Promise.resolve) would send the edit unchecked.
+  const flip = { armed: false, reads: 0, done: false };
+  const w = await choiceWorld(context);
+  const win = w.h.app.window as any;
+  const get = win.Storage.prototype.getItem;
+  win.Storage.prototype.getItem = function (k: string) {
+    const v = get.call(this, k);
+    if (flip.armed && !flip.done && k === 'tmux_servers' && /tryAttempt/u.test(new Error().stack ?? '') && ++flip.reads === 2) {
+      flip.done = true;
+      queueMicrotask(() => {
+        const servers = JSON.parse(get.call(this, 'tmux_servers'));
+        servers.find((e: any) => e.id === 'b').token = 'tokB-unchecked';
+        this.setItem('tmux_servers', JSON.stringify(servers));
+      });
+    }
+    return v;
+  };
+  await w.bringUp('b');
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B up');
+  const before = w.h.net.sent.length;
+  flip.armed = true;
+  conn(w.h, 'b')!.drop();
+  for (let i = 0; i < 6 && !flip.done; i++) { await w.h.app.advance(1000); await w.h.settle(); }
+  assert.ok(flip.done, 'the loop s last check was reached');
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  const bDials = w.h.net.sent.slice(before).filter((d) => d.startsWith('ws://b:9899'));
+  assert.equal(bDials[0], 'ws://b:9899 tokB', `the decided pair is the dialled pair: ${bDials.join(' | ')}`);
+});
+
+test('#458 validator V4 (ruling): an unreadable refusal record is reset once — kept aside, said on the Connection page; a never-refused server connects, a wrong token fails once and is recorded again', async (context) => {
+  const w = await choiceWorld(context, { refuse: ['c'], seed: { tmux_refused_tokens: 'not json {' } });
+  const real = async (n = 20) => { for (let i = 0; i < n; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); } };
+  await real();
+  assert.equal(w.ls.getItem('tmux_refused_tokens_unreadable'), 'not json {', 'the junk is kept aside for diagnosis');
+  assert.match(w.h.app.document.querySelector('.preferences')?.textContent ?? '', /refusal records on this device were unreadable and have been reset/iu, 'and the reset is said where the servers are');
+  await w.bringUp('b');
+  await w.bringUp('c');
+  await real();
+  assert.ok(conn(w.h, 'b')?.isConnected(), 'B (never refused, its token right) connects');
+  const cDials = () => w.events.filter((e) => e === 'connect:ws://c:9899').length;
+  assert.equal(cDials(), 1, 'C s wrong token: one failure');
+  assert.match(rowText(w.h, 'charlie'), /token refused/iu, 'recorded again on its first answer');
+  assert.ok(Object.keys(JSON.parse(w.ls.getItem('tmux_refused_tokens') ?? '{}')).includes('c'), 'and kept on the device');
+  for (let i = 0; i < 10; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(cDials(), 1, '100 s more: never again');
+  assert.equal(w.ls.getItem('tmux_refused_tokens_unreadable'), 'not json {', 'the kept value is not touched');
+});
+
+test('#458: only a pick starts a retry budget — a given-up member is not dialled by the choice; one pick starts one loop', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'] });
+  // B fails until its own loop gives up.
+  for (let i = 0; i < GIVE_UP_STEPS; i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  const quiet = dialsOf(w.events, 'b').length;
+  for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length, quiet, 'given up: nothing dials B');
+  await pickServer(w.h, 'beta');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu);
+  for (let i = 0; i < 2; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  const started = dialsOf(w.events, 'b').length;
+  assert.ok(started > quiet, 'the pick started one fresh loop');
+  await pickServer(w.h, 'beta');
+  await pickServer(w.h, 'beta');
+  assert.match(rowText(w.h, 'beta'), /chosen/iu, 'a re-pick of the chosen row keeps it chosen');
+  // The loop gives up again; the choice is still held, and nothing passive dials.
+  for (let i = 0; i < GIVE_UP_STEPS; i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /chosen; not answering/iu, 'honest: chosen, not trying');
+  const after = dialsOf(w.events, 'b').length;
+  for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length, after, '200 s with the choice held and no pick: no dial');
+  assert.equal(w.current(), 'a');
 });
 
 test('P1-1: an Aggregate switch through Add-a-server keeps every member s tree mounted while it runs, and after', async (context) => {

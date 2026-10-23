@@ -64,3 +64,25 @@ test('the switcher popover stays two lines: no build there, and none while the l
   const down = await lines(context, { connected: false, builds: () => BUILD });
   try { assert.equal(down.build(0), null, 'the current server is not live: nothing to say'); } finally { await down.app.close(); }
 });
+
+// #458: the chosen row says, in words, that it is the pending choice and
+// what its member is doing; a storage stop keeps its own reason.
+test('the chosen row reads chosen / not answering / its storage pause, never someone else\'s word (#458)', async context => {
+  for (const [target, want] of [
+    [{ id: 'b', failed: false, chosen: true }, /^bravo\s*ws:\/\/b:2· Chosen; the app moves there when it connects$/u],
+    [{ id: 'b', failed: true, chosen: true }, /· Chosen; not answering — pick it again to retry$/u],
+    [{ id: 'b', failed: true, chosen: true, why: 'Paused: storage' }, /· Chosen; Paused: storage$/u],
+    [{ id: 'b', failed: true, chosen: true, why: 'Token refused — edit its connection' }, /· Chosen; Token refused — edit its connection$/u],
+  ] as const) {
+    const app = await (await compiled).mount(context, {
+      props: { servers, currentId: 'a', link: { connected: true, target }, variant: 'page', onpick() {}, onrename() {}, onremove() {}, onadd() {} },
+      setup(window) { window.localStorage.setItem('tmux_locale', 'en'); },
+      modules: [],
+    });
+    try {
+      const row = [...app.document.querySelectorAll<HTMLElement>('.sm-pick')].find((b) => b.querySelector('.sm-name')?.textContent === 'bravo')!;
+      assert.match((row.textContent ?? '').replace(/\s+/gu, ' ').trim(), want);
+      assert.equal(row.getAttribute('aria-current'), null, 'never the current marker');
+    } finally { await app.close(); }
+  }
+});

@@ -153,3 +153,35 @@ test('a held dial to beta, then alpha is saved and its token edited, then beta a
   const created = loadServers(u.storage).find((s) => s.machineId === 'm-a');
   assert.equal(created?.token, 'tokB', 'a machine reached for the first time is recorded with the credential that worked');
 });
+
+test('a failed dial names the token IT sent: an edit that lands while it is out does not become the one refused (#458 review on the token state, P1-B)', async () => {
+  const r = rig();
+  r.hold();
+  let refuse = false;
+  const connect = r.connection.connect.bind(r.connection);
+  r.connection.connect = async (address: string, token: string) => {
+    const answer = await connect(address, token);
+    if (refuse) throw Object.assign(new Error('invalid proof'), { code: -32000 });
+    return answer;
+  };
+  refuse = true;
+  const dialling = r.runtime.dial();
+  await Promise.resolve();
+  setServerToken(r.storage, 'b', 'tokB-new');
+  await r.release();
+  const result = await dialling;
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok === false && result.reason === 'failed' ? result.tried : undefined, { address: 'ws://b:9899', token: 'tokB' }, 'the attempt s own address and token, never the entry s current ones');
+  assert.equal(r.beta().token, 'tokB-new', 'and the edit stands');
+});
+
+test('a dial sends the pair its caller decided — the token passed, not the entry s token re-read — and an attempt not owned when it would send sends nothing (#458 ruling on 77e1185d)', async () => {
+  const r = rig();
+  setServerToken(r.storage, 'b', 'tokB-edited');       // an edit after the caller's check
+  const result = await r.runtime.dial(() => true, { via: 'ws://b-ts:9899', token: 'tokB' });
+  assert.deepEqual(r.dials, ['ws://b-ts:9899 tokB'], 'the checked pair is the dialled pair');
+  assert.equal(result.ok, true);
+  const stale = await r.runtime.dial(() => false, { via: 'ws://b:9899', token: 'tokB' });
+  assert.deepEqual(stale, { ok: false, reason: 'superseded' });
+  assert.equal(r.dials.length, 1, 'not owned at the send: nothing sent');
+});

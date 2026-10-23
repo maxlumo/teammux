@@ -17,6 +17,7 @@
 
 import type { ServerTarget } from './server-target.ts';
 import { dialTimeoutMs, isAuthRefusal, isReachabilityFailure } from './dial-order.ts';
+import { candidateVerdict, type Eligibility } from './refused-attempts.ts';
 
 export interface ReconnectState {
   reconnecting: boolean;
@@ -54,8 +55,24 @@ export interface ReconnectDeps {
    * `handover` is that attempt's claim and `answer` what ITS connect
    * resolved with. */
   onSuccess: (useAddr: string, primaryAddr: string, handover?: unknown, answer?: unknown) => void;
-  /** Max attempts exhausted, no stored address, or watchdog fired. */
-  onGiveUp: () => void;
+  /** Max attempts exhausted, no stored address, or watchdog fired — or
+   * (`'auth'`) the server answered and refused the credentials, which no
+   * further dial can change (#458: the caller must not dial it again), or
+   * (`'unknown'`) every address is held because whether it was refused
+   * cannot be known. */
+  onGiveUp: (reason?: 'auth' | 'unknown') => void;
+  /** A HARD rule, apart from the soft `isAddressViable` preference (#458):
+   * may this (address, token) be sent at all? Only 'ok' is a candidate —
+   * for the first round's probe and every later round alike — and the loop
+   * never falls back to the others. The loop reads the whole candidate set
+   * through `candidateVerdict` at every point it chooses again; while the
+   * set is 'pending' it waits, inside the same watchdog budget, for `wake()`.
+   * Absent: every pair is ok. */
+  eligible?: (address: string, token: string) => Eligibility;
+  /** The host's wait before any dial — a walk asking the person something.
+   * The loop asks the set again AFTER it, as after the probe: the chosen
+   * pair is decided at the last await, by the loop itself. */
+  beforeDial?: () => Promise<unknown>;
   maxAttempts?: number;
   watchdogMs?: number;
   /** Injectable for tests; default to the real timers. */
@@ -80,7 +97,7 @@ export const RECONNECT_WATCHDOG_MS = 180000;
 export function createReconnectMachine(deps: ReconnectDeps) {
   const {
     connect, findBestAddress, isAddressViable, noteAddressUnreachable,
-    classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp, attempt: takeSocket,
+    classifyAddress, addressLabels, target, onStateChange, onSuccess, onGiveUp, attempt: takeSocket, eligible, beforeDial,
     maxAttempts = Infinity,
     watchdogMs = RECONNECT_WATCHDOG_MS,
     setTimeoutFn = setTimeout,
@@ -107,6 +124,23 @@ export function createReconnectMachine(deps: ReconnectDeps) {
    * so a retry can never take back what the form took in the gap. */
   let held: { current(): boolean } | null = null;
   const chainOwns = () => !held || held.current();
+  /** The attempt this chain waits at while its candidate set is 'pending'
+   * (#458): `wake()` asks the set again; null when not waiting. */
+  let parked: number | null = null;
+  /** The pairs a server refused in THIS chain (address \0 token): out of its
+   * candidate set whatever the host's `eligible` says, so a refusal is never
+   * sent again by the loop that received it. */
+  const refusedHere = new Set<string>();
+  const pairOf = (address: string, token: string) => `${address}\u0000${token}`;
+  const stateOf = (address: string, token: string): Eligibility =>
+    refusedHere.has(pairOf(address, token)) ? 'refused' : (eligible ? eligible(address, token) : 'ok');
+  /** The candidate set of a target and its one verdict: every point the loop
+   * chooses again reads it, never a single pair's state. */
+  function readSet(where: Pick<ServerTarget, 'address' | 'token' | 'alternates'>) {
+    const configured = [where.address, ...(where.alternates ?? [])];
+    const states = configured.map((a) => stateOf(a, where.token));
+    return { configured, states, verdict: candidateVerdict(states) };
+  }
 
   function emit() {
     onStateChange({ reconnecting, attempt, label });
@@ -117,6 +151,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     if (watchdog) clearTimeoutFn(watchdog);
     retryTimer = null;
     watchdog = null;
+    parked = null;
     attempt = 0;
     label = '';
   }
@@ -134,6 +169,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       reconnecting = false;
       if (retryTimer) clearTimeoutFn(retryTimer);
       retryTimer = null;
+      parked = null;
       emit();
       onGiveUp();
     }, watchdogMs);
@@ -162,20 +198,36 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       onGiveUp();
       return;
     }
+    const giveUp = (reason?: 'auth' | 'unknown') => {
+      reconnecting = false;
+      clearTimers();
+      emit();
+      onGiveUp(reason);
+    };
 
-    const allAddrs = [primary, ...(where?.alternates ?? [])];
+    // The attempt takes the socket NOW, before the address probe: a probe is
+    // part of the attempt, and one still out when the form takes over must
+    // not go on to dial (reviewer P1-a on 372cb4af). Before the set is read,
+    // too: a loop waiting on a 'pending' set is still this attempt, so a
+    // join or a form that claims meanwhile ends it quietly — its wake and its
+    // watchdog are then nobody's (#458).
+    const handover = takeSocket?.() ?? null;
+    if (handover) held = handover;
+    const owned = () => live() && (handover?.current() ?? true);
+
+    // The hard rule first, over the WHOLE candidate set (#458): only an 'ok'
+    // pair is a candidate; none ok but one still compared waits for it in
+    // this budget; every pair refused is the server refusing us; otherwise
+    // nothing can be decided. Neither of the last two dials.
+    const { configured, states, verdict } = readSet({ address: primary, token, alternates: where?.alternates ?? [] });
+    if (verdict === 'pending') { parked = n; return; }
+    if (verdict !== 'ok') { giveUp(verdict === 'refused' ? 'auth' : 'unknown'); return; }
+    const allAddrs = configured.filter((_, i) => states[i] === 'ok');
     let useAddr: string;
 
     // First attempt with multiple candidates: parallel probe → pick first
     // reachable. Avoids burning 3s × N timeouts cycling through dead
     // addresses serially.
-    // The attempt takes the socket NOW, before the address probe: a probe is
-    // part of the attempt, and one still out when the form takes over must
-    // not go on to dial (reviewer P1-a on 372cb4af).
-    const handover = takeSocket?.() ?? null;
-    if (handover) held = handover;
-    const owned = () => live() && (handover?.current() ?? true);
-
     if (n === 0 && allAddrs.length > 1) {
       try {
         const best = await findBestAddress(allAddrs);
@@ -197,6 +249,23 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       useAddr = pool[n % pool.length]!;
     }
 
+    // The host's wait (a walk asking the person) comes last before the dial.
+    if (beforeDial) {
+      try { await beforeDial(); } catch { /* the wait ended either way */ }
+      if (!live()) return;
+      if (!owned()) { yieldLoop(); return; }
+    }
+    // After every await, the loop asks again, from the target's CURRENT
+    // declaration (ruling on 77e1185d): the target gone stops, as at the
+    // start; a changed token, or a chosen address no longer in the current
+    // set or no longer 'ok', is never sent — this attempt chooses again from
+    // the whole current set (an 'ok' sibling is dialled, a 'pending' set
+    // waits). The pair checked here is the pair `connect` sends, in this turn.
+    const now = target();
+    if (!now?.address) { giveUp(); return; }
+    const current = readSet(now);
+    const at = current.configured.indexOf(useAddr);
+    if (now.token !== token || at < 0 || current.states[at] !== 'ok') { void tryAttempt(n, myGen); return; }
     attempt = n + 1;
     label = addressLabels[classifyAddress(useAddr)] || '';
     emit();
@@ -223,10 +292,19 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       // minutes. Stop at once; the connect card shows the stored address and
       // token to correct (board #393 review P2-2).
       if (isAuthRefusal(e)) {
-        reconnecting = false;
-        clearTimers();
-        emit();
-        onGiveUp();
+        // That PAIR is refused, never the member while another pair is still
+        // 'ok' or 'pending' (#458 validator V3; ruling on f20d1ea0): the set
+        // is read again, and the next attempt — same loop, same budget —
+        // dials an ok sibling or waits for a pending one. Every pair refused:
+        // the server refused us.
+        refusedHere.add(pairOf(useAddr, token));
+        const left = readSet(target() ?? { address: primary, token, alternates: configured.slice(1) }).verdict;
+        if (left === 'refused' || left === 'unknown') { giveUp(left === 'refused' ? 'auth' : 'unknown'); return; }
+        if (n + 1 < maxAttempts) {
+          retryTimer = setTimeoutFn(() => { void tryAttempt(n + 1, myGen); }, Math.min(500 * (n + 1), RETRY_GAP_CAP_MS));
+          return;
+        }
+        giveUp();
         return;
       }
       // Reachability failures (timeout / refused, NOT auth errors) feed the
@@ -262,6 +340,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       }
       gen++;
       held = null;      // an explicit start is a new chain, owning nothing yet
+      refusedHere.clear();
       reconnecting = true;
       emit();
       armWatchdog();
@@ -278,6 +357,14 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     },
     isActive(): boolean {
       return reconnecting;
+    },
+    /** A comparison the candidate set waited on has been decided: a loop
+     * waiting on 'pending' asks the set again now (#458). Otherwise a no-op. */
+    wake() {
+      if (!reconnecting || parked === null) return;
+      const n = parked;
+      parked = null;
+      void tryAttempt(n, gen);
     },
   };
 }

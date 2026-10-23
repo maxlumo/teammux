@@ -38,11 +38,12 @@
   import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
-  import { dialOrder, dialTimeoutMs } from './lib/app/dial-order.ts';
+  import { dialOrder, dialTimeoutMs, isAuthRefusal } from './lib/app/dial-order.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
   import { createMembers } from './lib/app/server-members.svelte.ts';
+  import { createRefusedAttempts, REFUSED_KEY, REFUSED_ASIDE_KEY } from './lib/app/refused-attempts.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
   import { createBoardUnion, createHubUnion } from './lib/app/hub-union.svelte.ts';
@@ -1281,23 +1282,23 @@
       // record, the arrival — and its answer comes back as its own result
       // (reviewer P1-2 on 341554b3). Nothing here is shared between
       // attempts: a variable the next attempt overwrites would let a stale
-      // one borrow a newer owner. Not while the person is being asked
-      // something: the dial waits for the walk to answer, and an attempt
-      // someone took over meanwhile is nobody's.
-      connect: (address, _token, timeoutMs, claim) => serverSwitch.idle().then(() => {
-        if (!claim?.current()) throw new Error('superseded');
-        return runtime.dial(() => claim.current(), { via: address, timeoutMs });
-      }).then(
+      // one borrow a newer owner. The machine calls this only after its own
+      // last word (below: the walk's wait, then the candidate set asked
+      // again), so nothing here decides whether to dial (#458 ruling on
+      // f20d1ea0: a withheld dial is the loop's state, never an error). It
+      // dials in the same turn, with the pair the machine decided — no
+      // microtask between, no token re-read (ruling on 77e1185d).
+      connect: (address, token, timeoutMs, claim) => runtime.dial(() => claim.current(), { via: address, token, timeoutMs }).then(
         (result) => {
           if (result.ok || result.reason === 'elsewhere') return result;
+          // A member's token refused, for the token THIS attempt sent: no
+          // path sends it again (#458; the loop then gives up on 'auth').
+          if (result.reason === 'failed' && isAuthRefusal(result.error) && bound() !== runtime) aggregate.refusedBy(runtime, result.tried);
           throw result.error ?? new Error(result.reason);
         },
         // An identity record that failed: the dial closed that socket, and
         // it is not a reachability failure to retry — it is reported.
-        (error) => {
-          if (error?.message === 'superseded') throw error;
-          return { ok: false, reason: 'unrecorded' };
-        },
+        () => ({ ok: false, reason: 'unrecorded' }),
       ),
       // THIS runtime's own generation (③a, reviewer P1-A): its reconnect
       // never makes another member's attempt stale, and a window attempt
@@ -1305,6 +1306,14 @@
       attempt: () => activations.member(runtime).claim(),
       findBestAddress,
       isAddressViable,
+      // The hard rule (#458): a member's loop never dials an (address, token)
+      // its server refused, or one not decided; the soft preference above
+      // stays what it was.
+      eligible: (address, token) => (bound() === runtime ? 'ok' : refusedAttempts.check(runtime.id, address, token)),
+      // Not while the person is being asked something: the dial waits for
+      // the walk to answer, and the loop then decides again — ownership and
+      // the candidate set — before it dials.
+      beforeDial: () => serverSwitch.idle(),
       noteAddressUnreachable,
       classifyAddress,
       addressLabels: ADDRESS_LABELS,
@@ -1316,7 +1325,7 @@
         reconnectClass = st.label;
       },
       onSuccess: (_useAddr, _primaryAddr, attempt, result) => (bound() === runtime ? onReconnected(runtime, result, attempt) : memberReconnected(runtime, result)),
-      onGiveUp: () => { if (bound() === runtime) { connected = false; page = 'settings'; } else aggregate.gaveUp(runtime); },
+      onGiveUp: (reason) => { if (bound() === runtime) { connected = false; page = 'settings'; } else aggregate.gaveUp(runtime, reason); },
     });
     reconnectors.set(runtime, machine);
     return machine;
@@ -1345,7 +1354,27 @@
    * server-members.svelte.ts). Each joins through the same gates as a
    * bring-up, addressed to its own id and owned by its own generation; none
    * writes CURRENT or takes the screen. */
+  // The attempts a server refused the token for, kept across reloads as
+  // SHA-256 digests (#458, refused-attempts.ts); a write that fails goes to
+  // the one storage error handling, and a digest computed asks the set again.
+  const refusedAttempts = createRefusedAttempts({
+    read: () => localStorage.getItem(REFUSED_KEY),
+    // A digest answers asynchronously: one that lands after the shell ended
+    // writes, reports and syncs nothing.
+    write: (text) => { if (windowDrain.ended) return; if (text) localStorage.setItem(REFUSED_KEY, text); else localStorage.removeItem(REFUSED_KEY); },
+    ...(globalThis.crypto?.subtle ? { digest: async (text) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('') } : {}),
+    failed: () => { if (!windowDrain.ended) storageFailed(); },
+    // An unreadable record is reset once (validator V4): kept aside for
+    // diagnosis, said on the Connection page, and every member dials again.
+    aside: (text) => { localStorage.setItem(REFUSED_ASIDE_KEY, text); },
+    reset: () => { if (!windowDrain.ended) membershipError = t('refusalsReset'); },
+    // Decided: an unpublished member joins again (sync), and a loop that was
+    // waiting on the comparison — a published member's — asks again (wake).
+    ready: () => { if (windowDrain.ended) return; syncMembers(); for (const machine of reconnectors.values()) machine.wake(); },
+  });
   const aggregate = createMembers({
+    refusals: refusedAttempts,
+    target: (id) => { const r = targetOf(localStorage, id); return r ? { address: r.address, token: r.token, alternates: r.alternates } : null; },
     include: (entry) => fleet.include(entry),
     gate: (id) => (foldFor(id) === 'blocked' ? 'blocked' : 'ok'),
     activations,
@@ -1381,6 +1410,7 @@
       else void ends.end(runtime);
     },
     retry(runtime) { if (!migrationBlocked && runtime !== bound()) reconnectorOf(runtime).start(); },
+    trying: (runtime) => !!reconnectors.get(runtime)?.isActive(),
     saved: (id) => loadServers(localStorage).some((s) => s.id === id),
     // The ONE host gate classifies a member's failed identity record, as it
     // does the focused server's (reviewer P1 on 453f02b8).
@@ -1440,6 +1470,7 @@
    * in the teardown schedules nothing. */
   function drainWindow() {
     settleHandover();
+    settleChosen();
     askOrphans();
   }
   const windowDrain = createWindowDrain(drainWindow);
@@ -1547,6 +1578,7 @@
       }
       if (!op.valid()) return;
       try { writeMode(localStorage, next); } catch { storageFailed(); return; }
+      retireChosen();
       // Every member was asked: they leave now, as answered.
       if (next === 'single') aggregate.leaveAll();
       connMode = next;
@@ -1560,6 +1592,7 @@
    * but could not be excluded is moved back. */
   async function setIncluded(id, on) {
     if (membershipFrozen() || connMode !== 'aggregate') return false;
+    if (!on && chosen?.id === id) retireChosen();
     membershipBusy = true;
     membershipError = '';
     const op = membershipOp();
@@ -1645,7 +1678,7 @@
     const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
     if (!target) return;
     const moved = focusMember(ref.serverId);
-    if (moved !== true) { pickMember(target); return; }
+    if (moved !== true) { refuseMember(target); return; }
     if (ref.target && ref.target !== `${ref.session}:`) openTerminal(ref.session, ref.target);
     else page = 'terminal';
     sessListOpen = false;
@@ -1653,12 +1686,12 @@
   /** A union row of ANOTHER server picked (③c-2): focus that server (D2:
    * no teardown) and hand its Hub the session as a landing it alone reads.
    * A server that is not a connected member is not a focus change — the
-   * row's own state says why (pickMember). */
+   * row's own state says why (refuseMember). */
   function pickServerProject(ref) {
     const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
     if (!target) return;
     const moved = focusMember(ref.serverId);
-    if (moved !== true) { pickMember(target); return; }
+    if (moved !== true) { refuseMember(target); return; }
     const v = viewOf(scopeSwap.bound());
     v.hubSelectReq = { serverId: ref.serverId, session: ref.session, n: (v.hubSelectReq?.n ?? 0) + 1 };
   }
@@ -1670,7 +1703,7 @@
     const target = loadServers(localStorage).find((s) => s.id === ref.serverId);
     if (!target) return;
     const moved = focusMember(ref.serverId);
-    if (moved !== true) { pickMember(target); return; }
+    if (moved !== true) { refuseMember(target); return; }
     const v = viewOf(scopeSwap.bound());
     v.boardIssueReq = { serverId: ref.serverId, session: ref.session, id: 0, n: (v.boardIssueReq?.n ?? 0) + 1 };
   }
@@ -1678,7 +1711,7 @@
    * Another included server's row focuses that server first (D2, as a
    * union project row does: `pickServerProject`); a server that is not a
    * connected member is not a focus change, and the row says why
-   * (`pickMember`). The jump request is the window's one; the Hub that
+   * (`refuseMember`). The jump request is the window's one; the Hub that
    * reads it refuses an alert of another server (`hubJumpOtherServer`), so
    * only the focused server's Hub — the alert's — acts on it. */
   function pickAlert(alert) {
@@ -1687,7 +1720,7 @@
       const target = loadServers(localStorage).find((s) => s.id === alert.server);
       if (!target) { centre.failed(alert, t('hubJumpOtherServer')); return; }
       const moved = focusMember(alert.server);
-      if (moved !== true) { pickMember(target); return; }
+      if (moved !== true) { refuseMember(target); return; }
     }
     centre.requestJump(alert);
     if (page !== 'hub') switchTab('hub');
@@ -2126,6 +2159,9 @@
       if (gate.fold === 'claimed') serverStates.set(runtime, stateFor(runtime.id));
       c.publishing();
       provisional.delete(runtime);
+      // The focus commits to another server here, whatever entry led in: an
+      // older pending choice is over (#458).
+      if (!m.keep && scopeSwap.bound() !== runtime) retireChosen();
       // Only now is the server left given up (ruling (a)): the swap ends it,
       // release first — and asks whether this runtime ADOPTED its state
       // first, so a same-machine merge keeps its downloads. The navigation
@@ -2221,6 +2257,9 @@
   }
 
   function doDisconnect() {
+    // The person asked to be offline: a pending choice must not bring the
+    // app up somewhere when its member answers (#458).
+    retireChosen();
     reconnect().cancel();
     live()?.disconnect();
     connected = false;
@@ -2437,6 +2476,8 @@
     let before = null;
     try {
       before = editSnapshot(localStorage);
+      // An edit is a new declaration: a pending choice of it is over (#458).
+      if (chosen?.id === detailsId) retireChosen();
       const result = edit(detailsId);
       if (result && 'refused' in result) return result.refused;
       return null;
@@ -2476,15 +2517,92 @@
     // Aggregate never falls back to the Single switch for a saved server
     // (orchestrator 02:28 and 03:23; reviewer P1-1 on 99566068): that switch
     // REPLACES the focused tree, so a pick is a focus move or nothing.
-    if (connMode === 'aggregate' && scopeSwap.bound()) { pickMember(target); return; }
+    if (connMode === 'aggregate' && scopeSwap.bound()) { chooseMember(target); return; }
     void switchTo(target);
   }
-  /** Aggregate: a row was picked. A connected member becomes the focus (D2).
-   * Any other server is not a focus change: the app STAYS where it is and
-   * the row shows that server's own state — an excluded one is included,
-   * and joins as a member through its own dial; one still connecting or
-   * failing keeps its own loop. The person focuses it once it is up. */
-  function pickMember(target) {
+  /** Aggregate, a server picker's row (Settings › Connection, the popover;
+   * #458): the person's choice of focus, recorded whatever the server's
+   * state — never a claim that it is up. A member that is up and the window
+   * free: the focus moves now (D2). Otherwise it becomes the window's
+   * PENDING choice (`chosen`), its row marked; the app stays where it is,
+   * and `settleChosen` moves the focus in place once that member is up and
+   * the window is free. The pick is the ONE explicit retry door: a member
+   * whose loop stopped gets one fresh loop (`aggregate.ask`); one already
+   * trying gets nothing new. An excluded one is included first, through
+   * the include's own checks. */
+  function chooseMember(target) {
+    const id = target.id;
+    retireChosen();
+    if (id === currentServerId(localStorage)) { serverMenuOpen = false; return; }
+    const moved = focusMember(id);
+    if (moved === true || moved === 'failed') return;
+    const pick = { gen: chosenGen, id, machine: target.machineId || null };
+    if (excludedIds.has(id)) {
+      chosen = pick;
+      // The include belongs to THIS pick: a newer choice made while it ran
+      // is not overwritten, and a failed include retires only this one.
+      void setIncluded(id, true).then((ok) => { if (chosen?.gen !== pick.gen) return; if (!ok) retireChosen(); else scheduleAsk(); });
+      return;
+    }
+    // A token refusal is recorded too, and dials nothing: the server answered,
+    // and only an edit of its connection can change that (validator V1).
+    if (aggregate.ask(id) === 'refused') { refuseMember(target); return; }
+    chosen = pick;
+    membershipError = '';
+    scheduleAsk();
+  }
+  /** The pending choice (#458): one per window, in memory, never a
+   * preference. `gen` is this pick's; every retirement bumps `chosenGen`,
+   * so a late include or drain of an older pick moves nothing. `machine`
+   * is the entry's machine at the pick; an entry that had none may learn
+   * it ONCE, from its own first authentication, and from then on must keep
+   * it. */
+  let chosen = $state.raw(null);
+  let chosenGen = 0;
+  function retireChosen() { chosenGen++; chosen = null; }
+  /** The chosen row's marker: failed when its member is (the dot), and WHY
+   * in words — a stopped loop is "not answering", a storage stop keeps its
+   * own reason (a kept choice under a block is paused, not unreachable). */
+  function chosenLink(st) {
+    const failed = st?.kind === 'failed';
+    const why = failed && st.reason === 'storage' ? t('memberStorage') : failed && st.reason === 'auth' ? t('memberTokenRefused') : failed && st.reason === 'unknown' ? t('memberRefusalUnknown') : '';
+    return { id: chosen.id, failed, chosen: true, ...(why ? { why } : {}) };
+  }
+  /** Complete the pending choice, from the window's drain only: it never
+   * dials and never starts a loop (only a pick does), and it moves the
+   * focus only through `focusMember`, after every gate a member passes to
+   * be published. A check that can still change (not up yet, the window
+   * busy, blocked) leaves the choice for the next drain; one that cannot
+   * retires it. */
+  function settleChosen() {
+    const c = chosen;
+    if (!c) return;
+    if (windowDrain.ended || readMode(localStorage) !== 'aggregate' || c.id === currentServerId(localStorage)) { retireChosen(); return; }
+    const saved = loadServers(localStorage);
+    const entry = saved.find((s) => s.id === c.id);
+    if (!entry || readExcluded(localStorage, saved).has(c.id)) { retireChosen(); return; }
+    if (c.machine ? entry.machineId !== c.machine : false) { retireChosen(); return; }
+    const st = aggregate.status(c.id);
+    if (!st || st.kind === 'orphan' || (st.kind === 'failed' && st.reason === 'elsewhere')) { retireChosen(); return; }
+    if (!c.machine && entry.machineId) chosen = { ...c, machine: entry.machineId };
+    const next = aggregate.runtimes().find((r) => r.id === c.id);
+    if (!next || !next.alive() || aggregate.orphan(next) || st.kind !== 'connected' || !next.connection.isConnected()) return;
+    if (windowBusy() || switching || migrationBlocked || askingOrphan || serverSwitch.guarding) return;
+    // 'failed' is a storage commit that refused: terminal for this choice.
+    if (focusMember(c.id) === 'failed' && chosen?.gen === c.gen) retireChosen();
+  }
+  // The chosen member's own state, and the registry, ask the drain again.
+  $effect(() => {
+    const c = chosen;
+    if (!c) return;
+    void aggregate.status(c.id); void serverList; void serverCurId;
+    untrack(scheduleAsk);
+  });
+  /** A refused focus move (a union or bell row, or a server picker's row
+   * the app will not dial past): the app STAYS where it is and the row
+   * shows that server's own state — an excluded one is included, and joins
+   * as a member through its own dial. */
+  function refuseMember(target) {
     if (target.id === currentServerId(localStorage)) { serverMenuOpen = false; return; }
     const moved = focusMember(target.id);
     if (moved === true) return;
@@ -2526,6 +2644,8 @@
     }
     serverSwitch.supersede();
     activations.claim();
+    // Any focus move the person made is newer than a pending choice (#458).
+    retireChosen();
     scopeSwap.refocus(next);
     aggregate.handOver(next);
     aggregate.adopt(left, left.connection.isConnected());
@@ -2555,7 +2675,8 @@
   /** What both server lists show about the connection (ServerList `link`). */
   const serverLink = $derived({
     connected: connected && !reconnecting,
-    target: switching ? { id: switching.target.id, failed: switching.phase === 'failed' } : null,
+    target: switching ? { id: switching.target.id, failed: switching.phase === 'failed' }
+      : chosen ? chosenLink(aggregate.status(chosen.id)) : null,
   });
   /** Bring a hidden guarded page into view so its own dialog asks there. */
   async function revealPage(next) {
@@ -2708,7 +2829,7 @@
   });
   // No switch while the fold is unrecorded: there is no server state to
   // arrive with.
-  const switchTo = (target) => serverSwitch.switchTo(target);
+  const switchTo = (target) => { retireChosen(); return serverSwitch.switchTo(target); };
   // App's own end (reviewer P2-1 on cc45d7d1): every resource it holds has
   // an owner here, so nothing outlives the shell — the candidates; every
   // activation in flight; every runtime's reconnect loop, stopped NOW with

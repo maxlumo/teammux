@@ -800,8 +800,16 @@ test('failover success RECORDS by machine identity — and never moves CURRENT (
   assert.match(runtimeSrc, /const address = how\.via \|\| route\?\.address \|\| target\.address;/u, 'the failover address is the one dialled');
   assert.match(runtimeSrc, /recordServer\(storage, \{\s*address,\s*token,[\s\S]*?machineId: machine/u,
     'the active address follows the connect, merged by machine identity, never by address alone');
-  assert.match(source, /connect: \(address, _token, timeoutMs, claim\) => serverSwitch\.idle\(\)\.then\(\(\) => \{\s*if \(!claim\?\.current\(\)\) throw new Error\('superseded'\);\s*return runtime\.dial\(\(\) => claim\.current\(\), \{ via: address, timeoutMs \}\);/u,
-    'the reconnect loop dials through the runtime it belongs to, under THAT attempt s own claim (reviewer P1-2 on 341554b3)');
+  assert.match(source, /connect: \(address, token, timeoutMs, claim\) => runtime\.dial\(\(\) => claim\.current\(\), \{ via: address, token, timeoutMs \}\)\.then\(/u,
+    'the reconnect loop dials through the runtime it belongs to, under THAT attempt s own claim (reviewer P1-2 on 341554b3), in the same turn, with the pair the loop decided (#458 ruling on 77e1185d)');
+  // #458 ruling on f20d1ea0 (P1-B): whether to dial is the LOOP's state,
+  // decided after its last await — never an Error the adapter below folds
+  // into a resolved 'unrecorded' success.
+  const adapter = source.match(/connect: \(address, token, timeoutMs, claim\) => [\s\S]*?\n      \),\n/u)?.[0] ?? '';
+  assert.ok(adapter, 'the connect adapter found');
+  assert.doesNotMatch(adapter, /refusedAttempts|throw new Error\(/u, 'the adapter withholds nothing and throws no plain Error');
+  assert.doesNotMatch(adapter, /Promise\.resolve|queueMicrotask|await |targetOf\(/u, 'and dials in the same turn, with the pair the loop decided (ruling on 77e1185d)');
+  assert.match(adapter, /\(\) => \(\{ ok: false, reason: 'unrecorded' \}\),\n/u, 'only a dial that REJECTED (the identity record) is unrecorded');
   assert.match(source, /onSuccess: \(_useAddr, _primaryAddr, attempt, result\) => \(bound\(\) === runtime \? onReconnected\(runtime, result, attempt\) : memberReconnected\(runtime, result\)\),/u, 'and hands on that attempt s own result');
   const rc = source.match(/function reconnectorOf\(runtime\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(rc, /let (claim|last)\b/u, 'nothing in a loop is shared between its attempts');
@@ -932,8 +940,8 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   assert.deepEqual([...source.matchAll(/activations\.endAll\(\)/gu)].length, 2, 'endAll: holdStorage and onDestroy, nowhere else');
   // ③a: a reconnect claims its OWN runtime's generation (reviewer P1-A).
   assert.match(source, /attempt: \(\) => activations\.member\(runtime\)\.claim\(\),/u);
-  assert.match(source, /connect: \(address, _token, timeoutMs, claim\) => serverSwitch\.idle\(\)\.then\(\(\) => \{\s*if \(!claim\?\.current\(\)\) throw new Error\('superseded'\);/u,
-    'one question at a time: a reconnect dial waits for the walk, and one taken over meanwhile is nobody s');
+  assert.match(source, /beforeDial: \(\) => serverSwitch\.idle\(\),/u,
+    'one question at a time: a reconnect dial waits for the walk, and the loop decides again (ownership, candidates) after it');
   const rc = source.match(/function reconnectorOf\(runtime\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
   assert.doesNotMatch(rc, /heldOffline = false|recordServer|tmux_address|tmux_token/u, 'an automatic attempt lifts no stay, records nothing itself and reads no mirror');
   // The dial found ANOTHER known machine and both entries stay: the app
@@ -1431,16 +1439,25 @@ test('Aggregate focus moves between connected members without a teardown (#335 �
   assert.match(fn, /!next\.connection\.isConnected\(\)/u, 'a member that is not connected is not a focus change (orchestrator 02:28)');
   // One commit (reviewer P1-3 on 99566068): storage (CURRENT last) or
   // nothing; then the window's old attempts go stale; then the front.
-  assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?catch \{[\s\S]*?return 'failed';\s*\}\s*serverSwitch\.supersede\(\);\s*activations\.claim\(\);\s*scopeSwap\.refocus\(next\);\s*aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
+  assert.match(fn, /focusServer\(localStorage, id\)[\s\S]*?catch \{[\s\S]*?return 'failed';\s*\}\s*serverSwitch\.supersede\(\);\s*activations\.claim\(\);\s*(?:\/\/[^\n]*\n\s*)*retireChosen\(\);\s*scopeSwap\.refocus\(next\);\s*aggregate\.handOver\(next\);\s*aggregate\.adopt\(left, left\.connection\.isConnected\(\)\);/u,
     'commit, then make the old focus s window work stale, then the front and the set');
   assert.doesNotMatch(fn, /activations\.endAll\(\)/u, 'members keep their own reconnects');
   assert.doesNotMatch(fn, /swap\(|dial\(|confirmLeave|ends\.end|fleet\.drop/u, 'nothing is torn down, dialled or asked');
   // ③b-3: an excluded server the person picks is included as the switch begins.
   // ③b (orchestrator 03:23; reviewer P1-1 on 99566068): Aggregate never
   // falls back to the replacing switch for a saved server.
-  assert.match(source, /if \(connMode === 'aggregate' && scopeSwap\.bound\(\)\) \{ pickMember\(target\); return; \}\s*void switchTo\(target\);/u, 'Single: the ordinary switch');
-  const pick = source.match(/function pickMember\(target\) \{[\s\S]*?\n  \}\n/u)?.[0] ?? '';
-  assert.doesNotMatch(pick, /switchTo\(|walkLeave\(|swap\(/u, 'a pick that is not a focus move replaces nothing');
+  assert.match(source, /if \(connMode === 'aggregate' && scopeSwap\.bound\(\)\) \{ chooseMember\(target\); return; \}\s*void switchTo\(target\);/u, 'Single: the ordinary switch');
+  // #458: a picker's row is a choice (chooseMember); a union or bell row's refusal stays (refuseMember).
+  // #458 review on d18cd450: the focus commit retires a pending choice, whatever entry led there.
+  assert.match(source, /c\.publishing\(\);\s*provisional\.delete\(runtime\);\s*(?:\/\/[^\n]*\n\s*)*if \(!m\.keep && scopeSwap\.bound\(\) !== runtime\) retireChosen\(\);/u);
+  assert.match(source, /eligible: \(address, token\) => \(bound\(\) === runtime \? 'ok' : refusedAttempts\.check\(runtime\.id, address, token\)\),/u, 'a member s loop is handed the hard rule (#458)');
+  assert.match(source, /function doDisconnect\(\) \{\s*(?:\/\/[^\n]*\n\s*)*retireChosen\(\);/u, 'Disconnect ends a pending choice');
+  assert.match(source, /const why = failed && st\.reason === 'storage' \? t\('memberStorage'\) : failed && st\.reason === 'auth' \? t\('memberTokenRefused'\) : failed && st\.reason === 'unknown' \? t\('memberRefusalUnknown'\) : '';/u, 'a storage stop, a token refusal and an unknown refusal keep their own words');
+  for (const name of ['chooseMember', 'refuseMember', 'settleChosen']) {
+    const pick = source.match(new RegExp(`function ${name}\\(\\w*\\) \\{[\\s\\S]*?\\n  \\}\\n`, 'u'))?.[0] ?? '';
+    assert.ok(pick, name);
+    assert.doesNotMatch(pick, /switchTo\(|walkLeave\(|swap\(/u, `${name}: a pick that is not a focus move replaces nothing`);
+  }
 });
 
 test('the mode and the include switches go through App s two changes, each walking what it destroys (#335 ③b-3)', () => {
@@ -1467,7 +1484,7 @@ test('the mode and the include switches go through App s two changes, each walki
 
 test('the Hub union s cross-server pick is a landing like the others: aimed at one tree, delivered through landingFor (#335 ③c-2)', () => {
   assert.match(source, /selectRequest=\{landingFor\(v\.hubSelectReq, runtime\)\}/u);
-  assert.match(source, /function pickServerProject\(ref\) \{[\s\S]*?const moved = focusMember\(ref\.serverId\);\s*if \(moved !== true\) \{ pickMember\(target\); return; \}[\s\S]*?v\.hubSelectReq = \{ serverId: ref\.serverId, session: ref\.session, n:/u,
+  assert.match(source, /function pickServerProject\(ref\) \{[\s\S]*?const moved = focusMember\(ref\.serverId\);\s*if \(moved !== true\) \{ refuseMember\(target\); return; \}[\s\S]*?v\.hubSelectReq = \{ serverId: ref\.serverId, session: ref\.session, n:/u,
     'focus first (D2, or stay with the row s state), then the landing on THAT tree s view');
   assert.match(source, /view\.hubSelectReq = null;/u, 'cleared with the other landings');
   assert.match(source, /const hubUnionFor = \$derived\(connMode === 'aggregate' \? \{[\s\S]*?runtimeOf: \(id\) =>/u, 'Single hands no union');
@@ -1517,7 +1534,7 @@ test('an absorbed member is orphaned at the fleet s own boundary, and asked only
   // module (`app/window-drain.ts`, where the end→late-release→timer order is
   // pinned as a unit) and App holds ONE instance of it.
   assert.match(source, /onDestroy\(\(\) => \{\s*windowDrain\.end\(\);\s*owedHandover = null;\s*orphansToAsk\.clear\(\);/u, 'the root ends FIRST, then its resources are closed');
-  assert.match(source, /function drainWindow\(\) \{\s*settleHandover\(\);\s*askOrphans\(\);\s*\}\s*const windowDrain = createWindowDrain\(drainWindow\);\s*const scheduleAsk = windowDrain\.schedule;/u, 'the handover is settled before an orphan is asked; the one scheduler decides when, and never after the end');
+  assert.match(source, /function drainWindow\(\) \{\s*settleHandover\(\);\s*settleChosen\(\);\s*askOrphans\(\);\s*\}\s*const windowDrain = createWindowDrain\(drainWindow\);\s*const scheduleAsk = windowDrain\.schedule;/u, 'the handover is settled before an orphan is asked; the one scheduler decides when, and never after the end');
   assert.equal([...source.matchAll(/createWindowDrain\(/gu)].length, 1, 'one scheduler instance');
   assert.doesNotMatch(source, /\b(?:askTimer|windowLeases)\b|let ended\b/u, 'no second timer, lease count or ended flag beside the scheduler s');
   const steps = ['scopeSwap.refocus(next)', 'owedHandover = null', 'focusServer(localStorage, next.id)', 'serverSwitch.supersede()', 'serverSwitch.dismiss()', 'activations.claim()', 'aggregate.handOver(next)', 'aggregate.adopt(leaving, false)', 'background = aggregate.runtimes()', 'loadServerRegistry()', 'syncMembers()']

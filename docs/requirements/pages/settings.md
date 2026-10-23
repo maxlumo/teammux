@@ -95,9 +95,13 @@ where Agents is a page of its own, reads as one plain list):
   address (not answering, paused on storage, reaches another known server),
   and "Excluded" for a server left out. Picking a CONNECTED member moves the
   focus (CURRENT and the mirror) with no dial and no teardown; picking an
-  excluded one includes it (it joins through its own dial; the app stays
-  where it is); picking a member that is not up is not a focus change — the
-  row shows its state and the person focuses it once it is up. Every mode or
+  excluded one includes it (it joins through its own dial); picking a member
+  that is not up is the person's CHOICE (#458): the app stays where it is,
+  the row says "Chosen; the app moves there when it connects" (or "…not
+  answering — pick it again to retry" once its loop stopped), a stopped
+  loop is restarted once by that pick, and the focus moves there by itself
+  when it is up — unless another pick, a removal, an exclusion, an edit or a
+  mode change came first. Every mode or
   include change asks the trees it would
   destroy first, one at a time, in that tree, and a "keep editing" changes
   nothing; excluding the focus moves the focus to the next connected member

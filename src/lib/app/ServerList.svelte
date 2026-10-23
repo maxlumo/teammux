@@ -27,8 +27,11 @@
     currentId: string;
     /** Connection state, one input for both hosts (board 315): `connected`
      * says whether the current entry's socket is up; `target` is a switch in
-     * progress (pending) or failed. aria-current never stands in for it. */
-    link?: { connected: boolean; target?: { id: string; failed: boolean } | null };
+     * progress (pending) or failed, or (`chosen`, Aggregate, #458) the
+     * person's pending choice of focus, said in words on its row so it can
+     * be told from other members whose dots look the same. aria-current
+     * never stands in for it: CURRENT moves only when the focus does. */
+    link?: { connected: boolean; target?: { id: string; failed: boolean; chosen?: boolean; why?: string } | null };
     /** 'menu' inside the switcher popover; 'page' inside Settings › Connection. */
     variant?: 'menu' | 'page';
     onpick: (id: string) => void;
@@ -87,12 +90,17 @@
     if (st?.kind === 'failed' || st?.kind === 'orphan') return 'failed';
     return 'rest';
   }
-  /** Why a member is failing, where the address line can say it. */
+  /** Why a member is failing, where the address line can say it — or, for
+   * the pending choice, that it is the one chosen and what it is doing. */
   function failure(id: string): string {
+    if (link.target?.chosen && link.target.id === id) {
+      if (link.target.why) return t('memberChosenHeld').replace('{reason}', link.target.why);
+      return t(link.target.failed ? 'memberChosenFailed' : 'memberChosen');
+    }
     const st = id !== currentId ? members?.status(id) : null;
     if (st?.kind !== 'failed') return '';
     if (st.reason === 'elsewhere') return t('memberElsewhere').replace('{name}', st.detail ?? '');
-    return t(st.reason === 'storage' ? 'memberStorage' : 'memberUnreachable');
+    return t(st.reason === 'storage' ? 'memberStorage' : st.reason === 'auth' ? 'memberTokenRefused' : st.reason === 'unknown' ? 'memberRefusalUnknown' : 'memberUnreachable');
   }
   /** The row's hover card carries only what the row HIDES (owner,
    * 2026-10: a card must not repeat the element): the machine id, the

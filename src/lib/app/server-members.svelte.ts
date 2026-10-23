@@ -31,6 +31,8 @@
 // first dial is out, `connected` once published and answering,
 // `reconnecting` while its loop runs, `failed` with the reason. `excluded`
 // is not a status here — an excluded server is not a member.
+import { isAuthRefusal } from './dial-order.ts';
+import { candidateVerdict, memoryRefusedAttempts, type Eligibility, type RefusedAttempts } from './refused-attempts.ts';
 import type { ServerId } from './refs.ts';
 import type { ServerEntry } from './servers.ts';
 import type { ServerRuntime, DialResult } from './server-runtime.ts';
@@ -42,7 +44,7 @@ export type MemberStatus =
   | { kind: 'reconnecting' }
   /** `unreachable`: no answer yet; `elsewhere`: another known machine
    * answered (`detail` names it); `storage`: the app is blocked on it. */
-  | { kind: 'failed'; reason: 'unreachable' | 'elsewhere' | 'storage'; detail?: string }
+  | { kind: 'failed'; reason: 'unreachable' | 'auth' | 'unknown' | 'elsewhere' | 'storage'; detail?: string }
   /** A published member whose IDENTITY is gone — its entry absorbed into
    * another, or its own reconnect reached another known machine — while its
    * tree, drafts and all, is still mounted: detached at once (its api
@@ -68,6 +70,13 @@ export interface MemberDeps {
   release(runtime: ServerRuntime): void;
   /** Start this runtime's own reconnect loop. */
   retry(runtime: ServerRuntime): void;
+  /** Is this runtime's own reconnect loop running now? */
+  trying(runtime: ServerRuntime): boolean;
+  /** The attempts a server refused the token for (#458; refused-attempts.ts):
+   * kept per member id, on the device as digests. Absent: memory only. */
+  refusals?: RefusedAttempts;
+  /** Where and with which token this member's next dial goes (its route). */
+  target?: (id: ServerId) => { address: string; token: string; alternates?: string[] } | null;
   /** Is this id still a saved entry? */
   saved(id: ServerId): boolean;
   /** A dial's identity record failed (the dial closed that socket): the
@@ -94,11 +103,24 @@ export interface Members {
   /** Reports from a member's own reconnect loop. */
   reconnecting(runtime: ServerRuntime): void;
   answered(runtime: ServerRuntime, result: DialResult): void;
-  gaveUp(runtime: ServerRuntime): void;
+  /** `'auth'`: the server refused the credentials (#458 validator V1);
+   * `'unknown'`: every address is held, its refusal state unknowable. */
+  gaveUp(runtime: ServerRuntime, reason?: 'auth' | 'unknown'): void;
+  /** A dial of this member's own loop came back refused for the address and
+   * token it sent (`tried`, from the dial's own result): that attempt is not
+   * sent again by any path; another address or token is another attempt. */
+  refusedBy(runtime: ServerRuntime, tried: { address: string; token: string } | undefined): void;
   /** A member's socket closed while the app is blocked: no loop now. */
   blocked(runtime: ServerRuntime): void;
   /** Retry: redial every published member that is not answering. */
   resume(): void;
+  /** The person picked this member (#458). The ONE explicit retry door: a
+   * member whose own loop has stopped (it gave up, or a refusal ended it)
+   * gets one fresh loop; one already trying — its first join in flight, or
+   * its loop running — gets nothing new (no second dial, the watchdog
+   * untouched). A refusal the app does not dial past (storage, another known
+   * machine, an orphan, not held) is not bypassed. Nothing passive calls it. */
+  ask(id: ServerId): 'connected' | 'trying' | 'started' | 'token' | 'held' | 'refused';
   /** The focus moved ONTO this published member (#335 D2): it leaves the
    * set without being let go of — the window owns it now. False when the
    * set does not hold it published. */
@@ -136,9 +158,55 @@ export function createMembers(deps: MemberDeps): Members {
     if (status) statuses[id] = status; else delete statuses[id];
   };
   const mine = (runtime: ServerRuntime) => held.get(runtime.id)?.runtime === runtime;
+  /** The ONE dial-eligibility fact (#458 validator V1; review on the token
+   * state): did this member's server refuse the (address, token) its next
+   * dial would send? Kept outside the member's slot and status — a re-join,
+   * a block, a reconnect report change none of it — and asked by every dial
+   * entry: join (every sync's), resume and the pick's ask. A pair not
+   * decided ('pending', 'unknown') is not dialled, a pick included. A
+   * changed address or token is another attempt. */
+  const refused = deps.refusals ?? memoryRefusedAttempts();
+  /** The last entry each member was synced with: a member whose join a
+   * refusal stopped has no slot, and is still a member (it can be chosen). */
+  const lastEntry = new Map<ServerId, ServerEntry>();
+  /** The member's dial eligibility comes from its CANDIDATE SET — every
+   * address of its machine, each with the token it would send (validator
+   * V3 on 36b2d37e): one refused pair takes out that pair, never the
+   * member. 'ok' when some pair is decided ok (the first such is where a
+   * join dials); 'pending' while none is ok and some is still compared;
+   * 'unknown' when none is ok or pending but some is unknowable; 'refused'
+   * only when every pair is. */
+  function candidates(entry: ServerEntry): { can: Eligibility; via?: string; token: string } {
+    const t = deps.target?.(entry.id) ?? { address: entry.address, token: entry.token };
+    const all = [t.address, ...(t.alternates ?? [])];
+    const states = all.map((a) => refused.check(entry.id, a, t.token));
+    const ok = states.indexOf('ok');
+    const can = candidateVerdict(states);
+    return can === 'ok' && ok > 0 ? { can, via: all[ok], token: t.token } : { can, token: t.token };
+  }
+  const eligible = (entry: ServerEntry): Eligibility => candidates(entry).can;
+  /** One pair refused: recorded, and the member's state is its SET's — a
+   * member another 'ok' or 'pending' pair is left for is still trying (its
+   * loop goes on or waits), never "token refused" (ruling on f20d1ea0).
+   * Returns that verdict. */
+  function markRefused(runtime: ServerRuntime, tried: { address: string; token: string } | undefined, published: boolean): Eligibility {
+    const id = runtime.id;
+    if (tried) refused.add(id, tried.address, tried.token);
+    const can = eligible(runtime.entry());
+    if (can === 'refused' || can === 'unknown') set(id, { kind: 'failed', reason: can === 'refused' ? 'auth' : 'unknown' });
+    else set(id, { kind: published ? 'reconnecting' : 'connecting' });
+    return can;
+  }
 
   async function join(entry: ServerEntry) {
     const id = entry.id;
+    // An attempt its server refused is not sent again by any join — a sync's
+    // (a rename elsewhere, a focus move, a reload) included. One not decided
+    // yet (its digest is being computed) waits, and the digest syncs again;
+    // one that can never be decided is held until its connection is edited.
+    const { can, via, token } = candidates(entry);
+    if (can === 'pending') { set(id, { kind: 'connecting' }); return; }
+    if (can !== 'ok') { set(id, { kind: 'failed', reason: can === 'refused' ? 'auth' : 'unknown' }); return; }
     if (deps.gate(id) === 'blocked') { set(id, { kind: 'failed', reason: 'storage' }); return; }
     const runtime = deps.include(entry);
     if (!runtime) { set(id, null); return; }
@@ -148,7 +216,11 @@ export function createMembers(deps: MemberDeps): Members {
     set(id, { kind: 'connecting' });
     let result: DialResult;
     try {
-      result = await runtime.dial(() => owner.current() && mine(runtime) && deps.wanted(id));
+      // Its primary address refused this token: the join dials the first
+      // address that is decided ok instead, never the refused pair.
+      // The pair checked is the pair sent: the join dials in this turn, with
+      // the token its check read (#458 ruling on 77e1185d).
+      result = await runtime.dial(() => owner.current() && mine(runtime) && deps.wanted(id), via ? { via, token } : { token });
     } catch {
       // The identity record threw. Still ours: the host gate decides — a
       // block keeps nothing of an unpublished member (Retry joins again); an
@@ -209,6 +281,15 @@ export function createMembers(deps: MemberDeps): Members {
       return;
     }
     if (result.reason === 'superseded') return;
+    // The server answered and refused the token: nothing retries it.
+    if (result.reason === 'failed' && isAuthRefusal(result.error)) {
+      // Another address of its machine is still a candidate or still being
+      // compared (#458 validator V3): its own loop, as after any failed join,
+      // tries what is left or waits for it.
+      const can = markRefused(runtime, result.tried, h.published);
+      if (can === 'ok' || can === 'pending') deps.retry(runtime);
+      return;
+    }
     // No answer: the member keeps its runtime and its own loop retries it.
     set(id, { kind: 'failed', reason: 'unreachable' });
     deps.retry(runtime);
@@ -243,6 +324,8 @@ export function createMembers(deps: MemberDeps): Members {
   return {
     sync(entries) {
       order = entries.map((e) => e.id);
+      lastEntry.clear();
+      for (const e of entries) lastEntry.set(e.id, e);
       const want = new Set(order);
       for (const id of known()) {
         if (want.has(id)) continue;
@@ -287,8 +370,14 @@ export function createMembers(deps: MemberDeps): Members {
     },
     dismiss(runtime) { if (mine(runtime) && held.get(runtime.id)?.orphan) forget(runtime.id); },
     answered,
-    gaveUp(runtime) { if (mine(runtime) && !held.get(runtime.id)?.orphan) set(runtime.id, { kind: 'failed', reason: 'unreachable' }); },
+    gaveUp(runtime, reason) {
+      const h = held.get(runtime.id);
+      if (!mine(runtime) || h?.orphan) return;
+      if (reason) set(runtime.id, { kind: 'failed', reason });
+      else set(runtime.id, { kind: 'failed', reason: 'unreachable' });
+    },
     blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
+    refusedBy(runtime, tried) { const h = held.get(runtime.id); if (mine(runtime) && !h?.orphan) markRefused(runtime, tried, !!h?.published); },
     handOver(runtime) {
       const h = held.get(runtime.id);
       if (!h || h.runtime !== runtime || !h.published || h.orphan) return false;
@@ -305,9 +394,45 @@ export function createMembers(deps: MemberDeps): Members {
     resume() {
       for (const [id, h] of held) {
         if (!h.published || h.orphan || statuses[id]?.kind === 'connected') continue;
+        // A pending set's loop waits for its comparison and dials nothing.
+        const can = eligible(h.runtime.entry());
+        if (can !== 'ok' && can !== 'pending') continue;
         set(id, { kind: 'reconnecting' });
         deps.retry(h.runtime);
       }
+    },
+    ask(id) {
+      const h = held.get(id);
+      if (!h) {
+        // A member a refusal (or an undecided one) stopped before it had a
+        // slot — a reload with a stored refusal: still a member, so still
+        // choosable. A refused, undecided or unknowable attempt is recorded
+        // and dials nothing; an edited one joins.
+        const entry = lastEntry.get(id);
+        const st = statuses[id];
+        const stopped = st?.kind === 'connecting' || (st?.kind === 'failed' && (st.reason === 'auth' || st.reason === 'unknown'));
+        if (!entry || !deps.wanted(id) || !stopped) return 'refused';
+        const can = eligible(entry);
+        if (can === 'refused') return 'token';
+        if (can !== 'ok') return 'held';
+        void join(entry);
+        return 'started';
+      }
+      if (h.orphan || !h.runtime.alive()) return 'refused';
+      const can = eligible(h.runtime.entry());
+      if (can === 'refused') return 'token';
+      if (can === 'unknown') return 'held';
+      const st = statuses[id];
+      if (st?.kind === 'failed' && (st.reason === 'storage' || st.reason === 'elsewhere')) return 'refused';
+      if (h.published && st?.kind === 'connected' && h.runtime.connection.isConnected()) return 'connected';
+      // A set still being compared: its loop waits for the comparison and
+      // dials nothing until it is decided ok — a stopped one is started to
+      // wait, so the decision reaches it (the loop's wake), not a sync.
+      if (h.join?.current() || deps.trying(h.runtime)) return can === 'pending' ? 'held' : 'trying';
+      if (deps.gate(id) === 'blocked') return 'refused';
+      set(id, { kind: h.published ? 'reconnecting' : 'connecting' });
+      deps.retry(h.runtime);
+      return can === 'pending' ? 'held' : 'started';
     },
     leave,
     leaveAll() { for (const id of known()) leave(id); },

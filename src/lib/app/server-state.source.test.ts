@@ -91,6 +91,9 @@ test('the identity modules have exactly the production consumers this commit giv
       // ③b-1: the background member set keys its members by ServerId (a type
       // import); App owns it, and it is not a page.
       'src/lib/app/server-members.svelte.ts',
+      // #458: the attempts a server refused the token for are kept per
+      // ServerId (a type import); the member set owns it, and it is not a page.
+      'src/lib/app/refused-attempts.ts',
       // ③c-1: the one rule for naming a server beside what it owns (a type
       // import); App reads it for every tag, and no page names a server.
       'src/lib/app/server-tag.ts',
