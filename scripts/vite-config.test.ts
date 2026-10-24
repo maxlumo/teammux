@@ -367,3 +367,29 @@ test('a build in the SAME root and cacheDir as a running dev server leaves its c
   assert.equal(JSON.parse(read(meta, 'utf8')).browserHash, hash, 'the dep hash the server handed to clients is unchanged');
   assert.ok((await server.transformRequest(url))?.code.includes('hi'), 'and the dep URL still answers after the build');
 });
+
+test('the cache directory comes from the config\'s own directory, whatever the working directory is (#464, validator P3)', async (context) => {
+  // "Resolved from the config file's own real directory" (the finish line). A SUBPROCESS, because the mutant that
+  // matters reads the cwd when the module LOADS (ROOT = process.cwd()): this file imported the config already,
+  // from the checkout, so an in-process chdir afterwards could not tell. The child stands somewhere else, imports the
+  // real config by absolute path and asks with NO argument, exactly as a Vite started from another directory would.
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath, pathToFileURL } = await import('node:url');
+  const { mkdtempSync, realpathSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const here = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+  const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-vite-cwd-')));
+  context.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+  const config = pathToFileURL(join(here, 'vite.config.js')).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const m = await import(${JSON.stringify(config)});
+     console.log(JSON.stringify([process.cwd(), m.viteCacheDir(), m.createViteConfig('serve', {}).cacheDir, m.createViteConfig('build', {}).cacheDir]));`,
+  ], { cwd: elsewhere, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const [cwd, direct, serve, build] = JSON.parse(child.stdout.trim().split('\n').pop()!);
+  assert.equal(cwd, elsewhere, 'the child stands somewhere else');
+  assert.equal(direct, `${here}/.vite`);
+  assert.equal(serve, `${here}/.vite`);
+  assert.equal(build, `${here}/.vite`);
+});
