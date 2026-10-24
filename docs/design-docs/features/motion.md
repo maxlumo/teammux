@@ -353,7 +353,7 @@ sizes (owner declined).
 
 ## Rules and their reasons
 
-- **The turn rail is the one outro (board #465, 2026-10-24).** Principle 5
+- **The turn rail is an outro exception (board #465, 2026-10-24).** Principle 5
   says leave with a cut, because an outro keeps a dead element in flow while
   what is under it has moved. The rail is an absolutely positioned overlay
   that holds no flow and has nothing under it that takes its place, so that
