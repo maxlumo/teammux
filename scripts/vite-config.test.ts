@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
+import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, viteCacheDir, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
 import { DEV_HOST_ENV, DEV_SERVER_PORT_ENV, devHost } from './dev-ports.mjs';
 
 test('Vite proxies WebSocket and downloads to the same internal Rust server', () => {
@@ -212,4 +212,158 @@ test('a DEV SERVER is `dev` + the minute it started, flagged, whatever HEAD or t
   const b = JSON.parse(createViteConfig('build', {}, { now: AT, git: () => 'bbbbbbbb' }).define.__TMM_BUILD__);
   assert.deepEqual([a.commit, b.commit], ['aaaaaaaa', 'bbbbbbbb']);
   assert.equal(JSON.parse(createViteConfig('serve', {}).define.__TMM_LICENSE__), pkg().license);
+});
+
+// Board #464 (owner, 2026-10-24 22:03: a blank page). Vite's dep pre-bundle cache
+// defaulted to `<root>/node_modules/.vite`, and a task worktree's node_modules is a
+// symlink to the launch checkout's, so ANY Vite started from a worktree rewrote the
+// supervised dev server's deps/_metadata.json (16:58, a scratch server on another
+// port: the port preflight guards one port only) while that server kept serving its
+// old dep hash. The cache now lives in each checkout's own gitignored `.vite/`.
+test('the dep cache is this checkout\'s own, outside node_modules, for serve and build alike (#464)', async () => {
+  const { fileURLToPath } = await import('node:url');
+  const { realpathSync } = await import('node:fs');
+  const here = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+  assert.equal(viteCacheDir(), `${here}/.vite`);
+  assert.equal(createViteConfig('serve', {}).cacheDir, `${here}/.vite`);
+  assert.equal(createViteConfig('build', {}).cacheDir, `${here}/.vite`);
+  assert.ok(!viteCacheDir().split('/').includes('node_modules'), 'never inside node_modules: that directory is shared by symlink');
+  assert.match(readFileSync(new URL('../.gitignore', import.meta.url), 'utf8'), /^\/\.vite$/mu, 'the cache is gitignored');
+});
+
+test('the cache directory is resolved from the REAL directory, so a symlinked checkout path cannot point it elsewhere (#464)', async () => {
+  const { mkdtempSync, mkdirSync, symlinkSync, realpathSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-vite-cache-')));
+  try {
+    mkdirSync(join(base, 'launch/node_modules'), { recursive: true });
+    mkdirSync(join(base, 'launch/worktree/task'), { recursive: true });
+    symlinkSync(join(base, 'launch/node_modules'), join(base, 'launch/worktree/task/node_modules'));   // how every task worktree is set up
+    symlinkSync(join(base, 'launch/worktree/task'), join(base, 'alias'));                                // and a path that reaches it through a link
+    assert.equal(viteCacheDir(join(base, 'launch/worktree/task')), join(base, 'launch/worktree/task/.vite'));
+    assert.equal(viteCacheDir(join(base, 'alias')), join(base, 'launch/worktree/task/.vite'));
+    assert.equal(viteCacheDir(join(base, 'launch')), join(base, 'launch/.vite'));
+    for (const root of ['launch/worktree/task', 'alias', 'launch']) {
+      assert.ok(!viteCacheDir(join(base, root)).includes('node_modules'), `${root}: not through the shared install`);
+    }
+    assert.notEqual(viteCacheDir(join(base, 'launch/worktree/task')), viteCacheDir(join(base, 'launch')), 'a worktree and the launch checkout never share a cache');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('two Vite roots that share a node_modules by symlink no longer write into each other (#464, the incident, on a scratch fixture)', async (context) => {
+  const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer } = await import('vite');
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-vite-shared-')));
+  context.after(() => rmSync(base, { recursive: true, force: true }));
+  mkdirSync(join(base, 'shared/node_modules/tiny-dep'), { recursive: true });
+  writeFileSync(join(base, 'shared/node_modules/tiny-dep/package.json'), '{"name":"tiny-dep","version":"1.0.0","main":"index.js"}');
+  writeFileSync(join(base, 'shared/node_modules/tiny-dep/index.js'), 'module.exports = { hi: 1 };');
+  for (const name of ['a', 'b']) {
+    mkdirSync(join(base, name));
+    symlinkSync(join(base, 'shared/node_modules'), join(base, name, 'node_modules'));
+    writeFileSync(join(base, name, 'index.html'), '<!doctype html><html><body>x</body></html>');
+    writeFileSync(join(base, name, 'package.json'), '{"name":"fx","type":"module"}');
+  }
+  const optimize = async (root: string, cacheDir?: string) => {
+    const server = await createServer({
+      root, configFile: false, logLevel: 'silent', ...(cacheDir ? { cacheDir } : {}),
+      server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { include: ['tiny-dep'], entries: [] },
+    });
+    const meta = join(cacheDir ?? join(root, 'node_modules/.vite'), 'deps/_metadata.json');
+    for (let i = 0; i < 100 && !existsSync(meta); i++) await new Promise((r) => setTimeout(r, 100));
+    await server.close();
+    return existsSync(meta);
+  };
+  // The incident: Vite's default cacheDir goes THROUGH the symlink into the shared install.
+  assert.equal(await optimize(join(base, 'a')), true);
+  assert.equal(existsSync(join(base, 'shared/node_modules/.vite/deps/_metadata.json')), true, 'the default cache landed in the SHARED node_modules');
+  assert.equal(existsSync(join(base, 'a/.vite')), false);
+  rmSync(join(base, 'shared/node_modules/.vite'), { recursive: true, force: true });
+  // The config's cacheDir: each root keeps its own, and the shared install is never written.
+  assert.equal(await optimize(join(base, 'a'), viteCacheDir(join(base, 'a'))), true);
+  assert.equal(await optimize(join(base, 'b'), viteCacheDir(join(base, 'b'))), true);
+  assert.equal(existsSync(join(base, 'a/.vite/deps/_metadata.json')), true);
+  assert.equal(existsSync(join(base, 'b/.vite/deps/_metadata.json')), true);
+  assert.equal(existsSync(join(base, 'shared/node_modules/.vite')), false, 'nothing was written through the symlink');
+});
+
+test('vite build writes nothing into the dep cache, so a build in the launch checkout is not a second writer (#464)', async (context) => {
+  // The build:android runs happen in the LIVE checkout, next to the supervised dev server whose cache is
+  // <checkout>/.vite. Measured on the real project (Vite 6.4.2): after `rm -rf .vite && vite build` the
+  // directory does not exist. Pinned here with the REAL config's plugin set on a scratch root and a
+  // cacheDir of its own, so no checkout's cache is touched even if this ever failed.
+  const { mkdtempSync, writeFileSync, existsSync, realpathSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { build } = await import('vite');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-vite-build-')));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body><script type="module" src="/main.js"></script></body></html>');
+  writeFileSync(join(root, 'main.js'), "import { answer } from './a.js'; document.title = String(answer);");
+  writeFileSync(join(root, 'a.js'), 'export const answer = 42;');
+  const cacheDir = join(root, '.vite');
+  await build({ ...createViteConfig('build', {}), root, configFile: false, logLevel: 'silent', cacheDir, build: { outDir: join(root, 'out'), emptyOutDir: true } });
+  assert.equal(existsSync(join(root, 'out/index.html')), true, 'the build ran');
+  assert.equal(existsSync(cacheDir), false, 'and it created no dep cache');
+});
+
+test('a build in the SAME root and cacheDir as a running dev server leaves its cache and its served deps alone (#464, reviewer P1)', async (context) => {
+  // The case that matters: build:android runs in the launch checkout, next to the supervised dev server whose
+  // cache is <checkout>/.vite. Serve populates the cache and STAYS UP; the project's build runs on the same root
+  // and the same cacheDir (the config\'s plugin set, a scratch root); every file in the cache keeps its bytes,
+  // its mtime and its name, and the optimized dep URL still answers. A private scratch root: no checkout touched.
+  const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, existsSync, readFileSync: read, readdirSync, statSync, rmSync } = await import('node:fs');
+  const { createHash } = await import('node:crypto');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer, build } = await import('vite');
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-vite-serve-build-')));
+  context.after(() => rmSync(base, { recursive: true, force: true }));
+  mkdirSync(join(base, 'shared/node_modules/tiny-dep'), { recursive: true });
+  writeFileSync(join(base, 'shared/node_modules/tiny-dep/package.json'), '{"name":"tiny-dep","version":"1.0.0","main":"index.js"}');
+  writeFileSync(join(base, 'shared/node_modules/tiny-dep/index.js'), 'module.exports = { hi: 1 };');
+  const root = join(base, 'checkout');
+  mkdirSync(root);
+  symlinkSync(join(base, 'shared/node_modules'), join(root, 'node_modules'));
+  writeFileSync(join(root, 'package.json'), '{"name":"fx","type":"module"}');
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body><script type="module" src="/main.js"></script></body></html>');
+  writeFileSync(join(root, 'main.js'), "import dep from 'tiny-dep'; document.title = String(dep.hi);");
+  const cacheDir = viteCacheDir(root);
+  const server = await createServer({
+    ...createViteConfig('serve', {}), root, configFile: false, logLevel: 'silent', cacheDir,
+    server: { middlewareMode: true, hmr: false, watch: null },
+    optimizeDeps: { include: ['tiny-dep'], entries: [] },
+  });
+  context.after(() => server.close());
+  const meta = join(cacheDir, 'deps/_metadata.json');
+  for (let i = 0; i < 100 && !existsSync(meta); i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 500));                    // let the plugins settle their own files
+  assert.equal(existsSync(meta), true, 'serve populated the cache');
+  const snapshot = () => {
+    const out: Record<string, string> = {};
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir).sort()) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) walk(path);
+        else out[path.slice(cacheDir.length)] = `${statSync(path).mtimeMs}:${createHash('md5').update(read(path)).digest('hex')}`;
+      }
+    };
+    walk(cacheDir);
+    return out;
+  };
+  const before = snapshot();
+  assert.ok(Object.keys(before).some((f) => f.includes('tiny-dep')), 'an optimized dep is in it');
+  const hash = JSON.parse(read(meta, 'utf8')).browserHash;
+  const url = `/.vite/deps/tiny-dep.js?v=${hash}`;
+  const served = await server.transformRequest(url);
+  assert.ok(served?.code.includes('hi'), 'the optimized dep is served');
+  await new Promise((r) => setTimeout(r, 50));                     // mtimes are compared at millisecond resolution
+  await build({ ...createViteConfig('build', {}), root, configFile: false, logLevel: 'silent', cacheDir, build: { outDir: join(base, 'out'), emptyOutDir: true } });
+  assert.equal(existsSync(join(base, 'out/index.html')), true, 'the build ran');
+  assert.deepEqual(snapshot(), before, 'the build touched nothing in the running server\'s cache: same files, same bytes, same mtimes');
+  assert.equal(JSON.parse(read(meta, 'utf8')).browserHash, hash, 'the dep hash the server handed to clients is unchanged');
+  assert.ok((await server.transformRequest(url))?.code.includes('hi'), 'and the dep URL still answers after the build');
 });

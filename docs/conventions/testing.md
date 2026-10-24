@@ -507,7 +507,7 @@ component, not in a general mock framework.
   Fresh localStorage and a new realm prevent one scenario seeding the next.
 - Vite uses `configFile:false`, `write:false` and a unique temporary
   `cacheDir`, removed after compilation. No listener, optimizer, live
-  `node_modules/.vite`, public assets or project `dist` is involved.
+  dev-server cache (`.vite/`), public assets or project `dist` is involved.
 - Heavy packages (`pdfjs-dist`, Mermaid, highlight.js, KaTeX and xterm)
   are excluded at the test-build boundary; bare lazy package imports stay
   deferred. Attempting to use them fails explicitly. Never modify production

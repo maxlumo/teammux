@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   DEV_DOWNLOAD_PATH,
@@ -215,6 +215,21 @@ export function quietDevReconnect() {
 const ROOT = fileURLToPath(new URL('.', import.meta.url)).replace(/\/$/, '');
 const NOT_THE_WEB_APP = ['worktree', 'src-tauri', 'temp', 'build', 'dist', '.tmm'];
 
+// Where THIS checkout's dependency pre-bundle cache lives (board #464). Vite's
+// default is `<root>/node_modules/.vite`, and a task worktree's `node_modules` is
+// a SYMLINK to the launch checkout's (one install, many worktrees): the default
+// then resolves THROUGH the link into the launch checkout's `.vite`, so any Vite
+// started from a worktree — a measurement page, a scratch server on another port
+// — rewrote the supervised dev server's `deps/_metadata.json` while that server
+// kept serving its old dep hash: a blank page on every open client (2026-10-24
+// 16:58; docs/conventions/development.md § Vite's dep cache is per checkout). The
+// port preflight guards the SAME port only; this does not depend on anyone's
+// care. The cache sits OUTSIDE node_modules, in this checkout's gitignored
+// `.vite/`, resolved from the config file's own REAL directory, so a worktree
+// gets its own and a scratch config that extends this one inherits it.
+/** This config's checkout's dep cache directory (absolute, never inside node_modules). */
+export const viteCacheDir = (root = ROOT) => `${realpathSync(root)}/.vite`;
+
 /** What the dev server's watcher skips (absolute globs). */
 export const watchIgnored = (root = ROOT) => NOT_THE_WEB_APP.map((dir) => `${root}/${dir}/**`);
 
@@ -270,6 +285,7 @@ export function devServerIdentity(now = new Date()) {
 
 export function createViteConfig(command, env = process.env, identityDeps = {}) {
   return {
+    cacheDir: viteCacheDir(),
     plugins: [allowCompactXtermLines(), quietDevReconnect(), svelte()],
     // esbuild dep pre-bundling bypasses plugin transforms, so the compact-lines
     // patch above would never apply in dev. Serve @xterm/xterm from source.

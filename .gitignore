@@ -4,6 +4,8 @@
 /target
 /dist
 /node_modules
+# Vite's dep pre-bundle cache, per checkout and OUTSIDE node_modules (board #464)
+/.vite
 /temp
 temp/
 # Symlink to the Android gradle build cache (created by the android build)

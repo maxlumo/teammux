@@ -221,6 +221,49 @@ green build silently serve that other tree's older APK. Healing only the
 dangling case, or picking the newest APK across all `android-*` dirs, is how you
 end up shipping the wrong tree.
 
+**Vite's dep cache is per checkout, outside `node_modules` (board #464,
+2026-10-24).** Vite's default `cacheDir` is `<root>/node_modules/.vite`, and a task
+worktree's `node_modules` is usually a SYMLINK to the launch checkout's. The default
+then resolved THROUGH the link into the launch checkout's cache, so any Vite started
+from a worktree rewrote the supervised dev server's `deps/_metadata.json` while that
+server kept serving its old dep hash: the owner's browser showed a blank page
+(2026-10-24 22:03). `_metadata.json` was rewritten at 16:58 by a scratch Vite on another
+port from a worktree with a symlinked `node_modules` (an agent's measurement
+page for #463; the same pattern earlier for #461). The port preflight above guards the SAME port
+only. The rule is now mechanical rather than a matter of care: `vite.config.js` sets
+`cacheDir` to `<real directory of the config>/.vite` (gitignored), for `serve` and
+`build` alike. A worktree gets its own cache; a scratch config that extends the main
+one inherits it. So a worktree may share `node_modules` by symlink ONLY because the
+cache no longer lives there; a dependency CHANGE still needs the worktree's own install
+(above), and a scratch Vite never sets `cacheDir` into another checkout, and still
+never runs in the launch checkout. Optimized deps are served from `/.vite/deps/…` now.
+
+The unit of isolation is the CHECKOUT, not the process or the port: two dev servers
+in the same checkout still share its `.vite`, so the port preflight stays and a
+second Vite is not started there on another port. A scratch config with
+`configFile: false` inherits NOTHING, the cache path included: it sets its own,
+with the config's one helper and no second path calculator
+(`import { viteCacheDir } from '../../vite.config.js'; … cacheDir: viteCacheDir()`,
+the import being THIS worktree's config, so it gets this worktree's `.vite`;
+importing the launch checkout's config would hand it the launch checkout's path).
+`viteCacheDir` is resolved through symlinks, so a symlinked path to a worktree and
+the worktree itself are the SAME cache, while a worktree and the launch checkout are
+two.
+Verified (Vite 6.4.2): two Vite instances from two worktrees that symlink one
+`node_modules` each wrote their own `.vite/deps/_metadata.json` (different hashes,
+`svelte.js?v=` 200 on both) and the launch checkout's `node_modules/.vite/deps/_metadata.json`
+kept its mtime and md5; `scripts/vite-config.test.ts` reproduces the incident on a
+scratch fixture (the default cache lands in the shared install) and pins the fix. The
+supervised unit moves to the new path when this change lands, without a restart: a
+running Vite restarts ITSELF when `vite.config.js` changes on disk (measured by the
+validator on #464: it switched to `<checkout>/.vite` at once and an open page reloaded
+once and mounted), so open pages reload once and the first load re-bundles. A
+render-test cache (`node_modules/.vite-render-test`, `src/lib/test/ssr.ts`) is a separate
+directory the dev server never reads, and is left as it is.
+`vite build` writes nothing into the cache (measured after `rm -rf .vite`: the directory does
+not exist afterwards; pinned on a scratch root with the real config's plugins), so the
+`build:android` runs in the launch checkout are not a second writer next to the supervised server.
+
 
 ## Build targets
 
@@ -327,7 +370,7 @@ a plain URL and over `/@fs/<absolute path>`. Now (`devHost`, `fsDeny` in
   default has something this list lacks) and adds `worktree/`, `src-tauri/`,
   `temp/`, `build/`, `dist/` and `.tmm/`, absolute and anchored at the config.
   Measured on the private Vite after: all of them 403 over the plain URL AND
-  `/@fs/<abs path>`; `/`, `/src/main.ts`, `/node_modules/.vite/deps/…` and
+  `/@fs/<abs path>`; `/`, `/src/main.ts`, `/.vite/deps/…` (`/node_modules/.vite/deps/…` before #464) and
   `/@fs/<abs>/src/main.ts` still 200. `scripts/vite-config.test.ts` runs a real
   server and asserts the same on a scratch root.
 

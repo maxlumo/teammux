@@ -4,8 +4,13 @@
 // 1. Development preflights fail FAST when the requested ports are already
 //    taken, and say exactly who owns them. `web` checks 5173, `server` checks
 //    9899, and `dev` checks the complete stack. Without this, a second Vite
-//    process can nuke node_modules/.vite before it loses the port race (the
-//    "blank white page"), while a duplicate backend wastes a build first.
+//    process can nuke the dep cache (<checkout>/.vite since #464; it used to be
+//    node_modules/.vite, shared by symlink with every worktree) before it loses
+//    the port race (the "blank white page"), while a duplicate backend wastes a
+//    build first. This guards the SAME port only. The cache being per checkout
+//    isolates one checkout from another (a worktree's Vite no longer touches
+//    the launch checkout's); it does NOT make a second Vite in the SAME
+//    checkout safe on another port: both optimizers still share its .vite.
 //
 // 2. `preflight android-apk`: after `tauri android build`, re-point the
 //    machine-local gradle build symlink (`app/build`) at THIS checkout's

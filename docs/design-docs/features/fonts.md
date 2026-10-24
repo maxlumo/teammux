@@ -343,7 +343,7 @@ bound must stay in sync with `LINE_HEIGHT_MIN`, or sub-minimum values throw in
 xterm's option setter and the slider silently does nothing below `1.00`.
 
 **Trap: Vite dep pre-bundling bypasses plugin transforms.** In dev, optimized
-deps are served from `node_modules/.vite/deps/` as esbuild output that never
+deps are served from the checkout's `.vite/deps/` (`node_modules/.vite/deps/` before #464) as esbuild output that never
 went through the plugin, so the patch only took effect in `npm run build` while
 `npm run dev` / `npm run tauri:dev` kept the stock `lineHeight >= 1` check.
 `@xterm/xterm` is therefore excluded via `optimizeDeps.exclude` (safe: the
