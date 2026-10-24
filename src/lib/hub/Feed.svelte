@@ -225,6 +225,9 @@
       askDir = motion.direction;
       askDirTravel = motion.travel;
       syncAsk(askDir);
+      // The turn rail shows while the reader is scrolling AWAY from the tail (board #465): the feed also
+      // scrolls itself (tail-follow, the park on load), and that must not flash it.
+      if (!following) turnRail?.nudge();
       if (following) {
         newBelow = false;
         markSeen();

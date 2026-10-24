@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { compileMount } from '../test/mount.ts';
 import { feedBlocks } from './hub.ts';
 
@@ -9,6 +10,13 @@ import { feedBlocks } from './hub.ts';
 // on the issue. What is pinned is the WIRING: which turn a pointer names, where
 // the ONE jump lands, and what a retirement leaves behind.
 const compiled = compileMount(new URL('./TurnRail.test.svelte', import.meta.url), []);
+
+// The dwell is the CSS token, defined once in app.css; the rail reads it from computed style, so the
+// fixture hands the same text to jsdom instead of repeating the figure.
+const DWELL_TOKEN = /--turn-rail-dwell:\s*([^;]+);/u.exec(readFileSync(new URL('../../app.css', import.meta.url), 'utf8'))![1]!;
+const DWELL = Number.parseFloat(DWELL_TOKEN) * (DWELL_TOKEN.trim().endsWith('ms') ? 1 : 1000);
+/** The rail's inert column (the reveal zone): x 346..390, y 70..660, beside the 100..400 band. */
+const COLUMN = { left: 346, top: 70, right: 390, bottom: 660 };
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
@@ -35,7 +43,7 @@ const base = (blocks: unknown, other: unknown = []) => ({
 
 /** The feed's classic scrollbar width (px), read by the rail as offsetWidth - clientWidth. */
 const SCROLLBAR = { w: 0 };
-async function open(context: import('node:test').TestContext, props: Record<string, unknown>) {
+async function open(context: import('node:test').TestContext, props: Record<string, unknown>, options: { wake?: boolean; dwell?: string } = {}) {
   Object.assign(BAND, BAND0);
   SCROLLBAR.w = 0;
   const captured: number[] = [];
@@ -45,12 +53,16 @@ async function open(context: import('node:test').TestContext, props: Record<stri
     setup(window) {
       const proto = window.Element.prototype as any;
       proto.getAnimations = () => [];
+      const style = window.document.createElement('style');
+      style.textContent = `:root { --turn-rail-dwell: ${options.dwell ?? DWELL_TOKEN}; }`;
+      window.document.head.append(style);
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });   // the 390px phone the band's x values describe
       (window.HTMLCanvasElement.prototype as any).getContext = () => null;
       const rect = (r: typeof BAND) => ({ ...r, width: r.right - r.left, height: r.bottom - r.top, x: r.left, y: r.top, toJSON() {} });
       const orig = proto.getBoundingClientRect;
       proto.getBoundingClientRect = function (this: Element) {
         if (this.classList.contains('tr-band')) return rect(BAND);
+        if (this.classList.contains('turn-rail')) return rect(COLUMN);
         if (this.classList.contains('feed-wrap')) return rect({ left: 0, top: 0, right: 390, bottom: 700 });
         return orig.call(this);
       };
@@ -94,7 +106,20 @@ async function open(context: import('node:test').TestContext, props: Record<stri
   geometry();
   await frames();
   geometry();
-  return { app, q, qa, frames, geometry, ev, yOf, rows, captured, released, BAND };
+  /** A mouse moves inside the rail's column: the desktop way to wake a hidden rail. */
+  const hover = async (x: number, y: number, kind = 'mouse', buttons = 0) => {
+    q('.feed-wrap')!.dispatchEvent(new app.window.PointerEvent('pointermove', { bubbles: true, pointerType: kind, pointerId: 31, clientX: x, clientY: y, buttons }));
+    await frames();
+  };
+  /** The reader scrolls away from the tail (the feed reports it once per frame). */
+  const scrollAway = async (top = 1200) => {
+    const feed = geometry();
+    feed.scrollTop = top; feed.dispatchEvent(new app.window.Event('scroll')); await frames();
+  };
+  const shown = () => !!q('.turn-rail')?.classList.contains('shown');
+  // Most rows are about the rail's behaviour once it is shown; the visibility rows ask for { wake: false }.
+  if (options.wake !== false && q('.turn-rail')) await hover(370, 300);
+  return { app, q, qa, frames, geometry, ev, yOf, rows, captured, released, BAND, hover, scrollAway, shown };
 }
 
 test('the rail is absent with one turn and appears with the second WITHOUT touching the feed\'s layout or reading position (#463)', async (context) => {
@@ -533,4 +558,236 @@ test('the fine adjust is GRADED by how far left of the band the finger is, throu
   assert.ok(part >= 52 && part <= 57, `GRADED 20px out (1.23x slower, about 54): ${part}`);
   assert.ok(far >= 32 && far <= 35, `the slowest at the full reach: ${far}`);
   assert.ok(onBand > part && part > far, 'monotonic: the further left, the finer');
+});
+
+// -- board #465: the rail is not always on ---------------------------------------------------------
+
+const tick = async (t: Awaited<ReturnType<typeof open>>, ms: number) => { await t.app.advance(ms); };
+/** Every awaited gesture spends up to 80ms of the mock clock on animation frames, so a dwell edge is probed with margins:
+ * still shown a little BEFORE it, hidden a little AFTER it. */
+const dwellEdge = async (t: Awaited<ReturnType<typeof open>>, what: string) => {
+  await tick(t, DWELL - 200);
+  assert.equal(t.shown(), true, `${what}: still shown just before a dwell has passed`);
+  await tick(t, 250);
+  assert.equal(t.shown(), false, `${what}: hidden once a dwell has passed`);
+};
+
+test('a loaded feed with several turns shows no rail until the reader scrolls away; the tail park and tail-follow never flash it (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    assert.ok(t.q('.turn-rail'), 'it is mounted');
+    assert.equal(t.shown(), false, 'hidden on load: the park at the tail is the feed scrolling itself');
+    const feed = t.geometry();
+    feed.scrollTop = 70000 - 500; feed.dispatchEvent(new t.app.window.Event('scroll')); await t.frames();
+    assert.equal(t.shown(), false, 'a scroll that lands in the tail zone is tail-follow, not the reader');
+    await tick(t, 20_000);
+    assert.equal(t.shown(), false);
+  } finally { await t.app.close(); }
+});
+
+test('scrolling away from the tail shows it at once; a full dwell after the LAST scroll hides it (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    await t.scrollAway(1200);
+    assert.equal(t.shown(), true, 'a scroll shows it within the frame');
+    await tick(t, DWELL - 300);
+    await t.scrollAway(1300);                     // another scroll: the dwell restarts from THIS one
+    await dwellEdge(t, 'after the last scroll');
+    await t.scrollAway(1400);
+    assert.equal(t.shown(), true, 'and a scroll brings it back');
+  } finally { await t.app.close(); }
+});
+
+test('the dwell is the CSS token and nothing else: a different token value moves the edge, a missing one hides at once (#465)', async (context) => {
+  for (const [dwell, ms] of [['3s', 3000], ['400ms', 400]] as const) {
+    const t = await open(context, base(room()), { wake: false, dwell });
+    try {
+      await t.scrollAway(1200);
+      assert.equal(t.shown(), true, `${dwell}: a scroll shows it`);
+      await tick(t, ms - 200);
+      assert.equal(t.shown(), true, `${dwell}: still shown just before the token's dwell`);
+      await tick(t, 250);
+      assert.equal(t.shown(), false, `${dwell}: hidden just after it, not at some other figure`);
+    } finally { await t.app.close(); }
+  }
+  const t = await open(context, base(room()), { wake: false, dwell: 'soon' });
+  try {
+    await t.scrollAway(1200);
+    await tick(t, 50);
+    assert.equal(t.shown(), false, 'a token that is not a time hides at once: the failure is visible');
+  } finally { await t.app.close(); }
+});
+
+test('a hidden rail takes no input: a press does not start, capture or jump (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band')!;
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    assert.deepEqual(t.captured, [], 'no capture');
+    assert.equal(t.q('.tr-pop'), null, 'no preview');
+    t.ev('pointerup', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    assert.equal(t.geometry().scrollTop, 0, 'a tap on the hidden column never jumps');
+    assert.equal(band.getAttribute('tabindex'), '0', 'but the band stays in the tab order');
+  } finally { await t.app.close(); }
+});
+
+test('a tap during the fade-OUT is the feed\'s, and one during the fade-IN is the rail\'s: nothing waits for a transition (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band')!;
+    await t.scrollAway(1200);
+    // The class is on the moment the rail is shown, so a press begun while the paint is still fading in finishes.
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 7 });
+    t.ev('pointermove', band, t.yOf(2), { kind: 'touch', id: 7 });
+    t.ev('pointerup', band, t.yOf(2), { kind: 'touch', id: 7 }); await t.frames();
+    assert.equal(t.geometry().scrollTop, 2792, 'committed mid-fade-in');
+    await tick(t, DWELL);
+    assert.equal(t.shown(), false);
+    const top = t.geometry().scrollTop;
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 8 });
+    t.ev('pointerup', band, t.yOf(1), { kind: 'touch', id: 8 }); await t.frames();
+    assert.equal(t.geometry().scrollTop, top, 'the class is already gone when the paint is still fading out: the tap does nothing');
+    assert.deepEqual(t.captured.filter((id) => id === 8), []);
+  } finally { await t.app.close(); }
+});
+
+test('a probe during the dwell keeps it, a long gesture is not timed out, and the dwell restarts from its end (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band')!;
+    await t.scrollAway(1200);
+    await tick(t, DWELL - 100);
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    await tick(t, 60_000);
+    assert.equal(t.shown(), true, 'a held gesture keeps it shown for as long as it lasts');
+    assert.ok(t.q('.tr-pop'), 'and its preview');
+    t.ev('pointercancel', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    await dwellEdge(t, 'a FULL dwell runs from the end of the gesture, not from when the scroll began');
+    assert.equal(t.geometry().scrollTop, 1200, 'a cancelled gesture jumped nowhere');
+  } finally { await t.app.close(); }
+});
+
+test('hovering a hidden rail\'s column with a mouse shows it without a jump; a touch or a pressed button does not (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    await t.hover(370, 300, 'touch');
+    assert.equal(t.shown(), false, 'a touch has no hover');
+    await t.hover(370, 300, 'mouse', 1);
+    assert.equal(t.shown(), false, 'a pressed button is a drag, not a hover');
+    await t.hover(200, 300);
+    assert.equal(t.shown(), false, 'outside the column');
+    await t.hover(370, 300);
+    assert.equal(t.shown(), true, 'inside the column');
+    assert.equal(t.geometry().scrollTop, 0, 'nothing jumped');
+    await tick(t, 60_000);
+    assert.equal(t.shown(), true, 'while the pointer rests in the column it stays');
+    await t.hover(200, 300);                                 // out of the column: a dwell begins
+    await dwellEdge(t, 'leaving the column');
+    await t.hover(370, 300);
+    t.q('.feed-wrap')!.dispatchEvent(new t.app.window.PointerEvent('pointerleave', { bubbles: false, pointerType: 'mouse', pointerId: 31 }));
+    await tick(t, DWELL);
+    assert.equal(t.shown(), false, 'leaving the feed releases the hold');
+    await t.hover(370, 300, 'pen');
+    assert.equal(t.shown(), true, 'a hovering pen wakes it like a mouse');
+    await t.hover(370, 300, 'pen', 1);
+    await tick(t, DWELL);
+    assert.equal(t.shown(), false, 'a pen that is pressing releases it');
+  } finally { await t.app.close(); }
+});
+
+test('keyboard focus shows it and keeps it, a blur starts the dwell (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band') as HTMLElement;
+    (band as any).matches = (selector: string) => selector === ':focus-visible';
+    band.dispatchEvent(new t.app.window.FocusEvent('focus')); await t.frames();
+    assert.equal(t.shown(), true, 'Tab to a hidden rail brings it back');
+    await tick(t, 60_000);
+    assert.equal(t.shown(), true, 'while it has focus it stays');
+    const key = (k: string) => band.dispatchEvent(new t.app.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    key('ArrowUp'); key('Enter'); await t.frames();
+    assert.notEqual(t.geometry().scrollTop, 0, 'and its keys work at once (no transition to wait for)');
+    band.dispatchEvent(new t.app.window.FocusEvent('blur')); await t.frames();
+    await dwellEdge(t, 'after a blur');
+    // A mouse press focuses the band too, but that is not a keyboard focus.
+    (band as any).matches = () => false;
+    band.dispatchEvent(new t.app.window.FocusEvent('focus')); await t.frames();
+    assert.equal(t.shown(), false);
+  } finally { await t.app.close(); }
+});
+
+test('a band that kept focus while hidden wakes on a navigating key, keeps the rail while it holds focus, and lets go on blur (#465 P1-A)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band') as HTMLElement;
+    const key = (k: string) => band.dispatchEvent(new t.app.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    // A mouse focused it while it was visible: the focus is real but never :focus-visible, so no hold.
+    await t.scrollAway(1200);
+    (band as any).matches = () => false;
+    band.dispatchEvent(new t.app.window.FocusEvent('focus')); await t.frames();
+    await tick(t, DWELL + 300);
+    assert.equal(t.shown(), false, 'the dwell ran out while the band is still the focused element');
+    // Keys that are not navigation wake nothing.
+    key('Tab'); key('Escape'); key('a'); await t.frames();
+    assert.equal(t.shown(), false, 'Tab, Escape and letters do not claim the rail');
+    // A pointer is still refused while hidden.
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 9 });
+    t.ev('pointerup', band, t.yOf(1), { kind: 'touch', id: 9 }); await t.frames();
+    assert.equal(t.geometry().scrollTop, 1200, 'the pointer gate is unchanged');
+    key('ArrowUp'); await t.frames();
+    assert.equal(t.shown(), true, 'the arrow wakes it with no focus event');
+    assert.ok(t.q('.tr-pop'), 'and the same key already previews');
+    key('Enter'); await t.frames();
+    assert.notEqual(t.geometry().scrollTop, 1200, 'and Enter commits');
+    await tick(t, DWELL * 3);
+    assert.equal(t.shown(), true, 'the commit closed the probe, but the keyboard still holds the band: it stays');
+    band.dispatchEvent(new t.app.window.FocusEvent('blur')); await t.frames();
+    await dwellEdge(t, 'after the blur');
+    // Space and Home/End wake it the same way.
+    for (const k of [' ', 'Home', 'End']) {
+      band.dispatchEvent(new t.app.window.FocusEvent('blur')); await tick(t, DWELL + 300);
+      assert.equal(t.shown(), false);
+      key(k); await t.frames();
+      assert.equal(t.shown(), true, `${JSON.stringify(k)} wakes it`);
+    }
+  } finally { await t.app.close(); }
+});
+
+test('a new reading context drops the old activity; the gate falling clears every hold (#465)', async (context) => {
+  {
+    const t = await open(context, base(room(), room().slice(0, 4)), { wake: false });
+    try {
+      await t.scrollAway(1200);
+      assert.equal(t.shown(), true);
+      t.q('.t-aba')!.click(); await t.frames();          // the Hub's select path: resetForRoom
+      assert.equal(t.shown(), false, 'the previous room\'s scroll does not decide the new room\'s visibility');
+      await tick(t, 60_000);
+      assert.equal(t.shown(), false, 'and its timer never fires');
+    } finally { await t.app.close(); }
+  }
+  {
+    const t = await open(context, base(room()), { wake: true });
+    try {
+      assert.equal(t.shown(), true, 'woken by the mouse');
+      t.q('.t-hide')!.click(); await t.frames();           // the host is hidden: the gate falls
+      t.q('.t-show')!.click(); await t.frames();
+      assert.equal(t.shown(), false, 'the pointer hold did not survive the gate');
+    } finally { await t.app.close(); }
+  }
+});
+
+test('hiding changes nothing the rail measures: the column and the band keep their rectangles, and a real resize still retires (#465)', async (context) => {
+  const t = await open(context, base(room()), { wake: false });
+  try {
+    const band = t.q('.tr-band')!;
+    await t.scrollAway(1200);
+    t.ev('pointerdown', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    assert.ok(t.q('.tr-pop'));
+    t.BAND.top = 130; t.BAND.bottom = 430;
+    t.app.window.dispatchEvent(new t.app.window.Event('resize')); await t.frames();
+    assert.equal(t.q('.tr-pop'), null, 'a real resize still cancels the gesture');
+    t.BAND.top = 100; t.BAND.bottom = 400;
+    t.ev('pointerup', band, t.yOf(1), { kind: 'touch', id: 7 }); await t.frames();
+    assert.equal(t.geometry().scrollTop, 1200, 'and restoring the rectangle does not bring the press back');
+  } finally { await t.app.close(); }
 });

@@ -207,6 +207,7 @@ and terminal ancestor restrictions remain unchanged.
 | `.skel` (+ `.skel-wrap`) | a loading placeholder of the coming shape with a slow shimmer, invisible for the first 150ms | 1.4s loop, stilled |
 | `pinTrack(track, edge)` + `moveTrack(cols, factor, from)` (`hub/reveal.ts`), `.cols.moving`, `.track.pin-start/.pin-end` | a desktop Hub partition is REVEALED: content pinned at its final width, the grid track's `@property` open factor moves; release on that track's own `transitionend` (safety net `moveMs()+100`, instant under reduced motion) | `--t-move` ease-out |
 | `use:hoverInfo={() => info}` + `ui/HoverCard` | the one hover card (title / text / label→value rows / note), 380ms dwell, 60ms hop, pointer + keyboard focus only | `--t-fast` intro |
+| `.tr-paint` under `.turn-rail.shown` (`hub/TurnRail.svelte`) | the Hub feed's turn rail is present only while it is wanted (board #465): the inner paint layer fades and slides `--turn-rail-shift` (6px) in from the right edge and back out; the hit column and band never transform. Reduced motion: opacity only | `--t-move`, ease-out, both ways |
 
 Usage: wrap the `<Icon>` in `<span class="chev" class:open={x}>`; put `.appear*`
 on the element that mounts inside `{#if}`; add `.state-ctl` to a segmented
@@ -351,6 +352,28 @@ remount (a layout bug, not a motion gap — belongs to a Team fix); button
 sizes (owner declined).
 
 ## Rules and their reasons
+
+- **The turn rail is the one outro (board #465, 2026-10-24).** Principle 5
+  says leave with a cut, because an outro keeps a dead element in flow while
+  what is under it has moved. The rail is an absolutely positioned overlay
+  that holds no flow and has nothing under it that takes its place, so that
+  reason does not apply, and the owner asked for it by name: "出现和隐藏要有
+  流畅的动画交互" (a cut at the edge of a scroll reads as flicker). The
+  deviation is limited to that case: an overlay that holds no flow, one
+  transition (opacity + a 6px `translateX`, `--t-move`, ease-out, in both
+  directions, on an inner paint layer, never on a layer that is measured),
+  and nothing waits for it to end. It is one more named exception beside the
+  desktop Hub partition's animated open AND close (#174, principles 5 and 8),
+  which stays exactly as it was; a list item and a popover still leave with
+  a cut. **Its dwell is 1500ms, one token
+  (`--turn-rail-dwell`, app.css).** The rail is a TARGET, not a readout: the
+  reader who sees it appear must bring a thumb to the right edge before it
+  leaves, so it outlives the scroll by more than `scrollFade`'s 700ms (a
+  scrollbar thumb, which is only looked at). Precedent for the figure, not a
+  standard: androidx `FastScroller` hides its handle 1500ms after it was last
+  shown (1200ms after a drag, 500ms to fade; androidx-main, read 2026-10-24).
+  The dwell counts from the END of the last activity (a scroll, or a probe,
+  focus or mouse hold), so a long hold gets the full 1500ms afterwards.
 
 - **Completion lifetime is not an animation or a transport timer** (#167
   batch 2, 2026-09-12): one 1500ms completion scheduler replaces private

@@ -19,6 +19,8 @@ import { scrubDown, scrubIndex, scrubMove, stepTurn, turnsSig } from './hub-turn
 export interface Rect { left: number; top: number; right: number; bottom: number }
 export type Landing = 'moved' | 'in-view' | 'missing';
 export type Source = 'press' | 'key' | 'row';
+/** The keys that navigate the rail (Escape only closes). The component wakes a hidden rail on these, so the list is here once. */
+export const RAIL_KEYS = ['ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '];
 
 export interface RailHost {
   /** The loaded feed's turns, live. */
@@ -27,6 +29,8 @@ export interface RailHost {
   current(): string;
   /** The host gate: shown, the room settled, two turns or more. */
   live(): boolean;
+  /** The rail is SHOWN (board #465): a hidden or fading-out rail takes no input, whatever a stale callback thinks. A hover may WAKE a hidden rail, but only the host does that. */
+  operable(): boolean;
   /** The band's hit rectangle in client pixels, or null when it is not laid out. */
   band(): Rect | null;
   /** How far past the band's inner edge (its left side) the fine scrub keeps slowing down. */
@@ -81,7 +85,7 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
 
   /** The synchronous guard at the entry of every handler and of commit. */
   function admitted(i: Intent | null): i is Intent {
-    if (!i || i.gen !== gen || !host.live()) return false;
+    if (!i || i.gen !== gen || !host.live() || !host.operable()) return false;
     if (sig() !== i.sig) return false;
     const r = host.band();
     return !!r && sameRect(r, i.rect);
@@ -153,7 +157,7 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
         set({ ...i, q, y: p.y, key });
         return;
       }
-      if (p.type === 'touch') return;                 // a touch has no hover
+      if (p.type === 'touch' || !host.operable()) return;   // a touch has no hover; a hidden rail takes none
       const rect = host.band();
       if (!rect) { if (i) drop(false); return; }
       open('hover', absoluteIndex(p.y, rect));
@@ -164,7 +168,7 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
       if (p.button !== undefined && p.button !== 0) return;
       if (intent?.kind === 'press') return;           // one transaction at a time
       const turns = host.turns(), rect = host.band();
-      if (!host.live() || !rect || turns.length === 0) return;
+      if (!host.live() || !host.operable() || !rect || turns.length === 0) return;
       const q = scrubDown(p.y, turns.length, geom(rect));
       host.capture(p.id);
       set({ kind: 'press', key: turns[scrubIndex(q, turns.length)]!.key, gen, sig: sig(), rect, pointerId: p.id, q, y: p.y });
@@ -215,14 +219,13 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
 
     /** Returns true when the key is the rail's, so the host stops it scrolling the feed. */
     key(name: string, repeat = false): boolean {
-      const handled = ['ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' ', 'Escape'];
-      if (!handled.includes(name)) return false;
+      if (!RAIL_KEYS.includes(name) && name !== 'Escape') return false;
       if (name === 'Escape') {
         if (!intent) return false;
         drop(true);
         return true;
       }
-      if (!host.live()) return true;
+      if (!host.live() || !host.operable()) return true;
       if (intent?.kind === 'press') return true;      // a held pointer owns the rail
       const turns = host.turns();
       if (intent && !admitted(intent)) { drop(false); }

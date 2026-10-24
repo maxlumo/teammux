@@ -5411,11 +5411,15 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
       const orig = proto.getBoundingClientRect;
       proto.getBoundingClientRect = function (this: Element) {
         if (this.classList.contains('tr-band')) return { left: 346, top: 100, right: 390, bottom: 400, width: 44, height: 300, x: 346, y: 100, toJSON() {} };
+        if (this.classList.contains('turn-rail')) return { left: 346, top: 70, right: 390, bottom: 660, width: 44, height: 590, x: 346, y: 70, toJSON() {} };
         return orig.call(this);
       };
       proto.setPointerCapture = () => {};
       proto.hasPointerCapture = () => false;
       proto.releasePointerCapture = () => {};
+      const dwell = window.document.createElement('style');            // the rail reads its dwell from this token (app.css has the figure)
+      dwell.textContent = ':root { --turn-rail-dwell: 1500ms; }';
+      window.document.head.append(dwell);
     },
     modules: [{
       ...rpc,
@@ -5437,6 +5441,11 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
   };
   const touch = (type: string, y: number) => q('.tr-band')?.dispatchEvent(new app.window.PointerEvent(type,
     { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 7, clientX: 370, clientY: y, button: 0 }));
+  /** A mouse inside the rail's column wakes it (it is hidden until something happens). */
+  const wake = async () => {
+    q('.feed-wrap')!.dispatchEvent(new app.window.PointerEvent('pointermove', { bubbles: true, pointerType: 'mouse', pointerId: 31, clientX: 370, clientY: 300, buttons: 0 }));
+    await settle();
+  };
   const select = async (room: string) => {
     q(`[aria-label="${room}"] .proj-pick`)!.click();
     for (let i = 0; i < 12 && q('.h1-text')?.textContent !== room; i++) await app.flush();
@@ -5451,19 +5460,23 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
     //    called retirement can tell the second visit from the first.
     await select('other'); await select('fixture');
     feed().scrollTop = 0;
+    await wake();
     touch('pointerdown', 250); await settle();
     assert.ok(q('.tr-pop'), 'the press is open');
     await select('other'); await select('fixture');
     assert.ok(q('.tr-band'), 'the cached room has its rail again');
     feed().scrollTop = 0;
+    await wake();
     touch('pointerup', 250); await settle();
     assert.equal(q('.tr-pop'), null);
     assert.equal(q('.feed')!.scrollTop, 0, 'the release of a press begun in the other visit lands nowhere');
     // 2. A control that does something, so the next rows are not vacuous.
+    await wake();
     touch('pointerdown', 250); touch('pointerup', 250); await settle();
     assert.equal(q('.feed')!.scrollTop, 1992, 'a fresh press and release on the same rail does land');
     // 3. The agent filter, through the page's own double click on a card.
     feed().scrollTop = 0;
+    await wake();
     touch('pointerdown', 250); await settle();
     const card = q('.acard[data-agent="bob"] .agent-select')!;
     for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {

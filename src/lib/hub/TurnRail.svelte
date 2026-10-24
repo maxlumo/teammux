@@ -8,6 +8,13 @@
   // DOM-free controller, every rule a test), the arithmetic in hub-turns.ts; this
   // file is only the markup, the pointer wiring and the placement.
   //
+  // It is not always on (board #465, owner 2026-10-24 23:12): hub-turn-visibility.ts
+  // derives SHOWN from the reader scrolling away from the tail, a live probe, keyboard
+  // focus or a mouse in the rail's column, and one dwell after the last of them
+  // (--turn-rail-dwell). Hidden is inert but reachable (a scroll, Tab, a mouse entering
+  // the column bring it back). Only an inner PAINT layer fades and slides; the column and
+  // the band keep their rectangles, which the input protocol and the popover measure.
+  //
   // What it is NOT: it computes no "current turn" of its own (idle, the emphasised
   // tick is the anchor's askKey, read-only; while a probe is open it is the
   // probe's), it writes no reading state, and it owns no scroll. See docs/design-docs/features/hub-feed.md § The turn rail.
@@ -15,7 +22,8 @@
   import { t } from '../core/i18n.svelte.ts';
   import { anchorOf, intersectRects, menuPlacementIn, popOrigin, POPOVER_EDGE, POPOVER_GAP, viewBox } from '../ui/placement.ts';
   import { agoShort } from './hub.ts';
-  import { createTurnRail } from './hub-turn-rail.ts';
+  import { createTurnRail, RAIL_KEYS } from './hub-turn-rail.ts';
+  import { createRailVisibility, cssMilliseconds } from './hub-turn-visibility.ts';
   import type { Landing, Rect } from './hub-turn-rail.ts';
   import { tickCapacity, tickCount, tickOf, turnLabel } from './hub-turns.ts';
   import type { AskTurn } from './hub-turns.ts';
@@ -43,6 +51,8 @@
   let capacity = $state(2);
   /** The scroller's scrollbar width at the right edge (0 for overlay scrollbars): the rail stands to its left. */
   let edge = $state(0);
+  /** The visibility rule's answer (hub-turn-visibility.ts); the class that drives CSS and the input gate. */
+  let shown = $state(false);
   let view = $state({ open: false, key: '', kind: null as null | 'hover' | 'press' | 'key' });
   let pw = $state(0);
   let ph = $state(0);
@@ -53,10 +63,17 @@
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   };
 
+  const dwell = () => {
+    const ms = hostEl ? cssMilliseconds(getComputedStyle(hostEl).getPropertyValue('--turn-rail-dwell')) : Number.NaN;
+    return Number.isNaN(ms) ? 0 : ms;     // a missing token fails visibly: the rail hides at once
+  };
+  const vis = createRailVisibility({ dwell, onChange: (next) => { shown = next; } });
+
   const rail = createTurnRail({
     turns: () => turns,
     current: () => current,
     live: () => live,
+    operable: () => shown,
     band: () => {
       if (!band) return null;
       const r = rectOf(band);
@@ -71,16 +88,38 @@
     const next = rail.view();
     if (next.open && !view.open) openedAt = Date.now();
     view = next;
+    vis.hold('probe', next.open);
   });
 
-  /** The owner of a reading-context change calls this at the change. */
-  export function retire() { rail.retire(); }
+  /** The owner of a reading-context change calls this at the change: the intents end and the old
+   * reading's pulse and timer decide nothing for the new one. */
+  export function retire() { rail.retire(); vis.reset(); }
+  /** The feed scrolled with the reader away from the tail (the feed calls this once per frame). */
+  export function nudge() { vis.nudge(); }
   /** Close an open preview (the Hub's back stack, Escape); true when one was open. */
   export function close(): boolean { return rail.key('Escape'); }
 
   // The gate falling is also a retirement, so nothing is resumed when it comes back.
-  $effect(() => { if (!live) untrack(() => rail.retire()); });
-  $effect(() => () => untrack(() => rail.dispose()));
+  $effect(() => { if (!live) untrack(() => { rail.retire(); vis.clear(); }); });
+  $effect(() => () => untrack(() => { rail.dispose(); vis.dispose(); }));
+
+  // A mouse (or a pen hovering) entering the rail's column wakes a hidden rail, with no click. The
+  // column is inert while hidden, so this listens on the feed-wrap and tests the pointer against the
+  // column's rectangle; a touch has no hover and a pressed button is not one.
+  $effect(() => {
+    const wrap = bounds;
+    if (!wrap) return;
+    const move = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
+      if (e.buttons !== 0 || !live || !hostEl) { vis.hold('entered', false); return; }
+      const r = hostEl.getBoundingClientRect();
+      vis.hold('entered', e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom);
+    };
+    const leave = () => vis.hold('entered', false);
+    wrap.addEventListener('pointermove', move);
+    wrap.addEventListener('pointerleave', leave);
+    return () => { wrap.removeEventListener('pointermove', move); wrap.removeEventListener('pointerleave', leave); };
+  });
 
   // How many ticks the column can draw: its content box over the pitch token.
   $effect(() => {
@@ -216,7 +255,7 @@
   };
 </script>
 
-<div class="turn-rail" bind:this={hostEl} style:--turn-rail-edge="{edge}px">
+<div class="turn-rail" class:shown bind:this={hostEl} style:--turn-rail-edge="{edge}px">
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="tr-band" bind:this={band} role="slider" tabindex="0" aria-orientation="vertical"
     aria-label={t('hubTurnRail')} aria-valuemin="1" aria-valuemax={count}
@@ -229,14 +268,23 @@
     onpointercancel={(e) => rail.pointerCancel(e.pointerId)}
     onlostpointercapture={(e) => rail.lostCapture(e.pointerId)}
     onpointerleave={leaving}
-    onkeydown={(e) => { if (rail.key(e.key, e.repeat)) { e.preventDefault(); e.stopPropagation(); } }}
-    onfocus={(e) => { if (keyboardFocus(e.currentTarget as HTMLElement)) rail.focus(); }}
-    onblur={() => rail.blur()}
+    onkeydown={(e) => {
+      // The band can hold focus while hidden (a mouse focused it, :focus-visible never matched, the dwell ran out):
+      // no focus event comes again, so a navigating key is itself the keyboard's claim on the rail.
+      if (live && RAIL_KEYS.includes(e.key)) vis.hold('focus', true);
+      if (rail.key(e.key, e.repeat)) { e.preventDefault(); e.stopPropagation(); }
+    }}
+    onfocus={(e) => { if (keyboardFocus(e.currentTarget as HTMLElement)) { vis.hold('focus', true); rail.focus(); } }}
+    onblur={() => { vis.hold('focus', false); rail.blur(); }}
     oncontextmenu={(e) => e.preventDefault()}>
-    {#each { length: ticks } as _, i (i)}
-      <!-- ONE emphasised tick: the probe's while a probe is open, else the anchor's. -->
-      <span class="tr-tick" class:cur={!view.open && i === curTick} class:probe={i === probeTick}></span>
-    {/each}
+    <!-- The PAINT layer: the only thing that fades and slides. The band around it never moves,
+         because the input protocol and the popover measure its rectangle. -->
+    <div class="tr-paint">
+      {#each { length: ticks } as _, i (i)}
+        <!-- ONE emphasised tick: the probe's while a probe is open, else the anchor's. -->
+        <span class="tr-tick" class:cur={!view.open && i === curTick} class:probe={i === probeTick}></span>
+      {/each}
+    </div>
   </div>
 </div>
 
@@ -282,12 +330,28 @@
     display: flex; flex-direction: column; justify-content: center;
   }
   .tr-band {
-    flex: 0 1 auto; min-height: 0; box-sizing: border-box; pointer-events: auto;
+    flex: 0 1 auto; min-height: 0; box-sizing: border-box; pointer-events: none;
     height: calc(var(--n, 2) * var(--turn-tick-pitch));
     display: flex; flex-direction: column;
-    touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none;
+    touch-action: auto; cursor: pointer; user-select: none; -webkit-user-select: none;
     -webkit-touch-callout: none;
   }
+  /* SHOWN is the class, not full opacity: the band is operable the moment the rail is shown (a press
+     begun mid-fade-in finishes) and inert the moment it is not (a tap during the fade-OUT is the feed's).
+     Hidden, it also refuses nothing of the browser's: the right edge is wholly the feed's. The node is
+     never inert or visibility:hidden, so Tab can still reach it and bring the rail back. */
+  .turn-rail.shown .tr-band { pointer-events: auto; touch-action: none; }
+  /* The ONE transition of the rail's presence (motion.md, board #465): opacity and a small slide in from
+     the edge on --t-move, ease-out both ways. An overlay that holds no flow, so the outro is animated too.
+     PAINT only: the translated box can reach past the fixed band (the slide, a scrollbar's clearance) and a press
+     there belongs to what is underneath, so it and its ticks take no pointer. The band alone takes input. */
+  .tr-paint {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; pointer-events: none;
+    opacity: 0; transform: translateX(var(--turn-rail-shift));
+    transition: opacity var(--t-move) ease-out, transform var(--t-move) ease-out;
+  }
+  .turn-rail.shown .tr-paint { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .tr-paint { transform: none; } }
   .tr-band:focus-visible { outline: var(--turn-tick-thick) solid var(--accent); outline-offset: calc(-1 * var(--turn-tick-thick)); border-radius: var(--ui-radius-control); }
   .tr-tick {
     flex: 1 1 0; min-height: 0; display: flex; align-items: center; justify-content: flex-start;

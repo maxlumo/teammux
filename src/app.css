@@ -465,6 +465,9 @@ button:disabled {
   /* Below the band: the feed's back-to-tail control (bottom 12px + 38px + the 3px its ::before hit area
      overhangs + a gap), so the two are never stacked. Pinned against those rules by a source test. */
   --turn-rail-clear: 60px;
+  /* The rail shows while the reader scrolls or a gesture is on it, and hides this long after the last (board #465,
+     motion.md). The ONE definition; hub-turn-visibility.ts reads it. */
+  --turn-rail-dwell: 1500ms; --turn-rail-shift: 6px;
   --turn-tick-pitch: 10px; --turn-tick-len: 10px; --turn-tick-len-cur: 16px; --turn-tick-thick: 2px;
   --turn-pop-width: 300px;
 }

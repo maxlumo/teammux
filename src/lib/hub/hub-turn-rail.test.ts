@@ -11,6 +11,7 @@ function rig(count = 10) {
     turns: keys(count) as { key: string }[],
     current: '',
     live: true,
+    operable: true,
     band: { left: 346, top: 100, right: 390, bottom: 400 } as Rect | null,
     landing: 'moved' as Landing,
     jumps: [] as string[],
@@ -22,6 +23,7 @@ function rig(count = 10) {
     turns: () => h.turns,
     current: () => h.current,
     live: () => h.live,
+    operable: () => h.operable,
     band: () => h.band,
     reach: () => 88,
     jump: (k) => { h.jumps.push(k); return h.landing; },
@@ -450,4 +452,41 @@ test('on the band the scrub is coarse; only sliding LEFT of its left edge slows 
   rail.pointerMove(touch(254, 390));                     // back on the band, at the far RIGHT: coarse again
   assert.ok(probe() - 506 >= 3, 'the screen edge side is not a slow zone');
   void h;
+});
+
+test('a hidden or fading-out rail takes no input: stale callbacks find a closed gate (#465)', () => {
+  const { h, rail, yOf, mouse, touch } = rig();
+  h.operable = false;
+  rail.pointerMove(mouse(yOf(3)));
+  assert.equal(rail.view().open, false, 'a hover does not open a preview on a hidden rail');
+  rail.pointerDown(touch(yOf(3)));
+  assert.deepEqual(h.captured, [], 'a press does not start, nor capture');
+  assert.equal(rail.pointerUp(touch(yOf(3))), null);
+  assert.equal(rail.rowClick('k3'), null);
+  assert.deepEqual(h.jumps, [], 'nothing jumped');
+  assert.equal(rail.key('Enter'), true, 'the key is still the rail\'s, so it does not scroll the feed, but it commits nothing');
+  assert.equal(rail.view().open, false);
+  assert.deepEqual(h.jumps, []);
+});
+
+test('a press that finds the rail no longer shown ends without a jump; the same press mid-fade-IN continues (#465)', () => {
+  {
+    const { h, rail, yOf, touch } = rig();
+    rail.pointerDown(touch(yOf(3)));
+    h.operable = false;                                    // the host reset the visibility under the finger
+    rail.pointerMove(touch(yOf(4)));
+    assert.equal(rail.view().open, false);
+    assert.equal(rail.pointerUp(touch(yOf(4))), null);
+    assert.deepEqual(h.jumps, []);
+  }
+  {
+    // Shown means operable at once: the host's rect does not move during the fade (only the paint layer does),
+    // so a press begun while the paint is still fading in is admitted and finishes.
+    const { h, rail, yOf, touch } = rig();
+    h.operable = true;
+    rail.pointerDown(touch(yOf(2)));
+    rail.pointerMove(touch(yOf(5)));
+    rail.pointerUp(touch(yOf(5)));
+    assert.deepEqual(h.jumps, ['k5']);
+  }
 });

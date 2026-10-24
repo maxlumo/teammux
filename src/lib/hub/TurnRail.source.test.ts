@@ -17,6 +17,8 @@ const markup = rail.slice(rail.indexOf('</script>'), rail.indexOf('<style>'));
 const script = rail.slice(0, rail.indexOf('</script>'));
 /** The code without its comments, so a comment may talk about what the code must not do. */
 const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/(^|[^:"'])\/\/.*$/gmu, '$1');
+/** The rail's CSS without its comments (they quote tokens and issue numbers like #465). */
+const styleCode = () => code(style);
 
 test('the popover is the one mechanism: menuPlacementIn, the menu surface, one element, no tooltip protocol', () => {
   assert.match(script, /menuPlacementIn\(box, tick, \{ w: pw, h: ph \}, POPOVER_GAP, POPOVER_EDGE, 'right', 'left'\)/u,
@@ -55,33 +57,79 @@ test('the rail owns no scroll and no reading state: the ONE jump is the prop it 
   assert.doesNotMatch(code(script), /pickAnchor|heldAnchor|syncAsk/u, 'no second selection rule');
 });
 
-test('tokens and atoms only: no px, no literal colour, no second tempo', () => {
-  assert.doesNotMatch(style, /\d+(?:\.\d+)?px/u, 'no raw px in the rail\'s CSS');
-  assert.doesNotMatch(style, /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/u, 'no literal colour');
-  assert.doesNotMatch(style, /--t-move|\bms\b|\d+s\b|ease|cubic-bezier|@keyframes|animation/u, 'only --t-fast, and no keyframes of its own');
-  for (const m of style.matchAll(/transition:\s*([^;]+);/gu)) {
-    for (const part of m[1]!.split(',')) assert.match(part, /var\(--t-fast\)/u, `transition on --t-fast only: ${part.trim()}`);
-  }
-  for (const token of ['--turn-rail-hit', '--turn-rail-inset', '--turn-tick-pitch', '--turn-tick-len', '--turn-tick-len-cur', '--turn-tick-thick', '--turn-pop-width']) {
+test('tokens and atoms only: no px, no literal colour, two declared tempos and no more', () => {
+  assert.doesNotMatch(styleCode(), /\d+(?:\.\d+)?px/u, 'no raw px in the rail\'s CSS');
+  assert.doesNotMatch(styleCode(), /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/u, 'no literal colour');
+  assert.doesNotMatch(styleCode(), /\d+(?:\.\d+)?m?s\b|cubic-bezier|@keyframes|animation/u, 'no raw time and no keyframes of its own');
+  const transitions = [...styleCode().matchAll(/transition:\s*([^;]+);/gu)].map((m) => m[1]!.trim());
+  assert.deepEqual(transitions, [
+    'opacity var(--t-move) ease-out, transform var(--t-move) ease-out',
+    'background var(--t-fast)',
+  ], 'the rail\'s presence: ONE declaration, opacity + transform, --t-move (board #465); and the tick\'s colour on --t-fast');
+  for (const token of ['--turn-rail-hit', '--turn-rail-inset', '--turn-tick-pitch', '--turn-tick-len', '--turn-tick-len-cur', '--turn-tick-thick', '--turn-pop-width', '--turn-rail-dwell', '--turn-rail-shift']) {
     assert.equal([...css.matchAll(new RegExp(`${token}:`, 'gu'))].length, 1, `${token} is defined once, in app.css`);
   }
   assert.match(css, /--turn-rail-hit: 44px;/u, 'the hit column is 44px on both screens');
-  assert.doesNotMatch(style, /transition:[^;]*\bwidth\b/u, 'layout properties are not animated (motion.md)');
-  assert.match(style, /touch-action: none/u);
-  assert.equal([...style.matchAll(/touch-action:/gu)].length, 1, 'only the band refuses the browser\'s scroll');
-  assert.match(style, /\.tr-band \{[^}]*touch-action: none/u);
-  assert.doesNotMatch(style, /\.turn-rail \{[^}]*touch-action/u, 'the column\'s empty parts refuse nothing');
-  // The column is the feed's own padding with the rail laid over it: inert except the band, so
-  // a wheel or a finger starting beside or above the band scrolls the feed natively (validator, #461).
-  assert.match(style, /\.turn-rail \{[^}]*position: absolute;[^}]*pointer-events: none;/u, 'the column overlays the padding and is inert');
-  assert.match(style, /\.tr-band \{[^}]*pointer-events: auto;/u, 'only the band takes the pointer');
+  assert.doesNotMatch(styleCode(), /transition:[^;]*\b(?:width|height|top|left|margin|padding)\b/u, 'layout properties are not animated (motion.md)');
+  assert.equal([...styleCode().matchAll(/touch-action:/gu)].length, 2, 'the band: auto while hidden, none while shown');
+  assert.match(styleCode(), /\.tr-band \{[^}]*touch-action: auto/u);
+  assert.match(styleCode(), /\.turn-rail\.shown \.tr-band \{ pointer-events: auto; touch-action: none; \}/u, 'only a SHOWN band takes the pointer and refuses the browser\'s scroll');
+  assert.doesNotMatch(styleCode(), /\.turn-rail \{[^}]*touch-action/u, 'the column\'s empty parts refuse nothing');
+  // The column overlays the feed and is inert: a wheel or a finger starting beside or above the band scrolls
+  // the feed natively (validator, #461). The band is inert too until the rail is shown.
+  assert.match(styleCode(), /\.turn-rail \{[^}]*position: absolute;[^}]*pointer-events: none;/u, 'the column overlays the feed and is inert');
+  assert.match(styleCode(), /\.tr-band \{[^}]*pointer-events: none;/u, 'a hidden band takes no pointer');
+});
+
+test('only the inner paint layer moves: the column and the band keep the rectangles that are measured (#465)', () => {
+  const rule = (selector: RegExp) => selector.exec(styleCode())?.[1] ?? '';
+  // EVERY rule whose subject is the column or the band (a later `.turn-rail { transform }` is as bad as the first one).
+  const measured = [...styleCode().matchAll(/([^{}]+)\{([^{}]*)\}/gu)]
+    .filter(([, selector]) => /^\.(?:turn-rail|tr-band)(?![\w-])/u.test(selector!.trim().split(/\s+/u).at(-1)!));
+  assert.ok(measured.length >= 3, 'the column and the band rules were found');
+  for (const [, selector, body] of measured) {
+    assert.doesNotMatch(body!, /transform|transition|opacity|translate/u, `${selector!.trim()} neither moves nor fades: its rectangle feeds the input protocol and the popover`);
+  }
+  assert.match(rule(/\.tr-paint \{([^}]*)\}/u), /pointer-events: none;/u, 'the moving paint is never a target: only the fixed band takes input, so a press on the slid box outside it is the feed\u2019s (reviewer #465 P1-B)');
+  assert.doesNotMatch([...styleCode().matchAll(/([^{}]+)\{([^{}]*)\}/gu)].filter(([, selector]) => /\.tr-(?:paint|tick)/u.test(selector!)).map(([, , body]) => body).join(' '), /pointer-events:\s*(?!none)\S/u, 'and nothing inside it turns pointer events back on');
+  assert.match(rule(/\.tr-paint \{([^}]*)\}/u), /opacity: 0; transform: translateX\(var\(--turn-rail-shift\)\);/u);
+  assert.match(styleCode(), /\.turn-rail\.shown \.tr-paint \{ opacity: 1; transform: none; \}/u);
+  assert.match(markup, /<div class="tr-band"[\s\S]*?<div class="tr-paint">[\s\S]*?class="tr-tick"/u, 'the paint layer is INSIDE the band and holds the ticks');
+  const hostEnd = markup.indexOf('{#if view.open && row}');
+  const before = markup.slice(0, hostEnd);
+  assert.ok(hostEnd > 0 && before.includes('class="tr-paint"'));
+  assert.equal([...before.matchAll(/<div\b/gu)].length, [...before.matchAll(/<\/div>/gu)].length, 'column, band and paint are all closed before the popover and the corridor begin: they are not under the moving layer');
+  assert.match(styleCode(), /@media \(prefers-reduced-motion: reduce\) \{ \.tr-paint \{ transform: none; \} \}/u, 'reduced motion: the fade stays, the slide goes');
+});
+
+test('visibility is derived by one controller; hidden is inert but reachable (#465)', async () => {
+  const visibility = await read('./hub-turn-visibility.ts');
+  assert.doesNotMatch(code(script), /setTimeout|clearTimeout|setInterval/u, 'no timer in the component: the dwell lives in the visibility controller');
+  assert.doesNotMatch(code(visibility), /\b1500\b|\b1\.5\b/u, 'the dwell figure is not here: it is the CSS token');
+  assert.match(script, /getComputedStyle\(hostEl\)\.getPropertyValue\('--turn-rail-dwell'\)/u, 'the one definition is read from the token');
+  assert.match(css, /--turn-rail-dwell: 1500ms;/u);
+  assert.match(script, /operable: \(\) => shown,/u, 'the input gate is the same fact as the class');
+  assert.match(markup, /class="turn-rail" class:shown/u);
+  assert.match(markup, /role="slider" tabindex="0"/u, 'still in the tab order while hidden, so Tab can bring it back');
+  assert.doesNotMatch(markup, /<[^>]*\sinert[\s=>]/u, 'never the inert attribute: Tab must still reach the band');
+  assert.doesNotMatch(styleCode(), /visibility:\s*hidden|display:\s*none/u, 'never hidden for the accessibility tree and the tab order');
+  assert.match(markup, /vis\.hold\('focus', true\); rail\.focus\(\)/u, 'focus shows it before the preview opens');
+  assert.match(script, /vis\.hold\('probe', next\.open\);/u, 'a probe is a hold');
+  assert.match(markup, /if \(live && RAIL_KEYS\.includes\(e\.key\)\) vis\.hold\('focus', true\);\s*if \(rail\.key\(/u, 'a navigating key on a focused-but-hidden band is the keyboard\u2019s claim: it holds the rail BEFORE the protocol sees the key (reviewer #465 P1-A)');
+  assert.match(script, /export function retire\(\) \{ rail\.retire\(\); vis\.reset\(\); \}/u, 'a reading-context change also drops the old pulse and timer');
+  assert.match(script, /vis\.dispose\(\)/u);
+  // Which scrolls count: only the reader scrolling away from the tail, from the feed\'s once-per-frame handler.
+  assert.match(feed, /if \(!following\) turnRail\?\.nudge\(\);/u);
+  // The mouse wake: mouse and pen hovering only, never a touch or a pressed button.
+  assert.match(script, /if \(e\.pointerType === 'touch'\) return;\s*if \(e\.buttons !== 0 \|\| !live \|\| !hostEl\) \{ vis\.hold\('entered', false\); return; \}/u);
+  assert.match(script, /wrap\.addEventListener\('pointerleave', leave\)/u);
 });
 
 test('the band is an operable slider that keeps a Tab exit and follows the preview', () => {
   assert.match(markup, /role="slider" tabindex="0" aria-orientation="vertical"/u);
   assert.match(markup, /aria-valuenow=\{shownIdx >= 0 \? shownIdx \+ 1 : count\} aria-valuetext=\{valueText\}/u,
     'value and text follow the PREVIEW while one is open, else the current turn');
-  assert.match(markup, /onkeydown=\{\(e\) => \{ if \(rail\.key\(e\.key, e\.repeat\)\) \{ e\.preventDefault\(\); e\.stopPropagation\(\); \} \}\}/u,
+  assert.match(markup, /onkeydown=\{\(e\) => \{[^]*?if \(rail\.key\(e\.key, e\.repeat\)\) \{ e\.preventDefault\(\); e\.stopPropagation\(\); \}\s*\}\}/u,
     'handled keys do not scroll the feed; everything else (Tab) is left alone');
   assert.match(markup, /oncontextmenu=\{\(e\) => e\.preventDefault\(\)\}/u);
   assert.match(script, /window\.addEventListener\('pointerdown', outside, true\)/u);
@@ -136,7 +184,7 @@ test('retire() is CALLED at every place the reading context changes', () => {
 
 test('the back stack and the host gate close the preview', () => {
   assert.match(hub, /backLayers\.register\('turnRail', \(\) => \{ if \(feedView\?\.closeTurnRail\(\)\) return true; return false; \}\)/u);
-  assert.match(script, /\$effect\(\(\) => \{ if \(!live\) untrack\(\(\) => rail\.retire\(\)\); \}\);/u, 'the gate falling edge retires too');
+  assert.match(script, /\$effect\(\(\) => \{ if \(!live\) untrack\(\(\) => \{ rail\.retire\(\); vis\.clear\(\); \}\); \}\);/u, 'the gate falling edge retires too, and clears every hold');
   assert.match(feed, /live=\{visible && roomReady && turns\.length >= 2\}/u);
 });
 
