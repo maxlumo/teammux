@@ -158,3 +158,10 @@ test('the rail\'s geometry changing is a retirement called at the change', () =>
   assert.match(script, /if \(next !== edge\) \{ edge = next; moved\(\); \}/u, 'and a scrollbar that appears or goes retires the rail');
   assert.match(script, /const moved = \(\) => untrack\(\(\) => rail\.retire\(\)\);/u);
 });
+
+test('the leftward reach is measured from the band to the screen\'s LEFT, and the tick\'s colour change is on --t-fast (#463)', () => {
+  assert.match(script, /reach: \(r\) => Math\.max\(0, Math\.min\(2 \* \(r\.right - r\.left\), r\.left\)\),/u,
+    'the room to slide into is what is left of the band; measuring toward the right edge collapses the graded slow-down into the slowest at once');
+  assert.doesNotMatch(code(script), /innerWidth\s*-\s*r\.right/u);
+  assert.match(style, /\.tr-tick::before \{[^}]*transition: background var\(--t-fast\);/u, 'the emphasis moves on --t-fast (an existence check: a rule that is missing must fail)');
+});

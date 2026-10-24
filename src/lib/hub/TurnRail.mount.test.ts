@@ -45,6 +45,7 @@ async function open(context: import('node:test').TestContext, props: Record<stri
     setup(window) {
       const proto = window.Element.prototype as any;
       proto.getAnimations = () => [];
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });   // the 390px phone the band's x values describe
       (window.HTMLCanvasElement.prototype as any).getContext = () => null;
       const rect = (r: typeof BAND) => ({ ...r, width: r.right - r.left, height: r.bottom - r.top, x: r.left, y: r.top, toJSON() {} });
       const orig = proto.getBoundingClientRect;
@@ -504,4 +505,32 @@ test('a classic scrollbar is stood clear of, read from the scroller, and its goi
     t.app.window.dispatchEvent(new t.app.window.Event('resize')); await t.frames();
     assert.equal(t.q('.turn-rail')!.getAttribute('style'), '--turn-rail-edge: 0px;');
   } finally { await t.app.close(); }
+});
+
+test('the fine adjust is GRADED by how far left of the band the finger is, through the real wiring (#463)', async (context) => {
+  const many = feedBlocks(Array.from({ length: 500 }, (_, i) => ({ id: `w${i}`, ts: NOW - (500 - i) * 60_000, from: 'human', body: `turn ${i}` })), [], 'chat', (n) => n);
+  const slide = async (x: number) => {
+    const t = await open(context, { a: many, b: [], roomReady: true, managedNames: ['dev'], agents });
+    try {
+      const band = t.q('.tr-band')!;
+      const at = () => Number(/turn (\d+)/u.exec(t.q('.tr-pop .tr-label')!.textContent!)![1]);
+      const y0 = 100 + 300 * 0.3;
+      t.ev('pointerdown', band, y0, { kind: 'touch', id: 7, x: 370 }); await t.frames();
+      const start = at();
+      if (x !== 370) { t.ev('pointermove', band, y0, { kind: 'touch', id: 7, x }); await t.frames(); }
+      t.ev('pointermove', band, y0 + 40, { kind: 'touch', id: 7, x }); await t.frames();
+      const covered = at() - start;
+      t.ev('pointercancel', band, y0 + 40, { kind: 'touch', id: 7, x }); await t.frames();
+      return covered;
+    } finally { await t.app.close(); }
+  };
+  // 500 turns on a 300px band: a pixel is 5/3 of a turn on the band, and the slowest it gets is
+  // 5/6 of a turn (the factor 2). 40px: 66 turns coarse, 33 at the slowest.
+  const onBand = await slide(370);
+  const part = await slide(346 - 20);           // 20px left of the band: one quarter of the way to the slowest
+  const far = await slide(346 - 88);            // the whole reach
+  assert.ok(onBand >= 65 && onBand <= 68, `coarse on the band: ${onBand}`);
+  assert.ok(part >= 52 && part <= 57, `GRADED 20px out (1.23x slower, about 54): ${part}`);
+  assert.ok(far >= 32 && far <= 35, `the slowest at the full reach: ${far}`);
+  assert.ok(onBand > part && part > far, 'monotonic: the further left, the finer');
 });
